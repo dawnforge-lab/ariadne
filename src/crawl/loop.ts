@@ -453,6 +453,9 @@ async function runToCompletion(
       if (!isSameOrigin(url, config.siteUrl)) continue; // external: linked, never fetched
       const verdict = await isUrlAllowed(url, { allowPrivate });
       if (!verdict.allowed) continue;
+      // isSameOrigin admits www<->apex and http->https spellings, and the
+      // robots wrapper judges those by the same rules (RobotsInfo.isAllowed):
+      // a variant spelling is never a way around Disallow.
       if (!discovery.robots.isAllowed(url)) continue;
 
       // Reserve. Atomic with respect to the event loop, which is what makes

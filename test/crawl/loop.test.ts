@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { and, eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, links, pages, sitemapUrls } from "../../src/db/schema.js";
+import { crawls, frontier, links, pages, sitemapUrls } from "../../src/db/schema.js";
 import { frontierCounts } from "../../src/crawl/frontier.js";
 import { runCrawl, resumeCrawl, type CrawlConfig } from "../../src/crawl/loop.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
@@ -36,6 +36,19 @@ let closedServer: Server;
 let closed: string;
 
 /**
+ * A site whose home page links to a *variant spelling* of its own origin —
+ * the `www.` host, which `isSameOrigin` admits into the crawl and which this
+ * server answers on too. robots.txt disallows /admin, and the disallowed
+ * links are written on the variant. robots-parser answers `undefined` for a
+ * foreign origin, so without the rewrite in RobotsInfo.isAllowed those URLs
+ * would be crawled under no rules at all (build plan rule 9).
+ */
+let variantServer: Server;
+let variant: string;
+/** The `www.` spelling of `variant`, synthesised once the port is known. */
+let variantWww: string;
+
+/**
  * A site that resets connections:
  *   /flappy        -> resets twice, then serves a page (the retry succeeds)
  *   /always-broken -> resets for ever (the retries are spent)
@@ -55,6 +68,20 @@ let poisonNextPage = false;
 
 function html(body: string): string {
   return `<!doctype html><html><head><title>t</title></head><body>${body}</body></html>`;
+}
+
+/**
+ * Listen on every interface and address the site by name, so both `localhost`
+ * and its `www.` variant reach this server. `www.localhost` resolves (to ::1
+ * here), which is what makes the robots-variant test honest: if the gate lets
+ * the variant spelling through, it really is fetched and really does produce a
+ * page row.
+ */
+async function listenByName(server: Server): Promise<string> {
+  await new Promise<void>((r) => server.listen(0, r));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  return `http://localhost:${port}`;
 }
 
 async function listen(server: Server): Promise<string> {
@@ -152,6 +179,31 @@ beforeAll(async () => {
   });
   closed = await listen(closedServer);
 
+  variantServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/robots.txt") {
+      res.setHeader("content-type", "text/plain");
+      res.end("User-agent: *\nDisallow: /admin\n");
+      return;
+    }
+    if (path === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      // The disallowed links carry the www. spelling of this very origin.
+      res.end(
+        html(
+          `<a href="/ok">ok</a>` +
+            `<a href="${variantWww}/admin/x">variant secret</a>` +
+            `<a href="${variantWww}/admin/y">variant secret 2</a>`,
+        ),
+      );
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html(`<p>${path}</p>`));
+  });
+  variant = await listenByName(variantServer);
+  variantWww = variant.replace("http://", "http://www.");
+
   brokenServer = createServer((req, res) => {
     const path = req.url ?? "";
     if (path === "/flappy") {
@@ -195,6 +247,7 @@ afterAll(async () => {
   await new Promise<void>((r) => flakyServer.close(() => r()));
   await new Promise<void>((r) => closedServer.close(() => r()));
   await new Promise<void>((r) => brokenServer.close(() => r()));
+  await new Promise<void>((r) => variantServer.close(() => r()));
 });
 
 function config(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
@@ -354,6 +407,36 @@ describe("runCrawl", () => {
     expect(summary.frontier.failed).toBe(1); // /always-broken
     expect(summary.frontier.pending).toBe(0);
     expect(rows).toHaveLength(3);
+  });
+
+  it("applies robots rules to same-site origin variants", async () => {
+    const summary = await crawl(config({ siteUrl: variant }));
+
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    // The www. spelling of /admin/x is same-origin by our own rule, so it is a
+    // URL this crawl would otherwise fetch. robots disallows /admin: it must
+    // not be fetched under either spelling, and must not even be enqueued.
+    expect(rows.map((r) => r.url).sort()).toEqual([`${variant}/`, `${variant}/ok`].sort());
+
+    const queued = await db
+      .select()
+      .from(frontier)
+      .where(eq(frontier.crawlId, summary.crawlId));
+    expect(queued.filter((r) => r.url.includes("www."))).toEqual([]);
+
+    // Nothing was attempted and then lost: a variant URL that slipped the gate
+    // would show up here as a DNS failure rather than an absence.
+    expect(summary.frontier.failed).toBe(0);
+    expect(summary.frontier.pending).toBe(0);
+    expect(summary.pagesCrawled).toBe(2);
+
+    // The link rows still record what the page pointed at — the fact is kept,
+    // only the fetch is refused.
+    const linkRows = await db
+      .select()
+      .from(links)
+      .where(and(eq(links.crawlId, summary.crawlId), eq(links.targetUrl, `${variantWww}/admin/x`)));
+    expect(linkRows).toHaveLength(1);
   });
 
   it("says why a robots-closed site produced no pages", async () => {

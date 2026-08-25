@@ -48,6 +48,7 @@ import { XMLParser } from "fast-xml-parser";
 import robotsParserImport from "robots-parser";
 import { request } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
+import { isSameOrigin } from "./parse/url-utils.js";
 import {
   blockedAddressMessage,
   decodeBody,
@@ -160,6 +161,11 @@ export interface RobotsInfo {
    * True when no rule forbids this URL. Allow-all when robots.txt is absent;
    * deny-all when it is unreachable and the caller has not opted out (see
    * DiscoveryOpts.onUnreachableRobots).
+   *
+   * A URL on a same-site origin variant (www <-> apex, http <-> https) is
+   * judged by the rules as if it were written on the origin robots.txt was
+   * read from — `isSameOrigin` admits those spellings into the crawl, so they
+   * must not escape its rules. See onRulesOrigin.
    */
   isAllowed(url: string): boolean;
   crawlDelaySec: number | null;
@@ -495,6 +501,37 @@ function classifyRobotsFailure(doc: DocResult): "absent" | "unreachable" | "retr
   return "retry";
 }
 
+/**
+ * Rewrite a same-site URL onto the origin the rules were read from, for the
+ * purposes of the robots check only.
+ *
+ * robots-parser answers `undefined` for any URL whose origin differs from the
+ * robots.txt it parsed, and `undefined` means "no rule forbids this" — so a
+ * site that serves both `example.com` and `www.example.com` (or both schemes)
+ * without redirecting would have every rule silently skipped for whichever
+ * spelling a link happened to use, and `Disallow: /admin` would not hold.
+ * `isSameOrigin` is the crawl boundary: URLs it admits are the same site by
+ * our own rule, so the same path rules apply to them. It is asymmetric about
+ * an http->https upgrade, so both directions are tried — the rules origin can
+ * be the upgraded one when robots.txt redirected to https.
+ *
+ * The rewrite never leaves this function: the URL enqueued and fetched is the
+ * one the caller passed. A genuinely external URL is not rewritten and keeps
+ * the old answer (no rules of ours apply to another site).
+ */
+function onRulesOrigin(url: string, rulesOrigin: string): string {
+  if (!isSameOrigin(url, rulesOrigin) && !isSameOrigin(rulesOrigin, url)) return url;
+  try {
+    const parsed = new URL(url);
+    const origin = new URL(rulesOrigin);
+    parsed.protocol = origin.protocol;
+    parsed.host = origin.host;
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
 async function fetchRobots(
   siteUrl: string,
   opts: DiscoveryOpts,
@@ -563,6 +600,9 @@ async function fetchRobots(
   const raw = decodeBody(doc.body, doc.contentType);
   const parsed = robotsParser(doc.url, raw);
   const userAgent = opts.userAgent;
+  // The origin these rules govern: the robots.txt we actually read, after any
+  // redirect. Every same-site spelling is judged against it (onRulesOrigin).
+  const rulesOrigin = new URL(doc.url).origin;
 
   return {
     fetched: true,
@@ -572,8 +612,11 @@ async function fetchRobots(
     // robots-parser answers `undefined` when no group matches, when the URL is
     // unparseable, or when it belongs to another host. None of those is a
     // prohibition, and none of them is guesswork: "no rule forbids this" is
-    // exactly what the protocol says to do.
-    isAllowed: (url: string) => parsed.isAllowed(url, userAgent) !== false,
+    // exactly what the protocol says to do. Same-site origin variants are
+    // rewritten onto the rules origin first, so "another host" cannot mean a
+    // second spelling of this one — see onRulesOrigin.
+    isAllowed: (url: string) =>
+      parsed.isAllowed(onRulesOrigin(url, rulesOrigin), userAgent) !== false,
     crawlDelaySec: parsed.getCrawlDelay(userAgent) ?? null,
     sitemapUrls: parsed.getSitemaps(),
     raw,
