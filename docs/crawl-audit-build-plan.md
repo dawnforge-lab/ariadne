@@ -257,3 +257,45 @@ existing report and action-plan output.
 - **The memory contract is a hard requirement, not a target.** If the 50k-page
   crawl peaks above 512MB, the cause is an unbounded structure somewhere; find
   it with a heap snapshot rather than raising the limit.
+
+---
+
+## 7. Known gaps carried out of Phase 1
+
+Phase 1 shipped with these open. Evidence and measurements are in
+`docs/gates/phase-1.md`; this section is the tracking record so Phase 2 sees
+them.
+
+### Hard-kill durability (open, decide in Phase 2)
+
+The loop marks a frontier row `done` once `PageWriter.addPage` has *buffered*
+the page row, and the insert happens when the buffer fills (`batchSize` 100).
+A process killed outright (SIGKILL, OOM, power) loses up to `batchSize - 1`
+rows per table while the frontier already records those URLs as finished, so a
+resume does not re-fetch them. Every graceful path — abort, error, normal
+finish — flushes first, so only a hard kill is exposed.
+
+**Fix direction:** complete the frontier row only after its page row is
+durable (flush-then-complete, or complete in the same transaction as the
+flush). Decide before the frontier's state machine grows a `render_pending`
+state in Phase 5.
+
+### Before the first real-site crawl
+
+Phase 1's gate ran against a local fixture server. Each of these bites on the
+open internet and none is exercised by the gate:
+
+- **`accept-encoding` / gzip in `fetch-page`**, with a cap on *decompressed*
+  bytes as well as wire bytes (discovery already caps decompressed sitemap
+  bytes; page fetch does not compress at all today).
+- **Per-origin connection cap on the undici agent.** Politeness (rule 9) is
+  currently paced by the host gate alone; nothing bounds concurrent sockets to
+  one origin.
+- **`allowPrivate` must not survive into persisted crawl config.** It is a
+  test-only escape hatch: strip it when the config is stored, and require an
+  explicit re-assertion on resume rather than replaying it from the row.
+- **Verify the robots origin-variant fix against a real www/apex site.** The
+  rewrite in `RobotsInfo.isAllowed` is covered by a fixture test only.
+- **6to4 (`2002::/16`) and Teredo (`2001::/32`) exclusion** in url-policy's
+  IPv6 global-unicast allowlist: both embed an IPv4 address that the
+  `2000::/3` allowlist currently waves through.
