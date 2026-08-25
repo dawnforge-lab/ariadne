@@ -58,6 +58,34 @@ describe("analyzePage", () => {
     expect(empty.metaDescription).toBe("");
   });
 
+  // HTML metadata names, link types and MIME types are ASCII case-insensitive.
+  // Reading `name="Description"` as "no description" would report a present
+  // tag as a missing one — a false audit fact, not just a miss.
+  it("matches meta name/property, rel and script type case-insensitively", () => {
+    const a = analyzePage(
+      `<html><head>
+       <meta name="Description" content="Present, not missing.">
+       <meta name="ROBOTS" content="noindex">
+       <meta property="OG:title" content="T">
+       <meta property="og:Description" content="D">
+       <meta property="OG:IMAGE" content="/og.png">
+       <link rel=" Canonical " href="/c">
+       <link rel="AMPHTML" href="/amp/">
+       </head><body><a href="/x" rel="NoFollow">x</a></body></html>`,
+      "https://x.test/",
+    );
+    expect(a.metaDescription).toBe("Present, not missing.");
+    expect(a.robotsMeta).toBe("noindex");
+    expect(a.ogTitle).toBe("T");
+    expect(a.ogDescription).toBe("D");
+    expect(a.ogImage).toBe("/og.png");
+    expect(a.canonicalHtml).toBe("/c");
+    expect(a.canonicalCount).toBe(1);
+    expect(a.hasAmp).toBe(true);
+    expect(a.links[0]?.rel).toBe("nofollow");
+    expect(a.links[0]?.nofollow).toBe(true);
+  });
+
   it("ignores a <title> inside <svg>", () => {
     const a = analyzePage(
       `<html><head></head><body><svg><title>icon</title></svg></body></html>`,

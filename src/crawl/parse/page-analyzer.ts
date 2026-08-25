@@ -25,8 +25,22 @@
  *    `attribs["rel"] === "canonical"` case-sensitively while its cheerio
  *    oracle matched case-insensitively (css-select treats `rel` as one of
  *    HTML's case-insensitive attribute values), so `rel="Canonical"` silently
- *    diverged. HTML link types are case-insensitive; lowercasing is correct
- *    and restores parity.
+ *    diverged. HTML link types are case-insensitive; lowercasing (and, on the
+ *    same token-value reasoning as below, trimming) is correct and restores
+ *    parity.
+ *  - The same case-folding is applied to `<meta>` `name` / `property` and to
+ *    `<script type>`, which upstream also compared case-sensitively:
+ *    `name="Description"` was read as "no description at all", turning a
+ *    present tag into a false "missing" audit fact — the worst kind of defect
+ *    this engine can produce. HTML metadata names and MIME types are both
+ *    ASCII case-insensitive, and the surrounding whitespace of a token-valued
+ *    attribute is not part of the token, so the values are trimmed too.
+ *    Unlike `rel`, css-select does NOT case-fold `name` / `property` / `type`
+ *    (verified: `meta[name="description"]` misses `name="Description"`), so
+ *    here the port deliberately diverges from raw css-select and the parity
+ *    oracle case-folds by hand to match. That divergence is the point: the
+ *    oracle encodes the old DOM implementation, and the old DOM
+ *    implementation was wrong about this.
  *  - Head fields are now strictly first-element-wins. Upstream's `??=` meant a
  *    `<link rel=canonical>` with no href left `canonical` null and let a later
  *    canonical win, which the DOM oracle would not. A `undefined` = not-seen
@@ -48,7 +62,12 @@ export interface PageLink {
   /** Raw `rel` attribute, lowercased; null when the attribute was absent. */
   rel: string | null;
   nofollow: boolean;
-  /** 0-based index of this link's first occurrence in document order. */
+  /**
+   * 0-based rank among the unique links kept for this page, in the document
+   * order of each target's first occurrence. Not a raw `<a>` element index:
+   * duplicate targets, skipped protocols and unparseable hrefs never consume
+   * a position, so the sequence is always dense.
+   */
   position: number;
 }
 
@@ -175,21 +194,23 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   const handleMetaTag = (attribs: Record<string, string>) => {
     const content = attribs["content"];
-    if (attribs["name"] === "description") {
+    const name = attribs["name"]?.trim().toLowerCase();
+    const property = attribs["property"]?.trim().toLowerCase();
+    if (name === "description") {
       if (metaDescription === undefined) metaDescription = content?.trim() ?? "";
-    } else if (attribs["name"] === "robots") {
+    } else if (name === "robots") {
       if (robotsMeta === undefined) robotsMeta = content ?? null;
-    } else if (attribs["property"] === "og:title") {
+    } else if (property === "og:title") {
       if (ogTitle === undefined) ogTitle = content ?? null;
-    } else if (attribs["property"] === "og:description") {
+    } else if (property === "og:description") {
       if (ogDescription === undefined) ogDescription = content ?? null;
-    } else if (attribs["property"] === "og:image") {
+    } else if (property === "og:image") {
       if (ogImage === undefined) ogImage = content ?? null;
     }
   };
 
   const handleLinkTag = (attribs: Record<string, string>) => {
-    const rel = attribs["rel"]?.toLowerCase();
+    const rel = attribs["rel"]?.trim().toLowerCase();
     if (rel === "canonical") {
       if (canonical === undefined) canonical = attribs["href"] ?? null;
       canonicalCount += 1;
@@ -262,7 +283,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             if (!("alt" in attribs)) imagesMissingAlt += 1;
             break;
           case "script":
-            if (attribs["type"] === "application/ld+json") {
+            if (
+              attribs["type"]?.trim().toLowerCase() === "application/ld+json"
+            ) {
               hasStructuredData = true;
             }
             break;
@@ -274,7 +297,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             if (href && !SKIPPED_LINK_PROTOCOLS.test(href)) {
               openAnchor = {
                 href,
-                rel: attribs["rel"]?.toLowerCase() ?? null,
+                rel: attribs["rel"]?.trim().toLowerCase() ?? null,
                 text: [],
               };
             }

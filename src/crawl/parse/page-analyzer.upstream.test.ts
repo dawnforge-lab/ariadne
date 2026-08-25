@@ -23,28 +23,36 @@ import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis {
   const $ = cheerio.load(html);
 
+  // css-select case-folds `rel` values but NOT `name` / `property` / `type`
+  // (verified: meta[name="description"] misses name="Description"). The port
+  // case-folds all of them, so the oracle does the attribute match by hand
+  // rather than by selector wherever that difference bites.
+  const fold = (value: string | undefined) => value?.trim().toLowerCase();
+  const byAttr = (tag: string, attr: string, wanted: string) =>
+    $(`${tag}[${attr}]`).filter((_, el) => fold($(el).attr(attr)) === wanted);
+
   const titleEl = $("title").first();
   const title = titleEl.length ? titleEl.text().trim() : null;
 
-  const descEl = $('meta[name="description"]').first();
+  const descEl = byAttr("meta", "name", "description").first();
   const metaDescription = descEl.length
     ? (descEl.attr("content")?.trim() ?? "")
     : null;
 
-  const canonicalEls = $("link[rel]").filter(
-    (_, el) => $(el).attr("rel")?.toLowerCase() === "canonical",
-  );
+  const canonicalEls = byAttr("link", "rel", "canonical");
   const canonicalHtml = canonicalEls.length
     ? (canonicalEls.first().attr("href") ?? null)
     : null;
 
-  const robotsMeta = $('meta[name="robots"]').first().attr("content") ?? null;
+  const robotsMeta =
+    byAttr("meta", "name", "robots").first().attr("content") ?? null;
   const ogTitle =
-    $('meta[property="og:title"]').first().attr("content") ?? null;
+    byAttr("meta", "property", "og:title").first().attr("content") ?? null;
   const ogDescription =
-    $('meta[property="og:description"]').first().attr("content") ?? null;
+    byAttr("meta", "property", "og:description").first().attr("content") ??
+    null;
   const ogImage =
-    $('meta[property="og:image"]').first().attr("content") ?? null;
+    byAttr("meta", "property", "og:image").first().attr("content") ?? null;
 
   const h1s: string[] = [];
   $("h1").each((_, el) => {
@@ -93,7 +101,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis 
     if (linksByTarget.has(resolved)) return;
     if (linksByTarget.size >= 2_000) return;
     const anchor = $(el).text().replace(/\s+/g, " ").trim().slice(0, 200);
-    const rel = $(el).attr("rel")?.toLowerCase() ?? null;
+    const rel = fold($(el).attr("rel")) ?? null;
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
@@ -104,22 +112,18 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis 
     });
   });
 
-  let hasStructuredData = false;
-  $('script[type="application/ld+json"]').each(() => {
-    hasStructuredData = true;
-  });
+  const hasStructuredData =
+    byAttr("script", "type", "application/ld+json").length > 0;
 
   const hreflangTags: string[] = [];
   $("link[rel][hreflang]").each((_, el) => {
-    if ($(el).attr("rel")?.toLowerCase() !== "alternate") return;
+    if (fold($(el).attr("rel")) !== "alternate") return;
     const hreflang = $(el).attr("hreflang");
     if (hreflang) hreflangTags.push(hreflang);
   });
 
   const hasAmp =
-    $("link[rel]").filter(
-      (_, el) => $(el).attr("rel")?.toLowerCase() === "amphtml",
-    ).length > 0 ||
+    byAttr("link", "rel", "amphtml").length > 0 ||
     $("html").attr("amp") !== undefined ||
     $("html").attr("⚡") !== undefined;
 
@@ -258,6 +262,17 @@ describe("analyzeHtml parity with the DOM reference", () => {
       <link rel="AMPHTML" href="/amp/">
       <link rel="ALTERNATE" hreflang="fr" href="/fr">
       </head><body><a href="/x" rel="NOFOLLOW">x</a></body></html>`);
+  });
+
+  it("matches on mixed-case meta name/property and script type", () => {
+    expectParity(`<html><head>
+      <meta name="Description" content="Present, not missing.">
+      <meta name="Robots" content="noindex">
+      <meta property="OG:title" content="OG Title">
+      <meta property="og:Description" content="OG Desc">
+      <meta property="OG:IMAGE" content="/og.png">
+      <script type="Application/LD+JSON">{"@type":"Article"}</script>
+      </head><body><p>x</p></body></html>`);
   });
 
   it("matches on an AMP root element", () => {

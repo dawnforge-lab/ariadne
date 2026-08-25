@@ -7,10 +7,29 @@
  */
 
 /**
+ * **`normalizeUrl` is the single authority for frontier and dedupe keys.**
+ * Two normalizers coexist in this codebase and they do not agree: url-policy's
+ * start-URL normalization is *validation only* — it decides whether a URL may
+ * be fetched at all — and its output is never a dedupe key. Anything that
+ * identifies a page (frontier membership, `pages.url_normalised`, link target
+ * matching) goes through this function and only this function. Task 9 passes
+ * the seed URL through here before enqueue, so the seed and the links that
+ * later point at it collapse to the same key.
+ *
+ * **This is not url-policy.** A URL this function returns is well-formed and
+ * canonical, not permitted: it says nothing about private ranges, blocked
+ * hosts or DNS. Every href it emits must still pass `isUrlAllowed` before the
+ * crawler fetches it (hard rule 5) — discovered, redirected-to, or supplied by
+ * a client.
+ *
  * Normalize a URL for deduplication:
  * - Resolve relative URLs against a base
  * - Strip fragments (#...)
- * - Sort query parameters
+ * - Sort query parameters. Intentional canonicalization, not incidental:
+ *   `?a=1&b=2` and `?b=2&a=1` are the same page on every stack that reads
+ *   params by name, so sorting stops one page entering the frontier twice.
+ *   It is also the clearest difference from url-policy's normalization, which
+ *   leaves param order alone — one more reason that output is not a key.
  * - Lowercase the hostname
  * - Preserve trailing slashes. A trailing slash is the canonical form on most
  *   CMS platforms (WordPress etc.), which 301-redirect the non-slash version to
