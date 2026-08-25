@@ -119,6 +119,28 @@ describe("normalizeAndValidateStartUrl", () => {
     } satisfies Partial<UrlPolicyError>);
   });
 
+  it("surfaces an unparseable A/AAAA payload instead of admitting the host", async () => {
+    vi.mocked(fetch).mockImplementation((input) =>
+      Promise.resolve(
+        requestUrl(input).endsWith("type=A")
+          ? new Response(
+              JSON.stringify({
+                Status: 0,
+                Answer: [{ type: 1, data: "not-an-address" }],
+              }),
+              { status: 200 },
+            )
+          : dnsOk(),
+      ),
+    );
+
+    await expect(
+      normalizeAndValidateStartUrl("https://garbage.example/"),
+    ).rejects.toMatchObject({
+      code: "DNS_RESOLUTION_FAILED",
+    } satisfies Partial<UrlPolicyError>);
+  });
+
   it("surfaces a DoH failure instead of treating it as allowed", async () => {
     vi.mocked(fetch).mockRejectedValue(new Error("dns down"));
 

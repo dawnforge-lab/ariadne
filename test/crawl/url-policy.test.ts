@@ -45,6 +45,11 @@ describe("isUrlAllowed", () => {
       "http://100.100.100.200/",
       "http://metadata.google.internal/",
       "http://metadata/",
+      // IPv4-mapped spellings of the metadata address must not step around
+      // the floor. URL canonicalises the dotted form to the hex one.
+      "http://[::ffff:a9fe:a9fe]/latest/meta-data/",
+      "http://[::ffff:169.254.169.254]/",
+      "http://[0:0:0:0:0:ffff:a9fe:a9fe]/",
     ]) {
       const v = await isUrlAllowed(u, { allowPrivate: true });
       expect(v.allowed, u).toBe(false);

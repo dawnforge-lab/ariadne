@@ -307,7 +307,20 @@ export const resolveViaDoh: AddressResolver = async (hostname, type) => {
   return body.Answer.filter(
     (answer): answer is Required<Pick<DnsJsonAnswer, "data" | "type">> =>
       answer.type === expectedType && typeof answer.data === "string",
-  ).map((answer) => normalizeHost(answer.data));
+  ).map((answer) => {
+    const address = normalizeHost(answer.data);
+    // An A/AAAA payload we cannot parse is a resolver anomaly, and the one
+    // way a malformed answer could otherwise slip through: an unparseable
+    // string is neither a blocked name nor a blocked literal, so the caller's
+    // .some() would read it as "not blocked" and admit the host. Throw.
+    if (parseIpv4(address) === null && parseIpv6(address) === null) {
+      throw new UrlPolicyError(
+        "DNS_RESOLUTION_FAILED",
+        `DoH ${type} lookup for ${hostname} returned an unparseable address: ${answer.data}`,
+      );
+    }
+    return address;
+  });
 };
 
 /**
@@ -365,15 +378,29 @@ export interface UrlPolicyOpts {
 }
 
 /**
+ * The IPv4 address a host denotes: a dotted quad, or the IPv4 inside an
+ * IPv4-mapped IPv6 literal. Both spellings must reach the same verdict —
+ * ::ffff:a9fe:a9fe is 169.254.169.254 wearing a hat.
+ */
+function hostAsIpv4(host: string): number[] | null {
+  const v4 = parseIpv4(host);
+  if (v4 !== null) return v4;
+  const v6 = parseIpv6(host);
+  return v6 === null ? null : mappedIpv4(v6);
+}
+
+/**
  * The floor the test-only allowPrivate escape hatch cannot lift. If
  * allowPrivate ever leaks out of the test suite, the crawler still cannot
  * reach a cloud metadata service — the payload of almost every real SSRF.
+ * Goes through hostAsIpv4 so a mapped spelling ([::ffff:a9fe:a9fe]) cannot
+ * step around the link-local test.
  */
 function hardBlockedReason(host: string): string | null {
   if (host !== "localhost" && BLOCKED_HOSTS.has(host)) {
     return `blocked host name (${host})`;
   }
-  const v4 = parseIpv4(host);
+  const v4 = hostAsIpv4(host);
   if (v4 !== null && v4[0] === 169 && v4[1] === 254) {
     return "link-local IPv4 address (169.254.0.0/16)";
   }
@@ -383,11 +410,28 @@ function hardBlockedReason(host: string): string | null {
 /**
  * The seam every fetch path calls, on every URL, before every request —
  * discovered, redirected-to, or supplied by a client. Async by contract
- * (callers already await it) but deliberately does no DNS: per-hop DoH would
- * make the crawl loop unusable. Hostname-level SSRF (a public name pointing at
- * private space) is checked once per hop on the start URL by
- * normalizeAndValidateStartUrl / resolveStartUrlRedirects, and each redirect
- * hop the crawl loop enqueues comes back through here.
+ * (callers already await it).
+ *
+ * WHAT THIS CHECKS: the URL as written. Scheme, and whether the host is a
+ * blocked name or an IP literal in blocked space. It is a string-level check.
+ *
+ * WHAT THIS DOES NOT CATCH — say it plainly, this is not complete SSRF
+ * protection: a perfectly ordinary-looking hostname that *resolves* to a
+ * private address (metadata.goog -> 169.254.169.254, or any attacker-owned
+ * name with an A record in RFC1918) passes here. This function does no DNS,
+ * deliberately: a DoH lookup per discovered link would make the crawl loop
+ * unusable.
+ *
+ * WHERE THAT IS CLOSED: two other controls, neither of them here.
+ *  1. The start URL (and every redirect hop it follows) is resolved and
+ *     re-checked by normalizeAndValidateStartUrl / resolveStartUrlRedirects.
+ *     That covers the operator-supplied entry point only.
+ *  2. The fetch layer must re-check the address it actually connects to, at
+ *     connect time — the only control that also closes the DNS-rebind window
+ *     between any check and the socket. That belongs to fetch-page (Task 5)
+ *     and is required, not optional; this function cannot substitute for it.
+ *
+ * So: necessary, cheap, called on every URL — but the perimeter, not the wall.
  */
 export async function isUrlAllowed(
   url: string,
