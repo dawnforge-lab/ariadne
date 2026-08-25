@@ -417,6 +417,57 @@ describe("PageWriter", () => {
     expect(await countOf(pages, crawlId)).toBe(1);
   });
 
+  it("attempts every table when one insert fails, and names what failed", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/poison`;
+    // A position past int4 is rejected by Postgres, so the `links` insert —
+    // and only that one — throws. `links` flushes second, so if flush() gave
+    // up at the first failure, hreflang and structured_data would be lost.
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        links: [
+          {
+            href: `${SITE}/one`,
+            anchor: "one",
+            rel: null,
+            nofollow: false,
+            position: 3_000_000_000,
+          },
+        ],
+      }),
+    );
+
+    let caught: unknown;
+    try {
+      await writer.flush();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    const aggregate = caught as AggregateError;
+    expect(aggregate.message).toContain("links");
+    expect(aggregate.errors).toHaveLength(1);
+    expect((aggregate.errors[0] as Error).message).toContain("1 row(s) lost");
+
+    expect(await countOf(links, crawlId)).toBe(0);
+    expect(await countOf(pages, crawlId)).toBe(1);
+    expect(await countOf(hreflang, crawlId)).toBe(2);
+    expect(await countOf(structuredData, crawlId)).toBe(1);
+
+    // The failed batch left the buffer, so the writer is usable again.
+    await expect(writer.flush()).resolves.toBeUndefined();
+    expect(writer.stats()).toEqual({
+      pages: 1,
+      links: 0,
+      hreflang: 2,
+      structuredData: 1,
+      hreflangUnresolved: 0,
+    });
+  });
+
   it("flush is idempotent and reports what it wrote", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);

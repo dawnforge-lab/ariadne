@@ -2,12 +2,21 @@
  * The crawl loop's write path: one `addPage` per fetched URL, batched inserts
  * into `pages` / `links` / `hreflang` / `structured_data`.
  *
- * The memory contract lives here as much as in the analyzer. Every buffer is
- * bounded by `batchSize` at all times — not "on average", not "after
- * `addPage` returns": rows are appended one at a time and the buffer is
- * drained the instant it fills, so a single mega-menu page carrying 2000 links
- * never parks 2000 rows in RAM. Nothing in this class is keyed by URL or by
- * page, so its footprint is O(batchSize), never O(crawl).
+ * The memory contract lives here as much as in the analyzer, and the exact
+ * bound matters. Two separate things are bounded:
+ *  - The persistent buffers. Each is ≤ `batchSize` at all times — not "on
+ *    average", not "after `addPage` returns": rows are appended one at a time
+ *    and the buffer is drained the instant it fills. A mega-menu page with
+ *    2000 links pushes twenty 100-row batches through the buffer instead of
+ *    holding a 2000-row one.
+ *  - The transient per-call arrays. `addPage` materialises the row objects for
+ *    one page before pushing them, so a call peaks at that page's row count,
+ *    which the analyzer's own caps bound (links 2000, hreflang 200,
+ *    structured data 50). Across the crawl loop that is
+ *    O(concurrency × analyzer caps), not O(URLs) — lazy generators would drop
+ *    the constant but buy nothing real at this scale.
+ * Nothing here is keyed by URL or by page, so the writer's footprint never
+ * grows with the size of the crawl.
  *
  * Two facts about the row shapes that readers of this data need:
  *  - `pages.simhash` is a SIGNED bigint and the analyzer's simhash is in the
@@ -174,12 +183,43 @@ export class PageWriter {
    * Write whatever is still buffered. Idempotent — an empty buffer is a no-op,
    * so the crawl loop's `finally` can call it unconditionally, and calling it
    * mid-crawl only costs a smaller-than-usual insert.
+   *
+   * Every table is attempted even when an earlier one fails. Sequential
+   * `await`s would abandon three buffers' worth of rows because one table's
+   * insert threw, and since this runs in the loop's `finally`, that failure
+   * would also be the error the crawl reports instead of whatever actually
+   * went wrong. So each flush is tried, the failures are collected, and an
+   * `AggregateError` naming every failed table is thrown at the end — the
+   * whole picture, loudly (hard rule 7), rather than the first fragment of it.
+   *
+   * A batch that fails is lost: its rows were taken out of the buffer before
+   * the insert. That is the transparent outcome — the error names the table
+   * and the row count, and the caller decides — not a silent retry that could
+   * double-write rows the database may in fact have committed.
    */
   async flush(): Promise<void> {
-    await this.flushPages();
-    await this.flushLinks();
-    await this.flushHreflang();
-    await this.flushStructuredData();
+    const drains: Array<[string, () => Promise<void>]> = [
+      ["pages", () => this.flushPages()],
+      ["links", () => this.flushLinks()],
+      ["hreflang", () => this.flushHreflang()],
+      ["structured_data", () => this.flushStructuredData()],
+    ];
+    const failed: string[] = [];
+    const errors: unknown[] = [];
+    for (const [table, drain] of drains) {
+      try {
+        await drain();
+      } catch (error) {
+        failed.push(table);
+        errors.push(error);
+      }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        `PageWriter.flush: ${errors.length} of ${drains.length} table flushes failed (${failed.join(", ")})`,
+      );
+    }
   }
 
   /**
@@ -198,43 +238,74 @@ export class PageWriter {
     }
   }
 
+  /**
+   * Take everything in one buffer and write it. The buffer is emptied before
+   * the insert is attempted, so a failing batch is gone from memory — the
+   * error says which table and how many rows, with the driver's own error as
+   * its `cause`.
+   */
+  private async drain<T>(
+    table: string,
+    counter: keyof PageWriterStats,
+    buffer: T[],
+    insert: (batch: T[]) => Promise<number>,
+  ): Promise<void> {
+    if (buffer.length === 0) return;
+    const batch = buffer.splice(0, buffer.length);
+    let written: number;
+    try {
+      written = await insert(batch);
+    } catch (error) {
+      throw new Error(
+        `PageWriter: insert into ${table} failed; ${batch.length} row(s) lost`,
+        { cause: error },
+      );
+    }
+    this.counts[counter] += written;
+  }
+
   private async flushPages(): Promise<void> {
-    if (this.pageBuffer.length === 0) return;
-    const batch = this.pageBuffer.splice(0, this.pageBuffer.length);
-    // A redirect target can already have been crawled under its own row, and
-    // (crawl_id, url) is unique. The loser of that race keeps its minted
-    // pageId on its child rows, which then point at a page row that does not
-    // exist. That is deliberate: de-duplicating here would need a per-crawl
-    // set of URLs in memory, which is exactly the O(URLs) structure the
-    // memory contract forbids. Link resolution is a SQL join on target_url,
-    // not on these ids, so it is unaffected.
-    const inserted = await this.db
-      .insert(pages)
-      .values(batch)
-      .onConflictDoNothing({ target: [pages.crawlId, pages.url] })
-      .returning({ id: pages.id });
-    this.counts.pages += inserted.length;
+    await this.drain("pages", "pages", this.pageBuffer, async (batch) => {
+      // A redirect target can already have been crawled under its own row, and
+      // (crawl_id, url) is unique. The loser of that race keeps its minted
+      // pageId on its child rows, which then point at a page row that does not
+      // exist. That is deliberate: de-duplicating here would need a per-crawl
+      // set of URLs in memory, which is exactly the O(URLs) structure the
+      // memory contract forbids. Link resolution is a SQL join on target_url,
+      // not on these ids, so it is unaffected.
+      const inserted = await this.db
+        .insert(pages)
+        .values(batch)
+        .onConflictDoNothing({ target: [pages.crawlId, pages.url] })
+        .returning({ id: pages.id });
+      return inserted.length;
+    });
   }
 
   private async flushLinks(): Promise<void> {
-    if (this.linkBuffer.length === 0) return;
-    const batch = this.linkBuffer.splice(0, this.linkBuffer.length);
-    await this.db.insert(links).values(batch);
-    this.counts.links += batch.length;
+    await this.drain("links", "links", this.linkBuffer, async (batch) => {
+      await this.db.insert(links).values(batch);
+      return batch.length;
+    });
   }
 
   private async flushHreflang(): Promise<void> {
-    if (this.hreflangBuffer.length === 0) return;
-    const batch = this.hreflangBuffer.splice(0, this.hreflangBuffer.length);
-    await this.db.insert(hreflang).values(batch);
-    this.counts.hreflang += batch.length;
+    await this.drain("hreflang", "hreflang", this.hreflangBuffer, async (batch) => {
+      await this.db.insert(hreflang).values(batch);
+      return batch.length;
+    });
   }
 
   private async flushStructuredData(): Promise<void> {
-    if (this.structuredDataBuffer.length === 0) return;
-    const batch = this.structuredDataBuffer.splice(0, this.structuredDataBuffer.length);
-    await this.db.insert(structuredData).values(batch);
-    this.counts.structuredData += batch.length;
+    await this.drain(
+      "structured_data",
+      "structuredData",
+      this.structuredDataBuffer,
+      async (batch) => {
+        await this.db.insert(structuredData).values(batch);
+        return batch.length;
+      },
+    );
   }
 
   private pageRow(
