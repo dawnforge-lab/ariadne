@@ -1,5 +1,8 @@
 node_modules/
+dist/
+coverage/
 drizzle/meta/_journal.json.bak
 *.log
+.env
 .tmp/
 .superpowers/
