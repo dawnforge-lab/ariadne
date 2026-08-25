@@ -143,16 +143,17 @@ describe("analyzePage", () => {
     expect(a.headingCounts).toEqual([1, 0, 0, 0, 0, 0]);
   });
 
-  // Documented limitation, inherited from upstream and shared with the DOM
-  // oracle (cheerio's .text() concatenates the same way): text nodes are
-  // joined with no separator, so minified markup merges the last word of one
-  // block with the first word of the next and undercounts.
-  it("undercounts words across block boundaries in minified markup", () => {
+  // Was a documented limitation inherited from upstream (text nodes joined
+  // with no separator, so `</h1><p>` merged two words into one and
+  // undercounted); Task 6 fixed it, since wordCount, textRatio, contentHash
+  // and simhash all read that accumulator. Element boundaries are whitespace
+  // now — see the element-boundary block in analyzer-extensions.test.ts.
+  it("counts words across block boundaries in minified markup", () => {
     const a = analyzePage(
       `<body><h1>Bare fragment</h1><p>three more words</p></body>`,
       "https://x.test/",
     );
-    expect(a.wordCount).toBe(4);
+    expect(a.wordCount).toBe(5);
   });
 
   it("does not count head text as content", () => {

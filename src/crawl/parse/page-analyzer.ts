@@ -50,9 +50,33 @@
  *  - `title` and `metaDescription` are `string | null`, where null means the
  *    element was absent and "" means it was present and empty — upstream
  *    collapsed both to "". The distinction is a real audit signal.
+ *
+ * Task 6 (P1-T3) then extended the analyzer with the checklist fields upstream
+ * never had — rel next/prev, dom size, text ratio, hreflang pairs, JSON-LD
+ * capture, content hash and simhash — all inside the same single pass. Two of
+ * its changes touch absorbed behaviour rather than adding to it:
+ *  - Element boundaries are whitespace. Upstream joined text nodes with no
+ *    separator, so minified markup (`</h1><p>`) merged the last word of one
+ *    block into the first word of the next and undercounted every such page.
+ *    Non-inline element boundaries now emit a separator, matching what a
+ *    browser renders; inline elements (`<em>`, `<b>`, …) and stripped
+ *    subtrees (`<script>`) do not, so `un<em>believ</em>able` stays one word.
+ *    `wordCount`, `textRatio`, `contentHash` and `simhash` all read this one
+ *    accumulator. This is a deliberate divergence from the old DOM
+ *    implementation (cheerio's `.text()` concatenates exactly as upstream
+ *    did); the parity oracle walks the DOM the same way so the suite still
+ *    holds the port to a reference, and named tests pin the new behaviour.
+ *  - `<link rel>` is matched as a token list, not as a whole value. `rel` is
+ *    space-separated by spec (`rel="next prefetch"`), and a DOM `relList` /
+ *    css-select `[rel~=…]` match reads it that way; the whole-value compare
+ *    upstream used silently missed every multi-token link. Canonical,
+ *    alternate/hreflang and amphtml came along to token matching with
+ *    next/prev; the oracle was moved to `~=` semantics to match.
  */
+import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
+import { simhash64 } from "./simhash.js";
 
 /** A link as the `links` table wants it. */
 export interface PageLink {
@@ -71,7 +95,23 @@ export interface PageLink {
   position: number;
 }
 
-/** Data extracted from a single page's HTML. Task 6 extends this. */
+/** One `<link rel=alternate hreflang=…>` target: both halves, or nothing. */
+export interface HreflangPair {
+  /** The `hreflang` attribute verbatim (BCP47-ish; not normalised here). */
+  code: string;
+  /** The `href` attribute verbatim — unresolved, as written in the page. */
+  href: string;
+}
+
+/** One JSON-LD node lifted out of a `<script type="application/ld+json">`. */
+export interface StructuredDataBlock {
+  /** `@type`, or the first entry when `@type` is an array; else "unknown". */
+  type: string;
+  /** The parsed node itself, untouched. */
+  raw: unknown;
+}
+
+/** Data extracted from a single page's HTML. */
 export interface PageAnalysis {
   title: string | null;
   metaDescription: string | null;
@@ -91,13 +131,39 @@ export interface PageAnalysis {
   imagesMissingAlt: number;
   hasAmp: boolean;
   links: PageLink[];
+  /** First `<link rel=next>` href; null when absent or href-less. */
+  relNext: string | null;
+  /** First `<link rel=prev>` href; null when absent or href-less. */
+  relPrev: string | null;
+  /** Open-tag tokenizer events — the page's element count as parsed. */
+  domSize: number;
+  /** Visible-text bytes / HTML bytes, clamped to 0..1. */
+  textRatio: number;
+  /** `rel=alternate` targets in document order, capped at MAX_HREFLANG_PAIRS. */
+  hreflang: HreflangPair[];
+  /** JSON-LD nodes in document order, capped at MAX_STRUCTURED_DATA_BLOCKS. */
+  structuredData: StructuredDataBlock[];
+  /**
+   * JSON-LD blocks that produced nothing: invalid JSON, or larger than the
+   * per-block buffer cap. Counted rather than swallowed — a page whose
+   * structured data does not parse is an audit finding, not an empty list.
+   */
+  structuredDataParseErrors: number;
+  /** sha256 (hex) of the normalised visible text — exact-duplicate key. */
+  contentHash: string;
+  /**
+   * 64-bit simhash of the same text — near-duplicate key. Unsigned range;
+   * persistence stores `BigInt.asIntN(64, simhash)` (see simhash.ts).
+   */
+  simhash: bigint;
 }
 
 /**
  * Everything the tokenizer extracts, including the fields `PageAnalysis` does
- * not surface yet. Task 6 promotes `bodyText`, `h1s`, `hasStructuredData`,
- * `hreflangTags` and `PageLink.isInternal` into the facade; until then they
- * are the parity suite's business and nothing else's.
+ * not surface. `bodyText` and `h1s` are the parity suite's business and
+ * nothing else's; `hasStructuredData` and `hreflangTags` are upstream's
+ * coarse forms of what the facade now carries as `structuredData` and
+ * `hreflang`, kept so the absorbed behaviour stays under the oracle.
  */
 export interface RawPageAnalysis extends PageAnalysis {
   bodyText: string;
@@ -114,6 +180,19 @@ export interface RawPageLink extends PageLink {
 const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
 /** Subtrees whose text is not visible content. */
 const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
+/**
+ * Elements that do not break a word. Everything else — blocks, `<br>`, `<img>`,
+ * list items, table cells — puts whitespace between the text on either side of
+ * it, which is what a browser renders and what upstream's separator-less
+ * concatenation got wrong. Shared with the parity oracle, which walks the DOM
+ * by the same rule.
+ */
+export const INLINE_TEXT_TAGS = new Set([
+  "a", "abbr", "b", "bdi", "bdo", "big", "cite", "code", "data", "del", "dfn",
+  "em", "font", "i", "ins", "kbd", "label", "mark", "nobr", "q", "rp", "rt",
+  "ruby", "s", "samp", "small", "span", "strike", "strong", "sub", "sup",
+  "time", "tt", "u", "var", "wbr",
+]);
 const HEADING_LEVELS: Record<string, number> = {
   h1: 1,
   h2: 2,
@@ -132,11 +211,62 @@ const MAX_ANCHOR_CHARS = 200;
  */
 const MAX_EXTRACTED_LINKS = 2_000;
 const MAX_HEADING_ORDER = 500;
+const MAX_HREFLANG_PAIRS = 200;
+const MAX_STRUCTURED_DATA_BLOCKS = 50;
+/**
+ * Per-block buffer cap for JSON-LD text, in characters. A block over this is
+ * never buffered, never parsed, and counted as a failure — the alternative is
+ * letting one page with a megabyte of embedded JSON set the crawl's memory
+ * high-water mark. Kept blocks retain references into their parsed document,
+ * so the worst case a page can hold is roughly this cap times the block cap.
+ */
+const MAX_LD_JSON_CHARS = 100_000;
+/** How far into nested arrays / `@graph` the JSON-LD node walk will go. */
+const MAX_LD_JSON_DEPTH = 5;
 
 interface OpenAnchor {
   href: string;
   rel: string | null;
   text: string[];
+}
+
+/**
+ * Flatten a parsed JSON-LD document into its nodes: arrays and `@graph`
+ * containers expand to one entry per node. A container that is itself typed
+ * (`{"@type":…,"@graph":[…]}`) counts as a node too.
+ */
+function collectLdJsonNodes(value: unknown, out: unknown[], depth: number): void {
+  if (depth > MAX_LD_JSON_DEPTH || out.length >= MAX_STRUCTURED_DATA_BLOCKS) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectLdJsonNodes(entry, out, depth + 1);
+    return;
+  }
+  // Scalars and null are not JSON-LD nodes: valid JSON, nothing to record.
+  if (typeof value !== "object" || value === null) return;
+  const node = value as Record<string, unknown>;
+  const graph = node["@graph"];
+  if (graph !== undefined) {
+    if ("@type" in node) out.push(node);
+    collectLdJsonNodes(graph, out, depth + 1);
+    return;
+  }
+  out.push(value);
+}
+
+/** `@type` of a JSON-LD node — first entry when it is an array. */
+function ldJsonType(node: unknown): string {
+  if (typeof node !== "object" || node === null) return "unknown";
+  const type = (node as Record<string, unknown>)["@type"];
+  if (typeof type === "string" && type.trim() !== "") return type;
+  if (Array.isArray(type)) {
+    const first = type.find(
+      (entry): entry is string => typeof entry === "string" && entry.trim() !== "",
+    );
+    if (first !== undefined) return first;
+  }
+  return "unknown";
 }
 
 /**
@@ -171,6 +301,19 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let hasStructuredData = false;
   let hasAmp = false;
   const hreflangTags: string[] = [];
+  let relNext: string | null | undefined;
+  let relPrev: string | null | undefined;
+  const hreflang: HreflangPair[] = [];
+  let domSize = 0;
+
+  // JSON-LD is buffered one block at a time: the tokenizer hands its text over
+  // in pieces, and only the closing </script> says the block is complete.
+  const structuredData: StructuredDataBlock[] = [];
+  let structuredDataParseErrors = 0;
+  let inLdJson = false;
+  let ldJsonParts: string[] = [];
+  let ldJsonChars = 0;
+  let ldJsonOversize = false;
 
   const h1s: string[] = [];
   const headingOrder: number[] = [];
@@ -211,15 +354,75 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   const handleLinkTag = (attribs: Record<string, string>) => {
     const rel = attribs["rel"]?.trim().toLowerCase();
-    if (rel === "canonical") {
-      if (canonical === undefined) canonical = attribs["href"] ?? null;
+    if (!rel) return;
+    // `rel` is a space-separated token list: rel="next prefetch" is a next
+    // link. Whole-value matching missed those; `~=` semantics do not.
+    const tokens = rel.split(/\s+/);
+    const href = attribs["href"];
+    if (tokens.includes("canonical")) {
+      if (canonical === undefined) canonical = href ?? null;
       canonicalCount += 1;
-    } else if (rel === "alternate" && attribs["hreflang"]) {
-      hreflangTags.push(attribs["hreflang"]);
-    } else if (rel === "amphtml") {
-      hasAmp = true;
+    }
+    const code = attribs["hreflang"];
+    if (tokens.includes("alternate") && code) {
+      hreflangTags.push(code);
+      // A pair with no href names no target, so it is not a pair. The code
+      // itself survives on the raw `hreflangTags` list.
+      if (href !== undefined && hreflang.length < MAX_HREFLANG_PAIRS) {
+        hreflang.push({ code, href });
+      }
+    }
+    if (tokens.includes("amphtml")) hasAmp = true;
+    if (tokens.includes("next") && relNext === undefined) relNext = href ?? null;
+    if (tokens.includes("prev") && relPrev === undefined) relPrev = href ?? null;
+  };
+
+  /**
+   * Finish the JSON-LD block the tokenizer was buffering. Never throws: a
+   * block that will not parse is counted, not guessed at and not fatal.
+   */
+  const flushLdJson = () => {
+    const text = ldJsonParts.join("");
+    const oversize = ldJsonOversize;
+    inLdJson = false;
+    ldJsonParts = [];
+    ldJsonChars = 0;
+    ldJsonOversize = false;
+    if (oversize) {
+      structuredDataParseErrors += 1;
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      structuredDataParseErrors += 1;
+      return;
+    }
+    const nodes: unknown[] = [];
+    collectLdJsonNodes(parsed, nodes, 0);
+    for (const node of nodes) {
+      if (structuredData.length >= MAX_STRUCTURED_DATA_BLOCKS) break;
+      structuredData.push({ type: ldJsonType(node), raw: node });
     }
   };
+
+  /**
+   * Emit an element boundary into the visible-text accumulator. Runs under the
+   * same scoping rules as `ontext`, and collapses runs so a tag-dense page does
+   * not grow the accumulator with separators.
+   */
+  const emitTextBoundary = () => {
+    if (suppressDepth > 0 || titleDepth > 0) return;
+    const parts =
+      bodyDepth > 0 ? bodyParts : headDepth === 0 ? fallbackParts : null;
+    if (parts === null) return;
+    if (parts.length === 0 || parts[parts.length - 1] === " ") return;
+    parts.push(" ");
+  };
+
+  const isTextBoundary = (name: string) =>
+    !INLINE_TEXT_TAGS.has(name) && !NON_CONTENT_TAGS.has(name);
 
   const closeAnchor = () => {
     if (!openAnchor) return;
@@ -246,6 +449,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const parser = new Parser(
     {
       onopentag(name, attribs) {
+        domSize += 1;
         if (NON_CONTENT_TAGS.has(name)) {
           suppressDepth += 1;
         }
@@ -287,6 +491,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               attribs["type"]?.trim().toLowerCase() === "application/ld+json"
             ) {
               hasStructuredData = true;
+              inLdJson = true;
+              ldJsonParts = [];
+              ldJsonChars = 0;
+              ldJsonOversize = false;
             }
             break;
           case "a": {
@@ -313,8 +521,20 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           }
           if (headingLevel === 1 && openH1 === null) openH1 = [];
         }
+        if (isTextBoundary(name)) emitTextBoundary();
       },
       ontext(text) {
+        // JSON-LD lives inside a suppressed subtree, so it is buffered before
+        // the visible-text scoping rules get a say.
+        if (inLdJson && !ldJsonOversize) {
+          ldJsonChars += text.length;
+          if (ldJsonChars > MAX_LD_JSON_CHARS) {
+            ldJsonOversize = true;
+            ldJsonParts = [];
+          } else {
+            ldJsonParts.push(text);
+          }
+        }
         if (suppressDepth > 0) return;
         if (titleDepth > 0) {
           titleParts.push(text);
@@ -337,6 +557,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           return;
         }
         if (noscriptDepth > 0) return;
+        if (isTextBoundary(name)) emitTextBoundary();
+        if (name === "script" && inLdJson) flushLdJson();
         if (name === "title" && titleDepth > 0) {
           titleDepth -= 1;
           if (titleDepth === 0) titleDone = true;
@@ -355,11 +577,20 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   );
   parser.write(html);
   parser.end();
+  // A document that ends inside a JSON-LD script still owes us its block.
+  if (inLdJson) flushLdJson();
 
   const rawText = (sawBody ? bodyParts : fallbackParts).join("");
   const bodyText = rawText.replace(/\s+/g, " ").trim();
   const wordCount = bodyText ? bodyText.split(/\s+/).length : 0;
   const title: string | null = sawTitle ? titleParts.join("").trim() : null;
+
+  // Bytes, not characters, on both sides: the ratio is about wire weight.
+  // Clamped because a text-only fragment is legitimately all text, and
+  // entity decoding can nudge a pathological page a hair over 1.
+  const htmlBytes = Buffer.byteLength(html);
+  const textRatio =
+    htmlBytes === 0 ? 0 : Math.min(1, Buffer.byteLength(bodyText) / htmlBytes);
 
   return {
     title,
@@ -384,6 +615,15 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     imagesMissingAlt,
     hasAmp,
     links: Array.from(linksByTarget.values()),
+    relNext: relNext ?? null,
+    relPrev: relPrev ?? null,
+    domSize,
+    textRatio,
+    hreflang,
+    structuredData,
+    structuredDataParseErrors,
+    contentHash: createHash("sha256").update(bodyText).digest("hex"),
+    simhash: simhash64(bodyText),
     bodyText,
     h1s,
     hasStructuredData,
@@ -419,5 +659,14 @@ export function analyzePage(html: string, url: string): PageAnalysis {
       nofollow,
       position,
     })),
+    relNext: raw.relNext,
+    relPrev: raw.relPrev,
+    domSize: raw.domSize,
+    textRatio: raw.textRatio,
+    hreflang: raw.hreflang,
+    structuredData: raw.structuredData,
+    structuredDataParseErrors: raw.structuredDataParseErrors,
+    contentHash: raw.contentHash,
+    simhash: raw.simhash,
   };
 }

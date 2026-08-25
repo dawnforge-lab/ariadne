@@ -11,16 +11,85 @@
  * 2000, headingOrder 500) and asserts that the scalar counters do NOT
  * saturate. New cases at the end cover the added fields against the oracle.
  *
+ * Task 6 moved the oracle twice more, both times because the DOM
+ * implementation it encodes was wrong and the port deliberately diverged:
+ *  - Visible text is collected by walking the DOM and treating every
+ *    non-inline element boundary as whitespace, instead of `.text()`, which
+ *    concatenates text nodes and merges words across `</h1><p>` in minified
+ *    markup. See the header of page-analyzer.ts.
+ *  - `link[rel]` is matched as a token list (`~=` semantics) rather than as a
+ *    whole value, so `rel="next prefetch"` is a next link.
+ * The oracle shares `INLINE_TEXT_TAGS` with the port: the parity claim is
+ * about walking the tree the same way, not about re-deriving the tag table.
+ *
+ * The fields Task 6 added (rel next/prev, domSize, textRatio, hreflang pairs,
+ * structuredData, contentHash, simhash) are NOT part of the parity surface —
+ * they have no upstream DOM implementation to be held to, and `domSize` has no
+ * DOM equivalent at all, since parse5 synthesises html/head/body elements the
+ * tokenizer never sees as open-tag events. They are covered directly in
+ * test/crawl/analyzer-extensions.test.ts; `expectParity` strips them.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
 import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
-import { analyzeHtml, type RawPageAnalysis } from "./page-analyzer.js";
+import {
+  analyzeHtml,
+  INLINE_TEXT_TAGS,
+  type RawPageAnalysis,
+} from "./page-analyzer.js";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 
+/** The Task 6 additions, which the oracle does not model. */
+const EXTENSION_FIELDS = [
+  "relNext",
+  "relPrev",
+  "domSize",
+  "textRatio",
+  "hreflang",
+  "structuredData",
+  "structuredDataParseErrors",
+  "contentHash",
+  "simhash",
+] as const;
+
+type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
+
+/** Subtrees the DOM implementation removed before reading text. */
+const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
+
+/**
+ * The bits of a domhandler node this walk needs. Declared structurally so the
+ * oracle does not import from cheerio's own dependency.
+ */
+interface DomNode {
+  type: string;
+  name?: string;
+  data?: string;
+  children?: DomNode[];
+}
+
+/**
+ * Visible text, DOM-side: every non-inline element boundary is whitespace,
+ * inline elements are transparent, non-content subtrees contribute nothing.
+ */
+function collectVisibleText(node: DomNode, out: string[]): void {
+  if (node.type === "text") {
+    out.push(node.data ?? "");
+    return;
+  }
+  const name = node.name?.toLowerCase();
+  if (name === undefined) return;
+  if (NON_CONTENT_TAGS.has(name)) return;
+  const boundary = !INLINE_TEXT_TAGS.has(name);
+  if (boundary) out.push(" ");
+  for (const child of node.children ?? []) collectVisibleText(child, out);
+  if (boundary) out.push(" ");
+}
+
 /** The DOM reference implementation — the logic the tokenizer replaced. */
-function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis {
+function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   const $ = cheerio.load(html);
 
   // css-select case-folds `rel` values but NOT `name` / `property` / `type`
@@ -30,6 +99,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis 
   const fold = (value: string | undefined) => value?.trim().toLowerCase();
   const byAttr = (tag: string, attr: string, wanted: string) =>
     $(`${tag}[${attr}]`).filter((_, el) => fold($(el).attr(attr)) === wanted);
+  // `rel` is a token list — `[rel~="canonical"]`, not `[rel="canonical"]`.
+  const relTokens = (value: string | undefined) =>
+    (fold(value) ?? "").split(/\s+/);
+  const byRel = (tag: string, token: string) =>
+    $(`${tag}[rel]`).filter((_, el) =>
+      relTokens($(el).attr("rel")).includes(token),
+    );
 
   const titleEl = $("title").first();
   const title = titleEl.length ? titleEl.text().trim() : null;
@@ -39,7 +115,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis 
     ? (descEl.attr("content")?.trim() ?? "")
     : null;
 
-  const canonicalEls = byAttr("link", "rel", "canonical");
+  const canonicalEls = byRel("link", "canonical");
   const canonicalHtml = canonicalEls.length
     ? (canonicalEls.first().attr("href") ?? null)
     : null;
@@ -79,9 +155,10 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis 
     $("h6").length,
   ];
 
-  const bodyClone = $("body").clone();
-  bodyClone.find("script, style, noscript, svg").remove();
-  const bodyText = bodyClone.text().replace(/\s+/g, " ").trim();
+  const textParts: string[] = [];
+  const bodyEl = $("body")[0] as unknown as DomNode | undefined;
+  if (bodyEl) collectVisibleText(bodyEl, textParts);
+  const bodyText = textParts.join("").replace(/\s+/g, " ").trim();
   const wordCount = bodyText ? bodyText.split(/\s+/).length : 0;
 
   let imagesTotal = 0;
@@ -117,13 +194,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis 
 
   const hreflangTags: string[] = [];
   $("link[rel][hreflang]").each((_, el) => {
-    if (fold($(el).attr("rel")) !== "alternate") return;
+    if (!relTokens($(el).attr("rel")).includes("alternate")) return;
     const hreflang = $(el).attr("hreflang");
     if (hreflang) hreflangTags.push(hreflang);
   });
 
   const hasAmp =
-    byAttr("link", "rel", "amphtml").length > 0 ||
+    byRel("link", "amphtml").length > 0 ||
     $("html").attr("amp") !== undefined ||
     $("html").attr("⚡") !== undefined;
 
@@ -153,7 +230,18 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): RawPageAnalysis 
 const PAGE_URL = "https://example.com/blog/post";
 
 function expectParity(html: string) {
-  const streamed = analyzeHtml(html, PAGE_URL);
+  const {
+    relNext: _relNext,
+    relPrev: _relPrev,
+    domSize: _domSize,
+    textRatio: _textRatio,
+    hreflang: _hreflang,
+    structuredData: _structuredData,
+    structuredDataParseErrors: _structuredDataParseErrors,
+    contentHash: _contentHash,
+    simhash: _simhash,
+    ...streamed
+  } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
   expect(streamed).toEqual(reference);
 }
@@ -277,6 +365,26 @@ describe("analyzeHtml parity with the DOM reference", () => {
 
   it("matches on an AMP root element", () => {
     expectParity(`<html amp><head><title>AMP</title></head><body><p>a</p></body></html>`);
+  });
+
+  it("matches on multi-token rel values", () => {
+    expectParity(`<html><head>
+      <link rel="canonical shortlink" href="/c">
+      <link rel="prefetch AMPHTML" href="/amp/">
+      <link rel="alternate stylesheet" hreflang="fr" href="/fr">
+      </head><body><a href="/x" rel="nofollow noopener">x</a></body></html>`);
+  });
+
+  it("matches word counts across minified block boundaries", () => {
+    expectParity(
+      `<body><h1>Bare fragment</h1><p>three more words</p><ul><li>a</li><li>b</li></ul><div>c</div></body>`,
+    );
+  });
+
+  it("matches when inline elements and stripped subtrees sit inside a word", () => {
+    expectParity(
+      `<body><p>un<em>believ</em>able <b>bold</b><span>ed</span>, al<script>ignored()</script>pha<br>tail</p></body>`,
+    );
   });
 
   it("matches when every canonical is counted", () => {
