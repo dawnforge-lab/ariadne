@@ -120,11 +120,43 @@ export interface CrawlSummary {
 const RULESET_VERSION = "0.1.0";
 
 /**
- * A lease outlives the worst case for one attempt (a 20s fetch timeout, plus
- * parse and insert) by a wide margin, and is still short enough that a crashed
- * worker's URLs are picked up in minutes rather than hours.
+ * The deadline this loop gives `fetchPage`. Stated here rather than left to
+ * fetch-page's own default because the lease duration is computed from it —
+ * two places that must agree, so there is one number.
  */
-const LEASE_SECONDS = 180;
+const FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * Floor on a lease, and the slack added on top of the worst-case wait. A lease
+ * must outlive everything one attempt can spend — the queue behind `HostGate`,
+ * the fetch itself, then parse and insert — because a lease that expires while
+ * the work is still running invites a second worker to fetch the same URL,
+ * which is a politeness violation (rule 9), not merely wasted effort.
+ */
+const LEASE_FLOOR_SECONDS = 180;
+const LEASE_SLACK_MS = 30_000;
+
+/**
+ * How long a batch of `batchSize` URLs may be leased for, given the per-host
+ * spacing actually in force.
+ *
+ * The bad case is a batch that is entirely one host — which is the *normal*
+ * case for a single-site crawl. `HostGate` hands out one slot per
+ * `delayMs`, so the last member of a batch of 16 under `Crawl-delay: 30` does
+ * not start its fetch for ~8 minutes; a flat 180s lease would have expired on
+ * it long before, and a second worker could legitimately re-lease and re-fetch
+ * a URL that is still in flight. `batchSize + 1` rather than `batchSize`
+ * because the gate may already owe an earlier batch one delay's wait.
+ *
+ * The cost is the other direction: a crashed worker's URLs sit idle for this
+ * long before anyone else may take them. That is the honest price of not
+ * double-fetching, and a resume that knows the worker is dead skips the wait
+ * entirely with `reclaimLeases`.
+ */
+function leaseSecondsFor(delayMs: number, batchSize: number): number {
+  const worstCaseMs = delayMs * (batchSize + 1) + FETCH_TIMEOUT_MS + LEASE_SLACK_MS;
+  return Math.max(LEASE_FLOOR_SECONDS, Math.ceil(worstCaseMs / 1000));
+}
 
 /** Attempts a transient failure gets before the URL is marked failed. */
 const MAX_ATTEMPTS = 3;
@@ -177,7 +209,8 @@ export interface ResumeOpts {
   signal?: AbortSignal;
   /**
    * Return *every* live lease in the crawl to pending before starting, instead
-   * of waiting for the dead worker's leases to expire (LEASE_SECONDS). Correct
+   * of waiting for the dead worker's leases to expire (see leaseSecondsFor).
+   * Correct
    * for a resume after a crash — which is the case the gate script exercises —
    * and wrong while another worker is still running: it would hand that
    * worker's URLs to this one.
@@ -392,18 +425,26 @@ async function runToCompletion(
    * Enqueue candidates that pass every gate, never letting the frontier grow
    * past `maxPages` rows. The cap is on rows *ever inserted*, so a hub page
    * with 5000 links cannot turn a 100-page crawl into a 5000-row table.
+   *
+   * `frontierRows` is *reserved* as each candidate is accepted, not compared
+   * once at the top: up to `maxConcurrency` calls of this function are in
+   * flight at any moment, and a check-then-insert separated by an `await`
+   * would let every one of them spend the same remaining room. The check and
+   * the increment sit in one synchronous step — no `await` between them — so
+   * the reservation is exact even with sixteen handlers interleaving. The
+   * count is corrected downwards afterwards by however many rows the
+   * `(crawl_id, url)` conflict dropped, so URLs already in the frontier do not
+   * permanently consume budget.
    */
   const enqueue = async (
     urls: readonly string[],
     depth: number,
     discoveredVia: string,
   ): Promise<void> => {
-    const room = config.maxPages - frontierRows;
-    if (room <= 0) return;
+    if (frontierRows >= config.maxPages) return;
 
     const items: EnqueueItem[] = [];
     for (const raw of urls) {
-      if (items.length >= room) break;
       // normalizeUrl is the single frontier-key authority (url-utils). Links
       // arrive already normalised from the analyzer; the seed and sitemap
       // entries do not, and running it twice is idempotent.
@@ -413,9 +454,20 @@ async function runToCompletion(
       const verdict = await isUrlAllowed(url, { allowPrivate });
       if (!verdict.allowed) continue;
       if (!discovery.robots.isAllowed(url)) continue;
+
+      // Reserve. Atomic with respect to the event loop, which is what makes
+      // the cap hold across concurrent handlers.
+      if (frontierRows >= config.maxPages) break;
+      frontierRows += 1;
       items.push({ url, depth, discoveredVia });
     }
-    frontierRows += await enqueueUrls(db, crawlId, items);
+    if (items.length === 0) return;
+
+    // A throw here leaves the reservation standing, which is the safe
+    // direction: the crawl is on its way out, and over-counting the frontier
+    // can only stop work early, never run past maxPages.
+    const inserted = await enqueueUrls(db, crawlId, items);
+    frontierRows -= items.length - inserted;
   };
 
   /**
@@ -444,6 +496,7 @@ async function runToCompletion(
       const result = await fetchPage(item.url, {
         userAgent: config.userAgent,
         allowPrivate,
+        timeoutMs: FETCH_TIMEOUT_MS,
       });
 
       // A transient failure with attempts left is not written yet: the row for
@@ -492,6 +545,14 @@ async function runToCompletion(
   const workerId = `worker_${randomUUID()}`;
   let aborted = false;
   let seedNote: string | null = null;
+  /**
+   * Errors on the way out, in the order they happened: the loop's own, then
+   * the shutdown's. A `finally` would have let the flush's error *replace* the
+   * loop's, which is the failure this collection exists to prevent — losing
+   * the error that explains the crawl in order to report the one it caused
+   * (rule 7). Every one of them surfaces, together.
+   */
+  const failures: unknown[] = [];
 
   try {
     await enqueue([config.siteUrl], 0, "seed");
@@ -518,12 +579,13 @@ async function runToCompletion(
       }
 
       const room = config.maxPages - pagesCrawled;
+      const size = Math.min(window.size(), room);
       const batch = await leaseBatch(
         db,
         crawlId,
         workerId,
-        Math.min(window.size(), room),
-        LEASE_SECONDS,
+        size,
+        leaseSecondsFor(gate.effectiveDelayMs(), size),
       );
 
       if (batch.length === 0) {
@@ -538,7 +600,7 @@ async function runToCompletion(
       // allSettled, not all: a handler that throws (our bug — a malformed
       // user agent, a page row that will not normalise) must still take the
       // crawl down, but only once its siblings have finished. `Promise.all`
-      // would return while they were mid-`addPage`, and the `finally` below
+      // would return while they were mid-`addPage`, and the shutdown below
       // would flush the writer's buffers underneath them.
       const settled = await Promise.allSettled(batch.map((item) => handleOne(item)));
       const outcomes: BatchOutcome[] = [];
@@ -558,14 +620,30 @@ async function runToCompletion(
       }
     }
     if (signal?.aborted === true) aborted = true;
-  } finally {
-    // Flush first: an AggregateError from here must surface, and it must not
-    // leave this worker's leases held for LEASE_SECONDS on the way out.
-    try {
-      await writer.flush();
-    } finally {
-      await releaseLeases(db, crawlId, workerId);
-    }
+  } catch (error) {
+    failures.push(error);
+  }
+
+  // Shutdown runs whatever happened above, and each step runs even if the
+  // previous one failed: buffered rows must be written, and this worker's
+  // leases must not stay held for a lease's worth of minutes on the way out.
+  try {
+    await writer.flush();
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await releaseLeases(db, crawlId, workerId);
+  } catch (error) {
+    failures.push(error);
+  }
+
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures,
+      `crawl ${crawlId}: ${failures.length} errors while running and shutting down`,
+    );
   }
 
   const status = aborted ? "cancelled" : "finished";

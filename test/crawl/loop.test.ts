@@ -35,6 +35,24 @@ let flaky: string;
 let closedServer: Server;
 let closed: string;
 
+/**
+ * A site that resets connections:
+ *   /flappy        -> resets twice, then serves a page (the retry succeeds)
+ *   /always-broken -> resets for ever (the retries are spent)
+ * Both are linked from `/`, and robots.txt 404s (absent -> allow all).
+ */
+let brokenServer: Server;
+let broken: string;
+let flappyHits = 0;
+let alwaysBrokenHits = 0;
+
+/**
+ * Set by the poison test: the next `/` request deletes the running crawl row
+ * out from under the loop, which makes the handler's enqueue *and* the
+ * writer's flush fail with foreign-key violations.
+ */
+let poisonNextPage = false;
+
 function html(body: string): string {
   return `<!doctype html><html><head><title>t</title></head><body>${body}</body></html>`;
 }
@@ -56,8 +74,16 @@ async function crawl(config: CrawlConfig, signal?: AbortSignal) {
 }
 
 beforeAll(async () => {
-  siteServer = createServer((req, res) => {
+  siteServer = createServer(async (req, res) => {
     const path = req.url ?? "";
+    if (poisonNextPage && path === "/") {
+      poisonNextPage = false;
+      // Deleting the crawl cascades to its frontier rows, so the very next
+      // enqueue and the writer's page insert both violate a foreign key.
+      await db
+        .delete(crawls)
+        .where(and(eq(crawls.siteUrl, base), eq(crawls.status, "running")));
+    }
     if (path === "/robots.txt") {
       res.setHeader("content-type", "text/plain");
       res.end(
@@ -126,6 +152,35 @@ beforeAll(async () => {
   });
   closed = await listen(closedServer);
 
+  brokenServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/flappy") {
+      flappyHits += 1;
+      // Two resets, then a real page: the URL is only crawlable on its third
+      // attempt, which is exactly what the requeue path exists for.
+      if (flappyHits <= 2) {
+        req.socket.destroy();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html("<p>up at last</p>"));
+      return;
+    }
+    if (path === "/always-broken") {
+      alwaysBrokenHits += 1;
+      req.socket.destroy();
+      return;
+    }
+    if (path === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html(`<a href="/flappy">f</a><a href="/always-broken">b</a>`));
+      return;
+    }
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("no");
+  });
+  broken = await listen(brokenServer);
+
   db = createDb(databaseUrl());
   await runMigrations(db);
 });
@@ -139,6 +194,7 @@ afterAll(async () => {
   await new Promise<void>((r) => siteServer.close(() => r()));
   await new Promise<void>((r) => flakyServer.close(() => r()));
   await new Promise<void>((r) => closedServer.close(() => r()));
+  await new Promise<void>((r) => brokenServer.close(() => r()));
 });
 
 function config(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
@@ -257,6 +313,49 @@ describe("runCrawl", () => {
     expect((await frontierCounts(db, summary.crawlId)).pending).toBe(0);
   });
 
+  it("stops enqueueing links at maxDepth", async () => {
+    const summary = await crawl(config({ maxDepth: 1 }));
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    const byUrl = new Map(rows.map((r) => [r.url, r]));
+
+    // /c is depth 1 and its link to /missing is never enqueued: at depth ===
+    // maxDepth a page is crawled but not expanded.
+    expect(byUrl.has(`${base}/c`)).toBe(true);
+    expect(byUrl.has(`${base}/missing`)).toBe(false);
+    expect([...byUrl.keys()].sort()).toEqual(
+      [`${base}/`, `${base}/a`, `${base}/b`, `${base}/c`, `${base}/d`].sort(),
+    );
+    expect(rows.every((r) => r.depth <= 1)).toBe(true);
+    // A redirect target is the same depth, not a step deeper, so /b -> /c is
+    // still followed from a depth-1 page.
+    expect(byUrl.get(`${base}/c`)?.depth).toBe(1);
+    expect(summary.frontier.pending).toBe(0);
+  });
+
+  it("retries a transient failure and records the attempt that settles it", async () => {
+    flappyHits = 0;
+    alwaysBrokenHits = 0;
+    const summary = await crawl(config({ siteUrl: broken }));
+
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    const byUrl = new Map(rows.map((r) => [r.url, r]));
+
+    // Reset twice, then served: the row is the *third* attempt's outcome, not
+    // the first failure that happened to be written first.
+    expect(flappyHits).toBe(3);
+    expect(byUrl.get(`${broken}/flappy`)?.fetchClass).toBe("ok");
+
+    // Reset for ever: three attempts, then one row carrying the failure.
+    expect(alwaysBrokenHits).toBe(3);
+    expect(byUrl.get(`${broken}/always-broken`)?.fetchClass).toBe("network_error");
+
+    // The frontier agrees: the retried URL is done, the exhausted one failed.
+    expect(summary.frontier.done).toBe(2); // / and /flappy
+    expect(summary.frontier.failed).toBe(1); // /always-broken
+    expect(summary.frontier.pending).toBe(0);
+    expect(rows).toHaveLength(3);
+  });
+
   it("says why a robots-closed site produced no pages", async () => {
     const summary = await crawl(config({ siteUrl: closed }));
     expect(summary.status).toBe("finished");
@@ -282,6 +381,28 @@ describe("runCrawl", () => {
     // The row is closed out as failed, not left `running` for ever.
     expect(created[0]?.status).toBe("failed");
     createdCrawls.push(created[0]!.id);
+  });
+
+  it("surfaces the loop's error and the shutdown's error together", async () => {
+    // Deleting the crawl mid-flight breaks two things at once: the seed page's
+    // enqueue (a frontier FK violation, inside the loop) and the writer's
+    // buffered page rows (a pages FK violation, during shutdown). Neither may
+    // hide the other.
+    poisonNextPage = true;
+    let thrown: unknown = null;
+    try {
+      await runCrawl(db, config());
+    } catch (error) {
+      thrown = error;
+    }
+    poisonNextPage = false;
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const aggregate = thrown as AggregateError;
+    expect(aggregate.errors).toHaveLength(2);
+    const text = aggregate.errors.map((e) => String((e as Error).message ?? e)).join("\n");
+    expect(text).toMatch(/frontier/); // the loop's error survived
+    expect(text).toMatch(/pages/); // and so did the flush's
   });
 });
 
