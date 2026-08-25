@@ -1301,7 +1301,7 @@ export interface CrawlConfig {
   siteUrl: string;
   maxPages: number;
   maxDepth: number;                    // default 10
-  userAgent: string;                   // default "AriadneBot/0.1 (+https://github.com/…)"
+  userAgent: string;                   // default "AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)"
   perHostDelayMs: number;              // default 1000
   maxConcurrency: number;              // default 16 (window ceiling)
   allowPrivate?: boolean;              // tests only
