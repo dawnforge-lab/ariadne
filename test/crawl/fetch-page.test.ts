@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import {
-  closeFetchAgents,
-  fetchPage,
-  type DnsLookupFn,
-} from "../../src/crawl/fetch-page.js";
+import { fetchPage } from "../../src/crawl/fetch-page.js";
+import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
 
 let server: Server;
 let base: string;
