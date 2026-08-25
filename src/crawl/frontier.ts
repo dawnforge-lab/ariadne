@@ -59,6 +59,23 @@ export interface EnqueueItem {
 }
 
 /**
+ * Rows per INSERT statement. Not a tuning knob — a correctness bound.
+ *
+ * Postgres binds parameters with a 16-bit count, so one statement carries at
+ * most 65,535 of them; a frontier row spends four (crawl_id, url, depth,
+ * discovered_via), which puts the wall at 16,383 rows. The caller that reaches
+ * it is not exotic: the crawl loop enqueues a whole sitemap in one call, and a
+ * 50k-URL sitemap is an ordinary large site. Well before the wall, the driver
+ * fails differently and worse — a ~30k-row statement overflows the call stack
+ * while the SQL is still being assembled, which reads like a crawler bug rather
+ * than a batch-size one.
+ *
+ * 1,000 rows (4,000 parameters) leaves an order of magnitude of headroom for
+ * the column count to grow without anyone having to rediscover this.
+ */
+const INSERT_CHUNK_ROWS = 1_000;
+
+/**
  * Add URLs to the frontier, ignoring any that are already there. Returns the
  * number of rows actually inserted — which is the caller's honest answer to
  * "how much did this page grow the crawl", and is what the loop budgets
@@ -68,6 +85,15 @@ export interface EnqueueItem {
  * owns its depth and provenance. Re-enqueueing a `done` URL therefore does not
  * resurrect it, which is what makes a resumed crawl continue rather than
  * restart (the seed is re-enqueued on every resume and stays done).
+ *
+ * A call larger than `INSERT_CHUNK_ROWS` becomes several statements rather
+ * than one oversized one. They are not one transaction, and deliberately so:
+ * a frontier row is idempotent (the conflict target makes re-enqueueing free),
+ * so a call that fails halfway leaves a partly-seeded frontier that the next
+ * call completes — which is strictly better than rolling 50,000 rows back
+ * because the last chunk timed out. The returned count is what actually
+ * landed, so a caller budgeting against it is never told about rows that did
+ * not.
  */
 export async function enqueueUrls(
   db: Db,
@@ -76,22 +102,26 @@ export async function enqueueUrls(
 ): Promise<number> {
   if (urls.length === 0) return 0;
 
-  const inserted = await db
-    .insert(frontier)
-    .values(
-      urls.map((item) => ({
-        crawlId,
-        url: item.url,
-        depth: item.depth,
-        discoveredVia: item.discoveredVia,
-      })),
-    )
-    // Duplicates *within* one batch collapse here too: DO NOTHING tolerates a
-    // row conflicting with one inserted earlier in the same statement.
-    .onConflictDoNothing({ target: [frontier.crawlId, frontier.url] })
-    .returning({ url: frontier.url });
+  let count = 0;
+  for (let i = 0; i < urls.length; i += INSERT_CHUNK_ROWS) {
+    const inserted = await db
+      .insert(frontier)
+      .values(
+        urls.slice(i, i + INSERT_CHUNK_ROWS).map((item) => ({
+          crawlId,
+          url: item.url,
+          depth: item.depth,
+          discoveredVia: item.discoveredVia,
+        })),
+      )
+      // Duplicates *within* one batch collapse here too: DO NOTHING tolerates a
+      // row conflicting with one inserted earlier in the same statement.
+      .onConflictDoNothing({ target: [frontier.crawlId, frontier.url] })
+      .returning({ url: frontier.url });
+    count += inserted.length;
+  }
 
-  return inserted.length;
+  return count;
 }
 
 /**

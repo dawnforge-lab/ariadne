@@ -81,6 +81,19 @@ describe("frontier", () => {
     expect((await frontierCounts(db, crawlId)).pending).toBe(2);
   });
 
+  it("enqueues a whole sitemap's worth of URLs in one call", async () => {
+    // Above Postgres's 65,535-parameter ceiling at four parameters a row
+    // (16,383 rows). One statement per call used to fail here, which is what a
+    // 50k-URL sitemap hands the crawl loop on its very first enqueue.
+    const crawlId = await newCrawl();
+    const many = Array.from({ length: 20_000 }, (_, i) => seed(`${SITE}/bulk/${i}`, 0, "sitemap"));
+    expect(await enqueueUrls(db, crawlId, many)).toBe(20_000);
+    expect((await frontierCounts(db, crawlId)).pending).toBe(20_000);
+
+    // Dedupe still holds across the chunk boundary, not merely inside one.
+    expect(await enqueueUrls(db, crawlId, many)).toBe(0);
+  });
+
   it("enqueueing nothing is a no-op, not a malformed insert", async () => {
     const crawlId = await newCrawl();
     expect(await enqueueUrls(db, crawlId, [])).toBe(0);
