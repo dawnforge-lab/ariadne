@@ -408,6 +408,36 @@ function hardBlockedReason(host: string): string | null {
 }
 
 /**
+ * The connect-time counterpart to isUrlAllowed, applied to an address the
+ * resolver actually returned rather than to the URL as written. fetch-page
+ * calls this from the socket `lookup` hook for every resolved address, which
+ * is what closes the hole isUrlAllowed documents below (a public name with a
+ * private A record) and the DNS-rebind window between any check and connect.
+ *
+ * It lives here, not in fetch-page, so the address policy has exactly one
+ * definition: `allowPrivate` relaxes it to the same floor the facade uses.
+ */
+export function blockedAddressReason(
+  address: string,
+  opts: UrlPolicyOpts = {},
+): string | null {
+  const host = normalizeHost(address);
+  if (!host) return "empty address";
+
+  // Contract: this takes an *address*, so anything that is not a parseable IP
+  // literal is a resolver anomaly and is refused, not admitted. Returning null
+  // for a string we could not classify is precisely the silent fallback
+  // resolveViaDoh already refuses to make.
+  if (parseIpv4(host) === null && parseIpv6(host) === null) {
+    return `unparseable resolved address (${address})`;
+  }
+
+  return opts.allowPrivate === true
+    ? hardBlockedReason(host)
+    : blockedHostReason(host);
+}
+
+/**
  * The seam every fetch path calls, on every URL, before every request —
  * discovered, redirected-to, or supplied by a client. Async by contract
  * (callers already await it).
@@ -426,10 +456,11 @@ function hardBlockedReason(host: string): string | null {
  *  1. The start URL (and every redirect hop it follows) is resolved and
  *     re-checked by normalizeAndValidateStartUrl / resolveStartUrlRedirects.
  *     That covers the operator-supplied entry point only.
- *  2. The fetch layer must re-check the address it actually connects to, at
+ *  2. The fetch layer re-checks the address it actually connects to, at
  *     connect time — the only control that also closes the DNS-rebind window
- *     between any check and the socket. That belongs to fetch-page (Task 5)
- *     and is required, not optional; this function cannot substitute for it.
+ *     between any check and the socket. That is fetchPage's socket `lookup`
+ *     hook calling blockedAddressReason (above); it is required, not
+ *     optional, and this function cannot substitute for it.
  *
  * So: necessary, cheap, called on every URL — but the perimeter, not the wall.
  */

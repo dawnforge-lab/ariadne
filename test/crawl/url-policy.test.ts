@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isCrawlableUrl, isUrlAllowed } from "../../src/crawl/url-policy.js";
+import {
+  blockedAddressReason,
+  isCrawlableUrl,
+  isUrlAllowed,
+} from "../../src/crawl/url-policy.js";
 
 describe("isUrlAllowed", () => {
   it("refuses non-http(s) schemes", async () => {
@@ -156,6 +160,49 @@ describe("isUrlAllowed", () => {
       "169.254.0.0/16",
     );
     expect((await isUrlAllowed("gopher://x/")).reason).toContain("gopher:");
+  });
+});
+
+describe("blockedAddressReason", () => {
+  it("refuses every spelling of a blocked address", () => {
+    for (const a of [
+      "127.0.0.1",
+      "0:0:0:0:0:ffff:7f00:1",
+      "::ffff:127.0.0.1",
+      "10.0.0.5",
+      "169.254.169.254",
+      "fd00::1",
+      "::1",
+    ]) {
+      expect(blockedAddressReason(a), a).not.toBeNull();
+    }
+  });
+
+  it("admits a public address", () => {
+    expect(blockedAddressReason("93.184.216.34")).toBeNull();
+    expect(blockedAddressReason("2606:2800:220:1:248:1893:25c8:1946")).toBeNull();
+  });
+
+  it("allowPrivate relaxes to the metadata floor and no further", () => {
+    expect(blockedAddressReason("127.0.0.1", { allowPrivate: true })).toBeNull();
+    expect(blockedAddressReason("10.0.0.5", { allowPrivate: true })).toBeNull();
+    // The floor allowPrivate cannot lift.
+    expect(
+      blockedAddressReason("169.254.169.254", { allowPrivate: true }),
+    ).not.toBeNull();
+    expect(
+      blockedAddressReason("::ffff:169.254.169.254", { allowPrivate: true }),
+    ).not.toBeNull();
+  });
+
+  it("refuses an unparseable answer rather than admitting it", () => {
+    expect(blockedAddressReason("")).not.toBeNull();
+    // A resolver answer that is not an IP literal is an anomaly, not a pass.
+    expect(blockedAddressReason("not-an-address")).not.toBeNull();
+    expect(blockedAddressReason("10..0.1")).not.toBeNull();
+    expect(
+      blockedAddressReason("not-an-address", { allowPrivate: true }),
+    ).not.toBeNull();
   });
 });
 
