@@ -1,0 +1,5 @@
+node_modules/
+drizzle/meta/_journal.json.bak
+*.log
+.tmp/
+.superpowers/
