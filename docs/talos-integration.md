@@ -10,7 +10,7 @@ absorbing the other.
 | | Talos | Ariadne |
 |---|---|---|
 | What | Multi-tenant SEO SaaS (keyword research, interlinking, redirects, content, ecommerce content, conversational SEO agent) | Site crawl + audit evidence engine |
-| Where | `/home/eugen-dev/Workflows/archimedes`, branch `feat/talos-rewrite` | this repo |
+| Where | `/home/eugen-dev/Workflows/talos`, branch `feat/talos-rewrite` | this repo |
 | Stack | Python 3.13 / FastAPI / Next.js 16 / Postgres | TypeScript / Node 22 / Postgres |
 | Crawling today | Per-URL pipeline crawls (crawl4ai/httpx) + the agent's single-page `crawl` tool with DNS-pinned SSRF guard | Site-wide frontier crawl (to be built) |
 
@@ -68,8 +68,8 @@ crawler inside Talos. The intended shape:
 ## Cross-references
 
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
-  archimedes repo.
-- Talos deep history: serena memory `talos-rewrite-status` in the archimedes
+  talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Workflows/talos`).
+- Talos deep history: serena memory `talos-rewrite-status` in the talos
   repo (`.serena/memories/`).
 - The audit checklist both systems serve: `~/.claude/skills/sf-audit/checklist.md`
   (82 checks; the 47 crawl-derived ones are Ariadne's scope).

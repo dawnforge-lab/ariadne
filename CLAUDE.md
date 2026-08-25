@@ -19,7 +19,7 @@ has not been demonstrated.
 
 ## Relationship to Talos
 
-Talos (`/home/eugen-dev/Workflows/archimedes`, branch `feat/talos-rewrite`) is
+Talos (`/home/eugen-dev/Workflows/talos`, branch `feat/talos-rewrite`) is
 the multi-tenant SEO SaaS. Ariadne is standalone but **Talos-ready**: the
 Talos SEO agent will eventually drive site-wide crawls through Ariadne's
 API/MCP surface instead of its own crawl tool. `docs/talos-integration.md`
