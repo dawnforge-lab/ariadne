@@ -1,0 +1,1 @@
+ALTER TABLE "pages" ADD COLUMN "structured_data_parse_errors" integer DEFAULT 0 NOT NULL;

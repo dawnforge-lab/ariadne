@@ -50,7 +50,18 @@ export const pages = pgTable("pages", {
   wordCount: integer("word_count"),
   textRatio: real("text_ratio"),
   contentHash: text("content_hash"),
+  // The analyzer's simhash is in the UNSIGNED 64-bit range; this column is a
+  // SIGNED Postgres bigint. Persistence stores `BigInt.asIntN(64, value)` and
+  // readers recover the analyzer's value with `BigInt.asUintN(64, stored)`.
+  // The bit pattern — all a hamming distance cares about — is identical either
+  // way, so the round trip is lossless. See src/crawl/parse/simhash.ts.
   simhash: bigint("simhash", { mode: "bigint" }),
+  // JSON-LD blocks on this page that would not parse (invalid JSON, or over
+  // the analyzer's per-block cap). A count, not a silence: a page whose
+  // structured data does not parse is an audit finding.
+  structuredDataParseErrors: integer("structured_data_parse_errors")
+    .notNull()
+    .default(0),
   responseTimeMs: integer("response_time_ms"),
   htmlBytes: integer("html_bytes"),
   domSize: integer("dom_size"),
