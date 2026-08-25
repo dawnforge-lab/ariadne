@@ -11,10 +11,19 @@
  * streaming read, and the same rule that a target-site problem is recorded,
  * never thrown.
  *
- * Nothing here decides anything. `discover` returns facts — the parsed robots
- * rules, the sitemap URLs, and an honest account of everything it could not
- * read. Persisting sitemap entries to `sitemap_urls` and obeying the crawl
- * delay are the crawl loop's job.
+ * `discover` returns facts — the parsed robots rules, the sitemap URLs, and an
+ * honest account of everything it could not read. Persisting sitemap entries
+ * to `sitemap_urls` is the crawl loop's job.
+ *
+ * Two things it does decide, because they are politeness and both bite before
+ * the crawl loop exists (build plan rule 9):
+ *  - An *unreachable* robots.txt (5xx, timeout, network error, refused URL —
+ *    as opposed to an absent one, which is a 4xx and normal) is retried, and
+ *    then means complete disallow, per RFC 9309 §2.3.1.4. A site whose server
+ *    is erroring does not get crawled on the assumption it would have let us.
+ *  - The crawl-delay it just parsed is applied to its own sitemap walk. Having
+ *    read `Crawl-delay: 10` and then fetched 300 shards back-to-back would be
+ *    the yellow.com.mt incident with extra steps.
  *
  * Caps (RFC 9309 for robots, the sitemaps.org protocol and Google's published
  * limits for the rest):
@@ -28,6 +37,10 @@
  *  - 300 documents per crawl, and a cap on the entries kept in memory (the
  *    memory contract is RAM O(concurrency), and 300 × 50k entries is not).
  * Every cap that bites is counted in `truncation`; none of them is silent.
+ *
+ * The byte caps bound what arrives on the wire, which is not the same as
+ * bounding what a parser can make of it — so a sitemap carrying a `<!DOCTYPE`
+ * is refused before it reaches the XML parser. See parseSitemapDoc.
  */
 import { gunzip as gunzipCallback } from "node:zlib";
 import { promisify } from "node:util";
@@ -86,16 +99,68 @@ const MAX_SITEMAP_ENTRIES = 200_000;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_REDIRECT_HOPS = 5;
 
+/**
+ * A robots.txt that is *unreachable* rather than absent gets three tries with
+ * a short linear backoff before we conclude the origin cannot tell us its
+ * rules. Three is enough to ride out a restart or a blip without becoming a
+ * load test on a server that is already failing.
+ */
+const ROBOTS_ATTEMPTS = 3;
+const ROBOTS_RETRY_BACKOFF_MS = 250;
+
+/**
+ * The pacing an origin gets when its robots.txt is unreachable and the caller
+ * has opted into crawling anyway: never `null`. We are about to crawl a server
+ * that just failed to serve a 60-byte text file, so it gets the delay it never
+ * got to ask for.
+ */
+const UNREACHABLE_CRAWL_DELAY_SEC = 5;
+
+/**
+ * The ceiling on an honoured `Crawl-delay`, matching the ceiling the crawl
+ * loop's governor will apply. A site asking for 3600 seconds between requests
+ * is asking us not to crawl it at all, which is a decision for the operator
+ * who scheduled the audit, not something discovery should silently sit out.
+ */
+const MAX_CRAWL_DELAY_MS = 30_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** gzip's two magic bytes. Trusted over the headers — see decompress. */
 const GZIP_MAGIC_0 = 0x1f;
 const GZIP_MAGIC_1 = 0x8b;
 
+/**
+ * The three outcomes of asking for robots.txt, which RFC 9309 treats very
+ * differently and which must never collapse into one another:
+ *  - `read`       — 2xx, parsed. The site's rules apply.
+ *  - `absent`     — 4xx. The site says there are no rules: allow all. Normal.
+ *  - `unreachable` — 5xx, timeout, network error, or a URL the policy refused,
+ *    after retries. The site could not tell us its rules, which is *not* the
+ *    same as telling us there are none. §2.3.1.4: complete disallow.
+ */
+export type RobotsOutcome = "read" | "absent" | "unreachable";
+
 export interface RobotsInfo {
   /** True only when a robots.txt was fetched and parsed. */
   fetched: boolean;
+  /**
+   * Which of the three outcomes this was. The discriminant to branch on;
+   * `status` stays a numeric HTTP status (and is null when there was no
+   * response at all) so it can be stored and compared as one.
+   */
+  outcome: RobotsOutcome;
   /** The HTTP status, when we got one. */
   status: number | null;
-  /** True when no rule forbids this URL — including when there is no robots. */
+  /** How many times robots.txt was requested (>1 only after a retry). */
+  attempts: number;
+  /**
+   * True when no rule forbids this URL. Allow-all when robots.txt is absent;
+   * deny-all when it is unreachable and the caller has not opted out (see
+   * DiscoveryOpts.onUnreachableRobots).
+   */
   isAllowed(url: string): boolean;
   crawlDelaySec: number | null;
   sitemapUrls: string[];
@@ -103,11 +168,12 @@ export interface RobotsInfo {
   /** True when robots.txt was longer than the 500KB read cap. */
   truncated: boolean;
   /**
-   * Why there are no rules, in plain words: a 404, a network error, a refused
-   * URL. Null when robots.txt was read. A site with no robots.txt is normal
-   * and is not an error — but "we are crawling allow-all because we could not
-   * read robots.txt" is a fact the caller must be able to see and report,
-   * which is why it is a field and not a log line.
+   * Why the rules are what they are, in plain words: a 404, a network error, a
+   * refused URL, and what we did about it. Null when robots.txt was read. A
+   * site with no robots.txt is normal and is not an error — but "we are
+   * crawling allow-all because it 404s" and "we are refusing to crawl because
+   * it 503s" are both facts the caller must be able to see and report, which
+   * is why this is a field and not a log line.
    */
   note: string | null;
 }
@@ -157,6 +223,22 @@ export interface DiscoveryOpts {
   /** Overrides the in-memory entry cap. See MAX_SITEMAP_ENTRIES. */
   maxEntries?: number;
   /**
+   * What an *unreachable* robots.txt means (5xx, timeout, network error,
+   * refused URL — never a 4xx, which is an absent robots.txt and always means
+   * allow-all). Defaults to "disallow", which is RFC 9309 §2.3.1.4 and what a
+   * polite crawler does. "allow" is a deliberate operator escape hatch — for
+   * an audit of a site whose robots.txt is known-broken — and it is not free:
+   * the origin gets UNREACHABLE_CRAWL_DELAY_SEC of pacing rather than none.
+   */
+  onUnreachableRobots?: "disallow" | "allow";
+  /**
+   * Ceiling on the honoured crawl-delay, default MAX_CRAWL_DELAY_MS. 0 turns
+   * pacing off, which only the test suite has any business doing.
+   */
+  maxCrawlDelayMs?: number;
+  /** Backoff between robots.txt retries. Lowered by tests. */
+  retryBackoffMs?: number;
+  /**
    * TEST ONLY. Relaxes the URL check and the connect-time address re-check to
    * the same floor as fetch-page's, so the suite can read a 127.0.0.1 fixture
    * server. Never wire this to config, an API field or an env var.
@@ -164,17 +246,29 @@ export interface DiscoveryOpts {
   allowPrivate?: boolean;
 }
 
-/** An allow-all robots stand-in, with the reason it is standing in. */
-function noRobots(note: string, status: number | null): RobotsInfo {
+/**
+ * A robots stand-in for a robots.txt we do not have, with the reason it is
+ * standing in and the verdict that reason earns.
+ */
+function noRobots(fields: {
+  outcome: RobotsOutcome;
+  allowed: boolean;
+  crawlDelaySec: number | null;
+  status: number | null;
+  attempts: number;
+  note: string;
+}): RobotsInfo {
   return {
     fetched: false,
-    status,
-    isAllowed: () => true,
-    crawlDelaySec: null,
+    outcome: fields.outcome,
+    status: fields.status,
+    attempts: fields.attempts,
+    isAllowed: () => fields.allowed,
+    crawlDelaySec: fields.crawlDelaySec,
     sitemapUrls: [],
     raw: null,
     truncated: false,
-    note,
+    note: fields.note,
   };
 }
 
@@ -187,13 +281,23 @@ interface DocResult {
   contentType: string | null;
   /** The document exceeded the byte cap. */
   oversized: boolean;
+  /**
+   * The URL policy refused this URL, or the address it resolved to. A verdict,
+   * not a failure: retrying it would produce the same answer.
+   */
+  refused: boolean;
   /** Bytes were kept, but the document continued past the cap. */
   truncated: boolean;
   /** Why there are no bytes. Null when ok. */
   reason: string | null;
 }
 
-function failedDoc(url: string, reason: string, status: number | null = null): DocResult {
+function failedDoc(
+  url: string,
+  reason: string,
+  status: number | null = null,
+  refused = false,
+): DocResult {
   return {
     ok: false,
     url,
@@ -201,6 +305,7 @@ function failedDoc(url: string, reason: string, status: number | null = null): D
     body: null,
     contentType: null,
     oversized: false,
+    refused,
     truncated: false,
     reason,
   };
@@ -260,7 +365,7 @@ async function fetchDoc(
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
     const verdict = await isUrlAllowed(url, { allowPrivate });
     if (!verdict.allowed) {
-      return failedDoc(url, `refused by URL policy: ${verdict.reason}`);
+      return failedDoc(url, `refused by URL policy: ${verdict.reason}`, null, true);
     }
 
     const deadline = new AbortController();
@@ -315,6 +420,7 @@ async function fetchDoc(
           body: null,
           contentType: headerValue(headers, "content-type"),
           oversized: true,
+          refused: false,
           truncated: true,
           reason: `larger than the ${maxBytes}-byte document cap`,
         };
@@ -330,6 +436,7 @@ async function fetchDoc(
           body: null,
           contentType: headerValue(headers, "content-type"),
           oversized: true,
+          refused: false,
           truncated: true,
           reason: `expands beyond the ${maxBytes}-byte document cap`,
         };
@@ -353,6 +460,7 @@ async function fetchDoc(
         body: decoded,
         contentType: headerValue(headers, "content-type"),
         oversized: false,
+        refused: false,
         truncated: read.truncated,
         reason: null,
       };
@@ -360,7 +468,7 @@ async function fetchDoc(
       // Our bug, not theirs — the same contract fetch-page keeps.
       if (isProgrammerError(error)) throw error;
       const refusal = blockedAddressMessage(error);
-      if (refusal !== null) return failedDoc(url, `refused at connect: ${refusal}`);
+      if (refusal !== null) return failedDoc(url, `refused at connect: ${refusal}`, null, true);
       if (deadlineHit || isTimeout(error)) return failedDoc(url, "timed out");
       return failedDoc(url, describeError(error));
     } finally {
@@ -371,24 +479,85 @@ async function fetchDoc(
   return failedDoc(url, `more than ${MAX_REDIRECT_HOPS} redirects`);
 }
 
-async function fetchRobots(siteUrl: string, opts: DiscoveryOpts): Promise<RobotsInfo> {
+/**
+ * How to read a robots.txt request that produced no rules.
+ *
+ * `absent` is the site telling us there are none (a 4xx, RFC 9309 §2.3.1.3 —
+ * "unavailable" means allow all). Everything else is the site failing to tell
+ * us anything: a 5xx, a timeout, a reset, a broken redirect, a body we could
+ * not decode. Those are `retry`, and become `unreachable` once the retries are
+ * spent. A URL the policy refused is `unreachable` immediately — the verdict
+ * is deterministic, and asking again would only be rude.
+ */
+function classifyRobotsFailure(doc: DocResult): "absent" | "unreachable" | "retry" {
+  if (doc.refused) return "unreachable";
+  if (doc.status !== null && doc.status >= 400 && doc.status < 500) return "absent";
+  return "retry";
+}
+
+async function fetchRobots(
+  siteUrl: string,
+  opts: DiscoveryOpts,
+  unreachableMode: "disallow" | "allow",
+): Promise<RobotsInfo> {
   let robotsUrl: string;
   try {
     robotsUrl = new URL("/robots.txt", siteUrl).href;
   } catch {
-    return noRobots(`unparseable site URL (${siteUrl})`, null);
+    return noRobots({
+      outcome: "unreachable",
+      allowed: unreachableMode === "allow",
+      crawlDelaySec: UNREACHABLE_CRAWL_DELAY_SEC,
+      status: null,
+      attempts: 0,
+      note: `unparseable site URL (${siteUrl}): robots.txt could not be requested`,
+    });
   }
 
-  const doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, true, opts);
+  const backoffMs = opts.retryBackoffMs ?? ROBOTS_RETRY_BACKOFF_MS;
+  let doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, true, opts);
+  let attempts = 1;
+  while (!doc.ok && classifyRobotsFailure(doc) === "retry" && attempts < ROBOTS_ATTEMPTS) {
+    // Linear backoff, deliberately short: this is a 60-byte text file, and the
+    // origin is already unhappy. Three tries, ~750ms, then we stop asking.
+    await sleep(backoffMs * attempts);
+    doc = await fetchDoc(robotsUrl, ROBOTS_MAX_BYTES, true, opts);
+    attempts++;
+  }
+
   if (!doc.ok || doc.body === null) {
-    // Every unreadable robots.txt — 404, 5xx, timeout, refused URL — becomes
-    // allow-all with the reason attached. RFC 9309 permits treating a 5xx as
-    // "disallow everything", and Google does for 12 hours; we deliberately do
-    // not. Ariadne crawls sites with the owner's permission, and silently
-    // producing an empty audit because one request 503'd is a worse failure
-    // than crawling a site whose robots.txt we could not read — as long as
-    // the caller can see that is what happened, which is what `note` is for.
-    return noRobots(`robots.txt not read: ${doc.reason ?? "no body"}`, doc.status);
+    const reason = doc.reason ?? "no body";
+    const tried = attempts === 1 ? "" : ` after ${attempts} attempts`;
+
+    if (classifyRobotsFailure(doc) === "absent") {
+      // The site answered, and the answer is "there is no robots.txt here".
+      // That is a rule: allow all (RFC 9309 §2.3.1.3), and not an error.
+      return noRobots({
+        outcome: "absent",
+        allowed: true,
+        crawlDelaySec: null,
+        status: doc.status,
+        attempts,
+        note: `robots.txt absent (${reason}): crawling allow-all`,
+      });
+    }
+
+    // The site could not answer. That is not permission. RFC 9309 §2.3.1.4
+    // says complete disallow, and build plan rule 9 agrees: a server that
+    // cannot serve its own robots.txt is not a server to start crawling.
+    // The caller can override — loudly, per-call, and never for free.
+    return noRobots({
+      outcome: "unreachable",
+      allowed: unreachableMode === "allow",
+      crawlDelaySec: UNREACHABLE_CRAWL_DELAY_SEC,
+      status: doc.status,
+      attempts,
+      note:
+        unreachableMode === "allow"
+          ? `robots.txt unreachable${tried} (${reason}): crawling anyway on the caller's ` +
+            `instruction, paced at ${UNREACHABLE_CRAWL_DELAY_SEC}s between requests`
+          : `robots.txt unreachable${tried} (${reason}): complete disallow`,
+    });
   }
 
   const raw = decodeBody(doc.body, doc.contentType);
@@ -397,6 +566,8 @@ async function fetchRobots(siteUrl: string, opts: DiscoveryOpts): Promise<Robots
 
   return {
     fetched: true,
+    outcome: "read",
+    attempts,
     status: doc.status,
     // robots-parser answers `undefined` when no group matches, when the URL is
     // unparseable, or when it belongs to another host. None of those is a
@@ -438,6 +609,30 @@ function childText(node: unknown, name: string): string | null {
 interface ParsedDoc {
   kind: "index" | "urlset";
   locs: { loc: string | null; lastmod: string | null }[];
+}
+
+/**
+ * How much of the document is searched for a DTD. A `<!DOCTYPE` may only
+ * appear in the prolog, before the root element, so a generous prefix is the
+ * whole of where it can legally be — and a `<!DOCTYPE` further in is not a
+ * doctype at all.
+ */
+const PROLOG_SEARCH_CHARS = 4_096;
+
+/**
+ * A DTD in a sitemap is refused, and the document with it.
+ *
+ * The 10MB cap bounds the bytes that arrive, not what a parser can be made to
+ * build out of them: a few hundred bytes of nested entity definitions
+ * ("billion laughs") expand inside the parser to gigabytes, which is the
+ * memory contract (rule 6) broken by a document that never came close to the
+ * size cap. Sitemaps have no legitimate use for a DTD — the entities that
+ * matter in a `<loc>` (`&amp;`, `&lt;`, `&quot;`) are XML's predefined five
+ * and need no declaration — so refusing every one of them costs nothing real
+ * and is one check rather than a parser audit.
+ */
+function hasDoctype(xml: string): boolean {
+  return /<!DOCTYPE/i.test(xml.slice(0, PROLOG_SEARCH_CHARS));
 }
 
 /**
@@ -488,9 +683,10 @@ function parseSitemapDoc(xml: string): ParsedDoc | null {
  * document nobody pointed at is the caller's decision to make (and to pay the
  * request for), not ours to make silently.
  *
- * Documents are read one at a time. Discovery is a handful of requests on a
- * normal site, and serialising them is the politeness floor until the crawl
- * loop's governor owns the schedule.
+ * Documents are read one at a time, spaced by the crawl-delay robots.txt asked
+ * for (capped, see MAX_CRAWL_DELAY_MS). Discovery is a handful of requests on
+ * a normal site and 300 on a sharded one; reading a `Crawl-delay` and then
+ * ignoring it for our own requests is the bug rule 9 exists to prevent.
  */
 export async function discover(
   siteUrl: string,
@@ -498,6 +694,8 @@ export async function discover(
 ): Promise<DiscoveryResult> {
   const allowPrivate = opts.allowPrivate === true;
   const maxEntries = opts.maxEntries ?? MAX_SITEMAP_ENTRIES;
+  const unreachableMode = opts.onUnreachableRobots ?? "disallow";
+  const maxCrawlDelayMs = opts.maxCrawlDelayMs ?? MAX_CRAWL_DELAY_MS;
 
   const truncation: DiscoveryTruncation = {
     oversizedDocsSkipped: 0,
@@ -510,15 +708,38 @@ export async function discover(
     failures: [],
   };
 
-  const robots = await fetchRobots(siteUrl, opts);
+  const robots = await fetchRobots(siteUrl, opts, unreachableMode);
 
-  const queue: { url: string; depth: number }[] = [
-    ...robots.sitemapUrls,
-    ...(opts.extraSitemaps ?? []),
-  ].map((url) => ({ url, depth: 0 }));
+  const sources = [...robots.sitemapUrls, ...(opts.extraSitemaps ?? [])];
+
+  // Complete disallow means complete: we do not go on to pull 300 sitemap
+  // shards off an origin that could not serve its robots.txt. The sources are
+  // still named, so "we never looked" is visible rather than inferred.
+  if (robots.outcome === "unreachable" && unreachableMode === "disallow") {
+    for (const url of sources) {
+      truncation.failures.push({
+        url,
+        reason: "not fetched: robots.txt unreachable, complete disallow in force",
+      });
+    }
+    return { robots, sitemapEntries: [], truncation };
+  }
+
+  const queue: { url: string; depth: number }[] = sources.map((url) => ({
+    url,
+    depth: 0,
+  }));
 
   const seen = new Set<string>();
   const entries = new Map<string, SitemapEntry>();
+
+  // The delay applies from the robots.txt request onwards: that was a request
+  // to this origin too, and the delay it declared starts counting there.
+  const crawlDelayMs = Math.min(
+    (robots.crawlDelaySec ?? 0) * 1000,
+    Math.max(maxCrawlDelayMs, 0),
+  );
+  let lastRequestAt = robots.attempts > 0 ? Date.now() : null;
 
   while (queue.length > 0) {
     const next = queue.shift();
@@ -540,8 +761,16 @@ export async function discover(
       break;
     }
 
+    if (crawlDelayMs > 0 && lastRequestAt !== null) {
+      // Measured from the end of the previous request, so a slow document
+      // never shortens the gap the site asked for.
+      const waited = Date.now() - lastRequestAt;
+      if (waited < crawlDelayMs) await sleep(crawlDelayMs - waited);
+    }
+
     truncation.docsFetched++;
     const doc = await fetchDoc(next.url, SITEMAP_MAX_BYTES, false, opts);
+    lastRequestAt = Date.now();
     if (doc.oversized) truncation.oversizedDocsSkipped++;
     if (!doc.ok || doc.body === null) {
       truncation.failures.push({
@@ -554,7 +783,16 @@ export async function discover(
     // the same document again under its other name.
     seen.add(doc.url);
 
-    const parsed = parseSitemapDoc(decodeBody(doc.body, doc.contentType));
+    const xml = decodeBody(doc.body, doc.contentType);
+    if (hasDoctype(xml)) {
+      truncation.failures.push({
+        url: next.url,
+        reason: "refused: <!DOCTYPE declaration in a sitemap (entity-expansion risk)",
+      });
+      continue;
+    }
+
+    const parsed = parseSitemapDoc(xml);
     if (parsed === null) {
       truncation.failures.push({
         url: next.url,

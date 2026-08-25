@@ -4,7 +4,18 @@ import { gzipSync } from "node:zlib";
 import { discover } from "../../src/crawl/discovery.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 
-const OPTS = { userAgent: "AriadneBot-test", allowPrivate: true };
+/**
+ * `maxCrawlDelayMs: 0` because the site fixture's robots.txt declares
+ * `Crawl-delay: 5` and the walk now honours it — pacing is asserted in its own
+ * test rather than paid for in every other one. `retryBackoffMs: 1` keeps the
+ * robots retry path fast; the retry *count* is asserted, not its wall time.
+ */
+const OPTS = {
+  userAgent: "AriadneBot-test",
+  allowPrivate: true,
+  maxCrawlDelayMs: 0,
+  retryBackoffMs: 1,
+};
 
 /** The site with a robots.txt: the brief's fixture. */
 let siteServer: Server;
@@ -13,6 +24,15 @@ let base: string;
 /** A site with no robots.txt, carrying the recursion/gzip/cap fixtures. */
 let bareServer: Server;
 let bare: string;
+
+/** A site whose robots.txt only ever 503s. */
+let flakyServer: Server;
+let flaky: string;
+let flakyRobotsHits = 0;
+
+/** A site that asks for a crawl-delay and serves three tiny sitemaps. */
+let paceServer: Server;
+let pace: string;
 
 function xml(res: ServerResponse, body: string): void {
   res.setHeader("content-type", "application/xml");
@@ -134,6 +154,16 @@ beforeAll(async () => {
           { loc: `${bare}/fine` },
         ]),
       );
+    } else if (path === "/doctype.xml") {
+      // A DTD inside the byte cap: a few hundred bytes that a parser expands
+      // into gigabytes. Refused on the declaration, before parsing.
+      xml(
+        res,
+        '<?xml version="1.0"?><!DOCTYPE urlset [<!ENTITY a "aaaaaaaaaa">' +
+          '<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">' +
+          '<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">]>' +
+          `<urlset><url><loc>${bare}/lol&c;</loc></url></urlset>`,
+      );
     } else if (path === "/dupes.xml") {
       xml(res, urlset([{ loc: `${bare}/same`, lastmod: "2026-01-02" }]));
     } else if (path === "/dupes-2.xml") {
@@ -158,11 +188,37 @@ beforeAll(async () => {
     }
   });
   bare = await listen(bareServer);
+
+  flakyServer = createServer((req, res) => {
+    if (req.url === "/robots.txt") {
+      flakyRobotsHits++;
+      res.statusCode = 503;
+      res.end("down");
+    } else if (req.url === "/s.xml") {
+      xml(res, urlset([{ loc: `${flaky}/page` }]));
+    } else {
+      res.statusCode = 404;
+      res.end("nope");
+    }
+  });
+  flaky = await listen(flakyServer);
+
+  paceServer = createServer((req, res) => {
+    if (req.url === "/robots.txt") {
+      res.setHeader("content-type", "text/plain");
+      res.end("User-agent: *\nCrawl-delay: 5\n");
+    } else if (req.url === "/p1.xml") {
+      xml(res, sitemapIndex([`${pace}/p2.xml`, `${pace}/p3.xml`]));
+    } else {
+      xml(res, urlset([{ loc: `${pace}${req.url ?? ""}-page` }]));
+    }
+  });
+  pace = await listen(paceServer);
 });
 
 afterAll(async () => {
   await closeFetchAgents();
-  for (const server of [siteServer, bareServer]) {
+  for (const server of [siteServer, bareServer, flakyServer, paceServer]) {
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
   }
@@ -172,6 +228,8 @@ describe("discover: robots.txt", () => {
   it("parses robots, crawl-delay and sitemap pointer", async () => {
     const d = await discover(base, OPTS);
     expect(d.robots.fetched).toBe(true);
+    expect(d.robots.outcome).toBe("read");
+    expect(d.robots.attempts).toBe(1);
     expect(d.robots.status).toBe(200);
     expect(d.robots.isAllowed(`${base}/admin/x`)).toBe(false);
     expect(d.robots.isAllowed(`${base}/shop`)).toBe(true);
@@ -181,29 +239,103 @@ describe("discover: robots.txt", () => {
     expect(d.robots.note).toBeNull();
   });
 
-  it("absent robots.txt yields fetched=false and allow-all", async () => {
-    const d = await discover(bare, { userAgent: "x", allowPrivate: true });
+  it("absent robots.txt (4xx) yields fetched=false and allow-all", async () => {
+    const d = await discover(bare, { ...OPTS, userAgent: "x" });
     expect(d.robots.fetched).toBe(false);
+    expect(d.robots.outcome).toBe("absent");
     expect(d.robots.isAllowed(`${bare}/anything`)).toBe(true);
     expect(d.robots.crawlDelaySec).toBeNull();
     expect(d.robots.sitemapUrls).toEqual([]);
+    // A 4xx is definitive — the site said there are no rules. No retry.
+    expect(d.robots.attempts).toBe(1);
     // Not an error, but not silent either: the reason is on the result.
     expect(d.robots.note).toContain("404");
   });
 
-  it("records an unreachable robots.txt without throwing", async () => {
+  it("retries a 5xx robots.txt, then disallows everything", async () => {
+    flakyRobotsHits = 0;
+    const d = await discover(flaky, OPTS);
+    expect(d.robots.outcome).toBe("unreachable");
+    expect(d.robots.status).toBe(503);
+    expect(d.robots.attempts).toBe(3);
+    expect(flakyRobotsHits).toBe(3);
+    // RFC 9309 §2.3.1.4: unreachable is not permission.
+    expect(d.robots.isAllowed(`${flaky}/`)).toBe(false);
+    expect(d.robots.isAllowed(`${flaky}/anything`)).toBe(false);
+    expect(d.robots.note).toContain("complete disallow");
+    expect(d.robots.note).toContain("503");
+  });
+
+  it("does not walk sitemaps while a complete disallow is in force", async () => {
+    const d = await discover(flaky, { ...OPTS, extraSitemaps: [`${flaky}/s.xml`] });
+    expect(d.sitemapEntries).toEqual([]);
+    expect(d.truncation.docsFetched).toBe(0);
+    // Named, not silently absent.
+    expect(d.truncation.failures[0]?.url).toBe(`${flaky}/s.xml`);
+    expect(d.truncation.failures[0]?.reason).toContain("complete disallow");
+  });
+
+  it("onUnreachableRobots:allow crawls anyway, but never without pacing", async () => {
+    const d = await discover(flaky, {
+      ...OPTS,
+      onUnreachableRobots: "allow",
+      extraSitemaps: [`${flaky}/s.xml`],
+    });
+    expect(d.robots.outcome).toBe("unreachable");
+    expect(d.robots.isAllowed(`${flaky}/anything`)).toBe(true);
+    // The escape hatch is not free: an erroring origin still gets a delay.
+    expect(d.robots.crawlDelaySec).toBe(5);
+    expect(d.robots.note).toContain("caller's instruction");
+    expect(d.sitemapEntries.map((e) => e.url)).toEqual([`${flaky}/page`]);
+  });
+
+  it("treats a network error as unreachable, with retries", async () => {
     // Port 1 on loopback: nothing listens there.
     const d = await discover("http://127.0.0.1:1/", OPTS);
     expect(d.robots.fetched).toBe(false);
-    expect(d.robots.isAllowed("http://127.0.0.1:1/x")).toBe(true);
-    expect(d.robots.note).not.toBeNull();
+    expect(d.robots.outcome).toBe("unreachable");
+    expect(d.robots.attempts).toBe(3);
+    expect(d.robots.isAllowed("http://127.0.0.1:1/x")).toBe(false);
+    expect(d.robots.note).toContain("complete disallow");
   });
 
-  it("refuses a site URL the policy blocks, without fetching", async () => {
-    const d = await discover("http://169.254.169.254/", { userAgent: "x" });
+  it("refuses a site URL the policy blocks, without fetching or retrying", async () => {
+    const d = await discover("http://169.254.169.254/", { ...OPTS, userAgent: "x" });
     expect(d.robots.fetched).toBe(false);
+    expect(d.robots.outcome).toBe("unreachable");
+    expect(d.robots.isAllowed("http://169.254.169.254/x")).toBe(false);
+    // A refusal is deterministic: asking again would only be rude.
+    expect(d.robots.attempts).toBe(1);
     expect(d.robots.note).toContain("169.254.169.254");
     expect(d.sitemapEntries).toEqual([]);
+  });
+});
+
+describe("discover: politeness", () => {
+  it("spaces sitemap fetches by the crawl-delay it just parsed", async () => {
+    const started = Date.now();
+    const d = await discover(pace, {
+      ...OPTS,
+      extraSitemaps: [`${pace}/p1.xml`],
+      // The site asks for 5s; the ceiling brings that down to something a test
+      // can wait for, exercising the same code path the governor will.
+      maxCrawlDelayMs: 120,
+    });
+    const elapsed = Date.now() - started;
+
+    expect(d.robots.crawlDelaySec).toBe(5);
+    expect(d.truncation.docsFetched).toBe(3);
+    // Gaps after robots.txt, p1 and p2 — three waits before the last fetch
+    // returns. Loopback fetches themselves are sub-millisecond.
+    expect(elapsed).toBeGreaterThanOrEqual(340);
+    expect(elapsed).toBeLessThan(3_000);
+    expect(d.sitemapEntries).toHaveLength(2);
+  });
+
+  it("is fast when pacing is off, so the delay above is the delay", async () => {
+    const started = Date.now();
+    await discover(pace, { ...OPTS, extraSitemaps: [`${pace}/p1.xml`] });
+    expect(Date.now() - started).toBeLessThan(300);
   });
 });
 
@@ -311,6 +443,13 @@ describe("discover: sitemaps", () => {
     expect(d.sitemapEntries).toEqual([]);
     expect(d.truncation.failures).toHaveLength(1);
     expect(d.truncation.failures[0]?.reason).toMatch(/urlset|sitemapindex/i);
+  });
+
+  it("refuses a sitemap carrying a DOCTYPE, before parsing it", async () => {
+    const d = await discover(bare, { ...OPTS, extraSitemaps: [`${bare}/doctype.xml`] });
+    expect(d.sitemapEntries).toEqual([]);
+    expect(d.truncation.failures).toHaveLength(1);
+    expect(d.truncation.failures[0]?.reason).toContain("DOCTYPE");
   });
 
   it("skips an empty <loc> rather than emitting a blank url", async () => {
