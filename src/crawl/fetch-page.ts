@@ -6,6 +6,11 @@
  * error must be visible *and* recorded, not swallowed and not thrown past the
  * loop).
  *
+ * The converse holds too, and matters as much: a problem that is *ours* — a
+ * malformed user agent, a bad option — is rethrown, never classified. See
+ * isProgrammerError. Classifying our own bug as `network_error` would bury a
+ * one-line config defect under 50k indistinguishable rows.
+ *
  * Fetch semantics are OpenSEO's decisions (site-audit-workflow-helpers.ts
  * @ c469a48ae90ab58413b198fe3d1ac1aa90a9b070), read as reference and
  * re-implemented over undici rather than lifted: manual redirects so every hop
@@ -75,7 +80,11 @@ export interface FetchResult {
   statusCode: number | null;
   fetchClass: FetchClass;
   contentType: string | null;
-  /** Absolute, resolved against url; null unless 3xx with a usable Location. */
+  /**
+   * Absolute, resolved against url, and policy-checked. Null unless the
+   * response was a 3xx whose Location resolved to a crawlable http(s) URL —
+   * see resolveRedirectTarget.
+   */
   redirectUrl: string | null;
   /** Decoded html text, ≤ 1MiB; null for every class except `ok`. */
   body: string | null;
@@ -86,7 +95,11 @@ export interface FetchResult {
   /** From `Link: <...>; rel="canonical"`, verbatim (not normalised). */
   canonicalHeader: string | null;
   xRobotsTag: string | null;
-  /** Why the URL or its resolved address was refused; null unless disallowed. */
+  /**
+   * Why something was refused, in plain words. Set on `disallowed` (the URL
+   * or the address it resolved to), and on `redirect` when the Location was
+   * dropped rather than passed on. Null otherwise.
+   */
   disallowedReason: string | null;
 }
 
@@ -398,6 +411,67 @@ function isTimeout(error: unknown): boolean {
   });
 }
 
+/**
+ * Resolve a `Location` against the page URL and put the result through the
+ * URL policy before handing it on.
+ *
+ * A `Location` is attacker-controlled text: `javascript:alert(1)`, `data:…`
+ * and `file:///etc/passwd` are all *absolute URLs*, so resolving alone
+ * launders them into a field the crawl loop persists and the report layer is
+ * apt to render as an href. Anything the policy refuses is dropped, and the
+ * drop is stated in `droppedReason` rather than looking like a 3xx that
+ * simply had no target.
+ *
+ * The fact of the redirect stays true regardless: the caller keeps
+ * `fetchClass: "redirect"` and the status code, and only loses something to
+ * enqueue.
+ *
+ * Uses `isUrlAllowed`, not `isCrawlableUrl`, for one reason: it is the only
+ * one of the two that honours `allowPrivate`, so a loopback fixture server's
+ * own redirects still resolve under test. The policy applied is otherwise the
+ * same, and it is the same seam the pre-flight check uses.
+ */
+async function resolveRedirectTarget(
+  location: string | null,
+  pageUrl: string,
+  allowPrivate: boolean,
+): Promise<{ redirectUrl: string | null; droppedReason: string | null }> {
+  if (location === null) {
+    return { redirectUrl: null, droppedReason: "3xx without a Location header" };
+  }
+
+  let resolved: string;
+  try {
+    resolved = new URL(location, pageUrl).href;
+  } catch {
+    return {
+      redirectUrl: null,
+      droppedReason: `unresolvable Location header (${location})`,
+    };
+  }
+
+  const verdict = await isUrlAllowed(resolved, { allowPrivate });
+  if (verdict.allowed) return { redirectUrl: resolved, droppedReason: null };
+  return {
+    redirectUrl: null,
+    droppedReason: `redirect target refused: ${verdict.reason}`,
+  };
+}
+
+/**
+ * Errors that are ours, not the target site's: undici's InvalidArgumentError
+ * (a malformed user agent, a bad option) and any TypeError out of our own
+ * misuse. These must not be classified — a newline in the configured user
+ * agent would otherwise write 50k `network_error` rows for a one-line bug in
+ * our config. "Nothing throws for a target-site problem" is the contract;
+ * this is the other side of it.
+ */
+function isProgrammerError(error: unknown): boolean {
+  return errorChain(error).some(
+    (link) => link instanceof TypeError || errorCode(link) === "UND_ERR_INVALID_ARG",
+  );
+}
+
 function emptyResult(
   url: string,
   fetchClass: FetchClass,
@@ -498,29 +572,23 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     const read = await readCapped(response.body, keepBody);
 
     if (isRedirect) {
-      const location = headerValue(headers, "location");
-      let redirectUrl: string | null = null;
-      if (location !== null) {
-        try {
-          redirectUrl = new URL(location, url).href;
-        } catch {
-          // A Location we cannot resolve is a defect on the target's side; the
-          // row still records the hop, with nothing to enqueue.
-          redirectUrl = null;
-        }
-      }
+      const target = await resolveRedirectTarget(
+        headerValue(headers, "location"),
+        url,
+        allowPrivate,
+      );
       return {
         url,
         statusCode,
         fetchClass: "redirect",
         contentType,
-        redirectUrl,
+        redirectUrl: target.redirectUrl,
         body: null,
         htmlBytes: read.bytes,
         responseTimeMs,
         canonicalHeader,
         xRobotsTag,
-        disallowedReason: null,
+        disallowedReason: target.droppedReason,
       };
     }
 
@@ -552,6 +620,10 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       disallowedReason: null,
     };
   } catch (error) {
+    // Our bug, not theirs — surface it loudly instead of burying it in a
+    // classified row. This is the only path out of fetchPage that throws.
+    if (isProgrammerError(error)) throw error;
+
     const responseTimeMs = Date.now() - started;
     const refusal = blockedAddressMessage(error);
     if (refusal !== null) {

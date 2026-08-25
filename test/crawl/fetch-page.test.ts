@@ -22,6 +22,21 @@ beforeAll(async () => {
       res.statusCode = 301;
       res.setHeader("location", "/ok");
       res.end();
+    } else if (req.url === "/moved-js") {
+      res.statusCode = 302;
+      res.setHeader("location", "javascript:alert(1)");
+      res.end();
+    } else if (req.url === "/moved-file") {
+      res.statusCode = 301;
+      res.setHeader("location", "file:///etc/passwd");
+      res.end();
+    } else if (req.url === "/moved-protocol-relative") {
+      res.statusCode = 302;
+      res.setHeader("location", "//other.example.com/x");
+      res.end();
+    } else if (req.url === "/moved-nowhere") {
+      res.statusCode = 302;
+      res.end();
     } else if (req.url === "/big") {
       res.setHeader("content-type", "text/html");
       res.end("x".repeat(2 * 1024 * 1024));
@@ -129,6 +144,32 @@ describe("fetchPage", () => {
     expect(r.body).toBeNull();
   });
 
+  it("drops a redirect target the URL policy refuses, but keeps the hop", async () => {
+    for (const path of ["/moved-js", "/moved-file"]) {
+      const r = await fetchPage(`${base}${path}`, OPTS);
+      // The redirect happened; that stays true. Only the target is dropped.
+      expect(r.fetchClass, path).toBe("redirect");
+      expect(r.statusCode, path).toBeGreaterThanOrEqual(300);
+      expect(r.redirectUrl, path).toBeNull();
+      expect(r.disallowedReason, path).toContain("refused");
+      expect(r.disallowedReason, path).toContain("scheme");
+    }
+  });
+
+  it("inherits the page scheme for a protocol-relative Location", async () => {
+    const r = await fetchPage(`${base}/moved-protocol-relative`, OPTS);
+    expect(r.fetchClass).toBe("redirect");
+    expect(r.redirectUrl).toBe("http://other.example.com/x");
+    expect(r.disallowedReason).toBeNull();
+  });
+
+  it("records a 3xx with no Location as a hop with nothing to enqueue", async () => {
+    const r = await fetchPage(`${base}/moved-nowhere`, OPTS);
+    expect(r.fetchClass).toBe("redirect");
+    expect(r.redirectUrl).toBeNull();
+    expect(r.disallowedReason).toContain("Location");
+  });
+
   it("caps the body at 1MiB", async () => {
     const r = await fetchPage(`${base}/big`, OPTS);
     expect(r.fetchClass).toBe("too_large");
@@ -231,6 +272,14 @@ describe("fetchPage", () => {
       },
     });
     expect(r.fetchClass).toBe("network_error");
+  });
+
+  it("throws our own bugs instead of classifying them", async () => {
+    // A newline in the configured user agent is a defect in our config, not a
+    // fact about the target site. It must not become a network_error row.
+    await expect(
+      fetchPage(`${base}/ok`, { ...OPTS, userAgent: "Ariadne\r\nX-Evil: 1" }),
+    ).rejects.toThrow(/user-agent/i);
   });
 
   it("refuses a disallowed URL without fetching", async () => {
