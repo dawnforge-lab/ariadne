@@ -41,16 +41,25 @@ const CONTENT = "content";
  * DETERMINISTIC: two runs over one crawl compare the same pages and produce the
  * same numbers (the deterministic-cap lesson).
  *
- * The value says so out loud — `pagesInType`, `pagesSampled` and `pairsSampled`
- * are all in the shape — so a reader can see when a number describes a sample
- * rather than the whole template.
+ * The value says so out loud — `pagesFingerprinted`, `pagesSampled` and
+ * `pairsSampled` are all in the shape — so a reader can see when a number
+ * describes a sample rather than the whole template.
+ *
+ * `pagesFingerprinted` is named for what it counts and not for what a reader
+ * might wish it counted: the sample is drawn from the pages that HAVE a
+ * fingerprint, so that is the population the sample is representative of, and
+ * it is the honest denominator. It is not the number of pages the type has —
+ * a cohort page the crawl recorded no simhash for is outside this metric
+ * entirely — and a column called `pagesInType` over this count would understate
+ * real type size wherever the two differ, in a value that travels to a report
+ * and to the agent without its copy attached.
  */
 export const TEMPLATE_SAMPLE_PAGES = 200;
 
-/** The tight distance the `shareWithin3Pct` column counts pairs inside of. */
+/** The tight distance the `shareWithin3BitsPct` column counts pairs inside of. */
 export const TEMPLATE_NEAR_BITS = 3;
 
-/** The loose distance `shareWithin8Pct` counts pairs inside of. */
+/** The loose distance `shareWithin8BitsPct` counts pairs inside of. */
 export const TEMPLATE_LOOSE_BITS = 8;
 
 /**
@@ -168,7 +177,7 @@ async function contentByType(db: Db, crawlId: string, self: MetricIdentity): Pro
 
 type SimilarityRow = {
   page_type: string;
-  pages_in_type: number;
+  pages_fingerprinted: number;
   pages_sampled: number;
   pairs_sampled: number;
   mean_hamming: number;
@@ -248,7 +257,7 @@ async function templateSimilarity(
       where rn <= ${TEMPLATE_SAMPLE_PAGES}
     ),
     sizes as (
-      select page_type, count(*)::int as pages_in_type from cohort group by page_type
+      select page_type, count(*)::int as pages_fingerprinted from cohort group by page_type
     ),
     sample_sizes as (
       select page_type, count(*)::int as pages_sampled from sampled group by page_type
@@ -261,7 +270,7 @@ async function templateSimilarity(
       join sampled b on b.page_type = a.page_type and a.id < b.id
     )
     select pr.page_type as page_type,
-           z.pages_in_type as pages_in_type,
+           z.pages_fingerprinted as pages_fingerprinted,
            s.pages_sampled as pages_sampled,
            count(*)::int as pairs_sampled,
            ${round2(sql`avg(pr.hamming)`)} as mean_hamming,
@@ -273,7 +282,7 @@ async function templateSimilarity(
     from pairs pr
     join sizes z on z.page_type = pr.page_type
     join sample_sizes s on s.page_type = pr.page_type
-    group by pr.page_type, z.pages_in_type, s.pages_sampled
+    group by pr.page_type, z.pages_fingerprinted, s.pages_sampled
     order by pr.page_type`);
 
   return rows.rows.map((row) =>
@@ -281,15 +290,15 @@ async function templateSimilarity(
       scope: "page_type",
       scopeValue: text(row.page_type, "page_type", self.id),
       value: {
-        pagesInType: num(row.pages_in_type, "pages_in_type", self.id),
+        pagesFingerprinted: num(row.pages_fingerprinted, "pages_fingerprinted", self.id),
         pagesSampled: num(row.pages_sampled, "pages_sampled", self.id),
         pairsSampled: num(row.pairs_sampled, "pairs_sampled", self.id),
         meanHamming: num(row.mean_hamming, "mean_hamming", self.id),
         p25: num(row.p25, "p25", self.id),
         median: num(row.median, "median", self.id),
         p75: num(row.p75, "p75", self.id),
-        shareWithin3Pct: num(row.share_within_near, "share_within_near", self.id),
-        shareWithin8Pct: num(row.share_within_loose, "share_within_loose", self.id),
+        shareWithin3BitsPct: num(row.share_within_near, "share_within_near", self.id),
+        shareWithin8BitsPct: num(row.share_within_loose, "share_within_loose", self.id),
       },
     }),
   );
@@ -298,10 +307,13 @@ async function templateSimilarity(
 /**
  * The two content metrics.
  *
- * The `shareWithin3Pct` / `shareWithin8Pct` key names spell
+ * The `shareWithin3BitsPct` / `shareWithin8BitsPct` key names spell
  * `TEMPLATE_NEAR_BITS` and `TEMPLATE_LOOSE_BITS`, which the copy test pins:
  * a threshold that moved without its key and its copy moving with it would be
- * a column whose name lies about what it counted.
+ * a column whose name lies about what it counted. Both halves of the suffix
+ * earn their place — the numeral is a distance in BITS and the value is a
+ * PERCENTAGE, and `shareWithin3Pct` would read as "within 3 per cent" to
+ * anyone holding the jsonb without the copy beside it.
  */
 export const contentMetrics: MetricRule[] = [
   metricRule("content.metrics-by-type", ["CHECK-38"], CONTENT, async (db, crawlId, self) =>

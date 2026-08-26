@@ -297,29 +297,29 @@ describe("the content metrics against the database", () => {
     //   within 3 bits: 1,1,2 -> 3 of 6 = 50.0%
     //   within 8 bits: all 6 -> 100.0%
     expect(rows["page_type|product"]).toEqual({
-      pagesInType: 4,
+      pagesFingerprinted: 4,
       pagesSampled: 4,
       pairsSampled: 6,
       meanHamming: 3.67,
       p25: 1.25,
       median: 3.5,
       p75: 5.75,
-      shareWithin3Pct: 50,
-      shareWithin8Pct: 100,
+      shareWithin3BitsPct: 50,
+      shareWithin8BitsPct: 100,
     });
 
     // blog: one pair, 64 bits apart. Every percentile of a single value is
     // that value, and neither threshold is met.
     expect(rows["page_type|blog"]).toEqual({
-      pagesInType: 2,
+      pagesFingerprinted: 2,
       pagesSampled: 2,
       pairsSampled: 1,
       meanHamming: 64,
       p25: 64,
       median: 64,
       p75: 64,
-      shareWithin3Pct: 0,
-      shareWithin8Pct: 0,
+      shareWithin3BitsPct: 0,
+      shareWithin8BitsPct: 0,
     });
 
     // A type with fewer than two fingerprinted pages has no pair to describe,
@@ -335,9 +335,13 @@ describe("the content metrics against the database", () => {
     //
     // The cap is what decides the answer: sampling the first 200 by id yields
     // C(200,2) = 19,900 pairs, every one of them 0 bits apart. Sampling all 205
-    // would yield C(205,2) = 20,910 pairs, 1,010 of which are 64 apart — so a
-    // missing cap, or a sample taken in some other order, cannot produce the
-    // numbers asserted below.
+    // would yield C(205,2) = 20,910 pairs, which split three ways — 19,900
+    // among the first 200 at distance 0, 200 × 5 = 1,000 crossing between the
+    // two groups at distance 64, and C(5,2) = 10 among the five extras, also at
+    // distance 0 (they share the fingerprint -1). So the uncapped mean would be
+    // 1,000 × 64 / 20,910 = 3.06 and the within-3 share 19,910/20,910 = 95.2%,
+    // neither of which is asserted below: a missing cap, or a sample taken in
+    // some other order, cannot produce these numbers.
     const specs: PageSpec[] = [];
     for (let i = 0; i < 205; i += 1) {
       specs.push({
@@ -353,15 +357,15 @@ describe("the content metrics against the database", () => {
     expect(TEMPLATE_SAMPLE_PAGES).toBe(200);
     // 200*199/2 = 19,900.
     expect(rows["page_type|bulk"]).toEqual({
-      pagesInType: 205,
+      pagesFingerprinted: 205,
       pagesSampled: 200,
       pairsSampled: 19_900,
       meanHamming: 0,
       p25: 0,
       median: 0,
       p75: 0,
-      shareWithin3Pct: 100,
-      shareWithin8Pct: 100,
+      shareWithin3BitsPct: 100,
+      shareWithin8BitsPct: 100,
     });
   });
 

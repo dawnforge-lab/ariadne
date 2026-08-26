@@ -415,8 +415,14 @@ describe("issue copy", () => {
   it("content.template-similarity names every column, the thresholds and the sample", () => {
     const c = ISSUE_COPY["content.template-similarity"]!;
     const text = c.explanation;
-    expect(text, "pagesInType").toMatch(/how many pages the type has/i);
-    expect(text, "pagesSampled").toMatch(/how many were sampled/i);
+    // `pagesFingerprinted` counts the pages the metric could actually compare,
+    // not the pages of the type: the cohort excludes any page the crawl
+    // recorded no fingerprint for. The name says so and the copy must too — a
+    // column called "pages in type" over a fingerprinted count would understate
+    // real type size wherever the two differ, silently.
+    expect(text, "pagesFingerprinted").toMatch(/how many of the type's pages carry a fingerprint/i);
+    expect(text, "the pages it leaves out").toMatch(/neither compared nor counted/i);
+    expect(text, "pagesSampled").toMatch(/how many of those were sampled/i);
     expect(text, "pairsSampled").toMatch(/how many pairs that was/i);
     expect(text, "meanHamming").toMatch(/mean distance/i);
     expect(text, "p25/median/p75").toContain("quartiles");
@@ -425,10 +431,10 @@ describe("issue copy", () => {
     // until the prose moves with it (the on-page-threshold contract).
     expect(TEMPLATE_NEAR_BITS).toBe(3);
     expect(TEMPLATE_LOOSE_BITS).toBe(8);
-    expect(text, "shareWithin3Pct").toMatch(
+    expect(text, "shareWithin3BitsPct").toMatch(
       new RegExp(`percentage of pairs within ${TEMPLATE_NEAR_BITS} bits`, "i"),
     );
-    expect(text, "shareWithin8Pct").toMatch(new RegExp(`within ${TEMPLATE_LOOSE_BITS} bits`, "i"));
+    expect(text, "shareWithin8BitsPct").toMatch(new RegExp(`within ${TEMPLATE_LOOSE_BITS} bits`, "i"));
     // The sampling rule is part of the shape: three of the columns describe it,
     // and a reader who cannot see it would read a sample as a census.
     expect(TEMPLATE_SAMPLE_PAGES).toBe(200);
