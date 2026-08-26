@@ -115,10 +115,11 @@ against a real Postgres. There is no in-memory stand-in and no skip-if-no-DB
 branch: a missing `DATABASE_URL` throws (`test/fixtures/harness.test.ts`), per
 hard rule 7.
 
-**First CI run: pending first push.** The branch has not been pushed, so this
-workflow has never executed on GitHub; it was validated structurally here (YAML
-parses; job, service, env and step shape as above). Its first execution — and
-the run link that belongs in this row — happens on the first push.
+**First CI run: PASS, 1m11s** (2026-08-26, on PR #1's first execution —
+the workflow's very first run on GitHub, no shake-out fixes needed):
+https://github.com/dawnforge-lab/ariadne/actions/runs/32961025736/job/98153173467
+It had previously been validated structurally only (YAML parses; job, service,
+env and step shape as above).
 
 ## Machine
 
