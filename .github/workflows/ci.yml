@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ariadne
+          POSTGRES_PASSWORD: ariadne
+          POSTGRES_DB: ariadne
+        ports: ["5432:5432"]
+        # The suite talks to a real Postgres — no in-memory stand-in — so the
+        # steps must not start until the server answers, or `db:migrate` races
+        # the container's first boot and fails for a reason that is not ours.
+        options: >-
+          --health-cmd "pg_isready -U ariadne" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ariadne:ariadne@localhost:5432/ariadne
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run db:migrate
+      - run: npm test

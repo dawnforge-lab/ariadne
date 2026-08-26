@@ -8,7 +8,11 @@ to travel with the code. Upstream is one-time source material, never synced.
 
 Copyright (c) 2026 Ben Senescu. MIT License.
 Absorbed at commit c469a48ae90ab58413b198fe3d1ac1aa90a9b070 (see provenance
-headers in the affected files under src/crawl/).
+headers in the affected files under src/crawl/ and src/rules/registry/copy/).
+
+The badseo fixture site's page content (`badseo/src/fixtures/`, `badseo/src/lib.ts`)
+was absorbed at the same commit into test/fixtures/ — see the provenance headers
+in test/fixtures/render.ts and test/fixtures/pages/absorbed.ts.
 
 ## SEOnaut — https://github.com/StJudeWasHere/seonaut
 

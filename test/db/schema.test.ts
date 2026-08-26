@@ -34,8 +34,15 @@ describe("schema", () => {
       where table_name = 'pages'`);
     const cols = res.rows.map((r) => r.column_name);
     for (const c of ["url_normalised","page_type","fetch_class","simhash","text_ratio",
-                     "dom_size","rel_next","rel_prev","discovered_via","rendered_word_count"]) {
+                     "dom_size","rel_next","rel_prev","discovered_via","rendered_word_count",
+                     "canonical_count","has_viewport","images_missing_dimensions",
+                     "has_lorem_ipsum"]) {
       expect(cols, `missing pages.${c}`).toContain(c);
+    }
+    // Dropped in Phase 2: never written by the crawler, so a rule reading them
+    // would be a rule that always passes (build plan hard rule 1).
+    for (const gone of ["in_sitemap", "redirect_hops"]) {
+      expect(cols, `${gone} should be dropped`).not.toContain(gone);
     }
   });
 });

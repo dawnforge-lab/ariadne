@@ -324,3 +324,39 @@ describe("element boundaries separate words", () => {
     expect(a.wordCount).toBe(1); // "alpha", as a browser renders it
   });
 });
+
+describe("bonus signals", () => {
+  it("detects the viewport meta", () => {
+    const withVp = analyzePage(`<html><head><meta name="viewport" content="width=device-width"><title>t</title></head><body><p>x</p></body></html>`, "https://ex.com/");
+    const without = analyzePage(`<html><head><title>t</title></head><body><p>x</p></body></html>`, "https://ex.com/");
+    expect(withVp.hasViewport).toBe(true);
+    expect(without.hasViewport).toBe(false);
+  });
+  it("counts images missing width/height", () => {
+    const a = analyzePage(`<html><body><img src="a.png" width="10" height="10"><img src="b.png" width="10"><img src="c.png"></body></html>`, "https://ex.com/");
+    expect(a.imagesMissingDimensions).toBe(2); // b (no height) and c (neither)
+  });
+  it("flags lorem ipsum placeholder text", () => {
+    const a = analyzePage(`<html><body><p>Lorem ipsum dolor sit amet, consectetur.</p></body></html>`, "https://ex.com/");
+    const b = analyzePage(`<html><body><p>Real product copy about widgets.</p></body></html>`, "https://ex.com/");
+    expect(a.hasLoremIpsum).toBe(true);
+    expect(b.hasLoremIpsum).toBe(false);
+  });
+  it("does not flag lorem inside script/style", () => {
+    const a = analyzePage(`<html><body><script>var x="lorem ipsum dolor";</script><p>clean</p></body></html>`, "https://ex.com/");
+    expect(a.hasLoremIpsum).toBe(false);
+  });
+  // The `name` match is folded like every other meta name (see the analyzer's
+  // provenance header), and an element boundary between the words must not
+  // hide the phrase the way it would if the accumulator had no separator.
+  it("folds the viewport name and spans element boundaries for lorem", () => {
+    const a = analyzePage(`<html><head><meta name=" Viewport " content="width=device-width"></head><body><p>lorem</p><p>ipsum dolor</p></body></html>`, "https://ex.com/");
+    expect(a.hasViewport).toBe(true);
+    expect(a.hasLoremIpsum).toBe(true);
+  });
+  it("counts an image with no dimensions once, not twice", () => {
+    const a = analyzePage(`<html><body><img src="a.png"><img src="b.png" height="4"></body></html>`, "https://ex.com/");
+    expect(a.imagesTotal).toBe(2);
+    expect(a.imagesMissingDimensions).toBe(2);
+  });
+});
