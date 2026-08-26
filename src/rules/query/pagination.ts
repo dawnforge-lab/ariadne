@@ -97,11 +97,20 @@ async function eachPaginatedPage(
       // statement's shape stays constant across batches (the link-targets
       // pattern). The inbound-link test is an `exists` inside the query: the
       // links table is never loaded (hard rule 3).
+      //
+      // `l.source_page_id <> p.id` excludes the target's links to ITSELF. A
+      // paginated page normally renders the whole pagination control, current
+      // page included, so page 2 almost always carries an anchor to page 2 —
+      // and without this exclusion that self-link would answer "is anything
+      // linking to page 2?" with a yes the reader can never follow, making the
+      // rule silent on precisely the sites it is for.
       const rows = await db.execute<{ url: string; linked: boolean }>(sql`
         select p.url,
                exists (
                  select 1 from links l
-                 where l.crawl_id = ${crawlId} and l.target_url = p.url
+                 where l.crawl_id = ${crawlId}
+                   and l.target_url = p.url
+                   and l.source_page_id <> p.id
                ) as linked
         from pages p
         where p.crawl_id = ${crawlId}

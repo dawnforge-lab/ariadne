@@ -31,7 +31,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("links.broken-internal");
     expect(ids).toContain("links.orphan");
     expect(ids).toContain("pagination.next-not-linked");
-    expect(ids.length).toBe(39);
+    expect(ids.length).toBe(40);
   });
 
   it("registers both kinds the runner drives", () => {

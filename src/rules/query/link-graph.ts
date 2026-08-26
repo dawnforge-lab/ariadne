@@ -10,13 +10,8 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 
-/**
- * The orphan finding, and the finding that says the orphan check could not be
- * answered. One rule id, two severities: a fault on the site is a warning, a
- * statement about the crawl is information.
- */
 const ORPHAN: RuleIdentity = { id: "links.orphan", severity: "warning" };
-const SKIPPED: RuleIdentity = { id: "links.orphan", severity: "info" };
+const SKIPPED: RuleIdentity = { id: "links.orphan-skipped", severity: "info" };
 
 /** What the crawl row and the frontier say about whether the crawl finished. */
 interface Completeness {
@@ -60,20 +55,27 @@ async function completeness(db: Db, crawlId: string): Promise<Completeness> {
 }
 
 /**
- * Why the orphan check cannot be trusted on this crawl, or null when it can.
+ * Why the orphan check cannot be run at all on this crawl, or null when it can.
  *
  * "Nothing links to this page" and "we never fetched the page that links to it"
- * are the same row in the database. Every condition below is a way the second
- * could be true, so the check does not run — and says so — rather than
- * reporting a crawl's own incompleteness as the site's fault.
+ * are the same row in the database. Each condition below is a way the second
+ * could be true of an unbounded number of URLs, so the check does not run — and
+ * says so, under `links.orphan-skipped` — rather than reporting a crawl's own
+ * incompleteness as the site's fault.
+ *
+ * FAILED frontier rows are deliberately NOT here. A failed URL is a bounded,
+ * named blind spot: the check still runs and every finding carries a caveat
+ * naming how many URLs went unread (see `orphanFindings`). Muting CHECK-32 for
+ * the whole site because one URL timed out would hide every real orphan behind
+ * a single fetch failure.
  */
 function skipReason(c: Completeness): string | null {
-  const unfinished = c.pending + c.leased + c.failed;
-  if (unfinished > 0) {
+  const unfetched = c.pending + c.leased;
+  if (unfetched > 0) {
     return (
-      `the crawl left ${unfinished} URL(s) unfetched (${c.pending} pending, ` +
-      `${c.leased} leased, ${c.failed} failed), so a page's inbound links may ` +
-      `simply not have been crawled yet`
+      `the crawl left ${unfetched} URL(s) unfetched (${c.pending} pending, ` +
+      `${c.leased} leased), so a page's inbound links may simply not have been ` +
+      "crawled yet"
     );
   }
   if (c.maxPages === null) {
@@ -100,6 +102,12 @@ function skipReason(c: Completeness): string | null {
  * it — so the two are directly comparable, and the link table is never loaded
  * into memory (hard rule 3).
  *
+ * `l.source_page_id <> p.id` is the load-bearing half of that anti-join. A page
+ * that links to itself — a logo linking home, a "back to top" anchor rewritten
+ * to the canonical URL, a self-referential breadcrumb — would otherwise satisfy
+ * its own inbound-link test and vanish from this rule. An orphan that links to
+ * itself is still an orphan: nothing else on the site can reach it.
+ *
  * Three deliberate inclusions and one exclusion:
  *  - Only indexable 200s. A 404 or a noindexed page with no inbound links is
  *    not an orphan worth fixing; it is a page that should have no traffic.
@@ -116,8 +124,13 @@ function skipReason(c: Completeness): string | null {
  * from two sources. A `<loc>` carrying a fragment or reordered query params is
  * the case where the two spellings differ and `inSitemap` reads false; the
  * finding itself does not depend on it.
+ *
+ * `failed` is the number of URLs the crawl could not fetch. Their outbound
+ * links were never read, so any of them could have linked to a page reported
+ * here — which is why every finding carries the count as a caveat rather than
+ * the whole check being suppressed.
  */
-async function orphanFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<Finding[]> {
   const rows = await db.execute<{
     id: string;
     url: string;
@@ -137,7 +150,9 @@ async function orphanFindings(db: Db, crawlId: string): Promise<Finding[]> {
       and not (p.depth = 0 and p.discovered_via = 'seed')
       and not exists (
         select 1 from links l
-        where l.crawl_id = ${crawlId} and l.target_url = p.url
+        where l.crawl_id = ${crawlId}
+          and l.target_url = p.url
+          and l.source_page_id <> p.id
       )
     order by p.url`);
 
@@ -148,17 +163,25 @@ async function orphanFindings(db: Db, crawlId: string): Promise<Finding[]> {
       evidence: {
         inSitemap: row.in_sitemap,
         discoveredVia: String(row.discovered_via),
+        ...(failed > 0 ? { caveat: { failedPages: failed } } : {}),
       },
       dedupeKey: String(row.url),
     }),
   );
 }
 
+/**
+ * The orphan check and the statement that it could not be run: two rule ids,
+ * because a finding's copy is looked up by its rule id, and rendering "the
+ * check did not run" under "Page has no internal links pointing to it" would be
+ * a false statement to a client.
+ *
+ * Both claim CHECK-32 and both read the same gate, each running it for itself
+ * rather than sharing state — a rule that depended on another rule having run
+ * first would be a rule that quietly reports nothing when run alone. Exactly
+ * one of them can produce a finding on any given crawl.
+ */
 export const linkGraphRules: QueryRule[] = [
-  // The one rule in the ruleset whose verdict depends on the crawl having
-  // finished. When it has not, the check is reported as skipped — one finding,
-  // naming the reason — rather than either guessing or falling silent
-  // (hard rule 7: a check we could not run is visible).
   defineRule<QueryRule>({
     kind: "query",
     id: ORPHAN.id,
@@ -169,8 +192,26 @@ export const linkGraphRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
       const state = await completeness(db, crawlId);
+      if (skipReason(state) !== null) return [];
+      return orphanFindings(db, crawlId, state.failed);
+    },
+  }),
+
+  // A check we could not run is visible, never silent (hard rule 7). One
+  // finding, site-scoped, naming the reason in its evidence — and the reason is
+  // about the crawl, so the severity is info rather than a fault on the site.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: SKIPPED.id,
+    checkIds: ["CHECK-32"],
+    category: "links",
+    severity: SKIPPED.severity,
+    ...copyFor(SKIPPED.id),
+    rulesetVersion: RULESET_VERSION,
+    run: async (db, crawlId): Promise<Finding[]> => {
+      const state = await completeness(db, crawlId);
       const skipped = skipReason(state);
-      if (skipped === null) return orphanFindings(db, crawlId);
+      if (skipped === null) return [];
       return [
         queryFinding(SKIPPED, {
           pageId: null,

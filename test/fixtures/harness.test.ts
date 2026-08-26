@@ -58,6 +58,26 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "pagination.next-target-uncrawled",
 ];
 
+/**
+ * Rules NO fixture can ever claim, because their firing condition is a property
+ * of an unhealthy crawl rather than of a page the site could serve.
+ *
+ * `links.orphan-skipped` fires only when the crawl did not finish — a frontier
+ * that never drained, or a crawl stopped at its page cap. This harness asserts
+ * the opposite in its first test (`frontier.pending === 0`, and `maxPages: 500`
+ * against a site of a few dozen pages), so a fixture that made this rule speak
+ * would be a fixture that broke the crawl. Its behaviour is covered by
+ * `test/rules/link-graph-query.test.ts`, which builds the incomplete crawls
+ * directly.
+ *
+ * Unlike `UNCLAIMED_UNTIL_TASK_9` this list does not empty: it is a permanent,
+ * named exemption. Task 9 deletes that list and leaves this one, so the
+ * every-rule-fires assertion stays strict about every rule a fixture COULD
+ * provoke. Adding an id here is a claim that no page can provoke it, and it
+ * needs the same kind of paragraph as the one above.
+ */
+const SKIP_HARNESS_CLAIMS: string[] = ["links.orphan-skipped"];
+
 let db: Db;
 let app: FixtureApp;
 let summary: CrawlSummary;
@@ -86,9 +106,9 @@ const issuesByPath = new Map<string, Set<string>>();
 const detailsByPath = new Map<string, unknown>();
 /**
  * Findings that belong to no URL, by rule id, with the evidence the rule wrote.
- * No registered rule writes one on THIS crawl any more — `links.orphan` writes
- * a site-scoped finding only when the crawl was incomplete, and this one is
- * not — so the map is asserted empty. It is still collected rather than
+ * No registered rule writes one on THIS crawl any more — `links.orphan-skipped`
+ * writes a site-scoped finding only when the crawl was incomplete, and this one
+ * is not — so the map is asserted empty. It is still collected rather than
  * dropped: a site-scoped finding appearing here is a rule that changed shape,
  * and the assertion below is where that surfaces instead of vanishing.
  */
@@ -246,9 +266,9 @@ describe("the fixture site end to end", () => {
   it("no finding on this crawl is site-scoped", () => {
     // `hreflang.missing-x-default` used to be the registry's one site-scoped
     // rule and is now per declaration SET, landing on a URL. The only rule that
-    // can still write a null-page finding is `links.orphan`, and only when the
-    // crawl was incomplete — this one drains its frontier and stops well short
-    // of maxPages, so it must not.
+    // can still write a null-page finding is `links.orphan-skipped`, and only
+    // when the crawl was incomplete — this one drains its frontier and stops
+    // well short of maxPages, so it must not.
     expect([...siteFindings.keys()]).toEqual([]);
   });
 
@@ -306,10 +326,11 @@ describe("the fixture site end to end", () => {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);
     }
 
+    const exempt = new Set(SKIP_HARNESS_CLAIMS);
     const unfired = registry
       .all()
       .map((rule) => rule.id)
-      .filter((id) => !fired.has(id))
+      .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     expect(
       unfired,
@@ -317,5 +338,18 @@ describe("the fixture site end to end", () => {
         "that makes it speak, or remove the id from UNCLAIMED_UNTIL_TASK_9 once " +
         "one exists",
     ).toEqual([...UNCLAIMED_UNTIL_TASK_9].sort());
+
+    // The exemption is asserted, not assumed. An id listed as unfireable that
+    // then fires is a rule whose condition is not what the list claims, and it
+    // must leave the list rather than sit there as a stale excuse.
+    for (const id of SKIP_HARNESS_CLAIMS) {
+      expect(fired.has(id), `${id} fired — it is not unfireable, drop the exemption`).toBe(
+        false,
+      );
+      expect(
+        registry.all().map((rule) => rule.id),
+        `${id} is exempted from coverage but is not a registered rule`,
+      ).toContain(id);
+    }
   });
 });

@@ -57,6 +57,7 @@ const PHASE_3_RULE_IDS = [
   "canonical.non-200-target",
   "canonical.non-indexable-target",
   "links.orphan",
+  "links.orphan-skipped",
   "hreflang.missing-return-link",
   "hreflang.non-indexable-target",
   "pagination.next-target-uncrawled",

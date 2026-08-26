@@ -232,17 +232,23 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "If the URL should exist, restore it or redirect it to its replacement. If it should not, update the links to point at the right page — or remove them. Fixing the target once repairs every link listed here.",
   },
-  // This rule speaks for two outcomes: a page with no inbound links, and the
-  // crawl declining to answer at all (an unfinished crawl cannot tell an orphan
-  // from a page whose linking pages were never fetched). The copy has to cover
-  // the finding, not the skip — the skipped finding carries its reason in its
-  // own evidence.
+  // Two rule ids for one check, because copy is looked up by rule id: the
+  // orphan finding and the statement that the check could not be run are
+  // different things to tell a client, and rendering the second under the
+  // first's title would be a lie.
   "links.orphan": {
     title: "Page has no internal links pointing to it",
     explanation:
-      "This indexable page was crawled, and no other page on the site links to it. Search engines find and weigh pages largely through internal links, so an orphan is crawled rarely, receives no link equity from the rest of the site, and cannot be reached by anyone browsing. A page listed in the sitemap but linked from nowhere is still an orphan: the sitemap tells a crawler the URL exists, not that the page matters.",
+      "This indexable page was crawled, and no other page on the site links to it — a link the page makes to itself does not count. Search engines find and weigh pages largely through internal links, so an orphan is crawled rarely, receives no link equity from the rest of the site, and cannot be reached by anyone browsing. A page listed in the sitemap but linked from nowhere is still an orphan: the sitemap tells a crawler the URL exists, not that the page matters. Where the crawl could not fetch some URLs, the finding carries a caveat naming how many: their outgoing links were never read, so one of them may link here.",
     howToFix:
-      "Link to the page from somewhere it belongs — a hub or category page, the navigation, or a related article — so both readers and crawlers have a path to it. If nothing on the site has a reason to link to it, that is the answer to whether the page should stay: consolidate it into a page that does earn links, or remove it.",
+      "Link to the page from somewhere it belongs — a hub or category page, the navigation, or a related article — so both readers and crawlers have a path to it. If nothing on the site has a reason to link to it, that is the answer to whether the page should stay: consolidate it into a page that does earn links, or remove it. If the finding carries a caveat about failed URLs, confirm those pages before acting on it.",
+  },
+  "links.orphan-skipped": {
+    title: "Orphan-page check could not be run on this crawl",
+    explanation:
+      "The check for pages with no internal links needs a crawl that reached every URL it knew about, because \"nothing links to this page\" and \"the page that links to it was never fetched\" look identical afterwards. This crawl did not finish that way — the finding names the reason, which is either URLs left unfetched or a crawl stopped at its configured page limit — so the check was not run rather than reporting the crawl's own limits as faults on the site.",
+    howToFix:
+      "Re-run or resume the crawl so the queue drains: raise the page limit if the crawl stopped at its cap, and give it a wider limit than the site's known page count. Once a crawl completes with an empty queue, the orphan check runs on its own.",
   },
 
   // --------------------------------------------------------------- hreflang

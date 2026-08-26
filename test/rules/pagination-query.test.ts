@@ -264,6 +264,23 @@ describe("paginationRules against the database", () => {
       expect(await findings("pagination.next-target-uncrawled", crawlId)).toHaveLength(0);
     });
 
+    // A paginated page renders the whole pagination control, current page
+    // included, so page 2 almost always carries an anchor to page 2. Counting
+    // that as an inbound link would answer "can a reader reach page 2?" with a
+    // link only a reader already on page 2 can see — and would silence the rule
+    // on exactly the sites it exists for.
+    it("fires when the target's only inbound link is its own", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/blog", relNext: "/blog?page=2" },
+        { path: "/blog?page=2", relPrev: "/blog" },
+      ]);
+      await addLink(crawlId, ids.get("/blog?page=2")!, "/blog?page=2");
+
+      const found = await findings("pagination.next-not-linked", crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/blog")]);
+    });
+
     it("is silent once any page links to the target", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [

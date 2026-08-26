@@ -39,19 +39,38 @@ function rule(id: string): QueryRule {
 }
 
 describe("linkGraphRules metadata", () => {
-  it("defines exactly the orphan rule of the Phase 3 table", () => {
-    expect(linkGraphRules.map((r) => r.id)).toEqual(["links.orphan"]);
+  // Two ids for one check. Copy is looked up by rule id, so the finding that
+  // says the check could not run cannot share an id with the finding that says
+  // a page has no inbound links — it would be rendered under that page's title.
+  it("defines the orphan rule and its skipped twin", () => {
+    expect(linkGraphRules.map((r) => r.id).sort()).toEqual([
+      "links.orphan",
+      "links.orphan-skipped",
+    ]);
   });
 
-  it("claims the checklist id, severity and category the table assigns", () => {
-    const orphan = rule("links.orphan");
-    expect(orphan.checkIds).toEqual(["CHECK-32"]);
-    expect(orphan.severity).toBe("warning");
-    expect(orphan.category).toBe("links");
-    expect(orphan.kind).toBe("query");
-    expect(orphan.title.length).toBeGreaterThan(5);
-    expect(orphan.explanation.length).toBeGreaterThan(40);
-    expect(orphan.rulesetVersion).toBeTruthy();
+  it("claims the checklist ids, severities and categories the table assigns", () => {
+    expect(
+      Object.fromEntries(linkGraphRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
+    ).toEqual({
+      "links.orphan": [["CHECK-32"], "warning", "links"],
+      // Info: a statement about the crawl, not a fault found on the site.
+      "links.orphan-skipped": [["CHECK-32"], "info", "links"],
+    });
+  });
+
+  it("every rule is a query rule carrying its own copy and a ruleset version", () => {
+    const titles = new Set<string>();
+    for (const r of linkGraphRules) {
+      expect(r.kind, r.id).toBe("query");
+      expect(r.title.length, r.id).toBeGreaterThan(5);
+      expect(r.explanation.length, r.id).toBeGreaterThan(40);
+      expect(r.rulesetVersion, r.id).toBeTruthy();
+      titles.add(r.title);
+    }
+    // The whole point of the split: the two findings do not share client-facing
+    // copy.
+    expect(titles.size).toBe(linkGraphRules.length);
   });
 });
 
@@ -128,6 +147,10 @@ describe("links.orphan against the database", () => {
     return rule("links.orphan").run(db, crawlId);
   }
 
+  async function skips(crawlId: string): Promise<Finding[]> {
+    return rule("links.orphan-skipped").run(db, crawlId);
+  }
+
   /** The seed row every crawl has: depth 0, discovered as the seed. */
   const SEED: PageSpec = { path: "/", depth: 0, discoveredVia: "seed" };
 
@@ -148,6 +171,8 @@ describe("links.orphan against the database", () => {
     await addLink(crawlId, ids.get("/a")!, "/b");
 
     expect(await orphans(crawlId)).toHaveLength(0);
+    // And the check ran: nothing was skipped.
+    expect(await skips(crawlId)).toHaveLength(0);
   });
 
   it("reports an indexable 200 page nothing links to, with its discovery evidence", async () => {
@@ -200,6 +225,28 @@ describe("links.orphan against the database", () => {
     expect(found).toHaveLength(1);
     expect(found[0]!.pageUrl).toBe(url("/from-sitemap"));
     expect(found[0]!.evidence).toEqual({ inSitemap: true, discoveredVia: "sitemap" });
+  });
+
+  // A page linking to itself — a logo linking home, a self-referential
+  // breadcrumb, a "back to top" rewritten to the canonical URL — would satisfy
+  // its own inbound-link test and disappear from this rule. It is still an
+  // orphan: nothing ELSE on the site can reach it.
+  it("still reports a page whose only inbound link is its own", async () => {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [
+      SEED,
+      { path: "/from-sitemap", discoveredVia: "sitemap" },
+    ]);
+    await db.insert(sitemapUrls).values({
+      crawlId,
+      url: url("/from-sitemap"),
+      sitemapSource: `${SITE}/sitemap.xml`,
+      lastmod: null,
+    });
+    await addLink(crawlId, ids.get("/from-sitemap")!, "/from-sitemap");
+
+    const found = await orphans(crawlId);
+    expect(found.map((f) => f.pageUrl)).toEqual([url("/from-sitemap")]);
   });
 
   it("says nothing about pages that are not indexable 200s", async () => {
@@ -255,10 +302,17 @@ describe("links.orphan against the database", () => {
       await addPages(crawlId, [SEED, { path: "/lonely" }]);
     }
 
-    function expectSkipped(found: Finding[], matching: RegExp): void {
+    /**
+     * A gated crawl: the skipped rule writes exactly one site-scoped finding
+     * naming the reason, and the orphan rule writes nothing at all. Both halves
+     * are asserted every time — a skip that did not silence the orphan check
+     * would report the crawl's blind spot as the site's fault anyway.
+     */
+    async function expectGated(crawlId: string, matching: RegExp): Promise<Finding> {
+      const found = await skips(crawlId);
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
-        ruleId: "links.orphan",
+        ruleId: "links.orphan-skipped",
         // Info, not warning: it is a statement about the crawl, not a fault
         // found on the site.
         severity: "info",
@@ -267,6 +321,8 @@ describe("links.orphan against the database", () => {
         dedupeKey: "site",
       });
       expect(String(found[0]!.evidence.skipped)).toMatch(matching);
+      expect(await orphans(crawlId), "the orphan check must not run when gated").toHaveLength(0);
+      return found[0]!;
     }
 
     it("skips, loudly, when the frontier still holds pending URLs", async () => {
@@ -280,23 +336,8 @@ describe("links.orphan against the database", () => {
         discoveredVia: "link",
       });
 
-      const found = await orphans(crawlId);
-      expectSkipped(found, /pending/i);
-      expect(found[0]!.evidence).toMatchObject({ pending: 1, leased: 0, failed: 0 });
-    });
-
-    it("skips when the frontier holds failed URLs", async () => {
-      const crawlId = await newCrawl();
-      await withAnOrphan(crawlId);
-      await db.insert(frontier).values({
-        crawlId,
-        url: url("/gave-up"),
-        state: "failed",
-        depth: 1,
-        discoveredVia: "link",
-      });
-
-      expectSkipped(await orphans(crawlId), /failed/i);
+      const found = await expectGated(crawlId, /pending/i);
+      expect(found.evidence).toMatchObject({ pending: 1, leased: 0, failed: 0 });
     });
 
     // A lease outstanding when the crawl stopped is a URL nobody finished:
@@ -313,10 +354,45 @@ describe("links.orphan against the database", () => {
         discoveredVia: "link",
       });
 
-      expectSkipped(await orphans(crawlId), /leased/i);
+      await expectGated(crawlId, /leased/i);
     });
 
-    it("does not skip on a frontier whose rows are all done", async () => {
+    // A failed URL is a BOUNDED, countable blind spot, unlike a queue that
+    // never drained. Muting CHECK-32 for the whole site because one URL timed
+    // out would hide every real orphan behind one fetch failure, so the check
+    // runs and each finding carries the count.
+    it("runs the check when the frontier drained but some URLs failed, with a caveat", async () => {
+      const crawlId = await newCrawl();
+      await withAnOrphan(crawlId);
+      await db.insert(frontier).values([
+        {
+          crawlId,
+          url: url("/gave-up"),
+          state: "failed",
+          depth: 1,
+          discoveredVia: "link",
+        },
+        {
+          crawlId,
+          url: url("/also-gave-up"),
+          state: "failed",
+          depth: 1,
+          discoveredVia: "link",
+        },
+      ]);
+
+      expect(await skips(crawlId)).toHaveLength(0);
+      const found = await orphans(crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.severity).toBe("warning");
+      expect(found[0]!.evidence).toEqual({
+        inSitemap: false,
+        discoveredVia: "link",
+        caveat: { failedPages: 2 },
+      });
+    });
+
+    it("does not skip, and adds no caveat, on a frontier whose rows are all done", async () => {
       const crawlId = await newCrawl();
       await withAnOrphan(crawlId);
       await db.insert(frontier).values({
@@ -327,18 +403,19 @@ describe("links.orphan against the database", () => {
         discoveredVia: "link",
       });
 
+      expect(await skips(crawlId)).toHaveLength(0);
       const found = await orphans(crawlId);
       expect(found).toHaveLength(1);
       expect(found[0]!.severity).toBe("warning");
+      expect(found[0]!.evidence).not.toHaveProperty("caveat");
     });
 
     it("skips when the crawl stopped at its page cap", async () => {
       const crawlId = await newCrawl({ pagesCrawled: MAX_PAGES });
       await withAnOrphan(crawlId);
 
-      const found = await orphans(crawlId);
-      expectSkipped(found, new RegExp(String(MAX_PAGES)));
-      expect(found[0]!.evidence).toMatchObject({
+      const found = await expectGated(crawlId, new RegExp(String(MAX_PAGES)));
+      expect(found.evidence).toMatchObject({
         pagesCrawled: MAX_PAGES,
         maxPages: MAX_PAGES,
       });
@@ -351,12 +428,14 @@ describe("links.orphan against the database", () => {
       const crawlId = await newCrawl({ config: {} });
       await withAnOrphan(crawlId);
 
-      expectSkipped(await orphans(crawlId), /maxPages/);
+      await expectGated(crawlId, /maxPages/);
     });
 
-    it("throws, naming the crawl, when there is no crawl row to gate on", async () => {
+    it("both rules throw, naming the crawl, when there is no crawl row to gate on", async () => {
       const missing = `crawl_${randomUUID()}`;
-      await expect(rule("links.orphan").run(db, missing)).rejects.toThrow(missing);
+      for (const r of linkGraphRules) {
+        await expect(r.run(db, missing), r.id).rejects.toThrow(missing);
+      }
     });
   });
 });
