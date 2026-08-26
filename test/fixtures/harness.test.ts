@@ -55,6 +55,7 @@ function databaseUrl(): string {
 const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "canonical.non-200-target",
   "canonical.non-indexable-target",
+  "content.soft-404",
   "host.legacy-host-reachable",
   "hreflang.missing-return-link",
   "hreflang.non-indexable-target",
@@ -73,6 +74,21 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "url.parameter-pages-indexable",
   "url.tracking-params-internal",
 ];
+
+/**
+ * `content.soft-404` needs a page the fixture site does not serve: one that
+ * answers 200 while being a "page not found". Either signal would claim it — a
+ * short page carrying not-found wording, or a body within four bits of what the
+ * site returns for a URL that cannot exist — and the second is the interesting
+ * one, because it also needs the app to serve 200 for unknown paths, which
+ * would change what several other fixtures see. Task 9 authors the page (and,
+ * if it takes the template route, the 200-for-everything handler behind it).
+ *
+ * Its two siblings are NOT here: `content.exact-duplicate` is claimed by the
+ * duplicate pair the absorbed collection already serves, and
+ * `content.near-duplicate` by two rungs of the deep click-chain, whose bodies
+ * are one template with a number substituted. Both are pinned below.
+ */
 
 /**
  * What the three URL/host entries above need, since none of them is simply a
@@ -411,6 +427,44 @@ describe("the fixture site end to end", () => {
     expect([
       ...(issuesByPath.get("/authored/hreflang-bad-code") ?? new Set<string>()),
     ]).not.toContain("hreflang.missing-x-default");
+  });
+
+  it("the duplicate rules see the site's real duplicates, end to end", () => {
+    // The simhash round trip, through the real crawler for once: an unsigned
+    // 64-bit value from the analyzer, stored as a signed bigint by the writer,
+    // compared by four band equalities and a `bit_count` XOR inside Postgres.
+    // The unit tests hand-build those rows; only this one proves the value that
+    // reaches the column is the value the SQL reads.
+    expect(detailsByPath.get("/content/duplicate-a\ncontent.exact-duplicate")).toEqual({
+      pageUrl: `${app.base}/content/duplicate-a`,
+      // The two absorbed copies are byte-identical by construction.
+      contentHash: expect.any(String),
+      urls: [`${app.base}/content/duplicate-a`, `${app.base}/content/duplicate-b`],
+      count: 2,
+      pageTypes: ["/content/duplicate-a", "/content/duplicate-b"],
+    });
+
+    // The click-chain's rungs are one template with a number substituted, and
+    // this pair is the one that lands inside the three-bit band. Pinning the
+    // distance, not just the rule id, is what makes this an assertion about the
+    // fingerprints rather than about two pages happening to be similar.
+    expect(detailsByPath.get("/deep/2\ncontent.near-duplicate")).toEqual({
+      pageUrl: `${app.base}/deep/2`,
+      urlA: `${app.base}/deep/2`,
+      urlB: `${app.base}/deep/4`,
+      hamming: 3,
+      pageTypeA: "/deep/:id",
+      pageTypeB: "/deep/:id",
+    });
+
+    // And nowhere else. A group is reported once, on its first member, and a
+    // pair once, on the first of the two — so a second page carrying either
+    // finding would mean a rule had started reporting per page.
+    const duplicated = [...issuesByPath]
+      .filter(([, ids]) => ids.has("content.exact-duplicate") || ids.has("content.near-duplicate"))
+      .map(([path]) => path)
+      .sort();
+    expect(duplicated).toEqual(["/content/duplicate-a", "/deep/2"]);
   });
 
   it("every registered rule fires on at least one fixture", () => {

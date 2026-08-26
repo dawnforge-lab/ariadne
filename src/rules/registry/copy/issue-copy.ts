@@ -497,4 +497,35 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Re-run the crawl with host probing enabled to answer these checks. In the meantime the same questions can be answered by hand: request each spelling of the domain and follow the redirects, confirming they all end on the canonical https host.",
   },
+
+  // ---------------------------------------------------------------- content
+  "content.soft-404": {
+    // Accuracy: two independent signals, and EITHER can fire this on its own —
+    // wording plus a short page, or a body that matches what the site serves
+    // for a URL that does not exist. Copy implying both are required, or that
+    // the page was proved missing, would misdescribe the rule.
+    title: "Soft 404 (a missing page answering 200)",
+    explanation:
+      'This page answers with a 200 OK, but it looks like a "page not found" rather than a page. Either signal alone is enough for us to say so: its visible text carries not-found wording and the page is under 300 words, or its content is within a few bits of the body this site served for a URL that cannot exist. Search engines treat these as errors anyway, so the URL is crawled repeatedly, kept out of the index, and the crawl budget spent on it is wasted.',
+    howToFix:
+      "Decide what the URL should be. If the content is genuinely gone, return a real 404 or 410 status rather than a 200, or 301-redirect it to the closest live page. If it is a real page that happens to be short or to mention the phrase, expand it so it stops resembling the error template — and check what links to it, because a soft 404 usually means something is generating URLs that were never meant to exist.",
+  },
+  "content.exact-duplicate": {
+    title: "Identical content at more than one URL",
+    explanation:
+      "These URLs return exactly the same visible text. A search engine picks one of them to keep and drops the others, and the links and ranking signals that should have gone to a single page are split between copies that compete with each other. It is also crawl budget spent fetching the same page repeatedly.",
+    howToFix:
+      "Pick the URL that should rank and point the others at it: a rel=canonical on the copies, or a 301 redirect where the duplicates should not exist at all. On templated sites, look for what created them — a print version, a parameter, a category path as well as a flat one — and fix the pattern rather than the individual pages.",
+  },
+  "content.near-duplicate": {
+    // Accuracy: this is a similarity measurement (a hamming distance between
+    // two 64-bit content fingerprints), not a plagiarism, scraping or
+    // copy-theft finding, and near-duplicate pages carry no ranking penalty.
+    // Do not let this copy imply any of that.
+    title: "Near-duplicate content",
+    explanation:
+      "These two pages are almost the same text. We compare a fingerprint of each page's visible words, and these two differ by at most three bits out of sixty-four — in practice, pages that differ only in boilerplate, a product name or a location. Search engines group pages this similar and show one of them, so a set of near-identical pages tends to rank as one page rather than as many.",
+    howToFix:
+      "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped.",
+  },
 };

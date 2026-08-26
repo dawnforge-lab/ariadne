@@ -339,9 +339,10 @@ const imagesMissingAlt: Fixture = {
 /**
  * The duplicate family — same page at two URLs, two pages sharing a title, two
  * pages sharing a meta description. Ariadne answers all three with cross-page
- * SQL (`contentHash` / `simhash` / grouped titles), which is a later phase's
- * query and metric rules, so these carry no expectations yet. The content is
- * exactly what those rules will need.
+ * SQL (`contentHash` / `simhash` / grouped titles). The first of the three now
+ * has its rule (`content.exact-duplicate`, CHECK-39) and its expectation below;
+ * duplicate titles and meta descriptions are still a later phase's metric
+ * rules, so those two pairs carry no expectations yet.
  */
 const DUP_TITLE = "Pumpkin Spice Latte Recipe";
 const DUP_META =
@@ -361,14 +362,17 @@ const DUP_BODY = article({
   ],
 });
 
-function duplicateBody(path: string): Fixture {
+function duplicateBody(path: string, expectedIssues: string[] = []): Fixture {
   return {
     path,
     category: CONTENT,
     name: "Duplicate content (same page, two URLs)",
-    // Later phase: duplicate-content / duplicate-title / duplicate-meta are
-    // cross-page query rules.
-    expectedIssues: [],
+    // `content.exact-duplicate` reports the GROUP once, on its lexically first
+    // member, so the expectation belongs to `/content/duplicate-a` alone — the
+    // `-b` copy is named in that finding's evidence rather than carrying one of
+    // its own. Duplicate titles and duplicate meta descriptions are still a
+    // later phase (metric rules).
+    expectedIssues,
     handler: (req, res) =>
       serve(req, res, () => ({
         title: DUP_TITLE,
@@ -978,10 +982,17 @@ function deepRung(level: number): Fixture {
     // clear the threshold would be filler on seven pages nobody looks at. The
     // honest thing is to say so — and until the exact pin below went on, nobody
     // had, because a containment assertion never asks what else fired.
-    expectedIssues:
-      level > DEEP_DEPTH_THRESHOLD
-        ? ["content.thin", "structure.deep-page"]
-        : ["content.thin"],
+    // Rung 2 carries a third: the rungs are one template with a number
+    // substituted, so some of them are near-duplicates of each other, and 2 and
+    // 4 are the pair that lands inside the three-bit band (the finding is
+    // reported once, on the lexically first of the two). Also not an accident
+    // to be papered over — it is exactly what CHECK-39 is about, and the pin in
+    // harness.test.ts quotes the pair and the distance.
+    expectedIssues: [
+      "content.thin",
+      ...(level > DEEP_DEPTH_THRESHOLD ? ["structure.deep-page"] : []),
+      ...(level === 2 ? ["content.near-duplicate"] : []),
+    ],
     // The last rung is pinned exactly rather than as a floor: unlike the rest
     // of the absorbed collection its body is ours (the chain was rebuilt for
     // Ariadne's depth threshold), so its complete finding set is something we
@@ -1067,7 +1078,7 @@ export const absorbedFixtures: Fixture[] = [
   headingSkip,
   thinContent,
   imagesMissingAlt,
-  duplicateBody("/content/duplicate-a"),
+  duplicateBody("/content/duplicate-a", ["content.exact-duplicate"]),
   duplicateBody("/content/duplicate-b"),
   dupTitleA,
   dupTitleB,

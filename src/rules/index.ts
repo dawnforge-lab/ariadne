@@ -4,6 +4,7 @@ import { statusRules } from "./page/status.js";
 import { canonicalRules } from "./page/canonical.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { technicalRules } from "./page/technical.js";
+import { contentRules } from "./query/content.js";
 import { hostRules } from "./query/host.js";
 import { hreflangRules } from "./query/hreflang.js";
 import { linkGraphRules } from "./query/link-graph.js";
@@ -38,6 +39,7 @@ export function buildRegistry(): Registry {
     ...sitemapRules,
     ...urlHygieneRules,
     ...hostRules,
+    ...contentRules,
   ]) {
     r.register(rule);
   }

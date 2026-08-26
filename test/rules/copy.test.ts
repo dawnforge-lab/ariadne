@@ -8,6 +8,23 @@ import {
   TITLE_MIN,
 } from "../../src/rules/page/on-page.js";
 import { DEEP_DEPTH, SLOW_MS } from "../../src/rules/page/technical.js";
+import {
+  NEAR_DUPLICATE_HAMMING,
+  SOFT_404_WORDS,
+} from "../../src/rules/query/content.js";
+
+/**
+ * The content copy spells its distance out in words, so the threshold pin below
+ * has to spell the constant out too. Only the values the rule could plausibly
+ * take are here; an unmapped one fails the assertion rather than passing it.
+ */
+const NUMBER_WORDS: Record<number, string> = {
+  1: "one",
+  2: "two",
+  3: "three",
+  4: "four",
+  5: "five",
+};
 
 /**
  * Every rule id defined by the Phase 2 rule tables (plan tasks 4-6). Kept here
@@ -80,6 +97,9 @@ const PHASE_3_RULE_IDS = [
   "host.duplicate-host-200",
   "host.legacy-host-reachable",
   "host.probe-skipped",
+  "content.soft-404",
+  "content.exact-duplicate",
+  "content.near-duplicate",
 ];
 
 const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
@@ -210,6 +230,40 @@ describe("issue copy", () => {
     const c = ISSUE_COPY["robots.missing"]!;
     const blurred = /unreachable|could not be (?:fetched|reached|read)|timed out|server error/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(blurred);
+  });
+
+  // Same contract as the on-page thresholds: the numbers in the content copy
+  // are the rules' own constants, so changing one fails here until the prose
+  // changes with it.
+  it("quotes the content thresholds the rules actually use", () => {
+    expect(ISSUE_COPY["content.soft-404"]!.explanation).toMatch(
+      new RegExp(`\\b${SOFT_404_WORDS} words\\b`),
+    );
+    expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toContain(
+      `${NUMBER_WORDS[NEAR_DUPLICATE_HAMMING]} bits out of sixty-four`,
+    );
+  });
+
+  // The soft-404 rule fires on EITHER signal. Copy saying both are needed would
+  // describe a rule half as sensitive as the one that ships, and copy claiming
+  // the page was proved missing would overstate what a similarity measurement
+  // and a word count can establish.
+  it("content.soft-404 does not make either signal a requirement", () => {
+    const c = ISSUE_COPY["content.soft-404"]!;
+    expect(c.explanation).toContain("200");
+    const bothRequired =
+      /both signals|only when both|and also matches|must (?:also )?match the|combination of both/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(bothRequired);
+  });
+
+  // The near-duplicate rule measures a hamming distance between two content
+  // fingerprints. It knows nothing about who wrote what, and near-duplicate
+  // pages carry no ranking penalty — the finding is about consolidation.
+  it("content.near-duplicate claims similarity, not plagiarism or a penalty", () => {
+    const c = ISSUE_COPY["content.near-duplicate"]!;
+    const overclaim =
+      /plagiaris|scraped|stolen|copied from|duplicate content penalt|penalis|penaliz|will be penal/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 
   it("headings.h1-multiple does not claim a ranking penalty", () => {

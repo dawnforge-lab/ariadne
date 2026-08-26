@@ -3,7 +3,11 @@ import { eq } from "drizzle-orm";
 import type { DiscoveryTruncation } from "../../crawl/discovery.js";
 import type { FetchClass } from "../../crawl/fetch-page.js";
 import type { HostProbeHop, HostProbeResult, HostProbeVariant } from "../../crawl/host-probe.js";
-import type { DiscoveryEvidence } from "../../crawl/loop.js";
+import type {
+  DiscoveryEvidence,
+  NotFoundProbeEvidence,
+  NotFoundProbeSample,
+} from "../../crawl/loop.js";
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
 import type { Finding } from "../registry/registry.js";
@@ -245,6 +249,115 @@ export async function readHostProbe(
       row.hostProbe === null || row.hostProbe === undefined
         ? null
         : parseHostProbe(row.hostProbe, ruleId, crawlId),
+  };
+}
+
+/** The crawl row the soft-404 rule reads: the seed URL, and the 404 sample or its absence. */
+export interface NotFoundProbeReading {
+  siteUrl: string;
+  /**
+   * Null means the crawl never reached the probe step — it is still running, or
+   * it failed before it. `{ skipped }` means the step ran and decided not to
+   * fetch, and says why. Neither is a template, and neither is a finding: see
+   * the `notfound_probe_jsonb` contract in src/db/schema.ts.
+   */
+  probe: NotFoundProbeEvidence | null;
+}
+
+/**
+ * `notfound_probe_jsonb` checked against the two shapes `probeKnownMissing`
+ * writes, rather than cast to one of them.
+ *
+ * Same reasoning as `parseDiscovery` and `parseHostProbe` above, with one
+ * sharper edge: `simhash` is stored as a DECIMAL STRING of a signed 64-bit
+ * value, and the soft-404 rule turns it into a bigint that goes into a
+ * `bit_count(… # …)` comparison. A number, a hex string or a value outside the
+ * signed range would either throw somewhere deep inside the SQL layer or —
+ * worse — compare against a different bit pattern than the analyzer produced,
+ * and every page would look far from the template. It is checked here, where
+ * the message can name the crawl.
+ *
+ * `fetchClass` is carried as stored: no rule branches on it — the soft-404 rule
+ * asks `statusCode === 200`, which is the question it actually has — so it rides
+ * along inside the evidence. A rule that starts reading it adds its check here.
+ */
+function parseNotFoundProbe(
+  value: unknown,
+  ruleId: string,
+  crawlId: string,
+): NotFoundProbeEvidence {
+  const bad = (why: string): never => {
+    throw new Error(`${ruleId}: crawl '${crawlId}' notfound probe evidence ${why}`);
+  };
+
+  if (!isRecord(value)) return bad("is not an object");
+
+  if ("skipped" in value) {
+    if (typeof value["skipped"] !== "string" || value["skipped"].trim() === "") {
+      return bad("has a skip with no reason in it");
+    }
+    return { skipped: value["skipped"] };
+  }
+
+  if (typeof value["probeUrl"] !== "string") {
+    return bad("is neither a sample (no probeUrl) nor a skip (no skipped)");
+  }
+  const status = value["statusCode"];
+  if (status !== null && typeof status !== "number") return bad("has a non-numeric statusCode");
+  if (typeof value["fetchClass"] !== "string") return bad("has no fetch class");
+  const wordCount = value["wordCount"];
+  if (wordCount !== null && typeof wordCount !== "number") {
+    return bad("has a non-numeric wordCount");
+  }
+  const simhash = value["simhash"];
+  if (simhash !== null && typeof simhash !== "string") return bad("has a non-string simhash");
+  if (typeof simhash === "string") {
+    let parsed: bigint;
+    try {
+      parsed = BigInt(simhash);
+    } catch {
+      return bad(`has a simhash '${simhash}' that is not an integer`);
+    }
+    if (BigInt.asIntN(64, parsed) !== parsed) {
+      return bad(`has a simhash '${simhash}' outside the signed 64-bit range`);
+    }
+  }
+
+  return {
+    probeUrl: value["probeUrl"],
+    statusCode: status,
+    fetchClass: value["fetchClass"] as NotFoundProbeSample["fetchClass"],
+    wordCount,
+    simhash,
+  };
+}
+
+/**
+ * The crawl row the soft-404 rule starts from.
+ *
+ * A separate read from the two above, for the reason spelled out on
+ * `readHostProbe`: each rule validates what it actually reads, so a malformed
+ * blob it does not touch cannot make it throw, and a malformed blob it does
+ * touch cannot make it quiet.
+ */
+export async function readNotFoundProbe(
+  db: Db,
+  crawlId: string,
+  ruleId: string,
+): Promise<NotFoundProbeReading> {
+  const rows = await db
+    .select({ siteUrl: crawls.siteUrl, notfoundProbe: crawls.notfoundProbe })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) throw new Error(`${ruleId}: no such crawl '${crawlId}'`);
+  return {
+    siteUrl: row.siteUrl,
+    probe:
+      row.notfoundProbe === null || row.notfoundProbe === undefined
+        ? null
+        : parseNotFoundProbe(row.notfoundProbe, ruleId, crawlId),
   };
 }
 

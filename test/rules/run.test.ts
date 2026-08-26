@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -28,7 +28,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("hreflang.invalid-code");
     // Phase 2's 28 page and hreflang rules, plus the Phase 3 redirect,
     // link/canonical-target, orphan, hreflang-join, pagination, robots,
-    // sitemap, URL-hygiene and host query rules.
+    // sitemap, URL-hygiene, host and content query rules.
     expect(ids).toContain("redirect.loop");
     expect(ids).toContain("links.broken-internal");
     expect(ids).toContain("links.orphan");
@@ -37,7 +37,8 @@ describe("buildRegistry", () => {
     expect(ids).toContain("sitemap.missing");
     expect(ids).toContain("url.normalisation-variants");
     expect(ids).toContain("host.http-serves-200");
-    expect(ids.length).toBe(57);
+    expect(ids).toContain("content.near-duplicate");
+    expect(ids.length).toBe(60);
   });
 
   it("registers both kinds the runner drives", () => {
@@ -87,15 +88,26 @@ describe("runRules against the database", () => {
   /**
    * A pages row built from the shared clean defaults, so a row differs from
    * "no rule fires on it" only in the signals this test names.
+   *
+   * The content fingerprints are per-URL rather than `mkPage`'s shared clean
+   * values, and for the same reason `/clean` is the seed: two rows carrying one
+   * `content_hash` and one `simhash` ARE duplicates of each other, so the
+   * content rules would report the clean page correctly and "a clean page
+   * contributes nothing" would stop being true for a reason that has nothing to
+   * do with the page. Derived from the URL, so they stay deterministic, and
+   * from a hash, so no two of them land within the near-duplicate band.
    */
   function mkRow(crawlId: string, path: string, overrides: Partial<PageRecord> = {}): PageRecord {
     const url = `${SITE}${path}`;
+    const digest = createHash("sha256").update(url).digest("hex");
     return mkPage({
       id: `page_${randomUUID()}`,
       crawlId,
       url,
       urlNormalised: url,
       canonicalHtml: url,
+      contentHash: digest,
+      simhash: BigInt.asIntN(64, BigInt(`0x${digest.slice(0, 16)}`)),
       ...overrides,
     });
   }
