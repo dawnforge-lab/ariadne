@@ -84,12 +84,14 @@ One row per URL.
 
 ```
 id, crawl_id, url, url_normalised, page_type, status_code, fetch_class,
-content_type, redirect_url, redirect_hops, depth, in_sitemap, discovered_via,
-title, meta_description, canonical_html, canonical_header, robots_meta,
-x_robots_tag, is_indexable, og_title, og_description, og_image,
+content_type, redirect_url, depth, discovered_via,
+title, meta_description, canonical_html, canonical_header, canonical_count,
+robots_meta, x_robots_tag, is_indexable, og_title, og_description, og_image,
 h1_count..h6_count, heading_order[], word_count, text_ratio,
-content_hash, simhash, response_time_ms, html_bytes, dom_size,
-images_total, images_missing_alt, has_amp, rel_next, rel_prev,
+content_hash, simhash, structured_data_parse_errors,
+response_time_ms, html_bytes, dom_size,
+images_total, images_missing_alt, images_missing_dimensions,
+has_amp, has_viewport, has_lorem_ipsum, rel_next, rel_prev,
 rendered (bool), rendered_word_count, rendered_link_count
 ```
 
@@ -97,6 +99,24 @@ New versus OpenSEO: `url_normalised` (lowercased, trailing slash stripped, for
 case and slash variant detection), `page_type`, `simhash`, `text_ratio`,
 `dom_size`, `rel_next`, `rel_prev`, `discovered_via`, and the `rendered_*`
 columns for the raw-versus-rendered diff.
+
+Two columns this inventory once listed are gone, and five signals the rules
+need have been added, all in built code:
+
+- `redirect_hops` and `in_sitemap` were **dropped** (Phase 2 groundwork,
+  `c791084`). Nothing ever wrote them, and a rule reading a column that is
+  always null is a rule that always passes — hard rule 1. Both facts are still
+  available as queries: hops from the redirect chain, sitemap membership from
+  `sitemap_urls.page_id`.
+- `canonical_count` — how many `<link rel=canonical>` elements the HTML
+  declared. `canonical_html` keeps the first; "more than one canonical"
+  (CHECK-18) is a finding a single-value column cannot express.
+- `structured_data_parse_errors` (Phase 1) — JSON-LD blocks that would not
+  parse. A count, not a silence.
+- `images_missing_dimensions` — `<img>` without both width and height, the CLS
+  signal (CHECK-49).
+- `has_viewport` — `<meta name=viewport>` present (CHECK-52).
+- `has_lorem_ipsum` — placeholder copy shipped to production (CHECK-40).
 
 ### `links`
 `crawl_id, source_page_id, target_url, target_page_id, anchor, rel, is_internal,
