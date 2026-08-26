@@ -11,6 +11,11 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import {
+  noteAtLeastTruncation,
+  noteTruncation,
+  URL_FINDING_CAP,
+} from "./crawl-evidence.js";
 
 /**
  * BCP-47-lite: a 2–3 letter language, optionally followed by a region that is
@@ -118,7 +123,12 @@ async function eachDeclarationSet(
   db: Db,
   crawlId: string,
   opts: { withTargets: boolean },
-  visit: (set: DeclarationSet, targets: TargetContext) => void,
+  /**
+   * Returning `"stop"` ends the walk after this set — for the caller whose
+   * accumulator cannot go on bounded (see `missingXDefaultFindings`). A caller
+   * that can count past its cap returns nothing and gets the whole crawl.
+   */
+  visit: (set: DeclarationSet, targets: TargetContext) => void | "stop",
 ): Promise<void> {
   let cursor = "";
   for (;;) {
@@ -168,7 +178,9 @@ async function eachDeclarationSet(
     const context = opts.withTargets
       ? await targetContext(db, crawlId, [...sets.values()])
       : { page: () => undefined, declares: () => NO_TARGETS };
-    for (const set of sets.values()) visit(set, context);
+    for (const set of sets.values()) {
+      if (visit(set, context) === "stop") return;
+    }
   }
 }
 
@@ -239,6 +251,12 @@ async function targetContext(
  * A member the crawl never fetched is skipped everywhere, and deliberately: a
  * URL we did not request says nothing about what it declares or whether it can
  * be indexed, and "unknown" is not a finding (hard rule 1).
+ *
+ * The finding is one per (page, member) PAIR, so a cluster wired one way round
+ * is O(pages × languages) of them: capped at `URL_FINDING_CAP` like every other
+ * URL-scoped rule. The walk runs to the end whatever the cap says — nothing
+ * about it grows with what is kept — so the count behind the cap is exact
+ * (`noteTruncation`): only the LISTING stops at the cap, never the counting.
  */
 async function declarationFindings(
   self: RuleIdentity,
@@ -251,12 +269,15 @@ async function declarationFindings(
   ) => Record<string, unknown> | null,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
+  let total = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: true }, (set, context) => {
     for (const member of set.targets) {
       const target = context.page(member);
       if (target === undefined) continue;
       const evidence = fires(set, target, context);
       if (evidence === null) continue;
+      total += 1;
+      if (findings.length >= URL_FINDING_CAP) continue;
       findings.push(
         queryFinding(self, {
           pageId: set.pageId,
@@ -267,7 +288,7 @@ async function declarationFindings(
       );
     }
   });
-  return findings;
+  return noteTruncation(findings, total);
 }
 
 /**
@@ -293,18 +314,31 @@ interface IncompleteSet {
  * least means the same crawl re-run writes the same row, and the fix — add one
  * link tag to the cluster's template — is the same wherever it is filed.
  *
- * Memory is O(distinct incomplete sets), not O(URLs): one hash and one target
- * list per cluster, and a cluster is shared by every page in it.
+ * The accumulator holds one hash and one TARGET LIST per distinct cluster, and
+ * a shop that ships a cluster per product has one per page — so unlike the
+ * scans above, this one cannot count past its cap for free: knowing the total
+ * means keeping every hash. It stops instead, one cluster past
+ * `URL_FINDING_CAP`, and reports a LOWER BOUND (`noteAtLeastTruncation`). What
+ * it did not scan it does not claim to have counted (the `content.near-
+ * duplicate` precedent).
  */
 async function missingXDefaultFindings(db: Db, crawlId: string): Promise<Finding[]> {
   const incomplete = new Map<string, IncompleteSet>();
+  /** 1 once the walk has seen a cluster it could not keep, 0 while it fits. */
+  let beyondCap = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: false }, (set) => {
     // A page naming one URL is not a cluster: there is no other version to
     // fall back FROM, so there is nothing missing.
     if (set.hasXDefault || set.targets.length < 2) return;
     const key = createHash("sha256").update(set.targets.join("\n")).digest("hex");
     if (incomplete.has(key)) return;
+    if (incomplete.size >= URL_FINDING_CAP) {
+      // One cluster past the cap is all the walk needs to prove there are more.
+      beyondCap = 1;
+      return "stop";
+    }
     incomplete.set(key, { targets: set.targets, firstMember: set.targets[0]! });
+    return;
   });
   if (incomplete.size === 0) return [];
 
@@ -322,7 +356,7 @@ async function missingXDefaultFindings(db: Db, crawlId: string): Promise<Finding
     for (const row of rows.rows) pageIds.set(String(row.url), String(row.id));
   }
 
-  return [...incomplete].map(([key, set]) =>
+  const findings = [...incomplete].map(([key, set]) =>
     queryFinding(X_DEFAULT, {
       pageId: pageIds.get(set.firstMember) ?? null,
       pageUrl: set.firstMember,
@@ -330,6 +364,7 @@ async function missingXDefaultFindings(db: Db, crawlId: string): Promise<Finding
       dedupeKey: key,
     }),
   );
+  return noteAtLeastTruncation(findings, incomplete.size + beyondCap);
 }
 
 /**

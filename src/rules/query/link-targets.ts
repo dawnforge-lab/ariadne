@@ -184,6 +184,16 @@ async function eachCanonicalTarget(
   }
 }
 
+/**
+ * The shape both canonical-target rules take: walk the resolved canonicals and
+ * keep the ones the rule fires on.
+ *
+ * Capped at `URL_FINDING_CAP` like every other URL-scoped rule — a template
+ * that canonicalises a whole section at one dead URL is O(pages) findings —
+ * and the scan runs to the end of the last batch either way, so the count
+ * behind the cap is exact (`noteTruncation`): only the LISTING stops at the
+ * cap, never the counting.
+ */
 async function canonicalTargetFindings(
   self: RuleIdentity,
   db: Db,
@@ -191,9 +201,12 @@ async function canonicalTargetFindings(
   fires: (t: ResolvedTarget) => Record<string, unknown> | null,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
+  let total = 0;
   await eachCanonicalTarget(db, crawlId, (t) => {
     const evidence = fires(t);
     if (evidence === null) return;
+    total += 1;
+    if (findings.length >= URL_FINDING_CAP) return;
     findings.push(
       queryFinding(self, {
         pageId: t.page.id,
@@ -203,7 +216,7 @@ async function canonicalTargetFindings(
       }),
     );
   });
-  return findings;
+  return noteTruncation(findings, total);
 }
 
 const BROKEN: RuleIdentity = { id: "links.broken-internal", severity: "warning" };

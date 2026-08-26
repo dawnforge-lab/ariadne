@@ -12,7 +12,8 @@ import {
   type DiscoveryEvidence,
   type NotFoundProbeSample,
 } from "../../src/crawl/loop.js";
-import { hostProbeStarts, type HostProbeResult } from "../../src/crawl/host-probe.js";
+import type { HostProbeResult } from "../../src/crawl/host-probe.js";
+import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 
 function databaseUrl(): string {

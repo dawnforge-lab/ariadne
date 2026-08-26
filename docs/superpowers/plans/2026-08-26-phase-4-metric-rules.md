@@ -41,7 +41,7 @@
 - **Truncated-key rename:** `redirects.ts` chain evidence `truncated` → `chainTruncated`; `robots.ts` raw-truncated boolean → `robotsTruncated`; harness/gate-doc references updated.
 - **Comment sweep:** crawl-evidence gate-uniformity overclaim fixed; `resumeCrawl` documents the host-probe re-run/overwrite; `hostProbeStarts` moved out of the fetch-stack module graph (the pure function relocates to url-utils or a pure module) so rules stop value-importing the fetch stack.
 
-- [ ] TDD per item → full suite green → commit `fix: phase 3 carried backlog — probe containment, finding caps, truncation renames`.
+- [x] TDD per item → full suite green → commit `fix: phase 3 carried backlog — probe containment, finding caps, truncation renames`.
 
 ---
 

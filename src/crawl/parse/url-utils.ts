@@ -3,11 +3,15 @@
  * @ c469a48ae90ab58413b198fe3d1ac1aa90a9b070.
  * Changes: none to behaviour — the module was self-contained (no framework
  * imports) and every export is carried over verbatim. Added: this provenance
- * header, the doc comment on detectUrlTemplate's slug rule, and one
- * Ariadne-authored export, `onRulesOrigin` (moved here from
- * src/crawl/discovery.ts so the rule layer can use it without importing the
- * fetch stack — see its own comment).
+ * header, the doc comment on detectUrlTemplate's slug rule, and two
+ * Ariadne-authored exports — `onRulesOrigin` (moved here from
+ * src/crawl/discovery.ts) and `hostProbeStarts` with its two helpers (moved
+ * here from src/crawl/host-probe.ts) — both so the rule layer can use them
+ * without importing the fetch stack; see their own comments. The one import
+ * below is a Node builtin, so the module stays free of framework and I/O
+ * dependencies.
  */
+import { isIP } from "node:net";
 
 /**
  * **`normalizeUrl` is the single authority for frontier and dedupe keys.**
@@ -225,4 +229,111 @@ export function detectUrlTemplate(pathname: string): string {
  */
 export function getOrigin(url: string): string {
   return new URL(url).origin;
+}
+
+/**
+ * The apex/`www` spellings of a hostname, apex first, whichever way round the
+ * input was written. Fixed order rather than "as seeded, then the twin" so the
+ * stored evidence reads the same for a site seeded as `example.com` and one
+ * seeded as `www.example.com`.
+ *
+ * An IP literal has no `www.` twin: `www.203.0.113.7` is not another name for
+ * the same machine, it is a hostname that means nothing — and asking the
+ * system resolver about it puts a made-up name on the wire (and, if some
+ * wildcard DNS answers, a real address on the other end of a fetch). A site
+ * addressed by IP gets its one spelling per scheme.
+ */
+function hostnameSpellings(hostname: string): string[] {
+  // URL.hostname brackets IPv6 (`[::1]`), which net.isIP does not recognise.
+  const literal = hostname.replace(/^\[|\]$/g, "");
+  if (isIP(literal) !== 0) return [hostname];
+  const apex = hostname.startsWith("www.") ? hostname.slice(4) : hostname;
+  return [apex, `www.${apex}`];
+}
+
+/** The origin root of a URL, with the scheme swapped for `scheme`. */
+function originRoot(url: URL, scheme: "http" | "https", hostname: string): string {
+  const port = url.port === "" ? "" : `:${url.port}`;
+  return `${scheme}://${hostname}${port}/`;
+}
+
+/**
+ * The exact list of URLs the host probe will request first, in order: the
+ * site's own spellings (four, or two when it is addressed by IP), then the
+ * legacy hosts.
+ *
+ * Pure and exported because it is the probe's contract — the tests pin the
+ * derivation here rather than inferring it from a network result, the crawl
+ * loop validates `legacyHosts` through it before the `crawls` row exists, and
+ * the host rules subtract the crawl's own spellings from a stored probe with
+ * it.
+ *
+ * Ariadne addition, not upstream, and it lives in this module for the reason
+ * `onRulesOrigin` does: src/crawl/host-probe.ts is the fetch stack, and the
+ * rule layer must be able to ask this question without importing it.
+ *
+ * A `legacyHosts` entry that cannot be read as a host or an http(s) URL throws:
+ * it is operator input naming a domain we are being asked to check, and
+ * dropping it silently would report "the legacy domain is fine" about a domain
+ * that was never probed (hard rule 7).
+ */
+export function hostProbeStarts(
+  siteUrl: string,
+  legacyHosts: readonly string[] = [],
+): string[] {
+  let site: URL;
+  try {
+    site = new URL(siteUrl);
+  } catch {
+    throw new Error(`hostProbeStarts: siteUrl is not a URL (${siteUrl})`);
+  }
+  if (site.protocol !== "http:" && site.protocol !== "https:") {
+    throw new Error(`hostProbeStarts: siteUrl is not http(s) (${siteUrl})`);
+  }
+
+  const starts: string[] = [];
+  const add = (url: string) => {
+    if (!starts.includes(url)) starts.push(url);
+  };
+
+  for (const hostname of hostnameSpellings(site.hostname)) {
+    for (const scheme of ["http", "https"] as const) {
+      add(originRoot(site, scheme, hostname));
+    }
+  }
+
+  for (const entry of legacyHosts) {
+    const trimmed = entry.trim();
+    if (trimmed.includes("://")) {
+      let legacy: URL;
+      try {
+        legacy = new URL(trimmed);
+      } catch {
+        throw new Error(`hostProbeStarts: legacyHosts entry is not a URL (${entry})`);
+      }
+      if (legacy.protocol !== "http:" && legacy.protocol !== "https:") {
+        throw new Error(
+          `hostProbeStarts: legacyHosts entry is not http(s) (${entry})`,
+        );
+      }
+      add(`${legacy.origin}/`);
+      continue;
+    }
+    let bare: URL;
+    try {
+      bare = new URL(`https://${trimmed}`);
+    } catch {
+      throw new Error(`hostProbeStarts: legacyHosts entry is not a host (${entry})`);
+    }
+    // `new URL` accepts a surprising amount as a hostname; anything that came
+    // back changed (a space, a path, credentials) was not a bare host.
+    if (bare.hostname !== trimmed.toLowerCase() || bare.pathname !== "/") {
+      throw new Error(`hostProbeStarts: legacyHosts entry is not a host (${entry})`);
+    }
+    for (const scheme of ["http", "https"] as const) {
+      add(originRoot(bare, scheme, bare.hostname));
+    }
+  }
+
+  return starts;
 }

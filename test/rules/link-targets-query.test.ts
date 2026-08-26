@@ -382,7 +382,12 @@ describe("linkTargetRules against the database", () => {
       expect(found[0]!.evidence).toMatchObject({ canonical: url("/gone"), targetStatus: 404 });
     });
 
-    it("walks every page, not just the first batch", async () => {
+    // Both halves of the batched scan's contract in one crawl: it reads past
+    // the first batch (the count proves it), and it stops *listing* at the
+    // findings cap while still counting what it saw. A template that
+    // canonicalises a whole section at a dead URL is O(pages) findings
+    // otherwise.
+    it("walks every page, not just the first batch, and caps what it lists", async () => {
       const crawlId = await newCrawl();
       const total = CANONICAL_BATCH + 5;
       const specs: PageSpec[] = [
@@ -393,7 +398,14 @@ describe("linkTargetRules against the database", () => {
       }
       await addPages(crawlId, specs);
 
-      expect(await findings("canonical.non-200-target", crawlId)).toHaveLength(total);
+      const found = await findings("canonical.non-200-target", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      // The exact total is what says the scan ran to the end of the last
+      // batch rather than stopping when the list filled up.
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
     });
   });
 

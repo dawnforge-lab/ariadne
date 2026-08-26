@@ -11,11 +11,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
-import {
-  hostProbeStarts,
-  probeHostVariants,
-  MAX_HOST_PROBE_HOPS,
-} from "../../src/crawl/host-probe.js";
+import { probeHostVariants, MAX_HOST_PROBE_HOPS } from "../../src/crawl/host-probe.js";
+// The derivation is the probe's contract but lives in the pure url-utils
+// module, so the rule layer can read it without importing the fetch stack.
+import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 
 let server: Server;
 let port = 0;

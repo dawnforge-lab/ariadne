@@ -251,7 +251,11 @@ export const robotsRules: QueryRule[] = [
           evidence: {
             skipped,
             outcome: discovery.robots.outcome,
-            truncated: discovery.robots.truncated,
+            // `robotsTruncated`, not `truncated`: this says the stored
+            // robots.txt is a 500KB prefix. `truncated` is the note a capped
+            // listing writes into its last finding (`noteTruncation`), and one
+            // evidence object must not spell two different facts the same way.
+            robotsTruncated: discovery.robots.truncated,
           },
           dedupeKey: "site",
         }),

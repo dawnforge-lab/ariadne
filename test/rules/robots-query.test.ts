@@ -313,7 +313,10 @@ describe("the robots rules against the database", () => {
       dedupeKey: "site",
     });
     expect(String((skipped[0]!.evidence as { skipped: string }).skipped)).toMatch(/500KB|read cap/);
-    expect(skipped[0]!.evidence).toMatchObject({ outcome: "read", truncated: true });
+    // `robotsTruncated`, not `truncated`: the second name belongs to the
+    // truncation note a capped listing writes, and one evidence object must
+    // not spell two different facts the same way.
+    expect(skipped[0]!.evidence).toMatchObject({ outcome: "read", robotsTruncated: true });
   });
 
   it("is silent when the robots.txt was read whole", async () => {

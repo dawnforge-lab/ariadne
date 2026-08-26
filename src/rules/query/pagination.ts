@@ -13,6 +13,7 @@ import {
   type PageRecord,
   type QueryRule,
 } from "../registry/registry.js";
+import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
 
 const CATEGORY = "url";
 
@@ -132,6 +133,16 @@ async function eachPaginatedPage(
   }
 }
 
+/**
+ * The shape all three pagination rules take: walk the paginated pages and keep
+ * the ones the rule fires on.
+ *
+ * Capped at `URL_FINDING_CAP` like every other URL-scoped rule — an archive
+ * carries `rel=next` on every page of every series, so a crawl that stops
+ * short of the last page fires on O(pages) of them — and the scan runs to the
+ * end of the last batch either way, so the count behind the cap is exact
+ * (`noteTruncation`): only the LISTING stops at the cap, never the counting.
+ */
 async function paginationFindings(
   self: RuleIdentity,
   db: Db,
@@ -139,9 +150,12 @@ async function paginationFindings(
   fires: (p: PaginatedPage) => Record<string, unknown> | null,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
+  let total = 0;
   await eachPaginatedPage(db, crawlId, (p) => {
     const evidence = fires(p);
     if (evidence === null) return;
+    total += 1;
+    if (findings.length >= URL_FINDING_CAP) return;
     findings.push(
       queryFinding(self, {
         pageId: p.page.id,
@@ -151,7 +165,7 @@ async function paginationFindings(
       }),
     );
   });
-  return findings;
+  return noteTruncation(findings, total);
 }
 
 export const paginationRules: QueryRule[] = [

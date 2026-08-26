@@ -1,3 +1,14 @@
+/**
+ * The redirect-graph rules: chains and loops, walked in SQL.
+ *
+ * Both cap what they LIST at `URL_FINDING_CAP` while counting what they find
+ * in full: the walk visits every head and every headless cycle whatever the cap
+ * says, so each case's dedupe key still goes into a set and the number behind
+ * the cap is exact (`noteTruncation`). A migration that chained a whole legacy
+ * tree, or a template that loops on every product, is O(pages) redirect paths —
+ * and one finding per path is a findings table that grows with the site rather
+ * than with the problem.
+ */
 import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 
@@ -10,6 +21,7 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
 
 const CATEGORY = "redirects";
 
@@ -20,8 +32,8 @@ const CATEGORY = "redirects";
  * chain long enough that reporting every hop helps nobody, and that would make
  * the recursive CTE's intermediate rows grow with the site.
  *
- * A chain cut short by the cap is reported with `truncated: true` rather than
- * silently presented as if it ended there.
+ * A chain cut short by the cap is reported with `chainTruncated: true`
+ * rather than silently presented as if it ended there.
  */
 export const MAX_REDIRECT_HOPS = 10;
 
@@ -232,8 +244,8 @@ function hitCapUnresolved(row: WalkRow): boolean {
  * Which of the two it is cannot be known from ten hops, and dropping it would
  * be a redirect path the engine walked, could not resolve, and said nothing
  * about (hard rule 7). It is reported as a truncated chain from the seed —
- * every hop in the evidence is one we actually followed, and `truncated: true`
- * says the path did not end there.
+ * every hop in the evidence is one we actually followed, and
+ * `chainTruncated: true` says the path did not end there.
  *
  * Deduped by coverage: seeds are walked in URL order and a seed already inside
  * an emitted walk's chain is skipped, so a 12-page ring is two findings rather
@@ -261,6 +273,8 @@ function unresolvedHeadless(rows: WalkRow[]): WalkRow[] {
  */
 function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
   const byHead = new Map<string, Finding>();
+  /** Every head that yielded a chain, cap or no cap — the exact count. */
+  const heads = new Set<string>();
   for (const row of rows) {
     if (cycleOf(row) !== null) continue;
     const tail = row.redirect_url;
@@ -276,12 +290,15 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
     // `Location` header is the only honest thing to print; a cap-stopped tail
     // has a row we could have named, and printing the header instead says what
     // the last visited page sent rather than implying we went on to fetch it —
-    // which `truncated: true` is simultaneously denying. The walk itself
+    // which `chainTruncated: true` is simultaneously denying. The walk itself
     // followed the normalised twin in both cases (see `walkFrom`), so nothing
     // about where the chain goes rests on this string.
     const chain = tail === null ? row.chain : [...row.chain, tail];
     const hops = tail === null ? row.chain.length - 1 : row.chain.length;
     if (hops < CHAIN_HOPS) continue;
+    if (heads.has(row.head)) continue;
+    heads.add(row.head);
+    if (byHead.size >= URL_FINDING_CAP) continue;
     byHead.set(
       row.head,
       queryFinding(self, {
@@ -294,13 +311,17 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
           // status to report. A truncated or uncrawled tail has none, and
           // guessing one would be inventing evidence.
           finalStatus: tail === null ? row.status_code : null,
-          truncated: tail !== null && row.tail_crawled,
+          // `chainTruncated`, not `truncated`: this says the WALK stopped at
+          // the hop cap with the path still going. `truncated` is the note a
+          // capped listing writes into its last finding, and one evidence
+          // object must not spell two different facts the same way.
+          chainTruncated: tail !== null && row.tail_crawled,
         },
         dedupeKey: row.head,
       }),
     );
   }
-  return [...byHead.values()];
+  return noteTruncation([...byHead.values()], heads.size);
 }
 
 /**
@@ -312,12 +333,16 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
  */
 function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
   const byCycle = new Map<string, Finding>();
+  /** Every distinct cycle seen, cap or no cap — the exact count. */
+  const cycles = new Set<string>();
   for (const row of rows) {
     const cycle = cycleOf(row);
     if (cycle === null) continue;
     const start = row.chain.indexOf(cycle[0]!);
     const key = createHash("sha1").update([...new Set(cycle)].sort().join("\n")).digest("hex");
-    if (byCycle.has(key)) continue;
+    if (cycles.has(key)) continue;
+    cycles.add(key);
+    if (byCycle.size >= URL_FINDING_CAP) continue;
     byCycle.set(
       key,
       queryFinding(self, {
@@ -330,7 +355,7 @@ function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
       }),
     );
   }
-  return [...byCycle.values()];
+  return noteTruncation([...byCycle.values()], cycles.size);
 }
 
 const CHAIN: RuleIdentity = { id: "redirect.chain", severity: "warning" };

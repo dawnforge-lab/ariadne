@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, hreflang, pages } from "../../src/db/schema.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
@@ -359,6 +360,34 @@ describe("hreflangRules against the database", () => {
       expect(await findings("hreflang.missing-x-default", crawlId)).toHaveLength(0);
     });
 
+    // The accumulator here holds one target LIST per distinct cluster, which
+    // grows with the site on a shop that ships a cluster per product. The scan
+    // stops once it has seen one more cluster than it may list, so the count
+    // it can report is a lower bound — `atLeast`, never `total`: what it did
+    // not scan it cannot claim to have counted.
+    it("caps the listed clusters and reports a lower bound, not a total", async () => {
+      const crawlId = await newCrawl();
+      const clusters = URL_FINDING_CAP + 20;
+      const paths = Array.from(
+        { length: clusters },
+        (_, i) => `/set-${String(i).padStart(4, "0")}`,
+      );
+      const ids = await addPages(crawlId, paths);
+      for (const [i, path] of paths.entries()) {
+        await addHreflang(crawlId, ids.get(path)!, [
+          ["en", url(path)],
+          ["fr", `https://fr.example/set-${String(i).padStart(4, "0")}`],
+        ]);
+      }
+
+      const found = await findings("hreflang.missing-x-default", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, atLeast: URL_FINDING_CAP + 1 },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
+    });
+
     it("reads only its own crawl", async () => {
       const other = await newCrawl();
       const otherIds = await addPages(other, ["/a", "/b"]);
@@ -439,6 +468,33 @@ describe("hreflangRules against the database", () => {
       ]);
 
       expect(await findings("hreflang.missing-return-link", crawlId)).toHaveLength(0);
+    });
+
+    // One finding per (page, alternate) pair, so a cluster wired one way round
+    // is O(pages × languages) findings. The scan itself runs to the end of the
+    // walk — the count is exact — and only the listing stops. Shared with
+    // `hreflang.non-indexable-target`: both read this file's declaration scan.
+    it("caps the findings and says how many pairs there really are", async () => {
+      const crawlId = await newCrawl();
+      const total = URL_FINDING_CAP + 1;
+      const targets = Array.from(
+        { length: total },
+        (_, i) => `/alt-${String(i).padStart(4, "0")}`,
+      );
+      const ids = await addPages(crawlId, ["/hub", ...targets]);
+      // The hub names every alternate; not one of them names the hub back.
+      await addHreflang(
+        crawlId,
+        ids.get("/hub")!,
+        targets.map((path) => ["fr", url(path)] as [string, string]),
+      );
+
+      const found = await findings("hreflang.missing-return-link", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
     });
 
     it("reads only its own crawl", async () => {

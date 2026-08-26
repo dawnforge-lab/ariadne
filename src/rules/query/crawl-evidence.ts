@@ -18,8 +18,12 @@ import type { Finding } from "../registry/registry.js";
  * Two hundred findings is already more than any action plan works through in
  * one pass, and the alternative — one row per URL on a sitemap of a hundred
  * thousand — is a findings table that grows with the site rather than with the
- * problem. The count behind the cap is always exact (`noteTruncation`): the
- * cap bounds what is *listed*, never what is known.
+ * problem. The cap bounds what is *listed*, and wherever the rule's scan runs
+ * to completion anyway the count behind it is exact (`noteTruncation`). Where
+ * the scan itself is what the cap has to stop — a quadratic join, an
+ * accumulator that grows with the site — the number reported is a lower bound
+ * and says so (`noteAtLeastTruncation`). What is never on offer is a listing
+ * cut short in silence.
  */
 export const URL_FINDING_CAP = 200;
 
@@ -120,12 +124,20 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
 }
 
 /**
- * The crawl row every robots and sitemap rule starts from.
- *
- * Read by all ten of them, including the ones whose finding comes entirely
- * from a SQL join: a crawl id nothing knows selects no rows and a rule that
+ * The crawl row a rule that reads the discovery evidence starts from — the
+ * robots and sitemap rules, including the ones whose finding comes entirely
+ * from a SQL join: a crawl id nothing knows selects no rows, and a rule that
  * answered `[]` for it would report a clean bill of health about a crawl that
  * does not exist (the `links.orphan` precedent, and `runRules`' own).
+ *
+ * It is NOT the one gate every query rule opens with, and the difference is
+ * worth knowing before adding a call. `assertCrawl` below checks existence
+ * alone, and the structured-data rules use it because a `discovery_jsonb` they
+ * never read must not be able to make them throw. The content and url-hygiene
+ * rules nevertheless come through HERE for their existence check and discard
+ * the result, which means they do refuse a crawl whose discovery blob is
+ * unreadable — a stricter gate than their evidence needs. Two gates, chosen
+ * per rule; a new rule picks the one that matches what it actually reads.
  */
 export async function readCrawlEvidence(
   db: Db,

@@ -13,11 +13,13 @@
  * fourth exists because a probe that did not run is a check that did not run,
  * and that has to be visible (hard rule 7).
  */
-import {
-  hostProbeStarts,
-  type HostProbeResult,
-  type HostProbeVariant,
-} from "../../crawl/host-probe.js";
+// `hostProbeStarts` comes from the pure url-utils module, not from
+// src/crawl/host-probe.ts: the probe's own module imports the fetch stack, and
+// a value-import of it here would pull undici into every rule run (hard rule 2
+// — rules read the database). The types beside it are erased at compile time
+// and cost nothing.
+import type { HostProbeResult, HostProbeVariant } from "../../crawl/host-probe.js";
+import { hostProbeStarts } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";

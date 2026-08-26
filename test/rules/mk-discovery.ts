@@ -14,7 +14,8 @@
  */
 import type { DiscoveryEvidence } from "../../src/crawl/loop.js";
 import type { DiscoveryTruncation } from "../../src/crawl/discovery.js";
-import { hostProbeStarts, type HostProbeResult } from "../../src/crawl/host-probe.js";
+import type { HostProbeResult } from "../../src/crawl/host-probe.js";
+import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 
 export function mkTruncation(
   overrides: Partial<DiscoveryTruncation> = {},
