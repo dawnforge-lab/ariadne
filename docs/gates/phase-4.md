@@ -123,6 +123,12 @@ claim in either direction.
 | metric rules | 33.3s | 38.0% | 10 metric rules, exact |
 | **total** | **87.8s** | | the runner's preamble accounts for the 0.0s residual |
 
+The metric phase's 33.3s is wider than the ten rules' own stopwatch sum (~21.5s)
+because the phase wall also contains the runner's per-rule delete-then-insert
+transactions for the 200,022 metric rows this pass wrote, which happen outside
+each rule's `run` and so outside its stopwatch — and it is inside that writing
+that the process peak sits.
+
 How the phases were timed: the gate script hands `runRules` the **real
 registry** with each rule's `run` wrapped in a stopwatch and each phase's first
 `byKind` call timestamped. Nothing in `src/` gained a hook for this — the
@@ -318,7 +324,13 @@ with **empty** arrays, so a metric that started claiming either fails. Every
 allowlisted claimant must be of kind `metric`, and CHECK-38 must still count as
 an AGENT check rather than a claimed one — both asserted.
 
-### The ruleset — 74 rules (`RULESET_VERSION` 0.2.0)
+### The ruleset — 74 rules (`RULESET_VERSION` 0.3.0)
+
+The bump to `0.3.0` **post-dates the gate run recorded above** — that run's
+`crawls` and findings rows are stamped `0.2.0`, and the ruleset content is
+otherwise identical to what is described here: the version constant was raised
+after the measurement, as the phase's ten new rules, the rewritten
+`schema.product-incomplete` copy and CHECK-44's widened profile all require.
 
 | kind | count | change this phase |
 |---|---|---|
