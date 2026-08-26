@@ -631,15 +631,17 @@ const STATUS = "status";
 /**
  * Upstream reached this URL through the sitemap; our site has no sitemap, so it
  * is linked from the hub like everything else. Ariadne reports a 404 as a
- * `client_error` page row and says so in the crawl summary; the rules that read
- * *who linked to it* are the link-graph query rules of a later phase, which is
- * why this page and `/links/broken-internal-link` below expect nothing yet.
+ * `client_error` page row and says so in the crawl summary.
+ *
+ * `links.broken-internal` is target-centric — one finding for the dead URL,
+ * counting the pages that link to it — so it lands HERE rather than on
+ * `/links/broken-internal-link` below, which is the page holding the link.
  */
 const notFound: Fixture = {
   path: "/status/not-found",
   category: STATUS,
   name: "Page returns 404",
-  expectedIssues: [],
+  expectedIssues: ["links.broken-internal"],
   handler: (req, res) =>
     serve(
       req,
@@ -737,7 +739,9 @@ const brokenInternalLink: Fixture = {
   path: "/links/broken-internal-link",
   category: STATUS,
   name: "Broken internal link",
-  // Later phase: "this page links to a URL that 404s" is a link-graph query rule.
+  // The finding for this page's dead link is written against the TARGET, so it
+  // is `/status/not-found` that expects `links.broken-internal`, not this page.
+  // This page is the inlink the finding counts.
   expectedIssues: [],
   handler: (req, res) =>
     serve(req, res, () => ({
@@ -761,15 +765,19 @@ const REDIRECT = "redirect";
 
 /**
  * The chain and the loop. Ariadne records every hop as its own `redirect` page
- * row today; naming a chain as a chain, and a loop as a loop, needs the hop
- * graph — a later phase's query rules. The pages are here so those rules have a
- * chain and a loop to find.
+ * row, and the redirect query rules walk that graph: `redirect.chain` is
+ * reported once, at the chain's HEAD (the redirect nothing else points at), so
+ * `/redirect/chain-1` carries it and the middle hop carries nothing.
+ *
+ * The loop is the headless case the walk's second pass exists for: nothing
+ * outside `/redirect/loop` redirects to it, so it is no chain's head and only a
+ * walk seeded from the page itself finds the cycle.
  */
 const redirectChain: Fixture = {
   path: "/redirect/chain-1",
   category: REDIRECT,
   name: "Redirect chain (3 hops)",
-  expectedIssues: [],
+  expectedIssues: ["redirect.chain"],
   handler: (_req, res) => redirect(res, "/redirect/chain-2", 301),
 };
 
@@ -777,6 +785,8 @@ const redirectChainMid: Fixture = {
   path: "/redirect/chain-2",
   category: REDIRECT,
   name: "Redirect chain (middle hop)",
+  // The chain is reported at its head, above; a middle hop is not a second
+  // chain.
   expectedIssues: [],
   handler: (_req, res) => redirect(res, "/", 301),
 };
@@ -785,7 +795,7 @@ const redirectLoop: Fixture = {
   path: "/redirect/loop",
   category: REDIRECT,
   name: "Redirect loop",
-  expectedIssues: [],
+  expectedIssues: ["redirect.loop"],
   handler: (_req, res) => redirect(res, "/redirect/loop", 302),
 };
 

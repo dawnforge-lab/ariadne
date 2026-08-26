@@ -33,7 +33,7 @@ function resolveCanonical(canonical: string, pageUrl: string): string | null {
   return normalizeUrl(canonical, pageUrl);
 }
 
-interface CanonicalTarget {
+export interface CanonicalTarget {
   /** The declared value, verbatim, for the evidence. */
   canonical: string;
   /** The normalized target, or null when the declared value does not parse. */
@@ -42,7 +42,18 @@ interface CanonicalTarget {
   pointsElsewhere: boolean;
 }
 
-function canonicalTarget(page: PageRecord): CanonicalTarget | null {
+/**
+ * What a page's canonical declaration comes to: the declared value, where it
+ * resolves, and whether that is somewhere other than this page — or `null` when
+ * the page declares no canonical at all.
+ *
+ * Exported because the query rules that judge the canonical's *target*
+ * (`canonical.non-200-target`, `canonical.non-indexable-target`) need the same
+ * answer these page rules work from. One resolution, one precedence order
+ * (HTML over header), one normalizer — a second copy in the query layer would
+ * be free to disagree with this one about what a page canonicalises to.
+ */
+export function resolveEffectiveCanonical(page: PageRecord): CanonicalTarget | null {
   const canonical = effectiveCanonical(page);
   if (canonical === null) return null;
   const resolved = resolveCanonical(canonical, page.url);
@@ -67,7 +78,7 @@ export const canonicalRules: PageRule[] = [
   // carries `unparseable` so the report can say which it is.
   pageRule("canonical.points-elsewhere", ["CHECK-17"], CATEGORY, "info", (p, self) => {
     if (!isAuditable(p)) return [];
-    const target = canonicalTarget(p);
+    const target = resolveEffectiveCanonical(p);
     if (target === null) return [];
     if (target.resolved === null)
       return [
@@ -105,7 +116,7 @@ export const canonicalRules: PageRule[] = [
   // the fact and the agent judges whether the site treats the two as one.
   pageRule("canonical.cross-domain", ["CHECK-20"], CATEGORY, "info", (p, self) => {
     if (!isAuditable(p)) return [];
-    const target = canonicalTarget(p);
+    const target = resolveEffectiveCanonical(p);
     if (target === null || target.resolved === null) return [];
     const canonicalHost = new URL(target.resolved).hostname;
     const pageHost = new URL(p.url).hostname.toLowerCase();
@@ -120,7 +131,7 @@ export const canonicalRules: PageRule[] = [
   // not a contradiction — `canonical.points-elsewhere` reports the malformation.
   pageRule("directive.canonical-noindex-conflict", ["CHECK-21"], CATEGORY, "warning", (p, self) => {
     if (!isAuditable(p) || !hasNoindex(p)) return [];
-    const target = canonicalTarget(p);
+    const target = resolveEffectiveCanonical(p);
     return target !== null && target.pointsElsewhere
       ? [
           finding(self, p, {

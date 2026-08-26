@@ -45,16 +45,31 @@ const PHASE_2_RULE_IDS = [
   "structure.deep-page",
 ];
 
+/**
+ * The query rules of the Phase 3 tables, listed the same way and for the same
+ * reason: copy lands with the rule, and a rule added without copy fails here as
+ * well as at registry build time.
+ */
+const PHASE_3_RULE_IDS = [
+  "redirect.chain",
+  "redirect.loop",
+  "links.broken-internal",
+  "canonical.non-200-target",
+  "canonical.non-indexable-target",
+];
+
+const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
+
 describe("issue copy", () => {
   it("throws on an unknown rule id", () => {
     expect(() => copyFor("no.such-rule")).toThrow(/no copy/);
   });
 
-  it("covers every Phase 2 rule id", () => {
-    for (const id of PHASE_2_RULE_IDS) {
+  it("covers every rule id the phase tables define, and nothing else", () => {
+    for (const id of ALL_RULE_IDS) {
       expect(() => copyFor(id), id).not.toThrow();
     }
-    expect(Object.keys(ISSUE_COPY).sort()).toEqual([...PHASE_2_RULE_IDS].sort());
+    expect(Object.keys(ISSUE_COPY).sort()).toEqual([...ALL_RULE_IDS].sort());
   });
 
   it("every entry has substantive, client-facing text", () => {

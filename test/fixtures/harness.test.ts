@@ -31,6 +31,25 @@ function databaseUrl(): string {
   return url;
 }
 
+/**
+ * Rules no fixture claims yet — the Phase 3 canonical-TARGET rules, which need
+ * a page whose canonical points at a URL the crawl fetched and found broken or
+ * noindexed. Phase 3's fixture task (Task 9) authors those pages and DELETES
+ * this list, at which point the last assertion below becomes the strict "every
+ * registered rule fires somewhere" it wants to be. The same pattern, and the
+ * same promise, as Phase 2's Task 8 -> 9.
+ *
+ * It is asserted exactly, not as a floor: a rule that quietly stops firing
+ * shows up here as an unexpected addition, and a rule Task 9 claims without
+ * removing its entry shows up as an unexpected absence. The other three Phase 3
+ * rules are not here because the absorbed redirect and 404 pages already
+ * provoke them — see their `expectedIssues`.
+ */
+const UNCLAIMED_UNTIL_TASK_9: string[] = [
+  "canonical.non-200-target",
+  "canonical.non-indexable-target",
+];
+
 let db: Db;
 let app: FixtureApp;
 let summary: CrawlSummary;
@@ -274,8 +293,8 @@ describe("the fixture site end to end", () => {
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +
-        "that makes it speak, or the rule is untested by the only test that " +
-        "exercises the whole engine",
-    ).toEqual([]);
+        "that makes it speak, or remove the id from UNCLAIMED_UNTIL_TASK_9 once " +
+        "one exists",
+    ).toEqual([...UNCLAIMED_UNTIL_TASK_9].sort());
   });
 });

@@ -173,6 +173,25 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Pick one intent. To consolidate into the canonical target, remove the noindex. To keep the page out of the index, remove the canonical (or make it self-referencing) and leave the noindex.",
   },
 
+  // The two canonical-TARGET rules below are query rules: they judge the page
+  // the canonical points at, which only a look at the other page's crawl row
+  // can answer. Both stay silent when that URL was never crawled — the copy
+  // must not imply we checked a URL we never fetched.
+  "canonical.non-200-target": {
+    title: "Canonical points to a URL that does not return 200",
+    explanation:
+      "This page's canonical URL was crawled and did not answer with a 200 OK — it redirects, errors, or is not there. A canonical asks search engines to consolidate this page's ranking signals into that URL, so when the target does not serve a page, the consolidation has nowhere to land and both URLs can end up out of the index.",
+    howToFix:
+      "Point the canonical at the URL that actually serves the content with a 200. If the target redirects, canonicalise straight to its destination rather than to the redirect; if it has gone, canonicalise the page to itself or to the closest live replacement.",
+  },
+  "canonical.non-indexable-target": {
+    title: "Canonical points to a page excluded from the index",
+    explanation:
+      "This page's canonical URL was crawled and answers normally, but it tells search engines not to index it (a noindex in its robots meta tag or X-Robots-Tag header). The page is asking for its signals to be consolidated into a URL that has opted out of the index, so neither URL is left as an indexable home for the content.",
+    howToFix:
+      "Decide which URL should rank. If it is the target, remove the noindex from it. If it is this page, point the canonical at itself and leave the other page excluded.",
+  },
+
   // ----------------------------------------------------------- indexability
   "indexability.noindex": {
     title: "Page is noindex",
@@ -187,6 +206,31 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "The robots meta tag and the X-Robots-Tag header both apply to this page and give different indexing instructions. Search engines resolve conflicting robots directives by taking the most restrictive one, so the page is very likely treated as noindex whichever source was meant to win.",
     howToFix:
       "Set the robots directive in one place only. Decide whether the page should be indexed, apply that in the template or the server config, and remove the other declaration.",
+  },
+
+  // ---------------------------------------------------------------- redirects
+  "redirect.chain": {
+    title: "Redirect chain",
+    explanation:
+      "This URL redirects to another URL that redirects again, so reaching the destination takes several round trips instead of one. Every hop costs the visitor time and the crawler a request, and chains are fragile: remove a middle hop and the whole path breaks. Search engines follow a limited number of hops before giving up on the URL entirely.",
+    howToFix:
+      "Repoint the first redirect straight at the final destination, so one hop replaces the chain, and do the same for any other rule that feeds into it. Then update the internal links, sitemap entries and canonicals that still name the old URL, so most visits skip the redirect altogether.",
+  },
+  "redirect.loop": {
+    title: "Redirect loop",
+    explanation:
+      "Following this URL's redirects comes back to a URL already visited, so the redirects never resolve. Nobody can reach the content: browsers stop with a redirect error, and search engines drop the URLs involved. Loops usually come from two rules fighting each other — a trailing-slash rule against an HTTPS or locale rule, for example — or from a page redirecting to itself.",
+    howToFix:
+      "Trace the rules that generate each hop in the loop and decide which URL is the destination, then make every other URL redirect to it directly and stop it redirecting onward. Test the entry URL with redirects followed to confirm it now ends on a 200.",
+  },
+
+  // -------------------------------------------------------------------- links
+  "links.broken-internal": {
+    title: "Internal links point to a URL that returns an error",
+    explanation:
+      "Pages on this site link to a URL that answered with a 4xx error, so every one of those links is a dead end. Visitors who click get an error page, and the crawler spends a request on nothing and passes no value on to a working page. This is reported once for the broken target, with a count of how many pages link to it and a sample of them, because the fix is at the target, not on each linking page.",
+    howToFix:
+      "If the URL should exist, restore it or redirect it to its replacement. If it should not, update the links to point at the right page — or remove them. Fixing the target once repairs every link listed here.",
   },
 
   // --------------------------------------------------------------- hreflang

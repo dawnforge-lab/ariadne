@@ -53,6 +53,35 @@ describe("queryFinding", () => {
     expect(f.severity).toBe("critical");
   });
 
+  // The identity is the rule's, never the payload's. A caller that hands over
+  // a row carrying its own `ruleId`/`severity` columns must not be able to
+  // relabel the finding — and no stray column may ride along into the shape
+  // the runner writes to `issues`.
+  it("cannot be relabelled by a payload carrying its own ruleId or severity", () => {
+    const payload = {
+      pageId: "page_1",
+      pageUrl: "https://example.com/a",
+      evidence: { hops: 3 },
+      dedupeKey: "https://example.com/a",
+      ruleId: "some.other-rule",
+      severity: "critical",
+      stray: "not part of a finding",
+    } as unknown as Parameters<typeof queryFinding>[1];
+
+    const f = queryFinding({ id: "redirect.chain", severity: "warning" }, payload);
+
+    expect(f.ruleId).toBe("redirect.chain");
+    expect(f.severity).toBe("warning");
+    expect(Object.keys(f).sort()).toEqual([
+      "dedupeKey",
+      "evidence",
+      "pageId",
+      "pageUrl",
+      "ruleId",
+      "severity",
+    ]);
+  });
+
   // The severity is single-sourced from the rule's identity, exactly as the
   // page-rule `finding` does it — the two helpers must not drift apart.
   it("takes severity from the rule identity, like the page-rule twin", () => {

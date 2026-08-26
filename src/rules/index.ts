@@ -5,6 +5,8 @@ import { canonicalRules } from "./page/canonical.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { technicalRules } from "./page/technical.js";
 import { hreflangRules } from "./query/hreflang.js";
+import { linkTargetRules } from "./query/link-targets.js";
+import { redirectRules } from "./query/redirects.js";
 
 /**
  * The ruleset: every rule the engine ships, registered in one place.
@@ -22,6 +24,8 @@ export function buildRegistry(): Registry {
     ...indexabilityRules,
     ...technicalRules,
     ...hreflangRules,
+    ...redirectRules,
+    ...linkTargetRules,
   ]) {
     r.register(rule);
   }

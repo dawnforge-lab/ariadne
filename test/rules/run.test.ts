@@ -19,13 +19,17 @@ function databaseUrl(): string {
 const SITE = "https://runner.example";
 
 describe("buildRegistry", () => {
-  it("registers every rule of the Phase 2 table exactly once", () => {
+  it("registers every rule of the phase tables exactly once", () => {
     const ids = buildRegistry().all().map((r) => r.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toContain("title.missing");
     expect(ids).toContain("http.server-error");
     expect(ids).toContain("hreflang.invalid-code");
-    expect(ids.length).toBe(28);
+    // Phase 2's 28 page and hreflang rules, plus the Phase 3 redirect and
+    // link/canonical-target query rules.
+    expect(ids).toContain("redirect.loop");
+    expect(ids).toContain("links.broken-internal");
+    expect(ids.length).toBe(33);
   });
 
   it("registers both kinds the runner drives", () => {

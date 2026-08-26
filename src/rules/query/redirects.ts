@@ -1,0 +1,267 @@
+import { createHash } from "node:crypto";
+import { sql, type SQL } from "drizzle-orm";
+
+import type { Db } from "../../db/client.js";
+import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { copyFor } from "../registry/copy/index.js";
+import {
+  defineRule,
+  RULESET_VERSION,
+  type Finding,
+  type QueryRule,
+} from "../registry/registry.js";
+
+const CATEGORY = "redirects";
+
+/**
+ * How many pages one walk may visit. A redirect graph is a functional graph —
+ * one target per page — so the only way to walk forever is a cycle, and the
+ * cycle test below already stops those. The cap is here for the other case: a
+ * chain long enough that reporting every hop helps nobody, and that would make
+ * the recursive CTE's intermediate rows grow with the site.
+ *
+ * A chain cut short by the cap is reported with `truncated: true` rather than
+ * silently presented as if it ended there.
+ */
+export const MAX_REDIRECT_HOPS = 10;
+
+/** A chain is worth reporting from this many redirect hops up. */
+const CHAIN_HOPS = 2;
+
+/**
+ * One terminal row of a walk: the last page reached from a given seed, with the
+ * URLs and page ids of everything visited on the way.
+ */
+interface WalkRow extends Record<string, unknown> {
+  /** The URL the walk started from. */
+  head: string;
+  /** URLs visited, in order, starting at the head. */
+  chain: string[];
+  /** `pages.id` for each URL in `chain`, same order. */
+  ids: string[];
+  depth: number;
+  /** True when the last URL in `chain` had already been visited by this walk. */
+  is_cycle: boolean;
+  /** Where the terminal page redirects to, or null when it answers for itself. */
+  redirect_url: string | null;
+  /** The terminal page's own status code. */
+  status_code: number | null;
+  /** Whether `redirect_url` has a `pages` row — i.e. whether the walk could have gone on. */
+  tail_crawled: boolean;
+}
+
+/**
+ * Walk the redirect graph forward from a set of seed URLs, in SQL.
+ *
+ * The recursion follows `pages.redirect_url` to the `pages` row for that URL,
+ * carrying the visited URLs along as an array so a revisit is detectable in the
+ * same step that makes it (`p.url = any(w.chain)`), and stopping at
+ * `MAX_REDIRECT_HOPS`. Non-redirect pages are visited too: the 200 (or the 404)
+ * a chain lands on is the most useful thing the evidence can name.
+ *
+ * Only the deepest row per seed comes back — the terminal state of that walk.
+ * Intermediate rows exist inside the CTE and are discarded by Postgres, so the
+ * result set is one row per seed rather than one per hop.
+ */
+async function walkFrom(db: Db, crawlId: string, seedUrls: SQL): Promise<WalkRow[]> {
+  const result = await db.execute<WalkRow>(sql`
+    with recursive seeds as (${seedUrls}),
+    walk as (
+      select s.url as head, p.url as url, p.redirect_url as redirect_url,
+             p.status_code as status_code, 1 as depth,
+             array[p.url] as chain, array[p.id] as ids, false as is_cycle
+      from seeds s
+      join pages p on p.crawl_id = ${crawlId} and p.url = s.url
+      union all
+      select w.head, p.url, p.redirect_url, p.status_code, w.depth + 1,
+             w.chain || p.url, w.ids || p.id, p.url = any(w.chain)
+      from walk w
+      join pages p on p.crawl_id = ${crawlId} and p.url = w.redirect_url
+      where w.depth < ${MAX_REDIRECT_HOPS} and not w.is_cycle
+    )
+    select w1.head, w1.chain, w1.ids, w1.depth, w1.is_cycle,
+           w1.redirect_url, w1.status_code,
+           exists (
+             select 1 from pages q
+             where q.crawl_id = ${crawlId} and q.url = w1.redirect_url
+           ) as tail_crawled
+    from walk w1
+    where w1.depth = (select max(w2.depth) from walk w2 where w2.head = w1.head)`);
+  return result.rows;
+}
+
+interface RedirectWalk {
+  /** Terminal rows of the walks that started at a chain head. */
+  fromHeads: WalkRow[];
+  /** Terminal rows of the walks that started at a redirect no head reaches. */
+  headless: WalkRow[];
+}
+
+/**
+ * Every redirect path in the crawl, as terminal rows.
+ *
+ * Two passes, because one is not enough. The first walks from the chain HEADS —
+ * redirect pages nothing else redirects to — which is where a client's chains
+ * actually start and what makes "report the chain once" possible.
+ *
+ * The second exists for the shape the first cannot see: a cycle whose every
+ * member is a redirect target (`a` -> `b` -> `a`, or a page pointing at itself)
+ * has no head, so no head walk ever reaches it. Those pages are seeded from
+ * themselves. Without this pass a redirect loop with no way in is invisible,
+ * which is precisely the loop a visitor can never escape.
+ *
+ * The two are kept apart because only cycles are read out of the second. In a
+ * graph where each page has one target, a redirect no head reaches is always a
+ * cycle member — walk backwards from it and, with no head to arrive at, the
+ * path must close on itself. So the only *other* thing the second pass can turn
+ * up is the remainder of a chain the hop cap stopped following, and reporting
+ * that as a chain of its own would bill one over-long path as several, under a
+ * "head" that is really its eleventh hop. The truncated chain says `truncated`;
+ * that is the honest report of it.
+ *
+ * Memory: the visited set and the redirect-page list are O(redirect pages), not
+ * O(URLs), and neither the links table nor the page table is loaded.
+ */
+async function redirectWalk(db: Db, crawlId: string): Promise<RedirectWalk> {
+  const rows = await walkFrom(
+    db,
+    crawlId,
+    sql`
+      select p.url from pages p
+      where p.crawl_id = ${crawlId} and p.fetch_class = 'redirect'
+        and not exists (
+          select 1 from pages q
+          where q.crawl_id = ${crawlId}
+            and q.fetch_class = 'redirect'
+            and q.redirect_url = p.url)`,
+  );
+
+  const visited = new Set<string>();
+  for (const row of rows) for (const url of row.chain) visited.add(url);
+
+  const redirects = await db.execute<{ url: string }>(sql`
+    select p.url from pages p
+    where p.crawl_id = ${crawlId} and p.fetch_class = 'redirect'`);
+  const headless = redirects.rows.map((r) => r.url).filter((url) => !visited.has(url));
+  if (headless.length === 0) return { fromHeads: rows, headless: [] };
+
+  return {
+    fromHeads: rows,
+    headless: await walkFrom(
+      db,
+      crawlId,
+      sql`
+        select p.url from pages p
+        where p.crawl_id = ${crawlId} and p.url = any(${sql.param(headless)}::text[])`,
+    ),
+  };
+}
+
+/**
+ * Chains, one finding per head.
+ *
+ * A walk that ended in a cycle is skipped: `redirect.loop` reports it, and
+ * billing the same broken path twice would put a warning and a critical on one
+ * fix. Hops are counted rather than pages, so the single redirect every CMS
+ * ships (`/x` -> `/x/`) is not a chain — the fires-when is "a redirect whose
+ * target is itself a redirect".
+ */
+function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
+  const byHead = new Map<string, Finding>();
+  for (const row of rows) {
+    if (row.is_cycle) continue;
+    const tail = row.redirect_url;
+    // The terminal page's target is either an uncrawled URL or the hop the cap
+    // stopped us following. Either way it is part of the path and belongs in
+    // the evidence, even though there is no page row behind it.
+    const chain = tail === null ? row.chain : [...row.chain, tail];
+    const hops = tail === null ? row.chain.length - 1 : row.chain.length;
+    if (hops < CHAIN_HOPS) continue;
+    byHead.set(
+      row.head,
+      queryFinding(self, {
+        pageId: row.ids[0] ?? null,
+        pageUrl: row.head,
+        evidence: {
+          chain,
+          length: hops,
+          // Only a walk that reached a page answering for itself has a final
+          // status to report. A truncated or uncrawled tail has none, and
+          // guessing one would be inventing evidence.
+          finalStatus: tail === null ? row.status_code : null,
+          truncated: tail !== null && row.tail_crawled,
+        },
+        dedupeKey: row.head,
+      }),
+    );
+  }
+  return [...byHead.values()];
+}
+
+/**
+ * Loops, one finding per distinct cycle.
+ *
+ * The terminal row's chain ends with the URL that repeated, so the cycle is the
+ * slice from that URL's first appearance to the end. Several heads can feed the
+ * same cycle and both members of a headless pair walk into it, so findings are
+ * keyed by the cycle's members — sorted, hashed — and the first one wins.
+ */
+function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
+  const byCycle = new Map<string, Finding>();
+  for (const row of rows) {
+    if (!row.is_cycle) continue;
+    const repeated = row.chain[row.chain.length - 1]!;
+    const start = row.chain.indexOf(repeated);
+    const cycle = row.chain.slice(start);
+    const key = createHash("sha1").update([...new Set(cycle)].sort().join("\n")).digest("hex");
+    if (byCycle.has(key)) continue;
+    byCycle.set(
+      key,
+      queryFinding(self, {
+        // The finding belongs to the first URL inside the cycle, not to a head
+        // that merely points into it: the head is fine, the loop is the fault.
+        pageId: row.ids[start] ?? null,
+        pageUrl: row.chain[start] ?? null,
+        evidence: { cycle },
+        dedupeKey: key,
+      }),
+    );
+  }
+  return [...byCycle.values()];
+}
+
+const CHAIN: RuleIdentity = { id: "redirect.chain", severity: "warning" };
+const LOOP: RuleIdentity = { id: "redirect.loop", severity: "critical" };
+
+/**
+ * The redirect-graph rules. Both read the same walk; each runs it for itself
+ * rather than sharing state between rules, because a rule that depended on
+ * another rule having run first would be a rule that quietly reports nothing
+ * when run alone.
+ */
+export const redirectRules: QueryRule[] = [
+  defineRule<QueryRule>({
+    kind: "query",
+    id: CHAIN.id,
+    checkIds: ["CHECK-10"],
+    category: CATEGORY,
+    severity: CHAIN.severity,
+    ...copyFor(CHAIN.id),
+    rulesetVersion: RULESET_VERSION,
+    run: async (db, crawlId) => chainFindings(CHAIN, (await redirectWalk(db, crawlId)).fromHeads),
+  }),
+
+  defineRule<QueryRule>({
+    kind: "query",
+    id: LOOP.id,
+    checkIds: ["CHECK-10"],
+    category: CATEGORY,
+    severity: LOOP.severity,
+    ...copyFor(LOOP.id),
+    rulesetVersion: RULESET_VERSION,
+    run: async (db, crawlId) => {
+      const walk = await redirectWalk(db, crawlId);
+      return loopFindings(LOOP, [...walk.fromHeads, ...walk.headless]);
+    },
+  }),
+];

@@ -65,7 +65,14 @@ export function queryFinding(
     dedupeKey: string;
   },
 ): Finding {
-  return { ruleId: self.id, severity: self.severity, ...f };
+  // Destructured field by field rather than spread: a spread of `f` — wherever
+  // it sits in the literal — carries whatever else the caller's object holds,
+  // and a `ruleId` or `severity` that arrived from a SQL row (`select *` into
+  // the payload, say) would either override the rule's own identity or ride
+  // along into the `issues` row. The identity is single-sourced from `self`,
+  // and only the four fields named here come from the caller.
+  const { pageId, pageUrl, evidence, dedupeKey } = f;
+  return { ruleId: self.id, pageId, pageUrl, severity: self.severity, evidence, dedupeKey };
 }
 
 /**
