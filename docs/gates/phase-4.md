@@ -5,8 +5,12 @@
 commit), plus the commit that adds `scripts/gate-rules.ts` and this file. **Every
 number below was measured on exactly that tree, in the run whose output is
 quoted verbatim** — the gate script is new code, but it only starts the fixture,
-calls `runCrawl` and `runRules`, and reads a stopwatch. Nothing here is carried
-over from an earlier session's claim; that is the provenance lesson Phase 3's
+calls `runCrawl` and `runRules`, and reads a stopwatch. A handful of figures
+come instead from SQL over the rows *that run* wrote (the HTML byte total, the
+`hreflang` row count, the page-type cohort counts, the uncapped banding join);
+each says so where it appears. The only numbers here from another phase or
+another corpus sit in a comparison column with that phase named. Nothing is
+carried over as if it were this run's; that is the provenance lesson Phase 3's
 gate doc paid for and this one obeys without exception.
 **Verdict:** PASSED. The build plan's Phase 4 gate — *"each metric renders as a
 table an agent can quote directly, with no post-processing needed to answer the
@@ -99,9 +103,12 @@ grown since: the discovery, host-probe and not-found-probe evidence blobs on the
 `crawls` row (Phase 3, migrations `0003`–`0005`) and the two normalised URL
 columns (Phase 4 Task 1, migration `0006`) are all written by this crawl and
 were not written by Phase 1's. RAM is still O(concurrency): the fixture, the
-config and the concurrency are unchanged and 748 MB of HTML still passes through
-a process that peaks under 200 MB. Throughput is a fact about this machine on
-this afternoon and should not be read as a capability claim in either direction.
+config and the concurrency are unchanged, and **747.6 MB of HTML** passed
+through a process that peaked under 200 MB — `sum(html_bytes) = 783,899,244`
+over this crawl's 50,000 `pages` rows, 15,678 bytes a page, read out of the
+database afterwards rather than printed by the script. Throughput is a fact
+about this machine on this afternoon and should not be read as a capability
+claim in either direction.
 
 ### The rules half — the first measurement at scale
 
@@ -146,9 +153,10 @@ began at 54.4s.
 ```
 
 The two hreflang join rules are 80% of the query phase between them: this
-fixture publishes two alternates on every page, so they join a 100,000-row
-`hreflang` table against 50,000 pages twice over. Everything below rank 12 is
-under 0.6s.
+fixture publishes two alternates on every page, so they join a **100,000-row**
+`hreflang` table against 50,000 pages twice over — `count(*) = 100,000` for this
+crawl, read out of the database afterwards, since the script prints the `pages`
+and `links` counts but not this one. Everything below rank 12 is under 0.6s.
 
 ### Repeatability
 
@@ -161,17 +169,32 @@ are 0.3s apart. That is the runner's re-run contract observed rather than
 asserted: `issues` absorbed the repeat through `issues_dedupe`, and each metric
 rule's delete-then-insert produced its row set again to the row.
 
-## Phase 3's mandated re-measures, at 50k
+## The two flagged rules, at 50k
 
-Phase 3's gate doc carried three duplicate-detection timings from a 5,000-page
-synthetic corpus and asked, in as many words, for them to be re-measured here
-before anyone assumed the 50k rule pass was free. Measured:
+Two rules arrived at this gate with a cost flag on them. They come from
+different places, and this section keeps them apart:
+
+- **`content.near-duplicate` is Phase 3's mandate.** Its gate doc carried three
+  timings of the simhash banding join from a 5,000-page synthetic corpus and
+  asked, in as many words, for a re-measure here before anyone assumed the 50k
+  rule pass was free.
+- **`content.template-similarity` is not.** It did not exist in Phase 3 — it is
+  a Phase 4 metric rule — so nothing was mandated about it. Its **own** header
+  flags a cost linear in the number of page types (it samples up to 200 pairs
+  per type), and that flag had never been measured at scale. This gate measures
+  it for the first time.
 
 | | Phase 3 (5k corpus, Task 7) | Phase 4 (50k, this run) |
 |---|---|---|
-| `content.near-duplicate`, as the rule runs it | 0.11s healthy / 521ms band-skew | **0.06s** (rank 24 of 74) |
+| the banding join, unindexed | 2.9s | not re-measured — migration `0004`'s four band indexes exist now and are not removed to make a comparison |
+| `content.near-duplicate`, healthy corpus, as the rule runs it | 0.11s | **0.06s** (rank 24 of 74) |
+| the same, with a skewed band distribution | 521ms | not reproduced — see the uncapped row, which is this fixture's skew and worse |
 | the same banding join **uncapped** | not measured | **23.6s, 481,745 pairs** |
-| `content.template-similarity` | not measured at scale | **1.48s** |
+| `content.template-similarity` | did not exist | **1.48s** |
+
+All three of Phase 3's figures are carried across rather than the two that
+happened to be comparable: a re-measure that quietly drops the numbers it cannot
+match is not a re-measure.
 
 **0.06s is the cap doing its job, not the join being cheap.** The rule's query
 carries `limit ${NEAR_DUPLICATE_PAIR_CAP + 1}` — 501 — and on this fixture it
@@ -197,8 +220,9 @@ could not cost. **An explicit `ANALYZE` between the crawl and the rule pass is
 carried to Phase 5's backlog**, and 0.06s must not be read as evidence that the
 question is closed.
 
-`content.template-similarity` — the rule flagged as linear in the number of page
-types, because it samples up to 200 pairs *per type* — cost **1.48s** and
+`content.template-similarity` — flagged by its own header as linear in the
+number of page types, because it samples up to 200 pairs *per type* — cost
+**1.48s** and
 emitted **one row**. It emits a row only for a type with at least two
 fingerprinted pages, and on this fixture exactly one type qualifies. Which is a
 finding of its own:

@@ -26,11 +26,14 @@
  *    silently judged half a site would otherwise read as a fast one.
  *  - **Recorded, not gated:** every wall time here. This is the first
  *    measurement of the rule pass at scale, so it is the baseline rather than a
- *    threshold. Two of the numbers are owed to Phase 3, which flagged them at
- *    5k and asked for a re-measure at 50k: `content.near-duplicate` (the
- *    simhash banding join, quadratic within a band) and
- *    `content.template-similarity` (a per-type pair sample, linear in the
- *    number of types). Both are printed by name, whatever they rank.
+ *    threshold. Two rules are printed by name whatever they rank, for two
+ *    different reasons:
+ *      - `content.near-duplicate` — the simhash banding join, quadratic within
+ *        a band. Phase 3's gate doc measured it on a 5k corpus and explicitly
+ *        mandated a re-measure here. This is that mandate.
+ *      - `content.template-similarity` — a Phase 4 rule, so Phase 3 mandated
+ *        nothing about it; its OWN header flags a cost linear in the number of
+ *        page types, and that flag has never been measured at scale.
  *
  * `allowPrivate: true` is the same sanctioned use as Phase 1: the site under
  * test is a loopback fixture (test/gate/site-server.ts).
@@ -62,9 +65,11 @@ const MB = 1024 * 1024;
 const SLOWEST_SHOWN = 12;
 
 /**
- * The two rules Phase 3's gate doc asked this gate to re-measure at 50k. Printed
- * by name whether or not they make the slowest table, because "it did not rank"
- * is not an answer to "how long did it take".
+ * The two rules whose cost was flagged before this gate ran — one by Phase 3's
+ * gate doc (`content.near-duplicate`), one by its own header
+ * (`content.template-similarity`); see the module header for which is which.
+ * Printed by name whether or not they make the slowest table, because "it did
+ * not rank" is not an answer to "how long did it take".
  */
 const REMEASURE_RULE_IDS = ["content.near-duplicate", "content.template-similarity"];
 
@@ -473,7 +478,7 @@ async function main(): Promise<number> {
     }
 
     console.log("");
-    console.log("— Phase 3's mandated re-measures at 50k —");
+    console.log("— the two flagged rules —");
     for (const id of REMEASURE_RULE_IDS) {
       const timing = registry.timings.get(id);
       if (timing === undefined) {
