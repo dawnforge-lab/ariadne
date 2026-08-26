@@ -22,6 +22,13 @@
  * The oracle shares `INLINE_TEXT_TAGS` with the port: the parity claim is
  * about walking the tree the same way, not about re-deriving the tag table.
  *
+ * Phase 2 (P2-T2) added `hasViewport` and `imagesMissingDimensions`, both of
+ * which ARE DOM reads and so are modelled here — the viewport meta through the
+ * hand-folded `byAttr`, the missing dimensions in the same `img` walk as the
+ * alt counter. Its third field, `hasLoremIpsum`, is stripped with the Task 6
+ * additions: it is a derivation of `bodyText`, which the oracle already models,
+ * not a separate DOM read.
+ *
  * The fields Task 6 added (rel next/prev, domSize, textRatio, hreflang pairs,
  * structuredData, contentHash, simhash) are NOT part of the parity surface —
  * they have no upstream DOM implementation to be held to, and `domSize` has no
@@ -52,6 +59,8 @@ const EXTENSION_FIELDS = [
   "structuredDataParseErrors",
   "contentHash",
   "simhash",
+  // A derivation of bodyText, like the two hashes above it.
+  "hasLoremIpsum",
 ] as const;
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
@@ -163,9 +172,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
 
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
+  let imagesMissingDimensions = 0;
   $("img").each((_, el) => {
     imagesTotal += 1;
     if ($(el).attr("alt") === undefined) imagesMissingAlt += 1;
+    if ($(el).attr("width") === undefined || $(el).attr("height") === undefined) {
+      imagesMissingDimensions += 1;
+    }
   });
 
   const linksByTarget = new Map<string, RawPageAnalysis["links"][number]>();
@@ -199,6 +212,8 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     if (hreflang) hreflangTags.push(hreflang);
   });
 
+  const hasViewport = byAttr("meta", "name", "viewport").length > 0;
+
   const hasAmp =
     byRel("link", "amphtml").length > 0 ||
     $("html").attr("amp") !== undefined ||
@@ -218,7 +233,9 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     wordCount,
     imagesTotal,
     imagesMissingAlt,
+    imagesMissingDimensions,
     hasAmp,
+    hasViewport,
     links: Array.from(linksByTarget.values()),
     bodyText,
     h1s,
@@ -240,6 +257,7 @@ function expectParity(html: string) {
     structuredDataParseErrors: _structuredDataParseErrors,
     contentHash: _contentHash,
     simhash: _simhash,
+    hasLoremIpsum: _hasLoremIpsum,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
@@ -385,6 +403,18 @@ describe("analyzeHtml parity with the DOM reference", () => {
     expectParity(
       `<body><p>un<em>believ</em>able <b>bold</b><span>ed</span>, al<script>ignored()</script>pha<br>tail</p></body>`,
     );
+  });
+
+  it("matches on the viewport meta and images missing dimensions", () => {
+    expectParity(`<html><head>
+      <meta name=" Viewport " content="width=device-width, initial-scale=1">
+      </head><body>
+      <img src="/a.png" width="10" height="10" alt="both">
+      <img src="/b.png" width="10" alt="width only">
+      <img src="/c.png" height="10" alt="height only">
+      <img src="/d.png" alt="neither">
+      <img src="/e.png" width="" height="" alt="present but empty">
+      </body></html>`);
   });
 
   it("matches when every canonical is counted", () => {

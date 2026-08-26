@@ -37,7 +37,10 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     wordCount: 420,
     imagesTotal: 3,
     imagesMissingAlt: 1,
+    imagesMissingDimensions: 0,
     hasAmp: false,
+    hasViewport: false,
+    hasLoremIpsum: false,
     links: [
       { href: `${SITE}/one`, anchor: "one", rel: null, nofollow: false, position: 0 },
       {
@@ -347,6 +350,37 @@ describe("PageWriter", () => {
     expect(row?.h2Count).toBe(2);
   });
 
+  it("writes the rule-signal columns the page rules read", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/signals`;
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        canonicalCount: 2,
+        hasViewport: true,
+        imagesMissingDimensions: 3,
+        hasLoremIpsum: true,
+      }),
+    );
+    await writer.flush();
+
+    const [row] = await db
+      .select({
+        canonicalCount: pages.canonicalCount,
+        hasViewport: pages.hasViewport,
+        imagesMissingDimensions: pages.imagesMissingDimensions,
+        hasLoremIpsum: pages.hasLoremIpsum,
+      })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    expect(row?.canonicalCount).toBe(2);
+    expect(row?.hasViewport).toBe(true);
+    expect(row?.imagesMissingDimensions).toBe(3);
+    expect(row?.hasLoremIpsum).toBe(true);
+  });
+
   it("strips a trailing slash from url_normalised", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
@@ -402,6 +436,11 @@ describe("PageWriter", () => {
     expect(row?.title).toBeNull();
     expect(row?.simhash).toBeNull();
     expect(row?.structuredDataParseErrors).toBe(0);
+    // No HTML, so no signal — the columns say "not seen", not "clean".
+    expect(row?.canonicalCount).toBe(0);
+    expect(row?.hasViewport).toBe(false);
+    expect(row?.imagesMissingDimensions).toBe(0);
+    expect(row?.hasLoremIpsum).toBe(false);
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);

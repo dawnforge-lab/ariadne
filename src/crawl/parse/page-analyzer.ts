@@ -72,6 +72,18 @@
  *    upstream used silently missed every multi-token link. Canonical,
  *    alternate/hreflang and amphtml came along to token matching with
  *    next/prev; the oracle was moved to `~=` semantics to match.
+ *
+ * Phase 2 (P2-T2) added three more signals the page rules need, all inside the
+ * same pass: `hasViewport` (a `<meta name=viewport>`, folded like every other
+ * meta name), `imagesMissingDimensions` (counted beside the alt counter, one
+ * count per image whichever attribute is absent) and `hasLoremIpsum`, derived
+ * at the end from the visible-text accumulator — the same one `wordCount`,
+ * `contentHash` and `simhash` read, so a lorem-ipsum string inside a script,
+ * style or noscript subtree cannot raise the flag. The first two are on the
+ * parity surface and the oracle computes them; `hasLoremIpsum` is not, for the
+ * same reason `contentHash` and `simhash` are not — it is a derivation of
+ * `bodyText`, which the oracle already holds the port to, not a separate piece
+ * of DOM reading.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
@@ -129,7 +141,21 @@ export interface PageAnalysis {
   wordCount: number;
   imagesTotal: number;
   imagesMissingAlt: number;
+  /**
+   * `<img>` elements missing a `width` or a `height` attribute (either one
+   * absent counts the image once). The layout-shift signal: a browser cannot
+   * reserve space for an image whose intrinsic box it is not told.
+   */
+  imagesMissingDimensions: number;
   hasAmp: boolean;
+  /** A `<meta name=viewport>` was declared — the mobile-readiness signal. */
+  hasViewport: boolean;
+  /**
+   * The page's visible text contains "lorem ipsum" — placeholder copy that
+   * shipped. Read off the same accumulator as `wordCount`, so script, style,
+   * noscript and svg subtrees cannot trigger it.
+   */
+  hasLoremIpsum: boolean;
   links: PageLink[];
   /** First `<link rel=next>` href; null when absent or href-less. */
   relNext: string | null;
@@ -223,6 +249,13 @@ const MAX_STRUCTURED_DATA_BLOCKS = 50;
 const MAX_LD_JSON_CHARS = 100_000;
 /** How far into nested arrays / `@graph` the JSON-LD node walk will go. */
 const MAX_LD_JSON_DEPTH = 5;
+/**
+ * Placeholder copy, matched against the visible text (never the raw HTML — a
+ * lorem-ipsum string in a script or a CSS comment is not shipped copy).
+ * The accumulator collapses whitespace, so the two words are always one space
+ * apart here even when an element boundary separates them in the markup.
+ */
+const LOREM_IPSUM = /lorem ipsum/i;
 
 interface OpenAnchor {
   href: string;
@@ -300,6 +333,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let canonicalCount = 0;
   let hasStructuredData = false;
   let hasAmp = false;
+  let hasViewport = false;
   const hreflangTags: string[] = [];
   let relNext: string | null | undefined;
   let relPrev: string | null | undefined;
@@ -322,6 +356,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
+  let imagesMissingDimensions = 0;
   const linksByTarget = new Map<string, RawPageLink>();
   let openAnchor: OpenAnchor | null = null;
 
@@ -343,6 +378,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       if (metaDescription === undefined) metaDescription = content?.trim() ?? "";
     } else if (name === "robots") {
       if (robotsMeta === undefined) robotsMeta = content ?? null;
+    } else if (name === "viewport") {
+      // Presence is the whole signal; the content string is the agent's
+      // business, not the evidence layer's.
+      hasViewport = true;
     } else if (property === "og:title") {
       if (ogTitle === undefined) ogTitle = content ?? null;
     } else if (property === "og:description") {
@@ -485,6 +524,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           case "img":
             imagesTotal += 1;
             if (!("alt" in attribs)) imagesMissingAlt += 1;
+            // One image, one count: missing either attribute is the same
+            // layout-shift defect and must not be double-counted.
+            if (!("width" in attribs) || !("height" in attribs)) {
+              imagesMissingDimensions += 1;
+            }
             break;
           case "script":
             if (
@@ -613,7 +657,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     wordCount,
     imagesTotal,
     imagesMissingAlt,
+    imagesMissingDimensions,
     hasAmp,
+    hasViewport,
+    hasLoremIpsum: LOREM_IPSUM.test(bodyText),
     links: Array.from(linksByTarget.values()),
     relNext: relNext ?? null,
     relPrev: relPrev ?? null,
@@ -651,7 +698,10 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     wordCount: raw.wordCount,
     imagesTotal: raw.imagesTotal,
     imagesMissingAlt: raw.imagesMissingAlt,
+    imagesMissingDimensions: raw.imagesMissingDimensions,
     hasAmp: raw.hasAmp,
+    hasViewport: raw.hasViewport,
+    hasLoremIpsum: raw.hasLoremIpsum,
     links: raw.links.map(({ href, anchor, rel, nofollow, position }) => ({
       href,
       anchor,
