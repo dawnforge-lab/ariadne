@@ -298,7 +298,7 @@ client-supplied legacy hosts, record the chains, done.
 | 37 H1 and hierarchy | missing, multiple, level skip, duplicate H1 | page | OS + SN |
 | 38 Content quality and intent match | evidence: word count, text ratio, template boilerplate share by page type | metric | AGENT |
 | 39 Near-duplicates | simhash banding to pairs + similarity buckets + pair-type matrix (product↔product etc); root cause is the agent's job | query + metric | NEW |
-| 40 Thin or placeholder content | `content.thin`, `content.lorem-ipsum`, `content.placeholder` | page | OS + SM |
+| 40 Thin or placeholder content | `content.thin`, `content.placeholder` | page | OS + SM |
 
 ### 11. Structured data
 | 43 Schema audit: types, gaps, opportunities | types-per-page-type matrix from `structured_data`; gap versus expected-profile table; opportunity is the agent's | metric + query | NEW |

@@ -13,6 +13,11 @@ import {
  * narrower than the full BCP-47 grammar — scripts and variants are vanishingly
  * rare in hreflang and a false "invalid" is worse than a missed exotic code.
  * `x-default` is the one special value and is checked separately.
+ *
+ * This is a test of FORM ONLY; there is no ISO membership check, so a
+ * well-formed but nonexistent code (`en-XX`, `zz`) passes. Shipping the ISO
+ * 639/3166 tables to catch it would mean keeping them current, and the far
+ * commoner mistake — `en_GB`, `english`, `en-UK` — is a shape this catches.
  */
 const HREFLANG_CODE = /^[a-z]{2,3}(-(?:[a-z]{2}|\d{3}))?$/i;
 

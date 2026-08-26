@@ -18,7 +18,12 @@
 import { describe, expect, it } from "vitest";
 
 import { buildRegistry } from "../../src/rules/index.js";
-import { AGENT_CHECKS, CRAWL_CHECK_IDS } from "../../src/rules/registry/registry.js";
+import {
+  AGENT_CHECKS,
+  CRAWL_CHECK_IDS,
+  METRIC_PENDING_CHECKS,
+  RENDER_CHECKS,
+} from "../../src/rules/registry/registry.js";
 
 describe("checklist coverage", () => {
   it("pins exactly which crawl-derived checks remain unclaimed (Phase 3 empties this)", () => {
@@ -56,5 +61,18 @@ describe("checklist coverage", () => {
     for (const agentCheck of AGENT_CHECKS) {
       expect(claimed.has(agentCheck), `${agentCheck} is an AGENT check, not a rule's`).toBe(false);
     }
+  });
+
+  // The annotations are only worth carrying if they describe the pin above.
+  // A check that gains a rule must leave its annotation list in the same
+  // commit, or the list is a stale reason for an absence that ended.
+  it("every annotated check is one of the unclaimed ones, and says why it is", () => {
+    const unclaimed = new Set(
+      buildRegistry().unclaimedChecks(CRAWL_CHECK_IDS, AGENT_CHECKS),
+    );
+    for (const c of RENDER_CHECKS)
+      expect(unclaimed.has(c), `${c} is claimed — drop it from RENDER_CHECKS`).toBe(true);
+    for (const c of METRIC_PENDING_CHECKS)
+      expect(unclaimed.has(c), `${c} is claimed — drop it from METRIC_PENDING_CHECKS`).toBe(true);
   });
 });

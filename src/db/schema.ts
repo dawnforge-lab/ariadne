@@ -14,6 +14,16 @@ export const crawls = pgTable("crawls", {
   pagesCrawled: integer("pages_crawled").notNull().default(0),
   pagesTotal: integer("pages_total"),
   renderPassCount: integer("render_pass_count").notNull().default(0),
+  // Three crawl-level evidence blobs the query rules read instead of fetching
+  // (hard rule 3: rules read the database). Each is nullable because each
+  // records something the crawl may not have done: `discovery` is what robots
+  // and sitemap discovery found, `hostProbe` is the www/apex/http variant
+  // walk, `notfoundProbe` is the synthetic-404 sample the soft-404 rule
+  // compares pages against. A null means "not attempted", which the rules
+  // report as a skipped check rather than passing over in silence.
+  discovery: jsonb("discovery_jsonb"),
+  hostProbe: jsonb("host_probe_jsonb"),
+  notfoundProbe: jsonb("notfound_probe_jsonb"),
 });
 
 export const pages = pgTable("pages", {
@@ -76,6 +86,11 @@ export const pages = pgTable("pages", {
   hasViewport: boolean("has_viewport").notNull().default(false),
   // Placeholder copy shipped to production (CHECK-40).
   hasLoremIpsum: boolean("has_lorem_ipsum").notNull().default(false),
+  // Body text carrying a "page not found" phrase (CHECK-13). One of the two
+  // soft-404 signals; the other is a simhash match against the site's own 404
+  // template. A phrase alone is not a verdict — a real article about broken
+  // links contains the words too — so the rule pairs it with a word count.
+  hasSoft404Phrases: boolean("has_soft404_phrases").notNull().default(false),
   relNext: text("rel_next"),
   relPrev: text("rel_prev"),
   rendered: boolean("rendered").notNull().default(false),
@@ -85,6 +100,10 @@ export const pages = pgTable("pages", {
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),
   index("pages_crawl_type").on(t.crawlId, t.pageType),
+  // The rule runner's page cursor: `where crawl_id = $1 and id > $2 order by
+  // id limit 500`. Without this the runner sorts the crawl's whole page set
+  // once per batch, which is the memory contract's cost moved into Postgres.
+  index("pages_crawl_id").on(t.crawlId, t.id),
 ]);
 
 export const links = pgTable("links", {
@@ -142,6 +161,11 @@ export const issues = pgTable("issues", {
   ruleId: text("rule_id").notNull(),
   pageId: text("page_id"),
   severity: text("severity").notNull(), // critical|warning|info
+  // The ruleset that produced this row. Defaulted rather than backfilled: the
+  // empty string is honestly "written before the stamp existed", where a
+  // backfilled version number would be a claim about which rules ran that
+  // nobody can check.
+  rulesetVersion: text("ruleset_version").notNull().default(""),
   dedupeKey: text("dedupe_key").notNull(),
   details: jsonb("details_jsonb").notNull(),
 }, (t) => [uniqueIndex("issues_dedupe").on(t.crawlId, t.ruleId, t.dedupeKey),

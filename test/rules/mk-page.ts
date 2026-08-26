@@ -60,6 +60,7 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     hasAmp: false,
     hasViewport: true,
     hasLoremIpsum: false,
+    hasSoft404Phrases: false,
     relNext: null,
     relPrev: null,
     rendered: false,

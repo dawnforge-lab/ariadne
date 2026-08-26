@@ -1,7 +1,7 @@
 import { and, asc, eq, gt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { issues, pages } from "../db/schema.js";
-import type { Registry } from "./registry/registry.js";
+import { crawls, issues, pages } from "../db/schema.js";
+import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import type { Finding } from "./registry/types.js";
 
 /**
@@ -36,6 +36,17 @@ export async function runRules(
   crawlId: string,
   registry: Registry,
 ): Promise<RunSummary> {
+  // A crawl id nothing knows selects no pages, and a run over no pages looks
+  // exactly like a clean site: zero findings, no error. Ask the `crawls` table
+  // first so a typo or a deleted crawl is an error rather than a green report
+  // about nothing (hard rule 7).
+  const crawl = await db
+    .select({ id: crawls.id })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  if (crawl.length === 0) throw new Error(`no such crawl '${crawlId}'`);
+
   // Metric rules exist in the registry's type but nothing here drives them.
   // Silently ignoring one would mean a registered rule that never runs and a
   // check that looks covered — so refuse the run instead.
@@ -60,6 +71,10 @@ export async function runRules(
             ruleId: f.ruleId,
             pageId: f.pageId,
             severity: f.severity,
+            // The ruleset that produced the row, stamped alongside it: a
+            // finding read back later says which rules judged it, without
+            // depending on the crawl row still being there to say so.
+            rulesetVersion: RULESET_VERSION,
             dedupeKey: f.dedupeKey,
             details: { pageUrl: f.pageUrl, ...f.evidence },
           })),

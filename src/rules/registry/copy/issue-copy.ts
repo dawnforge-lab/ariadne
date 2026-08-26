@@ -243,7 +243,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "structure.deep-page": {
     title: "Page is deep in the site structure",
     explanation:
-      "The page sits more than 5 links deep from where the crawl started. Depth is one of the ways crawlers and readers judge importance: deep pages get crawled less often, receive less internal link equity, and are harder to browse to.",
+      "This indexable page sits more than 5 links deep from where the crawl started. Depth is one of the ways crawlers and readers judge importance: deep pages get crawled less often, receive less internal link equity, and are harder to browse to. Pages excluded from the index are not reported here — their depth costs nothing.",
     howToFix:
       "Link to the page from higher-level pages — a hub, a category, or navigation — so the path to it is shorter. If it is not important enough to link from higher up, the honest answer may be to consolidate or remove it.",
   },

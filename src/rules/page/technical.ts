@@ -12,6 +12,14 @@ export const SLOW_MS = 1500;
 export const DEEP_DEPTH = 5;
 
 /**
+ * All five report under one heading. `RuleCategory` is the report's grouping,
+ * not a per-rule label: a "mobile" or a "structure" category with one rule in
+ * it is a section of one, and the client-facing question these five answer is
+ * the same one — how the page is built and served.
+ */
+const CATEGORY = "technical";
+
+/**
  * The bonus technical rules: signals the analyzer already extracts that trace
  * to checklist items outside the 47 crawl-derived checks. Each one states a
  * fact about the page — an absent tag, a count, a measured number — and leaves
@@ -20,7 +28,7 @@ export const DEEP_DEPTH = 5;
 export const technicalRules: PageRule[] = [
   // Fires only on the absence of the tag. Nothing here inspects the contents of
   // a viewport that does exist, and the copy must not claim otherwise.
-  pageRule("mobile.viewport-missing", ["CHECK-52"], "mobile", "warning", (p, self) =>
+  pageRule("mobile.viewport-missing", ["CHECK-52"], CATEGORY, "warning", (p, self) =>
     isAuditable(p) && !p.hasViewport ? [finding(self, p, {})] : [],
   ),
 
@@ -28,7 +36,7 @@ export const technicalRules: PageRule[] = [
   // already be reserving the space, so this is the attribute's absence, not
   // proven layout shift — `imagesTotal` rides along so the report can say
   // "3 of 8" rather than a bare number.
-  pageRule("images.missing-dimensions", ["CHECK-49"], "images", "info", (p, self) =>
+  pageRule("images.missing-dimensions", ["CHECK-49"], CATEGORY, "info", (p, self) =>
     isAuditable(p) && p.imagesMissingDimensions > 0
       ? [
           finding(self, p, {
@@ -41,7 +49,7 @@ export const technicalRules: PageRule[] = [
 
   // An absent alt attribute — not an empty one, which is the correct value for
   // a decorative image and is counted as present by the analyzer.
-  pageRule("images.missing-alt", ["CHECK-49"], "images", "info", (p, self) =>
+  pageRule("images.missing-alt", ["CHECK-49"], CATEGORY, "info", (p, self) =>
     isAuditable(p) && p.imagesMissingAlt > 0
       ? [finding(self, p, { imagesMissingAlt: p.imagesMissingAlt, imagesTotal: p.imagesTotal })]
       : [],
@@ -50,7 +58,7 @@ export const technicalRules: PageRule[] = [
   // One measurement of one fetch, from this machine, on this crawl. A null is
   // an unrecorded timing, not a fast one: firing on it would be reporting a
   // number the crawl does not have.
-  pageRule("performance.slow-response", ["CHECK-50"], "performance", "info", (p, self) =>
+  pageRule("performance.slow-response", ["CHECK-50"], CATEGORY, "info", (p, self) =>
     isAuditable(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
       ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: SLOW_MS })]
       : [],
@@ -58,8 +66,13 @@ export const technicalRules: PageRule[] = [
 
   // Depth is the shortest path the crawl actually took from its seed, so it is
   // relative to where the crawl started rather than to the site's home page.
-  pageRule("structure.deep-page", ["CHECK-31"], "structure", "info", (p, self) =>
-    isAuditable(p) && p.depth > DEEP_DEPTH
+  //
+  // Indexable pages only: click depth is about how much crawl attention and
+  // internal link equity a page gets, and a page that is not going in the index
+  // is not competing for either. Burying a noindex page is not a fault, so
+  // reporting it would be asking for a fix that should not be made.
+  pageRule("structure.deep-page", ["CHECK-31"], CATEGORY, "info", (p, self) =>
+    isAuditable(p) && p.isIndexable === true && p.depth > DEEP_DEPTH
       ? [finding(self, p, { depth: p.depth, threshold: DEEP_DEPTH })]
       : [],
   ),

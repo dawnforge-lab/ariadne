@@ -122,6 +122,10 @@ describe("runRules against the database", () => {
     );
     expect(titleRow.details).toMatchObject({ pageUrl: `${SITE}/untitled` });
 
+    // Every written row is stamped with the ruleset that produced it, so a
+    // finding read back months later can be traced to the rules of its day.
+    for (const r of rows) expect(r.rulesetVersion, r.ruleId).toBe(RULESET_VERSION);
+
     // Idempotence: a second run adds no rows — the dedupe index absorbs it.
     await runRules(db, crawlId, registry);
     const again = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
@@ -168,6 +172,14 @@ describe("runRules against the database", () => {
     expect(await db.select().from(issues).where(eq(issues.crawlId, mine))).toHaveLength(0);
   });
 
+  // A crawl id nothing knows produces no pages, which is indistinguishable
+  // from a crawl that found nothing: the run would "succeed" over an empty
+  // table and report zero findings. Refuse it instead (hard rule 7).
+  it("refuses an unknown crawl id, naming it", async () => {
+    const missing = `crawl_${randomUUID()}`;
+    await expect(runRules(db, missing, buildRegistry())).rejects.toThrow(missing);
+  });
+
   it("aborts loudly, naming the rule, when a rule throws", async () => {
     const crawlId = await newCrawl();
     await db.insert(pages).values([mkRow(crawlId, "/clean")]);
@@ -176,7 +188,7 @@ describe("runRules against the database", () => {
       kind: "page",
       id: "test.exploding",
       checkIds: ["CHECK-01"],
-      category: "test",
+      category: "technical",
       severity: "info",
       title: "Exploding test rule",
       explanation: "A rule that throws, so the runner's failure path can be observed.",
@@ -202,7 +214,7 @@ describe("runRules against the database", () => {
       kind: "metric",
       id: "test.metric",
       checkIds: ["CHECK-01"],
-      category: "test",
+      category: "technical",
       severity: "info",
       title: "A metric rule the runner cannot drive",
       explanation: "A stub metric rule, registered only to prove the runner rejects it.",

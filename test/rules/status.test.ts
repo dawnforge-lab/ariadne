@@ -19,7 +19,7 @@ describe("statusRules metadata", () => {
     expect(rule("crawl.blocked").checkIds).toEqual(["CHECK-05"]);
     for (const r of statusRules) {
       expect(r.kind, r.id).toBe("page");
-      expect(r.category, r.id).toBe("status");
+      expect(r.category, r.id).toBe("crawl");
       expect(r.rulesetVersion, r.id).toBeTruthy();
     }
   });

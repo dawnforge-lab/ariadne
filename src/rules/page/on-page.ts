@@ -1,4 +1,4 @@
-import { finding, isAuditable, pageRule } from "../helpers.js";
+import { finding, isAuditable, pageRule, present } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
 
 /**
@@ -13,11 +13,6 @@ export const META_MAX = 160;
 export const THIN_WORDS = 150;
 
 const CATEGORY = "on-page";
-
-/** Present means "has non-whitespace text": a `<title> </title>` is missing. */
-function present(value: string | null): value is string {
-  return value !== null && value.trim() !== "";
-}
 
 /**
  * The index of the first heading that is more than one level below the heading

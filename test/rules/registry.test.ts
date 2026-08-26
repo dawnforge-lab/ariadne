@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_CHECKS,
   CRAWL_CHECK_IDS,
+  METRIC_PENDING_CHECKS,
+  RENDER_CHECKS,
   defineRule,
   Registry,
   RULESET_VERSION,
@@ -14,7 +16,7 @@ const validPageRule = {
   kind: "page" as const,
   id: "title.missing",
   checkIds: ["CHECK-35"],
-  category: "on-page",
+  category: "on-page" as const,
   severity: "warning" as const,
   title: "Missing title",
   explanation: "The page has no <title> element.",
@@ -128,5 +130,47 @@ describe("check universe", () => {
   });
   it("every agent check is part of the crawl-derived universe", () => {
     for (const c of AGENT_CHECKS) expect(CRAWL_CHECK_IDS).toContain(c);
+  });
+});
+
+/**
+ * The two annotations that say WHY a check has no rule behind it yet, so the
+ * coverage pin's remaining entries are explained rather than merely counted:
+ * `RENDER_CHECKS` wait on the render pass, `METRIC_PENDING_CHECKS` on the
+ * metric-rule kind the runner does not drive yet. Neither is `AGENT_CHECKS` —
+ * those are judgement, and will never have a rule.
+ */
+describe("check annotations", () => {
+  it("exports the render-gated and metric-pending lists", () => {
+    expect(RENDER_CHECKS).toEqual(["CHECK-01", "CHECK-02", "CHECK-34"]);
+    expect(METRIC_PENDING_CHECKS).toEqual([
+      "CHECK-08",
+      "CHECK-29",
+      "CHECK-33",
+      "CHECK-33b",
+    ]);
+  });
+
+  it("every annotated check is part of the crawl-derived universe", () => {
+    for (const c of [...RENDER_CHECKS, ...METRIC_PENDING_CHECKS])
+      expect(CRAWL_CHECK_IDS, c).toContain(c);
+  });
+
+  // Disjoint at runtime, not just by inspection: a check that appears on two
+  // lists claims two different reasons for having no rule, and one of them is
+  // a lie the coverage pin would carry forward.
+  it("the three annotation lists are pairwise disjoint", () => {
+    const lists: [string, readonly string[]][] = [
+      ["AGENT_CHECKS", AGENT_CHECKS],
+      ["RENDER_CHECKS", RENDER_CHECKS],
+      ["METRIC_PENDING_CHECKS", METRIC_PENDING_CHECKS],
+    ];
+    for (const [nameA, a] of lists) {
+      expect(new Set(a).size, `${nameA} repeats an id`).toBe(a.length);
+      for (const [nameB, b] of lists) {
+        if (nameA === nameB) continue;
+        for (const c of a) expect(b, `${c} is on both ${nameA} and ${nameB}`).not.toContain(c);
+      }
+    }
   });
 });

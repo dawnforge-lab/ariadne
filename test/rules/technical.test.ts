@@ -185,4 +185,21 @@ describe("structure.deep-page", () => {
         .toHaveLength(0);
     }
   });
+
+  // The depth of a page that is not going in the index is not a finding: a
+  // buried noindex page is exactly where a buried noindex page belongs, and
+  // reporting it would be a fix request nobody should action.
+  it("is silent on a deep page that is not indexable", () => {
+    expect(
+      rule("structure.deep-page").run(mkPage({ depth: 11, isIndexable: false })),
+    ).toHaveLength(0);
+    expect(
+      rule("structure.deep-page").run(mkPage({ depth: 11, isIndexable: null })),
+    ).toHaveLength(0);
+    // …and still fires on the indexable page at the same depth, so the silence
+    // above is the indexability guard rather than a rule that stopped working.
+    expect(
+      rule("structure.deep-page").run(mkPage({ depth: 11, isIndexable: true })),
+    ).toHaveLength(1);
+  });
 });

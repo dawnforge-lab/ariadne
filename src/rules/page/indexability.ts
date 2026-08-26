@@ -1,12 +1,7 @@
-import { finding, isAuditable, pageRule } from "../helpers.js";
+import { finding, isAuditable, pageRule, present } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
 
 const CATEGORY = "indexability";
-
-/** Present means "declares something": a null, empty or blank directive does not. */
-function present(value: string | null): value is string {
-  return value !== null && value.trim() !== "";
-}
 
 /**
  * `none` as a whole directive: the list is comma- and space-delimited, so the

@@ -1,31 +1,22 @@
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
-import { finding, isAuditable, pageRule } from "../helpers.js";
+import { finding, isAuditable, pageRule, present } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
 import { hasNoindex } from "./indexability.js";
 
 const CATEGORY = "canonical";
 
 /**
- * A canonical declaration that names something. `<link rel=canonical href="">`
- * reaches the database as an empty string rather than a null, and an empty href
- * declares no URL — treating it as a declaration would hide the page from
- * `canonical.missing` while every other rule read it as a self-canonical and
- * stayed quiet too, which is exactly the always-passes hole the build plan
- * forbids. Blank is "not declared", everywhere in this file.
- */
-function declared(value: string | null): value is string {
-  return value !== null && value.trim() !== "";
-}
-
-/**
  * The canonical the page effectively declares. The HTML `<link rel=canonical>`
  * wins over the HTTP `Link` header because that is the order search engines
  * apply when both are present; `canonical.html-header-conflict` is what reports
  * the disagreement, so the other rules can work from one value.
+ *
+ * `present` is what "declares" means here: `<link rel=canonical href="">`
+ * reaches the database as an empty string, and an empty href names no URL.
  */
 function effectiveCanonical(page: PageRecord): string | null {
-  if (declared(page.canonicalHtml)) return page.canonicalHtml;
-  return declared(page.canonicalHeader) ? page.canonicalHeader : null;
+  if (present(page.canonicalHtml)) return page.canonicalHtml;
+  return present(page.canonicalHeader) ? page.canonicalHeader : null;
 }
 
 /**
@@ -98,7 +89,7 @@ export const canonicalRules: PageRule[] = [
 
   pageRule("canonical.html-header-conflict", ["CHECK-18"], CATEGORY, "warning", (p, self) => {
     const { canonicalHtml: html, canonicalHeader: header } = p;
-    if (!isAuditable(p) || !declared(html) || !declared(header)) return [];
+    if (!isAuditable(p) || !present(html) || !present(header)) return [];
     // A value that does not resolve falls back to its literal text rather than
     // to null, so two different malformed declarations stay two declarations
     // instead of collapsing into "no conflict".
