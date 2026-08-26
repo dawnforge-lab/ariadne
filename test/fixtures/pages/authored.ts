@@ -267,7 +267,8 @@ const noindexConflict: Fixture = {
 // fallback is a property of the crawl's whole annotation set rather than of any
 // one URL. It therefore appears in NEITHER page's `expectedIssues` — the
 // harness maps only page-attached findings to paths — and is asserted from the
-// harness's `siteFindings` set instead.
+// harness's `siteFindings` map instead, together with the three declarations
+// these two pages contribute between them.
 // ---------------------------------------------------------------------------
 
 /**
@@ -298,15 +299,24 @@ const hreflangBadCode: Fixture = {
 
 /**
  * A valid pair with no x-default. The page itself is clean — both codes parse,
- * so nothing page-attached fires here — and its whole job is to put the crawl's
- * annotation set into the state the site-scoped rule reports.
+ * so nothing page-attached fires here — and its job is to make the site-scoped
+ * rule's subject a real cluster rather than one malformed tag.
+ *
+ * That job is only worth doing if a test can tell the page apart from nothing,
+ * and the rule alone cannot: `hreflang.missing-x-default` fires on ANY
+ * declaration with no x-default anywhere, so the bad-code page above would
+ * produce it single-handed. The harness therefore asserts the declarations
+ * themselves — these two codes, on this path, and the total of three the
+ * finding counted — which is what stops this page from being a fixture that
+ * exists without being evidence.
  */
 const hreflangNoXDefault: Fixture = {
   path: "/authored/hreflang-no-xdefault",
   category: HREFLANG,
   name: "Language alternates with no x-default",
   // Intentionally empty: the only rule this page provokes is site-scoped, and
-  // site-scoped findings attach to no URL. See the block comment above.
+  // site-scoped findings attach to no URL. What this page IS pinned by is the
+  // harness's hreflang-declarations assertion. See the block comment above.
   expectedIssues: [],
   exact: true,
   handler: (req, res) =>

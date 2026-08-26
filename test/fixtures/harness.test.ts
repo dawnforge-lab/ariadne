@@ -17,7 +17,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlSummary } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, pages } from "../../src/db/schema.js";
+import { crawls, hreflang, issues, pages } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { runRules } from "../../src/rules/run.js";
 import type { Registry } from "../../src/rules/registry/registry.js";
@@ -52,12 +52,25 @@ const pageByPath = new Map<string, PageRecord>();
 /** Path -> the rule ids that fired on the page at that path. */
 const issuesByPath = new Map<string, Set<string>>();
 /**
- * Rule ids from findings that belong to no URL — today only
- * `hreflang.missing-x-default`, which is a fact about the crawl's annotation
- * set rather than about a page. They count towards coverage (a fixture's
- * hreflang is what produces them) and attach to no path, `/control` included.
+ * Findings that belong to no URL, by rule id, with the evidence the rule wrote
+ * — today only `hreflang.missing-x-default`, which is a fact about the crawl's
+ * annotation set rather than about a page. They count towards coverage (a
+ * fixture's hreflang is what produces them) and attach to no path, `/control`
+ * included.
+ *
+ * The evidence is kept, not just the id, because a site-scoped rule's evidence
+ * is the only place the fixtures behind it are visible. Assert the id alone and
+ * any single hreflang declaration anywhere satisfies the test, which would make
+ * every hreflang fixture after the first one dead weight.
  */
-const siteFindings = new Set<string>();
+const siteFindings = new Map<string, unknown>();
+/**
+ * Path -> the hreflang codes the page at that path declared, sorted, read
+ * straight from the `hreflang` table. This is the input side of the site-scoped
+ * rule: it says which fixture contributed which declaration, so a fixture that
+ * stopped contributing fails an assertion instead of quietly not mattering.
+ */
+const hreflangByPath = new Map<string, string[]>();
 
 beforeAll(async () => {
   db = createDb(databaseUrl());
@@ -100,7 +113,7 @@ beforeAll(async () => {
     // A null page id is a site-scoped finding: it belongs to the crawl, not to
     // a URL, so it maps to no path — which is what keeps it off /control.
     if (row.pageId === null) {
-      siteFindings.add(row.ruleId);
+      siteFindings.set(row.ruleId, row.details);
       continue;
     }
     const path = pathById.get(row.pageId);
@@ -111,6 +124,22 @@ beforeAll(async () => {
     fired.add(row.ruleId);
     issuesByPath.set(path, fired);
   }
+
+  for (const row of await db
+    .select()
+    .from(hreflang)
+    .where(eq(hreflang.crawlId, summary.crawlId))) {
+    const path = pathById.get(row.pageId);
+    if (path === undefined) {
+      throw new Error(
+        `hreflang ${row.hreflangCode} names page ${row.pageId}, which has no pages row`,
+      );
+    }
+    const codes = hreflangByPath.get(path) ?? [];
+    codes.push(row.hreflangCode);
+    hreflangByPath.set(path, codes);
+  }
+  for (const codes of hreflangByPath.values()) codes.sort();
 }, 120_000);
 
 afterAll(async () => {
@@ -189,7 +218,26 @@ describe("the fixture site end to end", () => {
     // registry today: the hreflang fixtures declare alternates and none
     // declares an x-default, so the crawl's annotation set is missing its
     // fallback. It is written once, with a null page id.
-    expect([...siteFindings].sort()).toEqual(["hreflang.missing-x-default"]);
+    expect([...siteFindings.keys()].sort()).toEqual(["hreflang.missing-x-default"]);
+
+    // Which fixture declared what, asserted exactly — both as the map of
+    // declarations that went in, and as the count the rule wrote out.
+    //
+    // This is what makes each hreflang fixture load-bearing rather than
+    // decorative. The site-scoped rule fires on ANY declaration with no
+    // x-default anywhere, so an assertion that only checked the rule id would
+    // be satisfied by the bad-code page alone, and `/authored/hreflang-no-xdefault`
+    // could be deleted without a single test noticing. Pinning the codes and
+    // the total means removing either page, or changing what either declares,
+    // fails here.
+    expect(Object.fromEntries(hreflangByPath)).toEqual({
+      "/authored/hreflang-bad-code": ["english-uk"],
+      "/authored/hreflang-no-xdefault": ["de", "en"],
+    });
+    expect(siteFindings.get("hreflang.missing-x-default")).toEqual({
+      pageUrl: null,
+      declarations: 3,
+    });
 
     // The attribution guard. A site-scoped finding names no URL, so it must
     // reach no fixture's path — not the hreflang pages that provoked it, and
@@ -213,7 +261,7 @@ describe("the fixture site end to end", () => {
     // coverage regardless of which page produced it is correct precisely
     // because there is no page to attribute it to; the assertion above is what
     // holds that "no page" honest.
-    const fired = new Set(siteFindings);
+    const fired = new Set(siteFindings.keys());
     for (const fixture of allFixtures()) {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);
     }
