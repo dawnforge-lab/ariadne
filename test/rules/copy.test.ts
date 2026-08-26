@@ -73,6 +73,13 @@ const PHASE_3_RULE_IDS = [
   "sitemap.non-indexable",
   "sitemap.uncrawled",
   "pages.not-in-sitemap",
+  "url.normalisation-variants",
+  "url.tracking-params-internal",
+  "url.parameter-pages-indexable",
+  "host.http-serves-200",
+  "host.duplicate-host-200",
+  "host.legacy-host-reachable",
+  "host.probe-skipped",
 ];
 
 const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];

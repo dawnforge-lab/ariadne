@@ -55,6 +55,7 @@ function databaseUrl(): string {
 const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "canonical.non-200-target",
   "canonical.non-indexable-target",
+  "host.legacy-host-reachable",
   "hreflang.missing-return-link",
   "hreflang.non-indexable-target",
   "links.orphan",
@@ -68,7 +69,29 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "sitemap.non-indexable",
   "sitemap.redirected",
   "sitemap.uncrawled",
+  "url.normalisation-variants",
+  "url.parameter-pages-indexable",
+  "url.tracking-params-internal",
 ];
+
+/**
+ * What the three URL/host entries above need, since none of them is simply a
+ * page with something wrong in its head:
+ *
+ *  - `url.normalisation-variants` needs two paths that differ only in case or a
+ *    trailing slash and BOTH answer 200. The absorbed trailing-slash fixture is
+ *    deliberately not that: its non-slash form redirects, which is the
+ *    configuration the rule stays quiet about (see the rule's own comment).
+ *  - `url.tracking-params-internal` needs a page linking to another fixture with
+ *    a `utm_*` or `gclid` parameter on the href.
+ *  - `url.parameter-pages-indexable` needs an indexable 200 at a URL with a
+ *    query string whose canonical names itself.
+ *  - `host.legacy-host-reachable` is the odd one: it needs a SECOND origin that
+ *    answers 200, passed to the crawl as `legacyHosts`. That is a second
+ *    fixture server on another port plus one line of crawl config, not a page —
+ *    so if Task 9 decides not to build it, this id moves to
+ *    `SKIP_HARNESS_CLAIMS` with a paragraph saying so, rather than staying here.
+ */
 
 /**
  * Rules NO fixture can ever claim, because their firing condition is a property
@@ -96,6 +119,21 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
  * all). Both are properties of an unhealthy crawl, like `links.orphan-skipped`
  * above, and both are covered by the same DB test file.
  *
+ * `host.probe-skipped` fires when the crawl recorded no host probe at all,
+ * which happens only when a crawl is started with `probeHosts: false`. This
+ * harness runs one crawl, with the probe on — asserted below, since
+ * `host.http-serves-200` fires from it — so provoking this rule would mean
+ * turning off the evidence three other host rules read. A property of how the
+ * crawl was started, like the two skips above, and covered by
+ * `test/rules/host-query.test.ts`.
+ *
+ * `host.duplicate-host-200` needs the www and apex spellings of one host to
+ * BOTH answer 200 over https. The fixture app is plain HTTP on 127.0.0.1: an
+ * IP literal has no `www.` twin (see `hostnameSpellings`), and nothing on the
+ * loopback serves TLS a crawl would accept, so neither half of the condition
+ * can exist here however many pages Task 9 authors. Covered by the same DB test
+ * file, which builds the probe rows directly.
+ *
  * Unlike `UNCLAIMED_UNTIL_TASK_9` this list does not empty: it is a permanent,
  * named exemption. Task 9 deletes that list and leaves this one, so the
  * every-rule-fires assertion stays strict about every rule a fixture COULD
@@ -103,6 +141,8 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
  * needs the same kind of paragraph as the one above.
  */
 const SKIP_HARNESS_CLAIMS: string[] = [
+  "host.duplicate-host-200",
+  "host.probe-skipped",
   "links.orphan-skipped",
   "robots.check-skipped",
   "robots.missing",
@@ -293,24 +333,44 @@ describe("the fixture site end to end", () => {
     expect([...(issuesByPath.get("/control") ?? new Set<string>())]).toEqual([]);
   });
 
-  it("the only site-scoped finding is the sitemap the site never declares", () => {
+  it("the site-scoped findings are the undeclared sitemap and the plaintext host", () => {
     // The fixture app serves a robots.txt with no `Sitemap:` line on purpose
     // (see app.ts: every page is reached by link, so no fixture is quietly
     // rescued by a sitemap). That is exactly what CHECK-06 reports, once, for
     // the crawl rather than for a URL.
+    //
+    // The second is the fixture server itself: it listens on plain HTTP at
+    // 127.0.0.1, so the host probe's http variant answers 200 at an `http://`
+    // URL instead of redirecting to https — which is precisely CHECK-14, and
+    // true of this site. It also proves the probe RAN, which is what puts
+    // `host.probe-skipped` in `SKIP_HARNESS_CLAIMS` rather than in the list
+    // above it.
     //
     // Everything else must stay off this list. `links.orphan-skipped` and
     // `robots.check-skipped` write null-page findings only when the crawl was
     // incomplete or its robots.txt unreadable — this crawl drains its frontier,
     // stops well short of maxPages and reads a two-line robots.txt — and
     // `robots.missing` needs a site that answers 404 for it.
-    expect([...siteFindings.keys()]).toEqual(["sitemap.missing"]);
+    expect([...siteFindings.keys()].sort()).toEqual([
+      "host.http-serves-200",
+      "sitemap.missing",
+    ]);
     expect(siteFindings.get("sitemap.missing")).toEqual({
       // `runRules` writes `pageUrl` into every details blob; a site-scoped
       // finding names no page, so it is null here.
       pageUrl: null,
       robotsOutcome: "read",
       sitemapSources: [],
+    });
+
+    // The http variant of the site's own origin, with the single hop the probe
+    // walked: the fixture server answered the root itself rather than
+    // redirecting anywhere.
+    const httpFinding = siteFindings.get("host.http-serves-200");
+    expect(httpFinding).toMatchObject({
+      pageUrl: `${app.base}/`,
+      variant: `${app.base}/`,
+      hops: [{ url: `${app.base}/`, statusCode: 200, fetchClass: "ok", location: null }],
     });
   });
 

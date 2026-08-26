@@ -4,6 +4,7 @@ import { statusRules } from "./page/status.js";
 import { canonicalRules } from "./page/canonical.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { technicalRules } from "./page/technical.js";
+import { hostRules } from "./query/host.js";
 import { hreflangRules } from "./query/hreflang.js";
 import { linkGraphRules } from "./query/link-graph.js";
 import { linkTargetRules } from "./query/link-targets.js";
@@ -11,6 +12,7 @@ import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
 import { robotsRules } from "./query/robots.js";
 import { sitemapRules } from "./query/sitemap.js";
+import { urlHygieneRules } from "./query/url-hygiene.js";
 
 /**
  * The ruleset: every rule the engine ships, registered in one place.
@@ -34,6 +36,8 @@ export function buildRegistry(): Registry {
     ...paginationRules,
     ...robotsRules,
     ...sitemapRules,
+    ...urlHygieneRules,
+    ...hostRules,
   ]) {
     r.register(rule);
   }

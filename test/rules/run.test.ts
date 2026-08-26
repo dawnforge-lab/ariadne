@@ -3,12 +3,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, issues, pages } from "../../src/db/schema.js";
+import { crawls, hreflang, issues, pages, urlParams } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { PAGE_BATCH, runRules } from "../../src/rules/run.js";
 import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import type { MetricRule, PageRecord, PageRule } from "../../src/rules/registry/types.js";
-import { mkDiscovery } from "./mk-discovery.js";
+import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
 import { mkPage } from "./mk-page.js";
 
 function databaseUrl(): string {
@@ -27,15 +27,17 @@ describe("buildRegistry", () => {
     expect(ids).toContain("http.server-error");
     expect(ids).toContain("hreflang.invalid-code");
     // Phase 2's 28 page and hreflang rules, plus the Phase 3 redirect,
-    // link/canonical-target, orphan, hreflang-join, pagination, robots and
-    // sitemap query rules.
+    // link/canonical-target, orphan, hreflang-join, pagination, robots,
+    // sitemap, URL-hygiene and host query rules.
     expect(ids).toContain("redirect.loop");
     expect(ids).toContain("links.broken-internal");
     expect(ids).toContain("links.orphan");
     expect(ids).toContain("pagination.next-not-linked");
     expect(ids).toContain("robots.blocks-sitemap-urls");
     expect(ids).toContain("sitemap.missing");
-    expect(ids.length).toBe(50);
+    expect(ids).toContain("url.normalisation-variants");
+    expect(ids).toContain("host.http-serves-200");
+    expect(ids.length).toBe(57);
   });
 
   it("registers both kinds the runner drives", () => {
@@ -61,6 +63,12 @@ describe("runRules against the database", () => {
    * the healthy site — robots.txt read whole, one declared sitemap, nothing
    * truncated — so those rules stay silent and each assertion below is about
    * the page rule it names.
+   *
+   * The host probe is here for the third time for the same reason: a null
+   * `host_probe_jsonb` means the probe never ran, and `host.probe-skipped`
+   * says so on every crawl row that leaves it out. `mkHostProbe` is the site
+   * whose spellings all redirect into one canonical host, so the host rules
+   * are silent too.
    */
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
@@ -69,6 +77,7 @@ describe("runRules against the database", () => {
       siteUrl: SITE,
       config: { maxPages: 10_000, userAgent: "AriadneBot-test" },
       discovery: mkDiscovery(),
+      hostProbe: mkHostProbe(SITE),
       rulesetVersion: "test",
     });
     createdCrawls.push(id);
@@ -207,6 +216,35 @@ describe("runRules against the database", () => {
     expect(summary.pagesScanned).toBe(1);
     expect(summary.findings).toBe(0);
     expect(await db.select().from(issues).where(eq(issues.crawlId, mine))).toHaveLength(0);
+  });
+
+  // The derivation phase. It is part of the run rather than a step a caller
+  // has to remember, so a crawl judged by `runRules` always has a current
+  // parameter inventory beside its findings — and the summary says how much was
+  // written, because a phase that reported nothing would be a phase nobody
+  // would notice had stopped running.
+  it("derives the crawl's url_params inventory, and says how much it wrote", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([
+      mkRow(crawlId, "/", { depth: 0, discoveredVia: "seed" }),
+      mkRow(crawlId, "/list?colour=red&utm_source=news", { depth: 0, discoveredVia: "seed" }),
+    ]);
+
+    const summary = await runRules(db, crawlId, buildRegistry());
+    expect(summary.derived).toEqual({ "deriveUrlParams.params": 2 });
+
+    const rows = await db.select().from(urlParams).where(eq(urlParams.crawlId, crawlId));
+    expect(
+      Object.fromEntries(rows.map((r) => [r.paramName, r.isTracking])),
+    ).toEqual({ colour: false, utm_source: true });
+
+    // Re-running the whole runner is safe, inventory included: the derivation
+    // rebuilds its rows rather than adding to them.
+    const again = await runRules(db, crawlId, buildRegistry());
+    expect(again.derived).toEqual(summary.derived);
+    expect(await db.select().from(urlParams).where(eq(urlParams.crawlId, crawlId))).toHaveLength(
+      rows.length,
+    );
   });
 
   // A crawl id nothing knows produces no pages, which is indistinguishable

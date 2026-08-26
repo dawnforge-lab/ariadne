@@ -1,6 +1,8 @@
 import { eq } from "drizzle-orm";
 
 import type { DiscoveryTruncation } from "../../crawl/discovery.js";
+import type { FetchClass } from "../../crawl/fetch-page.js";
+import type { HostProbeHop, HostProbeResult, HostProbeVariant } from "../../crawl/host-probe.js";
 import type { DiscoveryEvidence } from "../../crawl/loop.js";
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
@@ -145,6 +147,104 @@ export async function readCrawlEvidence(
     siteUrl: row.siteUrl,
     discovery: parseDiscovery(row.discovery, ruleId, crawlId),
     config: row.config,
+  };
+}
+
+/** The crawl row the host rules read: the seed URL, and the probe or its absence. */
+export interface HostProbeEvidence {
+  siteUrl: string;
+  /**
+   * Null means the probe was NOT ATTEMPTED — the caller passed
+   * `probeHosts: false`, or the crawl predates the column. It never means "the
+   * variants were fine": the probe records a site's behaviour, however bad, as
+   * hops. See the `host_probe_jsonb` contract in src/db/schema.ts.
+   */
+  probe: HostProbeResult | null;
+}
+
+/**
+ * `host_probe_jsonb` checked against the shape `probeHostVariants` writes,
+ * rather than cast to it.
+ *
+ * Same reasoning as `parseDiscovery` above, and the same consequence if it were
+ * skipped: a `statusCode` that arrived as a string would compare unequal to
+ * 200, and the rule that exists to say "this http spelling serves a 200" would
+ * quietly stop saying it. Every field the host rules branch on — the hop's
+ * URL, its status, the variant's start — is checked here, and a mismatch names
+ * the crawl.
+ *
+ * `fetchClass` and `location` are carried as stored: no rule branches on
+ * either, they ride along inside the evidence a finding quotes. A rule that
+ * starts reading one adds its check here.
+ */
+function parseHostProbe(value: unknown, ruleId: string, crawlId: string): HostProbeResult {
+  const bad = (why: string): never => {
+    throw new Error(`${ruleId}: crawl '${crawlId}' host probe evidence ${why}`);
+  };
+
+  if (!isRecord(value)) return bad("is not an object");
+  const variants = value["variants"];
+  if (!Array.isArray(variants)) return bad("has no variants array");
+
+  const parsed: HostProbeVariant[] = [];
+  for (const variant of variants) {
+    if (!isRecord(variant)) return bad("has a variant that is not an object");
+    if (typeof variant["start"] !== "string") return bad("has a variant with no start URL");
+    const final = variant["final"];
+    if (final !== null && typeof final !== "string") return bad("has a non-string variant final");
+    const hops = variant["hops"];
+    if (!Array.isArray(hops)) return bad(`has no hops array for variant '${variant["start"]}'`);
+
+    const parsedHops: HostProbeHop[] = [];
+    for (const hop of hops) {
+      if (!isRecord(hop)) return bad("has a hop that is not an object");
+      if (typeof hop["url"] !== "string") return bad("has a hop with no url");
+      const status = hop["statusCode"];
+      if (status !== null && typeof status !== "number") return bad("has a non-numeric hop status");
+      if (typeof hop["fetchClass"] !== "string") return bad("has a hop with no fetch class");
+      const location = hop["location"];
+      if (location !== null && typeof location !== "string") {
+        return bad("has a non-string hop location");
+      }
+      parsedHops.push({
+        url: hop["url"],
+        statusCode: status,
+        fetchClass: hop["fetchClass"] as FetchClass,
+        location,
+      });
+    }
+    parsed.push({ start: variant["start"], hops: parsedHops, final });
+  }
+  return { variants: parsed };
+}
+
+/**
+ * The crawl row every host rule starts from.
+ *
+ * A separate read from `readCrawlEvidence` on purpose, in both directions: the
+ * host rules do not need the discovery evidence and must not throw for a crawl
+ * whose sitemap walk is unreadable, and the robots and sitemap rules must not
+ * start throwing because a `host_probe_jsonb` blob is malformed. Each rule
+ * validates what it actually reads.
+ */
+export async function readHostProbe(
+  db: Db,
+  crawlId: string,
+  ruleId: string,
+): Promise<HostProbeEvidence> {
+  const rows = await db
+    .select({ siteUrl: crawls.siteUrl, hostProbe: crawls.hostProbe })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) throw new Error(`${ruleId}: no such crawl '${crawlId}'`);
+  return {
+    siteUrl: row.siteUrl,
+    probe:
+      row.hostProbe === null || row.hostProbe === undefined
+        ? null
+        : parseHostProbe(row.hostProbe, ruleId, crawlId),
   };
 }
 

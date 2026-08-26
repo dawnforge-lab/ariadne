@@ -441,4 +441,60 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Link to the page from higher-level pages — a hub, a category, or navigation — so the path to it is shorter. If it is not important enough to link from higher up, the honest answer may be to consolidate or remove it.",
   },
+
+  // -------------------------------------------------------------------- url
+  "url.normalisation-variants": {
+    // Accuracy: the rule fires only when EVERY URL in the group answered 200.
+    // A spelling that redirects to another is the fix, not the fault, and this
+    // copy must not be rendered over one.
+    title: "The same page served under several URLs",
+    explanation:
+      "More than one URL on this site answers with the same page: the addresses differ only in capitalisation or a trailing slash, and each of them returns a page of its own instead of redirecting to a single version. Search engines treat each spelling as a separate URL, so the links and ranking signals pointing at one page are split between them, and which version gets indexed is left to the crawler.",
+    howToFix:
+      "Pick one spelling as canonical and make the site emit only that one in its links, its sitemap and its canonical tags. Redirect the other spellings to it with a 301 so the versions already indexed and linked consolidate onto the URL you chose.",
+  },
+  "url.tracking-params-internal": {
+    title: "Internal links carry campaign tracking parameters",
+    explanation:
+      "Internal links on this site point at a URL tagged with campaign or ad-click parameters (utm_source, gclid and the like). Those tags belong on links coming from outside: used internally they create a second, tagged URL for a page that search engines may crawl and index, and they overwrite the original traffic source in analytics so the visit is re-attributed to a campaign it did not come from.",
+    howToFix:
+      "Strip the tracking parameters from internal links and point them at the clean URL. Where the tags exist to measure an internal promotion, use an analytics feature meant for that — internal campaign or content-group tracking — rather than the parameters reserved for external campaigns.",
+  },
+  "url.parameter-pages-indexable": {
+    title: "Parameterised URL invites indexing of itself",
+    explanation:
+      "This URL carries query parameters, returns a 200, is not excluded from the index, and names itself as its own canonical. On a filterable listing that is how a handful of pages becomes thousands of near-identical indexable URLs, one per combination of filters, each competing with the clean page. It is sometimes the right call — a search or feed page that should rank — which is why this is a statement to check rather than a fault.",
+    howToFix:
+      "Decide which parameter combinations deserve to be pages. For the ones that do not, canonicalise the variant to the clean URL and keep it out of the sitemap and the internal links. Parameters that only reorder or narrow the same set of items — sort, view, session — should not produce indexable URLs at all.",
+  },
+
+  // ------------------------------------------------------------------- host
+  "host.http-serves-200": {
+    title: "The site answers over plain http",
+    explanation:
+      "One of the site's spellings serves a page over http rather than redirecting to https. Browsers mark the plaintext version as not secure, its traffic can be read and altered in transit, and search engines can index it as a separate URL — so the site competes with itself and the secure version loses part of its link equity.",
+    howToFix:
+      "Redirect every http URL to its https equivalent with a single 301, preserving the path and the query string, and serve HSTS on the https response so browsers stop asking for the insecure version at all.",
+  },
+  "host.duplicate-host-200": {
+    title: "Both www and non-www serve the site",
+    explanation:
+      "The www and the bare-domain spellings of this site both answer with a page in their own right, with no redirect between them. Every URL on the site therefore exists twice, and links, rankings and crawl budget are split between two hosts that serve identical content.",
+    howToFix:
+      "Choose one host as canonical and 301-redirect the other to it, keeping the path and query string intact. Update internal links, the sitemap and the canonical tags to the chosen host, and confirm both spellings resolve to it in Search Console.",
+  },
+  "host.legacy-host-reachable": {
+    title: "A former domain still serves its own site",
+    explanation:
+      "A domain the site used to live on still answers with a page instead of redirecting to the current one. The old site stays indexable alongside the new one, the two compete for the same queries, and every link earned on the old domain stops short of the site it was meant to point at. It is occasionally deliberate — a brand kept separate on purpose — which is why this is reported as something to confirm.",
+    howToFix:
+      "If the domain is genuinely retired, 301-redirect it to the matching URL on the live site, page by page rather than everything to the homepage, and keep the redirects in place indefinitely. If it is meant to stay a separate site, make sure it is not serving the same content.",
+  },
+  "host.probe-skipped": {
+    title: "Host variants were not checked",
+    explanation:
+      "This crawl did not probe the site's other spellings, so nothing here says whether the http version redirects, whether www and the bare domain both serve the site, or whether a former domain is still reachable. That is a limit of this crawl rather than a finding about the site: the probe is skipped when a crawl is started with host probing turned off.",
+    howToFix:
+      "Re-run the crawl with host probing enabled to answer these checks. In the meantime the same questions can be answered by hand: request each spelling of the domain and follow the redirects, confirming they all end on the canonical https host.",
+  },
 };
