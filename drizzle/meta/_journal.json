@@ -43,6 +43,13 @@
       "when": 1787760603147,
       "tag": "0005_spicy_pete_wisdom",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787766855201,
+      "tag": "0006_nappy_oracle",
+      "breakpoints": true
     }
   ]
 }

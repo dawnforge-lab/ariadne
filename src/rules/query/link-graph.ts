@@ -120,11 +120,11 @@ function skipReason(c: Completeness): string | null {
  *    sitemap and links from nowhere is precisely the orphan the check is for.
  *    `inSitemap` says which kind it is.
  *
- * `sitemap_urls.url` is the `<loc>` as the site published it and `pages.url` is
- * the frontier key, so the membership test is an exact match on the same URL
- * from two sources. A `<loc>` carrying a fragment or reordered query params is
- * the case where the two spellings differ and `inSitemap` reads false; the
- * finding itself does not depend on it.
+ * The membership test matches `sitemap_urls.url_normalised` — the `<loc>` put
+ * through the same `normalizeUrl` that produced `pages.url` — rather than the
+ * published `<loc>` beside it, so a sitemap entry carrying a fragment or
+ * reordered query params is recognised as the page it names. `inSitemap` is
+ * evidence rather than a condition: the finding itself does not depend on it.
  *
  * `failed` is the number of URLs the crawl could not fetch. Their outbound
  * links were never read, so any of them could have linked to a page reported
@@ -149,7 +149,7 @@ async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<
     select p.id, p.url, p.discovered_via,
            exists (
              select 1 from sitemap_urls s
-             where s.crawl_id = ${crawlId} and s.url = p.url
+             where s.crawl_id = ${crawlId} and s.url_normalised = p.url
            ) as in_sitemap,
            count(*) over ()::int as total_matches
     from pages p

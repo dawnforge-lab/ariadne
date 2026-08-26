@@ -24,6 +24,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { robotsRules } from "../../src/rules/query/robots.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
+import { normalised } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -100,9 +101,18 @@ describe("the robots rules against the database", () => {
     return id;
   }
 
+  // `url_normalised` is computed the way the crawl loop computes it: the rule
+  // judges that column, and a helper that left it empty would be testing a
+  // sitemap row no crawl could write.
   async function addSitemapUrls(crawlId: string, urls: string[]): Promise<void> {
     await db.insert(sitemapUrls).values(
-      urls.map((url) => ({ crawlId, url, sitemapSource: `${SITE}/sitemap.xml`, lastmod: null })),
+      urls.map((url) => ({
+        crawlId,
+        url,
+        urlNormalised: normalised(url),
+        sitemapSource: `${SITE}/sitemap.xml`,
+        lastmod: null,
+      })),
     );
   }
 

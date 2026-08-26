@@ -28,7 +28,7 @@
 
 **Interfaces:** `pages` gains `redirect_url_normalised text` (null when no redirect or unresolvable-per-policy); `sitemap_urls` gains `url_normalised text notnull`. Writers populate via `normalizeUrl` (persist for pages; the loop's sitemap persist for sitemap_urls). The published spellings (`redirect_url`, `sitemap_urls.url`) stay untouched as evidence. Every join that previously matched a stored spelling against `pages.url` switches to the normalized column: the redirect walk's recursive join, the four sitemap⋈pages rules, `pages.not-in-sitemap`'s anti-join, orphan's `inSitemap` evidence, `robots.blocks-sitemap-urls`' entry list (evidence keeps the published `<loc>`). The `normalizationSensitive` evidence flags and their pinned harness test are REMOVED (the gap is closed — deleting the flag is the proof). Fixture: add a `<loc>` with a fragment + unsorted params for an existing page and assert it now joins (the case that used to false-positive).
 
-- [ ] Failing tests (the fragment-loc join case; redirect chain through a fragment Location) → migration 0006 (additive) → writers → joins → flag removal → full suite green → commit `feat: normalized join columns for stored URLs — seam closed (P4 opener)`.
+- [x] Failing tests (the fragment-loc join case; redirect chain through a fragment Location) → migration 0006 (additive) → writers → joins → flag removal → full suite green → commit `feat: normalized join columns for stored URLs — seam closed (P4 opener)`.
 
 ---
 

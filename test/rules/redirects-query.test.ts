@@ -15,6 +15,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
 import { MAX_REDIRECT_HOPS, redirectRules } from "../../src/rules/query/redirects.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { normalised } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -91,6 +92,9 @@ describe("redirectRules against the database", () => {
       fetchClass: s.fetchClass,
       statusCode: s.statusCode,
       redirectUrl: s.redirectUrl ?? null,
+      // The published `Location` and the spelling the walk joins on, exactly as
+      // `PageWriter` stores the pair.
+      redirectUrlNormalised: s.redirectUrl === undefined ? null : normalised(s.redirectUrl),
       depth: 1,
       discoveredVia: "link",
     }));
@@ -141,6 +145,36 @@ describe("redirectRules against the database", () => {
         truncated: false,
       });
       expect(await findings("redirect.loop", crawlId)).toHaveLength(0);
+    });
+
+    // A `Location` may carry a fragment, or spell its query string in another
+    // order, and the crawler normalises it before fetching — so the page row
+    // for the target is keyed without the fragment and with the parameters
+    // sorted. The walk follows `redirect_url_normalised`, which is the same
+    // spelling, so the chain continues through the hop instead of stopping
+    // dead at a URL nothing matches and reading as a two-page path.
+    it("walks through a Location carrying a fragment and unsorted parameters", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/f1", fetchClass: "redirect", statusCode: 301, redirectUrl: url("/f2#top") },
+        {
+          path: "/f2",
+          fetchClass: "redirect",
+          statusCode: 301,
+          redirectUrl: url("/f3?b=2&a=1"),
+        },
+        ok("/f3?a=1&b=2"),
+      ]);
+
+      const found = await findings("redirect.chain", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({ pageId: ids.get("/f1"), pageUrl: url("/f1") });
+      expect(found[0]!.evidence).toEqual({
+        chain: [url("/f1"), url("/f2"), url("/f3?a=1&b=2")],
+        length: 2,
+        finalStatus: 200,
+        truncated: false,
+      });
     });
 
     // One hop is a redirect, not a chain: the trailing-slash pattern every CMS

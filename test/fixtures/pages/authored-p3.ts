@@ -550,6 +550,49 @@ const trackedParameterPage: Fixture = {
 };
 
 /**
+ * The page whose sitemap entry is spelled differently from its own URL.
+ *
+ * `/sitemap.xml` publishes `?sort=asc&ref=sitemap#top` for a page the crawl
+ * fetches at `?ref=sitemap&sort=asc`: a fragment on the end and the parameters
+ * in the order a template appended them rather than sorted. `normalizeUrl`
+ * strips the one and sorts the other, so the two are one URL — and the entry
+ * must join the page the crawl created FROM IT.
+ *
+ * Before the normalized join columns existed it did not: the entry read as a
+ * URL the crawl never reached (`sitemap.uncrawled`) and the page as one the
+ * sitemap never listed (`pages.not-in-sitemap`), two findings about a site that
+ * had done nothing wrong. That both are absent from this fixture's exact set —
+ * and that `/sitemap.xml` still publishes the divergent spelling, which the
+ * harness reads out of `sitemap_urls` — is what proves the seam closed.
+ *
+ * The query string is not decoration: sorting only means something with two
+ * parameters to sort. It costs one finding, and the fixture declares it —
+ * `url.parameter-pages-indexable` is what an indexable parameter page naming
+ * itself canonical fires, and this page is exactly that.
+ */
+const sitemapLocVariant: Fixture = {
+  path: "/authored3/loc-variant?ref=sitemap&sort=asc",
+  sitemapLoc: "/authored3/loc-variant?sort=asc&ref=sitemap#top",
+  category: SITEMAP,
+  name: "Page whose <loc> carries a fragment and unsorted parameters",
+  expectedIssues: ["url.parameter-pages-indexable"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "The sitemap entry that spells this address its own way",
+      metaDescription:
+        "The sitemap publishes this page with a fragment on the end and its parameters in another order. It is the same URL, and the crawl fetched it.",
+      bodyHtml: healthyBody({
+        h1: "One page, two spellings, one of them written by the sitemap",
+        lede: "Nothing about this address is wrong. The file that lists it simply writes it differently.",
+        what: "The page answers at a URL carrying two query parameters. The sitemap names it with those parameters in the opposite order and a fragment appended, which is what a template that builds URLs by concatenation tends to emit.",
+        why: "A fragment is never sent to a server and parameter order never changes which page answers, so both spellings address one resource. An audit that compared the published text against the fetched key character by character would announce that the sitemap lists a page nobody crawled and that a crawled page is missing from the sitemap — two faults invented out of punctuation, on a site with neither.",
+        fix: "Compare sitemap entries against crawled URLs on the normalised form of both, and keep the published spelling for the report, because the line somebody edits is the line the file actually contains.",
+      }),
+    })),
+};
+
+/**
  * The one indexable page `/sitemap.xml` does not list.
  *
  * `pages.not-in-sitemap` is data-gated on the crawl holding at least one sitemap
@@ -681,6 +724,7 @@ export const authoredP3Fixtures: Fixture[] = [
   caseVariantUpper,
   caseVariantLower,
   trackedParameterPage,
+  sitemapLocVariant,
   notInSitemap,
   productIncomplete,
   selfServingReviews,

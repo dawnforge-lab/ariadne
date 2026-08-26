@@ -6,23 +6,26 @@
  * joins between `sitemap_urls` — every `<loc>` the walk collected, whether or
  * not the frontier had room for it — and `pages`.
  *
- * ## The join basis, and where it is imprecise
+ * ## The join basis
  *
  * `sitemap_urls.url` is the `<loc>` resolved with `new URL(loc).href` — the
- * spelling the site published. `pages.url` is `normalizeUrl` output — the
+ * spelling the site published — and `pages.url` is `normalizeUrl` output, the
  * frontier key. The two differ in exactly two ways: `normalizeUrl` strips the
- * fragment and sorts query parameters. So a `<loc>` carrying `#section`, or
- * one whose query string is not in sorted order, does not match the `pages`
- * row the crawl created *from that very entry*, and reads here as an entry
- * that was never crawled — and its page reads as one the sitemap never listed.
+ * fragment and sorts query parameters. A `<loc>` carrying `#section`, or one
+ * whose query string is not in sorted order, is therefore the same URL as the
+ * `pages` row the crawl created *from that very entry* spelled differently.
  *
- * The comparison is left exact rather than half-normalised in SQL, because a
- * half-normalisation would fix the fragment case and leave the parameter case
- * looking fixed. The real repair is in the crawl layer — store the `<loc>`'s
- * frontier key alongside the published spelling, or fill `sitemap_urls.page_id`
- * when the entry is enqueued — and it is out of this task's scope. Until then
- * the two rules that could mislead say so in their evidence
- * (`normalizationSensitive`), which is true of any URL carrying a `#` or a `?`.
+ * So the join is on `sitemap_urls.url_normalised`, which the crawl loop writes
+ * beside the published spelling through the same `normalizeUrl` the frontier
+ * uses. Matching the published spelling instead reported such an entry as one
+ * the crawl never reached and its page as one the sitemap never listed: two
+ * findings about a site that had done nothing wrong, on nothing but
+ * punctuation. Every rule below quotes `s.url` in its evidence all the same —
+ * the published `<loc>` is the line of XML somebody edits.
+ *
+ * Rows written before that column existed carry an empty string, which matches
+ * no page and joins to nothing — the same silence they had when the join was
+ * on the published spelling.
  */
 import { sql, type SQL } from "drizzle-orm";
 
@@ -99,7 +102,7 @@ async function joinFindings(
            p.robots_meta, p.x_robots_tag,
            count(*) over ()::int as total_matches
     from sitemap_urls s
-    join pages p on p.crawl_id = ${crawlId} and p.url = s.url
+    join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
     where s.crawl_id = ${crawlId} and ${condition}
     order by s.url
     limit ${URL_FINDING_CAP}`);
@@ -113,11 +116,6 @@ async function joinFindings(
     }),
   );
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
-}
-
-/** True of a URL whose published spelling may differ from its frontier key. */
-function normalizationSensitive(url: string): boolean {
-  return url.includes("#") || url.includes("?");
 }
 
 export const sitemapRules: QueryRule[] = [
@@ -305,7 +303,7 @@ export const sitemapRules: QueryRule[] = [
         select s.url, p.id as page_id, p.fetch_class,
                count(*) over ()::int as total_matches
         from sitemap_urls s
-        left join pages p on p.crawl_id = ${crawlId} and p.url = s.url
+        left join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
         where s.crawl_id = ${crawlId}
           and (p.id is null or p.status_code is null)
         order by s.url
@@ -322,7 +320,6 @@ export const sitemapRules: QueryRule[] = [
             url: row.url,
             attempted: row.page_id !== null,
             ...(row.page_id === null ? {} : { fetchClass: row.fetch_class, statusCode: null }),
-            ...(normalizationSensitive(row.url) ? { normalizationSensitive: true } : {}),
           },
           dedupeKey: row.url,
         }),
@@ -363,7 +360,7 @@ export const sitemapRules: QueryRule[] = [
           and p.is_indexable
           and not exists (
             select 1 from sitemap_urls s
-            where s.crawl_id = ${crawlId} and s.url = p.url
+            where s.crawl_id = ${crawlId} and s.url_normalised = p.url
           )
         order by p.url
         limit ${URL_FINDING_CAP}`);
@@ -372,10 +369,7 @@ export const sitemapRules: QueryRule[] = [
         queryFinding(NOT_IN_SITEMAP, {
           pageId: row.id,
           pageUrl: row.url,
-          evidence: {
-            pageUrl: row.url,
-            ...(normalizationSensitive(row.url) ? { normalizationSensitive: true } : {}),
-          },
+          evidence: { pageUrl: row.url },
           dedupeKey: row.url,
         }),
       );

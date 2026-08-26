@@ -17,7 +17,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlSummary } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, issues, pages } from "../../src/db/schema.js";
+import { crawls, hreflang, issues, pages, sitemapUrls } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { THIN_WORDS } from "../../src/rules/page/on-page.js";
 import { SOFT_404_WORDS } from "../../src/rules/query/content.js";
@@ -517,6 +517,41 @@ describe("the fixture site end to end", () => {
       "/deep/6",
       "/deep/7",
     ]);
+  });
+
+  it("a <loc> spelled with a fragment and unsorted parameters joins its own page", async () => {
+    // The end-to-end half of the normalization seam. `/authored3/loc-variant`
+    // is published by `/sitemap.xml` as `?sort=asc&ref=sitemap#top` and fetched
+    // by the crawl as `?ref=sitemap&sort=asc`: one URL, two spellings, written
+    // by two different parts of this system. Read from the tables rather than
+    // asserted from the fixture constants, so what is proved is what the
+    // crawler stored.
+    const path = "/authored3/loc-variant?ref=sitemap&sort=asc";
+    const published = `${app.base}/authored3/loc-variant?sort=asc&ref=sitemap#top`;
+    const page = pageByPath.get(path);
+    if (page === undefined) throw new Error("the loc-variant fixture was never crawled");
+
+    // The published spelling is stored verbatim — the `<loc>` is evidence, and
+    // normalising the column would destroy the line a client goes and edits —
+    // and the join column beside it is the frontier key of the page above.
+    const [entry] = await db
+      .select()
+      .from(sitemapUrls)
+      .where(and(eq(sitemapUrls.crawlId, summary.crawlId), eq(sitemapUrls.url, published)));
+    if (entry === undefined) throw new Error(`no sitemap_urls row for ${published}`);
+    expect(entry.urlNormalised).toBe(page.url);
+
+    // And so neither of the two findings that spelling used to invent exists.
+    // They are looked for in two places because they land in two: an entry that
+    // matches no page row is site-scoped and reaches `siteFindings`, while
+    // `pages.not-in-sitemap` names the page and lands on its path.
+    expect([...(issuesByPath.get(path) ?? new Set<string>())]).not.toContain(
+      "pages.not-in-sitemap",
+    );
+    const uncrawled = (siteFindings.get("sitemap.uncrawled") ?? []).map(
+      (d) => (d as { url: string }).url,
+    );
+    expect(uncrawled).not.toContain(published);
   });
 
   it("the paginated series proves all three pagination rules", () => {

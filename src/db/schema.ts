@@ -54,6 +54,17 @@ export const pages = pgTable("pages", {
   fetchClass: text("fetch_class").notNull(),   // ok|redirect|client_error|server_error|blocked|timeout|network_error|non_html|too_large
   contentType: text("content_type"),
   redirectUrl: text("redirect_url"),
+  // The same target as `redirect_url`, put through `normalizeUrl` — the
+  // spelling `pages.url` is keyed by, and therefore the only spelling a join
+  // to `pages` can use. `redirect_url` keeps the resolved `Location` verbatim,
+  // because that is what the server sent and what the evidence quotes; a
+  // `Location` carrying a fragment or unsorted query params is the same URL as
+  // the page row the crawl created from it, and only this column says so.
+  //
+  // Null in three cases, and they are one fact: there is no crawlable target.
+  // No redirect at all, a 3xx with no usable `Location`, and a target the URL
+  // policy refused all leave `redirect_url` null too.
+  redirectUrlNormalised: text("redirect_url_normalised"),
   depth: integer("depth").notNull(),
   discoveredVia: text("discovered_via").notNull(), // seed|link|sitemap|redirect
   title: text("title"),
@@ -195,11 +206,34 @@ export const structuredData = pgTable("structured_data", {
 
 export const sitemapUrls = pgTable("sitemap_urls", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  // The `<loc>` as the site published it, resolved to absolute and no further.
+  // It stays the primary key and the evidence: the report quotes it because it
+  // is the line of XML somebody edits.
   url: text("url").notNull(),
+  // The same entry put through `normalizeUrl` — fragment stripped, query
+  // parameters sorted — which is the spelling `pages.url` is keyed by, and
+  // therefore the only spelling that can join the two tables. A `<loc>`
+  // reading `/x?b=2&a=1#top` and the page row the crawl created from it
+  // (`/x?a=1&b=2`) are one URL, and this column is where they meet.
+  //
+  // NOT NULL with an empty-string default, which is for rows written before
+  // this column existed and for nothing else: the writer always computes a
+  // value (and throws if it cannot). An empty string matches no `pages.url`,
+  // so a pre-Phase-4 crawl's entries simply do not join — exactly what they did
+  // when the join was on the published spelling.
+  urlNormalised: text("url_normalised").notNull().default(""),
   sitemapSource: text("sitemap_source").notNull(),
   lastmod: text("lastmod"),
   pageId: text("page_id"),
-}, (t) => [primaryKey({ columns: [t.crawlId, t.url] })]);
+}, (t) => [
+  primaryKey({ columns: [t.crawlId, t.url] }),
+  // The join column of five rules (the four sitemap ⋈ pages rules and
+  // `pages.not-in-sitemap`'s anti-join, plus `links.orphan`'s membership test).
+  // The primary key served those joins while they matched on `url`; this index
+  // is what keeps a 50k-entry sitemap off a sequential scan now that they match
+  // on the normalised spelling.
+  index("sitemap_urls_crawl_normalised").on(t.crawlId, t.urlNormalised),
+]);
 
 export const urlParams = pgTable("url_params", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),

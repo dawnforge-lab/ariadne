@@ -42,22 +42,42 @@ interface WalkRow extends Record<string, unknown> {
   depth: number;
   /** True when the last URL in `chain` had already been visited by this walk. */
   is_cycle: boolean;
-  /** Where the terminal page redirects to, or null when it answers for itself. */
+  /**
+   * Where the terminal page redirects to AS THE SERVER SPELLED IT, or null when
+   * it answers for itself. Evidence only — every comparison uses the normalised
+   * twin below, because `chain` is made of `pages.url` frontier keys.
+   */
   redirect_url: string | null;
+  /**
+   * The same target through `normalizeUrl`: the spelling `pages.url` is keyed
+   * by, and therefore the walk's join key, its cycle test and its
+   * "was this crawled" test. Null exactly when `redirect_url` is.
+   */
+  redirect_url_normalised: string | null;
   /** The terminal page's own status code. */
   status_code: number | null;
-  /** Whether `redirect_url` has a `pages` row — i.e. whether the walk could have gone on. */
+  /**
+   * Whether `redirect_url_normalised` has a `pages` row — i.e. whether the walk
+   * could have gone on.
+   */
   tail_crawled: boolean;
 }
 
 /**
  * Walk the redirect graph forward from a set of seed URLs, in SQL.
  *
- * The recursion follows `pages.redirect_url` to the `pages` row for that URL,
- * carrying the visited URLs along as an array so a revisit is detectable in the
- * same step that makes it (`p.url = any(w.chain)`), and stopping at
- * `MAX_REDIRECT_HOPS`. Non-redirect pages are visited too: the 200 (or the 404)
- * a chain lands on is the most useful thing the evidence can name.
+ * The recursion follows `pages.redirect_url_normalised` to the `pages` row for
+ * that URL, carrying the visited URLs along as an array so a revisit is
+ * detectable in the same step that makes it (`p.url = any(w.chain)`), and
+ * stopping at `MAX_REDIRECT_HOPS`. Non-redirect pages are visited too: the 200
+ * (or the 404) a chain lands on is the most useful thing the evidence can name.
+ *
+ * The join is on the NORMALISED target, never on the published one.
+ * `pages.url` is `normalizeUrl` output — fragment stripped, query params sorted
+ * — so a `Location` reading `/b#section` matches no row under its own spelling
+ * while naming a page the crawl certainly fetched. Joining the published
+ * spelling made such a chain stop dead one hop in: a false negative in both
+ * rules, invisible because a chain that ends is what most chains do.
  *
  * Only the deepest row per seed comes back — the terminal state of that walk.
  * Intermediate rows exist inside the CTE and are discarded by Postgres, so the
@@ -68,22 +88,24 @@ async function walkFrom(db: Db, crawlId: string, seedUrls: SQL): Promise<WalkRow
     with recursive seeds as (${seedUrls}),
     walk as (
       select s.url as head, p.url as url, p.redirect_url as redirect_url,
+             p.redirect_url_normalised as redirect_url_normalised,
              p.status_code as status_code, 1 as depth,
              array[p.url] as chain, array[p.id] as ids, false as is_cycle
       from seeds s
       join pages p on p.crawl_id = ${crawlId} and p.url = s.url
       union all
-      select w.head, p.url, p.redirect_url, p.status_code, w.depth + 1,
+      select w.head, p.url, p.redirect_url, p.redirect_url_normalised,
+             p.status_code, w.depth + 1,
              w.chain || p.url, w.ids || p.id, p.url = any(w.chain)
       from walk w
-      join pages p on p.crawl_id = ${crawlId} and p.url = w.redirect_url
+      join pages p on p.crawl_id = ${crawlId} and p.url = w.redirect_url_normalised
       where w.depth < ${MAX_REDIRECT_HOPS} and not w.is_cycle
     )
     select w1.head, w1.chain, w1.ids, w1.depth, w1.is_cycle,
-           w1.redirect_url, w1.status_code,
+           w1.redirect_url, w1.redirect_url_normalised, w1.status_code,
            exists (
              select 1 from pages q
-             where q.crawl_id = ${crawlId} and q.url = w1.redirect_url
+             where q.crawl_id = ${crawlId} and q.url = w1.redirect_url_normalised
            ) as tail_crawled
     from walk w1
     where w1.depth = (select max(w2.depth) from walk w2 where w2.head = w1.head)`);
@@ -138,7 +160,7 @@ async function redirectWalk(db: Db, crawlId: string): Promise<RedirectWalk> {
           select 1 from pages q
           where q.crawl_id = ${crawlId}
             and q.fetch_class = 'redirect'
-            and q.redirect_url = p.url)`,
+            and q.redirect_url_normalised = p.url)`,
   );
 
   const visited = new Set<string>();
@@ -175,15 +197,22 @@ async function redirectWalk(db: Db, crawlId: string): Promise<RedirectWalk> {
  *    cycle of k, with p + k exactly at the cap, would otherwise be reported as
  *    a truncated chain: a warning where the truth is a critical nobody can
  *    reach the content through.
+ *
+ * The second test compares the NORMALISED target against `chain`, whose members
+ * are `pages.url`. Comparing the published `Location` would miss a loop closed
+ * by a hop whose target carries a fragment — the loop would be reported as a
+ * chain, which is a warning where the truth is a critical.
  */
 function cycleOf(row: WalkRow): string[] | null {
   if (row.is_cycle) {
     const repeated = row.chain[row.chain.length - 1]!;
     return row.chain.slice(row.chain.indexOf(repeated));
   }
-  if (row.redirect_url === null) return null;
-  const closesAt = row.chain.indexOf(row.redirect_url);
-  return closesAt === -1 ? null : [...row.chain.slice(closesAt), row.redirect_url];
+  if (row.redirect_url_normalised === null) return null;
+  const closesAt = row.chain.indexOf(row.redirect_url_normalised);
+  return closesAt === -1
+    ? null
+    : [...row.chain.slice(closesAt), row.redirect_url_normalised];
 }
 
 /**
@@ -191,7 +220,7 @@ function cycleOf(row: WalkRow): string[] | null {
  * closing a loop — so what happens past the cap is genuinely unknown.
  */
 function hitCapUnresolved(row: WalkRow): boolean {
-  return row.redirect_url !== null && row.tail_crawled && cycleOf(row) === null;
+  return row.redirect_url_normalised !== null && row.tail_crawled && cycleOf(row) === null;
 }
 
 /**
@@ -238,6 +267,11 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
     // The terminal page's target is either an uncrawled URL or the hop the cap
     // stopped us following. Either way it is part of the path and belongs in
     // the evidence, even though there is no page row behind it.
+    //
+    // Quoted as the SERVER spelled it, unlike the hops before it: those are
+    // pages the crawl fetched and are named by their frontier key, while this
+    // one is a `Location` header nothing was fetched under. The walk itself
+    // followed the normalised twin (see `walkFrom`).
     const chain = tail === null ? row.chain : [...row.chain, tail];
     const hops = tail === null ? row.chain.length - 1 : row.chain.length;
     if (hops < CHAIN_HOPS) continue;

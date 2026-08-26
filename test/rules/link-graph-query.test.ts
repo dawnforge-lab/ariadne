@@ -21,7 +21,7 @@ import { crawls, frontier, links, pages, sitemapUrls } from "../../src/db/schema
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { linkGraphRules } from "../../src/rules/query/link-graph.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
-import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
+import { normalised, writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -218,6 +218,7 @@ describe("links.orphan against the database", () => {
     await db.insert(sitemapUrls).values({
       crawlId,
       url: url("/from-sitemap"),
+      urlNormalised: normalised(url("/from-sitemap")),
       sitemapSource: `${SITE}/sitemap.xml`,
       lastmod: null,
     });
@@ -241,6 +242,7 @@ describe("links.orphan against the database", () => {
     await db.insert(sitemapUrls).values({
       crawlId,
       url: url("/from-sitemap"),
+      urlNormalised: normalised(url("/from-sitemap")),
       sitemapSource: `${SITE}/sitemap.xml`,
       lastmod: null,
     });

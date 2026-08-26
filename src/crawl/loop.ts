@@ -908,6 +908,18 @@ function emptyWriterStats(): PageWriterStats {
  * Write the sitemap as it was declared — every entry, not only the ones the
  * frontier had room for. "The site says these URLs exist" and "we crawled
  * them" are different facts, and the coverage rules need both.
+ *
+ * Each row carries the entry twice: `url` is the `<loc>` as the site published
+ * it, which is what the report quotes, and `url_normalised` is that same entry
+ * through `normalizeUrl` — the spelling `pages.url` is keyed by, and the only
+ * one a join to `pages` can use. A `<loc>` carrying a fragment or unsorted
+ * query params names the very page the crawl fetched from it, and without the
+ * second column the sitemap rules would report it as uncrawled and its page as
+ * unlisted (see the sitemap rules' module header).
+ *
+ * `discover()` policy-checks every entry before it gets here, so a `<loc>` that
+ * will not normalise is this engine's defect and not a site's — it throws
+ * rather than writing a row that could never join (hard rule 7).
  */
 async function persistSitemap(
   db: Db,
@@ -916,12 +928,19 @@ async function persistSitemap(
 ): Promise<void> {
   const entries = discovery.sitemapEntries;
   for (let i = 0; i < entries.length; i += SITEMAP_BATCH) {
-    const batch = entries.slice(i, i + SITEMAP_BATCH).map((entry) => ({
-      crawlId,
-      url: entry.url,
-      sitemapSource: entry.source,
-      lastmod: entry.lastmod,
-    }));
+    const batch = entries.slice(i, i + SITEMAP_BATCH).map((entry) => {
+      const normalised = normalizeUrl(entry.url);
+      if (normalised === null) {
+        throw new Error(`persistSitemap: cannot normalise sitemap entry ${entry.url}`);
+      }
+      return {
+        crawlId,
+        url: entry.url,
+        urlNormalised: normalised,
+        sitemapSource: entry.source,
+        lastmod: entry.lastmod,
+      };
+    });
     // discover() dedupes by URL, so a conflict here means a resume re-reading
     // the same sitemap. The first read's row stands.
     await db.insert(sitemapUrls).values(batch).onConflictDoNothing();
