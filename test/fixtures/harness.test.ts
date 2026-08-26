@@ -832,8 +832,21 @@ describe("the fixture site end to end", () => {
     }
 
     const exempt = new Set(SKIP_HARNESS_CLAIMS);
+    // METRIC rules are skipped by KIND, not exempted by id, and the reason is
+    // categorical rather than fixture-specific: a metric rule writes rows to
+    // the `metrics` table and never writes an issue, so "fires on a fixture"
+    // is a question that cannot be asked of one. Listing them in
+    // SKIP_HARNESS_CLAIMS would be a lie of a different shape — that paragraph
+    // is for rules a page COULD provoke but this site cannot.
+    //
+    // They are not left unproven: `test/rules/link-metrics.test.ts` asserts
+    // every number against a hand-computed crawl, and Task 7 adds the harness's
+    // own metric assertion — the exact metric-id set present after `runRules`,
+    // with three site rows pinned to hand-derived fixture-site values. That is
+    // the coverage net for this kind.
     const unfired = registry
       .all()
+      .filter((rule) => rule.kind !== "metric")
       .map((rule) => rule.id)
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();

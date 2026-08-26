@@ -143,12 +143,10 @@ describe("check universe", () => {
 describe("check annotations", () => {
   it("exports the render-gated and metric-pending lists", () => {
     expect(RENDER_CHECKS).toEqual(["CHECK-01", "CHECK-02", "CHECK-34"]);
-    expect(METRIC_PENDING_CHECKS).toEqual([
-      "CHECK-08",
-      "CHECK-29",
-      "CHECK-33",
-      "CHECK-33b",
-    ]);
+    // CHECK-33 and CHECK-33b left the list with the link-graph metrics that
+    // claim them; the two below wait on the sitemap-structure and
+    // URL-parameter metrics.
+    expect(METRIC_PENDING_CHECKS).toEqual(["CHECK-08", "CHECK-29"]);
   });
 
   it("every annotated check is part of the crawl-derived universe", () => {

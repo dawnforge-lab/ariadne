@@ -48,13 +48,17 @@ describe("buildRegistry", () => {
     expect(ids).toContain("host.http-serves-200");
     expect(ids).toContain("content.near-duplicate");
     expect(ids).toContain("schema.product-incomplete");
-    expect(ids.length).toBe(64);
+    // And Phase 4's first metric rules.
+    expect(ids).toContain("inlinks.distribution");
+    expect(ids).toContain("structure.depth-distribution");
+    expect(ids.length).toBe(68);
   });
 
-  it("registers both kinds the runner drives", () => {
+  it("registers every kind the runner drives", () => {
     const registry = buildRegistry();
     expect(registry.byKind("page").length).toBeGreaterThan(0);
     expect(registry.byKind("query").length).toBeGreaterThan(0);
+    expect(registry.byKind("metric").length).toBeGreaterThan(0);
   });
 });
 
@@ -338,8 +342,10 @@ describe("runRules against the database", () => {
 
   /**
    * A metric rule built for a test: the registry metadata a rule cannot ship
-   * without, wrapped around a body the test controls. No real metric rules
-   * exist yet, so the metric phase is exercised through stubs.
+   * without, wrapped around a body the test controls. Real metric rules exist
+   * now (the link-graph four), but what is under test here is the PHASE — the
+   * delete-then-insert, the validation, the abort — so it is driven through
+   * stubs whose rows the test chooses, not through a rule with its own SQL.
    */
   function mkMetricRule(id: string, run: MetricRule["run"]): MetricRule {
     return {
@@ -454,8 +460,12 @@ describe("runRules against the database", () => {
     expect(summary.byRule["links.orphan"]).toBeGreaterThan(0);
     expect(written.length).toBeGreaterThan(0);
     expect(summary.findings).toBe(written.length);
-    expect(await readMetrics(crawlId)).toEqual({
-      "test.issue-count|site|": { n: written.length },
+    // The stub's row, asserted on its own key: `buildRegistry()` now ships
+    // real metric rules too, and their rows are in this map beside it. What
+    // this test is about is the ORDER — the stub counted the issues AFTER the
+    // page and query phases had written them.
+    expect((await readMetrics(crawlId))["test.issue-count|site|"]).toEqual({
+      n: written.length,
     });
   });
 
@@ -601,11 +611,21 @@ describe("runRules against the database", () => {
 
   // A registry with no metric rules still reports the phase, so a run's summary
   // has the same shape whether or not any metric ran.
+  //
+  // Built by SUBTRACTION from the shipped ruleset, because that ruleset now
+  // registers metric rules: the case this asserts is a registry someone
+  // assembles without them, not the engine's own.
   it("reports an empty metric phase when no metric rule is registered", async () => {
     const crawlId = await newCrawl();
     await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
 
-    const summary = await runRules(db, crawlId, buildRegistry());
+    const noMetrics = new Registry();
+    for (const rule of buildRegistry().all()) {
+      if (rule.kind !== "metric") noMetrics.register(rule);
+    }
+    expect(noMetrics.byKind("metric")).toHaveLength(0);
+
+    const summary = await runRules(db, crawlId, noMetrics);
     expect(summary.metrics).toBe(0);
     expect(summary.byMetric).toEqual({});
   });

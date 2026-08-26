@@ -8,6 +8,11 @@
  * (per docs/crawl-audit-build-plan.md P2-T2); howToFix authored where neither
  * upstream provides one.
  *
+ * The file carries the METRIC rules' copy too, at the bottom, under its own
+ * heading: a metric's title labels a table rather than naming a fault, but the
+ * lookup is by rule id and there is one of those per rule kind, so one map
+ * serves all three. The heading states how the three fields are read there.
+ *
  * Every string here is client-facing: it reaches a report or an action plan
  * verbatim. Two standing constraints on edits:
  *
@@ -568,5 +573,54 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "This page's Organization or LocalBusiness markup carries a rating or reviews about the business itself. Google's review-snippet policy treats ratings an entity publishes about itself as self-serving and ignores them, so the stars never appear in search results even though the markup is technically valid. It is not a penalty and the reviews may be perfectly genuine — the markup simply does not earn a rich result where it is.",
     howToFix:
       "Move the ratings to something a review can legitimately be about: Product, Service, Book, Course, Recipe and similar types all support review snippets, so a rating on the page for what you sell counts where the same rating on your company block does not. Keep the customer reviews visible on the page either way, and let independent review platforms carry the business-level rating.",
+  },
+
+  // ------------------------------------------------------------------ metrics
+  //
+  // A metric's copy answers three different questions from an issue's, and the
+  // fields are reused rather than renamed so one lookup serves every rule kind:
+  //
+  //   title       — the LABEL OF THE TABLE the metric renders as.
+  //   explanation — WHAT THE NUMBERS MEAN: what was counted, over which pages,
+  //                 and what was deliberately excluded. A reader who quotes the
+  //                 table must be able to say what it measured from this text
+  //                 alone.
+  //   howToFix    — HOW TO READ AND ACT ON IT. A metric is not a fault, so
+  //                 there is nothing to repair; what belongs here is which end
+  //                 of the table to look at first and what a number there
+  //                 implies.
+  //
+  // Same accuracy rule as everywhere above, and it bites harder here: a number
+  // reaches a client as a fact. Say what was measured, not what it suggests.
+  // The list caps quoted in words below are the rules' own constants
+  // (`EXTREMES_LIST_CAP`, `SOURCE_TYPE_CAP` in src/rules/metric/link-metrics.ts)
+  // and the copy test pins them.
+  "inlinks.distribution": {
+    title: "Internal links per page",
+    explanation:
+      "How many other pages link to each of this site's indexable pages, summarised as a distribution: how many pages were measured, the smallest and largest number of inbound links, the mean, and the quartiles. A page is counted once per linking page, so being named in both the header and the footer of one page is one inbound link; a link a page makes to itself is not counted at all. Pages nothing links to are included as zero rather than dropped — they are what the bottom of the table is about. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+    howToFix:
+      "Read the bottom quartile first: those pages are barely supported by the site's own linking, and a page with no inbound links at all is one search engines will rarely recrawl. Then compare the per-type rows with the site row — a template whose median sits well below the site's is a template the internal linking has forgotten. The top of the distribution shows where internal link equity is concentrated, which is usually the cheapest place to add a link to a page from the bottom.",
+  },
+  "inlinks.extremes": {
+    title: "Most and least linked pages",
+    explanation:
+      "The twenty indexable pages with the fewest inbound internal links and the twenty with the most, each with its count, so the ends of the distribution can be quoted as URLs rather than as numbers. Inbound links are counted exactly as in the internal-links-per-page table: one per linking page, never a page's link to itself. Ties are broken by URL, so the same crawl always names the same pages. On a site with fewer than twenty indexable pages both lists name every page, in opposite orders.",
+    howToFix:
+      "Check the bottom list against what the site is there to sell or rank: a commercially important page in that list is the finding, while an archive or a filter page there is expected. The top list says where the site's internal linking currently points — usually a navigation block — and those pages are the cheapest place to add a link to something from the bottom list.",
+  },
+  "inlinks.sources-by-type": {
+    title: "Where each template's inbound links come from",
+    explanation:
+      "For each type of page on the site, how many internal links reach it from each other type — category pages linking to products, blog posts linking to categories, and so on. Links are counted once per pair of pages, and a page's link to itself is not counted. Destinations are indexable pages that returned 200; the linking side is every page the crawl read, because a page kept out of the index still passes a link. Pages the crawler could not assign a template to appear as (untyped) on either side. Where a type is linked to from more than twenty-five other types, the remainder are summed into a single 'other' entry. A type shown with no sources receives no internal links from anywhere on this site.",
+    howToFix:
+      "Read each row as a sentence about the site's structure — 'product pages are linked to by category pages and by nothing else'. A commercially important type reached from only one other type depends entirely on that template being crawled; a type with no sources at all is reachable only from the sitemap or from outside. Where editorial pages link to nothing commercial, that is an internal linking opportunity rather than a fault to repair.",
+  },
+  "structure.depth-distribution": {
+    title: "Click depth from the start of the crawl",
+    explanation:
+      "How many links from where the crawl started each indexable page sits, summarised as a distribution: how many pages were measured, the shallowest and deepest, the mean, and the quartiles. Depth is measured from the crawl's starting URL, so it is the site's own home page unless the crawl was pointed somewhere else. Only pages that returned 200 and are indexable are measured — a buried noindex page costs nothing. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+    howToFix:
+      "Read the upper quartiles: pages deep in the structure are crawled less often and receive less internal link equity, so a template whose median depth is high is one whose pages compete from behind. Where that template matters commercially, shorten the path to it — a hub, a category page or a navigation entry — rather than treating each deep page individually.",
   },
 };

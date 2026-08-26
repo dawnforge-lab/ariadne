@@ -13,6 +13,10 @@ import {
   SOFT_404_WORDS,
 } from "../../src/rules/query/content.js";
 import { BREADCRUMB_PAGE_FLOOR } from "../../src/rules/query/structured-data.js";
+import {
+  EXTREMES_LIST_CAP,
+  SOURCE_TYPE_CAP,
+} from "../../src/rules/metric/link-metrics.js";
 
 /**
  * The content copy spells its distance out in words, so the threshold pin below
@@ -107,7 +111,20 @@ const PHASE_3_RULE_IDS = [
   "schema.self-serving-reviews",
 ];
 
-const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
+/**
+ * The metric rules of the Phase 4 tables. Same contract as the two lists above
+ * — copy lands with the rule — and the same reason to keep listing them by
+ * hand: a metric that shipped without copy would render as a table with no
+ * label saying what its numbers are.
+ */
+const PHASE_4_METRIC_IDS = [
+  "inlinks.distribution",
+  "inlinks.extremes",
+  "inlinks.sources-by-type",
+  "structure.depth-distribution",
+];
+
+const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS, ...PHASE_4_METRIC_IDS];
 
 describe("issue copy", () => {
   it("throws on an unknown rule id", () => {
@@ -338,6 +355,28 @@ describe("issue copy", () => {
     expect(c.explanation).toMatch(/not a penalty/i);
     const overclaim = /fake|fraudulent|fabricat|manual action|penalis|penaliz|will be penal/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  });
+
+  // The metric copy quotes both list caps in words, and both are the rules'
+  // own constants. Pinned the way the on-page thresholds are: a cap that moves
+  // fails here until the prose moves with it.
+  it("quotes the list caps the link metrics actually apply", () => {
+    expect(EXTREMES_LIST_CAP).toBe(20);
+    expect(ISSUE_COPY["inlinks.extremes"]!.explanation).toContain("twenty");
+    expect(SOURCE_TYPE_CAP).toBe(25);
+    expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain("twenty-five");
+  });
+
+  // A metric states what was counted; it does not accuse the site of anything.
+  // "Fix" language in a table's copy would turn a distribution into a fault
+  // list, and the numbers at the bottom of a distribution are frequently fine.
+  it("the metric copy describes a measurement rather than a defect", () => {
+    for (const id of PHASE_4_METRIC_IDS) {
+      const c = ISSUE_COPY[id]!;
+      const asFault =
+        /this (?:is a|indicates a) (?:problem|fault|error)|must be fixed|you must fix|is broken|penalis|penaliz/i;
+      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(asFault);
+    }
   });
 
   it("headings.h1-multiple does not claim a ranking penalty", () => {
