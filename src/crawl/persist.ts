@@ -408,16 +408,34 @@ export class PageWriter {
 }
 
 /**
+ * `none` as a whole directive — Google's shorthand for "noindex, nofollow".
+ * Bounded on both sides because the directive list is comma- and
+ * space-delimited: a substring test would read "nonevent" as a directive and
+ * drop the page out of the index.
+ */
+const NONE_DIRECTIVE = /(?:^|[\s,])none(?:[\s,]|$)/i;
+
+/** Whether one robots directive string asks for the page to stay out of the index. */
+function saysNoindex(value: string | null): boolean {
+  return /noindex/i.test(value ?? "") || NONE_DIRECTIVE.test(value ?? "");
+}
+
+/**
  * Indexability as the checklist defines it: a 200 that fetched cleanly and is
  * not told to stay out of the index by either robots channel. Anything else —
  * a redirect, a 404, a blocked page, a page with no HTML — is not indexable,
  * which is why the fetch class is part of the test and not just the status.
+ *
+ * MIRRORED BY `saysNoindex` (src/rules/page/indexability.ts), which asks the
+ * same question of the stored columns when the rules run. The two must agree —
+ * a page the rule layer calls noindex and this column calls indexable is a
+ * contradiction the report cannot resolve. Change one, change the other.
  */
 function isIndexable(fetch: FetchResult, analysis: PageAnalysis | null): boolean {
   return (
     fetch.statusCode === 200 &&
     fetch.fetchClass === "ok" &&
-    !/noindex/i.test(analysis?.robotsMeta ?? "") &&
-    !/noindex/i.test(fetch.xRobotsTag ?? "")
+    !saysNoindex(analysis?.robotsMeta ?? null) &&
+    !saysNoindex(fetch.xRobotsTag)
   );
 }

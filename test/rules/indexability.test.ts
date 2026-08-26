@@ -98,6 +98,26 @@ describe("indexability.noindex", () => {
     }
   });
 
+  // `none` is Google's documented shorthand for "noindex, nofollow", so a page
+  // carrying it is out of the index exactly as if it had said noindex.
+  it("treats the `none` directive as noindex, in either source", () => {
+    for (const robotsMeta of ["none", "NONE", "none, noarchive", "max-snippet:-1,none"]) {
+      expect(rule("indexability.noindex").run(mkPage({ robotsMeta })), robotsMeta)
+        .toHaveLength(1);
+    }
+    expect(rule("indexability.noindex").run(mkPage({ xRobotsTag: "none" }))).toHaveLength(1);
+  });
+
+  // `none` is matched as a whole token, never as a substring: a directive list
+  // is comma- and space-delimited, and a word that merely contains "none" is
+  // not the directive.
+  it("does not read `none` inside a longer word as the directive", () => {
+    for (const robotsMeta of ["nonevent", "unnone", "nonesuch, noarchive", "none-such"]) {
+      expect(rule("indexability.noindex").run(mkPage({ robotsMeta })), robotsMeta)
+        .toHaveLength(0);
+    }
+  });
+
   it("is silent on directives that do not say noindex", () => {
     for (const robotsMeta of ["index, follow", "nofollow", "noarchive", "", null]) {
       expect(rule("indexability.noindex").run(mkPage({ robotsMeta })), String(robotsMeta))
@@ -139,6 +159,19 @@ describe("indexability.meta-header-conflict", () => {
     expect(
       rule("indexability.meta-header-conflict").run(
         mkPage({ robotsMeta: "noindex", xRobotsTag: "noindex, nofollow" }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("counts a `none` directive as the noindex side of a conflict", () => {
+    expect(
+      rule("indexability.meta-header-conflict").run(
+        mkPage({ robotsMeta: "none", xRobotsTag: "index, follow" }),
+      ),
+    ).toHaveLength(1);
+    expect(
+      rule("indexability.meta-header-conflict").run(
+        mkPage({ robotsMeta: "none", xRobotsTag: "noindex" }),
       ),
     ).toHaveLength(0);
   });

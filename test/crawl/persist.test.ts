@@ -194,6 +194,29 @@ describe("PageWriter", () => {
         makeAnalysis(),
         false,
       ],
+      // `none` is Google's shorthand for "noindex, nofollow". The page is out of
+      // the index, so is_indexable must say so — and the rule layer's
+      // `saysNoindex` agrees (see src/rules/page/indexability.ts).
+      [
+        `${SITE}/meta-none`,
+        makeFetch(`${SITE}/meta-none`),
+        makeAnalysis({ robotsMeta: "none" }),
+        false,
+      ],
+      [
+        `${SITE}/header-none`,
+        makeFetch(`${SITE}/header-none`, { xRobotsTag: "NONE, noarchive" }),
+        makeAnalysis(),
+        false,
+      ],
+      // ...matched as a whole token only: a word that merely contains "none" is
+      // not the directive, and the page stays indexable.
+      [
+        `${SITE}/meta-nonevent`,
+        makeFetch(`${SITE}/meta-nonevent`),
+        makeAnalysis({ robotsMeta: "nonevent" }),
+        true,
+      ],
       [
         `${SITE}/404`,
         makeFetch(`${SITE}/404`, {

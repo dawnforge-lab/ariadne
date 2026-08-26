@@ -7,6 +7,7 @@ import {
   TITLE_MAX,
   TITLE_MIN,
 } from "../../src/rules/page/on-page.js";
+import { DEEP_DEPTH, SLOW_MS } from "../../src/rules/page/technical.js";
 
 /**
  * Every rule id defined by the Phase 2 rule tables (plan tasks 4-6). Kept here
@@ -83,13 +84,15 @@ describe("issue copy", () => {
     expect(ISSUE_COPY["content.thin"]!.explanation).toContain(`${THIN_WORDS} words`);
   });
 
-  // TODO(Task 6): the slow-response and depth constants land with the technical
-  // rules. Re-point these at the imported constants then; the literal substrings
-  // are a placeholder pin until they exist.
-  it("quotes the technical thresholds", () => {
-    expect(ISSUE_COPY["performance.slow-response"]!.explanation).toContain("1500ms");
-    expect(ISSUE_COPY["structure.deep-page"]!.explanation).toContain(
-      "5 links deep",
+  // Asserted against the rule constants, like the on-page thresholds above, so
+  // the prose cannot drift from the number the rule fires on. Word-bounded:
+  // a bare `toContain("5 links deep")` would also pass against "15 links deep".
+  it("quotes the technical thresholds the rules actually use", () => {
+    expect(ISSUE_COPY["performance.slow-response"]!.explanation).toMatch(
+      new RegExp(`\\b${SLOW_MS}ms\\b`),
+    );
+    expect(ISSUE_COPY["structure.deep-page"]!.explanation).toMatch(
+      new RegExp(`\\b${DEEP_DEPTH} links deep\\b`),
     );
   });
 

@@ -9,17 +9,30 @@ function present(value: string | null): value is string {
 }
 
 /**
- * Whether a robots directive string asks for noindex. Substring match, because
- * the directive arrives as a comma list ("max-snippet:-1, noindex, nofollow")
- * and the value is stored verbatim.
+ * `none` as a whole directive: the list is comma- and space-delimited, so the
+ * token has to be bounded on both sides. A substring test would read "nonevent"
+ * as a directive and hide the page from every rule below.
+ */
+const NONE_DIRECTIVE = /(?:^|[\s,])none(?:[\s,]|$)/i;
+
+/**
+ * Whether a robots directive string asks for noindex. Substring match for
+ * `noindex` itself, because the directive arrives as a comma list
+ * ("max-snippet:-1, noindex, nofollow") and the value is stored verbatim.
  *
- * Deliberately literal: `none` is Google's shorthand for "noindex, nofollow"
- * but no other engine documents it the same way, and this rule reports what the
- * page said, not what one engine would infer. Exported so the canonical rules
- * ask the same question rather than growing a second definition of "noindex".
+ * `none` counts too: it is Google's shorthand for "noindex, nofollow", and a
+ * page carrying it is out of the index just as surely as one that spelled the
+ * directive out. Exported so the canonical rules ask the same question rather
+ * than growing a second definition of "noindex".
+ *
+ * MIRRORED IN `isIndexable` (src/crawl/persist.ts), which stamps
+ * `pages.is_indexable` at crawl time from the same two robots sources. The two
+ * must agree — a page this function calls noindex and that column calls
+ * indexable is a contradiction the report cannot resolve. Change one, change
+ * the other.
  */
 export function saysNoindex(value: string | null): boolean {
-  return present(value) && /noindex/i.test(value);
+  return present(value) && (/noindex/i.test(value) || NONE_DIRECTIVE.test(value));
 }
 
 /** Whether either robots source on this page asks for noindex. */
