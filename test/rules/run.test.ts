@@ -48,10 +48,13 @@ describe("buildRegistry", () => {
     expect(ids).toContain("host.http-serves-200");
     expect(ids).toContain("content.near-duplicate");
     expect(ids).toContain("schema.product-incomplete");
-    // And Phase 4's first metric rules.
+    // And Phase 4's metric rules.
     expect(ids).toContain("inlinks.distribution");
     expect(ids).toContain("structure.depth-distribution");
-    expect(ids.length).toBe(68);
+    expect(ids).toContain("content.metrics-by-type");
+    expect(ids).toContain("content.template-similarity");
+    expect(ids).toContain("hreflang.coverage");
+    expect(ids.length).toBe(71);
   });
 
   it("registers every kind the runner drives", () => {

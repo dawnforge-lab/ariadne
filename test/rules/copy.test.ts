@@ -17,6 +17,11 @@ import {
   EXTREMES_LIST_CAP,
   SOURCE_TYPE_CAP,
 } from "../../src/rules/metric/link-metrics.js";
+import {
+  TEMPLATE_LOOSE_BITS,
+  TEMPLATE_NEAR_BITS,
+  TEMPLATE_SAMPLE_PAGES,
+} from "../../src/rules/metric/content-metrics.js";
 
 /**
  * The content copy spells its distance out in words, so the threshold pin below
@@ -122,6 +127,9 @@ const PHASE_4_METRIC_IDS = [
   "inlinks.extremes",
   "inlinks.sources-by-type",
   "structure.depth-distribution",
+  "content.metrics-by-type",
+  "content.template-similarity",
+  "hreflang.coverage",
 ];
 
 const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS, ...PHASE_4_METRIC_IDS];
@@ -382,6 +390,80 @@ describe("issue copy", () => {
       expect(text, `${id}: p25/median/p75`).toContain("quartiles");
       expect(text, `${id}: p95`).toContain("95th percentile");
     }
+  });
+
+  // The same contract, for the Task 5 metrics — which do NOT inherit the
+  // assertion above, because their shapes are their own. Every column of every
+  // value shape has to be findable in the prose: a table's numbers are quoted
+  // to a client, and a column nobody named is a number nobody can explain.
+  it("content.metrics-by-type names both measures and every column of each", () => {
+    const text = ISSUE_COPY["content.metrics-by-type"]!.explanation;
+    expect(text, "the two measures").toMatch(/word count/i);
+    expect(text, "the two measures").toMatch(/text ratio/i);
+    expect(text, "the count").toMatch(/how many pages were measured/i);
+    // And that the count is per measure rather than the size of the cohort —
+    // the one place this shape differs from the link metrics' distribution.
+    expect(text, "the count is per measure").toMatch(
+      /pages that actually carry each measure|carry each measure/i,
+    );
+    expect(text, "min and max").toMatch(/shortest and longest/i);
+    expect(text, "the mean").toContain("mean");
+    expect(text, "p25/median/p75").toContain("quartiles");
+    expect(text, "p95").toContain("95th percentile");
+  });
+
+  it("content.template-similarity names every column, the thresholds and the sample", () => {
+    const c = ISSUE_COPY["content.template-similarity"]!;
+    const text = c.explanation;
+    expect(text, "pagesInType").toMatch(/how many pages the type has/i);
+    expect(text, "pagesSampled").toMatch(/how many were sampled/i);
+    expect(text, "pairsSampled").toMatch(/how many pairs that was/i);
+    expect(text, "meanHamming").toMatch(/mean distance/i);
+    expect(text, "p25/median/p75").toContain("quartiles");
+    // The two share columns, and the thresholds their KEYS spell. Pinned
+    // against the rule's own constants, so a threshold that moves fails here
+    // until the prose moves with it (the on-page-threshold contract).
+    expect(TEMPLATE_NEAR_BITS).toBe(3);
+    expect(TEMPLATE_LOOSE_BITS).toBe(8);
+    expect(text, "shareWithin3Pct").toMatch(
+      new RegExp(`percentage of pairs within ${TEMPLATE_NEAR_BITS} bits`, "i"),
+    );
+    expect(text, "shareWithin8Pct").toMatch(new RegExp(`within ${TEMPLATE_LOOSE_BITS} bits`, "i"));
+    // The sampling rule is part of the shape: three of the columns describe it,
+    // and a reader who cannot see it would read a sample as a census.
+    expect(TEMPLATE_SAMPLE_PAGES).toBe(200);
+    expect(text, "the sampling rule").toMatch(
+      new RegExp(`first ${TEMPLATE_SAMPLE_PAGES} pages`, "i"),
+    );
+    expect(text, "the sample's ordering").toMatch(/page-id order/i);
+  });
+
+  // The plan's naming ruling, asserted negatively because that is the only
+  // direction that holds: prose already saying "template similarity" can have
+  // the other word appended to it and still pass a positive check. The metric
+  // measures how alike two pages are; which parts of a page are worth reading
+  // is a judgement it has not made.
+  it("content.template-similarity is labelled template similarity and never the other word", () => {
+    const c = ISSUE_COPY["content.template-similarity"]!;
+    expect(`${c.title} ${c.explanation} ${c.howToFix}`).not.toMatch(/boilerplate/i);
+    expect(`${c.title} ${c.explanation}`.toLowerCase()).toContain("template");
+  });
+
+  it("hreflang.coverage names its three columns and its empty-cohort answer", () => {
+    const text = ISSUE_COPY["hreflang.coverage"]!.explanation;
+    expect(text, "pagesWithHreflang").toMatch(
+      /how many of this site's indexable pages publish at least one hreflang/i,
+    );
+    expect(text, "indexablePages").toMatch(/out of how many were measured/i);
+    expect(text, "coveragePct").toMatch(/percentage rounded to one decimal place/i);
+    // The null case is a column value a reader will meet, so it is copy too.
+    expect(text, "the null percentage").toMatch(/no percentage rather than zero/i);
+    // And the claim it must NOT make: coverage counts pages that declare
+    // something, not pages whose declarations are correct — that is the
+    // hreflang findings' subject, and conflating them would let a client read
+    // "100% coverage" as "the international setup is sound".
+    const overclaim = /(?:sets|declarations) are (?:complete|correct|valid)|correctly configured/i;
+    expect(text).not.toMatch(overclaim);
   });
 
   // A metric states what was counted; it does not accuse the site of anything.

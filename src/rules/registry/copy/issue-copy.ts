@@ -623,4 +623,29 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Read the upper quartiles: pages deep in the structure are crawled less often and receive less internal link equity, so a template whose median depth is high is one whose pages compete from behind. Where that template matters commercially, shorten the path to it — a hub, a category page or a navigation entry — rather than treating each deep page individually.",
   },
+  "content.metrics-by-type": {
+    title: "Word count and text density by template",
+    explanation:
+      "How much text this site's indexable pages carry, as two distributions: the word count of the page's visible text, and the text ratio — the share of the page's HTML that is that text rather than markup. Each is summarised the same way: how many pages were measured, the shortest and longest, the mean, the quartiles, and the 95th percentile — the level only the largest one page in twenty reaches. The two counts are the pages that actually carry each measure, so a page the parser recorded no word count for is absent from the word-count column and still present in the text-ratio one. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+    howToFix:
+      "Compare each template's row with the site row and with what the template is for: a product listing legitimately carries less text than an article, so the number to read is the spread inside one template rather than the difference between two. A template whose lower quartile sits far below its median has a tail of pages carrying much less than the rest — those are the pages to look at first. A low text ratio says the page is mostly markup, which is a rendering and template question rather than an editorial one.",
+  },
+  "content.template-similarity": {
+    // The plan's naming ruling: this table is about TEMPLATE SIMILARITY. The
+    // copy test asserts the other word never appears here — a measurement of
+    // how alike two pages are must not be labelled with a verdict on which
+    // parts of them are worth reading.
+    title: "How alike the pages inside each template are",
+    explanation:
+      "For each type of page, how similar its pages are to each other, measured between every pair as the number of bits by which their content fingerprints differ — 0 means the two read as the same text, 64 means they share nothing. The table gives the mean distance, the quartiles, and the percentage of pairs within 3 bits and within 8 bits of each other. Comparing every pair of a large template would be quadratic, so the pairs are sampled: the first 200 pages of each type, taken in page-id order, which is effectively arbitrary and always the same for a given crawl. The row states how many pages the type has, how many were sampled and how many pairs that was, so a number over a sample is never mistaken for a number over the whole template. Types with fewer than two fingerprinted pages have no pair to compare and get no row.",
+    howToFix:
+      "Read each row against what the template is: a set of location or filter pages sitting a couple of bits apart is pages that differ only in a name, while a set of articles doing the same is a signal worth investigating. A high percentage within 3 bits says most of the type's pages are interchangeable to a search engine, which is a consolidation question — fewer pages, or more that is genuinely specific to each. A wide spread inside one type usually means the type is really two, and the templates are worth separating before either is judged.",
+  },
+  "hreflang.coverage": {
+    title: "Share of pages declaring hreflang",
+    explanation:
+      "How many of this site's indexable pages publish at least one hreflang declaration, out of how many were measured, and that as a percentage rounded to one decimal place. A page counts once however many alternates it names, and declarations from the page's HTML, its HTTP headers and the sitemap all count — this is about which pages take part in the international setup at all, not about whether the sets they name are complete, which the hreflang findings cover separately. Only pages that returned 200 and are indexable are counted. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped). A row with no measured pages shows no percentage rather than zero.",
+    howToFix:
+      "On a site with no international presence, low coverage here is expected and says nothing. Where the site does serve more than one language or country, read the per-template rows: coverage that is high on one template and near zero on another is the usual shape, and it means a template was left out of whatever generates the tags rather than that the site lacks alternates. Pair this with the hreflang findings — a template with high coverage and many missing return links is a different job from one with no coverage at all.",
+  },
 };

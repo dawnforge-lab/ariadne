@@ -41,14 +41,15 @@ describe("checklist coverage", () => {
   // so a rule added or dropped fails CI rather than quietly making that table
   // wrong — and so the metric count is a number someone has to update
   // deliberately rather than one that drifts as Phase 4 lands its rules.
-  it("pins the ruleset split the gate doc reports: 68 rules = 26 page + 38 query + 4 metric", () => {
+  it("pins the ruleset split the gate doc reports: 71 rules = 26 page + 38 query + 7 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(68);
+    expect(registry.all()).toHaveLength(71);
     expect(registry.byKind("page")).toHaveLength(26);
     expect(registry.byKind("query")).toHaveLength(38);
-    // The link-graph four. Phase 4's remaining metric rules land in later
-    // tasks, each raising this number in the commit that registers it.
-    expect(registry.byKind("metric")).toHaveLength(4);
+    // The link-graph four, plus the two content metrics and hreflang coverage.
+    // Phase 4's remaining metric rules land in later tasks, each raising this
+    // number in the commit that registers it.
+    expect(registry.byKind("metric")).toHaveLength(7);
   });
 
   it("accounts for all 47 crawl-derived checks: 39 claimed, 3 agent, 5 unclaimed", () => {
@@ -57,7 +58,12 @@ describe("checklist coverage", () => {
     // rather than silently changing what "unclaimed" means.
     const registry = buildRegistry();
     const claimed = registry.claimedCheckIds();
-    const claimedInUniverse = CRAWL_CHECK_IDS.filter((c) => claimed.has(c));
+    const agent = new Set(AGENT_CHECKS);
+    // Agent checks are excluded from the claimed bucket rather than assumed
+    // absent from it: a METRIC may carry an agent check's id (see the test
+    // below), and counting it in both buckets would make the arithmetic sum to
+    // 48 while every individual number stayed right.
+    const claimedInUniverse = CRAWL_CHECK_IDS.filter((c) => claimed.has(c) && !agent.has(c));
     const unclaimed = registry.unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS]);
 
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
@@ -75,11 +81,44 @@ describe("checklist coverage", () => {
       CRAWL_CHECK_IDS.length,
     );
 
-    // No rule claims a check the agent owns: an AGENT check with a rule behind
-    // it is a rule that always passes (build plan §6).
+    // No FINDING-producing rule claims a check the agent owns: an AGENT check
+    // with a page or query rule behind it is a rule that always passes (build
+    // plan §6), because the thing being checked is a judgement no amount of
+    // crawl data settles.
+    //
+    // A METRIC is the exception, and it is a principled one rather than a hole:
+    // a metric produces no findings and passes nothing. It states what was
+    // counted and leaves the verdict to the agent, which is precisely the
+    // division AGENT_CHECKS exists to protect. `content.metrics-by-type` and
+    // `content.template-similarity` therefore carry CHECK-38 as EVIDENCE for a
+    // judgement they do not make.
+    const judging = new Set(
+      buildRegistry()
+        .all()
+        .filter((r) => r.kind !== "metric")
+        .flatMap((r) => r.checkIds),
+    );
     for (const agentCheck of AGENT_CHECKS) {
-      expect(claimed.has(agentCheck), `${agentCheck} is an AGENT check, not a rule's`).toBe(false);
+      expect(judging.has(agentCheck), `${agentCheck} is an AGENT check, not a rule's`).toBe(false);
     }
+  });
+
+  // The other direction of the same ruling: an agent check a metric claims must
+  // be claimed BY A METRIC AND NOTHING ELSE. Asserted positively so the
+  // exception above cannot quietly widen — a page rule added to CHECK-38 would
+  // fail the guard, and a metric silently dropping the id would fail this.
+  it("CHECK-38 is evidenced by metric rules and judged by none", () => {
+    const registry = buildRegistry();
+    const claimants = registry.all().filter((r) => r.checkIds.includes("CHECK-38"));
+    expect(claimants.map((r) => r.id).sort()).toEqual([
+      "content.metrics-by-type",
+      "content.template-similarity",
+    ]);
+    for (const r of claimants) expect(r.kind, r.id).toBe("metric");
+    // And it stays out of the unclaimed pin: the agent owns it either way.
+    expect(registry.unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS])).not.toContain(
+      "CHECK-38",
+    );
   });
 
   // The annotations are only worth carrying if they describe the pin above.

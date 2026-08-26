@@ -20,11 +20,11 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
+import { UNTYPED } from "../../src/rules/metric/cohort.js";
 import {
   EXTREMES_LIST_CAP,
   linkMetrics,
   SOURCE_TYPE_CAP,
-  UNTYPED,
 } from "../../src/rules/metric/link-metrics.js";
 import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";

@@ -36,36 +36,16 @@
  * (`derivePageType`). The column is nullable, so a null groups under the
  * documented sentinel `UNTYPED` rather than vanishing: a cohort of pages the
  * detector could not type is still a cohort, and dropping it would silently
- * change what "the site" means between two metrics.
+ * change what "the site" means between two metrics. The sentinel, the cohort
+ * predicate and the column checks now live in `./cohort.js`, shared with the
+ * content and hreflang metrics so all three measure one set of pages.
  */
 import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
-
-/**
- * The scope value a cohort of pages with no `page_type` is filed under.
- *
- * Parenthesised so it reads as a label rather than as a template name a site
- * might really have — but that is a courtesy to the reader, NOT a uniqueness
- * claim. `derivePageType` returns a detected URL template (`/blog/:id/:slug`),
- * which cannot be spelled this way, or a CLIENT-CONFIGURED name, which can:
- * nothing stops a client calling a bucket `(untyped)`.
- *
- * That case is handled rather than argued away, and the handling is the reason
- * the coalesce lives inside each cohort CTE instead of in an outer `GROUP BY`:
- * a client-named `(untyped)` and the untyped pages MERGE into one cohort, one
- * row, one scope value. A merge is the only sound answer — the two are
- * indistinguishable by the time a reader has the table — and doing it in the
- * cohort makes it structural. Coalescing later would instead produce two groups
- * projecting one scope value, which is two rows for one primary key and a rule
- * the runner rejects for answering the same question twice.
- *
- * The empty string was not available for the sentinel: it is what a
- * site-scoped row stores in the metrics primary key.
- */
-export const UNTYPED = "(untyped)";
+import { COHORT_PAGE_TYPE, cohortFilter, nullableNum, num, UNTYPED } from "./cohort.js";
 
 /** How many URLs `inlinks.extremes` names at each end. */
 export const EXTREMES_LIST_CAP = 20;
@@ -78,14 +58,6 @@ export const SOURCE_TYPE_CAP = 25;
 
 /** The bucket the types past `SOURCE_TYPE_CAP` are summed into. */
 const OTHER_SOURCES = "other";
-
-/** The pages every metric here measures: fetched OK, 200, indexable. */
-function cohortFilter(crawlId: string): SQL {
-  return sql`p.crawl_id = ${crawlId}
-    and p.fetch_class = 'ok'
-    and p.status_code = 200
-    and p.is_indexable`;
-}
 
 /**
  * One row per cohort page: its url, its type, and how many DISTINCT other pages
@@ -103,7 +75,7 @@ function cohortFilter(crawlId: string): SQL {
  */
 function inlinkCohort(crawlId: string): SQL {
   return sql`
-    select p.url as url, coalesce(p.page_type, ${UNTYPED}) as page_type,
+    select p.url as url, ${COHORT_PAGE_TYPE} as page_type,
            count(distinct l.source_page_id)::int as v
     from pages p
     left join links l
@@ -155,27 +127,6 @@ type DistributionRow = {
   max: number | null;
   mean: number | null;
 };
-
-/**
- * A number from a SQL row, checked rather than cast.
- *
- * The casts in the queries above are what make these columns `int4`/`float8`
- * — types the driver parses to JavaScript numbers. A cast dropped in an edit
- * would hand back an `int8` or a `numeric`, which arrive as STRINGS, and
- * `{count: "10"}` in a jsonb column is a metric that reads correctly and
- * compares wrongly forever after. It fails here instead (hard rule 7).
- */
-function num(value: unknown, column: string, ruleId: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${ruleId}: column '${column}' came back as ${typeof value}, not a number`);
-  }
-  return value;
-}
-
-/** The same, for the statistics that are null over an empty cohort. */
-function nullableNum(value: unknown, column: string, ruleId: string): number | null {
-  return value === null ? null : num(value, column, ruleId);
-}
 
 /**
  * Run the distribution shape over a cohort and return its metric rows: one for
@@ -296,7 +247,7 @@ type SourceTypeRow = {
 async function sourcesByType(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
   const rows = await db.execute<SourceTypeRow>(sql`
     with target as (
-      select p.id as id, p.url as url, coalesce(p.page_type, ${UNTYPED}) as target_type
+      select p.id as id, p.url as url, ${COHORT_PAGE_TYPE} as target_type
       from pages p
       where ${cohortFilter(crawlId)}
     ),
@@ -393,7 +344,7 @@ export const linkMetrics: MetricRule[] = [
       db,
       crawlId,
       self,
-      sql`select coalesce(p.page_type, ${UNTYPED}) as page_type, p.depth as v
+      sql`select ${COHORT_PAGE_TYPE} as page_type, p.depth as v
           from pages p
           where ${cohortFilter(crawlId)}`,
     ),
