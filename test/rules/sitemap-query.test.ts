@@ -330,6 +330,26 @@ describe("the sitemap rules against the database", () => {
     expect(found[0]!.evidence).toEqual({ url: url("/never-reached") });
   });
 
+  // The join is exact on the URL, and `sitemap_urls.url` is the published
+  // `<loc>` while `pages.url` is `normalizeUrl` output — which strips the
+  // fragment and sorts query parameters. A `<loc>` carrying either does not
+  // match the page the crawl created FROM IT, and reads here as uncrawled. The
+  // finding still fires (the crawl genuinely has no row under that spelling)
+  // and its evidence says the spelling is what may be at fault. See the module
+  // header for why this is not papered over in SQL.
+  it("flags a finding whose URL spelling may differ from the frontier key", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/x" }]);
+    await addSitemapUrls(crawlId, ["/x#section"]);
+
+    const found = await run("sitemap.uncrawled", crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).toEqual({
+      url: url("/x#section"),
+      normalizationSensitive: true,
+    });
+  });
+
   it("caps the uncrawled findings and says so on the last one", async () => {
     const crawlId = await newCrawl();
     const total = URL_FINDING_CAP + 1;
