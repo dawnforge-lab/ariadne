@@ -248,10 +248,11 @@ and the rest of the checklist entry is the agent's to judge.
 `.github/workflows/ci.yml` is unchanged: `ubuntu-latest`, a health-checked
 `postgres:16` service, Node 22, then `npm ci` → `npx tsc --noEmit` →
 `npm run db:migrate` → `npm test`. Its triggers are **push to `main` and every
-pull request**, so this branch's first CI run is **pending the first pull
-request** — there is no run to link yet, and the figures above are from the
-local run recorded below. The Phase 2 gate's lesson applies: record the run
-link once it exists rather than claiming a green CI that has not executed.
+pull request**. **First CI run on this branch: PASS, 1m18s** (2026-08-26, on
+PR #2, including the final fix-wave commit `cdae0aa`):
+https://github.com/dawnforge-lab/ariadne/actions/runs/32995357044/job/98262980970
+The figures above are from the local run recorded below; the CI run reproduces
+the same suite against the service container.
 
 ## Machine
 
