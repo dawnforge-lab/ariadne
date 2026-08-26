@@ -80,10 +80,10 @@ export interface CrawlConfig {
    */
   allowPrivate?: boolean;
   /**
-   * Walk the host's four spellings before crawling (see host-probe). Defaults
-   * to on: it costs four fetches, and it is the only evidence the host rules
-   * (CHECK-13/14/15) have. Set false to skip it — the rules then report the
-   * check as skipped rather than passing it.
+   * Walk the host's other spellings before crawling (see host-probe). Defaults
+   * to on: it costs four chains paced by `perHostDelayMs`, and it is the only
+   * evidence the host rules (CHECK-13/14/15) have. Set false to skip it — the
+   * rules then report the check as skipped rather than passing it.
    */
   probeHosts?: boolean;
   /**
@@ -111,6 +111,15 @@ export interface DiscoveryEvidence {
     crawlDelaySec: number | null;
     note: string | null;
     raw: string | null;
+    /**
+     * `raw` is a 500KB prefix, not the whole file. It travels with the text
+     * because a rule that re-parses a truncated robots.txt would find no
+     * `Disallow` for every rule past the cap and conclude the URL is allowed —
+     * the same silent "not disallowed" an unreachable robots.txt is refused
+     * for (RFC 9309 §2.3.1.4). A rule reading `raw` must check this and refuse
+     * to conclude, not conclude quietly.
+     */
+    truncated: boolean;
   };
   sitemapSources: string[];
   truncation: DiscoveryTruncation;
@@ -470,13 +479,15 @@ async function runToCompletion(
   // INSERTION 1 — the host probe, before discovery. It asks what the site's
   // *other names* do, which is a question the crawl proper can never answer:
   // everything after this line happens under the one spelling the crawl was
-  // seeded with, robots.txt included. Four requests for an origin root, one at
-  // a time; see host-probe.
+  // seeded with, robots.txt included. Four chains, up to five hops each, one
+  // at a time and paced by `perHostDelayMs` — robots.txt is not readable yet,
+  // so the config delay is the spacing it can honour; see host-probe.
   if (config.probeHosts !== false) {
     const hostProbe = await probeHostVariants(config.siteUrl, {
       userAgent: config.userAgent,
       allowPrivate,
       legacyHosts: config.legacyHosts,
+      perHostDelayMs: config.perHostDelayMs,
       timeoutMs: FETCH_TIMEOUT_MS,
     });
     await db.update(crawls).set({ hostProbe }).where(eq(crawls.id, crawlId));
@@ -789,6 +800,7 @@ function discoveryEvidence(discovery: DiscoveryResult): DiscoveryEvidence {
       crawlDelaySec: discovery.robots.crawlDelaySec,
       note: discovery.robots.note,
       raw: discovery.robots.raw,
+      truncated: discovery.robots.truncated,
     },
     // The documents the walk was pointed at. Today that is exactly what
     // robots.txt declared, because `discover` is called without

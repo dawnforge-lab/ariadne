@@ -444,7 +444,11 @@ describe("runCrawl", () => {
   });
 
   it("applies robots rules to same-site origin variants", async () => {
-    const summary = await crawl(config({ siteUrl: variant }));
+    // Probe off: this is the one fixture addressed by name rather than by IP,
+    // so the host probe would synthesise `www.localhost` and ask the system
+    // resolver about it. The suite does not put made-up names on the wire —
+    // the probe's own tests inject a resolver instead.
+    const summary = await crawl(config({ siteUrl: variant, probeHosts: false }));
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
     // The www. spelling of /admin/x is same-origin by our own rule, so it is a
@@ -547,6 +551,9 @@ describe("crawl-level evidence", () => {
     expect(discovery.robots.raw).toContain(`Sitemap: ${base}/sitemap.xml`);
     expect(discovery.robots.crawlDelaySec).toBeNull();
     expect(discovery.robots.note).toBeNull();
+    // `raw` is a 500KB prefix; a rule re-parsing it must know whether it is
+    // reading the whole file or the start of one.
+    expect(discovery.robots.truncated).toBe(false);
     expect(discovery.sitemapSources).toEqual([`${base}/sitemap.xml`]);
     expect(discovery.docsFetched).toBe(1);
     expect(discovery.truncation.failures).toEqual([]);
@@ -602,6 +609,12 @@ describe("crawl-level evidence", () => {
     const summary = await crawl(config());
     const probe = (await crawlRow(summary.crawlId)).hostProbe as HostProbeResult;
     expect(probe.variants.map((v) => v.start)).toEqual(hostProbeStarts(base));
+    // The fixture is addressed by IP, so there is no www spelling to invent —
+    // two starts, and no name this suite has to ask a real resolver about.
+    expect(probe.variants.map((v) => v.start)).toEqual([
+      `${base}/`,
+      `${base.replace("http://", "https://")}/`,
+    ]);
 
     const apex = probe.variants.find((v) => v.start === `${base}/`);
     expect(apex?.hops[0]?.statusCode).toBe(200);

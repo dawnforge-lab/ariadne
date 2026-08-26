@@ -28,13 +28,20 @@
  *    along with it. Our own bugs still throw: `fetchPage` rethrows a malformed
  *    user agent, and this module does not catch it.
  *
- *  - **The probe is cheap and finite.** Four starts (plus legacy hosts), five
- *    hops each, one request at a time, origin roots only. It runs once per
- *    crawl, before discovery, so it costs four fetches against a crawl of
- *    thousands.
+ *  - **The probe is cheap, finite and paced.** Four chains (plus legacy
+ *    hosts), up to five hops each, origin roots only, run one at a time behind
+ *    a `HostGate` at the crawl's own `perHostDelayMs` — keyed per hop's host,
+ *    so a chain that walks apex -> www spaces each name separately and two
+ *    chains through the same name still wait for each other. Without that gate
+ *    the probe is the rudest thing the crawler does: twenty back-to-back
+ *    requests at the start of every crawl (hard rule 9). robots.txt has not
+ *    been read yet, so its `Crawl-delay` cannot be honoured here; the config
+ *    delay is the floor that can be.
  */
+import { isIP } from "node:net";
 import { fetchPage, type FetchClass } from "./fetch-page.js";
 import type { DnsLookupFn } from "./http.js";
+import { HostGate } from "./politeness.js";
 
 /**
  * Hops followed per variant. Five is the ceiling browsers and Googlebot both
@@ -78,6 +85,13 @@ export interface HostProbeResult {
 
 export interface HostProbeOpts {
   userAgent: string;
+  /**
+   * Spacing between two requests to the same host, in ms — the crawl's own
+   * `CrawlConfig.perHostDelayMs`. Required, not defaulted: a probe that paced
+   * itself by a number nobody chose would be a politeness decision made by
+   * omission (the same reason `CrawlConfig` has no defaults of its own).
+   */
+  perHostDelayMs: number;
   /** Per-hop deadline, passed straight to fetch-page. */
   timeoutMs?: number;
   /**
@@ -97,12 +111,21 @@ export interface HostProbeOpts {
 }
 
 /**
- * The apex/`www` pair for a hostname, apex first, whichever way round the
+ * The apex/`www` spellings of a hostname, apex first, whichever way round the
  * input was written. Fixed order rather than "as seeded, then the twin" so the
  * stored evidence reads the same for a site seeded as `example.com` and one
  * seeded as `www.example.com`.
+ *
+ * An IP literal has no `www.` twin: `www.203.0.113.7` is not another name for
+ * the same machine, it is a hostname that means nothing — and asking the
+ * system resolver about it puts a made-up name on the wire (and, if some
+ * wildcard DNS answers, a real address on the other end of a fetch). A site
+ * addressed by IP gets its one spelling per scheme.
  */
-function hostnamePair(hostname: string): [string, string] {
+function hostnameSpellings(hostname: string): string[] {
+  // URL.hostname brackets IPv6 (`[::1]`), which net.isIP does not recognise.
+  const literal = hostname.replace(/^\[|\]$/g, "");
+  if (isIP(literal) !== 0) return [hostname];
   const apex = hostname.startsWith("www.") ? hostname.slice(4) : hostname;
   return [apex, `www.${apex}`];
 }
@@ -115,7 +138,8 @@ function originRoot(url: URL, scheme: "http" | "https", hostname: string): strin
 
 /**
  * The exact list of URLs the probe will request first, in order: the site's
- * own four spellings, then the legacy hosts.
+ * own spellings (four, or two when it is addressed by IP), then the legacy
+ * hosts.
  *
  * Pure and exported because it is the probe's contract — the tests pin the
  * derivation here rather than inferring it from a network result, and the
@@ -145,7 +169,7 @@ export function hostProbeStarts(
     if (!starts.includes(url)) starts.push(url);
   };
 
-  for (const hostname of hostnamePair(site.hostname)) {
+  for (const hostname of hostnameSpellings(site.hostname)) {
     for (const scheme of ["http", "https"] as const) {
       add(originRoot(site, scheme, hostname));
     }
@@ -188,11 +212,18 @@ export function hostProbeStarts(
 }
 
 /** Follow one variant to wherever it lands, recording every hop. */
-async function followChain(start: string, opts: HostProbeOpts): Promise<HostProbeVariant> {
+async function followChain(
+  start: string,
+  opts: HostProbeOpts,
+  gate: HostGate,
+): Promise<HostProbeVariant> {
   const hops: HostProbeHop[] = [];
   let url = start;
 
   for (let hop = 0; hop < MAX_HOST_PROBE_HOPS; hop += 1) {
+    // Per hop, keyed by that hop's host: a chain that crosses from www to the
+    // apex is two names, and each of them keeps its own spacing.
+    await gate.acquire(new URL(url).host);
     const result = await fetchPage(url, {
       userAgent: opts.userAgent,
       allowPrivate: opts.allowPrivate,
@@ -226,19 +257,25 @@ async function followChain(start: string, opts: HostProbeOpts): Promise<HostProb
  * Probe every spelling of `siteUrl`'s host (plus any `legacyHosts`) and report
  * where each one lands.
  *
- * One request at a time: this is the same origin under different names, and
- * four simultaneous connections to it would be the opposite of the politeness
+ * One chain at a time, and every hop through a `HostGate` at the crawl's
+ * `perHostDelayMs`: these are the same machine under different names, and
+ * twenty back-to-back requests to it would be the opposite of the politeness
  * the crawl proper is careful about (hard rule 9). It runs before discovery,
- * so there is no robots `crawl-delay` known yet to pace it by — four sequential
- * requests to an origin root is the conservative reading of that.
+ * so robots.txt's own `Crawl-delay` is not known yet and cannot be honoured
+ * here — the gate is built with `robotsCrawlDelaySec: null` and the crawl's
+ * configured spacing is what it can promise.
  */
 export async function probeHostVariants(
   siteUrl: string,
   opts: HostProbeOpts,
 ): Promise<HostProbeResult> {
+  const gate = new HostGate({
+    perHostDelayMs: opts.perHostDelayMs,
+    robotsCrawlDelaySec: null,
+  });
   const variants: HostProbeVariant[] = [];
   for (const start of hostProbeStarts(siteUrl, opts.legacyHosts ?? [])) {
-    variants.push(await followChain(start, opts));
+    variants.push(await followChain(start, opts, gate));
   }
   return { variants };
 }

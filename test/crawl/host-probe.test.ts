@@ -26,12 +26,15 @@ const lookup: DnsLookupFn = (_hostname, options, callback) => {
   else callback(null, "127.0.0.1", 4);
 };
 
-function opts(extra: { legacyHosts?: string[] } = {}) {
+function opts(extra: { legacyHosts?: string[]; perHostDelayMs?: number } = {}) {
   return {
     userAgent: "AriadneBot-test",
     allowPrivate: true,
     lookup,
     timeoutMs: 5_000,
+    // Unpaced by default: the pacing test below sets a real delay, and every
+    // other case is about the recorded evidence, not the clock.
+    perHostDelayMs: 0,
     ...extra,
   };
 }
@@ -113,6 +116,20 @@ describe("hostProbeStarts", () => {
       "http://www.new.example/",
       "https://www.new.example/",
       "http://old.example:81/",
+    ]);
+  });
+
+  it("gives an IP-addressed site no www spelling", () => {
+    // `www.203.0.113.7` names nothing; asking the resolver about it would put
+    // a made-up name on the wire and could land the fetch on whatever some
+    // wildcard DNS answers with.
+    expect(hostProbeStarts("http://203.0.113.7:8080/")).toEqual([
+      "http://203.0.113.7:8080/",
+      "https://203.0.113.7:8080/",
+    ]);
+    expect(hostProbeStarts("http://[::1]/")).toEqual([
+      "http://[::1]/",
+      "https://[::1]/",
     ]);
   });
 
@@ -207,6 +224,22 @@ describe("probeHostVariants", () => {
     // fetch-page dropped the link-local target; the hop is still evidence.
     expect(apex?.hops[0]?.location).toBeNull();
     expect(apex?.final).toBeNull();
+  });
+
+  it("paces its hops by perHostDelayMs, per host", async () => {
+    // Four chains over two names, five requests in all. Keyed by host, the
+    // gate owes: apex hop 1 free, apex hop 2 (the https spelling is the same
+    // host) one delay, www hop 1 free, the www chain's hop into the apex
+    // another delay, the https www spelling nothing more. Two waits minimum.
+    const delay = 80;
+    const t0 = Date.now();
+    const result = await probeHostVariants(`http://site.test:${port}/`, {
+      ...opts({ perHostDelayMs: delay }),
+    });
+    const elapsed = Date.now() - t0;
+
+    expect(result.variants).toHaveLength(4);
+    expect(elapsed).toBeGreaterThanOrEqual(2 * delay - 10);
   });
 
   it("probes legacy hosts alongside the site's own variants", async () => {
