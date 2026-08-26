@@ -218,9 +218,24 @@ export const sitemapUrls = pgTable("sitemap_urls", {
   //
   // NOT NULL with an empty-string default, which is for rows written before
   // this column existed and for nothing else: the writer always computes a
-  // value (and throws if it cannot). An empty string matches no `pages.url`,
-  // so a pre-Phase-4 crawl's entries simply do not join — exactly what they did
-  // when the join was on the published spelling.
+  // value (and throws if it cannot).
+  //
+  // What that default MEANS for such a row, stated plainly because it is not
+  // benign: an empty string matches no `pages.url`, so every entry of a
+  // pre-Phase-4 crawl joins to nothing — and the three rules that fire on a
+  // FAILED match then fire on all of them. `sitemap.uncrawled` reports every
+  // entry as a URL the crawl never reached, `pages.not-in-sitemap` reports
+  // every indexable 200 (its data gate only asks that the crawl HOLD sitemap
+  // rows, which it does), and `links.orphan` calls every orphan
+  // `inSitemap: false`. That is maximal noise, not silence, and it is worse
+  // than the pre-switch behaviour, under which almost every row joined.
+  //
+  // So a pre-Phase-4 crawl is NOT a supported re-judge target: re-crawl the
+  // site. Same ruling and same reason as a null `discovery_jsonb`, which the
+  // rules refuse outright rather than judging a site on evidence that is not
+  // there (`parseDiscovery`, src/rules/query/crawl-evidence.ts) — the
+  // difference is only that a missing column cannot be told apart from a
+  // legitimately empty string at read time, so this one cannot throw.
   urlNormalised: text("url_normalised").notNull().default(""),
   sitemapSource: text("sitemap_source").notNull(),
   lastmod: text("lastmod"),

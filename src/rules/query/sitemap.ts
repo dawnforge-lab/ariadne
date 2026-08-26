@@ -23,9 +23,15 @@
  * punctuation. Every rule below quotes `s.url` in its evidence all the same —
  * the published `<loc>` is the line of XML somebody edits.
  *
- * Rows written before that column existed carry an empty string, which matches
- * no page and joins to nothing — the same silence they had when the join was
- * on the published spelling.
+ * Rows written before that column existed carry an empty string, and an empty
+ * string matches no page. That is not a quiet outcome: every entry of such a
+ * crawl fails the join, so `sitemap.uncrawled` reports the whole sitemap as
+ * never reached and `pages.not-in-sitemap` reports every indexable 200 (its
+ * data gate only asks that sitemap rows EXIST, and they do). A pre-Phase-4
+ * crawl is therefore not a re-judge target — re-crawl the site. It is the same
+ * ruling `parseDiscovery` makes for a null `discovery_jsonb`, and for the same
+ * reason; it simply cannot be enforced by throwing, because a defaulted empty
+ * string is indistinguishable from a legitimate one at read time.
  */
 import { sql, type SQL } from "drizzle-orm";
 

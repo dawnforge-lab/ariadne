@@ -268,10 +268,16 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
     // stopped us following. Either way it is part of the path and belongs in
     // the evidence, even though there is no page row behind it.
     //
-    // Quoted as the SERVER spelled it, unlike the hops before it: those are
-    // pages the crawl fetched and are named by their frontier key, while this
-    // one is a `Location` header nothing was fetched under. The walk itself
-    // followed the normalised twin (see `walkFrom`).
+    // Quoted as the SERVER spelled it, unlike the hops before it, which are
+    // pages the walk actually visited and are named by their frontier key. That
+    // reads two ways depending on which tail this is, and both are intended: an
+    // UNCRAWLED tail was never fetched under any spelling, so the `Location`
+    // header is the only honest thing to print; a tail the HOP CAP stopped us
+    // following does have a page row (`tail_crawled`), and printing the header
+    // there says what the last visited page sent rather than implying we went
+    // on to fetch it. The walk itself followed the normalised twin either way
+    // (see `walkFrom`), so nothing about where the chain goes rests on this
+    // string.
     const chain = tail === null ? row.chain : [...row.chain, tail];
     const hops = tail === null ? row.chain.length - 1 : row.chain.length;
     if (hops < CHAIN_HOPS) continue;
