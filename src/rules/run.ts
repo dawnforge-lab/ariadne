@@ -216,18 +216,29 @@ export async function runRules(
   // that metric, and rolling them back because a different rule is broken would
   // replace a true number with a missing one.
   for (const rule of registry.byKind("metric")) {
-    let rows: Metric[];
+    let returned: unknown;
     try {
-      rows = await rule.run(db, crawlId);
+      returned = await rule.run(db, crawlId);
     } catch (error) {
       throw new Error(`rule '${rule.id}' threw`, { cause: error });
     }
+    // A rule that returns something other than an array is a rule defect, and
+    // it has to fail the way every other rule defect fails: named. Without this
+    // the `for…of` below would throw a bare "is not iterable" TypeError that
+    // says nothing about which rule produced it.
+    if (!Array.isArray(returned)) {
+      throw new Error(
+        `rule '${rule.id}' returned ${returned === null ? "null" : typeof returned} ` +
+          "rather than an array of metric rows",
+      );
+    }
+    const rows: Metric[] = returned;
 
     // Validated as a set, before anything is written: a rule that emits one bad
     // row writes none of them, so the crawl never holds half of a metric.
     for (const m of rows) {
       // `metricRow` makes this unreachable for a rule that uses it. Checked
-      // anyway because the delete above is keyed on the rule's own id: a row
+      // anyway because the delete below is keyed on the rule's own id: a row
       // filed under another metric id would never be recomputed and never
       // removed — a permanent stale row no rule owns.
       if (m.metricId !== rule.id) {
@@ -246,6 +257,15 @@ export async function runRules(
         throw new Error(
           `rule '${rule.id}' emitted a 'page_type' row with no scope value — ` +
             "a cohort without a name identifies no pages",
+        );
+      }
+      // And the symmetric defect. There is one site per crawl, so a site row
+      // carrying a scope value keys a SECOND site row: the same question
+      // answered twice, with nothing to say which answer is the site's.
+      if (m.scope === "site" && m.scopeValue !== "") {
+        throw new Error(
+          `rule '${rule.id}' emitted a 'site' row with scope value '${m.scopeValue}' — ` +
+            "a site-scoped metric has one row per crawl and names nothing",
         );
       }
     }

@@ -92,22 +92,35 @@ export function queryFinding(
  * be recomputed and never removed. `metricId` therefore comes from `self` and
  * from nowhere else.
  *
- * `scopeValue` is optional because a site-scoped metric has nothing to name:
- * it defaults to the empty string, which is what the composite primary key
- * `(crawl_id, metric_id, scope, scope_value)` stores for the one row per crawl.
- * A `page_type` row without one is refused by the runner — an unnamed cohort
- * identifies no group of pages, and would collide with the site row's key.
+ * The parameter is a discriminated union rather than one shape with an optional
+ * `scopeValue`, because the two scopes ask for different things and the optional
+ * spelling let a caller write both of the rows the runner refuses:
+ *
+ *   - `page_type` REQUIRES a name. A cohort row is the answer for one group of
+ *     pages; without a name it identifies no group, and the empty string is
+ *     already spoken for — it is what a site row stores in the composite primary
+ *     key `(crawl_id, metric_id, scope, scope_value)`.
+ *   - `site` ACCEPTS no name. There is one site per crawl, so a scope value on
+ *     it would key a second "site" row and answer the same question twice.
+ *
+ * Both are now unrepresentable for a caller that uses this helper. The runner
+ * checks them again at the JavaScript boundary, where a rule body's return value
+ * is not something the type system has seen.
  */
 export function metricRow(
   self: { id: string },
-  m: { scope: "site" | "page_type"; scopeValue?: string; value: Record<string, unknown> },
+  m:
+    | { scope: "site"; value: Record<string, unknown> }
+    | { scope: "page_type"; scopeValue: string; value: Record<string, unknown> },
 ): Metric {
-  // Destructured field by field rather than spread, for `queryFinding`'s
-  // reason: a spread of `m` would carry whatever else the caller's object holds
-  // — a `metricId` read out of a SQL row, say — either overriding the rule's
-  // own identity or riding along into the `metrics` row.
-  const { scope, scopeValue, value } = m;
-  return { metricId: self.id, scope, scopeValue: scopeValue ?? "", value };
+  // Each field named rather than spread, for `queryFinding`'s reason: a spread
+  // of `m` would carry whatever else the caller's object holds — a `metricId`
+  // read out of a SQL row, say — either overriding the rule's own identity or
+  // riding along into the `metrics` row.
+  if (m.scope === "site") {
+    return { metricId: self.id, scope: "site", scopeValue: "", value: m.value };
+  }
+  return { metricId: self.id, scope: "page_type", scopeValue: m.scopeValue, value: m.value };
 }
 
 /**

@@ -447,6 +447,11 @@ describe("runRules against the database", () => {
 
     const summary = await runRules(db, crawlId, registry);
     const written = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
+    // A page rule and a QUERY rule both fired, so the count the metric read is
+    // one the query phase had already contributed to — which is what makes this
+    // an ordering assertion rather than a count of page findings.
+    expect(summary.byRule["title.missing"]).toBe(1);
+    expect(summary.byRule["links.orphan"]).toBeGreaterThan(0);
     expect(written.length).toBeGreaterThan(0);
     expect(summary.findings).toBe(written.length);
     expect(await readMetrics(crawlId)).toEqual({
@@ -500,6 +505,25 @@ describe("runRules against the database", () => {
     expect(await readMetrics(crawlId)).toEqual({});
   });
 
+  // The symmetric defect: one site per crawl means a site row that names
+  // something keys a SECOND site row, and the crawl answers the same question
+  // twice with nothing to say which answer is the site's. `metricRow`'s
+  // discriminated union makes it unrepresentable; this is the JS boundary.
+  it("refuses a site row that carries a scope value, naming the rule", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const registry = new Registry();
+    registry.register(
+      mkMetricRule("test.named-site", async () => [
+        { metricId: "test.named-site", scope: "site", scopeValue: "product", value: { n: 1 } },
+      ]),
+    );
+
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.named-site/);
+    expect(await readMetrics(crawlId)).toEqual({});
+  });
+
   // `metricRow` makes this unreachable from a rule that uses it; the runner
   // checks anyway, because the delete that keeps metrics from going stale is
   // `metric_id = <rule id>` — a row filed under another id would never be
@@ -516,6 +540,62 @@ describe("runRules against the database", () => {
     );
 
     await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.mislabelled/);
+    expect(await readMetrics(crawlId)).toEqual({});
+  });
+
+  // Where the transactional guarantee actually lives. The delete and the
+  // inserts share one transaction precisely so a failed write cannot leave the
+  // crawl with the previous answer erased and no new one — which is the state
+  // "delete, then fail" would produce.
+  it("rolls the delete back when the insert fails, keeping the previous answer", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    let emitted: Metric[] = [
+      metricRow({ id: "test.rollback" }, { scope: "site", value: { pages: 1 } }),
+    ];
+    const registry = new Registry();
+    registry.register(mkMetricRule("test.rollback", async () => emitted));
+
+    await runRules(db, crawlId, registry);
+    expect(await readMetrics(crawlId)).toEqual({ "test.rollback|site|": { pages: 1 } });
+
+    // Two answers for one cohort. The composite primary key refuses the second
+    // rather than letting one of them silently win — a rule that computed a
+    // cohort twice is a defect, and the defect is what must surface.
+    emitted = [
+      metricRow(
+        { id: "test.rollback" },
+        { scope: "page_type", scopeValue: "product", value: { pages: 2 } },
+      ),
+      metricRow(
+        { id: "test.rollback" },
+        { scope: "page_type", scopeValue: "product", value: { pages: 3 } },
+      ),
+    ];
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(
+      /rule 'test\.rollback' failed to write its 2 metric rows/,
+    );
+
+    // The delete rolled back with the insert: the crawl still holds the answer
+    // the previous run computed, not an empty space where a metric used to be.
+    expect(await readMetrics(crawlId)).toEqual({ "test.rollback|site|": { pages: 1 } });
+  });
+
+  // A rule that returns a non-array is a rule defect, and it has to fail the
+  // way every other rule defect fails — named. Left unchecked it would surface
+  // as a bare "is not iterable" TypeError naming nothing.
+  it("refuses a metric rule that returns something other than an array, naming it", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const registry = new Registry();
+    registry.register(
+      mkMetricRule("test.returns-null", (async () => null) as unknown as MetricRule["run"]),
+    );
+
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.returns-null/);
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/null rather than an array/);
     expect(await readMetrics(crawlId)).toEqual({});
   });
 

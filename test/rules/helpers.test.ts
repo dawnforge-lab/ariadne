@@ -137,4 +137,15 @@ describe("metricRow", () => {
     expect(m.metricId).toBe("content.thin-share");
     expect(Object.keys(m).sort()).toEqual(["metricId", "scope", "scopeValue", "value"]);
   });
+
+  // Both rows the runner refuses are unrepresentable here: the parameter is a
+  // discriminated union, so a site row cannot carry a name and a cohort row
+  // cannot lack one. The assertion is the typecheck itself — `@ts-expect-error`
+  // fails `tsc` if either line ever starts compiling.
+  it("makes a named site row and a nameless cohort row impossible to build", () => {
+    // @ts-expect-error a site-scoped metric has one row per crawl and names nothing
+    expect(metricRow({ id: "some.metric" }, { scope: "site", scopeValue: "x", value: {} })).toBeTruthy();
+    // @ts-expect-error a page_type row must name the cohort it answers for
+    expect(metricRow({ id: "some.metric" }, { scope: "page_type", value: {} })).toBeTruthy();
+  });
 });
