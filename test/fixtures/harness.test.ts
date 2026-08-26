@@ -21,6 +21,7 @@ import { crawls, issues, pages } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { runRules } from "../../src/rules/run.js";
 import type { Registry } from "../../src/rules/registry/registry.js";
+import type { PageRecord } from "../../src/rules/registry/types.js";
 import { allFixtures } from "./fixture.js";
 import { startFixtureApp, type FixtureApp } from "./app.js";
 
@@ -59,8 +60,19 @@ let app: FixtureApp;
 let summary: CrawlSummary;
 let registry: Registry;
 
-/** Every path the crawl produced a `pages` row for. */
-const crawledPaths = new Set<string>();
+/**
+ * Path -> the `pages` row the crawl wrote for it. The whole row, not just the
+ * path: an assertion about what a page fired means nothing without the fetch
+ * outcome beside it, because most rules are gated on `isAuditable` and a page
+ * that 404s or redirects fires nothing at all (see the control assertion).
+ *
+ * The key is pathname + query, and a collision throws rather than merging. Two
+ * URLs that differ only in their query string are two pages and two sets of
+ * findings; letting them share a key would let one page's finding satisfy
+ * another page's expectation, which is the one failure this whole file exists
+ * to prevent.
+ */
+const pageByPath = new Map<string, PageRecord>();
 /** Path -> the rule ids that fired on the page at that path. */
 const issuesByPath = new Map<string, Set<string>>();
 /**
@@ -91,8 +103,22 @@ beforeAll(async () => {
   await runRules(db, summary.crawlId, registry);
 
   const pageRows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
-  const pathById = new Map(pageRows.map((p) => [p.id, new URL(p.url).pathname]));
-  for (const path of pathById.values()) crawledPaths.add(path);
+  const pathById = new Map<string, string>();
+  for (const page of pageRows) {
+    const url = new URL(page.url);
+    // Query included: `/x?a=1` and `/x` are two pages with two sets of
+    // findings, and a fixture that asserts about one must never be handed the
+    // other's. A collision is our defect, not a page to merge into.
+    const key = `${url.pathname}${url.search}`;
+    const existing = pageByPath.get(key);
+    if (existing !== undefined) {
+      throw new Error(
+        `two pages rows share the key ${key}: ${existing.url} and ${page.url}`,
+      );
+    }
+    pageByPath.set(key, page);
+    pathById.set(page.id, key);
+  }
 
   for (const row of await db.select().from(issues).where(eq(issues.crawlId, summary.crawlId))) {
     // A null page id is a site-scoped finding: it belongs to the crawl, not to
@@ -132,7 +158,9 @@ describe("the fixture site end to end", () => {
     // the hub forgot to link would otherwise surface as a missing finding,
     // which reads like a broken rule rather than an unreachable page.
     for (const fixture of allFixtures()) {
-      expect([...crawledPaths], `${fixture.path} was never crawled`).toContain(fixture.path);
+      expect([...pageByPath.keys()], `${fixture.path} was never crawled`).toContain(
+        fixture.path,
+      );
     }
   });
 
@@ -148,6 +176,21 @@ describe("the fixture site end to end", () => {
   });
 
   it("no rule fires on the control page", () => {
+    // "Fired nothing" is only evidence if the page was actually audited. Almost
+    // every page rule is gated on `isAuditable`, so a control that regressed to
+    // a 404, a redirect or a body the analyzer could not read would fire
+    // nothing and pass this assertion while proving the opposite of what it
+    // claims. The fetch outcome is checked first, from the page row.
+    const control = pageByPath.get("/control");
+    if (control === undefined) {
+      throw new Error("/control has no pages row: the control page was never crawled");
+    }
+    expect(control.fetchClass, "/control must be a clean fetch to prove anything").toBe("ok");
+    expect(control.statusCode).toBe(200);
+    // A null word count means no analysis ran — the page rules read a row with
+    // nothing in it, which is silence for the wrong reason.
+    expect(control.wordCount, "/control must have been analyzed").not.toBeNull();
+
     // The hub at `/` legitimately fires rules — it is a page, not the control.
     expect([...(issuesByPath.get("/control") ?? new Set<string>())]).toEqual([]);
   });
