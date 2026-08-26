@@ -110,14 +110,19 @@ interface RedirectWalk {
  * themselves. Without this pass a redirect loop with no way in is invisible,
  * which is precisely the loop a visitor can never escape.
  *
- * The two are kept apart because only cycles are read out of the second. In a
- * graph where each page has one target, a redirect no head reaches is always a
- * cycle member — walk backwards from it and, with no head to arrive at, the
- * path must close on itself. So the only *other* thing the second pass can turn
- * up is the remainder of a chain the hop cap stopped following, and reporting
- * that as a chain of its own would bill one over-long path as several, under a
- * "head" that is really its eleventh hop. The truncated chain says `truncated`;
- * that is the honest report of it.
+ * The two are kept apart because chains are read out of the second pass only in
+ * the one case where dropping them would hide something. In a graph where each
+ * page has one target, a redirect no head reaches is always a cycle member —
+ * walk backwards from it and, with no head to arrive at, the path must close on
+ * itself. That holds while the walk is unbounded; with a hop cap, the second
+ * pass also picks up the remainder of a chain the cap stopped following.
+ *
+ * A remainder that terminates normally is already reported at its real head, as
+ * a truncated chain, so reporting it again would bill one over-long path as
+ * several under a "head" that is really its eleventh hop. A remainder that
+ * *itself* runs out of hops is a different matter: nothing anywhere reports it,
+ * and it may equally be a ring longer than the cap. `unresolvedHeadless` is
+ * what keeps that case visible.
  *
  * Memory: the visited set and the redirect-page list are O(redirect pages), not
  * O(URLs), and neither the links table nor the page table is loaded.
@@ -158,9 +163,68 @@ async function redirectWalk(db: Db, crawlId: string): Promise<RedirectWalk> {
 }
 
 /**
+ * The cycle a terminal row proves, closing repeat included (`[d, e, d]`), or
+ * null when the walk proved no cycle.
+ *
+ * Two ways a walk proves one, and the second matters as much as the first:
+ *  - the recursion revisited a URL (`is_cycle`), so the repeat is the last
+ *    element of the chain;
+ *  - the recursion stopped at the hop cap and the terminal page's target is
+ *    already IN the chain. The walk never took that step, so `is_cycle` is
+ *    false, but the loop is proven all the same — a chain of p hops into a
+ *    cycle of k, with p + k exactly at the cap, would otherwise be reported as
+ *    a truncated chain: a warning where the truth is a critical nobody can
+ *    reach the content through.
+ */
+function cycleOf(row: WalkRow): string[] | null {
+  if (row.is_cycle) {
+    const repeated = row.chain[row.chain.length - 1]!;
+    return row.chain.slice(row.chain.indexOf(repeated));
+  }
+  if (row.redirect_url === null) return null;
+  const closesAt = row.chain.indexOf(row.redirect_url);
+  return closesAt === -1 ? null : [...row.chain.slice(closesAt), row.redirect_url];
+}
+
+/**
+ * True when the walk ran out of hops without either landing somewhere or
+ * closing a loop — so what happens past the cap is genuinely unknown.
+ */
+function hitCapUnresolved(row: WalkRow): boolean {
+  return row.redirect_url !== null && row.tail_crawled && cycleOf(row) === null;
+}
+
+/**
+ * The walks worth reporting as chains out of the headless pass.
+ *
+ * Most headless rows are cycles, and `redirect.loop` has them. The exception is
+ * a walk that hit the cap without closing: either a ring longer than the cap,
+ * or the tail of an over-long chain whose head reported its own truncation.
+ * Which of the two it is cannot be known from ten hops, and dropping it would
+ * be a redirect path the engine walked, could not resolve, and said nothing
+ * about (hard rule 7). It is reported as a truncated chain from the seed —
+ * every hop in the evidence is one we actually followed, and `truncated: true`
+ * says the path did not end there.
+ *
+ * Deduped by coverage: seeds are walked in URL order and a seed already inside
+ * an emitted walk's chain is skipped, so a 12-page ring is two findings rather
+ * than twelve.
+ */
+function unresolvedHeadless(rows: WalkRow[]): WalkRow[] {
+  const covered = new Set<string>();
+  const out: WalkRow[] = [];
+  for (const row of [...rows].sort((a, b) => a.head.localeCompare(b.head))) {
+    if (!hitCapUnresolved(row) || covered.has(row.head)) continue;
+    out.push(row);
+    for (const url of row.chain) covered.add(url);
+  }
+  return out;
+}
+
+/**
  * Chains, one finding per head.
  *
- * A walk that ended in a cycle is skipped: `redirect.loop` reports it, and
+ * A walk that proved a cycle is skipped: `redirect.loop` reports it, and
  * billing the same broken path twice would put a warning and a critical on one
  * fix. Hops are counted rather than pages, so the single redirect every CMS
  * ships (`/x` -> `/x/`) is not a chain — the fires-when is "a redirect whose
@@ -169,7 +233,7 @@ async function redirectWalk(db: Db, crawlId: string): Promise<RedirectWalk> {
 function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
   const byHead = new Map<string, Finding>();
   for (const row of rows) {
-    if (row.is_cycle) continue;
+    if (cycleOf(row) !== null) continue;
     const tail = row.redirect_url;
     // The terminal page's target is either an uncrawled URL or the hop the cap
     // stopped us following. Either way it is part of the path and belongs in
@@ -201,18 +265,16 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
 /**
  * Loops, one finding per distinct cycle.
  *
- * The terminal row's chain ends with the URL that repeated, so the cycle is the
- * slice from that URL's first appearance to the end. Several heads can feed the
- * same cycle and both members of a headless pair walk into it, so findings are
- * keyed by the cycle's members — sorted, hashed — and the first one wins.
+ * Several heads can feed the same cycle and both members of a headless pair
+ * walk into it, so findings are keyed by the cycle's members — sorted, hashed —
+ * and the first one wins.
  */
 function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
   const byCycle = new Map<string, Finding>();
   for (const row of rows) {
-    if (!row.is_cycle) continue;
-    const repeated = row.chain[row.chain.length - 1]!;
-    const start = row.chain.indexOf(repeated);
-    const cycle = row.chain.slice(start);
+    const cycle = cycleOf(row);
+    if (cycle === null) continue;
+    const start = row.chain.indexOf(cycle[0]!);
     const key = createHash("sha1").update([...new Set(cycle)].sort().join("\n")).digest("hex");
     if (byCycle.has(key)) continue;
     byCycle.set(
@@ -248,7 +310,13 @@ export const redirectRules: QueryRule[] = [
     severity: CHAIN.severity,
     ...copyFor(CHAIN.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId) => chainFindings(CHAIN, (await redirectWalk(db, crawlId)).fromHeads),
+    run: async (db, crawlId) => {
+      const walk = await redirectWalk(db, crawlId);
+      return chainFindings(CHAIN, [
+        ...walk.fromHeads,
+        ...unresolvedHeadless(walk.headless),
+      ]);
+    },
   }),
 
   defineRule<QueryRule>({

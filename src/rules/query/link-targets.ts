@@ -210,8 +210,19 @@ export const linkTargetRules: QueryRule[] = [
   }),
 
   // A canonical names the URL whose ranking signals every duplicate should be
-  // consolidated into. When that URL does not answer with a 200, the
-  // consolidation has nowhere to land.
+  // consolidated into. When that URL answered with something other than a 200,
+  // the consolidation has nowhere to land.
+  //
+  // The condition is the status code, not `isAuditable`, and the difference is
+  // what the rule is honest about:
+  //  - `status_code` is null when the crawl got no HTTP answer at all (a
+  //    timeout, a DNS or connection failure, a challenge with no response).
+  //    We learned nothing about that URL, which is the same silence a canonical
+  //    for an uncrawled URL gets. `crawl.blocked` and the crawl summary are
+  //    where a fetch we could not complete is reported.
+  //  - a 200 that was not HTML (`fetch_class` `non_html`) DID return 200, so
+  //    firing "does not return 200" on it would be a false statement. It is not
+  //    this rule's finding.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_200.id,
@@ -222,15 +233,21 @@ export const linkTargetRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) =>
       canonicalTargetFindings(NON_200, db, crawlId, ({ target }) =>
-        isAuditable(target)
-          ? null
-          : { targetStatus: target.statusCode, targetFetchClass: target.fetchClass },
+        target.statusCode !== null && target.statusCode !== 200
+          ? { targetStatus: target.statusCode, targetFetchClass: target.fetchClass }
+          : null,
       ),
   }),
 
-  // The target answers, but tells search engines to keep it out of the index.
-  // `is_indexable` is null when nothing was analysed, and unknown is not the
-  // same as "not indexable" — only an explicit false fires.
+  // The target answers with a 200 OK page, and that page tells search engines
+  // to keep it out of the index.
+  //
+  // `isAuditable` is half the condition, and it is what makes this rule and the
+  // one above disjoint. `is_indexable` is a plain boolean the writer sets false
+  // for every 404, redirect, 5xx and non-HTML response, so testing it alone
+  // would report a canonical pointing at a 404 as "points at a noindexed page"
+  // — a second finding for the same fault, carrying copy about a robots
+  // directive that page never had.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
@@ -241,7 +258,7 @@ export const linkTargetRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) =>
       canonicalTargetFindings(NON_INDEXABLE, db, crawlId, ({ target }) =>
-        target.isIndexable === false
+        isAuditable(target) && target.isIndexable === false
           ? { targetRobotsMeta: target.robotsMeta, targetXRobotsTag: target.xRobotsTag }
           : null,
       ),

@@ -272,6 +272,59 @@ describe("redirectRules against the database", () => {
       );
     });
 
+    // The walk stops one step short of taking the edge that closes the loop, so
+    // the row comes back with `is_cycle` false and a target that is already in
+    // the chain. Without the closing test this is a truncated chain — a warning
+    // where the truth is that nobody can reach the content at all.
+    it("finds a cycle that closes exactly at the hop cap", async () => {
+      const crawlId = await newCrawl();
+      // Three hops in, then a seven-page ring: ten pages, the cap exactly.
+      const specs: PageSpec[] = [];
+      for (let i = 0; i < MAX_REDIRECT_HOPS - 1; i += 1) {
+        specs.push(hop(`/c-${i}`, `/c-${i + 1}`));
+      }
+      specs.push(hop(`/c-${MAX_REDIRECT_HOPS - 1}`, "/c-3"));
+      await addPages(crawlId, specs);
+
+      const loops = await findings("redirect.loop", crawlId);
+      expect(loops).toHaveLength(1);
+      expect(loops[0]!.severity).toBe("critical");
+      expect(loops[0]!.pageUrl).toBe(url("/c-3"));
+      expect(loops[0]!.evidence.cycle).toEqual([
+        url("/c-3"), url("/c-4"), url("/c-5"), url("/c-6"),
+        url("/c-7"), url("/c-8"), url("/c-9"), url("/c-3"),
+      ]);
+      // And it is not also billed as a chain.
+      expect(await findings("redirect.chain", crawlId)).toHaveLength(0);
+    });
+
+    // A ring with more members than the cap cannot be closed by any walk, so
+    // the engine cannot call it a loop. What it must not do is say nothing: the
+    // seeds are reported as truncated chains, deduped by coverage.
+    it("reports a ring longer than the hop cap as unresolved rather than dropping it", async () => {
+      const crawlId = await newCrawl();
+      const ring = MAX_REDIRECT_HOPS + 2;
+      const name = (i: number): string => `/ring-${String(i % ring).padStart(2, "0")}`;
+      await addPages(
+        crawlId,
+        Array.from({ length: ring }, (_, i) => hop(name(i), name(i + 1))),
+      );
+
+      // No walk can close a 12-member ring in 10 hops, so there is no loop to
+      // claim — but the paths are visible, not silently discarded.
+      expect(await findings("redirect.loop", crawlId)).toHaveLength(0);
+      const chains = await findings("redirect.chain", crawlId);
+      // Two 10-hop windows cover the twelve members: the first seed in URL
+      // order, then the first member its window did not reach.
+      expect(chains).toHaveLength(2);
+      for (const f of chains) {
+        expect(f.evidence.truncated).toBe(true);
+        expect(f.evidence.length).toBe(MAX_REDIRECT_HOPS);
+        expect(f.evidence.finalStatus).toBeNull();
+      }
+      expect(chains.map((f) => f.pageUrl)).toEqual([url("/ring-00"), url("/ring-10")]);
+    });
+
     it("keys different cycles apart", async () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, [

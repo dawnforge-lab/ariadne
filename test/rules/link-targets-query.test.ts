@@ -70,12 +70,29 @@ describe("linkTargetRules against the database", () => {
   interface PageSpec {
     path: string;
     fetchClass?: string;
-    statusCode?: number;
+    /** Null for a fetch that got no HTTP answer at all (timeout, network error). */
+    statusCode?: number | null;
     canonicalHtml?: string;
     canonicalHeader?: string;
-    isIndexable?: boolean | null;
     robotsMeta?: string;
     xRobotsTag?: string;
+  }
+
+  /**
+   * `is_indexable` exactly as `PageWriter` computes it (see `isIndexable` in
+   * src/crawl/persist.ts): a plain boolean, true only for a 200 OK with no
+   * noindex directive. Derived rather than passed in, so no test can insert a
+   * combination the crawler could never write and then assert a rule's
+   * behaviour on it.
+   */
+  function writerIndexable(s: PageSpec): boolean {
+    const noindex = (v: string | undefined): boolean => /\bnoindex\b|\bnone\b/i.test(v ?? "");
+    return (
+      (s.statusCode ?? 200) === 200 &&
+      (s.fetchClass ?? "ok") === "ok" &&
+      !noindex(s.robotsMeta) &&
+      !noindex(s.xRobotsTag)
+    );
   }
 
   async function newCrawl(): Promise<string> {
@@ -92,10 +109,10 @@ describe("linkTargetRules against the database", () => {
       url: `${SITE}${s.path}`,
       urlNormalised: `${SITE}${s.path}`.toLowerCase().replace(/\/$/, ""),
       fetchClass: s.fetchClass ?? "ok",
-      statusCode: s.statusCode ?? 200,
+      statusCode: s.statusCode === undefined ? 200 : s.statusCode,
       canonicalHtml: s.canonicalHtml ?? null,
       canonicalHeader: s.canonicalHeader ?? null,
-      isIndexable: s.isIndexable === undefined ? true : s.isIndexable,
+      isIndexable: writerIndexable(s),
       robotsMeta: s.robotsMeta ?? null,
       xRobotsTag: s.xRobotsTag ?? null,
       depth: 1,
@@ -160,7 +177,7 @@ describe("linkTargetRules against the database", () => {
         { path: "/s1" },
         { path: "/s2" },
         { path: "/s3" },
-        { path: "/gone", fetchClass: "client_error", statusCode: 404, isIndexable: null },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
       ]);
       await addLinks(crawlId, ["/s1", "/s2", "/s3"], ids, "/gone");
 
@@ -188,7 +205,7 @@ describe("linkTargetRules against the database", () => {
       const sources = Array.from({ length: 14 }, (_, i) => `/src-${String(i).padStart(2, "0")}`);
       const ids = await addPages(crawlId, [
         ...sources.map((path) => ({ path })),
-        { path: "/dead", fetchClass: "client_error", statusCode: 410, isIndexable: null },
+        { path: "/dead", fetchClass: "client_error", statusCode: 410 },
       ]);
       await addLinks(crawlId, sources, ids, "/dead");
 
@@ -204,7 +221,7 @@ describe("linkTargetRules against the database", () => {
       const ids = await addPages(crawlId, [
         { path: "/src" },
         { path: "/fine" },
-        { path: "/external-404", fetchClass: "client_error", statusCode: 404, isIndexable: null },
+        { path: "/external-404", fetchClass: "client_error", statusCode: 404 },
       ]);
       await addLinks(crawlId, ["/src"], ids, "/fine");
       await addLinks(crawlId, ["/src"], ids, "/external-404", false);
@@ -218,7 +235,7 @@ describe("linkTargetRules against the database", () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [
         { path: "/src" },
-        { path: "/boom", fetchClass: "server_error", statusCode: 503, isIndexable: null },
+        { path: "/boom", fetchClass: "server_error", statusCode: 503 },
       ]);
       await addLinks(crawlId, ["/src"], ids, "/boom");
 
@@ -229,7 +246,7 @@ describe("linkTargetRules against the database", () => {
       const other = await newCrawl();
       const otherIds = await addPages(other, [
         { path: "/src" },
-        { path: "/gone", fetchClass: "client_error", statusCode: 404, isIndexable: null },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
       ]);
       await addLinks(other, ["/src"], otherIds, "/gone");
 
@@ -247,7 +264,7 @@ describe("linkTargetRules against the database", () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [
         { path: "/points-at-404", canonicalHtml: url("/gone") },
-        { path: "/gone", fetchClass: "client_error", statusCode: 404, isIndexable: null },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
       ]);
 
       const found = await findings("canonical.non-200-target", crawlId);
@@ -265,6 +282,12 @@ describe("linkTargetRules against the database", () => {
         targetStatus: 404,
         targetFetchClass: "client_error",
       });
+
+      // The two rules are disjoint. `is_indexable` is false on this 404 — the
+      // writer sets it false for every non-200 — so a rule testing that flag
+      // alone would report the same fault twice, the second time with copy
+      // about a robots directive the page never carried.
+      expect(await findings("canonical.non-indexable-target", crawlId)).toHaveLength(0);
     });
 
     it("fires on a canonical that points at a redirect", async () => {
@@ -275,7 +298,6 @@ describe("linkTargetRules against the database", () => {
           path: "/moved",
           fetchClass: "redirect",
           statusCode: 301,
-          isIndexable: null,
         },
       ]);
 
@@ -288,6 +310,40 @@ describe("linkTargetRules against the database", () => {
         targetStatus: 301,
         targetFetchClass: "redirect",
       });
+      expect(await findings("canonical.non-indexable-target", crawlId)).toHaveLength(0);
+    });
+
+    // The crawl got no HTTP answer from the target at all, so it knows nothing
+    // about whether that URL serves a page — the same silence an uncrawled
+    // target gets. A fetch that could not complete is the crawl summary's
+    // report, not a canonical finding.
+    it("is silent when the target fetch produced no status code", async () => {
+      const crawlId = await newCrawl();
+      for (const fetchClass of ["timeout", "network_error"]) {
+        const crawl = await newCrawl();
+        await addPages(crawl, [
+          { path: "/points-at-dead-host", canonicalHtml: url("/unreachable") },
+          { path: "/unreachable", fetchClass, statusCode: null },
+        ]);
+        expect(await findings("canonical.non-200-target", crawl), fetchClass).toHaveLength(0);
+        expect(await findings("canonical.non-indexable-target", crawl), fetchClass).toHaveLength(0);
+      }
+      expect(await findings("canonical.non-200-target", crawlId)).toHaveLength(0);
+    });
+
+    // The target DID return 200; it just was not HTML. Reporting it under "does
+    // not return 200" would be a false statement about the response, and its
+    // `is_indexable` false is a consequence of not being an HTML page rather
+    // than of any robots directive — so the indexability rule stays quiet too.
+    it("is silent when the target returned 200 but was not HTML", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/points-at-pdf", canonicalHtml: url("/brochure.pdf") },
+        { path: "/brochure.pdf", fetchClass: "non_html", statusCode: 200 },
+      ]);
+
+      expect(await findings("canonical.non-200-target", crawlId)).toHaveLength(0);
+      expect(await findings("canonical.non-indexable-target", crawlId)).toHaveLength(0);
     });
 
     // Unknown is not evidence: a canonical for a URL the crawl never fetched
@@ -315,7 +371,7 @@ describe("linkTargetRules against the database", () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, [
         { path: "/header-only", canonicalHeader: url("/gone") },
-        { path: "/gone", fetchClass: "client_error", statusCode: 404, isIndexable: null },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
       ]);
 
       const found = await findings("canonical.non-200-target", crawlId);
@@ -327,7 +383,7 @@ describe("linkTargetRules against the database", () => {
       const crawlId = await newCrawl();
       const total = CANONICAL_BATCH + 5;
       const specs: PageSpec[] = [
-        { path: "/gone", fetchClass: "client_error", statusCode: 404, isIndexable: null },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
       ];
       for (let i = 0; i < total; i += 1) {
         specs.push({ path: `/p-${String(i).padStart(4, "0")}`, canonicalHtml: url("/gone") });
@@ -345,7 +401,6 @@ describe("linkTargetRules against the database", () => {
         { path: "/points-at-noindex", canonicalHtml: url("/noindexed") },
         {
           path: "/noindexed",
-          isIndexable: false,
           robotsMeta: "noindex, follow",
           xRobotsTag: "noindex",
         },
@@ -369,16 +424,27 @@ describe("linkTargetRules against the database", () => {
       expect(await findings("canonical.non-200-target", crawlId)).toHaveLength(0);
     });
 
-    // `is_indexable` is null when nothing was analysed (a 404, a non-HTML
-    // response). Null is unknown, and unknown is not "not indexable".
-    it("is silent when the target's indexability is unknown", async () => {
+    // `is_indexable` is false for every 404, redirect, 5xx and non-HTML
+    // response, not only for a noindex directive, so this rule needs the
+    // target to be a 200 OK page before the flag means what its copy says.
+    it("fires only on a target that answers 200, whatever else is false", async () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, [
-        { path: "/points-at-unknown", canonicalHtml: url("/unanalysed") },
-        { path: "/unanalysed", fetchClass: "non_html", statusCode: 200, isIndexable: null },
+        { path: "/at-404", canonicalHtml: url("/gone") },
+        { path: "/at-5xx", canonicalHtml: url("/boom") },
+        { path: "/at-redirect", canonicalHtml: url("/moved") },
+        { path: "/at-noindex", canonicalHtml: url("/noindexed") },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+        { path: "/boom", fetchClass: "server_error", statusCode: 503 },
+        { path: "/moved", fetchClass: "redirect", statusCode: 301 },
+        { path: "/noindexed", robotsMeta: "noindex" },
       ]);
 
-      expect(await findings("canonical.non-indexable-target", crawlId)).toHaveLength(0);
+      const found = await findings("canonical.non-indexable-target", crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/at-noindex")]);
+      // The other three are the status rule's, once each.
+      expect((await findings("canonical.non-200-target", crawlId)).map((f) => f.pageUrl).sort())
+        .toEqual([url("/at-404"), url("/at-5xx"), url("/at-redirect")].sort());
     });
 
     it("is silent for a page that canonicalises to itself while being noindex", async () => {
@@ -389,7 +455,6 @@ describe("linkTargetRules against the database", () => {
         {
           path: "/self-noindex",
           canonicalHtml: url("/self-noindex"),
-          isIndexable: false,
           robotsMeta: "noindex",
         },
       ]);
