@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
+import {
+  analyzePage,
+  SOFT_404_PHRASES,
+} from "../../src/crawl/parse/page-analyzer.js";
 import { simhash64, hammingDistance } from "../../src/crawl/parse/simhash.js";
 
 const HTML = `<!doctype html><html><head>
@@ -358,5 +361,71 @@ describe("bonus signals", () => {
     const a = analyzePage(`<html><body><img src="a.png"><img src="b.png" height="4"></body></html>`, "https://ex.com/");
     expect(a.imagesTotal).toBe(2);
     expect(a.imagesMissingDimensions).toBe(2);
+  });
+});
+
+/**
+ * The soft-404 phrase flag: `hasLoremIpsum`'s twin, read off the same
+ * visible-text accumulator. The query rule that consumes it (CHECK-16) pairs a
+ * phrase with a thin body and the site's own 404 template, so a false positive
+ * here becomes a false finding there — which is why the list is phrases and
+ * never a bare "404".
+ */
+describe("soft-404 phrases", () => {
+  it("fires on visible text", () => {
+    const a = analyzePage(
+      `<html><body><p>Sorry — this page cannot be found.</p></body></html>`,
+      "https://ex.com/x",
+    );
+    expect(a.hasSoft404Phrases).toBe(true);
+  });
+
+  it("does not fire from script text", () => {
+    const a = analyzePage(
+      `<html><body><script>var msg = "Page not found";</script><p>A real article about widgets.</p></body></html>`,
+      "https://ex.com/x",
+    );
+    expect(a.hasSoft404Phrases).toBe(false);
+  });
+
+  it("does not fire on a bare 404 in prose", () => {
+    for (const text of ["He was born in 404 BC.", "Meet us in room 404 upstairs."]) {
+      const a = analyzePage(`<html><body><p>${text}</p></body></html>`, "https://ex.com/x");
+      expect(a.hasSoft404Phrases, text).toBe(false);
+    }
+  });
+
+  it("matches every phrase in the list, case-insensitively", () => {
+    for (const phrase of SOFT_404_PHRASES) {
+      const a = analyzePage(
+        `<html><body><p>${phrase.toUpperCase()}</p></body></html>`,
+        "https://ex.com/x",
+      );
+      expect(a.hasSoft404Phrases, phrase).toBe(true);
+    }
+  });
+
+  it("reads a typographic apostrophe as an apostrophe", () => {
+    const a = analyzePage(
+      `<html><body><p>Sorry, this page doesn’t exist.</p></body></html>`,
+      "https://ex.com/x",
+    );
+    expect(a.hasSoft404Phrases).toBe(true);
+  });
+
+  it("spans element boundaries, like every other text derivation", () => {
+    const a = analyzePage(
+      `<html><body><h1>Page</h1><p>not found</p></body></html>`,
+      "https://ex.com/x",
+    );
+    expect(a.hasSoft404Phrases).toBe(true);
+  });
+
+  it("stays false on ordinary copy", () => {
+    const a = analyzePage(
+      `<html><body><p>Our widgets are found in every good hardware shop.</p></body></html>`,
+      "https://ex.com/x",
+    );
+    expect(a.hasSoft404Phrases).toBe(false);
   });
 });

@@ -41,6 +41,7 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     hasAmp: false,
     hasViewport: false,
     hasLoremIpsum: false,
+    hasSoft404Phrases: false,
     links: [
       { href: `${SITE}/one`, anchor: "one", rel: null, nofollow: false, position: 0 },
       {
@@ -385,6 +386,7 @@ describe("PageWriter", () => {
         hasViewport: true,
         imagesMissingDimensions: 3,
         hasLoremIpsum: true,
+        hasSoft404Phrases: true,
       }),
     );
     await writer.flush();
@@ -395,6 +397,7 @@ describe("PageWriter", () => {
         hasViewport: pages.hasViewport,
         imagesMissingDimensions: pages.imagesMissingDimensions,
         hasLoremIpsum: pages.hasLoremIpsum,
+        hasSoft404Phrases: pages.hasSoft404Phrases,
       })
       .from(pages)
       .where(eq(pages.crawlId, crawlId));
@@ -402,6 +405,7 @@ describe("PageWriter", () => {
     expect(row?.hasViewport).toBe(true);
     expect(row?.imagesMissingDimensions).toBe(3);
     expect(row?.hasLoremIpsum).toBe(true);
+    expect(row?.hasSoft404Phrases).toBe(true);
   });
 
   it("strips a trailing slash from url_normalised", async () => {
@@ -464,6 +468,7 @@ describe("PageWriter", () => {
     expect(row?.hasViewport).toBe(false);
     expect(row?.imagesMissingDimensions).toBe(0);
     expect(row?.hasLoremIpsum).toBe(false);
+    expect(row?.hasSoft404Phrases).toBe(false);
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);
