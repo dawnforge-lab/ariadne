@@ -232,6 +232,18 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "If the URL should exist, restore it or redirect it to its replacement. If it should not, update the links to point at the right page — or remove them. Fixing the target once repairs every link listed here.",
   },
+  // This rule speaks for two outcomes: a page with no inbound links, and the
+  // crawl declining to answer at all (an unfinished crawl cannot tell an orphan
+  // from a page whose linking pages were never fetched). The copy has to cover
+  // the finding, not the skip — the skipped finding carries its reason in its
+  // own evidence.
+  "links.orphan": {
+    title: "Page has no internal links pointing to it",
+    explanation:
+      "This indexable page was crawled, and no other page on the site links to it. Search engines find and weigh pages largely through internal links, so an orphan is crawled rarely, receives no link equity from the rest of the site, and cannot be reached by anyone browsing. A page listed in the sitemap but linked from nowhere is still an orphan: the sitemap tells a crawler the URL exists, not that the page matters.",
+    howToFix:
+      "Link to the page from somewhere it belongs — a hub or category page, the navigation, or a related article — so both readers and crawlers have a path to it. If nothing on the site has a reason to link to it, that is the answer to whether the page should stay: consolidate it into a page that does earn links, or remove it.",
+  },
 
   // --------------------------------------------------------------- hreflang
   "hreflang.invalid-code": {
@@ -241,12 +253,56 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       'Use a valid code: a two- or three-letter language, optionally followed by a region — "en", "en-gb", "es-419". Region codes are countries, not languages, and "x-default" is the only special value.',
   },
+  // Per SET, not per site and not per page: the finding names one cluster of
+  // alternates, reported once however many pages declare it. The copy must not
+  // say "this page" or "this site".
   "hreflang.missing-x-default": {
-    title: "No x-default hreflang declared",
+    title: "Hreflang cluster declares no x-default",
     explanation:
-      'This crawl found hreflang annotations, but none of them declares "x-default". The x-default value names the version to serve when a visitor matches no other language or region, and without it those visitors are matched by guesswork.',
+      'This set of hreflang alternates names two or more versions of the page and none of them is "x-default". The x-default value names the version to serve when a visitor matches no other language or region, and without it those visitors are matched by guesswork — usually landing on whichever version the search engine considers primary rather than the one you would have chosen.',
     howToFix:
-      'Add an "x-default" hreflang pointing at the fallback version — usually the international or language-selector page — to the same hreflang cluster that carries the other annotations.',
+      'Add an "x-default" alternate to this cluster, pointing at the fallback version — usually the international English page or a language selector. The annotation belongs on every page in the cluster, alongside the alternates already there, so it is normally a one-line change in the template that generates them.',
+  },
+  "hreflang.missing-return-link": {
+    title: "Hreflang alternate does not point back",
+    explanation:
+      "This page names another page as its language alternate, that page was crawled, and it does not name this one in return. Hreflang annotations are only honoured when they are reciprocal: a one-way annotation is discarded, so the alternate is ignored and visitors keep being served the wrong language version.",
+    howToFix:
+      "Make the annotations symmetrical. Every page in a cluster should declare the same full set of alternates, including itself, so each version confirms the others. Generating the block once from a single mapping and rendering it on every page in the cluster is what stops this recurring.",
+  },
+  "hreflang.non-indexable-target": {
+    title: "Hreflang alternate points to a page search engines cannot serve",
+    explanation:
+      "This page names a language alternate whose URL was crawled and either redirects or is excluded from the index. An hreflang cluster is a set of pages a search engine can choose between, so an alternate that does not serve a page at its own URL cannot be chosen, and the annotation naming it is dropped along with the version it was meant to offer.",
+    howToFix:
+      "Point the annotation at the URL that actually serves that language version with a 200, rather than at a redirect to it. If the target is deliberately excluded from the index, it does not belong in the cluster — remove the annotation, or remove the exclusion if the page was meant to rank.",
+  },
+
+  // ------------------------------------------------------------- pagination
+  // Accuracy note for all three: Google stopped using rel=next/rel=prev as a
+  // discovery or consolidation signal in 2019. The copy may say the markup
+  // documents the series and that the HTML links are what crawlers follow; it
+  // must not claim the annotations themselves still consolidate pages.
+  "pagination.next-target-uncrawled": {
+    title: "Next page in the series was not crawled",
+    explanation:
+      "This page declares a rel=next pointing at the following page of the series, and this crawl has no record of that URL. Most often the series simply runs past the edge of the crawl, which is not a fault; the other explanations are a stale rel=next left behind after the series shrank, or a value that is not a usable URL at all. This is a statement about what the crawl saw, not a verdict.",
+    howToFix:
+      "Nothing to do if the crawl was bounded and the series continues past it. If the URL is wrong or the page it names no longer exists, correct the rel=next in the template that generates the series so it names the page that follows.",
+  },
+  "pagination.next-not-linked": {
+    title: "Later page of a series is reachable only through rel=next",
+    explanation:
+      "This page's rel=next names a page that was crawled, and no page on the site has an HTML link to it. Crawlers follow links; rel=next has not been used for discovery since 2019, so a series wired together only by these annotations leaves its later pages with no path in and no internal link equity, however many items they hold.",
+    howToFix:
+      "Render real anchor links for the pagination — next, previous, and the page numbers — rather than relying on rel=next or on a script that builds the links after load. Where the pagination is a JavaScript control, make sure a crawlable link with an href ships in the HTML alongside it.",
+  },
+  "pagination.canonical-to-other": {
+    title: "Paginated page canonicalises to another URL",
+    explanation:
+      "This page is part of a series — it declares a rel=prev — and its canonical names a different URL, usually the first page. That is a deliberate choice with a real cost either way: consolidating the series onto page 1 asks search engines to ignore everything the later pages list, while a self-referencing canonical keeps them indexable at the price of near-duplicate listing pages. Which is right depends on whether the deeper pages hold content worth finding on its own.",
+    howToFix:
+      "Decide what the deeper pages are for. If their items should be findable, canonicalise each page to itself and let the series be indexed. If the series exists only to browse a single collection, keep the canonical on page 1 and make sure the items themselves are reachable and indexable through their own pages.",
   },
 
   // -------------------------------------------------------------- technical

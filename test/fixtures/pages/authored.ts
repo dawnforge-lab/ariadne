@@ -262,13 +262,15 @@ const noindexConflict: Fixture = {
 // Hreflang
 //
 // Both pages below declare language alternates and neither declares an
-// x-default, which is what makes `hreflang.missing-x-default` fire. That rule
-// is SITE-SCOPED: it writes one finding with a null page id, because a missing
-// fallback is a property of the crawl's whole annotation set rather than of any
-// one URL. It therefore appears in NEITHER page's `expectedIssues` — the
-// harness maps only page-attached findings to paths — and is asserted from the
-// harness's `siteFindings` map instead, together with the three declarations
-// these two pages contribute between them.
+// x-default. Only the second one fires `hreflang.missing-x-default`, and the
+// difference is the point of having both: that rule judges a declaration SET,
+// so a page naming two alternates is a cluster with no fallback, while a page
+// naming one is not a cluster at all and has nothing to fall back from.
+//
+// The finding lands on the lexically first member of the set — the fixture's
+// own URL here, the German alternate being on another host — so it is a
+// page-attached finding with a `pageUrl`, asserted through `expectedIssues`
+// and, for the set it names, through the harness's `detailsByPath` pin.
 // ---------------------------------------------------------------------------
 
 /**
@@ -298,26 +300,24 @@ const hreflangBadCode: Fixture = {
 };
 
 /**
- * A valid pair with no x-default. The page itself is clean — both codes parse,
- * so nothing page-attached fires here — and its job is to make the site-scoped
- * rule's subject a real cluster rather than one malformed tag.
+ * A valid pair with no x-default: two codes that both parse, naming two URLs,
+ * and no fallback for a visitor who is neither English nor German.
  *
- * That job is only worth doing if a test can tell the page apart from nothing,
- * and the rule alone cannot: `hreflang.missing-x-default` fires on ANY
- * declaration with no x-default anywhere, so the bad-code page above would
- * produce it single-handed. The harness therefore asserts the declarations
- * themselves — these two codes, on this path, and the total of three the
- * finding counted — which is what stops this page from being a fixture that
+ * Both declarations are needed. `hreflang.missing-x-default` judges the set a
+ * page declares, and a set of one is not a cluster — so a single alternate
+ * would fire nothing, and this page is the only fixture that makes the rule
+ * speak. The harness pins the codes that go in and the targets the finding
+ * names on the way out, which is what stops this page from being a fixture that
  * exists without being evidence.
  */
 const hreflangNoXDefault: Fixture = {
   path: "/authored/hreflang-no-xdefault",
   category: HREFLANG,
   name: "Language alternates with no x-default",
-  // Intentionally empty: the only rule this page provokes is site-scoped, and
-  // site-scoped findings attach to no URL. What this page IS pinned by is the
-  // harness's hreflang-declarations assertion. See the block comment above.
-  expectedIssues: [],
+  // The finding attaches to the lexically first member of the set, which is
+  // this page's own URL: the alternate is `https://de.example/...` and `http:`
+  // sorts before `https:`.
+  expectedIssues: ["hreflang.missing-x-default"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({

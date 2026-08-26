@@ -32,22 +32,30 @@ function databaseUrl(): string {
 }
 
 /**
- * Rules no fixture claims yet — the Phase 3 canonical-TARGET rules, which need
- * a page whose canonical points at a URL the crawl fetched and found broken or
- * noindexed. Phase 3's fixture task (Task 9) authors those pages and DELETES
- * this list, at which point the last assertion below becomes the strict "every
- * registered rule fires somewhere" it wants to be. The same pattern, and the
- * same promise, as Phase 2's Task 8 -> 9.
+ * Rules no fixture claims yet. Each needs a page shape the fixture site does
+ * not serve today: a canonical or an hreflang alternate pointing at a URL the
+ * crawl fetched and found broken or noindexed, a page nothing links to (the
+ * hub links every fixture, which is what makes the crawl reach them all), and
+ * a paginated series. Phase 3's fixture task (Task 9) authors those pages and
+ * DELETES this list, at which point the last assertion below becomes the strict
+ * "every registered rule fires somewhere" it wants to be. The same pattern, and
+ * the same promise, as Phase 2's Task 8 -> 9.
  *
  * It is asserted exactly, not as a floor: a rule that quietly stops firing
  * shows up here as an unexpected addition, and a rule Task 9 claims without
- * removing its entry shows up as an unexpected absence. The other three Phase 3
- * rules are not here because the absorbed redirect and 404 pages already
- * provoke them — see their `expectedIssues`.
+ * removing its entry shows up as an unexpected absence. The other Phase 3 rules
+ * are not here because the absorbed redirect and 404 pages, and the authored
+ * hreflang pair, already provoke them — see their `expectedIssues`.
  */
 const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "canonical.non-200-target",
   "canonical.non-indexable-target",
+  "hreflang.missing-return-link",
+  "hreflang.non-indexable-target",
+  "links.orphan",
+  "pagination.canonical-to-other",
+  "pagination.next-not-linked",
+  "pagination.next-target-uncrawled",
 ];
 
 let db: Db;
@@ -71,16 +79,18 @@ const pageByPath = new Map<string, PageRecord>();
 /** Path -> the rule ids that fired on the page at that path. */
 const issuesByPath = new Map<string, Set<string>>();
 /**
- * Findings that belong to no URL, by rule id, with the evidence the rule wrote
- * — today only `hreflang.missing-x-default`, which is a fact about the crawl's
- * annotation set rather than about a page. They count towards coverage (a
- * fixture's hreflang is what produces them) and attach to no path, `/control`
- * included.
- *
- * The evidence is kept, not just the id, because a site-scoped rule's evidence
- * is the only place the fixtures behind it are visible. Assert the id alone and
- * any single hreflang declaration anywhere satisfies the test, which would make
- * every hreflang fixture after the first one dead weight.
+ * `${path}\n${ruleId}` -> the details the rule wrote. A rule id alone says a
+ * finding landed; the details say it landed on the right evidence, which is
+ * what makes a fixture load-bearing rather than decorative.
+ */
+const detailsByPath = new Map<string, unknown>();
+/**
+ * Findings that belong to no URL, by rule id, with the evidence the rule wrote.
+ * No registered rule writes one on THIS crawl any more — `links.orphan` writes
+ * a site-scoped finding only when the crawl was incomplete, and this one is
+ * not — so the map is asserted empty. It is still collected rather than
+ * dropped: a site-scoped finding appearing here is a rule that changed shape,
+ * and the assertion below is where that surfaces instead of vanishing.
  */
 const siteFindings = new Map<string, unknown>();
 /**
@@ -142,6 +152,7 @@ beforeAll(async () => {
     const fired = issuesByPath.get(path) ?? new Set<string>();
     fired.add(row.ruleId);
     issuesByPath.set(path, fired);
+    detailsByPath.set(`${path}\n${row.ruleId}`, row.details);
   }
 
   for (const row of await db
@@ -232,41 +243,52 @@ describe("the fixture site end to end", () => {
     expect([...(issuesByPath.get("/control") ?? new Set<string>())]).toEqual([]);
   });
 
-  it("the site-scoped findings belong to the crawl and to no fixture path", () => {
-    // `hreflang.missing-x-default` is the only site-scoped rule in the
-    // registry today: the hreflang fixtures declare alternates and none
-    // declares an x-default, so the crawl's annotation set is missing its
-    // fallback. It is written once, with a null page id.
-    expect([...siteFindings.keys()].sort()).toEqual(["hreflang.missing-x-default"]);
+  it("no finding on this crawl is site-scoped", () => {
+    // `hreflang.missing-x-default` used to be the registry's one site-scoped
+    // rule and is now per declaration SET, landing on a URL. The only rule that
+    // can still write a null-page finding is `links.orphan`, and only when the
+    // crawl was incomplete — this one drains its frontier and stops well short
+    // of maxPages, so it must not.
+    expect([...siteFindings.keys()]).toEqual([]);
+  });
 
+  it("the hreflang fixtures' declarations reach the rules that judge them", () => {
     // Which fixture declared what, asserted exactly — both as the map of
-    // declarations that went in, and as the count the rule wrote out.
+    // declarations that went in, and as the set the finding named on the way
+    // out.
     //
     // This is what makes each hreflang fixture load-bearing rather than
-    // decorative. The site-scoped rule fires on ANY declaration with no
-    // x-default anywhere, so an assertion that only checked the rule id would
-    // be satisfied by the bad-code page alone, and `/authored/hreflang-no-xdefault`
-    // could be deleted without a single test noticing. Pinning the codes and
-    // the total means removing either page, or changing what either declares,
-    // fails here.
+    // decorative. Asserting the rule id alone would be satisfied by whichever
+    // page happened to declare a cluster, and the other could be deleted
+    // without a test noticing. Pinning the codes, and the targets the finding
+    // carries, means removing either page or changing what it declares fails
+    // here.
     expect(Object.fromEntries(hreflangByPath)).toEqual({
       "/authored/hreflang-bad-code": ["english-uk"],
       "/authored/hreflang-no-xdefault": ["de", "en"],
     });
-    expect(siteFindings.get("hreflang.missing-x-default")).toEqual({
-      pageUrl: null,
-      declarations: 3,
+
+    // The x-default finding belongs to the two-alternate cluster, not to the
+    // single bad-code declaration: a page naming one URL is not a cluster and
+    // has nothing to fall back from. It lands on the lexically first member of
+    // the set, which here is the fixture's own URL — the German alternate is on
+    // another host the crawl never fetched, and is named in the evidence all
+    // the same.
+    const declared = pageByPath.get("/authored/hreflang-no-xdefault");
+    if (declared === undefined) throw new Error("the no-xdefault fixture was never crawled");
+    expect(
+      detailsByPath.get("/authored/hreflang-no-xdefault\nhreflang.missing-x-default"),
+    ).toEqual({
+      pageUrl: declared.url,
+      targets: [declared.url, "https://de.example/willkommen"],
+      setSize: 2,
     });
 
-    // The attribution guard. A site-scoped finding names no URL, so it must
-    // reach no fixture's path — not the hreflang pages that provoked it, and
-    // above all not `/control`, whose whole claim is that nothing lands on it.
-    for (const fixture of allFixtures()) {
-      expect(
-        [...(issuesByPath.get(fixture.path) ?? new Set<string>())],
-        `${fixture.path} must not be blamed for a site-scoped finding`,
-      ).not.toContain("hreflang.missing-x-default");
-    }
+    // And the bad-code page, whose one declaration is not a set, carries no
+    // x-default finding at all.
+    expect([
+      ...(issuesByPath.get("/authored/hreflang-bad-code") ?? new Set<string>()),
+    ]).not.toContain("hreflang.missing-x-default");
   });
 
   it("every registered rule fires on at least one fixture", () => {
@@ -274,12 +296,11 @@ describe("the fixture site end to end", () => {
     // but it proves nothing: a rule "covered" only by the hub would be a rule
     // no fixture was ever written for.
     //
-    // `siteFindings` seeds the set because a site-scoped rule has no page to
-    // land on: it is provoked by a fixture's markup — here, the hreflang pages'
-    // declarations — but written against the crawl. Counting it towards
-    // coverage regardless of which page produced it is correct precisely
-    // because there is no page to attribute it to; the assertion above is what
-    // holds that "no page" honest.
+    // `siteFindings` still seeds the set, and is empty today. A site-scoped
+    // rule has no page to land on — it is provoked by a fixture's markup but
+    // written against the crawl — so counting one towards coverage regardless
+    // of which page produced it would be correct. The assertion above is what
+    // holds "no page" honest while there are none.
     const fired = new Set(siteFindings.keys());
     for (const fixture of allFixtures()) {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);

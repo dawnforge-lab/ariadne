@@ -25,11 +25,13 @@ describe("buildRegistry", () => {
     expect(ids).toContain("title.missing");
     expect(ids).toContain("http.server-error");
     expect(ids).toContain("hreflang.invalid-code");
-    // Phase 2's 28 page and hreflang rules, plus the Phase 3 redirect and
-    // link/canonical-target query rules.
+    // Phase 2's 28 page and hreflang rules, plus the Phase 3 redirect,
+    // link/canonical-target, orphan, hreflang-join and pagination query rules.
     expect(ids).toContain("redirect.loop");
     expect(ids).toContain("links.broken-internal");
-    expect(ids.length).toBe(33);
+    expect(ids).toContain("links.orphan");
+    expect(ids).toContain("pagination.next-not-linked");
+    expect(ids.length).toBe(39);
   });
 
   it("registers both kinds the runner drives", () => {
@@ -43,9 +45,20 @@ describe("runRules against the database", () => {
   let db: Db;
   const createdCrawls: string[] = [];
 
+  /**
+   * A crawl row that looks like one that ran to completion: a page cap it did
+   * not reach, and no frontier rows. `links.orphan` refuses to judge an
+   * incomplete crawl and writes a skipped finding instead, so a crawl row
+   * without a readable `maxPages` would add that finding to every case below.
+   */
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({ id, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    await db.insert(crawls).values({
+      id,
+      siteUrl: SITE,
+      config: { maxPages: 10_000 },
+      rulesetVersion: "test",
+    });
     createdCrawls.push(id);
     return id;
   }
@@ -78,7 +91,12 @@ describe("runRules against the database", () => {
 
   it("writes one issues row per finding, is idempotent, and leaves a clean page alone", async () => {
     const crawlId = await newCrawl();
-    const clean = mkRow(crawlId, "/clean");
+    // The clean page is the crawl's seed. `links.orphan` reports an indexable
+    // page with no inbound links, and a synthetic crawl has no `links` rows at
+    // all — so a clean page that was not the seed would fire it, and "a clean
+    // page contributes nothing" would stop being true for a reason that has
+    // nothing to do with the page.
+    const clean = mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" });
     const untitled = mkRow(crawlId, "/untitled", { title: null });
     const broken = mkRow(crawlId, "/broken", { fetchClass: "server_error", statusCode: 503 });
     await db.insert(pages).values([clean, untitled, broken]);
@@ -168,7 +186,10 @@ describe("runRules against the database", () => {
     const other = await newCrawl();
     await db.insert(pages).values([mkRow(other, "/untitled", { title: null })]);
     const mine = await newCrawl();
-    await db.insert(pages).values([mkRow(mine, "/clean")]);
+    // The seed, for the reason given above: an indexable page nothing links to
+    // is an orphan, and "a clean crawl produces nothing" has to mean the rules
+    // read the right crawl, not that this page is unreachable.
+    await db.insert(pages).values([mkRow(mine, "/clean", { depth: 0, discoveredVia: "seed" })]);
 
     const summary = await runRules(db, mine, buildRegistry());
     expect(summary.pagesScanned).toBe(1);

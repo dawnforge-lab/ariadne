@@ -56,6 +56,12 @@ const PHASE_3_RULE_IDS = [
   "links.broken-internal",
   "canonical.non-200-target",
   "canonical.non-indexable-target",
+  "links.orphan",
+  "hreflang.missing-return-link",
+  "hreflang.non-indexable-target",
+  "pagination.next-target-uncrawled",
+  "pagination.next-not-linked",
+  "pagination.canonical-to-other",
 ];
 
 const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
@@ -139,6 +145,31 @@ describe("issue copy", () => {
     const misconfigured =
       /misconfigured|incorrectly configured|incorrect viewport|wrong viewport|badly configured|invalid viewport/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(misconfigured);
+  });
+
+  // The rule is per SET now: it fires once per distinct cluster of alternates,
+  // not once for the crawl and not once per page. Copy saying "this site" or
+  // "this page" would describe the shape the rule used to have.
+  it("hreflang.missing-x-default speaks about a cluster, not a site or a page", () => {
+    const c = ISSUE_COPY["hreflang.missing-x-default"]!;
+    const wrongScope = /this (?:crawl|site|page)|the whole site|site-wide/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(wrongScope);
+  });
+
+  // rel=next/rel=prev stopped being a discovery or consolidation signal in
+  // 2019. The findings are about what the markup documents and about the HTML
+  // links that are missing beside it.
+  it("the pagination copy does not claim rel=next still consolidates a series", () => {
+    for (const id of [
+      "pagination.next-target-uncrawled",
+      "pagination.next-not-linked",
+      "pagination.canonical-to-other",
+    ]) {
+      const c = ISSUE_COPY[id]!;
+      const overclaim =
+        /rel=next (?:tells|lets|helps|allows|asks) (?:search engines|google|crawlers)|(?:search engines|google|crawlers) use rel=next|consolidat\w+ (?:the )?series (?:with|through|via) rel=next/i;
+      expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
+    }
   });
 
   it("headings.h1-multiple does not claim a ranking penalty", () => {

@@ -5,7 +5,9 @@ import { canonicalRules } from "./page/canonical.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { technicalRules } from "./page/technical.js";
 import { hreflangRules } from "./query/hreflang.js";
+import { linkGraphRules } from "./query/link-graph.js";
 import { linkTargetRules } from "./query/link-targets.js";
+import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
 
 /**
@@ -26,6 +28,8 @@ export function buildRegistry(): Registry {
     ...hreflangRules,
     ...redirectRules,
     ...linkTargetRules,
+    ...linkGraphRules,
+    ...paginationRules,
   ]) {
     r.register(rule);
   }

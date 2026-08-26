@@ -18,6 +18,7 @@ import {
   SAMPLE_SOURCES,
 } from "../../src/rules/query/link-targets.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -67,32 +68,10 @@ describe("linkTargetRules against the database", () => {
   let db: Db;
   const createdCrawls: string[] = [];
 
-  interface PageSpec {
+  interface PageSpec extends IndexabilitySpec {
     path: string;
-    fetchClass?: string;
-    /** Null for a fetch that got no HTTP answer at all (timeout, network error). */
-    statusCode?: number | null;
     canonicalHtml?: string;
     canonicalHeader?: string;
-    robotsMeta?: string;
-    xRobotsTag?: string;
-  }
-
-  /**
-   * `is_indexable` exactly as `PageWriter` computes it (see `isIndexable` in
-   * src/crawl/persist.ts): a plain boolean, true only for a 200 OK with no
-   * noindex directive. Derived rather than passed in, so no test can insert a
-   * combination the crawler could never write and then assert a rule's
-   * behaviour on it.
-   */
-  function writerIndexable(s: PageSpec): boolean {
-    const noindex = (v: string | undefined): boolean => /\bnoindex\b|\bnone\b/i.test(v ?? "");
-    return (
-      (s.statusCode ?? 200) === 200 &&
-      (s.fetchClass ?? "ok") === "ok" &&
-      !noindex(s.robotsMeta) &&
-      !noindex(s.xRobotsTag)
-    );
   }
 
   async function newCrawl(): Promise<string> {
