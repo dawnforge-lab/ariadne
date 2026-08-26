@@ -53,9 +53,10 @@ export const RENDER_CHECKS: readonly string[] = ["CHECK-01", "CHECK-02", "CHECK-
 
 /**
  * Checks whose answer is a site-wide number rather than a per-page fault —
- * they belong to the metric rules, which the runner does not drive yet. Listed
- * so the coverage pin's remainder says *why* each check is still unclaimed
- * instead of leaving a reader to guess.
+ * they belong to the metric rules. The runner drives the metric kind; no
+ * metric rule claims these ids yet. Listed so the coverage pin's remainder
+ * says *why* each check is still unclaimed instead of leaving a reader to
+ * guess.
  */
 export const METRIC_PENDING_CHECKS: readonly string[] = [
   "CHECK-08", "CHECK-29", "CHECK-33", "CHECK-33b",

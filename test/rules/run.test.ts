@@ -3,11 +3,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, issues, pages, structuredData, urlParams } from "../../src/db/schema.js";
+import {
+  crawls,
+  hreflang,
+  issues,
+  metrics,
+  pages,
+  structuredData,
+  urlParams,
+} from "../../src/db/schema.js";
+import { metricRow } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { PAGE_BATCH, runRules } from "../../src/rules/run.js";
 import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
-import type { MetricRule, PageRecord, PageRule } from "../../src/rules/registry/types.js";
+import type { Metric, MetricRule, PageRecord, PageRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
 import { mkPage } from "./mk-page.js";
 
@@ -327,29 +336,197 @@ describe("runRules against the database", () => {
     await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.exploding/);
   });
 
-  it("refuses to run a registry containing a metric rule", async () => {
-    const crawlId = await newCrawl();
-    await db.insert(pages).values([mkRow(crawlId, "/clean")]);
-
-    // Metric rules are a registry kind the runner has no loop for. Running the
-    // registry anyway would quietly skip it, so the runner must refuse.
-    const metric: MetricRule = {
+  /**
+   * A metric rule built for a test: the registry metadata a rule cannot ship
+   * without, wrapped around a body the test controls. No real metric rules
+   * exist yet, so the metric phase is exercised through stubs.
+   */
+  function mkMetricRule(id: string, run: MetricRule["run"]): MetricRule {
+    return {
       kind: "metric",
-      id: "test.metric",
+      id,
       checkIds: ["CHECK-01"],
       category: "technical",
       severity: "info",
-      title: "A metric rule the runner cannot drive",
-      explanation: "A stub metric rule, registered only to prove the runner rejects it.",
-      howToFix: "Extend the runner.",
+      title: `Test metric ${id}`,
+      explanation: "A stub metric rule, registered so the runner's metric phase can be observed.",
+      howToFix: "A metric is a number, not a fault — there is nothing to fix.",
       rulesetVersion: RULESET_VERSION,
-      run: async () => [],
+      run,
     };
-    const registry = new Registry();
-    registry.register(metric);
+  }
 
-    await expect(runRules(db, crawlId, registry)).rejects.toThrow(
-      "runRules does not drive metric rules yet — extend the runner before registering metric rules",
+  /** The crawl's metric rows, keyed by their composite primary key. */
+  async function readMetrics(crawlId: string): Promise<Record<string, unknown>> {
+    const rows = await db.select().from(metrics).where(eq(metrics.crawlId, crawlId));
+    return Object.fromEntries(
+      rows.map((r) => [`${r.metricId}|${r.scope}|${r.scopeValue}`, r.value]),
     );
+  }
+
+  // The metrics-vs-issues asymmetry, which is the whole reason the metric phase
+  // deletes before it inserts. An issue is evidence: it happened, and a re-run
+  // adds nothing (the dedupe index absorbs it). A metric is recomputed state:
+  // the crawl's current answer, and last run's answer is not evidence of
+  // anything once this run has produced its own. A cohort that stopped existing
+  // must therefore stop having a row — an upsert alone could refresh the
+  // survivors but never remove the departed.
+  it("writes a metric rule's rows, refreshes them, and drops a cohort that stopped being emitted", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    let emitted: Metric[] = [
+      metricRow({ id: "test.cohorts" }, { scope: "site", value: { pages: 2 } }),
+      metricRow(
+        { id: "test.cohorts" },
+        { scope: "page_type", scopeValue: "product", value: { pages: 1 } },
+      ),
+      metricRow(
+        { id: "test.cohorts" },
+        { scope: "page_type", scopeValue: "blog", value: { pages: 1 } },
+      ),
+    ];
+    const registry = new Registry();
+    registry.register(mkMetricRule("test.cohorts", async () => emitted));
+
+    const first = await runRules(db, crawlId, registry);
+    expect(first.metrics).toBe(3);
+    expect(first.byMetric).toEqual({ "test.cohorts": 3 });
+    expect(await readMetrics(crawlId)).toEqual({
+      "test.cohorts|site|": { pages: 2 },
+      "test.cohorts|page_type|product": { pages: 1 },
+      "test.cohorts|page_type|blog": { pages: 1 },
+    });
+
+    // A re-run over the same crawl: the site row's value is replaced rather
+    // than kept or duplicated, and `blog` — a cohort this run does not emit —
+    // is gone rather than left behind as a claim about pages nothing counted.
+    emitted = [
+      metricRow({ id: "test.cohorts" }, { scope: "site", value: { pages: 5 } }),
+      metricRow(
+        { id: "test.cohorts" },
+        { scope: "page_type", scopeValue: "product", value: { pages: 5 } },
+      ),
+    ];
+    const second = await runRules(db, crawlId, registry);
+    expect(second.metrics).toBe(2);
+    expect(second.byMetric).toEqual({ "test.cohorts": 2 });
+    expect(await readMetrics(crawlId)).toEqual({
+      "test.cohorts|site|": { pages: 5 },
+      "test.cohorts|page_type|product": { pages: 5 },
+    });
+
+    // A rule that emits nothing at all still clears its own rows — and the
+    // summary names it with a zero, so "the rule ran and found nothing" is
+    // distinguishable from "the rule never ran".
+    emitted = [];
+    const third = await runRules(db, crawlId, registry);
+    expect(third.metrics).toBe(0);
+    expect(third.byMetric).toEqual({ "test.cohorts": 0 });
+    expect(await readMetrics(crawlId)).toEqual({});
+  });
+
+  // The phase order: page rules, derivations, query rules, then metrics. A
+  // metric summarises what the run found, so it has to run last — one that ran
+  // before the query rules would report a crawl's issue counts as they stood
+  // halfway through judging it.
+  it("runs the metric phase after the issue-writing phases", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([
+      mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" }),
+      mkRow(crawlId, "/untitled", { title: null }),
+    ]);
+
+    const registry = buildRegistry();
+    registry.register(
+      mkMetricRule("test.issue-count", async (dbArg, id) => {
+        const rows = await dbArg.select().from(issues).where(eq(issues.crawlId, id));
+        return [metricRow({ id: "test.issue-count" }, { scope: "site", value: { n: rows.length } })];
+      }),
+    );
+
+    const summary = await runRules(db, crawlId, registry);
+    const written = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
+    expect(written.length).toBeGreaterThan(0);
+    expect(summary.findings).toBe(written.length);
+    expect(await readMetrics(crawlId)).toEqual({
+      "test.issue-count|site|": { n: written.length },
+    });
+  });
+
+  it("aborts loudly naming the metric rule that threw, keeping earlier rules' rows", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const registry = new Registry();
+    registry.register(
+      mkMetricRule("test.first-metric", async () => [
+        metricRow({ id: "test.first-metric" }, { scope: "site", value: { pages: 1 } }),
+      ]),
+    );
+    registry.register(
+      mkMetricRule("test.exploding-metric", () => {
+        throw new Error("boom");
+      }),
+    );
+
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.exploding-metric/);
+
+    // Each metric rule owns its own transaction, so the rule that finished
+    // before the failure keeps what it wrote: its rows are this crawl's current
+    // answer for that metric, and rolling them back would replace a true number
+    // with a missing one because a different rule is broken.
+    expect(await readMetrics(crawlId)).toEqual({ "test.first-metric|site|": { pages: 1 } });
+  });
+
+  // A cohort row is "the answer for THIS group of pages". Without a name, the
+  // group is unidentifiable — and the empty string is already taken: it is what
+  // a site-scoped row stores. Two nameless cohorts would collide on the primary
+  // key with each other and with the site row.
+  it("refuses a page_type row with no scope value, naming the rule", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const registry = new Registry();
+    registry.register(
+      mkMetricRule("test.nameless-cohort", async () => [
+        { metricId: "test.nameless-cohort", scope: "page_type", scopeValue: "", value: { n: 1 } },
+      ]),
+    );
+
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.nameless-cohort/);
+    // Validated before anything is written: the rule's whole set is refused,
+    // not the bad row alone.
+    expect(await readMetrics(crawlId)).toEqual({});
+  });
+
+  // `metricRow` makes this unreachable from a rule that uses it; the runner
+  // checks anyway, because the delete that keeps metrics from going stale is
+  // `metric_id = <rule id>` — a row filed under another id would never be
+  // recomputed and never removed.
+  it("refuses a row filed under a metric id that is not the rule's own", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const registry = new Registry();
+    registry.register(
+      mkMetricRule("test.mislabelled", async () => [
+        { metricId: "test.some-other-metric", scope: "site", scopeValue: "", value: { n: 1 } },
+      ]),
+    );
+
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.mislabelled/);
+    expect(await readMetrics(crawlId)).toEqual({});
+  });
+
+  // A registry with no metric rules still reports the phase, so a run's summary
+  // has the same shape whether or not any metric ran.
+  it("reports an empty metric phase when no metric rule is registered", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const summary = await runRules(db, crawlId, buildRegistry());
+    expect(summary.metrics).toBe(0);
+    expect(summary.byMetric).toEqual({});
   });
 });

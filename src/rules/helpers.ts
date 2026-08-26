@@ -2,6 +2,7 @@ import { copyFor } from "./registry/copy/index.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
 import type {
   Finding,
+  Metric,
   PageRecord,
   PageRule,
   RuleCategory,
@@ -80,6 +81,33 @@ export function queryFinding(
   // and only the four fields named here come from the caller.
   const { pageId, pageUrl, evidence, dedupeKey } = f;
   return { ruleId: self.id, pageId, pageUrl, severity: self.severity, evidence, dedupeKey };
+}
+
+/**
+ * The metric rules' twin of `queryFinding`. A metric rule produces numbers
+ * rather than accusations, so there is no page and no severity to carry — but
+ * the identity question is the same one, and sharper: the runner deletes a
+ * metric rule's rows for the crawl with `metric_id = <the rule's id>` before
+ * inserting its fresh set, so a row filed under any other metric id would never
+ * be recomputed and never removed. `metricId` therefore comes from `self` and
+ * from nowhere else.
+ *
+ * `scopeValue` is optional because a site-scoped metric has nothing to name:
+ * it defaults to the empty string, which is what the composite primary key
+ * `(crawl_id, metric_id, scope, scope_value)` stores for the one row per crawl.
+ * A `page_type` row without one is refused by the runner — an unnamed cohort
+ * identifies no group of pages, and would collide with the site row's key.
+ */
+export function metricRow(
+  self: { id: string },
+  m: { scope: "site" | "page_type"; scopeValue?: string; value: Record<string, unknown> },
+): Metric {
+  // Destructured field by field rather than spread, for `queryFinding`'s
+  // reason: a spread of `m` would carry whatever else the caller's object holds
+  // — a `metricId` read out of a SQL row, say — either overriding the rule's
+  // own identity or riding along into the `metrics` row.
+  const { scope, scopeValue, value } = m;
+  return { metricId: self.id, scope, scopeValue: scopeValue ?? "", value };
 }
 
 /**

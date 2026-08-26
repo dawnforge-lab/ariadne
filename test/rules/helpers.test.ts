@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { finding, present, queryFinding } from "../../src/rules/helpers.js";
+import { finding, metricRow, present, queryFinding } from "../../src/rules/helpers.js";
 import { mkPage } from "./mk-page.js";
 
 describe("present", () => {
@@ -92,5 +92,49 @@ describe("queryFinding", () => {
       queryFinding(self, { pageId: page.id, pageUrl: page.url, evidence: {}, dedupeKey: page.url })
         .severity,
     ).toBe("info");
+  });
+});
+
+describe("metricRow", () => {
+  it("stamps the rule's id and defaults a site-scoped row's scope value to the empty string", () => {
+    const m = metricRow(
+      { id: "indexability.ratio" },
+      { scope: "site", value: { indexable: 90, total: 100 } },
+    );
+    expect(m).toEqual({
+      metricId: "indexability.ratio",
+      scope: "site",
+      scopeValue: "",
+      value: { indexable: 90, total: 100 },
+    });
+  });
+
+  it("carries a cohort row's scope value through unchanged", () => {
+    const m = metricRow(
+      { id: "depth.distribution" },
+      { scope: "page_type", scopeValue: "product", value: { median: 3 } },
+    );
+    expect(m.scope).toBe("page_type");
+    expect(m.scopeValue).toBe("product");
+    expect(m.value).toEqual({ median: 3 });
+  });
+
+  // The identity is the rule's, never the payload's — `queryFinding`'s reason,
+  // with a sharper edge: the runner deletes a metric rule's rows by
+  // `metric_id = <rule id>` before inserting its fresh set, so a row that
+  // arrived under some other metric id would never be deleted and would sit in
+  // `metrics` forever as state no rule recomputes.
+  it("cannot be relabelled by a payload carrying its own metricId", () => {
+    const payload = {
+      scope: "site",
+      value: { n: 1 },
+      metricId: "some.other-metric",
+      stray: "not part of a metric row",
+    } as unknown as Parameters<typeof metricRow>[1];
+
+    const m = metricRow({ id: "content.thin-share" }, payload);
+
+    expect(m.metricId).toBe("content.thin-share");
+    expect(Object.keys(m).sort()).toEqual(["metricId", "scope", "scopeValue", "value"]);
   });
 });
