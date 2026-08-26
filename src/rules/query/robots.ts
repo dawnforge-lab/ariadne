@@ -13,6 +13,7 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import {
+  assertNormalisedSitemap,
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
@@ -112,6 +113,13 @@ async function eachSitemapUrl(
  */
 async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   const evidence = await readCrawlEvidence(db, crawlId, BLOCKS.id);
+  // The fifth reader of `url_normalised`, gated for the same reason as the four
+  // that join it — but failing the other way round. An empty spelling is not a
+  // URL robots-parser can judge, so it answers `undefined` and this rule stays
+  // silent about a sitemap it never actually checked: a false ALL-CLEAR, which
+  // is the one outcome worse than a false accusation. Same refusal, same
+  // remedy.
+  await assertNormalisedSitemap(db, crawlId, BLOCKS.id);
   if (robotsUnreadable(evidence.discovery) !== null) return [];
   const raw = evidence.discovery.robots.raw;
   if (raw === null) return [];

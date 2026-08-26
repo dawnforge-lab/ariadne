@@ -349,4 +349,37 @@ describe("the robots rules against the database", () => {
       await expect(r.run(db, crawlId), r.id).rejects.toThrow(/discovery/i);
     }
   });
+
+  // This rule judges `url_normalised` — the spelling the crawler would have
+  // fetched — so a crawl whose sitemap rows predate that column hands
+  // robots-parser an empty string, which it cannot judge and answers
+  // `undefined` for. The rule would then report nothing at all: a false
+  // ALL-CLEAR over a sitemap it never checked. Refused, by the same gate the
+  // sitemap rules use, and only for the rule that reads the column.
+  it("refuses a crawl whose sitemap rows predate url_normalised", async () => {
+    const crawlId = await newCrawl(
+      mkDiscovery({ robots: { raw: "User-agent: *\nDisallow: /private/\n" } }),
+    );
+    // The shape migration 0006 left behind: published spelling, column default.
+    await db.insert(sitemapUrls).values({
+      crawlId,
+      url: `${SITE}/private/hidden`,
+      sitemapSource: `${SITE}/sitemap.xml`,
+      lastmod: null,
+    });
+
+    const blocks = robotsRules.find((r) => r.id === "robots.blocks-sitemap-urls");
+    if (blocks === undefined) throw new Error("robots.blocks-sitemap-urls is not registered");
+    await expect(blocks.run(db, crawlId)).rejects.toThrow(
+      /no normalised spelling.*Re-crawl the site/s,
+    );
+    await expect(blocks.run(db, crawlId)).rejects.toThrow(crawlId);
+
+    // The other two read the discovery blob alone and never touch the column.
+    for (const id of ["robots.missing", "robots.check-skipped"]) {
+      const other = robotsRules.find((r) => r.id === id);
+      if (other === undefined) throw new Error(`${id} is not registered`);
+      await expect(other.run(db, crawlId), id).resolves.toBeDefined();
+    }
+  });
 });

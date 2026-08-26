@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import type { DiscoveryTruncation } from "../../crawl/discovery.js";
 import type { FetchClass } from "../../crawl/fetch-page.js";
@@ -9,7 +9,7 @@ import type {
   NotFoundProbeSample,
 } from "../../crawl/loop.js";
 import type { Db } from "../../db/client.js";
-import { crawls } from "../../db/schema.js";
+import { crawls, sitemapUrls } from "../../db/schema.js";
 import type { Finding } from "../registry/registry.js";
 
 /**
@@ -152,6 +152,54 @@ export async function readCrawlEvidence(
     discovery: parseDiscovery(row.discovery, ruleId, crawlId),
     config: row.config,
   };
+}
+
+/**
+ * Refuse a crawl whose `sitemap_urls` rows predate `url_normalised`.
+ *
+ * Every rule that compares a sitemap entry with a page matches
+ * `sitemap_urls.url_normalised` against `pages.url`. That column arrived with
+ * migration 0006, NOT NULL with an empty-string default, and the default is the
+ * only way an empty string can be in it: `normalizeUrl` returns at least
+ * `scheme://host/` for every URL it accepts, and the writer throws rather than
+ * storing anything for a URL it rejects (`persistSitemap`, src/crawl/loop.ts).
+ * So `url_normalised = ''` means exactly one thing — a row written before the
+ * column existed — and it is fully distinguishable at read time.
+ *
+ * It has to be refused rather than tolerated, because such a row does not join
+ * to nothing quietly. It fails the join, and the rules that fire ON a failed
+ * join then fire on everything: `sitemap.uncrawled` reports the entire sitemap
+ * as never reached, `pages.not-in-sitemap` reports every indexable 200 (its
+ * data gate only asks that sitemap rows exist, and they do), and
+ * `links.orphan` calls every orphan `inSitemap: false`. A report full of
+ * invented findings is the loudest possible way to be wrong, and nothing in the
+ * output would say the cause was a schema version.
+ *
+ * Same ruling as `parseDiscovery`'s refusal of a null `discovery_jsonb`, and
+ * the same remedy: re-crawl the site. Re-judging a pre-Phase-4 crawl is not
+ * supported (hard rule 7).
+ *
+ * One indexed lookup per rule invocation — `(crawl_id, url_normalised)` is an
+ * index, and this asks it for a single row.
+ */
+export async function assertNormalisedSitemap(
+  db: Db,
+  crawlId: string,
+  ruleId: string,
+): Promise<void> {
+  const rows = await db
+    .select({ url: sitemapUrls.url })
+    .from(sitemapUrls)
+    .where(and(eq(sitemapUrls.crawlId, crawlId), eq(sitemapUrls.urlNormalised, "")))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) return;
+  throw new Error(
+    `${ruleId}: crawl '${crawlId}' has sitemap entries with no normalised spelling ` +
+      `(e.g. '${row.url}') — those rows predate the url_normalised column, so every ` +
+      "join to `pages` fails and this rule would report the whole sitemap as wrong. " +
+      "Re-crawl the site to produce rows the sitemap rules can read",
+  );
 }
 
 /**

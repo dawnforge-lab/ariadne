@@ -493,4 +493,57 @@ describe("the sitemap rules against the database", () => {
       await expect(r.run(db, crawlId), r.id).rejects.toThrow(/discovery/i);
     }
   });
+
+  // A `sitemap_urls` row written before migration 0006 carries the column's
+  // empty-string default, which matches no page — so every rule that joins the
+  // two tables would report the whole sitemap as wrong rather than say nothing.
+  // No crawl can write an empty spelling (`normalizeUrl` returns at least
+  // `scheme://host/`, and `persistSitemap` throws on what it rejects), so the
+  // default is unambiguous and is refused outright: the same ruling the missing
+  // discovery evidence above gets, and the same remedy.
+  it("refuses a crawl whose sitemap rows predate url_normalised", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/listed" }]);
+    // Written the way migration 0006 left a pre-existing row: the published
+    // spelling, and the column's default beside it.
+    await db.insert(sitemapUrls).values({
+      crawlId,
+      url: url("/listed"),
+      sitemapSource: `${SITE}/sitemap.xml`,
+      lastmod: null,
+    });
+
+    for (const id of [
+      "sitemap.non-200",
+      "sitemap.redirected",
+      "sitemap.non-indexable",
+      "sitemap.uncrawled",
+      "pages.not-in-sitemap",
+    ]) {
+      // The message names the crawl, quotes an entry, and says what to do.
+      await expect(run(id, crawlId), id).rejects.toThrow(
+        /no normalised spelling.*Re-crawl the site/s,
+      );
+      await expect(run(id, crawlId), id).rejects.toThrow(crawlId);
+    }
+
+    // The two rules that read the discovery blob alone never touch the column
+    // and must keep working: gating them would refuse to say "this site
+    // declares no sitemap" over a join they do not make.
+    expect(await run("sitemap.missing", crawlId)).toHaveLength(0);
+    expect(await run("sitemap.invalid", crawlId)).toHaveLength(0);
+  });
+
+  it("says nothing about a crawl whose sitemap rows are all normalised", async () => {
+    // The other half of the gate: it must not fire on a healthy crawl. Every
+    // other test in this file is that assertion too, but stating it once
+    // directly means a gate that started throwing on everything fails here
+    // rather than in twenty places at once.
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/listed" }]);
+    await addSitemapUrls(crawlId, ["/listed"]);
+    for (const r of sitemapRules) {
+      await expect(r.run(db, crawlId), r.id).resolves.toBeDefined();
+    }
+  });
 });

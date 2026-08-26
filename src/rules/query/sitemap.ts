@@ -23,15 +23,20 @@
  * punctuation. Every rule below quotes `s.url` in its evidence all the same —
  * the published `<loc>` is the line of XML somebody edits.
  *
- * Rows written before that column existed carry an empty string, and an empty
- * string matches no page. That is not a quiet outcome: every entry of such a
- * crawl fails the join, so `sitemap.uncrawled` reports the whole sitemap as
- * never reached and `pages.not-in-sitemap` reports every indexable 200 (its
- * data gate only asks that sitemap rows EXIST, and they do). A pre-Phase-4
- * crawl is therefore not a re-judge target — re-crawl the site. It is the same
- * ruling `parseDiscovery` makes for a null `discovery_jsonb`, and for the same
- * reason; it simply cannot be enforced by throwing, because a defaulted empty
- * string is indistinguishable from a legitimate one at read time.
+ * Rows written before that column existed carry its empty-string default, and
+ * an empty string matches no page. That is not a quiet outcome: every entry of
+ * such a crawl fails the join, so `sitemap.uncrawled` would report the whole
+ * sitemap as never reached and `pages.not-in-sitemap` every indexable 200 (its
+ * data gate only asks that sitemap rows EXIST, and they do).
+ *
+ * So these rules do not tolerate it — they refuse it. No crawl can write an
+ * empty `url_normalised` (`normalizeUrl` returns at least `scheme://host/`,
+ * and `persistSitemap` throws on anything it rejects), which makes the default
+ * unambiguous at read time, and every rule below opens with
+ * `assertNormalisedSitemap`: it throws, names the crawl and an example entry,
+ * and says to re-crawl the site. A pre-Phase-4 crawl is not a re-judge target.
+ * Same ruling `parseDiscovery` makes for a null `discovery_jsonb`, for the same
+ * reason (hard rule 7).
  */
 import { sql, type SQL } from "drizzle-orm";
 
@@ -45,6 +50,7 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import {
+  assertNormalisedSitemap,
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
@@ -103,6 +109,7 @@ async function joinFindings(
   evidenceOf: (row: JoinRow) => Record<string, unknown>,
 ): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, self.id);
+  await assertNormalisedSitemap(db, crawlId, self.id);
   const result = await db.execute<JoinRow>(sql`
     select s.url, p.id as page_id, p.status_code, p.fetch_class, p.redirect_url,
            p.robots_meta, p.x_robots_tag,
@@ -300,6 +307,7 @@ export const sitemapRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
+      await assertNormalisedSitemap(db, crawlId, UNCRAWLED.id);
       const result = await db.execute<{
         url: string;
         page_id: string | null;
@@ -351,6 +359,7 @@ export const sitemapRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, NOT_IN_SITEMAP.id);
+      await assertNormalisedSitemap(db, crawlId, NOT_IN_SITEMAP.id);
       const gate = await db.execute<{ has_sitemap: boolean }>(sql`
         select exists (
           select 1 from sitemap_urls s where s.crawl_id = ${crawlId}

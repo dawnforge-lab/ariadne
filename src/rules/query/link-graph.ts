@@ -9,7 +9,11 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import {
+  assertNormalisedSitemap,
+  noteTruncation,
+  URL_FINDING_CAP,
+} from "./crawl-evidence.js";
 
 const ORPHAN: RuleIdentity = { id: "links.orphan", severity: "warning" };
 const SKIPPED: RuleIdentity = { id: "links.orphan-skipped", severity: "info" };
@@ -139,6 +143,11 @@ function skipReason(c: Completeness): string | null {
  * before `limit` takes its slice, so the exact total survives the cap.
  */
 async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<Finding[]> {
+  // The `inSitemap` evidence reads `sitemap_urls.url_normalised`, so this rule
+  // is gated on that column being populated exactly like the sitemap rules
+  // are: on a pre-Phase-4 crawl every orphan would be labelled `inSitemap:
+  // false`, which is a quiet falsehood rather than a loud one.
+  await assertNormalisedSitemap(db, crawlId, ORPHAN.id);
   const rows = await db.execute<{
     id: string;
     url: string;

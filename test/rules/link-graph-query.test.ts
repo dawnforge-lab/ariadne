@@ -252,6 +252,25 @@ describe("links.orphan against the database", () => {
     expect(found.map((f) => f.pageUrl)).toEqual([url("/from-sitemap")]);
   });
 
+  // `inSitemap` reads `sitemap_urls.url_normalised`, so a crawl whose sitemap
+  // rows predate that column would label every orphan `inSitemap: false` — a
+  // quiet falsehood inside the evidence of a finding that still fires. Refused
+  // instead, by the same gate the sitemap rules open with.
+  it("refuses a crawl whose sitemap rows predate url_normalised", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [SEED, { path: "/from-sitemap", discoveredVia: "sitemap" }]);
+    // The shape migration 0006 left behind: published spelling, column default.
+    await db.insert(sitemapUrls).values({
+      crawlId,
+      url: url("/from-sitemap"),
+      sitemapSource: `${SITE}/sitemap.xml`,
+      lastmod: null,
+    });
+
+    await expect(orphans(crawlId)).rejects.toThrow(/no normalised spelling.*Re-crawl the site/s);
+    await expect(orphans(crawlId)).rejects.toThrow(crawlId);
+  });
+
   it("says nothing about pages that are not indexable 200s", async () => {
     const crawlId = await newCrawl();
     await addPages(crawlId, [
