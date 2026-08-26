@@ -1,4 +1,9 @@
 import { Registry } from "./registry/registry.js";
+import { contentMetrics } from "./metric/content-metrics.js";
+import { crawlMetrics } from "./metric/crawl-metrics.js";
+import { hreflangMetrics } from "./metric/hreflang-metrics.js";
+import { linkMetrics } from "./metric/link-metrics.js";
+import { urlMetrics } from "./metric/url-metrics.js";
 import { onPageRules } from "./page/on-page.js";
 import { statusRules } from "./page/status.js";
 import { canonicalRules } from "./page/canonical.js";
@@ -42,6 +47,14 @@ export function buildRegistry(): Registry {
     ...hostRules,
     ...contentRules,
     ...structuredDataRules,
+    // The metric kind. Registered in the same list because a rule is a rule to
+    // the registry — the runner is what tells the kinds apart, driving these
+    // last, after everything that writes evidence.
+    ...linkMetrics,
+    ...contentMetrics,
+    ...hreflangMetrics,
+    ...urlMetrics,
+    ...crawlMetrics,
   ]) {
     r.register(rule);
   }

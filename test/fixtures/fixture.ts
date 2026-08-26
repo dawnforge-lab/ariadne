@@ -73,6 +73,20 @@ export interface Fixture {
    */
   inSitemap?: boolean;
   /**
+   * The request target `/sitemap.xml` publishes for this fixture, when it
+   * deliberately differs from `path`. Default: `path` itself.
+   *
+   * A sitemap is written by a CMS, not by the crawler, and it publishes URLs
+   * the way its templates spell them — with a fragment on the end, with query
+   * parameters in whatever order the code appended them. `normalizeUrl` strips
+   * the first and sorts the second before the URL becomes a frontier key, so
+   * the `<loc>` and the `pages.url` created FROM that `<loc>` are two spellings
+   * of one URL. The rules join `sitemap_urls.url_normalised`, so they match;
+   * this field is what puts a divergent spelling in front of them end to end
+   * (see `/authored3/loc-variant`).
+   */
+  sitemapLoc?: string;
+  /**
    * Whether the hub links this fixture. Default true.
    *
    * The hub is what makes one crawl from the seed reach the whole collection, so

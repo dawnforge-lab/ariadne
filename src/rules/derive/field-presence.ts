@@ -43,9 +43,33 @@ export interface SchemaProfile {
   /**
    * Fields whose presence is more than "the key carries something", by field
    * name. Everything not named here is judged by `hasValue`.
+   *
+   * A predicate receives the field's own value AND the block's other profiled
+   * fields, because two kinds of profile field cannot be answered from one key:
+   * a field that lives inside another (`offers.priceCurrency` — see
+   * `SCOPED_SEPARATOR`), and a field with several accepted spellings (`gtin`,
+   * which schema.org also spells `gtin13`). Both would otherwise have to be
+   * judged against a key the markup never carries, and a rich-result field a
+   * client had supplied would be reported as missing.
    */
-  predicates?: Readonly<Record<string, (value: unknown) => boolean>>;
+  predicates?: Readonly<
+    Record<string, (value: unknown, fields: Record<string, unknown>) => boolean>
+  >;
 }
+
+/**
+ * What separates a container from the field inside it, in a profile field name:
+ * `offers.priceCurrency` is the `priceCurrency` of the block's `offers`, not a
+ * top-level key called `offers.priceCurrency`.
+ *
+ * A scoped name is never looked for in the markup — its predicate reads the
+ * container — and it is what a client is shown when the field is missing, which
+ * is why it is spelled the way the checklist spells it (`offers: price,
+ * priceCurrency, availability`). "priceCurrency is missing" on a block whose
+ * offer carries one would be a false accusation; "offers.priceCurrency" says
+ * exactly where to look.
+ */
+export const SCOPED_SEPARATOR = ".";
 
 /**
  * The fields of an `offers` object that make it an offer rather than a
@@ -53,6 +77,31 @@ export interface SchemaProfile {
  * Merchant listing with neither shows no price at all.
  */
 export const OFFER_PRICE_FIELDS: readonly string[] = ["price", "priceSpecification"];
+
+/**
+ * The spellings of a product's GTIN.
+ *
+ * `gtin` with the code's length appended is how schema.org spells the same
+ * identifier at each length, and the checklist's CHECK-44 names `gtin`, `gtin13`
+ * and `ean` in one breath as alternatives ("gtin / gtin13 / ean / mpn —
+ * product identifiers for Google Shopping"). A product carrying a `gtin13` has
+ * a GTIN, so a profile field called `gtin` that only looked at the key `gtin`
+ * would report a missing identifier to a client who supplied one — the false
+ * accusation the whole presence blob exists to avoid.
+ *
+ * `mpn` is deliberately NOT here: it is a different identifier (the
+ * manufacturer's own part number, not a GTIN), the checklist names it
+ * separately, and a product may honestly have one and not the other. It is its
+ * own recommended field.
+ */
+export const GTIN_FIELDS: readonly string[] = [
+  "gtin",
+  "gtin8",
+  "gtin12",
+  "gtin13",
+  "gtin14",
+  "ean",
+];
 
 /**
  * The schema types this engine has an opinion about, and what that opinion is.
@@ -70,8 +119,52 @@ export const OFFER_PRICE_FIELDS: readonly string[] = ["price", "priceSpecificati
 export const SCHEMA_PROFILES: Readonly<Record<string, SchemaProfile>> = {
   Product: {
     required: ["name", "image", "offers"],
-    recommended: ["description", "sku", "brand", "aggregateRating", "review"],
-    predicates: { offers: offersCarryPrice },
+    /**
+     * CHECK-44's recommended list, read off the sf-audit checklist
+     * (`~/.claude/skills/sf-audit/checklist.md`, lines 1334-1364; the field
+     * lists are lines 1341-1351):
+     *
+     *  - `description`, `sku`, `brand` — the checklist calls these REQUIRED
+     *    (line 1342). They stay recommended here, unchanged by this widening:
+     *    moving a field into `required` changes which pages get a finding and at
+     *    what severity, which is a deliberate ruleset change rather than a
+     *    profile widening. Same for `url`, which this profile does not name at
+     *    all. Both are carried backlog, not oversights.
+     *  - `offers.priceCurrency`, `offers.availability` — line 1343, which lists
+     *    them INSIDE `offers` ("offers: price, priceCurrency, availability,
+     *    url"). They are read from the offer by predicate, and named for where
+     *    they live; a top-level `priceCurrency` is not where correct markup
+     *    puts one, and profiling it as a bare name would report every
+     *    well-marked-up product as missing it.
+     *  - `gtin`, `mpn` — line 1346, the Google Shopping identifiers. `gtin`
+     *    accepts any of its spellings (`GTIN_FIELDS`); `mpn` is its own field.
+     *  - `aggregateRating`, `review` — lines 1347-1348.
+     *  - `color`, `material`, `size` — lines 1349-1351, the attributes the
+     *    checklist calls high impact for fashion and apparel. The checklist
+     *    writes the last as "size / pattern"; `pattern` is not profiled, so a
+     *    product carrying only a pattern is reported as missing `size`, which
+     *    is true of the field named.
+     */
+    recommended: [
+      "description",
+      "sku",
+      "brand",
+      "offers.priceCurrency",
+      "offers.availability",
+      "gtin",
+      "mpn",
+      "aggregateRating",
+      "review",
+      "color",
+      "material",
+      "size",
+    ],
+    predicates: {
+      offers: offersCarryPrice,
+      "offers.priceCurrency": (_value, fields) => offersCarry(fields["offers"], "priceCurrency"),
+      "offers.availability": (_value, fields) => offersCarry(fields["offers"], "availability"),
+      gtin: (_value, fields) => GTIN_FIELDS.some((name) => hasValue(fields[name])),
+    },
   },
   BreadcrumbList: {
     required: ["itemListElement"],
@@ -140,20 +233,49 @@ export function hasValue(value: unknown): boolean {
  * never a falsy number.
  */
 export function offersCarryPrice(value: unknown): boolean {
+  return offersCarryAny(value, OFFER_PRICE_FIELDS);
+}
+
+/**
+ * Whether any of a Product's offers carries a usable value under `field` —
+ * what the `offers.*` profile fields are judged by.
+ *
+ * The same "one offer is enough" reading as `offersCarryPrice`, for the same
+ * reason: `offers` may be a single Offer or an array of them, and a rich result
+ * needs one complete offer rather than every variant being complete. A product
+ * whose in-stock size carries an availability and whose sold-out sizes do not
+ * has an availability.
+ */
+export function offersCarry(value: unknown, field: string): boolean {
+  return offersCarryAny(value, [field]);
+}
+
+function offersCarryAny(value: unknown, fields: readonly string[]): boolean {
   const offers = Array.isArray(value) ? value : [value];
   return offers.some(
-    (offer) => isRecord(offer) && OFFER_PRICE_FIELDS.some((field) => hasValue(offer[field])),
+    (offer) => isRecord(offer) && fields.some((field) => hasValue(offer[field])),
   );
 }
 
-/** Every field name any profile mentions — what the SQL projection keeps. */
+/**
+ * Every RAW KEY the projection has to keep for the profiles to be judged.
+ *
+ * Two corrections to "the field names the profiles list", and both are
+ * load-bearing — a key the projection drops reaches `computePresence` as
+ * `undefined`, which is indistinguishable there from markup that omits it:
+ *
+ *  - scoped names (`offers.priceCurrency`) are NOT keys and are left out. Their
+ *    container (`offers`) is already kept, because the profile requires it.
+ *  - the alternative spellings a predicate reads (`GTIN_FIELDS`) are keys no
+ *    profile lists by name, and every one of them is kept.
+ */
 export const PROFILED_FIELDS: readonly string[] = [
-  ...new Set(
-    Object.values(SCHEMA_PROFILES).flatMap((profile) => [
-      ...profile.required,
-      ...profile.recommended,
-    ]),
-  ),
+  ...new Set([
+    ...Object.values(SCHEMA_PROFILES)
+      .flatMap((profile) => [...profile.required, ...profile.recommended])
+      .filter((field) => !field.includes(SCOPED_SEPARATOR)),
+    ...GTIN_FIELDS,
+  ]),
 ];
 
 /** One block's presence, judged against its type's profile. */
@@ -161,7 +283,16 @@ function computePresence(profile: SchemaProfile, fields: Record<string, unknown>
   const judge = (field: string): boolean => {
     const predicate = profile.predicates?.[field];
     const value = fields[field];
-    return predicate === undefined ? hasValue(value) : predicate(value);
+    // A scoped name has no key of its own, so a missing predicate for one would
+    // silently judge every block against `undefined` and report the field
+    // missing everywhere. It is a profile defect, and it says so.
+    if (predicate === undefined && field.includes(SCOPED_SEPARATOR)) {
+      throw new Error(
+        `deriveFieldPresence: profile field '${field}' is scoped but has no predicate — ` +
+          "a scoped name is read out of its container, never as a key",
+      );
+    }
+    return predicate === undefined ? hasValue(value) : predicate(value, fields);
   };
   return {
     required: Object.fromEntries(profile.required.map((f) => [f, judge(f)])),

@@ -23,7 +23,10 @@ import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages, structuredData } from "../../src/db/schema.js";
-import { deriveFieldPresence } from "../../src/rules/derive/field-presence.js";
+import {
+  deriveFieldPresence,
+  SCHEMA_PROFILES,
+} from "../../src/rules/derive/field-presence.js";
 import {
   BREADCRUMB_PAGE_FLOOR,
   SELF_SERVING_FIELDS,
@@ -44,6 +47,18 @@ const SITE = "https://schema-rules.example";
 const url = (path: string): string => `${SITE}${path}`;
 
 const PRICED_OFFER = { "@type": "Offer", price: "129.00", priceCurrency: "EUR" };
+
+/**
+ * A `recommended` presence group judging every field of the CURRENT Product
+ * profile the same way — derived from the profile rather than listed, so a
+ * profile widening (CHECK-44's, and the next one) does not leave a blob here
+ * quietly stale and testing a different branch than it claims to.
+ */
+function allRecommended(value: boolean): Record<string, boolean> {
+  return Object.fromEntries(
+    SCHEMA_PROFILES["Product"]!.recommended.map((field) => [field, value]),
+  );
+}
 
 const byId = new Map(structuredDataRules.map((r) => [r.id, r]));
 function rule(id: string): QueryRule {
@@ -328,7 +343,22 @@ describe("the structured-data rules against the database", () => {
         dedupeKey: url("/shoe"),
         evidence: {
           missingRequired: ["image"],
-          missingRecommended: ["brand", "aggregateRating", "review"],
+          // Profile order, and the fields are exactly what this block omits:
+          // it has a description, a sku and a priced offer WITH a currency, so
+          // `offers.priceCurrency` is not among them — the widened CHECK-44
+          // profile reads that field out of the offer rather than looking for a
+          // top-level key that correct markup never carries.
+          missingRecommended: [
+            "brand",
+            "offers.availability",
+            "gtin",
+            "mpn",
+            "aggregateRating",
+            "review",
+            "color",
+            "material",
+            "size",
+          ],
         },
       });
     });
@@ -427,24 +457,15 @@ describe("the structured-data rules against the database", () => {
         // it does name is true, so nothing here is false.
         "/stale-profile": {
           required: { name: true, image: true },
-          recommended: {
-            description: true,
-            sku: true,
-            brand: true,
-            aggregateRating: true,
-            review: true,
-          },
+          recommended: allRecommended(true),
         },
-        // A value that is not a boolean says nothing about the field.
+        // A value that is not a boolean says nothing about the field. The rest
+        // of the blob is exactly what the CURRENT profile would judge, so this
+        // shape reaches the not-a-boolean branch rather than the stale-profile
+        // one — which is what it is here to test.
         "/not-boolean": {
           required: { name: true, image: "yes", offers: true },
-          recommended: {
-            description: true,
-            sku: true,
-            brand: true,
-            aggregateRating: true,
-            review: true,
-          },
+          recommended: allRecommended(true),
         },
       };
 

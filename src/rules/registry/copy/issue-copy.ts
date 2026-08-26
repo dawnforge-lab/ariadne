@@ -8,6 +8,11 @@
  * (per docs/crawl-audit-build-plan.md P2-T2); howToFix authored where neither
  * upstream provides one.
  *
+ * The file carries the METRIC rules' copy too, at the bottom, under its own
+ * heading: a metric's title labels a table rather than naming a fault, but the
+ * lookup is by rule id and there is one of those per rule kind, so one map
+ * serves all three. The heading states how the three fields are read there.
+ *
  * Every string here is client-facing: it reaches a report or an action plan
  * verbatim. Two standing constraints on edits:
  *
@@ -549,9 +554,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // carries several.
     title: "Product markup is missing required fields",
     explanation:
-      "No Product block on this page provides every field a product rich result needs. Google will not show the price, availability or rating snippet for a product whose markup is incomplete, so the listing falls back to a plain blue link while competitors' show the price. The fields listed with this finding are the ones missing from all of the page's Product markup, not from one block of it — note that an offers block counts only when it carries a price or a priceSpecification.",
+      "No Product block on this page provides every field a product rich result needs. Google will not show the price, availability or rating snippet for a product whose markup is incomplete, so the listing falls back to a plain blue link while competitors' show the price. The fields listed with this finding are the ones missing from all of the page's Product markup, not from one block of it — note that an offers block counts only when it carries a price or a priceSpecification, and that a field written as offers.priceCurrency is one that belongs inside the offer rather than beside it. A product identifier counts under gtin whichever length of GTIN it is written as, and mpn is listed separately because a manufacturer part number is a different identifier rather than another spelling of the same one.",
     howToFix:
-      "Fill in the missing required fields on the product template — name, image and a priced offers block — generating them from the same product data the page renders, so a product with no image or no price in the catalogue shows the same gap in both places. Add the recommended fields where you honestly have them (description, sku, brand, and ratings or reviews you actually collect), then confirm the page passes Google's Rich Results Test.",
+      "Fill in the missing required fields on the product template — name, image and a priced offers block — generating them from the same product data the page renders, so a product with no image or no price in the catalogue shows the same gap in both places. Then add the recommended fields you honestly hold: a currency and an availability inside the offer, a GTIN or manufacturer part number for Google Shopping, the description, sku and brand, ratings or reviews you actually collect, and the attributes shoppers search by where the product has them — colour, material and size. Confirm the page passes Google's Rich Results Test afterwards.",
   },
   "schema.breadcrumb-absent": {
     title: "No breadcrumb markup anywhere on the site",
@@ -568,5 +573,100 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "This page's Organization or LocalBusiness markup carries a rating or reviews about the business itself. Google's review-snippet policy treats ratings an entity publishes about itself as self-serving and ignores them, so the stars never appear in search results even though the markup is technically valid. It is not a penalty and the reviews may be perfectly genuine — the markup simply does not earn a rich result where it is.",
     howToFix:
       "Move the ratings to something a review can legitimately be about: Product, Service, Book, Course, Recipe and similar types all support review snippets, so a rating on the page for what you sell counts where the same rating on your company block does not. Keep the customer reviews visible on the page either way, and let independent review platforms carry the business-level rating.",
+  },
+
+  // ------------------------------------------------------------------ metrics
+  //
+  // A metric's copy answers three different questions from an issue's, and the
+  // fields are reused rather than renamed so one lookup serves every rule kind:
+  //
+  //   title       — the LABEL OF THE TABLE the metric renders as.
+  //   explanation — WHAT THE NUMBERS MEAN: what was counted, over which pages,
+  //                 and what was deliberately excluded. A reader who quotes the
+  //                 table must be able to say what it measured from this text
+  //                 alone.
+  //   howToFix    — HOW TO READ AND ACT ON IT. A metric is not a fault, so
+  //                 there is nothing to repair; what belongs here is which end
+  //                 of the table to look at first and what a number there
+  //                 implies.
+  //
+  // Same accuracy rule as everywhere above, and it bites harder here: a number
+  // reaches a client as a fact. Say what was measured, not what it suggests.
+  // The list caps quoted in words below are the rules' own constants
+  // (`EXTREMES_LIST_CAP`, `SOURCE_TYPE_CAP` in src/rules/metric/link-metrics.ts)
+  // and the copy test pins them.
+  "inlinks.distribution": {
+    title: "Internal links per page",
+    explanation:
+      "How many other pages link to each of this site's indexable pages, summarised as a distribution: how many pages were measured, the smallest and largest number of inbound links, the mean, the quartiles, and the 95th percentile — the level only the best-linked one page in twenty reaches. A page is counted once per linking page, so being named in both the header and the footer of one page is one inbound link; a link a page makes to itself is not counted at all. Pages nothing links to are included as zero rather than dropped — they are what the bottom of the table is about. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+    howToFix:
+      "Read the bottom quartile first: those pages are barely supported by the site's own linking, and a page with no inbound links at all is one search engines will rarely recrawl. Then compare the per-type rows with the site row — a template whose median sits well below the site's is a template the internal linking has forgotten. The top of the distribution shows where internal link equity is concentrated, which is usually the cheapest place to add a link to a page from the bottom.",
+  },
+  "inlinks.extremes": {
+    title: "Most and least linked pages",
+    explanation:
+      "The twenty indexable pages with the fewest inbound internal links and the twenty with the most, each with its count, so the ends of the distribution can be quoted as URLs rather than as numbers. Inbound links are counted exactly as in the internal-links-per-page table: one per linking page, never a page's link to itself. Ties are broken by URL, so the same crawl always names the same pages. On a site with fewer than twenty indexable pages both lists name every page, in opposite orders.",
+    howToFix:
+      "Check the bottom list against what the site is there to sell or rank: a commercially important page in that list is the finding, while an archive or a filter page there is expected. The top list says where the site's internal linking currently points — usually a navigation block — and those pages are the cheapest place to add a link to something from the bottom list.",
+  },
+  "inlinks.sources-by-type": {
+    title: "Where each template's inbound links come from",
+    explanation:
+      "For each type of page on the site, how many internal links reach it from each other type — category pages linking to products, blog posts linking to categories, and so on. Links are counted once per pair of pages, and a page's link to itself is not counted. Destinations are indexable pages that returned 200; the linking side is every page the crawl read, because a page kept out of the index still passes a link. Pages the crawler could not assign a template to appear as (untyped) on either side. Where a type is linked to from more than twenty-five other types, the remainder are summed into a single (other) entry — written in brackets so that a template a site really has named 'other' keeps its own entry beside it. A type shown with no sources receives no internal links from anywhere on this site.",
+    howToFix:
+      "Read each row as a sentence about the site's structure — 'product pages are linked to by category pages and by nothing else'. A commercially important type reached from only one other type depends entirely on that template being crawled; a type with no sources at all is reachable only from the sitemap or from outside. Where editorial pages link to nothing commercial, that is an internal linking opportunity rather than a fault to repair.",
+  },
+  "structure.depth-distribution": {
+    title: "Click depth from the start of the crawl",
+    explanation:
+      "How many links from where the crawl started each indexable page sits, summarised as a distribution: how many pages were measured, the shallowest and deepest, the mean, the quartiles, and the 95th percentile — the depth only the deepest one page in twenty is buried past. Depth is measured from the crawl's starting URL, so it is the site's own home page unless the crawl was pointed somewhere else. Only pages that returned 200 and are indexable are measured — a buried noindex page costs nothing. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+    howToFix:
+      "Read the upper quartiles: pages deep in the structure are crawled less often and receive less internal link equity, so a template whose median depth is high is one whose pages compete from behind. Where that template matters commercially, shorten the path to it — a hub, a category page or a navigation entry — rather than treating each deep page individually.",
+  },
+  "content.metrics-by-type": {
+    title: "Word count and text density by template",
+    explanation:
+      "How much text this site's indexable pages carry, as two distributions: the word count of the page's visible text, and the text ratio — the share of the page's HTML that is that text rather than markup. Each is summarised the same way: how many pages were measured, the shortest and longest, the mean, the quartiles, and the 95th percentile — the level only the largest one page in twenty reaches. The two counts are the pages that actually carry each measure, so a page the parser recorded no word count for is absent from the word-count column and still present in the text-ratio one. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+    howToFix:
+      "Compare each template's row with the site row and with what the template is for: a product listing legitimately carries less text than an article, so the number to read is the spread inside one template rather than the difference between two. A template whose lower quartile sits far below its median has a tail of pages carrying much less than the rest — those are the pages to look at first. A low text ratio says the page is mostly markup, which is a rendering and template question rather than an editorial one.",
+  },
+  "content.template-similarity": {
+    // The plan's naming ruling: this table is about TEMPLATE SIMILARITY. The
+    // copy test asserts the other word never appears here — a measurement of
+    // how alike two pages are must not be labelled with a verdict on which
+    // parts of them are worth reading.
+    title: "How alike the pages inside each template are",
+    explanation:
+      "For each type of page, how similar its pages are to each other, measured between every pair as the number of bits by which their content fingerprints differ — 0 means the two read as the same text, 64 means they share nothing. The table gives the mean distance, the quartiles, and the percentage of pairs within 3 bits and within 8 bits of each other. Comparing every pair of a large template would be quadratic, so the pairs are sampled: the first 200 pages of each type, taken in page-id order, which is effectively arbitrary and always the same for a given crawl. The row states how many of the type's pages carry a fingerprint, how many of those were sampled and how many pairs that was, so a number over a sample is never mistaken for a number over the whole template. A page the crawl recorded no fingerprint for is outside this table on both counts — neither compared nor counted — and a type with fewer than two fingerprinted pages has no pair to compare and gets no row at all.",
+    howToFix:
+      "Read each row against what the template is: a set of location or filter pages sitting a couple of bits apart is pages that differ only in a name, while a set of articles doing the same is a signal worth investigating. A high percentage within 3 bits says most of the type's pages are interchangeable to a search engine, which is a consolidation question — fewer pages, or more that is genuinely specific to each. A wide spread inside one type usually means the type is really two, and the templates are worth separating before either is judged.",
+  },
+  "hreflang.coverage": {
+    title: "Share of pages declaring hreflang",
+    explanation:
+      "How many of this site's indexable pages publish at least one hreflang declaration, out of how many were measured, and that as a percentage rounded to one decimal place. A page counts once however many alternates it names, and declarations from the page's HTML, its HTTP headers and the sitemap all count — this is about which pages take part in the international setup at all, not about whether the sets they name are complete, which the hreflang findings cover separately. Only pages that returned 200 and are indexable are counted. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped). A row with no measured pages shows no percentage rather than zero.",
+    howToFix:
+      "On a site with no international presence, low coverage here is expected and says nothing. Where the site does serve more than one language or country, read the per-template rows: coverage that is high on one template and near zero on another is the usual shape, and it means a template was left out of whatever generates the tags rather than that the site lacks alternates. Pair this with the hreflang findings — a template with high coverage and many missing return links is a different job from one with no coverage at all.",
+  },
+  "url.param-volumes": {
+    title: "Query parameters across the site's URLs",
+    explanation:
+      "The shape of this site's parameter space: how many distinct parameter names the crawl found, how many of those are tracking parameters — the campaign tags and ad-click ids analytics adds, such as utm_source, gclid and fbclid — and the twenty parameters carrying the most URLs, each with the number of URLs it appears on and whether it is one of the tracking ones. The list is ordered by that count, largest first, with ties broken by name so the same crawl always names the same twenty; the total beside it says how many parameters there are altogether. Beneath them are how many crawled pages carry a query string at all, and how many of those returned 200 and are indexable. A URL is counted once per parameter it carries, so a URL repeating one parameter twice counts once, and the page counts cover every URL the crawl fetched whatever its status, which is the same set the parameter counts were taken from.",
+    howToFix:
+      "Read the indexable count against the total: parameterised URLs that are indexable are the ones competing with the pages they were filtered from, and they are what a faceted-navigation decision is about. Then read the top of the list — a parameter on tens of thousands of URLs is a filter or a sort control generating crawl surface, while a tracking parameter appearing at all means campaign-tagged links are being crawled as pages. Neither is automatically wrong: a single-filter URL can be the best landing page a site has for the query it matches, so the question each parameter asks is whether its URLs are worth indexing, and the answer belongs in the canonical and robots handling for that parameter rather than in a blanket rule.",
+  },
+  "redirect.volume": {
+    title: "How much of the crawl was redirects",
+    explanation:
+      "How many of the URLs this crawl requested answered with a redirect, out of how many pages were fetched in total, and that as a percentage rounded to one decimal place. Every page the crawl read counts in the total, whatever it answered, because a redirect is a share of what was fetched rather than of what was indexable. Each redirecting URL counts once, so a link that redirects and appears in the footer of every page is one redirecting URL here, not one per page. Beside them are how many redirect chains and how many redirect loops the audit found on this crawl — the same chains and loops the redirect findings list, counted in full even where that list was capped at the first 200. A crawl with no pages shows no percentage rather than zero.",
+    howToFix:
+      "The percentage is the crawl-budget number: every redirect is a request that returns no content, so a site spending a tenth of its crawl on them is a site whose pages are being fetched less often than they could be. Read it beside the chains and loops, which are faults rather than overhead — a loop returns nothing at all, and a chain multiplies the cost of every link into it. Where the share is high and the chains are few, the fix is usually in the links themselves rather than in the redirect rules: point internal links, sitemap entries and navigation at the destination URL, so the redirect stays available for outside traffic and stops being walked on every crawl.",
+  },
+  "sitemap.structure": {
+    title: "What the site's sitemap is made of",
+    explanation:
+      "How this site's sitemap entries are distributed across sitemap documents. The site row gives the number of documents that contributed at least one entry, the total number of entries stored across them, how many documents were fetched and then dropped whole for being too large to read, how many documents carry more than the 50,000 entries the sitemaps protocol allows in one file, and whether the crawl's own entry cap stopped collection — when it did, every count here is a floor rather than a total. Each other row is one sitemap document, named by the URL it was fetched from, with how many entries it contributed and whether that is past 50,000. An entry listed in several documents is counted once, under the first document it was found in, and a sitemap index carries no entries of its own so it appears only through its children. The largest 50 documents are listed; the document count in the site row says how many there are in total.",
+    howToFix:
+      "Read the document list as the maintenance story: a site of any size whose entries all sit in one document has no way to see which section of the site is stale, and no way to submit or diagnose one part of it separately. Splitting by content type — products, collections, articles, pages — costs nothing and makes the sitemap a tool rather than a formality. A document past 50,000 entries has to be split whatever else is true, since the entries past the limit are not read. A document dropped for its size is entries this crawl never saw at all, so treat the numbers here as incomplete until it is split and re-crawled.",
   },
 };

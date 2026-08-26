@@ -23,7 +23,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
-export const RULESET_VERSION = "0.2.0";
+export const RULESET_VERSION = "0.3.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
@@ -48,18 +48,20 @@ export const AGENT_CHECKS: readonly string[] = ["CHECK-38", "CHECK-41", "CHECK-4
  * page shows after its JavaScript has run is not in the raw HTML the crawler
  * stores today. A rule written against the unrendered body would report the
  * empty shell as the page, which is worse than reporting nothing.
+ *
+ * It is now the ONLY annotation, and therefore the whole of the coverage pin:
+ * `unclaimedChecks(…)` equals this list exactly, which is what
+ * `test/rules/coverage.test.ts` asserts. `METRIC_PENDING_CHECKS` stood beside
+ * it from Phase 3, holding CHECK-08, CHECK-29, CHECK-33 and CHECK-33b — checks
+ * whose answer is a site-wide number rather than a per-page fault. Phase 4's
+ * metric rules claimed all four (the link-graph metrics took CHECK-33 and
+ * CHECK-33b, `sitemap.structure` took CHECK-08, `url.param-volumes` took
+ * CHECK-29), and the constant was deleted rather than kept empty: an annotation
+ * with nothing to annotate is a reason nobody needs, and a future check waiting
+ * on a metric will arrive with the rule that claims it rather than with a list
+ * to join.
  */
 export const RENDER_CHECKS: readonly string[] = ["CHECK-01", "CHECK-02", "CHECK-34"];
-
-/**
- * Checks whose answer is a site-wide number rather than a per-page fault —
- * they belong to the metric rules, which the runner does not drive yet. Listed
- * so the coverage pin's remainder says *why* each check is still unclaimed
- * instead of leaving a reader to guess.
- */
-export const METRIC_PENDING_CHECKS: readonly string[] = [
-  "CHECK-08", "CHECK-29", "CHECK-33", "CHECK-33b",
-];
 
 export function defineRule<T extends AnyRule>(rule: T): T {
   const fail = (msg: string): never => {

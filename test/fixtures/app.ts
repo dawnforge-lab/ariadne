@@ -102,13 +102,18 @@ ${links}
  * Host header this request arrived on, for the same reason a fixture's canonical
  * is: the port is only known once the server is listening.
  *
+ * A fixture may publish a spelling of its own URL that is not its request
+ * target (`Fixture.sitemapLoc`): a fragment, or query parameters in an order
+ * `normalizeUrl` would sort. That is what a real CMS emits, and the entry still
+ * names the page the crawl fetched — see `/authored3/loc-variant`.
+ *
  * The order is the fixture order, which puts the hub first and keeps a diff of
  * this document readable. Nothing reads the order.
  */
 function sitemapXml(fixtures: readonly Fixture[], origin: string): string {
   const paths = [
     "/",
-    ...fixtures.filter((f) => f.inSitemap !== false).map((f) => f.path),
+    ...fixtures.filter((f) => f.inSitemap !== false).map((f) => f.sitemapLoc ?? f.path),
     ROBOTS_BLOCKED_PATH,
   ];
   const entries = paths

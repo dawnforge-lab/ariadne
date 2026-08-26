@@ -24,6 +24,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { robotsRules } from "../../src/rules/query/robots.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
+import { normalised } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -100,9 +101,18 @@ describe("the robots rules against the database", () => {
     return id;
   }
 
+  // `url_normalised` is computed the way the crawl loop computes it: the rule
+  // judges that column, and a helper that left it empty would be testing a
+  // sitemap row no crawl could write.
   async function addSitemapUrls(crawlId: string, urls: string[]): Promise<void> {
     await db.insert(sitemapUrls).values(
-      urls.map((url) => ({ crawlId, url, sitemapSource: `${SITE}/sitemap.xml`, lastmod: null })),
+      urls.map((url) => ({
+        crawlId,
+        url,
+        urlNormalised: normalised(url),
+        sitemapSource: `${SITE}/sitemap.xml`,
+        lastmod: null,
+      })),
     );
   }
 
@@ -303,7 +313,10 @@ describe("the robots rules against the database", () => {
       dedupeKey: "site",
     });
     expect(String((skipped[0]!.evidence as { skipped: string }).skipped)).toMatch(/500KB|read cap/);
-    expect(skipped[0]!.evidence).toMatchObject({ outcome: "read", truncated: true });
+    // `robotsTruncated`, not `truncated`: the second name belongs to the
+    // truncation note a capped listing writes, and one evidence object must
+    // not spell two different facts the same way.
+    expect(skipped[0]!.evidence).toMatchObject({ outcome: "read", robotsTruncated: true });
   });
 
   it("is silent when the robots.txt was read whole", async () => {
@@ -337,6 +350,39 @@ describe("the robots rules against the database", () => {
     const crawlId = await newCrawl({ robots: "yes" });
     for (const r of robotsRules) {
       await expect(r.run(db, crawlId), r.id).rejects.toThrow(/discovery/i);
+    }
+  });
+
+  // This rule judges `url_normalised` — the spelling the crawler would have
+  // fetched — so a crawl whose sitemap rows predate that column hands
+  // robots-parser an empty string, which it cannot judge and answers
+  // `undefined` for. The rule would then report nothing at all: a false
+  // ALL-CLEAR over a sitemap it never checked. Refused, by the same gate the
+  // sitemap rules use, and only for the rule that reads the column.
+  it("refuses a crawl whose sitemap rows predate url_normalised", async () => {
+    const crawlId = await newCrawl(
+      mkDiscovery({ robots: { raw: "User-agent: *\nDisallow: /private/\n" } }),
+    );
+    // The shape migration 0006 left behind: published spelling, column default.
+    await db.insert(sitemapUrls).values({
+      crawlId,
+      url: `${SITE}/private/hidden`,
+      sitemapSource: `${SITE}/sitemap.xml`,
+      lastmod: null,
+    });
+
+    const blocks = robotsRules.find((r) => r.id === "robots.blocks-sitemap-urls");
+    if (blocks === undefined) throw new Error("robots.blocks-sitemap-urls is not registered");
+    await expect(blocks.run(db, crawlId)).rejects.toThrow(
+      /no normalised spelling.*Re-crawl the site/s,
+    );
+    await expect(blocks.run(db, crawlId)).rejects.toThrow(crawlId);
+
+    // The other two read the discovery blob alone and never touch the column.
+    for (const id of ["robots.missing", "robots.check-skipped"]) {
+      const other = robotsRules.find((r) => r.id === id);
+      if (other === undefined) throw new Error(`${id} is not registered`);
+      await expect(other.run(db, crawlId), id).resolves.toBeDefined();
     }
   });
 });

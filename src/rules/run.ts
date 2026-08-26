@@ -1,10 +1,10 @@
 import { and, asc, eq, gt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { crawls, issues, pages } from "../db/schema.js";
+import { crawls, issues, metrics, pages } from "../db/schema.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
-import type { Finding } from "./registry/types.js";
+import { METRIC_SCOPES, type Finding, type Metric } from "./registry/types.js";
 
 /**
  * Pages read per round trip — the memory contract: never the whole table.
@@ -12,7 +12,7 @@ import type { Finding } from "./registry/types.js";
  * more than once without hardcoding the number.
  */
 export const PAGE_BATCH = 500;
-/** Findings per insert statement. */
+/** Rows per insert statement — findings, and a metric rule's rows. */
 const INSERT_BATCH = 500;
 
 export interface RunSummary {
@@ -21,6 +21,16 @@ export interface RunSummary {
   byRule: Record<string, number>;
   /** Rows each derivation wrote, by derivation name. */
   derived: Record<string, number>;
+  /** `metrics` rows written across every metric rule. */
+  metrics: number;
+  /**
+   * Rows written per metric rule. Unlike `byRule`, which names only the rules
+   * that fired, this names every metric rule that ran — a metric rule that
+   * produced nothing has *removed* the crawl's previous answer, which is a
+   * result rather than a non-event, so a zero here and an absent key mean
+   * different things.
+   */
+  byMetric: Record<string, number>;
 }
 
 /**
@@ -51,10 +61,11 @@ type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
 const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence];
 
 /**
- * Run every rule in `registry` over one crawl, writing `issues` rows.
+ * Run every rule in `registry` over one crawl, writing `issues` and `metrics`
+ * rows.
  *
  * Pages are streamed by id cursor and findings are buffered, so RAM is
- * O(batch), never O(URLs). Inserts are `onConflictDoNothing`: the
+ * O(batch), never O(URLs). Issue inserts are `onConflictDoNothing`: the
  * `issues_dedupe` unique index absorbs a re-run over the same crawl, which
  * makes the runner safe to repeat.
  *
@@ -78,16 +89,14 @@ export async function runRules(
     .limit(1);
   if (crawl.length === 0) throw new Error(`no such crawl '${crawlId}'`);
 
-  // Metric rules exist in the registry's type but nothing here drives them.
-  // Silently ignoring one would mean a registered rule that never runs and a
-  // check that looks covered — so refuse the run instead.
-  if (registry.byKind("metric").length > 0) {
-    throw new Error(
-      "runRules does not drive metric rules yet — extend the runner before registering metric rules",
-    );
-  }
-
-  const summary: RunSummary = { pagesScanned: 0, findings: 0, byRule: {}, derived: {} };
+  const summary: RunSummary = {
+    pagesScanned: 0,
+    findings: 0,
+    byRule: {},
+    derived: {},
+    metrics: 0,
+    byMetric: {},
+  };
   const buffer: Finding[] = [];
 
   const flush = async (): Promise<void> => {
@@ -178,5 +187,121 @@ export async function runRules(
     await flush();
   }
   await flush();
+
+  // The metric phase, last. A metric summarises the crawl the run has just
+  // finished judging, so everything that writes evidence has to be done: a
+  // metric that ran before the query rules could count a crawl's issues as they
+  // stood halfway through.
+  //
+  // The metrics-vs-issues asymmetry, and the reason this phase deletes before
+  // it inserts:
+  //
+  //   An issue is EVIDENCE. It happened, it is stamped with the ruleset that
+  //   found it, and a re-run adds nothing — `onConflictDoNothing` over the
+  //   `issues_dedupe` index absorbs the repeat.
+  //
+  //   A metric is RECOMPUTED STATE. It is the crawl's current answer, and last
+  //   run's answer is not evidence of anything once this run has produced its
+  //   own. An upsert alone would refresh the rows that still exist and silently
+  //   preserve the ones that do not: a `page_type` cohort that vanished on a
+  //   re-crawl would keep its row, and a reader would see a count for a group
+  //   of pages nothing counted (hard rule 7 — a stale number is a fallback
+  //   wearing a number's clothes).
+  //
+  // So each metric rule's rows for this crawl are deleted and its fresh set
+  // inserted, inside ONE transaction: the two statements share it because the
+  // table is otherwise briefly missing a metric a reader might be asking for.
+  // Per rule rather than per phase, so a rule that throws does not take a
+  // finished rule's rows with it — those rows are this crawl's true answer for
+  // that metric, and rolling them back because a different rule is broken would
+  // replace a true number with a missing one.
+  for (const rule of registry.byKind("metric")) {
+    let returned: unknown;
+    try {
+      returned = await rule.run(db, crawlId);
+    } catch (error) {
+      throw new Error(`rule '${rule.id}' threw`, { cause: error });
+    }
+    // A rule that returns something other than an array is a rule defect, and
+    // it has to fail the way every other rule defect fails: named. Without this
+    // the `for…of` below would throw a bare "is not iterable" TypeError that
+    // says nothing about which rule produced it.
+    if (!Array.isArray(returned)) {
+      throw new Error(
+        `rule '${rule.id}' returned ${returned === null ? "null" : typeof returned} ` +
+          "rather than an array of metric rows",
+      );
+    }
+    const rows: Metric[] = returned;
+
+    // Validated as a set, before anything is written: a rule that emits one bad
+    // row writes none of them, so the crawl never holds half of a metric.
+    for (const m of rows) {
+      // `metricRow` makes this unreachable for a rule that uses it. Checked
+      // anyway because the delete below is keyed on the rule's own id: a row
+      // filed under another metric id would never be recomputed and never
+      // removed — a permanent stale row no rule owns.
+      if (m.metricId !== rule.id) {
+        throw new Error(
+          `rule '${rule.id}' emitted a row under metric id '${m.metricId}' — ` +
+            "a metric rule writes only its own id",
+        );
+      }
+      if (!(METRIC_SCOPES as readonly string[]).includes(m.scope)) {
+        throw new Error(`rule '${rule.id}' emitted an unknown metric scope '${m.scope}'`);
+      }
+      // Every scope but `site` names the one thing its row is about — a page
+      // type, a sitemap document. Without that name the row identifies nothing,
+      // and the empty string is already spoken for: it is what a site-scoped row
+      // stores in the primary key.
+      if (m.scope !== "site" && m.scopeValue === "") {
+        throw new Error(
+          `rule '${rule.id}' emitted a '${m.scope}' row with no scope value — ` +
+            "a scoped row without a name identifies nothing",
+        );
+      }
+      // And the symmetric defect. There is one site per crawl, so a site row
+      // carrying a scope value keys a SECOND site row: the same question
+      // answered twice, with nothing to say which answer is the site's.
+      if (m.scope === "site" && m.scopeValue !== "") {
+        throw new Error(
+          `rule '${rule.id}' emitted a 'site' row with scope value '${m.scopeValue}' — ` +
+            "a site-scoped metric has one row per crawl and names nothing",
+        );
+      }
+    }
+
+    try {
+      await db.transaction(async (tx) => {
+        await tx
+          .delete(metrics)
+          .where(and(eq(metrics.crawlId, crawlId), eq(metrics.metricId, rule.id)));
+        for (let i = 0; i < rows.length; i += INSERT_BATCH) {
+          // A plain insert, no conflict clause: the delete above cleared this
+          // rule's rows, so the only way to collide now is a rule emitting the
+          // same (scope, scopeValue) twice — two different answers for one
+          // cohort, which is a defect that must surface rather than have one
+          // answer silently win.
+          await tx.insert(metrics).values(
+            rows.slice(i, i + INSERT_BATCH).map((m) => ({
+              crawlId,
+              metricId: m.metricId,
+              scope: m.scope,
+              scopeValue: m.scopeValue,
+              value: m.value,
+            })),
+          );
+        }
+      });
+    } catch (error) {
+      throw new Error(`rule '${rule.id}' failed to write its ${rows.length} metric rows`, {
+        cause: error,
+      });
+    }
+
+    summary.metrics += rows.length;
+    summary.byMetric[rule.id] = rows.length;
+  }
+
   return summary;
 }

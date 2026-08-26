@@ -13,6 +13,7 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import {
+  assertNormalisedSitemap,
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
@@ -45,6 +46,12 @@ const SKIPPED: RuleIdentity = { id: "robots.check-skipped", severity: "info" };
 /**
  * Every sitemap URL of one crawl, in batches, oldest-first by URL.
  *
+ * Each entry arrives in both of its spellings: the `<loc>` the site published,
+ * and the `normalizeUrl` form the crawler would have fetched it under. The
+ * second is what the judgement uses, so this rule asks robots.txt about the
+ * very URL the crawler's own enqueue check asked about; the first is what the
+ * finding quotes.
+ *
  * A crawl's sitemap can hold tens of thousands of entries, so they are streamed
  * by URL cursor and dropped as they are judged: RAM is O(batch), never O(URLs)
  * (hard rule 6). The cursor is the primary key's second column, which makes the
@@ -53,19 +60,19 @@ const SKIPPED: RuleIdentity = { id: "robots.check-skipped", severity: "info" };
 async function eachSitemapUrl(
   db: Db,
   crawlId: string,
-  visit: (url: string) => void,
+  visit: (url: string, urlNormalised: string) => void,
 ): Promise<void> {
   let cursor = "";
   for (;;) {
     const batch = await db
-      .select({ url: sitemapUrls.url })
+      .select({ url: sitemapUrls.url, urlNormalised: sitemapUrls.urlNormalised })
       .from(sitemapUrls)
       .where(and(eq(sitemapUrls.crawlId, crawlId), gt(sitemapUrls.url, cursor)))
       .orderBy(asc(sitemapUrls.url))
       .limit(SITEMAP_URL_BATCH);
     if (batch.length === 0) return;
     cursor = batch[batch.length - 1]!.url;
-    for (const row of batch) visit(row.url);
+    for (const row of batch) visit(row.url, row.urlNormalised);
   }
 }
 
@@ -106,6 +113,13 @@ async function eachSitemapUrl(
  */
 async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   const evidence = await readCrawlEvidence(db, crawlId, BLOCKS.id);
+  // The fifth reader of `url_normalised`, gated for the same reason as the four
+  // that join it — but failing the other way round. An empty spelling is not a
+  // URL robots-parser can judge, so it answers `undefined` and this rule stays
+  // silent about a sitemap it never actually checked: a false ALL-CLEAR, which
+  // is the one outcome worse than a false accusation. Same refusal, same
+  // remedy.
+  await assertNormalisedSitemap(db, crawlId, BLOCKS.id);
   if (robotsUnreadable(evidence.discovery) !== null) return [];
   const raw = evidence.discovery.robots.raw;
   if (raw === null) return [];
@@ -124,10 +138,14 @@ async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   // past the cap — the findings array does not — so RAM stays O(batch).
   const findings: Finding[] = [];
   let total = 0;
-  await eachSitemapUrl(db, crawlId, (url) => {
-    // Judged under the rules origin, reported under the spelling the sitemap
-    // published: `judged` never leaves this function.
-    const judged = onRulesOrigin(url, rulesOrigin);
+  await eachSitemapUrl(db, crawlId, (url, urlNormalised) => {
+    // Judged as the CRAWLER would have seen it — the normalised entry, on the
+    // rules origin — and reported under the spelling the sitemap published:
+    // `judged` never leaves this function. Judging the published `<loc>`
+    // instead would ask robots.txt about a URL with a fragment on it, or with
+    // its parameters in an order the crawler never used, and could disagree
+    // with the enqueue check that actually governed the crawl.
+    const judged = onRulesOrigin(urlNormalised, rulesOrigin);
     if (parsed.isAllowed(judged, userAgent) !== false) return;
     total++;
     if (findings.length >= URL_FINDING_CAP) return;
@@ -233,7 +251,11 @@ export const robotsRules: QueryRule[] = [
           evidence: {
             skipped,
             outcome: discovery.robots.outcome,
-            truncated: discovery.robots.truncated,
+            // `robotsTruncated`, not `truncated`: this says the stored
+            // robots.txt is a 500KB prefix. `truncated` is the note a capped
+            // listing writes into its last finding (`noteTruncation`), and one
+            // evidence object must not spell two different facts the same way.
+            robotsTruncated: discovery.robots.truncated,
           },
           dedupeKey: "site",
         }),

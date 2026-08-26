@@ -12,7 +12,8 @@ import {
   type DiscoveryEvidence,
   type NotFoundProbeSample,
 } from "../../src/crawl/loop.js";
-import { hostProbeStarts, type HostProbeResult } from "../../src/crawl/host-probe.js";
+import type { HostProbeResult } from "../../src/crawl/host-probe.js";
+import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 
 function databaseUrl(): string {
@@ -363,6 +364,11 @@ describe("runCrawl", () => {
       .where(eq(sitemapUrls.crawlId, summary.crawlId));
     expect(rows.map((r) => r.url).sort()).toEqual([`${base}/`, `${base}/d`]);
     expect(rows.find((r) => r.url === `${base}/`)?.lastmod).toBe("2026-08-01");
+    // Every entry also carries the frontier key the sitemap rules join on.
+    // These two `<loc>`s are already in normal form, so the pair matches — what
+    // is asserted is that the column is written at all, never left at its
+    // pre-Phase-4 default.
+    expect(rows.map((r) => r.urlNormalised).sort()).toEqual([`${base}/`, `${base}/d`]);
     expect(summary.discovery.sitemapEntries).toBe(2);
   });
 

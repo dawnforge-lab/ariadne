@@ -13,6 +13,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { PAGINATION_BATCH, paginationRules } from "../../src/rules/query/pagination.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
@@ -210,7 +211,12 @@ describe("paginationRules against the database", () => {
       });
     });
 
-    it("walks every page, not just the first batch", async () => {
+    // Both halves of the batched scan's contract: it reads past the first
+    // batch (the exact count proves it), and it stops *listing* at the
+    // findings cap — a paginated archive is O(pages) rel=next declarations,
+    // and a crawl that stops short of the series' end fires on every one of
+    // them.
+    it("walks every page, not just the first batch, and caps what it lists", async () => {
       const crawlId = await newCrawl();
       const total = PAGINATION_BATCH + 5;
       await addPages(
@@ -221,7 +227,12 @@ describe("paginationRules against the database", () => {
         })),
       );
 
-      expect(await findings("pagination.next-target-uncrawled", crawlId)).toHaveLength(total);
+      const found = await findings("pagination.next-target-uncrawled", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
     });
 
     it("reads only its own crawl", async () => {

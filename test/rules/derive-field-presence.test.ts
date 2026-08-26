@@ -20,7 +20,10 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, structuredData } from "../../src/db/schema.js";
 import {
   FIELD_PRESENCE_PAGE_BATCH,
+  GTIN_FIELDS,
+  PROFILED_FIELDS,
   SCHEMA_PROFILES,
+  SCOPED_SEPARATOR,
   deriveFieldPresence,
   type FieldPresence,
 } from "../../src/rules/derive/field-presence.js";
@@ -34,18 +37,43 @@ function databaseUrl(): string {
 
 const SITE = "https://schema.example";
 
-/** A Product block with everything the profile asks for. */
+/**
+ * A Product block with everything the profile asks for — all three required
+ * fields and all twelve recommended ones.
+ *
+ * The identifier is deliberately spelled `gtin13` rather than `gtin`: the
+ * profile field is `gtin` and accepts any of the spellings schema.org gives the
+ * same code, so a block carrying one of the others is the case that would be
+ * reported as a missing identifier if the alias list stopped being read.
+ */
 const COMPLETE_PRODUCT = {
   "@type": "Product",
   name: "Trail Runner 3",
   image: ["https://schema.example/img/trail-3.jpg"],
-  offers: { "@type": "Offer", price: "129.00", priceCurrency: "EUR" },
+  offers: {
+    "@type": "Offer",
+    price: "129.00",
+    priceCurrency: "EUR",
+    availability: "https://schema.org/InStock",
+  },
   description: "A light trail shoe with a rock plate.",
   sku: "TR-3-42",
   brand: { "@type": "Brand", name: "Ariadne" },
+  gtin13: "0614141999996",
+  mpn: "TR3-42-BLK",
   aggregateRating: { "@type": "AggregateRating", ratingValue: "4.6", reviewCount: "88" },
   review: [{ "@type": "Review", author: "A runner" }],
+  color: "Black",
+  material: "Mesh",
+  size: "42",
 };
+
+/** The twelve recommended fields, all judged the same way. */
+function allRecommended(value: boolean): Record<string, boolean> {
+  return Object.fromEntries(
+    SCHEMA_PROFILES["Product"]!.recommended.map((field) => [field, value]),
+  );
+}
 
 describe("SCHEMA_PROFILES", () => {
   // The profiles are the contract the rules read: `schema.product-incomplete`
@@ -55,13 +83,35 @@ describe("SCHEMA_PROFILES", () => {
   it("holds exactly the two profiles the plan's table names", () => {
     expect(Object.keys(SCHEMA_PROFILES).sort()).toEqual(["BreadcrumbList", "Product"]);
     expect(SCHEMA_PROFILES["Product"]!.required).toEqual(["name", "image", "offers"]);
+    // CHECK-44's recommended list, widened from five names to twelve (checklist
+    // lines 1341-1351). Two of them are SCOPED — read out of `offers` by a
+    // predicate rather than looked for as top-level keys — and `gtin` accepts
+    // any of its schema.org spellings.
     expect(SCHEMA_PROFILES["Product"]!.recommended).toEqual([
       "description",
       "sku",
       "brand",
+      "offers.priceCurrency",
+      "offers.availability",
+      "gtin",
+      "mpn",
       "aggregateRating",
       "review",
+      "color",
+      "material",
+      "size",
     ]);
+    // Every scoped name has a predicate: without one it would be judged against
+    // a key no markup carries and reported missing on every block.
+    for (const field of SCHEMA_PROFILES["Product"]!.recommended) {
+      if (!field.includes(SCOPED_SEPARATOR)) continue;
+      expect(SCHEMA_PROFILES["Product"]!.predicates?.[field], field).toBeTypeOf("function");
+    }
+    // And the keys a predicate reads are projected, or it sees nothing: the
+    // GTIN spellings no profile lists by name.
+    for (const field of GTIN_FIELDS) expect(PROFILED_FIELDS, field).toContain(field);
+    // A scoped name is not a key and must not be looked for as one.
+    expect(PROFILED_FIELDS.filter((f) => f.includes(SCOPED_SEPARATOR))).toEqual([]);
     expect(SCHEMA_PROFILES["BreadcrumbList"]!.required).toEqual(["itemListElement"]);
     expect(SCHEMA_PROFILES["BreadcrumbList"]!.recommended).toEqual([]);
   });
@@ -142,14 +192,58 @@ describe("deriveFieldPresence against the database", () => {
     expect(await deriveFieldPresence(db, crawlId)).toEqual({ blocks: 1 });
     expect(await presenceOf(crawlId, "page_a")).toEqual({
       required: { name: true, image: true, offers: true },
-      recommended: {
-        description: true,
-        sku: true,
-        brand: true,
-        aggregateRating: true,
-        review: true,
-      },
+      // Every recommended field true, the two read out of the offer and the
+      // aliased `gtin` included.
+      recommended: allRecommended(true),
     });
+  });
+
+  it("reads the offer's currency and availability, and any spelling of a GTIN", async () => {
+    const crawlId = await newCrawl();
+    await addBlocks(crawlId, [
+      {
+        // An array of offers, the shape a product with variants uses: the first
+        // carries the currency and the second the availability, and one offer
+        // carrying a field is enough for the product to have it.
+        pageId: "page_variants",
+        type: "Product",
+        raw: {
+          "@type": "Product",
+          offers: [
+            { "@type": "Offer", price: "10.00", priceCurrency: "EUR" },
+            { "@type": "Offer", price: "12.00", availability: "https://schema.org/InStock" },
+          ],
+          ean: "5012345678900",
+        },
+      },
+      {
+        // A currency at the TOP LEVEL is not where a rich result reads one, and
+        // the profile field is `offers.priceCurrency` for exactly that reason.
+        pageId: "page_toplevel",
+        type: "Product",
+        raw: {
+          "@type": "Product",
+          offers: { "@type": "Offer", price: "10.00" },
+          priceCurrency: "EUR",
+          availability: "https://schema.org/InStock",
+          mpn: "ABC-123",
+        },
+      },
+    ]);
+
+    await deriveFieldPresence(db, crawlId);
+    const variants = (await presenceOf(crawlId, "page_variants")).recommended;
+    expect(variants["offers.priceCurrency"]).toBe(true);
+    expect(variants["offers.availability"]).toBe(true);
+    // `ean` is one of the accepted spellings; `mpn` is a different identifier.
+    expect(variants["gtin"]).toBe(true);
+    expect(variants["mpn"]).toBe(false);
+
+    const toplevel = (await presenceOf(crawlId, "page_toplevel")).recommended;
+    expect(toplevel["offers.priceCurrency"]).toBe(false);
+    expect(toplevel["offers.availability"]).toBe(false);
+    expect(toplevel["mpn"]).toBe(true);
+    expect(toplevel["gtin"]).toBe(false);
   });
 
   it("marks an absent, empty-string or empty-array field as not present", async () => {
@@ -164,7 +258,9 @@ describe("deriveFieldPresence against the database", () => {
           // more than a missing one (the `present()` helper's rule).
           name: "   ",
           image: [],
-          offers: COMPLETE_PRODUCT.offers,
+          // Priced, so `offers` itself is present — and carrying nothing else,
+          // so the two fields read out of it are not.
+          offers: { "@type": "Offer", price: "14.00" },
           description: "",
           sku: null,
         },
@@ -174,13 +270,7 @@ describe("deriveFieldPresence against the database", () => {
     await deriveFieldPresence(db, crawlId);
     expect(await presenceOf(crawlId, "page_a")).toEqual({
       required: { name: false, image: false, offers: true },
-      recommended: {
-        description: false,
-        sku: false,
-        brand: false,
-        aggregateRating: false,
-        review: false,
-      },
+      recommended: allRecommended(false),
     });
   });
 

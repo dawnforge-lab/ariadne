@@ -382,7 +382,12 @@ describe("linkTargetRules against the database", () => {
       expect(found[0]!.evidence).toMatchObject({ canonical: url("/gone"), targetStatus: 404 });
     });
 
-    it("walks every page, not just the first batch", async () => {
+    // Both halves of the batched scan's contract in one crawl: it reads past
+    // the first batch (the count proves it), and it stops *listing* at the
+    // findings cap while still counting what it saw. A template that
+    // canonicalises a whole section at a dead URL is O(pages) findings
+    // otherwise.
+    it("walks every page, not just the first batch, and caps what it lists", async () => {
       const crawlId = await newCrawl();
       const total = CANONICAL_BATCH + 5;
       const specs: PageSpec[] = [
@@ -393,7 +398,43 @@ describe("linkTargetRules against the database", () => {
       }
       await addPages(crawlId, specs);
 
-      expect(await findings("canonical.non-200-target", crawlId)).toHaveLength(total);
+      const found = await findings("canonical.non-200-target", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      // The exact total is what says the scan ran to the end of the last
+      // batch rather than stopping when the list filled up.
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
+      // Re-judging the same crawl lists the same two hundred. It has to: the
+      // issues table is appended under `onConflictDoNothing`, so a cap that
+      // kept an arbitrary two hundred each run would grow the table past the
+      // cap it exists to enforce.
+      const again = await findings("canonical.non-200-target", crawlId);
+      expect(again.map((f) => f.pageUrl)).toEqual(found.map((f) => f.pageUrl));
+    });
+
+    // Which two hundred, stated in full — the batch boundary is out of the way
+    // here (fewer declaring pages than `CANONICAL_BATCH`), so the whole listing
+    // comes from one batch and the order is the declaring URL's, not the
+    // target lookup's row order.
+    it("keeps the lexically first pages when one batch overflows the cap", async () => {
+      const crawlId = await newCrawl();
+      const total = URL_FINDING_CAP + 1;
+      const paths = Array.from({ length: total }, (_, i) => `/q-${String(i).padStart(4, "0")}`);
+      expect(total).toBeLessThan(CANONICAL_BATCH);
+      await addPages(crawlId, [
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+        ...paths.map((path) => ({ path, canonicalHtml: url("/gone") })),
+      ]);
+
+      const found = await findings("canonical.non-200-target", crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual(
+        [...paths].sort().slice(0, URL_FINDING_CAP).map(url),
+      );
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
     });
   });
 

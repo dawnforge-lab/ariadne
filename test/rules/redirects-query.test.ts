@@ -13,8 +13,10 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { MAX_REDIRECT_HOPS, redirectRules } from "../../src/rules/query/redirects.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
+import { normalised } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -91,6 +93,9 @@ describe("redirectRules against the database", () => {
       fetchClass: s.fetchClass,
       statusCode: s.statusCode,
       redirectUrl: s.redirectUrl ?? null,
+      // The published `Location` and the spelling the walk joins on, exactly as
+      // `PageWriter` stores the pair.
+      redirectUrlNormalised: s.redirectUrl === undefined ? null : normalised(s.redirectUrl),
       depth: 1,
       discoveredVia: "link",
     }));
@@ -138,9 +143,39 @@ describe("redirectRules against the database", () => {
         chain: [url("/a"), url("/b"), url("/c")],
         length: 2,
         finalStatus: 200,
-        truncated: false,
+        chainTruncated: false,
       });
       expect(await findings("redirect.loop", crawlId)).toHaveLength(0);
+    });
+
+    // A `Location` may carry a fragment, or spell its query string in another
+    // order, and the crawler normalises it before fetching — so the page row
+    // for the target is keyed without the fragment and with the parameters
+    // sorted. The walk follows `redirect_url_normalised`, which is the same
+    // spelling, so the chain continues through the hop instead of stopping
+    // dead at a URL nothing matches and reading as a two-page path.
+    it("walks through a Location carrying a fragment and unsorted parameters", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/f1", fetchClass: "redirect", statusCode: 301, redirectUrl: url("/f2#top") },
+        {
+          path: "/f2",
+          fetchClass: "redirect",
+          statusCode: 301,
+          redirectUrl: url("/f3?b=2&a=1"),
+        },
+        ok("/f3?a=1&b=2"),
+      ]);
+
+      const found = await findings("redirect.chain", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({ pageId: ids.get("/f1"), pageUrl: url("/f1") });
+      expect(found[0]!.evidence).toEqual({
+        chain: [url("/f1"), url("/f2"), url("/f3?a=1&b=2")],
+        length: 2,
+        finalStatus: 200,
+        chainTruncated: false,
+      });
     });
 
     // One hop is a redirect, not a chain: the trailing-slash pattern every CMS
@@ -172,7 +207,7 @@ describe("redirectRules against the database", () => {
         chain: [url("/u1"), url("/u2"), url("/never-crawled")],
         length: 2,
         finalStatus: null,
-        truncated: false,
+        chainTruncated: false,
       });
     });
 
@@ -191,11 +226,49 @@ describe("redirectRules against the database", () => {
       expect(found[0]!.pageUrl).toBe(url("/deep-0"));
       expect(found[0]!.evidence).toMatchObject({
         length: MAX_REDIRECT_HOPS,
-        truncated: true,
+        chainTruncated: true,
         finalStatus: null,
       });
       // The walked hops plus the one the cap stopped us following.
       expect(found[0]!.evidence.chain).toHaveLength(MAX_REDIRECT_HOPS + 1);
+    });
+
+    // A migration that chained every old URL through an intermediate hop makes
+    // O(pages) chains, so the findings list is capped like every other
+    // URL-scoped rule's. The walk itself still visits every head, so the count
+    // behind the cap is exact.
+    it("caps the findings and says how many chains there really are", async () => {
+      const crawlId = await newCrawl();
+      const total = URL_FINDING_CAP + 1;
+      const specs: PageSpec[] = [];
+      for (let i = 0; i < total; i += 1) {
+        const n = String(i).padStart(4, "0");
+        specs.push(hop(`/c-${n}-head`, `/c-${n}-mid`), hop(`/c-${n}-mid`, `/c-${n}-end`));
+        specs.push(ok(`/c-${n}-end`));
+      }
+      await addPages(crawlId, specs);
+
+      const found = await findings("redirect.chain", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      // WHICH two hundred is not left to the query plan: the walk is ordered by
+      // head, so the cap takes the first heads in URL order. Without this the
+      // same crawl re-judged would append a different arbitrary two hundred and
+      // the issues table would grow past the cap run over run.
+      const heads = Array.from({ length: total }, (_, i) =>
+        url(`/c-${String(i).padStart(4, "0")}-head`),
+      ).sort();
+      expect(found.map((f) => f.pageUrl)).toEqual(heads.slice(0, URL_FINDING_CAP));
+      // And re-running it lists exactly the same ones.
+      const again = await findings("redirect.chain", crawlId);
+      expect(again.map((f) => f.pageUrl)).toEqual(found.map((f) => f.pageUrl));
+      // The truncation note and the chain's own hop-cap flag are different
+      // facts and now have different names: this list was cut short, these
+      // chains were not.
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        chainTruncated: false,
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
     });
 
     it("reads only its own crawl", async () => {
@@ -318,7 +391,7 @@ describe("redirectRules against the database", () => {
       // order, then the first member its window did not reach.
       expect(chains).toHaveLength(2);
       for (const f of chains) {
-        expect(f.evidence.truncated).toBe(true);
+        expect(f.evidence.chainTruncated).toBe(true);
         expect(f.evidence.length).toBe(MAX_REDIRECT_HOPS);
         expect(f.evidence.finalStatus).toBeNull();
       }
@@ -337,6 +410,35 @@ describe("redirectRules against the database", () => {
       const found = await findings("redirect.loop", crawlId);
       expect(found).toHaveLength(2);
       expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(2);
+    });
+
+    // The same cap as the chain scan, over the other accumulator: distinct
+    // cycles are still counted whole, only the listing stops.
+    it("caps the findings and says how many distinct loops there really are", async () => {
+      const crawlId = await newCrawl();
+      const total = URL_FINDING_CAP + 1;
+      const specs: PageSpec[] = [];
+      for (let i = 0; i < total; i += 1) {
+        const n = String(i).padStart(4, "0");
+        specs.push(hop(`/l-${n}-a`, `/l-${n}-b`), hop(`/l-${n}-b`, `/l-${n}-a`));
+      }
+      await addPages(crawlId, specs);
+
+      const found = await findings("redirect.loop", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      // Ordered by head like the chain scan, so the cap keeps the first cycles
+      // in URL order — each reported at its own lexically first member, which
+      // is the `-a` page of the pair.
+      const first = Array.from({ length: total }, (_, i) =>
+        url(`/l-${String(i).padStart(4, "0")}-a`),
+      ).sort();
+      expect(found.map((f) => f.pageUrl)).toEqual(first.slice(0, URL_FINDING_CAP));
+      const again = await findings("redirect.loop", crawlId);
+      expect(again.map((f) => f.pageUrl)).toEqual(found.map((f) => f.pageUrl));
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
     });
   });
 });

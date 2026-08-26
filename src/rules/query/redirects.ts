@@ -1,3 +1,19 @@
+/**
+ * The redirect-graph rules: chains and loops, walked in SQL.
+ *
+ * Both cap what they LIST at `URL_FINDING_CAP` while counting what they find
+ * in full: the walk visits every head and every headless cycle whatever the cap
+ * says, so each case's dedupe key still goes into a set and the number behind
+ * the cap is exact (`noteTruncation`). A migration that chained a whole legacy
+ * tree, or a template that loops on every product, is O(pages) redirect paths —
+ * and one finding per path is a findings table that grows with the site rather
+ * than with the problem.
+ *
+ * WHICH cases the cap keeps is settled too: the walk comes back ordered by head
+ * (see `walkFrom`) and both accumulators take the first cases in that order, so
+ * re-running a crawl's rules reports the same two hundred rather than a fresh
+ * arbitrary two hundred appended beside the last run's.
+ */
 import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 
@@ -10,6 +26,7 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
 
 const CATEGORY = "redirects";
 
@@ -20,8 +37,8 @@ const CATEGORY = "redirects";
  * chain long enough that reporting every hop helps nobody, and that would make
  * the recursive CTE's intermediate rows grow with the site.
  *
- * A chain cut short by the cap is reported with `truncated: true` rather than
- * silently presented as if it ended there.
+ * A chain cut short by the cap is reported with `chainTruncated: true`
+ * rather than silently presented as if it ended there.
  */
 export const MAX_REDIRECT_HOPS = 10;
 
@@ -42,51 +59,82 @@ interface WalkRow extends Record<string, unknown> {
   depth: number;
   /** True when the last URL in `chain` had already been visited by this walk. */
   is_cycle: boolean;
-  /** Where the terminal page redirects to, or null when it answers for itself. */
+  /**
+   * Where the terminal page redirects to AS THE SERVER SPELLED IT, or null when
+   * it answers for itself. Evidence only — every comparison uses the normalised
+   * twin below, because `chain` is made of `pages.url` frontier keys.
+   */
   redirect_url: string | null;
+  /**
+   * The same target through `normalizeUrl`: the spelling `pages.url` is keyed
+   * by, and therefore the walk's join key, its cycle test and its
+   * "was this crawled" test. Null exactly when `redirect_url` is.
+   */
+  redirect_url_normalised: string | null;
   /** The terminal page's own status code. */
   status_code: number | null;
-  /** Whether `redirect_url` has a `pages` row — i.e. whether the walk could have gone on. */
+  /**
+   * Whether `redirect_url_normalised` has a `pages` row — i.e. whether the walk
+   * could have gone on.
+   */
   tail_crawled: boolean;
 }
 
 /**
  * Walk the redirect graph forward from a set of seed URLs, in SQL.
  *
- * The recursion follows `pages.redirect_url` to the `pages` row for that URL,
- * carrying the visited URLs along as an array so a revisit is detectable in the
- * same step that makes it (`p.url = any(w.chain)`), and stopping at
- * `MAX_REDIRECT_HOPS`. Non-redirect pages are visited too: the 200 (or the 404)
- * a chain lands on is the most useful thing the evidence can name.
+ * The recursion follows `pages.redirect_url_normalised` to the `pages` row for
+ * that URL, carrying the visited URLs along as an array so a revisit is
+ * detectable in the same step that makes it (`p.url = any(w.chain)`), and
+ * stopping at `MAX_REDIRECT_HOPS`. Non-redirect pages are visited too: the 200
+ * (or the 404) a chain lands on is the most useful thing the evidence can name.
+ *
+ * The join is on the NORMALISED target, never on the published one.
+ * `pages.url` is `normalizeUrl` output — fragment stripped, query params sorted
+ * — so a `Location` reading `/b#section` matches no row under its own spelling
+ * while naming a page the crawl certainly fetched. Joining the published
+ * spelling made such a chain stop dead one hop in: a false negative in both
+ * rules, invisible because a chain that ends is what most chains do.
  *
  * Only the deepest row per seed comes back — the terminal state of that walk.
  * Intermediate rows exist inside the CTE and are discarded by Postgres, so the
  * result set is one row per seed rather than one per hop.
+ *
+ * Ordered by head, and that is load-bearing rather than tidiness. Both callers
+ * stop listing at `URL_FINDING_CAP`, so the row order decides WHICH cases are
+ * reported; an unordered CTE projection is whatever the plan happens to emit,
+ * so a re-run of the same crawl could report a different two hundred and the
+ * `issues` table — appended under `onConflictDoNothing` — would grow past the
+ * cap run over run. A defined order makes the capped listing the same listing
+ * every time.
  */
 async function walkFrom(db: Db, crawlId: string, seedUrls: SQL): Promise<WalkRow[]> {
   const result = await db.execute<WalkRow>(sql`
     with recursive seeds as (${seedUrls}),
     walk as (
       select s.url as head, p.url as url, p.redirect_url as redirect_url,
+             p.redirect_url_normalised as redirect_url_normalised,
              p.status_code as status_code, 1 as depth,
              array[p.url] as chain, array[p.id] as ids, false as is_cycle
       from seeds s
       join pages p on p.crawl_id = ${crawlId} and p.url = s.url
       union all
-      select w.head, p.url, p.redirect_url, p.status_code, w.depth + 1,
+      select w.head, p.url, p.redirect_url, p.redirect_url_normalised,
+             p.status_code, w.depth + 1,
              w.chain || p.url, w.ids || p.id, p.url = any(w.chain)
       from walk w
-      join pages p on p.crawl_id = ${crawlId} and p.url = w.redirect_url
+      join pages p on p.crawl_id = ${crawlId} and p.url = w.redirect_url_normalised
       where w.depth < ${MAX_REDIRECT_HOPS} and not w.is_cycle
     )
     select w1.head, w1.chain, w1.ids, w1.depth, w1.is_cycle,
-           w1.redirect_url, w1.status_code,
+           w1.redirect_url, w1.redirect_url_normalised, w1.status_code,
            exists (
              select 1 from pages q
-             where q.crawl_id = ${crawlId} and q.url = w1.redirect_url
+             where q.crawl_id = ${crawlId} and q.url = w1.redirect_url_normalised
            ) as tail_crawled
     from walk w1
-    where w1.depth = (select max(w2.depth) from walk w2 where w2.head = w1.head)`);
+    where w1.depth = (select max(w2.depth) from walk w2 where w2.head = w1.head)
+    order by w1.head`);
   return result.rows;
 }
 
@@ -138,7 +186,7 @@ async function redirectWalk(db: Db, crawlId: string): Promise<RedirectWalk> {
           select 1 from pages q
           where q.crawl_id = ${crawlId}
             and q.fetch_class = 'redirect'
-            and q.redirect_url = p.url)`,
+            and q.redirect_url_normalised = p.url)`,
   );
 
   const visited = new Set<string>();
@@ -175,15 +223,22 @@ async function redirectWalk(db: Db, crawlId: string): Promise<RedirectWalk> {
  *    cycle of k, with p + k exactly at the cap, would otherwise be reported as
  *    a truncated chain: a warning where the truth is a critical nobody can
  *    reach the content through.
+ *
+ * The second test compares the NORMALISED target against `chain`, whose members
+ * are `pages.url`. Comparing the published `Location` would miss a loop closed
+ * by a hop whose target carries a fragment — the loop would be reported as a
+ * chain, which is a warning where the truth is a critical.
  */
 function cycleOf(row: WalkRow): string[] | null {
   if (row.is_cycle) {
     const repeated = row.chain[row.chain.length - 1]!;
     return row.chain.slice(row.chain.indexOf(repeated));
   }
-  if (row.redirect_url === null) return null;
-  const closesAt = row.chain.indexOf(row.redirect_url);
-  return closesAt === -1 ? null : [...row.chain.slice(closesAt), row.redirect_url];
+  if (row.redirect_url_normalised === null) return null;
+  const closesAt = row.chain.indexOf(row.redirect_url_normalised);
+  return closesAt === -1
+    ? null
+    : [...row.chain.slice(closesAt), row.redirect_url_normalised];
 }
 
 /**
@@ -191,7 +246,7 @@ function cycleOf(row: WalkRow): string[] | null {
  * closing a loop — so what happens past the cap is genuinely unknown.
  */
 function hitCapUnresolved(row: WalkRow): boolean {
-  return row.redirect_url !== null && row.tail_crawled && cycleOf(row) === null;
+  return row.redirect_url_normalised !== null && row.tail_crawled && cycleOf(row) === null;
 }
 
 /**
@@ -203,8 +258,8 @@ function hitCapUnresolved(row: WalkRow): boolean {
  * Which of the two it is cannot be known from ten hops, and dropping it would
  * be a redirect path the engine walked, could not resolve, and said nothing
  * about (hard rule 7). It is reported as a truncated chain from the seed —
- * every hop in the evidence is one we actually followed, and `truncated: true`
- * says the path did not end there.
+ * every hop in the evidence is one we actually followed, and
+ * `chainTruncated: true` says the path did not end there.
  *
  * Deduped by coverage: seeds are walked in URL order and a seed already inside
  * an emitted walk's chain is skipped, so a 12-page ring is two findings rather
@@ -232,15 +287,32 @@ function unresolvedHeadless(rows: WalkRow[]): WalkRow[] {
  */
 function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
   const byHead = new Map<string, Finding>();
+  /** Every head that yielded a chain, cap or no cap — the exact count. */
+  const heads = new Set<string>();
   for (const row of rows) {
     if (cycleOf(row) !== null) continue;
     const tail = row.redirect_url;
-    // The terminal page's target is either an uncrawled URL or the hop the cap
-    // stopped us following. Either way it is part of the path and belongs in
-    // the evidence, even though there is no page row behind it.
+    // The terminal page's target is either a URL the crawl never fetched or the
+    // hop the CAP stopped us following — the second has a page row
+    // (`tail_crawled`), the first has none. What they share is that this walk
+    // did not visit it, and either way it is part of the path and belongs in
+    // the evidence.
+    //
+    // Quoted as the SERVER spelled it, unlike the hops before it, which the
+    // walk did visit and which are named by their frontier key. Both cases want
+    // that: an uncrawled tail was never fetched under any spelling, so the
+    // `Location` header is the only honest thing to print; a cap-stopped tail
+    // has a row we could have named, and printing the header instead says what
+    // the last visited page sent rather than implying we went on to fetch it —
+    // which `chainTruncated: true` is simultaneously denying. The walk itself
+    // followed the normalised twin in both cases (see `walkFrom`), so nothing
+    // about where the chain goes rests on this string.
     const chain = tail === null ? row.chain : [...row.chain, tail];
     const hops = tail === null ? row.chain.length - 1 : row.chain.length;
     if (hops < CHAIN_HOPS) continue;
+    if (heads.has(row.head)) continue;
+    heads.add(row.head);
+    if (byHead.size >= URL_FINDING_CAP) continue;
     byHead.set(
       row.head,
       queryFinding(self, {
@@ -253,13 +325,17 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
           // status to report. A truncated or uncrawled tail has none, and
           // guessing one would be inventing evidence.
           finalStatus: tail === null ? row.status_code : null,
-          truncated: tail !== null && row.tail_crawled,
+          // `chainTruncated`, not `truncated`: this says the WALK stopped at
+          // the hop cap with the path still going. `truncated` is the note a
+          // capped listing writes into its last finding, and one evidence
+          // object must not spell two different facts the same way.
+          chainTruncated: tail !== null && row.tail_crawled,
         },
         dedupeKey: row.head,
       }),
     );
   }
-  return [...byHead.values()];
+  return noteTruncation([...byHead.values()], heads.size);
 }
 
 /**
@@ -271,12 +347,16 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
  */
 function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
   const byCycle = new Map<string, Finding>();
+  /** Every distinct cycle seen, cap or no cap — the exact count. */
+  const cycles = new Set<string>();
   for (const row of rows) {
     const cycle = cycleOf(row);
     if (cycle === null) continue;
     const start = row.chain.indexOf(cycle[0]!);
     const key = createHash("sha1").update([...new Set(cycle)].sort().join("\n")).digest("hex");
-    if (byCycle.has(key)) continue;
+    if (cycles.has(key)) continue;
+    cycles.add(key);
+    if (byCycle.size >= URL_FINDING_CAP) continue;
     byCycle.set(
       key,
       queryFinding(self, {
@@ -289,11 +369,20 @@ function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
       }),
     );
   }
-  return [...byCycle.values()];
+  return noteTruncation([...byCycle.values()], cycles.size);
 }
 
-const CHAIN: RuleIdentity = { id: "redirect.chain", severity: "warning" };
-const LOOP: RuleIdentity = { id: "redirect.loop", severity: "critical" };
+/**
+ * The two redirect-graph rules' identities.
+ *
+ * Exported because `redirect.volume` (src/rules/metric/crawl-metrics.ts) counts
+ * the `issues` rows these two wrote, and it selects them BY ID. A metric that
+ * spelled `'redirect.chain'` in its own SQL would go silently to zero the day
+ * either rule was renamed — a metric reading "no chains on this site" about a
+ * site whose chains are sitting in the issues table (hard rule 7).
+ */
+export const CHAIN: RuleIdentity = { id: "redirect.chain", severity: "warning" };
+export const LOOP: RuleIdentity = { id: "redirect.loop", severity: "critical" };
 
 /**
  * The redirect-graph rules. Both read the same walk; each runs it for itself

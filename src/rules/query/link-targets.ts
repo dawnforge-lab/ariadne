@@ -176,14 +176,39 @@ async function eachCanonicalTarget(
         ),
       );
 
+    const visits: ResolvedTarget[] = [];
     for (const target of targets) {
       for (const { page, canonical } of wanted.get(target.url) ?? []) {
-        visit({ page, canonical, resolvedTo: target.url, target });
+        visits.push({ page, canonical, resolvedTo: target.url, target });
       }
     }
+    // Sorted by the DECLARING page's URL — the finding's own key — before
+    // anything is handed on. The target lookup above has no ORDER BY, so its
+    // row order is whatever the plan emits, and the callers stop listing at
+    // `URL_FINDING_CAP`: an unordered visit would let a re-run of the same
+    // crawl report a different two hundred, and the `issues` table (appended
+    // under `onConflictDoNothing`) would grow past the cap run over run.
+    // O(batch), like everything else in this loop.
+    visits.sort((a, b) => a.page.url.localeCompare(b.page.url));
+    for (const t of visits) visit(t);
   }
 }
 
+/**
+ * The shape both canonical-target rules take: walk the resolved canonicals and
+ * keep the ones the rule fires on.
+ *
+ * Capped at `URL_FINDING_CAP` like every other URL-scoped rule — a template
+ * that canonicalises a whole section at one dead URL is O(pages) findings —
+ * and the scan runs to the end of the last batch either way, so the count
+ * behind the cap is exact (`noteTruncation`): only the LISTING stops at the
+ * cap, never the counting.
+ *
+ * WHICH findings the cap keeps is settled by the walk: batches advance by
+ * `pages.id` and each batch is visited in declaring-URL order (see
+ * `eachCanonicalTarget`), so the same crawl re-judged reports the same two
+ * hundred rather than a fresh arbitrary two hundred beside the last run's.
+ */
 async function canonicalTargetFindings(
   self: RuleIdentity,
   db: Db,
@@ -191,9 +216,12 @@ async function canonicalTargetFindings(
   fires: (t: ResolvedTarget) => Record<string, unknown> | null,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
+  let total = 0;
   await eachCanonicalTarget(db, crawlId, (t) => {
     const evidence = fires(t);
     if (evidence === null) return;
+    total += 1;
+    if (findings.length >= URL_FINDING_CAP) return;
     findings.push(
       queryFinding(self, {
         pageId: t.page.id,
@@ -203,7 +231,7 @@ async function canonicalTargetFindings(
       }),
     );
   });
-  return findings;
+  return noteTruncation(findings, total);
 }
 
 const BROKEN: RuleIdentity = { id: "links.broken-internal", severity: "warning" };

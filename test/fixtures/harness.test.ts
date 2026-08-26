@@ -2,10 +2,10 @@
  * The end-to-end net.
  *
  * One local HTTP site, crawled once by the REAL crawler, judged once by the
- * REAL rule runner, asserted from the `issues` table. Nothing here stubs a
- * fetch, hand-builds a `pages` row, or calls a rule directly: if the analyzer
- * stops extracting a signal, or the writer stops persisting it, or a rule stops
- * reading it, this file fails, and none of the unit suites would.
+ * REAL rule runner, asserted from the `issues` and `metrics` tables. Nothing
+ * here stubs a fetch, hand-builds a `pages` row, or calls a rule directly: if
+ * the analyzer stops extracting a signal, or the writer stops persisting it, or
+ * a rule stops reading it, this file fails, and none of the unit suites would.
  *
  * The crawl and the rule run happen once, in `beforeAll`. Every assertion below
  * reads the same result, so adding a fixture costs a page fetch, not a crawl.
@@ -17,7 +17,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlSummary } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, issues, pages } from "../../src/db/schema.js";
+import { crawls, hreflang, issues, metrics, pages, sitemapUrls } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { THIN_WORDS } from "../../src/rules/page/on-page.js";
 import { SOFT_404_WORDS } from "../../src/rules/query/content.js";
@@ -169,6 +169,27 @@ const siteFindings = new Map<string, unknown[]>();
  * stopped contributing fails an assertion instead of quietly not mattering.
  */
 const hreflangByPath = new Map<string, string[]>();
+/**
+ * Metric id -> its rows for this crawl, keyed by `"<scope>|<scopeValue>"`.
+ *
+ * The metric layer's half of this file. A metric rule writes no `issues` row —
+ * it produces a table of numbers rather than an accusation — so none of the
+ * maps above can see one, and until this map existed the harness could not tell
+ * a metric that ran from a metric that did not.
+ *
+ * The key is the rest of the `metrics` primary key (`crawl, metric, scope,
+ * scopeValue`), so a duplicate here would be a row the runner's upsert should
+ * have collapsed; it throws rather than overwriting, for the same reason
+ * `pageByPath` does.
+ */
+const metricsById = new Map<string, Map<string, unknown>>();
+
+/** One metric's site row, or a failure naming the metric that has none. */
+function siteMetric(metricId: string): unknown {
+  const value = metricsById.get(metricId)?.get("site|");
+  if (value === undefined) throw new Error(`${metricId} wrote no site row for this crawl`);
+  return value;
+}
 
 /**
  * A details blob serialised with its keys in a fixed order, for sorting.
@@ -285,6 +306,16 @@ beforeAll(async () => {
     hreflangByPath.set(path, codes);
   }
   for (const codes of hreflangByPath.values()) codes.sort();
+
+  for (const row of await db.select().from(metrics).where(eq(metrics.crawlId, summary.crawlId))) {
+    const byScope = metricsById.get(row.metricId) ?? new Map<string, unknown>();
+    const key = `${row.scope}|${row.scopeValue}`;
+    if (byScope.has(key)) {
+      throw new Error(`two metrics rows share the key ${row.metricId} ${key}`);
+    }
+    byScope.set(key, row.value);
+    metricsById.set(row.metricId, byScope);
+  }
 }, 120_000);
 
 afterAll(async () => {
@@ -519,6 +550,41 @@ describe("the fixture site end to end", () => {
     ]);
   });
 
+  it("a <loc> spelled with a fragment and unsorted parameters joins its own page", async () => {
+    // The end-to-end half of the normalization seam. `/authored3/loc-variant`
+    // is published by `/sitemap.xml` as `?sort=asc&ref=sitemap#top` and fetched
+    // by the crawl as `?ref=sitemap&sort=asc`: one URL, two spellings, written
+    // by two different parts of this system. Read from the tables rather than
+    // asserted from the fixture constants, so what is proved is what the
+    // crawler stored.
+    const path = "/authored3/loc-variant?ref=sitemap&sort=asc";
+    const published = `${app.base}/authored3/loc-variant?sort=asc&ref=sitemap#top`;
+    const page = pageByPath.get(path);
+    if (page === undefined) throw new Error("the loc-variant fixture was never crawled");
+
+    // The published spelling is stored verbatim — the `<loc>` is evidence, and
+    // normalising the column would destroy the line a client goes and edits —
+    // and the join column beside it is the frontier key of the page above.
+    const [entry] = await db
+      .select()
+      .from(sitemapUrls)
+      .where(and(eq(sitemapUrls.crawlId, summary.crawlId), eq(sitemapUrls.url, published)));
+    if (entry === undefined) throw new Error(`no sitemap_urls row for ${published}`);
+    expect(entry.urlNormalised).toBe(page.url);
+
+    // And so neither of the two findings that spelling used to invent exists.
+    // They are looked for in two places because they land in two: an entry that
+    // matches no page row is site-scoped and reaches `siteFindings`, while
+    // `pages.not-in-sitemap` names the page and lands on its path.
+    expect([...(issuesByPath.get(path) ?? new Set<string>())]).not.toContain(
+      "pages.not-in-sitemap",
+    );
+    const uncrawled = (siteFindings.get("sitemap.uncrawled") ?? []).map(
+      (d) => (d as { url: string }).url,
+    );
+    expect(uncrawled).not.toContain(published);
+  });
+
   it("the paginated series proves all three pagination rules", () => {
     const url = (path: string): string => `${app.base}${path}`;
 
@@ -711,13 +777,26 @@ describe("the fixture site end to end", () => {
   it("the structured-data fixtures name the field that is missing and the rating that is self-serving", () => {
     // The field names are what a client goes and adds, so they are pinned rather
     // than counted: the Product block carries a name and a priced offer and no
-    // image, and three of the five recommended fields are absent too.
+    // image, and eight of the twelve recommended fields are absent too. The two
+    // that are NOT absent are the pair read out of the offer — the fixture's
+    // offer carries both a currency and an availability — which is this
+    // collection's proof that the widened CHECK-44 profile reads them from
+    // inside `offers` rather than looking for top-level keys.
     expect(
       detailsByPath.get("/authored3/product-incomplete\nschema.product-incomplete"),
     ).toEqual({
       pageUrl: `${app.base}/authored3/product-incomplete`,
       missingRequired: ["image"],
-      missingRecommended: ["brand", "aggregateRating", "review"],
+      missingRecommended: [
+        "brand",
+        "gtin",
+        "mpn",
+        "aggregateRating",
+        "review",
+        "color",
+        "material",
+        "size",
+      ],
     });
 
     expect(detailsByPath.get("/authored3/reviews\nschema.self-serving-reviews")).toEqual({
@@ -781,6 +860,166 @@ describe("the fixture site end to end", () => {
     expect(duplicated).toEqual(["/content/duplicate-a", "/deep/2"]);
   });
 
+  it("every metric rule wrote its table for this crawl", () => {
+    // The metric layer's coverage assertion, and the reason the rule sweep
+    // below can stop skipping the kind. A metric writes no `issues` row, so
+    // "did it fire" is a question only the `metrics` table can answer — and
+    // every one of the ten CAN answer it here: eight always emit a site row,
+    // `inlinks.sources-by-type` emits one per target cohort type and this site
+    // has 42 of them, and `content.template-similarity` emits one per type with
+    // two fingerprinted pages, which the `/deep/:id`, `/head/:slug`,
+    // `/content/:slug`, `/authored/:slug` and `/authored3/:slug` templates give
+    // it. There is no exemption paragraph to write.
+    expect([...metricsById.keys()].sort()).toEqual([
+      "content.metrics-by-type",
+      "content.template-similarity",
+      "hreflang.coverage",
+      "inlinks.distribution",
+      "inlinks.extremes",
+      "inlinks.sources-by-type",
+      "redirect.volume",
+      "sitemap.structure",
+      "structure.depth-distribution",
+      "url.param-volumes",
+    ]);
+    // And that set is the registry's, not a list that happens to agree with it:
+    // a metric added without a fixture that provokes it fails here.
+    expect([...metricsById.keys()].sort()).toEqual(
+      registry
+        .byKind("metric")
+        .map((rule) => rule.id)
+        .sort(),
+    );
+  });
+
+  it("the three quotable site metrics carry the numbers this site actually has", () => {
+    // The quotability gate made mechanical. Every number below is hand-derived
+    // from the fixture collection — the pages it serves, the anchors it renders
+    // and the sitemap it publishes — rather than copied from what the SQL
+    // produced, which would assert only that the query is deterministic.
+    //
+    // THE COHORT, which two of the three are computed over. The crawl writes 72
+    // `pages` rows: the 71 fixtures plus the hub at `/`. Eleven of them are not
+    // an indexable 200 and are therefore outside the cohort every metric shares
+    // (fetched OK, 200, indexable):
+    //
+    //   noindex (4): /index/noindex-meta, /index/noindex-header,
+    //                /authored/canonical-noindex, /authored/noindex-conflict
+    //   errors  (3): /status/not-found 404, /status/server-error 503,
+    //                /status/blocked 403
+    //   redirects(4): /redirect/chain-1, /redirect/chain-2, /redirect/loop,
+    //                /redirect/trailing-slash
+    //
+    // 72 - 11 = 61 cohort pages. The `schema.breadcrumb-absent` assertion above
+    // counts the same set out of `pageByPath` and is asserted against the same
+    // rows, which is a second reading of this number from a different direction.
+    const COHORT = 61;
+
+    // THE LINK GRAPH. Every anchor the site renders, and there are only four
+    // kinds: the hub at `/` links the 63 fixtures whose `linkedFromHub` is not
+    // false; `/links/broken-internal-link` links `/status/not-found`;
+    // `/deep/N` links `/deep/N+1` for N = 1…6 (the seventh rung ends the chain);
+    // and the paginated series links `paged-1 -> paged-2`, `paged-2 -> paged-1`,
+    // `paged-3 -> paged-2` and `paged-3 -> paged-3`. Nothing else on the site
+    // renders an `<a>`.
+    //
+    // Inlinks per cohort page — DISTINCT source pages, a page's link to itself
+    // never counted (the `links.orphan` lesson):
+    //
+    //   0  `/`                       nothing links the hub. `/redirect/chain-2`
+    //                                REDIRECTS to it, and a redirect is not a link.
+    //   0  /structure/orphan         not hub-linked, and nothing else names it
+    //   0  /authored3/paged-3        not hub-linked; only paged-3 links paged-3
+    //   3  /authored3/paged-2        the hub, paged-1, paged-3
+    //   2  /authored3/paged-1        the hub, paged-2
+    //   1  /deep/2 … /deep/7         the rung above (6 pages)
+    //   1  every other cohort page   the hub alone —
+    //                                61 - 3 - 1 - 1 - 6 = 50 pages
+    //
+    // Sorted, that is 0,0,0 then fifty-six 1s (the 50 above plus the 6 deep
+    // rungs) then 2 then 3. Sum = 56 + 2 + 3 = 61, so mean = 61/61 = 1.
+    //
+    // n = 61, so `percentile_cont` interpolates at pos = q * 60 over v0…v60,
+    // where v0…v2 = 0, v3…v58 = 1, v59 = 2, v60 = 3:
+    //   p25    pos 15 -> v15 = 1
+    //   median pos 30 -> v30 = 1
+    //   p75    pos 45 -> v45 = 1
+    //   p95    pos 57 -> v57 = 1
+    // Every one lands inside the run of 1s, so none of them interpolates.
+    expect(siteMetric("inlinks.distribution")).toEqual({
+      count: COHORT,
+      min: 0,
+      p25: 1,
+      median: 1,
+      p75: 1,
+      p95: 1,
+      max: 3,
+      mean: 1,
+    });
+
+    // HREFLANG COVERAGE. Six pages publish a declaration — exactly the six the
+    // `hreflang` table assertion above pins, and all six are indexable 200s
+    // inside the cohort (the "noindex" in `/authored3/hreflang-noindex` is
+    // about the page its alternate points AT, not about itself). The unit is
+    // the page, not the declaration: `/authored3/hreflang-a` names three
+    // alternates and is one covered page.
+    //
+    // 100 * 6 / 61 = 9.83606… -> 9.8 at the one decimal place the SQL rounds to.
+    expect(siteMetric("hreflang.coverage")).toEqual({
+      pagesWithHreflang: 6,
+      indexablePages: COHORT,
+      coveragePct: 9.8,
+    });
+    // The two counts are read from the tables the harness already holds, so a
+    // fixture that stopped declaring hreflang, or a page that stopped being
+    // indexable, fails as a disagreement between two readings rather than as
+    // an unexplained number.
+    expect(hreflangByPath.size).toBe(6);
+    expect(
+      [...pageByPath.values()].filter(
+        (p) => p.fetchClass === "ok" && p.statusCode === 200 && p.isIndexable,
+      ).length,
+    ).toBe(COHORT);
+
+    // SITEMAP STRUCTURE. robots.txt declares two documents and only one of them
+    // contributes an entry: `/sitemap-broken.xml` answers 200 with an HTML
+    // error page and is refused before the XML parser sees it (the
+    // `sitemap.invalid` finding above is the other half of that fact), so
+    // `docs` counts one — this column counts documents that contributed a
+    // `sitemap_urls` row, not documents fetched.
+    //
+    // `/sitemap.xml` publishes the hub, every fixture whose `inSitemap` is not
+    // false, and the one URL robots.txt blocks:
+    //   1 (the hub, `/`)
+    // + 55 (fixtures listed, of the 71 — sixteen opt out)
+    // + 1 (/private/hidden)
+    // = 57 entries, all distinct, so the walk's first-source-wins dedupe drops
+    // none of them.
+    //
+    // 57 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
+    // it; no document was dropped for exceeding the read cap; and the walk
+    // stopped at no entry cap — which is what makes every count above exact
+    // rather than a floor.
+    expect(siteMetric("sitemap.structure")).toEqual({
+      docs: 1,
+      totalUrls: 57,
+      oversizedDocsSkipped: 0,
+      urlCapBreaches: 0,
+      entryCapReached: false,
+    });
+    // The per-document row beneath it, which is where `docs: 1` is spent: the
+    // one document, with the same 57 entries under its own URL. Asserted as the
+    // exact key set, so the broken document appearing here — or the good one
+    // vanishing — is a failure rather than a number nobody reads.
+    expect([...(metricsById.get("sitemap.structure") ?? new Map()).keys()].sort()).toEqual([
+      `sitemap_doc|${app.base}/sitemap.xml`,
+      "site|",
+    ]);
+    expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
+      { urls: 57, breaches50k: false },
+    );
+  });
+
   it("every registered rule fires on at least one fixture", () => {
     // Fixture paths only. The hub is crawled and judged like any other page,
     // but it proves nothing: a rule "covered" only by the hub would be a rule
@@ -791,7 +1030,15 @@ describe("the fixture site end to end", () => {
     // — so counting it towards coverage regardless of which page produced it is
     // correct. The assertion above is what holds the contents of that map
     // honest.
-    const fired = new Set(siteFindings.keys());
+    //
+    // `metricsById` seeds it for the same reason and with the same warrant. A
+    // metric rule writes rows to the `metrics` table and never writes an issue,
+    // so "fires" means "wrote its table" for this kind — and the metric
+    // assertions above are what hold THAT map honest: the exact id set, and
+    // three site rows pinned to hand-derived fixture-site values. The kind used
+    // to be filtered out of this sweep on the promise of exactly those
+    // assertions; they exist now, so it is not.
+    const fired = new Set([...siteFindings.keys(), ...metricsById.keys()]);
     for (const fixture of allFixtures()) {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);
     }
@@ -802,10 +1049,10 @@ describe("the fixture site end to end", () => {
       .map((rule) => rule.id)
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
-    // The strict form, at last: every registered rule fires on this one crawl,
-    // save the seven `SKIP_HARNESS_CLAIMS` name and explain. A new rule arrives
-    // here with no fixture and fails immediately, which is the point — the
-    // alternative is a rule nobody has ever seen speak.
+    // The strict form, over every kind at last: every registered rule speaks on
+    // this one crawl, save the seven `SKIP_HARNESS_CLAIMS` name and explain. A
+    // new rule arrives here with no fixture and fails immediately, which is the
+    // point — the alternative is a rule nobody has ever seen speak.
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +

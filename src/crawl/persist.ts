@@ -18,7 +18,7 @@
  * Nothing here is keyed by URL or by page, so the writer's footprint never
  * grows with the size of the crawl.
  *
- * Two facts about the row shapes that readers of this data need:
+ * Three facts about the row shapes that readers of this data need:
  *  - `pages.simhash` is a SIGNED bigint and the analyzer's simhash is in the
  *    unsigned 64-bit range. It is stored as `BigInt.asIntN(64, simhash)`;
  *    recover the analyzer's value with `BigInt.asUintN(64, stored)`. The bit
@@ -29,6 +29,13 @@
  *    a trailing slash are two frontier entries (they are two HTTP resources,
  *    and one usually redirects to the other) but one `url_normalised` group,
  *    which is exactly what the duplicate-URL checks want to see.
+ *  - `pages.redirect_url` is the resolved `Location` verbatim and
+ *    `pages.redirect_url_normalised` is that same target through
+ *    `normalizeUrl` — the spelling `pages.url` is keyed by. Join the redirect
+ *    graph on the second; quote the first as evidence. A `Location` carrying a
+ *    fragment, or query params in an order `normalizeUrl` sorts, is the same
+ *    URL as the page row the crawler created from it, and only the normalised
+ *    column can say so.
  *
  * `pageId` is minted here rather than read back from the insert, so child rows
  * can reference their page without a round trip. The consequence is stated
@@ -334,6 +341,13 @@ export class PageWriter {
       fetchClass: fetch.fetchClass,
       contentType: fetch.contentType,
       redirectUrl: fetch.redirectUrl,
+      // The join key for the redirect graph. `fetch.redirectUrl` is already
+      // absolute, http(s) and policy-checked (see FetchResult), so a null out
+      // of `normalizeUrl` here is a defect in this engine rather than something
+      // a site did — and a redirect chain that silently stopped walking because
+      // of it would be a false negative nobody could see (hard rule 7).
+      redirectUrlNormalised:
+        fetch.redirectUrl === null ? null : normaliseRedirect(fetch.redirectUrl),
       depth: item.depth,
       discoveredVia: item.discoveredVia,
       title: analysis?.title ?? null,
@@ -406,6 +420,19 @@ export class PageWriter {
     }
     return rows;
   }
+}
+
+/**
+ * A redirect target in the spelling `pages.url` is keyed by. Throws rather than
+ * storing a null the join would read as "this redirect goes nowhere": see the
+ * call site.
+ */
+function normaliseRedirect(redirectUrl: string): string {
+  const normalised = normalizeUrl(redirectUrl);
+  if (normalised === null) {
+    throw new Error(`PageWriter: cannot normalise redirect target ${redirectUrl}`);
+  }
+  return normalised;
 }
 
 /**

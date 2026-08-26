@@ -224,12 +224,20 @@ and the rest of the checklist entry is the agent's to judge.
      redirect walk — a false negative in `redirect.chain`/`redirect.loop`.
    - `sitemap_urls.url` is the published `<loc>`; `pages.url` is
      `normalizeUrl` output. The same mismatch gives false `sitemap.uncrawled`
-     and false `pages.not-in-sitemap`, mitigated today by a
+     and false `pages.not-in-sitemap`, mitigated at the time by a
      `normalizationSensitive` flag on the evidence rather than fixed.
 
    Both are the same shape and both want the same crawl-layer fix — normalize
    what is stored, or normalize on the join — carried to the Phase 3 final
    review and out of it into Phase 4's backlog. Neither is a rule defect.
+
+   **CLOSED by Phase 4 Task 1.** Migration `0006` adds
+   `pages.redirect_url_normalised` and `sitemap_urls.url_normalised`, written by
+   the two crawl-layer writers through `normalizeUrl`; every join that matched a
+   stored spelling against `pages.url` now matches the normalised column, and
+   the published spellings stay as evidence. The `normalizationSensitive` flag
+   and the test that pinned it are gone — there is nothing left for them to
+   warn about.
 3. **A perf caveat the Phase 4 50k expectations must budget for.** *Provenance:
    these three figures were measured during **Task 7** on a synthetic
    5,000-page corpus, not on the fixture site and **not re-measured at gate

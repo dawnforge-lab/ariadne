@@ -13,6 +13,22 @@ import {
   SOFT_404_WORDS,
 } from "../../src/rules/query/content.js";
 import { BREADCRUMB_PAGE_FLOOR } from "../../src/rules/query/structured-data.js";
+import {
+  EXTREMES_LIST_CAP,
+  OTHER_SOURCES,
+  SOURCE_TYPE_CAP,
+} from "../../src/rules/metric/link-metrics.js";
+import {
+  TEMPLATE_LOOSE_BITS,
+  TEMPLATE_NEAR_BITS,
+  TEMPLATE_SAMPLE_PAGES,
+} from "../../src/rules/metric/content-metrics.js";
+import {
+  SITEMAP_DOC_ROWS_CAP,
+  SITEMAP_URL_CAP,
+} from "../../src/rules/metric/crawl-metrics.js";
+import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 
 /**
  * The content copy spells its distance out in words, so the threshold pin below
@@ -107,7 +123,26 @@ const PHASE_3_RULE_IDS = [
   "schema.self-serving-reviews",
 ];
 
-const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
+/**
+ * The metric rules of the Phase 4 tables. Same contract as the two lists above
+ * — copy lands with the rule — and the same reason to keep listing them by
+ * hand: a metric that shipped without copy would render as a table with no
+ * label saying what its numbers are.
+ */
+const PHASE_4_METRIC_IDS = [
+  "inlinks.distribution",
+  "inlinks.extremes",
+  "inlinks.sources-by-type",
+  "structure.depth-distribution",
+  "content.metrics-by-type",
+  "content.template-similarity",
+  "hreflang.coverage",
+  "url.param-volumes",
+  "redirect.volume",
+  "sitemap.structure",
+];
+
+const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS, ...PHASE_4_METRIC_IDS];
 
 describe("issue copy", () => {
   it("throws on an unknown rule id", () => {
@@ -338,6 +373,189 @@ describe("issue copy", () => {
     expect(c.explanation).toMatch(/not a penalty/i);
     const overclaim = /fake|fraudulent|fabricat|manual action|penalis|penaliz|will be penal/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  });
+
+  // The metric copy quotes both list caps in words, and both are the rules'
+  // own constants. Pinned the way the on-page thresholds are: a cap that moves
+  // fails here until the prose moves with it.
+  it("quotes the list caps the link metrics actually apply", () => {
+    expect(EXTREMES_LIST_CAP).toBe(20);
+    expect(ISSUE_COPY["inlinks.extremes"]!.explanation).toContain("twenty");
+    expect(SOURCE_TYPE_CAP).toBe(25);
+    expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain("twenty-five");
+    // The rollup bucket is a KEY a reader meets in the table, so the copy has to
+    // name it — and name the parenthesised spelling, which is what keeps it
+    // apart from a template a client really called `other`.
+    expect(OTHER_SOURCES).toBe("(other)");
+    expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain(OTHER_SOURCES);
+  });
+
+  // The metric-copy contract is that a reader can say what the table measured
+  // from the text alone — so every COLUMN of the value shape has to appear in
+  // it. p95 was the one the first draft left out: the number was in the jsonb
+  // and nowhere in the prose. Asserted for both distribution metrics, which
+  // share the shape, so the same omission cannot recur in the metrics Tasks 5
+  // and 6 copy from this pattern.
+  it("the distribution copy names every column of the shape, p95 included", () => {
+    for (const id of ["inlinks.distribution", "structure.depth-distribution"]) {
+      const text = ISSUE_COPY[id]!.explanation;
+      expect(text, `${id}: the count`).toMatch(/how many pages were measured/i);
+      expect(text, `${id}: min and max`).toMatch(/smallest and largest|shallowest and deepest/i);
+      expect(text, `${id}: the mean`).toContain("mean");
+      expect(text, `${id}: p25/median/p75`).toContain("quartiles");
+      expect(text, `${id}: p95`).toContain("95th percentile");
+    }
+  });
+
+  // The same contract, for the Task 5 metrics — which do NOT inherit the
+  // assertion above, because their shapes are their own. Every column of every
+  // value shape has to be findable in the prose: a table's numbers are quoted
+  // to a client, and a column nobody named is a number nobody can explain.
+  it("content.metrics-by-type names both measures and every column of each", () => {
+    const text = ISSUE_COPY["content.metrics-by-type"]!.explanation;
+    expect(text, "the two measures").toMatch(/word count/i);
+    expect(text, "the two measures").toMatch(/text ratio/i);
+    expect(text, "the count").toMatch(/how many pages were measured/i);
+    // And that the count is per measure rather than the size of the cohort —
+    // the one place this shape differs from the link metrics' distribution.
+    expect(text, "the count is per measure").toMatch(
+      /pages that actually carry each measure|carry each measure/i,
+    );
+    expect(text, "min and max").toMatch(/shortest and longest/i);
+    expect(text, "the mean").toContain("mean");
+    expect(text, "p25/median/p75").toContain("quartiles");
+    expect(text, "p95").toContain("95th percentile");
+  });
+
+  it("content.template-similarity names every column, the thresholds and the sample", () => {
+    const c = ISSUE_COPY["content.template-similarity"]!;
+    const text = c.explanation;
+    // `pagesFingerprinted` counts the pages the metric could actually compare,
+    // not the pages of the type: the cohort excludes any page the crawl
+    // recorded no fingerprint for. The name says so and the copy must too — a
+    // column called "pages in type" over a fingerprinted count would understate
+    // real type size wherever the two differ, silently.
+    expect(text, "pagesFingerprinted").toMatch(/how many of the type's pages carry a fingerprint/i);
+    expect(text, "the pages it leaves out").toMatch(/neither compared nor counted/i);
+    expect(text, "pagesSampled").toMatch(/how many of those were sampled/i);
+    expect(text, "pairsSampled").toMatch(/how many pairs that was/i);
+    expect(text, "meanHamming").toMatch(/mean distance/i);
+    expect(text, "p25/median/p75").toContain("quartiles");
+    // The two share columns, and the thresholds their KEYS spell. Pinned
+    // against the rule's own constants, so a threshold that moves fails here
+    // until the prose moves with it (the on-page-threshold contract).
+    expect(TEMPLATE_NEAR_BITS).toBe(3);
+    expect(TEMPLATE_LOOSE_BITS).toBe(8);
+    expect(text, "shareWithin3BitsPct").toMatch(
+      new RegExp(`percentage of pairs within ${TEMPLATE_NEAR_BITS} bits`, "i"),
+    );
+    expect(text, "shareWithin8BitsPct").toMatch(new RegExp(`within ${TEMPLATE_LOOSE_BITS} bits`, "i"));
+    // The sampling rule is part of the shape: three of the columns describe it,
+    // and a reader who cannot see it would read a sample as a census.
+    expect(TEMPLATE_SAMPLE_PAGES).toBe(200);
+    expect(text, "the sampling rule").toMatch(
+      new RegExp(`first ${TEMPLATE_SAMPLE_PAGES} pages`, "i"),
+    );
+    expect(text, "the sample's ordering").toMatch(/page-id order/i);
+  });
+
+  // The plan's naming ruling, asserted negatively because that is the only
+  // direction that holds: prose already saying "template similarity" can have
+  // the other word appended to it and still pass a positive check. The metric
+  // measures how alike two pages are; which parts of a page are worth reading
+  // is a judgement it has not made.
+  it("content.template-similarity is labelled template similarity and never the other word", () => {
+    const c = ISSUE_COPY["content.template-similarity"]!;
+    expect(`${c.title} ${c.explanation} ${c.howToFix}`).not.toMatch(/boilerplate/i);
+    expect(`${c.title} ${c.explanation}`.toLowerCase()).toContain("template");
+  });
+
+  it("hreflang.coverage names its three columns and its empty-cohort answer", () => {
+    const text = ISSUE_COPY["hreflang.coverage"]!.explanation;
+    expect(text, "pagesWithHreflang").toMatch(
+      /how many of this site's indexable pages publish at least one hreflang/i,
+    );
+    expect(text, "indexablePages").toMatch(/out of how many were measured/i);
+    expect(text, "coveragePct").toMatch(/percentage rounded to one decimal place/i);
+    // The null case is a column value a reader will meet, so it is copy too.
+    expect(text, "the null percentage").toMatch(/no percentage rather than zero/i);
+    // And the claim it must NOT make: coverage counts pages that declare
+    // something, not pages whose declarations are correct — that is the
+    // hreflang findings' subject, and conflating them would let a client read
+    // "100% coverage" as "the international setup is sound".
+    const overclaim = /(?:sets|declarations) are (?:complete|correct|valid)|correctly configured/i;
+    expect(text).not.toMatch(overclaim);
+  });
+
+  // The same contract for the task 6 metrics: every column of every value shape
+  // has to be findable in the prose, because a number that reaches a client
+  // without a sentence explaining it is a number nobody can defend.
+  it("url.param-volumes names every column of its shape, the cap and the tie-break", () => {
+    const text = ISSUE_COPY["url.param-volumes"]!.explanation;
+    expect(text, "totalParams").toMatch(/how many distinct parameter names/i);
+    expect(text, "trackingParams").toMatch(/how many of those are tracking parameters/i);
+    // The three columns of a `topParams` entry: name, occurrences, isTracking.
+    expect(text, "topParams.occurrences").toMatch(/the number of URLs it appears on/i);
+    expect(text, "topParams.isTracking").toMatch(/whether it is one of the tracking ones/i);
+    expect(text, "parameterisedPages").toMatch(/how many crawled pages carry a query string/i);
+    expect(text, "parameterisedIndexablePages").toMatch(
+      /how many of those returned 200 and are indexable/i,
+    );
+    // The cap is the rule's own constant, and the tie-break is what makes the
+    // list the same twenty on every run (the on-page-threshold contract).
+    expect(TOP_PARAMS_CAP).toBe(20);
+    expect(text, "the cap").toContain("twenty");
+    expect(text, "the tie-break").toMatch(/ties broken by name/i);
+  });
+
+  it("redirect.volume names every column and what its counts are capped by", () => {
+    const text = ISSUE_COPY["redirect.volume"]!.explanation;
+    expect(text, "redirectPages").toMatch(/how many of the URLs this crawl requested/i);
+    expect(text, "totalPages").toMatch(/out of how many pages were fetched in total/i);
+    expect(text, "ratioPct").toMatch(/percentage rounded to one decimal place/i);
+    expect(text, "chains and loops").toMatch(/how many redirect chains and how many redirect loops/i);
+    // The counts are exact even where the FINDINGS listing was capped, and the
+    // copy has to say so: a reader comparing the table with the findings list
+    // would otherwise take the difference for an error.
+    expect(text, "the finding cap").toMatch(
+      new RegExp(`counted in full even where that list was capped at the first ${URL_FINDING_CAP}`, "i"),
+    );
+    expect(text, "the null share").toMatch(/no percentage rather than zero/i);
+  });
+
+  it("sitemap.structure names every column of both its shapes", () => {
+    const text = ISSUE_COPY["sitemap.structure"]!.explanation;
+    expect(text, "docs").toMatch(/number of documents that contributed at least one entry/i);
+    expect(text, "totalUrls").toMatch(/total number of entries stored across them/i);
+    expect(text, "oversizedDocsSkipped").toMatch(/dropped whole for being too large to read/i);
+    expect(text, "urlCapBreaches").toMatch(/how many documents carry more than the 50,000/i);
+    // `entryCapReached` changes what every other number means, so it is copy
+    // rather than a footnote.
+    expect(text, "entryCapReached").toMatch(/whether the crawl's own entry cap stopped collection/i);
+    expect(text, "the floor that implies").toMatch(/a floor rather than a total/i);
+    // The per-document row: scope value, urls, breaches50k.
+    expect(text, "the doc row's identity").toMatch(/named by the URL it was fetched from/i);
+    expect(text, "urls").toMatch(/how many entries it contributed/i);
+    expect(text, "breaches50k").toMatch(/whether that is past 50,000/i);
+    // Both caps are the rule's own constants.
+    expect(SITEMAP_URL_CAP).toBe(50_000);
+    expect(text, "the protocol cap").toContain("50,000");
+    expect(SITEMAP_DOC_ROWS_CAP).toBe(50);
+    expect(text, "the listing cap").toMatch(
+      new RegExp(`largest ${SITEMAP_DOC_ROWS_CAP} documents are listed`, "i"),
+    );
+  });
+
+  // A metric states what was counted; it does not accuse the site of anything.
+  // "Fix" language in a table's copy would turn a distribution into a fault
+  // list, and the numbers at the bottom of a distribution are frequently fine.
+  it("the metric copy describes a measurement rather than a defect", () => {
+    for (const id of PHASE_4_METRIC_IDS) {
+      const c = ISSUE_COPY[id]!;
+      const asFault =
+        /this (?:is a|indicates a) (?:problem|fault|error)|must be fixed|you must fix|is broken|penalis|penaliz/i;
+      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(asFault);
+    }
   });
 
   it("headings.h1-multiple does not claim a ranking penalty", () => {

@@ -21,7 +21,7 @@ import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { sitemapRules } from "../../src/rules/query/sitemap.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
-import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
+import { normalised, writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -117,6 +117,7 @@ describe("the sitemap rules against the database", () => {
       robotsMeta: s.robotsMeta ?? null,
       xRobotsTag: s.xRobotsTag ?? null,
       redirectUrl: s.redirectUrl ?? null,
+      redirectUrlNormalised: s.redirectUrl === undefined ? null : normalised(s.redirectUrl),
       depth: 1,
       discoveredVia: "sitemap",
     }));
@@ -129,6 +130,9 @@ describe("the sitemap rules against the database", () => {
       paths.map((path) => ({
         crawlId,
         url: url(path),
+        // What the crawl loop writes beside the published `<loc>`, and what
+        // every join below reads.
+        urlNormalised: normalised(url(path)),
         sitemapSource: `${SITE}/sitemap.xml`,
         lastmod: null,
       })),
@@ -377,24 +381,31 @@ describe("the sitemap rules against the database", () => {
     });
   });
 
-  // The join is exact on the URL, and `sitemap_urls.url` is the published
-  // `<loc>` while `pages.url` is `normalizeUrl` output — which strips the
-  // fragment and sorts query parameters. A `<loc>` carrying either does not
-  // match the page the crawl created FROM IT, and reads here as uncrawled. The
-  // finding still fires (the crawl genuinely has no row under that spelling)
-  // and its evidence says the spelling is what may be at fault. See the module
-  // header for why this is not papered over in SQL.
-  it("flags a finding whose URL spelling may differ from the frontier key", async () => {
+  // The published `<loc>` and the frontier key are two spellings of one URL:
+  // `normalizeUrl` strips the fragment and sorts query parameters, so a site
+  // that publishes `?b=2&a=1#section` for the page the crawl fetched at
+  // `?a=1&b=2` is naming that very page. The join reads
+  // `sitemap_urls.url_normalised`, so the entry matches its row in both
+  // directions — no invented `sitemap.uncrawled`, no invented
+  // `pages.not-in-sitemap` — while the evidence still quotes the spelling the
+  // site published, because that is the line of XML somebody edits.
+  it("joins a <loc> spelled with a fragment and unsorted parameters to its page", async () => {
     const crawlId = await newCrawl();
-    await addPages(crawlId, [{ path: "/x" }]);
-    await addSitemapUrls(crawlId, ["/x#section"]);
+    await addPages(crawlId, [
+      { path: "/x?a=1&b=2" },
+      { path: "/gone?a=1&b=2", fetchClass: "client_error", statusCode: 404 },
+    ]);
+    await addSitemapUrls(crawlId, ["/x?b=2&a=1#section", "/gone?b=2&a=1#top"]);
 
-    const found = await run("sitemap.uncrawled", crawlId);
+    expect(await run("sitemap.uncrawled", crawlId)).toHaveLength(0);
+    expect(await run("pages.not-in-sitemap", crawlId)).toHaveLength(0);
+
+    const found = await run("sitemap.non-200", crawlId);
     expect(found).toHaveLength(1);
     expect(found[0]!.evidence).toEqual({
-      url: url("/x#section"),
-      attempted: false,
-      normalizationSensitive: true,
+      url: url("/gone?b=2&a=1#top"),
+      statusCode: 404,
+      fetchClass: "client_error",
     });
   });
 
@@ -480,6 +491,59 @@ describe("the sitemap rules against the database", () => {
     const crawlId = await newCrawl(null);
     for (const r of sitemapRules) {
       await expect(r.run(db, crawlId), r.id).rejects.toThrow(/discovery/i);
+    }
+  });
+
+  // A `sitemap_urls` row written before migration 0006 carries the column's
+  // empty-string default, which matches no page — so every rule that joins the
+  // two tables would report the whole sitemap as wrong rather than say nothing.
+  // No crawl can write an empty spelling (`normalizeUrl` returns at least
+  // `scheme://host/`, and `persistSitemap` throws on what it rejects), so the
+  // default is unambiguous and is refused outright: the same ruling the missing
+  // discovery evidence above gets, and the same remedy.
+  it("refuses a crawl whose sitemap rows predate url_normalised", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/listed" }]);
+    // Written the way migration 0006 left a pre-existing row: the published
+    // spelling, and the column's default beside it.
+    await db.insert(sitemapUrls).values({
+      crawlId,
+      url: url("/listed"),
+      sitemapSource: `${SITE}/sitemap.xml`,
+      lastmod: null,
+    });
+
+    for (const id of [
+      "sitemap.non-200",
+      "sitemap.redirected",
+      "sitemap.non-indexable",
+      "sitemap.uncrawled",
+      "pages.not-in-sitemap",
+    ]) {
+      // The message names the crawl, quotes an entry, and says what to do.
+      await expect(run(id, crawlId), id).rejects.toThrow(
+        /no normalised spelling.*Re-crawl the site/s,
+      );
+      await expect(run(id, crawlId), id).rejects.toThrow(crawlId);
+    }
+
+    // The two rules that read the discovery blob alone never touch the column
+    // and must keep working: gating them would refuse to say "this site
+    // declares no sitemap" over a join they do not make.
+    expect(await run("sitemap.missing", crawlId)).toHaveLength(0);
+    expect(await run("sitemap.invalid", crawlId)).toHaveLength(0);
+  });
+
+  it("says nothing about a crawl whose sitemap rows are all normalised", async () => {
+    // The other half of the gate: it must not fire on a healthy crawl. Every
+    // other test in this file is that assertion too, but stating it once
+    // directly means a gate that started throwing on everything fails here
+    // rather than in twenty places at once.
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/listed" }]);
+    await addSitemapUrls(crawlId, ["/listed"]);
+    for (const r of sitemapRules) {
+      await expect(r.run(db, crawlId), r.id).resolves.toBeDefined();
     }
   });
 });

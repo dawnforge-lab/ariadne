@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import type { DiscoveryTruncation } from "../../crawl/discovery.js";
 import type { FetchClass } from "../../crawl/fetch-page.js";
@@ -9,7 +9,7 @@ import type {
   NotFoundProbeSample,
 } from "../../crawl/loop.js";
 import type { Db } from "../../db/client.js";
-import { crawls } from "../../db/schema.js";
+import { crawls, sitemapUrls } from "../../db/schema.js";
 import type { Finding } from "../registry/registry.js";
 
 /**
@@ -18,8 +18,12 @@ import type { Finding } from "../registry/registry.js";
  * Two hundred findings is already more than any action plan works through in
  * one pass, and the alternative — one row per URL on a sitemap of a hundred
  * thousand — is a findings table that grows with the site rather than with the
- * problem. The count behind the cap is always exact (`noteTruncation`): the
- * cap bounds what is *listed*, never what is known.
+ * problem. The cap bounds what is *listed*, and wherever the rule's scan runs
+ * to completion anyway the count behind it is exact (`noteTruncation`). Where
+ * the scan itself is what the cap has to stop — a quadratic join, an
+ * accumulator that grows with the site — the number reported is a lower bound
+ * and says so (`noteAtLeastTruncation`). What is never on offer is a listing
+ * cut short in silence.
  */
 export const URL_FINDING_CAP = 200;
 
@@ -98,6 +102,18 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
   ) {
     return bad("has no truncation.failures array of {url, reason}");
   }
+  // `sitemap.structure` reads these two, so they are checked rather than
+  // carried: `oversizedDocsSkipped` is a COLUMN of that metric's site row, and
+  // an `undefined` reaching a jsonb value would store `null` where a count
+  // belongs; `entryLimited` is the flag that turns every count in that table
+  // from a total into a floor, and a non-boolean reads as falsy — the metric
+  // would state a truncated sitemap's numbers as complete ones.
+  if (typeof truncation["oversizedDocsSkipped"] !== "number") {
+    return bad("has a non-numeric truncation.oversizedDocsSkipped");
+  }
+  if (typeof truncation["entryLimited"] !== "boolean") {
+    return bad("has a non-boolean truncation.entryLimited");
+  }
 
   if (typeof value["docsFetched"] !== "number") return bad("has a non-numeric docsFetched");
 
@@ -110,22 +126,31 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
       truncated: robots["truncated"],
     },
     sitemapSources: sources as string[],
-    // Only `failures` is checked, because only `failures` is read by a rule
-    // (`sitemap.invalid`). The counters beside it are carried through as
-    // stored: a rule that starts branching on one of them must add its check
-    // above rather than trusting this cast.
+    // `failures`, `oversizedDocsSkipped` and `entryLimited` are checked above,
+    // because those are the three a rule reads (`sitemap.invalid`, and
+    // `sitemap.structure`'s site row). The counters beside them are carried
+    // through as stored: a rule that starts branching on one of them must add
+    // its check above rather than trusting this cast.
     truncation: truncation as unknown as DiscoveryTruncation,
     docsFetched: value["docsFetched"],
   };
 }
 
 /**
- * The crawl row every robots and sitemap rule starts from.
- *
- * Read by all ten of them, including the ones whose finding comes entirely
- * from a SQL join: a crawl id nothing knows selects no rows and a rule that
+ * The crawl row a rule that reads the discovery evidence starts from — the
+ * robots and sitemap rules, including the ones whose finding comes entirely
+ * from a SQL join: a crawl id nothing knows selects no rows, and a rule that
  * answered `[]` for it would report a clean bill of health about a crawl that
  * does not exist (the `links.orphan` precedent, and `runRules`' own).
+ *
+ * It is NOT the one gate every query rule opens with, and the difference is
+ * worth knowing before adding a call. `assertCrawl` below checks existence
+ * alone, and the structured-data rules use it because a `discovery_jsonb` they
+ * never read must not be able to make them throw. The content and url-hygiene
+ * rules nevertheless come through HERE for their existence check and discard
+ * the result, which means they do refuse a crawl whose discovery blob is
+ * unreadable — a stricter gate than their evidence needs. Two gates, chosen
+ * per rule; a new rule picks the one that matches what it actually reads.
  */
 export async function readCrawlEvidence(
   db: Db,
@@ -152,6 +177,54 @@ export async function readCrawlEvidence(
     discovery: parseDiscovery(row.discovery, ruleId, crawlId),
     config: row.config,
   };
+}
+
+/**
+ * Refuse a crawl whose `sitemap_urls` rows predate `url_normalised`.
+ *
+ * Every rule that compares a sitemap entry with a page matches
+ * `sitemap_urls.url_normalised` against `pages.url`. That column arrived with
+ * migration 0006, NOT NULL with an empty-string default, and the default is the
+ * only way an empty string can be in it: `normalizeUrl` returns at least
+ * `scheme://host/` for every URL it accepts, and the writer throws rather than
+ * storing anything for a URL it rejects (`persistSitemap`, src/crawl/loop.ts).
+ * So `url_normalised = ''` means exactly one thing — a row written before the
+ * column existed — and it is fully distinguishable at read time.
+ *
+ * It has to be refused rather than tolerated, because such a row does not join
+ * to nothing quietly. It fails the join, and the rules that fire ON a failed
+ * join then fire on everything: `sitemap.uncrawled` reports the entire sitemap
+ * as never reached, `pages.not-in-sitemap` reports every indexable 200 (its
+ * data gate only asks that sitemap rows exist, and they do), and
+ * `links.orphan` calls every orphan `inSitemap: false`. A report full of
+ * invented findings is the loudest possible way to be wrong, and nothing in the
+ * output would say the cause was a schema version.
+ *
+ * Same ruling as `parseDiscovery`'s refusal of a null `discovery_jsonb`, and
+ * the same remedy: re-crawl the site. Re-judging a pre-Phase-4 crawl is not
+ * supported (hard rule 7).
+ *
+ * One indexed lookup per rule invocation — `(crawl_id, url_normalised)` is an
+ * index, and this asks it for a single row.
+ */
+export async function assertNormalisedSitemap(
+  db: Db,
+  crawlId: string,
+  ruleId: string,
+): Promise<void> {
+  const rows = await db
+    .select({ url: sitemapUrls.url })
+    .from(sitemapUrls)
+    .where(and(eq(sitemapUrls.crawlId, crawlId), eq(sitemapUrls.urlNormalised, "")))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) return;
+  throw new Error(
+    `${ruleId}: crawl '${crawlId}' has sitemap entries with no normalised spelling ` +
+      `(e.g. '${row.url}') — those rows predate the url_normalised column, so every ` +
+      "join to `pages` fails and this rule would report the whole sitemap as wrong. " +
+      "Re-crawl the site to produce rows the sitemap rules can read",
+  );
 }
 
 /**

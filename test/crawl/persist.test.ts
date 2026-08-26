@@ -374,6 +374,48 @@ describe("PageWriter", () => {
     expect(row?.h2Count).toBe(2);
   });
 
+  // The redirect graph is joined on `redirect_url_normalised`, so the writer
+  // owes it the frontier key of the target — while `redirect_url` keeps the
+  // `Location` as the server sent it, because that is the evidence. A page with
+  // no redirect has neither.
+  it("stores a redirect target in both spellings, and null for a page with none", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const moved = `${SITE}/moved`;
+    await writer.addPage(
+      item(moved),
+      makeFetch(moved, {
+        statusCode: 301,
+        fetchClass: "redirect",
+        body: null,
+        redirectUrl: `${SITE}/target?b=2&a=1#section`,
+      }),
+      null,
+    );
+    await writer.addPage(item(`${SITE}/stays`), makeFetch(`${SITE}/stays`), makeAnalysis());
+    await writer.flush();
+
+    const rows = await db
+      .select({
+        url: pages.url,
+        redirectUrl: pages.redirectUrl,
+        redirectUrlNormalised: pages.redirectUrlNormalised,
+      })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    const byUrl = new Map(rows.map((r) => [r.url, r]));
+    expect(byUrl.get(moved)).toEqual({
+      url: moved,
+      redirectUrl: `${SITE}/target?b=2&a=1#section`,
+      redirectUrlNormalised: `${SITE}/target?a=1&b=2`,
+    });
+    expect(byUrl.get(`${SITE}/stays`)).toEqual({
+      url: `${SITE}/stays`,
+      redirectUrl: null,
+      redirectUrlNormalised: null,
+    });
+  });
+
   it("writes the rule-signal columns the page rules read", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);

@@ -48,7 +48,7 @@ import { crawls, sitemapUrls } from "../db/schema.js";
 import { RULESET_VERSION } from "../rules/registry/registry.js";
 import { discover, type DiscoveryResult, type DiscoveryTruncation, type RobotsInfo } from "./discovery.js";
 import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
-import { hostProbeStarts, probeHostVariants } from "./host-probe.js";
+import { probeHostVariants } from "./host-probe.js";
 import {
   completeUrl,
   enqueueUrls,
@@ -61,7 +61,7 @@ import {
   type LeasedUrl,
 } from "./frontier.js";
 import { analyzePage } from "./parse/page-analyzer.js";
-import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
+import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
 import { isUrlAllowed } from "./url-policy.js";
@@ -323,6 +323,15 @@ export async function runCrawl(
  * re-crawling anything. Discovery does run again, because robots rules and the
  * crawl-delay are needed to gate and pace whatever the continuation discovers,
  * and a crawl resumed hours later must honour the rules as they are now.
+ *
+ * The host probe runs again too, and its result OVERWRITES `host_probe_jsonb`:
+ * like discovery it is a reading of the site as it is now, and half of one
+ * crawl's variants beside half of another's would be evidence of no particular
+ * moment. Same for the known-404 probe on the way out. The cost is up to four
+ * more origin-root chains per resume, paced by the same gate as ever (rule 9) —
+ * a caller resuming often enough for that to matter passes `probeHosts: false`
+ * in `opts.config`, and the row then keeps whatever walk the earlier run
+ * stored, untouched.
  */
 export async function resumeCrawl(
   db: Db,
@@ -760,24 +769,42 @@ async function runToCompletion(
     failures.push(error);
   }
 
-  if (failures.length === 1) throw failures[0];
-  if (failures.length > 1) {
-    throw new AggregateError(
-      failures,
-      `crawl ${crawlId}: ${failures.length} errors while running and shutting down`,
-    );
-  }
+  raiseFailures(crawlId, failures, "while running and shutting down");
 
   // INSERTION 3 — one last fetch, of a URL that cannot exist, so the rules can
   // tell a real 404 from a site that answers 200 for everything. It runs after
   // the loop's errors have been dealt with (a crawl that is failing does not
   // get to make another request) and before the row is closed.
+  //
+  // Contained, unlike everything above it: by this point every page has been
+  // fetched, written and committed, and the probe is an epilogue. A throw from
+  // it — the analyzer on a hostile template, a lost connection on its own
+  // update — must not turn a crawl that did all of its work into a `failed`
+  // row, which is what letting it propagate to `execute` would do. It is
+  // written down instead, in the shape the probe's other decisions take
+  // (`{ skipped }`, hard rule 7): a reader sees a probe that ran and failed,
+  // never a null column or a half-written sample.
+  //
+  // The one thing not on offer is log-and-continue. If the skip cannot be
+  // recorded either, the crawl has lost its ability to say what it knows, and
+  // both errors go into the same aggregation the loop and the shutdown use.
   const status = aborted ? "cancelled" : "finished";
-  await probeKnownMissing(db, crawlId, config, discovery, gate, {
-    allowPrivate,
-    pagesCrawled,
-    aborted,
-  });
+  try {
+    await probeKnownMissing(db, crawlId, config, discovery, gate, {
+      allowPrivate,
+      pagesCrawled,
+      aborted,
+    });
+  } catch (error) {
+    try {
+      await writeNotFoundProbe(db, crawlId, {
+        skipped: `probe failed: ${messageOf(error)}`,
+      });
+    } catch (writeError) {
+      failures.push(error, writeError);
+    }
+  }
+  raiseFailures(crawlId, failures, "while probing for a known-404");
   await closeCrawl(db, crawlId, status, pagesCrawled);
   return summarise(
     db,
@@ -790,6 +817,23 @@ async function runToCompletion(
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
   );
+}
+
+/**
+ * Throw what went wrong: the single error as itself, several together, nothing
+ * when nothing did. One shape for every collection point in the loop, so an
+ * error is never lost to the one it caused (rule 7).
+ */
+function raiseFailures(crawlId: string, failures: unknown[], when: string): void {
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, `crawl ${crawlId}: ${failures.length} errors ${when}`);
+  }
+}
+
+/** A thrown value's message, for a column that has to hold a reason. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** The `crawls.discovery_jsonb` row for one discovery result. */
@@ -908,6 +952,18 @@ function emptyWriterStats(): PageWriterStats {
  * Write the sitemap as it was declared — every entry, not only the ones the
  * frontier had room for. "The site says these URLs exist" and "we crawled
  * them" are different facts, and the coverage rules need both.
+ *
+ * Each row carries the entry twice: `url` is the `<loc>` as the site published
+ * it, which is what the report quotes, and `url_normalised` is that same entry
+ * through `normalizeUrl` — the spelling `pages.url` is keyed by, and the only
+ * one a join to `pages` can use. A `<loc>` carrying a fragment or unsorted
+ * query params names the very page the crawl fetched from it, and without the
+ * second column the sitemap rules would report it as uncrawled and its page as
+ * unlisted (see the sitemap rules' module header).
+ *
+ * `discover()` policy-checks every entry before it gets here, so a `<loc>` that
+ * will not normalise is this engine's defect and not a site's — it throws
+ * rather than writing a row that could never join (hard rule 7).
  */
 async function persistSitemap(
   db: Db,
@@ -916,12 +972,19 @@ async function persistSitemap(
 ): Promise<void> {
   const entries = discovery.sitemapEntries;
   for (let i = 0; i < entries.length; i += SITEMAP_BATCH) {
-    const batch = entries.slice(i, i + SITEMAP_BATCH).map((entry) => ({
-      crawlId,
-      url: entry.url,
-      sitemapSource: entry.source,
-      lastmod: entry.lastmod,
-    }));
+    const batch = entries.slice(i, i + SITEMAP_BATCH).map((entry) => {
+      const normalised = normalizeUrl(entry.url);
+      if (normalised === null) {
+        throw new Error(`persistSitemap: cannot normalise sitemap entry ${entry.url}`);
+      }
+      return {
+        crawlId,
+        url: entry.url,
+        urlNormalised: normalised,
+        sitemapSource: entry.source,
+        lastmod: entry.lastmod,
+      };
+    });
     // discover() dedupes by URL, so a conflict here means a resume re-reading
     // the same sitemap. The first read's row stands.
     await db.insert(sitemapUrls).values(batch).onConflictDoNothing();

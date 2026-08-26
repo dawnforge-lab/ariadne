@@ -84,7 +84,7 @@ One row per URL.
 
 ```
 id, crawl_id, url, url_normalised, page_type, status_code, fetch_class,
-content_type, redirect_url, depth, discovered_via,
+content_type, redirect_url, redirect_url_normalised, depth, discovered_via,
 title, meta_description, canonical_html, canonical_header, canonical_count,
 robots_meta, x_robots_tag, is_indexable, og_title, og_description, og_image,
 h1_count..h6_count, heading_order[], word_count, text_ratio,
@@ -117,6 +117,11 @@ need have been added, all in built code:
   signal (CHECK-49).
 - `has_viewport` — `<meta name=viewport>` present (CHECK-52).
 - `has_lorem_ipsum` — placeholder copy shipped to production (CHECK-40).
+- `redirect_url_normalised` (Phase 4) — the resolved `Location` through
+  `normalizeUrl`, which is the spelling `pages.url` is keyed by and therefore
+  the only one the redirect walk can join on. `redirect_url` keeps the
+  published target as evidence. A `Location` carrying a fragment or unsorted
+  query params used to stop the walk dead one hop in.
 
 ### `links`
 `crawl_id, source_page_id, target_url, target_page_id, anchor, rel, is_internal,
@@ -135,8 +140,13 @@ verification is a self-join; SF's "missing return links" is this query.
 types per page type plus field-level completeness.
 
 ### `sitemap_urls`
-`crawl_id, url, sitemap_source, lastmod, page_id` — retained so CHECK-07 and
-CHECK-09 are joins rather than set arithmetic in memory.
+`crawl_id, url, url_normalised, sitemap_source, lastmod, page_id` — retained so
+CHECK-07 and CHECK-09 are joins rather than set arithmetic in memory. `url` is
+the `<loc>` the site published and is what the report quotes; `url_normalised`
+(Phase 4) is that entry through `normalizeUrl`, the spelling `pages.url` is
+keyed by, and is what every join to `pages` matches. Joining the published
+spelling reported a `<loc>` carrying a fragment or unsorted query params as
+uncrawled and its page as unlisted.
 
 ### `url_params`
 `crawl_id, param_name, occurrence_count, sample_urls[], is_tracking` — the

@@ -5,7 +5,16 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { finding, present, queryFinding } from "../../src/rules/helpers.js";
+import {
+  finding,
+  metricRow,
+  metricRule,
+  present,
+  queryFinding,
+  type MetricIdentity,
+} from "../../src/rules/helpers.js";
+import { ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
+import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { mkPage } from "./mk-page.js";
 
 describe("present", () => {
@@ -92,5 +101,116 @@ describe("queryFinding", () => {
       queryFinding(self, { pageId: page.id, pageUrl: page.url, evidence: {}, dedupeKey: page.url })
         .severity,
     ).toBe("info");
+  });
+});
+
+describe("metricRow", () => {
+  it("stamps the rule's id and defaults a site-scoped row's scope value to the empty string", () => {
+    const m = metricRow(
+      { id: "indexability.ratio" },
+      { scope: "site", value: { indexable: 90, total: 100 } },
+    );
+    expect(m).toEqual({
+      metricId: "indexability.ratio",
+      scope: "site",
+      scopeValue: "",
+      value: { indexable: 90, total: 100 },
+    });
+  });
+
+  it("carries a cohort row's scope value through unchanged", () => {
+    const m = metricRow(
+      { id: "depth.distribution" },
+      { scope: "page_type", scopeValue: "product", value: { median: 3 } },
+    );
+    expect(m.scope).toBe("page_type");
+    expect(m.scopeValue).toBe("product");
+    expect(m.value).toEqual({ median: 3 });
+  });
+
+  it("carries a sitemap document's URL through as the scope value", () => {
+    // The scope that is not a cohort of pages: a `sitemap_doc` row answers for
+    // one document, named by the URL it was fetched from.
+    const m = metricRow(
+      { id: "sitemap.structure" },
+      {
+        scope: "sitemap_doc",
+        scopeValue: "https://example.com/sitemap-products.xml",
+        value: { urls: 3, breaches50k: false },
+      },
+    );
+    expect(m.scope).toBe("sitemap_doc");
+    expect(m.scopeValue).toBe("https://example.com/sitemap-products.xml");
+    expect(m.value).toEqual({ urls: 3, breaches50k: false });
+  });
+
+  // The identity is the rule's, never the payload's — `queryFinding`'s reason,
+  // with a sharper edge: the runner deletes a metric rule's rows by
+  // `metric_id = <rule id>` before inserting its fresh set, so a row that
+  // arrived under some other metric id would never be deleted and would sit in
+  // `metrics` forever as state no rule recomputes.
+  it("cannot be relabelled by a payload carrying its own metricId", () => {
+    const payload = {
+      scope: "site",
+      value: { n: 1 },
+      metricId: "some.other-metric",
+      stray: "not part of a metric row",
+    } as unknown as Parameters<typeof metricRow>[1];
+
+    const m = metricRow({ id: "content.thin-share" }, payload);
+
+    expect(m.metricId).toBe("content.thin-share");
+    expect(Object.keys(m).sort()).toEqual(["metricId", "scope", "scopeValue", "value"]);
+  });
+
+  // Both rows the runner refuses are unrepresentable here: the parameter is a
+  // discriminated union, so a site row cannot carry a name and a cohort row
+  // cannot lack one. The assertion is the typecheck itself — `@ts-expect-error`
+  // fails `tsc` if either line ever starts compiling.
+  it("makes a named site row and a nameless cohort row impossible to build", () => {
+    // @ts-expect-error a site-scoped metric has one row per crawl and names nothing
+    expect(metricRow({ id: "some.metric" }, { scope: "site", scopeValue: "x", value: {} })).toBeTruthy();
+    // @ts-expect-error a page_type row must name the cohort it answers for
+    expect(metricRow({ id: "some.metric" }, { scope: "page_type", value: {} })).toBeTruthy();
+    // @ts-expect-error and a sitemap_doc row must name its document
+    expect(metricRow({ id: "some.metric" }, { scope: "sitemap_doc", value: {} })).toBeTruthy();
+  });
+});
+
+describe("metricRule", () => {
+  // The id is written once and reaches the body as `self`, so a rule cannot
+  // stamp its rows with an id different from the one the runner deletes by.
+  it("hands the body its own identity, and it is the registered id", async () => {
+    let seen: MetricIdentity | undefined;
+    const rule = metricRule("inlinks.distribution", ["CHECK-33"], "links", async (_db, _crawl, self) => {
+      seen = self;
+      return [metricRow(self, { scope: "site", value: { n: 1 } })];
+    });
+
+    const rows = await rule.run(undefined as never, "crawl_1");
+    expect(seen).toEqual({ id: "inlinks.distribution" });
+    expect(rows).toEqual([
+      { metricId: "inlinks.distribution", scope: "site", scopeValue: "", value: { n: 1 } },
+    ]);
+  });
+
+  // Not a default the caller may override — the kind has one severity, because
+  // a metric states a number and accuses no one.
+  it("registers as a metric rule that is always info, with the rule's own copy", () => {
+    const rule = metricRule("structure.depth-distribution", ["CHECK-31"], "technical", async () => []);
+    expect(rule.kind).toBe("metric");
+    expect(rule.severity).toBe("info");
+    expect(rule.category).toBe("technical");
+    expect(rule.checkIds).toEqual(["CHECK-31"]);
+    expect(rule.rulesetVersion).toBe(RULESET_VERSION);
+    expect(rule.title).toBe(ISSUE_COPY["structure.depth-distribution"]!.title);
+  });
+
+  // Copy is looked up at definition time, so a metric with none fails when the
+  // module loads rather than rendering as an unlabelled table.
+  it("refuses to define a metric that has no copy", () => {
+    expect(() => metricRule("no.such-metric", ["CHECK-31"], "links", async () => [])).toThrow(
+      /no copy for rule 'no.such-metric'/,
+    );
   });
 });

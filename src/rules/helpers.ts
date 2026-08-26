@@ -1,7 +1,11 @@
+import type { Db } from "../db/client.js";
 import { copyFor } from "./registry/copy/index.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
 import type {
   Finding,
+  Metric,
+  MetricRule,
+  MetricScope,
   PageRecord,
   PageRule,
   RuleCategory,
@@ -83,6 +87,65 @@ export function queryFinding(
 }
 
 /**
+ * The metric rules' twin of `queryFinding`. A metric rule produces numbers
+ * rather than accusations, so there is no page and no severity to carry — but
+ * the identity question is the same one, and sharper: the runner deletes a
+ * metric rule's rows for the crawl with `metric_id = <the rule's id>` before
+ * inserting its fresh set, so a row filed under any other metric id would never
+ * be recomputed and never removed. `metricId` therefore comes from `self` and
+ * from nowhere else.
+ *
+ * The parameter is a discriminated union rather than one shape with an optional
+ * `scopeValue`, because the two scopes ask for different things and the optional
+ * spelling let a caller write both of the rows the runner refuses:
+ *
+ *   - every scope but `site` REQUIRES a name. A `page_type` row is the answer
+ *     for one group of pages and a `sitemap_doc` row the answer for one sitemap
+ *     document; without a name neither identifies what it counted, and the empty
+ *     string is already spoken for — it is what a site row stores in the
+ *     composite primary key `(crawl_id, metric_id, scope, scope_value)`.
+ *   - `site` ACCEPTS no name. There is one site per crawl, so a scope value on
+ *     it would key a second "site" row and answer the same question twice.
+ *
+ * Both are now unrepresentable for a caller that uses this helper. The runner
+ * checks them again at the JavaScript boundary, where a rule body's return value
+ * is not something the type system has seen.
+ */
+/**
+ * The identity a metric row is stamped with — an id and nothing else.
+ *
+ * A metric carries no severity (it accuses no one) and names no page, so where
+ * `RuleIdentity` has two fields this has one. It exists as a named type all the
+ * same, because it is the thing `metricRow` refuses to take from anywhere but
+ * the rule's own definition: the runner deletes a metric rule's rows by
+ * `metric_id = <the rule's id>`, so a row filed under any other id is a row
+ * nothing ever recomputes or removes.
+ */
+export interface MetricIdentity {
+  id: string;
+}
+
+export function metricRow(
+  self: MetricIdentity,
+  m:
+    | { scope: "site"; value: Record<string, unknown> }
+    | {
+        scope: Exclude<MetricScope, "site">;
+        scopeValue: string;
+        value: Record<string, unknown>;
+      },
+): Metric {
+  // Each field named rather than spread, for `queryFinding`'s reason: a spread
+  // of `m` would carry whatever else the caller's object holds — a `metricId`
+  // read out of a SQL row, say — either overriding the rule's own identity or
+  // riding along into the `metrics` row.
+  if (m.scope === "site") {
+    return { metricId: self.id, scope: "site", scopeValue: "", value: m.value };
+  }
+  return { metricId: self.id, scope: m.scope, scopeValue: m.scopeValue, value: m.value };
+}
+
+/**
  * Define a page rule: the registry metadata, the client-facing copy (which
  * `copyFor` throws for if it is missing — a rule cannot ship untitled) and the
  * ruleset version, assembled around a body that receives the page and the
@@ -108,5 +171,40 @@ export function pageRule(
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     run: (page) => run(page, self),
+  });
+}
+
+/**
+ * Define a metric rule: `pageRule`'s twin for the kind that produces numbers.
+ *
+ * Same job — registry metadata, the copy `copyFor` throws for if it is missing,
+ * the ruleset version — and the same reason to be a factory rather than four
+ * spelled-out object literals: the id appears in three places that must agree
+ * (the registry key, the `copyFor` lookup, and the `metricId` stamped on every
+ * row the rule emits), and here it is written once and handed to the body as
+ * `self`. A rule that restated its own id in a `metricRow` call could drift
+ * from the id the runner deletes by, which is the one drift the metrics table
+ * cannot survive: rows nothing owns are never recomputed and never removed.
+ *
+ * `severity` is not a parameter, unlike `pageRule`'s. A metric states what was
+ * counted; it accuses the site of nothing, and the judgement is the agent's —
+ * so `info` is not a default here, it is the only value the kind can have.
+ */
+export function metricRule(
+  id: string,
+  checkIds: string[],
+  category: RuleCategory,
+  run: (db: Db, crawlId: string, self: MetricIdentity) => Promise<Metric[]>,
+): MetricRule {
+  const self: MetricIdentity = { id };
+  return defineRule<MetricRule>({
+    kind: "metric",
+    id,
+    checkIds,
+    category,
+    severity: "info",
+    ...copyFor(id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId) => run(db, crawlId, self),
   });
 }

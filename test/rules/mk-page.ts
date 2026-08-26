@@ -1,4 +1,5 @@
 import { expect } from "vitest";
+import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import type { PageRecord, PageRule } from "../../src/rules/registry/types.js";
 
 /**
@@ -26,6 +27,7 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     fetchClass: "ok",
     contentType: "text/html; charset=utf-8",
     redirectUrl: null,
+    redirectUrlNormalised: null,
     depth: 2,
     discoveredVia: "link",
     title: CLEAN_TITLE,
@@ -101,6 +103,23 @@ export function writerIndexable(s: IndexabilitySpec): boolean {
     !noindex(s.robotsMeta) &&
     !noindex(s.xRobotsTag)
   );
+}
+
+/**
+ * The frontier key of a URL — `normalizeUrl`, the crawler's own function, not a
+ * re-implementation of it.
+ *
+ * The join columns the crawl layer writes beside a published spelling
+ * (`sitemap_urls.url_normalised`, `pages.redirect_url_normalised`) are computed
+ * with exactly this, so a DB test that inserts rows directly stores what a
+ * crawl would have stored. A URL that will not normalise throws here rather
+ * than becoming an empty string no join could match, which would be a test
+ * quietly asserting a rule's silence.
+ */
+export function normalised(value: string): string {
+  const url = normalizeUrl(value);
+  if (url === null) throw new Error(`test URL will not normalise: ${value}`);
+  return url;
 }
 
 /**
