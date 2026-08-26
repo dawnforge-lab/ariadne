@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_CHECKS,
+  CRAWL_CHECK_IDS,
   defineRule,
   Registry,
+  RULESET_VERSION,
   RuleDefinitionError,
   type PageRule,
   type Severity,
@@ -16,7 +19,7 @@ const validPageRule = {
   title: "Missing title",
   explanation: "The page has no <title> element.",
   howToFix: "Add a unique, descriptive <title>.",
-  rulesetVersion: "0.1.0",
+  rulesetVersion: RULESET_VERSION,
   run: () => [],
 };
 
@@ -71,6 +74,20 @@ describe("defineRule", () => {
     const suffixed = { ...validPageRule, checkIds: ["CHECK-38a"] };
     expect(defineRule(suffixed)).toBe(suffixed);
   });
+  it("throws on an unknown kind", () => {
+    expect(() => defineRule({ ...validPageRule, kind: "cosmic" as never }))
+      .toThrow(RuleDefinitionError);
+    expect(() => defineRule({ ...validPageRule, kind: "cosmic" as never }))
+      .toThrow(/bad kind 'cosmic'/);
+  });
+  it("RuleDefinitionError is recognizable by name", () => {
+    try {
+      defineRule({ ...validPageRule, id: "BAD ID" });
+      throw new Error("no throw");
+    } catch (e) {
+      expect((e as Error).name).toBe("RuleDefinitionError");
+    }
+  });
 });
 
 describe("Registry", () => {
@@ -89,5 +106,27 @@ describe("Registry", () => {
     const r = new Registry();
     r.register(validPageRule);
     expect(r.unclaimedChecks(["CHECK-35"], [])).toEqual([]);
+  });
+  it("byKind narrows and filters", () => {
+    const r = new Registry();
+    r.register(validPageRule);
+    expect(r.byKind("page").map((x) => x.id)).toEqual(["title.missing"]);
+    expect(r.byKind("query")).toEqual([]);
+  });
+});
+
+describe("check universe", () => {
+  it("exports the crawl-derived check universe and agent list", () => {
+    expect(CRAWL_CHECK_IDS).toHaveLength(47);
+    expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
+    expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    expect(RULESET_VERSION).toBe("0.2.0");
+  });
+  it("every listed check id is a well-formed CHECK-NN and unique", () => {
+    expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
+    for (const c of CRAWL_CHECK_IDS) expect(c).toMatch(/^CHECK-\d{2}[a-z]?$/);
+  });
+  it("every agent check is part of the crawl-derived universe", () => {
+    for (const c of AGENT_CHECKS) expect(CRAWL_CHECK_IDS).toContain(c);
   });
 });

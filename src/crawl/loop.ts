@@ -43,6 +43,9 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, sitemapUrls } from "../db/schema.js";
+// Ruleset provenance for the `crawls` row: the registry owns the number, the
+// loop only stamps it.
+import { RULESET_VERSION } from "../rules/registry/registry.js";
 import { discover, type DiscoveryResult, type DiscoveryTruncation, type RobotsInfo } from "./discovery.js";
 import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
 import {
@@ -111,13 +114,6 @@ export interface CrawlSummary {
   /** Why the crawl ended, when that needs saying. Null on a clean finish. */
   note: string | null;
 }
-
-/**
- * Ruleset provenance for the `crawls` row. Phase 2 owns the real value when
- * the rule registry exists; until then it is stated here rather than left to a
- * caller to invent per crawl.
- */
-const RULESET_VERSION = "0.1.0";
 
 /**
  * The deadline this loop gives `fetchPage`. Stated here rather than left to

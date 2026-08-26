@@ -26,14 +26,16 @@ export const pages = pgTable("pages", {
   fetchClass: text("fetch_class").notNull(),   // ok|redirect|client_error|server_error|blocked|timeout|network_error|non_html|too_large
   contentType: text("content_type"),
   redirectUrl: text("redirect_url"),
-  redirectHops: integer("redirect_hops"),
   depth: integer("depth").notNull(),
-  inSitemap: boolean("in_sitemap").notNull().default(false),
   discoveredVia: text("discovered_via").notNull(), // seed|link|sitemap|redirect
   title: text("title"),
   metaDescription: text("meta_description"),
   canonicalHtml: text("canonical_html"),
   canonicalHeader: text("canonical_header"),
+  // How many <link rel=canonical> elements the HTML declared. `canonical_html`
+  // keeps the first; this counts them all, because "more than one canonical"
+  // (CHECK-18) is a finding a single-value column cannot express.
+  canonicalCount: integer("canonical_count").notNull().default(0),
   robotsMeta: text("robots_meta"),
   xRobotsTag: text("x_robots_tag"),
   isIndexable: boolean("is_indexable"),
@@ -67,7 +69,13 @@ export const pages = pgTable("pages", {
   domSize: integer("dom_size"),
   imagesTotal: integer("images_total").notNull().default(0),
   imagesMissingAlt: integer("images_missing_alt").notNull().default(0),
+  // <img> without both width and height — the CLS signal (CHECK-49).
+  imagesMissingDimensions: integer("images_missing_dimensions").notNull().default(0),
   hasAmp: boolean("has_amp").notNull().default(false),
+  // <meta name=viewport> present — the mobile-readiness signal (CHECK-52).
+  hasViewport: boolean("has_viewport").notNull().default(false),
+  // Placeholder copy shipped to production (CHECK-40).
+  hasLoremIpsum: boolean("has_lorem_ipsum").notNull().default(false),
   relNext: text("rel_next"),
   relPrev: text("rel_prev"),
   rendered: boolean("rendered").notNull().default(false),
