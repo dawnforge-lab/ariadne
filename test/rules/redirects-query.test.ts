@@ -250,6 +250,17 @@ describe("redirectRules against the database", () => {
 
       const found = await findings("redirect.chain", crawlId);
       expect(found).toHaveLength(URL_FINDING_CAP);
+      // WHICH two hundred is not left to the query plan: the walk is ordered by
+      // head, so the cap takes the first heads in URL order. Without this the
+      // same crawl re-judged would append a different arbitrary two hundred and
+      // the issues table would grow past the cap run over run.
+      const heads = Array.from({ length: total }, (_, i) =>
+        url(`/c-${String(i).padStart(4, "0")}-head`),
+      ).sort();
+      expect(found.map((f) => f.pageUrl)).toEqual(heads.slice(0, URL_FINDING_CAP));
+      // And re-running it lists exactly the same ones.
+      const again = await findings("redirect.chain", crawlId);
+      expect(again.map((f) => f.pageUrl)).toEqual(found.map((f) => f.pageUrl));
       // The truncation note and the chain's own hop-cap flag are different
       // facts and now have different names: this list was cut short, these
       // chains were not.
@@ -415,6 +426,15 @@ describe("redirectRules against the database", () => {
 
       const found = await findings("redirect.loop", crawlId);
       expect(found).toHaveLength(URL_FINDING_CAP);
+      // Ordered by head like the chain scan, so the cap keeps the first cycles
+      // in URL order — each reported at its own lexically first member, which
+      // is the `-a` page of the pair.
+      const first = Array.from({ length: total }, (_, i) =>
+        url(`/l-${String(i).padStart(4, "0")}-a`),
+      ).sort();
+      expect(found.map((f) => f.pageUrl)).toEqual(first.slice(0, URL_FINDING_CAP));
+      const again = await findings("redirect.loop", crawlId);
+      expect(again.map((f) => f.pageUrl)).toEqual(found.map((f) => f.pageUrl));
       expect(found[found.length - 1]!.evidence).toMatchObject({
         truncated: { reported: URL_FINDING_CAP, total },
       });

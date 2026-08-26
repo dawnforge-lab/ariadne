@@ -406,6 +406,35 @@ describe("linkTargetRules against the database", () => {
         truncated: { reported: URL_FINDING_CAP, total },
       });
       expect(found[0]!.evidence).not.toHaveProperty("truncated");
+      // Re-judging the same crawl lists the same two hundred. It has to: the
+      // issues table is appended under `onConflictDoNothing`, so a cap that
+      // kept an arbitrary two hundred each run would grow the table past the
+      // cap it exists to enforce.
+      const again = await findings("canonical.non-200-target", crawlId);
+      expect(again.map((f) => f.pageUrl)).toEqual(found.map((f) => f.pageUrl));
+    });
+
+    // Which two hundred, stated in full — the batch boundary is out of the way
+    // here (fewer declaring pages than `CANONICAL_BATCH`), so the whole listing
+    // comes from one batch and the order is the declaring URL's, not the
+    // target lookup's row order.
+    it("keeps the lexically first pages when one batch overflows the cap", async () => {
+      const crawlId = await newCrawl();
+      const total = URL_FINDING_CAP + 1;
+      const paths = Array.from({ length: total }, (_, i) => `/q-${String(i).padStart(4, "0")}`);
+      expect(total).toBeLessThan(CANONICAL_BATCH);
+      await addPages(crawlId, [
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+        ...paths.map((path) => ({ path, canonicalHtml: url("/gone") })),
+      ]);
+
+      const found = await findings("canonical.non-200-target", crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual(
+        [...paths].sort().slice(0, URL_FINDING_CAP).map(url),
+      );
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
     });
   });
 

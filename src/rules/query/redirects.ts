@@ -8,6 +8,11 @@
  * tree, or a template that loops on every product, is O(pages) redirect paths —
  * and one finding per path is a findings table that grows with the site rather
  * than with the problem.
+ *
+ * WHICH cases the cap keeps is settled too: the walk comes back ordered by head
+ * (see `walkFrom`) and both accumulators take the first cases in that order, so
+ * re-running a crawl's rules reports the same two hundred rather than a fresh
+ * arbitrary two hundred appended beside the last run's.
  */
 import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
@@ -94,6 +99,14 @@ interface WalkRow extends Record<string, unknown> {
  * Only the deepest row per seed comes back — the terminal state of that walk.
  * Intermediate rows exist inside the CTE and are discarded by Postgres, so the
  * result set is one row per seed rather than one per hop.
+ *
+ * Ordered by head, and that is load-bearing rather than tidiness. Both callers
+ * stop listing at `URL_FINDING_CAP`, so the row order decides WHICH cases are
+ * reported; an unordered CTE projection is whatever the plan happens to emit,
+ * so a re-run of the same crawl could report a different two hundred and the
+ * `issues` table — appended under `onConflictDoNothing` — would grow past the
+ * cap run over run. A defined order makes the capped listing the same listing
+ * every time.
  */
 async function walkFrom(db: Db, crawlId: string, seedUrls: SQL): Promise<WalkRow[]> {
   const result = await db.execute<WalkRow>(sql`
@@ -120,7 +133,8 @@ async function walkFrom(db: Db, crawlId: string, seedUrls: SQL): Promise<WalkRow
              where q.crawl_id = ${crawlId} and q.url = w1.redirect_url_normalised
            ) as tail_crawled
     from walk w1
-    where w1.depth = (select max(w2.depth) from walk w2 where w2.head = w1.head)`);
+    where w1.depth = (select max(w2.depth) from walk w2 where w2.head = w1.head)
+    order by w1.head`);
   return result.rows;
 }
 
