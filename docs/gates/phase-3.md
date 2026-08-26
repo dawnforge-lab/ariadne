@@ -3,9 +3,12 @@
 **Date:** 2026-08-26
 **Code:** branch `worktree-phase-3-query-rules` at `456d610` (the last fixture
 commit), plus the commit that adds this file, the strengthened coverage
-assertion and a one-line spec correction. Everything below was measured on
-exactly that tree — the added files are a test assertion and two documents, so
-they change no behaviour the figures describe.
+assertion and a one-line spec correction. **The suite, harness, fixture,
+ruleset and coverage figures below were measured on exactly that tree** — the
+added files are a test assertion and two documents, so they change no behaviour
+those figures describe. The three duplicate-detection timings under "what Phase
+4 inherits" are the one exception, and carry their provenance there: they come
+from Task 7 and were not re-measured at gate time.
 **Verdict:** PASSED, under the owner-approved gate amendment recorded below.
 **36 new rules** join the 28 Phase 2 left, all of them `query`-kind; the coverage
 pin falls from **29 unclaimed to 7**, and those seven are exactly the checks no
@@ -33,7 +36,7 @@ are not prose — `RENDER_CHECKS` and `METRIC_PENDING_CHECKS` are exported
 constants, and `test/rules/coverage.test.ts` now asserts
 
 ```ts
-[...RENDER_CHECKS, ...METRIC_PENDING_CHECKS].sort() === unclaimed.sort()
+expect([...RENDER_CHECKS, ...METRIC_PENDING_CHECKS].sort()).toEqual([...unclaimed].sort());
 ```
 
 as **equality in both directions**. An unclaimed check with no annotation fails,
@@ -112,11 +115,19 @@ of them landed in migrations `0003`–`0005`:
 Beyond the pages, the site now serves what the join rules need to have anything
 to read: a `robots.txt` that allows all but `/private/` and declares **two**
 `Sitemap:` lines, a real `/sitemap.xml` listing the hub and 54 of the 70
-fixtures (the deep click-chain is deliberately left out — a sitemap entry is
-enqueued at depth 0 and would flatten the chain `structure.deep-page` needs), a
-deliberately broken second document (`/sitemap-broken.xml`, a 200 that is an
-HTML error page), a robots-disallowed URL listed in the sitemap, and a **second
-host name** the same server answers to, passed to the crawl as `legacyHosts` so
+fixtures. Sixteen are held back by `inSitemap: false`, for two reasons: the
+deep click-chain's seven rungs, because a sitemap entry is enqueued at depth 0
+and would flatten the chain `structure.deep-page` needs; and nine more, eight of
+which a well-made sitemap would not list anyway — the noindexed, blocked,
+500-ing and redirecting fixtures, which listed would each collect a second,
+off-topic `sitemap.non-indexable` / `sitemap.non-200` / `sitemap.redirected`
+finding on top of the one they exist to demonstrate — the ninth being
+`/authored3/unlisted`, whose whole subject is being the page the file forgot.
+
+Beside that document the site serves a deliberately broken second one
+(`/sitemap-broken.xml`, a 200 that is an HTML error page), lists a
+robots-disallowed URL in the good one, and answers to a **second host name**,
+passed to the crawl as `legacyHosts` so
 `host.legacy-host-reachable` fires from the real probe rather than from
 hand-built evidence.
 
@@ -219,15 +230,17 @@ and the rest of the checklist entry is the agent's to judge.
    Both are the same shape and both want the same crawl-layer fix — normalize
    what is stored, or normalize on the join — carried to the Phase 3 final
    review and out of it into Phase 4's backlog. Neither is a rule defect.
-3. **A perf caveat the Phase 4 50k expectations must budget for.** The
-   near-duplicate banding join was measured at **2.9s over 5k pages** before
-   indexing; the four band expression indexes in migration `0004` took that
-   same healthy-site 5k corpus to **0.11s** (26×). The worst case is not the
-   healthy case:
-   with a **skewed band distribution** the same query measured **521ms**, and
-   the join is quadratic *within* a band. At 50k pages that is the number to
-   watch, not the 0.11s. Re-measure at the Phase 4 gate before assuming the
-   50k crawl's rule pass is free.
+3. **A perf caveat the Phase 4 50k expectations must budget for.** *Provenance:
+   these three figures were measured during **Task 7** on a synthetic
+   5,000-page corpus, not on the fixture site and **not re-measured at gate
+   time**. They are the one set of numbers on this page that the tree above
+   does not vouch for.* The near-duplicate banding join measured **2.9s over 5k
+   pages** before indexing; the four band expression indexes in migration
+   `0004` took that same healthy-site 5k corpus to **0.11s** (26×). The worst
+   case is not the healthy case: with a **skewed band distribution** the same
+   query measured **521ms**, and the join is quadratic *within* a band. At 50k
+   pages that is the number to watch, not the 0.11s. **Re-measure at the Phase
+   4 gate** before assuming the 50k crawl's rule pass is free.
 4. **A hard kill still loses buffered rows** (carried unchanged from Phase 1).
 
 ## CI
