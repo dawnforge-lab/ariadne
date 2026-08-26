@@ -411,7 +411,8 @@ that.
 `.github/workflows/ci.yml` is unchanged: `ubuntu-latest`, a health-checked
 `postgres:16` service, Node 22, then `npm ci` → `npx tsc --noEmit` →
 `npm run db:migrate` → `npm test`. Its triggers are push to `main` and every
-pull request. **First CI run on this branch: pending the first pull request.**
+pull request. **First CI run on this branch: PR #3, `test` pass in 1m28s —
+<https://github.com/dawnforge-lab/ariadne/actions/runs/33019458508/job/98345931129>.**
 The gate script is not part of CI and is not meant to be — it takes twelve
 minutes and wants a machine, not a runner.
 
