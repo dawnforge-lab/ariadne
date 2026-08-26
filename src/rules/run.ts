@@ -4,8 +4,12 @@ import { issues, pages } from "../db/schema.js";
 import type { Registry } from "./registry/registry.js";
 import type { Finding } from "./registry/types.js";
 
-/** Pages read per round trip — the memory contract: never the whole table. */
-const PAGE_BATCH = 500;
+/**
+ * Pages read per round trip — the memory contract: never the whole table.
+ * Exported so a test can build a crawl that forces the cursor loop to iterate
+ * more than once without hardcoding the number.
+ */
+export const PAGE_BATCH = 500;
 /** Findings per insert statement. */
 const INSERT_BATCH = 500;
 
