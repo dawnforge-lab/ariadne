@@ -51,18 +51,30 @@ export const SAMPLE_VARIANTS = 10;
 export const PARAM_PAGE_BATCH = 500;
 
 /**
- * The POSIX pattern that finds a tracking param inside a URL's query string.
+ * The POSIX pattern that finds a tracking param, applied to a URL's query
+ * string ALONE — everything after the first `?`, which is the region the SQL
+ * below slices out before matching.
  *
- * `[?&]` anchors the name to the start of a parameter, so `my_gclid=1` is not a
- * `gclid`; `(=|&|$)` anchors its end, so `utm_sourced=1` is not a `utm_source`.
- * A valueless `?fbclid` matches on the `&`/end branch, because a parameter with
- * no value is still a parameter the URL carries.
+ * Matching the whole URL would be wrong in a way that produces a false
+ * accusation rather than a near miss. A `?` is legal inside a parameter VALUE
+ * and `normalizeUrl` preserves it, so our own crawler can store
+ * `?to=/x?utm_source=y` — one parameter named `to`. A `[?&]`-anchored pattern
+ * over the whole string matches the `?` inside that value, while the JS parse
+ * below reports the URL's real parameters and finds no tracking name among
+ * them: a warning about campaign parameters over a URL that carries none.
+ * Slicing the query region first makes the two agree — inside it, that inner
+ * `?` is an ordinary character with no `&` or start-of-string before it.
+ *
+ * `(^|&)` anchors the name to the start of a parameter, so `my_gclid=1` is not
+ * a `gclid`; `(=|&|$)` anchors its end, so `utm_sourced=1` is not a
+ * `utm_source`. A valueless `?fbclid` matches on the `&`/end branch, because a
+ * parameter with no value is still a parameter the URL carries.
  *
  * Case-sensitive (`~`, not `~*`), like the inventory's `is_tracking` flag and
  * for the same reason: `UTM_Source` is a parameter the site invented that no
  * analytics tool reads as a campaign tag.
  */
-const TRACKING_PATTERN = `[?&](${TRACKING_PARAMS.join("|")})(=|&|$)`;
+const TRACKING_PATTERN = `(^|&)(${TRACKING_PARAMS.join("|")})(=|&|$)`;
 
 // The pattern is built by joining the names with `|`, so a name carrying a
 // regex metacharacter would silently change what it matches. Checked at module
@@ -160,12 +172,16 @@ async function variantFindings(db: Db, crawlId: string): Promise<Finding[]> {
  * at it. Internal only — another site's tracking parameters are not ours to
  * fix, and a tagged outbound link is often deliberate.
  *
- * The set and the exact total are decided in SQL, so the links table is never
- * loaded (hard rule 3) and the cap bounds only what is listed. Which parameters
- * a listed target carries is worked out in JavaScript afterwards, over at most
- * `URL_FINDING_CAP` URLs: naming them in SQL would mean unnesting every
- * internal link's query string to report a list the pattern has already proved
- * non-empty.
+ * The candidate set is decided in SQL, so the links table is never loaded (hard
+ * rule 3) and the cap bounds only what is listed. **Which parameters a target
+ * actually carries is settled in JavaScript, and that answer is the authority:**
+ * a candidate whose parsed query string holds no tracking key produces no
+ * finding, so `params: []` is unreachable and this rule can never accuse a URL
+ * of carrying a campaign tag it does not have. The SQL pattern is a pre-filter
+ * — an upper bound on the set — matched against the query region alone so the
+ * two agree (see `TRACKING_PATTERN`); naming the parameters in SQL as well
+ * would mean unnesting every internal link's query string to rebuild a list
+ * `URL.searchParams` already has.
  */
 async function trackingFindings(db: Db, crawlId: string): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, TRACKING.id);
@@ -181,13 +197,22 @@ async function trackingFindings(db: Db, crawlId: string): Promise<Finding[]> {
     left join pages p on p.crawl_id = ${crawlId} and p.url = l.target_url
     where l.crawl_id = ${crawlId}
       and l.is_internal
-      and l.target_url ~ ${TRACKING_PATTERN}
+      and position('?' in l.target_url) > 0
+      and substr(l.target_url, position('?' in l.target_url) + 1) ~ ${TRACKING_PATTERN}
     group by l.target_url, p.id
     order by l.target_url
     limit ${URL_FINDING_CAP}`);
 
   const tracking = new Set(TRACKING_PARAMS);
-  const findings = result.rows.map((row) => {
+  const findings: Finding[] = [];
+  // The pre-filter's count, corrected for every candidate the parse rejected.
+  // With the query-region pattern the two should never disagree, so this only
+  // ever subtracts zero; it is here because a total that counted a row we
+  // refused to list would be a number nothing behind it supports. Past the cap
+  // no row is inspected, so beyond it the count remains the pre-filter's.
+  let total = result.rows[0]?.total_matches ?? 0;
+
+  for (const row of result.rows) {
     let params: string[];
     try {
       params = [...new URL(row.target_url).searchParams.keys()].filter((k) => tracking.has(k));
@@ -196,21 +221,27 @@ async function trackingFindings(db: Db, crawlId: string): Promise<Finding[]> {
       // rather than a site's, and it is not something to skip quietly.
       throw new Error(`${TRACKING.id}: link target '${row.target_url}' is not a URL`);
     }
-    return queryFinding(TRACKING, {
-      // Null when the crawl never fetched the tagged URL — a link to a URL that
-      // does not answer is a different rule's finding; this one is about the
-      // tag, and the URL is the evidence either way.
-      pageId: row.page_id,
-      pageUrl: row.target_url,
-      evidence: {
-        targetUrl: row.target_url,
-        params: [...new Set(params)].sort(),
-        inlinkCount: row.inlink_count,
-      },
-      dedupeKey: row.target_url,
-    });
-  });
-  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+    if (params.length === 0) {
+      total -= 1;
+      continue;
+    }
+    findings.push(
+      queryFinding(TRACKING, {
+        // Null when the crawl never fetched the tagged URL — a link to a URL
+        // that does not answer is a different rule's finding; this one is about
+        // the tag, and the URL is the evidence either way.
+        pageId: row.page_id,
+        pageUrl: row.target_url,
+        evidence: {
+          targetUrl: row.target_url,
+          params: [...new Set(params)].sort(),
+          inlinkCount: row.inlink_count,
+        },
+        dedupeKey: row.target_url,
+      }),
+    );
+  }
+  return noteTruncation(findings, total);
 }
 
 /**

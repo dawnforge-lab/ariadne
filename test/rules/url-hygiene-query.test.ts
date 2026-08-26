@@ -296,6 +296,54 @@ describe("the URL rules against the database", () => {
       expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
+    it("is silent when the tracking name is inside a parameter VALUE", async () => {
+      // `?` is legal inside a value and `normalizeUrl` preserves it, so our own
+      // crawler can store this: ONE parameter, named `to`, whose value happens
+      // to contain the text `?utm_source=y`. A finding here would accuse the
+      // URL of carrying a campaign tag it does not have — and would carry an
+      // empty `params` list, since the parse finds no tracking key.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/" }]);
+      await addLinks(crawlId, ids.get("/")!, ["/go?to=/x?utm_source=y"]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("fires on a real tracking param sitting next to such a value", async () => {
+      // One character apart from the case above, and the opposite verdict: here
+      // `utm_source` is its own parameter.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/" }]);
+      await addLinks(crawlId, ids.get("/")!, ["/go?to=/x&utm_source=y"]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        targetUrl: url("/go?to=/x&utm_source=y"),
+        params: ["utm_source"],
+        inlinkCount: 1,
+      });
+    });
+
+    it("never reports a target with an empty params list", async () => {
+      // The invariant behind the two cases above, asserted over a mixed set:
+      // whatever the SQL pre-filter admits, a finding always names at least one
+      // parameter the URL really carries.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/" }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        "/a?to=/x?utm_source=y",
+        "/b?to=/x?gclid=1&fbclid=2",
+        "/c?plain=1",
+        "/d?utm_campaign=spring",
+      ]);
+
+      const found = await run(ID, crawlId);
+      for (const f of found) {
+        expect(f.evidence["params"], String(f.pageUrl)).not.toEqual([]);
+      }
+      expect(found.map((f) => f.evidence["params"])).toEqual([["fbclid"], ["utm_campaign"]]);
+    });
+
     it("matches a valueless tracking param", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/" }]);
