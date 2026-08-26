@@ -16,7 +16,7 @@
  * a 200, so filtering to the cohort would leave `redirect.volume` counting
  * nothing at all.
  */
-import { sql, type SQL } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
@@ -55,8 +55,13 @@ type RedirectRow = {
   redirect_pages: number;
   total_pages: number;
   ratio_pct: number | null;
-  chains: number;
-  loops: number;
+};
+
+type FindingCountRow = {
+  rule_id: string;
+  listed: number;
+  /** The `truncated` notes those rows carry, as jsonb — `null` when none does. */
+  notes: unknown;
 };
 
 /**
@@ -70,28 +75,66 @@ type RedirectRow = {
  * Counting the issues rows alone would therefore report exactly 200 chains for
  * a site with four thousand, and 200 is a number a client would act on.
  *
- * `greatest` rather than `coalesce(total, listed)` for two reasons: an
- * uncapped rule writes no note at all, so `total` is null and the listing is
- * the answer; and the result can never come back BELOW the number of rows
- * actually on disk, whatever a note says.
+ * **Three situations, three different answers, and only one of them is a
+ * count.** `redirectVolume`'s second query hands back the rows a rule listed and
+ * every `truncated` note among them; this function decides what that means:
  *
- * The `jsonb_typeof` guard is what keeps the cast honest — a `truncated` note
- * of another shape (`{reported, atLeast}`, which these two rules never write)
- * contributes nothing rather than raising a cast error from inside the SQL
- * layer, and the listing stands.
+ *  1. **No note.** The listing is complete — that is what the absence of a note
+ *     MEANS, not a value missing from it — so the row count is the answer. This
+ *     is semantics rather than a fallback.
+ *  2. **An `ExactTruncation` (`{reported, total}` with a numeric `total`).** The
+ *     rule counted every case and listed some of them, so `total` is the answer.
+ *     Taken as `greatest(listed, total)`, so the number can never come back
+ *     below the rows actually on disk whatever a note claims.
+ *  3. **Anything else** — a `total` that is not a number, or the
+ *     `LowerBoundTruncation` shape (`{reported, atLeast}`) — **throws.**
+ *
+ * The third case is the one worth spelling out. A `{reported, atLeast}` note is
+ * a rule saying "I stopped looking"; there is no exact total behind it, and
+ * these two rules never write one today. Ignoring it and reporting the listing
+ * would put 200 in a column called `chains`, under copy that says "counted in
+ * full" — a true-looking number nothing behind it answered, which is exactly
+ * hard rule 1's always-passes defect wearing a metric's clothes. If a future
+ * edit ever swaps these rules to `noteAtLeastTruncation`, this throws and the
+ * decision gets made deliberately: a lower bound needs a column that says it is
+ * one. The same goes for a malformed note — a `total` of `"4111"` or `null` is a
+ * note we cannot read, and a metric that cannot read its input says so (hard
+ * rule 7).
  */
-function exactFindingCount(crawlId: string, ruleId: string): SQL {
-  return sql`(
-    select greatest(
-      count(*),
-      coalesce(max(case
-        when jsonb_typeof(i.details_jsonb -> 'truncated' -> 'total') = 'number'
-        then (i.details_jsonb -> 'truncated' ->> 'total')::int
-      end), 0)
-    )::int
-    from issues i
-    where i.crawl_id = ${crawlId} and i.rule_id = ${ruleId}
-  )`;
+function exactFindingCount(row: FindingCountRow, self: MetricIdentity): number {
+  const listed = num(row.listed, "listed", self.id);
+  if (row.notes === null || row.notes === undefined) return listed;
+
+  const bad = (why: string, note: unknown): never => {
+    throw new Error(
+      `${self.id}: crawl finding '${row.rule_id}' carries a truncation note that ${why} ` +
+        `(${JSON.stringify(note)}) — an exact count cannot be read from it, and the ` +
+        `${listed} listed rows are a capped listing rather than a total`,
+    );
+  };
+
+  // `jsonb_agg` of a jsonb column: an array of the notes, one per finding that
+  // carries one. Normally that is exactly one — the note rides on the last
+  // finding of a capped listing — but the shape is validated rather than
+  // assumed, because "there is only ever one" is a property of the writer and
+  // this reads the table.
+  if (!Array.isArray(row.notes)) return bad("did not come back as a JSON array", row.notes);
+
+  let total = listed;
+  for (const note of row.notes) {
+    if (typeof note !== "object" || note === null || Array.isArray(note)) {
+      return bad("is not an object", note);
+    }
+    const value = (note as Record<string, unknown>)["total"];
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return bad(
+        "names no numeric `total` — a lower-bound note (`atLeast`) or a malformed one",
+        note,
+      );
+    }
+    total = Math.max(total, value);
+  }
+  return total;
 }
 
 /**
@@ -114,7 +157,10 @@ function exactFindingCount(crawlId: string, ruleId: string): SQL {
  *    crawl with no pages rather than 0: nothing was measured, and "0% of this
  *    crawl was redirects" is a claim the absence of pages does not support.
  *  - `chains` / `loops` — how many redirect chains and loops the QUERY rules
- *    found on this crawl, read from their own `issues` rows.
+ *    found on this crawl, read from their own `issues` rows. EXACT, including
+ *    where those rules stopped listing at `URL_FINDING_CAP`: see
+ *    `exactFindingCount` for the three shapes a truncation note can take and
+ *    why two of them throw rather than report the listing.
  *
  * **The query-phase coupling, stated out loud.** The last two columns are not
  * computed here: they are counted out of the `issues` table, which is what
@@ -142,9 +188,7 @@ async function redirectVolume(db: Db, crawlId: string, self: MetricIdentity): Pr
       case when count(*) = 0 then null
            else round(100.0 * count(*) filter (where p.fetch_class = 'redirect')
                       / count(*), 1)::float8
-      end as ratio_pct,
-      ${exactFindingCount(crawlId, CHAIN.id)} as chains,
-      ${exactFindingCount(crawlId, LOOP.id)} as loops
+      end as ratio_pct
     from pages p
     where p.crawl_id = ${crawlId}`);
 
@@ -155,6 +199,28 @@ async function redirectVolume(db: Db, crawlId: string, self: MetricIdentity): Pr
     throw new Error(`${self.id}: crawl '${crawlId}' redirect query returned no row`);
   }
 
+  // The findings the two redirect rules wrote, and any truncation notes among
+  // them. Grouped in SQL and judged in JavaScript, because "how many chains are
+  // there" is not one aggregate: a note that cannot be read as an exact total
+  // has to stop the metric rather than fold into a number (`exactFindingCount`).
+  const counted = await db.execute<FindingCountRow>(sql`
+    select i.rule_id,
+           count(*)::int as listed,
+           jsonb_agg(i.details_jsonb -> 'truncated')
+             filter (where jsonb_exists(i.details_jsonb, 'truncated')) as notes
+    from issues i
+    where i.crawl_id = ${crawlId}
+      and i.rule_id = any(${sql.param([CHAIN.id, LOOP.id])}::text[])
+    group by i.rule_id`);
+
+  // A rule with no findings has no row here, and that is the honest zero: no
+  // rows listed and no note to say otherwise.
+  const byRule = new Map(counted.rows.map((r) => [text(r.rule_id, "rule_id", self.id), r]));
+  const found = (ruleId: string): number => {
+    const r = byRule.get(ruleId);
+    return r === undefined ? 0 : exactFindingCount(r, self);
+  };
+
   return [
     metricRow(self, {
       scope: "site",
@@ -162,8 +228,8 @@ async function redirectVolume(db: Db, crawlId: string, self: MetricIdentity): Pr
         redirectPages: num(row.redirect_pages, "redirect_pages", self.id),
         totalPages: num(row.total_pages, "total_pages", self.id),
         ratioPct: nullableNum(row.ratio_pct, "ratio_pct", self.id),
-        chains: num(row.chains, "chains", self.id),
-        loops: num(row.loops, "loops", self.id),
+        chains: found(CHAIN.id),
+        loops: found(LOOP.id),
       },
     }),
   ];

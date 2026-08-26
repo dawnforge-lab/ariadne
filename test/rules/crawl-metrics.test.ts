@@ -199,15 +199,65 @@ describe("the crawl metrics against the database", () => {
           key: "chain-c",
           details: { truncated: { reported: 3, total: 4111 } },
         },
-        // A note of the OTHER shape — the lower bound `content.near-duplicate`
-        // writes. These two rules never write one, and if one appeared it must
-        // not be read as an exact total: the listing stands instead.
-        { ruleId: "redirect.loop", key: "loop-a", details: { truncated: { reported: 1, atLeast: 9 } } },
+        // The loop rule was not capped: no note, so its listing is complete and
+        // the row count is the answer. The absence of a note MEANS that.
+        { ruleId: "redirect.loop", key: "loop-a" },
       ]);
 
       const value = await site(ID, crawlId);
       expect(value["chains"]).toBe(4111);
       expect(value["loops"]).toBe(1);
+    });
+
+    it("refuses a lower-bound truncation note rather than reporting the listing", async () => {
+      // The other truncation shape — `{reported, atLeast}`, what a rule writes
+      // when it stopped LOOKING — carries no exact total. These two rules never
+      // write one today; if an edit ever swapped them to
+      // `noteAtLeastTruncation`, reporting the listing under a column called
+      // `chains` would put a capped 200 where the copy promises a full count.
+      // The metric stops instead, so that decision gets made deliberately.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/r1", statusCode: 301, fetchClass: "redirect" }]);
+      await addIssues(crawlId, [
+        {
+          ruleId: "redirect.loop",
+          key: "loop-a",
+          details: { truncated: { reported: 1, atLeast: 9 } },
+        },
+      ]);
+
+      await expect(rule(ID).run(db, crawlId)).rejects.toThrow(
+        /redirect\.volume: crawl finding 'redirect\.loop' carries a truncation note/,
+      );
+    });
+
+    it("refuses a truncation note whose total is not a number", async () => {
+      // `total: "4111"` is a note we cannot read — a jsonb string where a count
+      // belongs. Ignoring it would ship the capped listing as an exact count
+      // under copy that says "counted in full" (hard rule 7).
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/r1", statusCode: 301, fetchClass: "redirect" }]);
+      await addIssues(crawlId, [
+        {
+          ruleId: "redirect.chain",
+          key: "chain-a",
+          details: { truncated: { reported: 1, total: "4111" } },
+        },
+      ]);
+
+      await expect(rule(ID).run(db, crawlId)).rejects.toThrow(
+        /'redirect\.chain' carries a truncation note that names no numeric `total`/,
+      );
+    });
+
+    it("refuses a truncation note that is not an object at all", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/r1", statusCode: 301, fetchClass: "redirect" }]);
+      await addIssues(crawlId, [
+        { ruleId: "redirect.chain", key: "chain-a", details: { truncated: 4111 } },
+      ]);
+
+      await expect(rule(ID).run(db, crawlId)).rejects.toThrow(/is not an object/);
     });
 
     it("answers a crawl with no pages with a null share rather than a zero", async () => {
