@@ -1,4 +1,5 @@
-import type { PageRecord } from "../../src/rules/registry/types.js";
+import { expect } from "vitest";
+import type { PageRecord, PageRule } from "../../src/rules/registry/types.js";
 
 /**
  * The clean page: every column of `pages` filled with a value that no rule
@@ -66,4 +67,69 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     renderedLinkCount: null,
     ...overrides,
   };
+}
+
+/**
+ * Look a rule up by id in one rule array, failing loudly when it is absent.
+ * Every page-rule test file drives its rules through this rather than indexing
+ * the array by position, so renaming or reordering a rule breaks the test that
+ * names it instead of silently testing a different rule.
+ */
+export function ruleLookup(rules: PageRule[], arrayName: string): (id: string) => PageRule {
+  const byId = new Map(rules.map((r) => [r.id, r]));
+  return (id) => {
+    const r = byId.get(id);
+    if (!r) throw new Error(`no rule '${id}' in ${arrayName}`);
+    return r;
+  };
+}
+
+/**
+ * The six fetch shapes that are not "an HTML 200 we can read". Redirects and
+ * errors are the status rules' subject; every rule guarded by `isAuditable`
+ * must stay silent on all of them, including the two that look like a success
+ * and are not (a non-HTML body, and a 204 with no body at all).
+ */
+export const NON_OK_FETCHES: Partial<PageRecord>[] = [
+  { fetchClass: "redirect", statusCode: 301 },
+  { fetchClass: "client_error", statusCode: 404 },
+  { fetchClass: "server_error", statusCode: 503 },
+  { fetchClass: "blocked", statusCode: 403 },
+  { fetchClass: "non_html", statusCode: 200 },
+  { fetchClass: "ok", statusCode: 204 },
+];
+
+/**
+ * Assert that a set of `isAuditable`-guarded rules is silent on every non-200
+ * fetch shape — and that the sweep means something.
+ *
+ * `brokenShapes` are page overrides that fire the rules when the fetch *was* a
+ * 200. The precondition below asserts their union fires every rule in `rules`,
+ * so a sweep cannot pass because the shapes stopped triggering anything: the
+ * only reason for the silence it then observes is the fetch class.
+ */
+export function expectSilentOnNonOkFetches(
+  rules: PageRule[],
+  brokenShapes: Partial<PageRecord>[],
+): void {
+  const fired = new Set(
+    brokenShapes.flatMap((shape) =>
+      rules.filter((r) => r.run(mkPage(shape)).length > 0).map((r) => r.id),
+    ),
+  );
+  for (const r of rules) {
+    expect(fired.has(r.id), `${r.id}: no broken shape fires it, the sweep would be vacuous`)
+      .toBe(true);
+  }
+
+  for (const shape of brokenShapes) {
+    for (const nonOk of NON_OK_FETCHES) {
+      for (const r of rules) {
+        expect(
+          r.run(mkPage({ ...shape, ...nonOk })),
+          `${r.id} ${nonOk.fetchClass}/${nonOk.statusCode}`,
+        ).toHaveLength(0);
+      }
+    }
+  }
 }

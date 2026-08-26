@@ -7,14 +7,36 @@ import {
   TITLE_MAX,
   TITLE_MIN,
 } from "../../src/rules/page/on-page.js";
-import { CLEAN_META, CLEAN_TITLE, mkPage } from "./mk-page.js";
+import {
+  CLEAN_META,
+  CLEAN_TITLE,
+  expectSilentOnNonOkFetches,
+  mkPage,
+  ruleLookup,
+} from "./mk-page.js";
 
-const byId = Object.fromEntries(onPageRules.map((r) => [r.id, r]));
-const rule = (id: string) => {
-  const r = byId[id];
-  if (!r) throw new Error(`no rule '${id}' in onPageRules`);
-  return r;
-};
+const rule = ruleLookup(onPageRules, "onPageRules");
+
+/**
+ * Page shapes whose union fires all eleven on-page rules on a 200: nothing
+ * present, everything too short, everything too long.
+ */
+const BROKEN_ON_PAGE = [
+  {
+    title: null,
+    metaDescription: null,
+    h1Count: 0,
+    headingOrder: [1, 4],
+    wordCount: 3,
+    hasLoremIpsum: true,
+  },
+  { title: "x".repeat(TITLE_MIN - 1), metaDescription: "x".repeat(META_MIN - 1) },
+  {
+    title: "x".repeat(TITLE_MAX + 1),
+    metaDescription: "x".repeat(META_MAX + 1),
+    h1Count: 3,
+  },
+];
 
 describe("onPageRules metadata", () => {
   it("defines exactly the eleven on-page rules of the Phase 2 table", () => {
@@ -72,29 +94,10 @@ describe("onPageRules metadata", () => {
   });
 
   it("no rule fires on a page that was not fetched as a 200 OK", () => {
-    // Every on-page signal is missing or wrong here; the only reason to stay
-    // silent is the fetch class. Redirects and errors are the status rules' job.
-    const broken = {
-      title: null,
-      metaDescription: null,
-      h1Count: 0,
-      headingOrder: [1, 4],
-      wordCount: 3,
-      hasLoremIpsum: true,
-    };
-    for (const nonOk of [
-      { fetchClass: "redirect", statusCode: 301 },
-      { fetchClass: "client_error", statusCode: 404 },
-      { fetchClass: "server_error", statusCode: 503 },
-      { fetchClass: "blocked", statusCode: 403 },
-      { fetchClass: "non_html", statusCode: 200 },
-      { fetchClass: "ok", statusCode: 204 },
-    ]) {
-      for (const r of onPageRules) {
-        expect(r.run(mkPage({ ...broken, ...nonOk })), `${r.id} ${nonOk.fetchClass}/${nonOk.statusCode}`)
-          .toHaveLength(0);
-      }
-    }
+    // Every on-page signal is missing or wrong in these shapes; the only reason
+    // to stay silent is the fetch class. Redirects and errors are the status
+    // rules' job.
+    expectSilentOnNonOkFetches(onPageRules, BROKEN_ON_PAGE);
   });
 });
 

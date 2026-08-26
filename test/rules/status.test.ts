@@ -1,13 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { statusRules } from "../../src/rules/page/status.js";
-import { mkPage } from "./mk-page.js";
+import { mkPage, ruleLookup } from "./mk-page.js";
 
-const byId = Object.fromEntries(statusRules.map((r) => [r.id, r]));
-const rule = (id: string) => {
-  const r = byId[id];
-  if (!r) throw new Error(`no rule '${id}' in statusRules`);
-  return r;
-};
+// No non-200 sweep here on purpose: the status rules are the ones that must
+// speak on a broken fetch, so `expectSilentOnNonOkFetches` is not theirs.
+const rule = ruleLookup(statusRules, "statusRules");
 
 describe("statusRules metadata", () => {
   it("defines exactly the two status rules of the Phase 2 table", () => {
