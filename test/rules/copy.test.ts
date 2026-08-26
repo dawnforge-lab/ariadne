@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { copyFor, ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
+import {
+  META_MAX,
+  META_MIN,
+  THIN_WORDS,
+  TITLE_MAX,
+  TITLE_MIN,
+} from "../../src/rules/page/on-page.js";
 
 /**
  * Every rule id defined by the Phase 2 rule tables (plan tasks 4-6). Kept here
@@ -57,20 +64,29 @@ describe("issue copy", () => {
     }
   });
 
-  // TODO(Task 4): the rule constants (TITLE_MIN/MAX, META_MIN/MAX, THIN_WORDS,
-  // and the slow-response / depth thresholds) land with the rules. Re-point
-  // these assertions at the imported constants then, so the copy and the rule
-  // cannot drift apart; the literal substrings below are a placeholder pin.
-  it("quotes thresholds that match the rule constants", () => {
-    expect(ISSUE_COPY["title.too-short"]!.explanation).toContain("10 characters");
-    expect(ISSUE_COPY["title.too-long"]!.explanation).toContain("60 characters");
+  // The on-page thresholds are asserted against the rule constants themselves,
+  // so copy and rule cannot drift apart: change TITLE_MIN and this test fails
+  // until the prose is changed with it.
+  it("quotes the on-page thresholds the rules actually use", () => {
+    expect(ISSUE_COPY["title.too-short"]!.explanation).toContain(
+      `${TITLE_MIN} characters`,
+    );
+    expect(ISSUE_COPY["title.too-long"]!.explanation).toContain(
+      `${TITLE_MAX} characters`,
+    );
     expect(ISSUE_COPY["meta-description.too-short"]!.explanation).toContain(
-      "70 characters",
+      `${META_MIN} characters`,
     );
     expect(ISSUE_COPY["meta-description.too-long"]!.explanation).toContain(
-      "160 characters",
+      `${META_MAX} characters`,
     );
-    expect(ISSUE_COPY["content.thin"]!.explanation).toContain("150 words");
+    expect(ISSUE_COPY["content.thin"]!.explanation).toContain(`${THIN_WORDS} words`);
+  });
+
+  // TODO(Task 6): the slow-response and depth constants land with the technical
+  // rules. Re-point these at the imported constants then; the literal substrings
+  // are a placeholder pin until they exist.
+  it("quotes the technical thresholds", () => {
     expect(ISSUE_COPY["performance.slow-response"]!.explanation).toContain("1500ms");
     expect(ISSUE_COPY["structure.deep-page"]!.explanation).toContain(
       "5 links deep",
