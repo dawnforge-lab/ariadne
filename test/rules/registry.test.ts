@@ -121,7 +121,7 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
-    expect(RULESET_VERSION).toBe("0.2.0");
+    expect(RULESET_VERSION).toBe("0.3.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

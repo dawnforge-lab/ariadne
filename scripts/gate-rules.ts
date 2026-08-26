@@ -20,7 +20,9 @@
  * WHAT IS GATED AND WHAT IS MERELY RECORDED
  *
  *  - **Gated:** peak RSS across the whole process, ≤ 512MB. Over the line is a
- *    non-zero exit and a heap snapshot, never a bigger line (build plan rule 6).
+ *    non-zero exit; the script itself takes no heap snapshot. Finding the
+ *    unbounded structure with one is the operator's next step, and raising the
+ *    line is not an option (build plan rule 6).
  *    Also gated: the crawl reaching exactly the fixture's page count, and the
  *    rule pass scanning exactly the pages the crawl wrote — a rule pass that
  *    silently judged half a site would otherwise read as a fast one.
@@ -280,7 +282,16 @@ async function countRows(db: Db, table: string, crawlId: string): Promise<number
   const res = await db.execute(
     sql`select count(*)::int as n from ${sql.identifier(table)} where crawl_id = ${crawlId}`,
   );
-  return Number(res.rows[0]?.["n"] ?? 0);
+  const row = res.rows[0];
+  if (row === undefined) {
+    // An aggregate with no GROUP BY returns exactly one row over any input,
+    // including none. No row is therefore not "this table is empty for this
+    // crawl" — it is a statement that did not run the way it reads, and a gate
+    // that reported it as 0 would fail the page-count check for the wrong
+    // reason (hard rule 7, and the metric rules' own idiom).
+    throw new Error(`gate: count over '${table}' for crawl '${crawlId}' returned no row`);
+  }
+  return Number(row["n"]);
 }
 
 function seconds(ms: number): string {

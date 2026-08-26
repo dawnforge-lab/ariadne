@@ -23,7 +23,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
-export const RULESET_VERSION = "0.2.0";
+export const RULESET_VERSION = "0.3.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

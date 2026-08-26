@@ -23,6 +23,7 @@ import { UNTYPED } from "../../src/rules/metric/cohort.js";
 import {
   EXTREMES_LIST_CAP,
   linkMetrics,
+  OTHER_SOURCES,
   SOURCE_TYPE_CAP,
 } from "../../src/rules/metric/link-metrics.js";
 import {
@@ -526,7 +527,7 @@ describe("the link-graph metrics against the database", () => {
 
   // The same bound on the other unbounded axis: a site with hundreds of
   // templates must not produce a jsonb object with hundreds of keys.
-  it("caps the source types per target at the cap and rolls the rest into 'other'", async () => {
+  it("caps the source types per target at the cap and rolls the rest into '(other)'", async () => {
     const capCrawl = await newCrawl();
     // One target, and thirty source pages each of its own type, each linking
     // to the target once. Every source type therefore has a count of 1, so the
@@ -547,7 +548,10 @@ describe("the link-graph metrics against the database", () => {
 
     const named: Record<string, number> = {};
     for (let i = 1; i <= SOURCE_TYPE_CAP; i += 1) named[`t${String(i).padStart(2, "0")}`] = 1;
-    expect(rows["page_type|hub"]).toEqual({ sources: { ...named, other: 30 - SOURCE_TYPE_CAP } });
+    expect(OTHER_SOURCES).toBe("(other)");
+    expect(rows["page_type|hub"]).toEqual({
+      sources: { ...named, [OTHER_SOURCES]: 30 - SOURCE_TYPE_CAP },
+    });
 
     // The thirty source pages are cohort members too, and nothing links to any
     // of them: a target cohort with no inbound links at all gets an EMPTY map
@@ -557,6 +561,48 @@ describe("the link-graph metrics against the database", () => {
     expect(rows["page_type|t01"]).toEqual({ sources: {} });
     expect(rows["page_type|t30"]).toEqual({ sources: {} });
     expect(Object.keys(rows)).toHaveLength(31);
+  });
+
+  // The rollup key is parenthesised, and this is what that buys. A `page_type`
+  // can be a client-configured name, so a site really can have a template
+  // called `other` — and unlike the `(untyped)` collision, merging it into the
+  // rollup would NOT be sound: the ranked CTE still knows which rows are the
+  // named type inside the cap and which are the remainder past it.
+  it("keeps a source type genuinely named 'other' apart from the rollup bucket", async () => {
+    const collideCrawl = await newCrawl();
+    // One target, one source type literally named `other` with TWO source pages
+    // (so it ranks first on count and lands well inside the cap), and thirty
+    // single-page types after it. Ranks: `other` 1, t01…t24 2…25, and t25…t30
+    // past the cap and into the rollup.
+    const specs: PageSpec[] = [
+      { path: "/hub", pageType: "hub", depth: 0 },
+      { path: "/o1", pageType: "other", depth: 1 },
+      { path: "/o2", pageType: "other", depth: 1 },
+    ];
+    const edges: [string, string][] = [
+      ["/o1", "/hub"],
+      ["/o2", "/hub"],
+    ];
+    for (let i = 1; i <= 30; i += 1) {
+      const path = `/s${String(i).padStart(2, "0")}`;
+      specs.push({ path, pageType: `t${String(i).padStart(2, "0")}`, depth: 1 });
+      edges.push([path, "/hub"]);
+    }
+    const ids = await addPages(collideCrawl, specs);
+    await addLinks(collideCrawl, ids, edges);
+
+    const rows = await run("inlinks.sources-by-type", collideCrawl);
+
+    const named: Record<string, number> = { other: 2 };
+    // `other` took rank 1, so only 24 of the t-types fit under the cap.
+    for (let i = 1; i <= SOURCE_TYPE_CAP - 1; i += 1) named[`t${String(i).padStart(2, "0")}`] = 1;
+    expect(rows["page_type|hub"]).toEqual({
+      sources: { ...named, [OTHER_SOURCES]: 30 - (SOURCE_TYPE_CAP - 1) },
+    });
+    // The two keys are distinct and neither absorbed the other's count.
+    const hub = (rows["page_type|hub"] as { sources: Record<string, number> }).sources;
+    expect(hub["other"]).toBe(2);
+    expect(hub[OTHER_SOURCES]).toBe(6);
   });
 
   // `links` has no foreign key to `pages`, so a link whose source row is

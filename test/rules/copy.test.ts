@@ -15,6 +15,7 @@ import {
 import { BREADCRUMB_PAGE_FLOOR } from "../../src/rules/query/structured-data.js";
 import {
   EXTREMES_LIST_CAP,
+  OTHER_SOURCES,
   SOURCE_TYPE_CAP,
 } from "../../src/rules/metric/link-metrics.js";
 import {
@@ -382,6 +383,11 @@ describe("issue copy", () => {
     expect(ISSUE_COPY["inlinks.extremes"]!.explanation).toContain("twenty");
     expect(SOURCE_TYPE_CAP).toBe(25);
     expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain("twenty-five");
+    // The rollup bucket is a KEY a reader meets in the table, so the copy has to
+    // name it — and name the parenthesised spelling, which is what keeps it
+    // apart from a template a client really called `other`.
+    expect(OTHER_SOURCES).toBe("(other)");
+    expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain(OTHER_SOURCES);
   });
 
   // The metric-copy contract is that a reader can say what the table measured

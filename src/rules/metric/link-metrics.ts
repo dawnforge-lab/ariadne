@@ -64,12 +64,25 @@ export const EXTREMES_LIST_CAP = 20;
 
 /**
  * How many source page types `inlinks.sources-by-type` names per target
- * cohort before the remainder is rolled into one `other` bucket.
+ * cohort before the remainder is rolled into one `(other)` bucket.
  */
 export const SOURCE_TYPE_CAP = 25;
 
-/** The bucket the types past `SOURCE_TYPE_CAP` are summed into. */
-const OTHER_SOURCES = "other";
+/**
+ * The bucket the types past `SOURCE_TYPE_CAP` are summed into.
+ *
+ * Parenthesised for the same reason as `UNTYPED`, and with more force. A
+ * `page_type` is a detected URL template (`/blog/:id/:slug`), which cannot be
+ * spelled this way, or a CLIENT-CONFIGURED name, which can: nothing stops a
+ * client calling a template `other`. Where `UNTYPED` MERGES such a collision —
+ * sound, because by the time a reader has the table the two really are
+ * indistinguishable — a merge here would NOT be sound. The ranked CTE knows
+ * perfectly well which rows are a real `other` type inside the cap and which
+ * are the rollup past it, so summing them into one key would destroy a
+ * distinction the query still holds. Parenthesising keeps the two apart: a
+ * client's `other` stays its own key beside `(other)`.
+ */
+export const OTHER_SOURCES = "(other)";
 
 /**
  * One row per cohort page: its url, its type, and how many DISTINCT other pages
@@ -253,9 +266,11 @@ type SourceTypeRow = {
  * Two bounds, both in SQL. The target side is one metric row per cohort
  * `page_type` — cohorts are rows, never nested arrays — and the source side is
  * capped at `SOURCE_TYPE_CAP` types per row with the remainder summed into
- * `other`, ranked by count descending and then type name ascending so the cut
- * is deterministic. A site with hundreds of detected templates would otherwise
- * put hundreds of keys in one jsonb object.
+ * `OTHER_SOURCES`, ranked by count descending and then type name ascending so
+ * the cut is deterministic. A site with hundreds of detected templates would
+ * otherwise put hundreds of keys in one jsonb object. The rollup key is
+ * parenthesised so a client template genuinely named `other` keeps its own
+ * entry beside it — see the constant.
  *
  * A target cohort NOTHING links to gets `{sources: {}}` rather than no row: the
  * runner deletes and rewrites a metric's rows every run, so an absent row means

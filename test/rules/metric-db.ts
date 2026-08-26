@@ -58,12 +58,17 @@ export function metricLookup(
  * agent in the config or a particular `pagesCrawled` states that and nothing
  * else. What is NOT overridable by omission is `status: "finished"` — a metric
  * reading a half-finished crawl is a different test, and one that has to say so.
+ *
+ * `id` is excluded from the override type rather than merely ignored: the id is
+ * generated here and RETURNED, so an override of it would be spread into the
+ * row while every caller kept using the returned value — a test inserting one
+ * crawl and querying another. It fails to compile instead.
  */
 export async function newMetricCrawl(
   db: Db,
   siteUrl: string,
   created: string[],
-  overrides: Partial<typeof crawls.$inferInsert> = {},
+  overrides: Partial<Omit<typeof crawls.$inferInsert, "id">> = {},
 ): Promise<string> {
   const id = `crawl_${randomUUID()}`;
   await db.insert(crawls).values({
