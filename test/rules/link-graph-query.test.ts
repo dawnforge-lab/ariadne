@@ -18,6 +18,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, links, pages, sitemapUrls } from "../../src/db/schema.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { linkGraphRules } from "../../src/rules/query/link-graph.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
@@ -278,6 +279,27 @@ describe("links.orphan against the database", () => {
 
     const found = await orphans(crawlId);
     expect(found.map((f) => f.pageUrl)).toEqual([url("/near-miss")]);
+  });
+
+  // A site whose navigation this crawl cannot follow — JavaScript menus, or a
+  // large sitemap linked from nowhere — orphans a page per page, so the rule
+  // is capped like every other URL-scoped rule rather than mirroring the site
+  // into the findings table.
+  it("caps the findings and says so on the last one", async () => {
+    const crawlId = await newCrawl();
+    const total = URL_FINDING_CAP + 1;
+    const lonely = Array.from({ length: total }, (_, i) => `/lonely-${String(i).padStart(4, "0")}`);
+    await addPages(crawlId, [SEED, ...lonely.map((path) => ({ path }))]);
+
+    const found = await orphans(crawlId);
+    expect(found).toHaveLength(URL_FINDING_CAP);
+    // Ordered by URL, so the cap takes a deterministic slice.
+    expect(found.map((f) => f.pageUrl)).toEqual(lonely.slice(0, URL_FINDING_CAP).map(url));
+    // The count is exact: the cap bounds what is listed, never what is known.
+    expect(found[found.length - 1]!.evidence).toMatchObject({
+      truncated: { reported: URL_FINDING_CAP, total },
+    });
+    expect(found[0]!.evidence).not.toHaveProperty("truncated");
   });
 
   it("reads only its own crawl", async () => {

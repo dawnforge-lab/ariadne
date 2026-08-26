@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { isAuditable, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -84,6 +84,7 @@ interface TargetPage {
   id: string;
   url: string;
   fetchClass: string;
+  statusCode: number | null;
   isIndexable: boolean | null;
 }
 
@@ -188,9 +189,10 @@ async function targetContext(
     id: string;
     url: string;
     fetch_class: string;
+    status_code: number | null;
     is_indexable: boolean | null;
   }>(sql`
-    select p.id, p.url, p.fetch_class, p.is_indexable
+    select p.id, p.url, p.fetch_class, p.status_code, p.is_indexable
     from pages p
     where p.crawl_id = ${crawlId} and p.url = any(${sql.param(wanted)}::text[])`);
   const byUrl = new Map<string, TargetPage>();
@@ -199,6 +201,7 @@ async function targetContext(
       id: String(row.id),
       url: String(row.url),
       fetchClass: String(row.fetch_class),
+      statusCode: row.status_code === null ? null : Number(row.status_code),
       isIndexable: row.is_indexable,
     });
   }
@@ -418,6 +421,17 @@ export const hreflangRules: QueryRule[] = [
   // equals, and the fix — point the annotation at the URL that actually serves
   // that language — is the same whether the target moved or opted out.
   // `targetFetchClass` says which it was.
+  //
+  // The `is_indexable` half is gated on `isAuditable` — the same guard
+  // `canonical.non-indexable-target` uses, and for the same reason. The writer
+  // sets `is_indexable` false for every 404, 5xx, blocked response and network
+  // failure as well as for a noindex, so testing it alone would report a dead
+  // alternate under copy about "the exclusion" — a robots directive that page
+  // never had, on a page that returned no HTML to carry one. An alternate
+  // whose URL is gone therefore produces NO finding from this rule: the
+  // crawl's own evidence about that URL (its `pages` row, `links.broken-
+  // internal`, `http.server-error`, `crawl.blocked`) is what reports it, and
+  // saying it twice under the wrong title is worse than saying it once.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
@@ -428,7 +442,7 @@ export const hreflangRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) =>
       declarationFindings(NON_INDEXABLE, db, crawlId, (_set, target) =>
-        target.fetchClass === "redirect" || target.isIndexable === false
+        target.fetchClass === "redirect" || (isAuditable(target) && target.isIndexable === false)
           ? {
               target: target.url,
               targetFetchClass: target.fetchClass,

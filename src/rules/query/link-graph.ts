@@ -9,6 +9,7 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
 
 const ORPHAN: RuleIdentity = { id: "links.orphan", severity: "warning" };
 const SKIPPED: RuleIdentity = { id: "links.orphan-skipped", severity: "info" };
@@ -129,6 +130,13 @@ function skipReason(c: Completeness): string | null {
  * links were never read, so any of them could have linked to a page reported
  * here — which is why every finding carries the count as a caveat rather than
  * the whole check being suppressed.
+ *
+ * Capped at `URL_FINDING_CAP` like every other URL-scoped rule. A site whose
+ * navigation is built in JavaScript this crawl does not run, or one that
+ * publishes a large sitemap and links none of it, produces an orphan per page
+ * — O(pages) findings out of a rule that is supposed to name a problem, not
+ * mirror the site. `count(*) over ()` is evaluated across the full result set
+ * before `limit` takes its slice, so the exact total survives the cap.
  */
 async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<Finding[]> {
   const rows = await db.execute<{
@@ -136,12 +144,14 @@ async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<
     url: string;
     discovered_via: string;
     in_sitemap: boolean;
+    total_matches: number;
   }>(sql`
     select p.id, p.url, p.discovered_via,
            exists (
              select 1 from sitemap_urls s
              where s.crawl_id = ${crawlId} and s.url = p.url
-           ) as in_sitemap
+           ) as in_sitemap,
+           count(*) over ()::int as total_matches
     from pages p
     where p.crawl_id = ${crawlId}
       and p.fetch_class = 'ok'
@@ -154,9 +164,10 @@ async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<
           and l.target_url = p.url
           and l.source_page_id <> p.id
       )
-    order by p.url`);
+    order by p.url
+    limit ${URL_FINDING_CAP}`);
 
-  return rows.rows.map((row) =>
+  const findings = rows.rows.map((row) =>
     queryFinding(ORPHAN, {
       pageId: String(row.id),
       pageUrl: String(row.url),
@@ -168,6 +179,7 @@ async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<
       dedupeKey: String(row.url),
     }),
   );
+  return noteTruncation(findings, rows.rows[0]?.total_matches ?? 0);
 }
 
 /**

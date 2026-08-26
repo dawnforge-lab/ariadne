@@ -12,6 +12,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import {
   CANONICAL_BATCH,
   linkTargetRules,
@@ -219,6 +220,29 @@ describe("linkTargetRules against the database", () => {
       await addLinks(crawlId, ["/src"], ids, "/boom");
 
       expect(await findings("links.broken-internal", crawlId)).toHaveLength(0);
+    });
+
+    // O(broken targets) is O(pages) on a site that 404s a whole section, so
+    // the rule is capped like every other URL-scoped rule. The count behind
+    // the cap counts distinct TARGETS, which is the unit of the finding.
+    it("caps the findings and says so on the last one", async () => {
+      const crawlId = await newCrawl();
+      const total = URL_FINDING_CAP + 1;
+      const dead = Array.from({ length: total }, (_, i) => `/dead-${String(i).padStart(4, "0")}`);
+      const ids = await addPages(crawlId, [
+        { path: "/src" },
+        ...dead.map((path) => ({ path, fetchClass: "client_error", statusCode: 404 })),
+      ]);
+      for (const path of dead) await addLinks(crawlId, ["/src"], ids, path);
+
+      const found = await findings("links.broken-internal", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      // Sorted by target, so the cap takes a deterministic slice.
+      expect(found.map((f) => f.pageUrl)).toEqual(dead.slice(0, URL_FINDING_CAP).map(url));
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
     });
 
     it("reads only its own crawl", async () => {

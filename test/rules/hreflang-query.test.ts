@@ -495,7 +495,11 @@ describe("hreflangRules against the database", () => {
       });
     });
 
-    it("fires when the alternate points at a page that is gone", async () => {
+    // `is_indexable` is false for a 404 as it is for a noindex, so an
+    // ungated test of it would file a dead alternate under copy about "the
+    // exclusion" — a directive that page never carried. The crawl's own
+    // evidence about the 404 is what reports it; this rule stays silent.
+    it("is silent when the alternate points at a page that is gone", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [
         "/en",
@@ -503,9 +507,24 @@ describe("hreflangRules against the database", () => {
       ]);
       await addHreflang(crawlId, ids.get("/en")!, [["fr", url("/fr")]]);
 
-      const found = await findings("hreflang.non-indexable-target", crawlId);
-      expect(found).toHaveLength(1);
-      expect(found[0]!.evidence).toMatchObject({ targetFetchClass: "client_error" });
+      expect(await findings("hreflang.non-indexable-target", crawlId)).toHaveLength(0);
+    });
+
+    // The same silence for the other shapes `is_indexable` is false on: a
+    // server error and a WAF block are faults the crawl reports as themselves.
+    it("is silent on a blocked or erroring alternate", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        "/en",
+        { path: "/fr", fetchClass: "server_error", statusCode: 503 },
+        { path: "/de", fetchClass: "blocked", statusCode: 403 },
+      ]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["fr", url("/fr")],
+        ["de", url("/de")],
+      ]);
+
+      expect(await findings("hreflang.non-indexable-target", crawlId)).toHaveLength(0);
     });
 
     it("is silent on an indexable target, and on one that was never crawled", async () => {
@@ -521,10 +540,7 @@ describe("hreflangRules against the database", () => {
 
     it("reads only its own crawl", async () => {
       const other = await newCrawl();
-      const otherIds = await addPages(other, [
-        "/en",
-        { path: "/fr", fetchClass: "client_error", statusCode: 404 },
-      ]);
+      const otherIds = await addPages(other, ["/en", { path: "/fr", robotsMeta: "noindex" }]);
       await addHreflang(other, otherIds.get("/en")!, [["fr", url("/fr")]]);
 
       const mine = await newCrawl();

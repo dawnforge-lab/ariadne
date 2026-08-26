@@ -288,9 +288,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.missing": {
     title: "No sitemap is declared in robots.txt",
     explanation:
-      "The site's robots.txt contains no Sitemap: line, so nothing tells a crawler where the sitemap is. The site may still have one — this is a statement about the declaration, not about the file — but a sitemap that is never announced is one search engines have to be told about by hand, and one that no crawler, including this one, can find on its own. A declared sitemap is the cheapest way to tell search engines which URLs you consider canonical and how recently each changed.",
+      "No robots.txt declares a sitemap for this site: either the file carries no Sitemap: line, or the site serves no robots.txt at all. Nothing tells a crawler where the sitemap is. The site may still have one — this is a statement about the declaration, not about the file — but a sitemap that is never announced is one search engines have to be told about by hand, and one that no crawler, including this one, can find on its own. A declared sitemap is the cheapest way to tell search engines which URLs you consider canonical and how recently each changed.",
     howToFix:
-      "Publish a sitemap if there is not one, then add a Sitemap: line to robots.txt naming its absolute URL. Submit it in Search Console as well: the declaration makes it discoverable, the submission makes its coverage reportable.",
+      "Publish a sitemap if there is not one, then add a Sitemap: line naming its absolute URL to robots.txt — creating robots.txt too if the site serves none. Submit the sitemap in Search Console as well: the declaration makes it discoverable, the submission makes its coverage reportable.",
   },
   "sitemap.invalid": {
     title: "A sitemap document could not be read",
@@ -304,7 +304,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "This URL is published in the site's sitemap and answered with something other than a 200 when it was fetched — the finding carries the status. A sitemap is a list of URLs you are asking search engines to index, so an error page in it wastes crawl budget on a URL that cannot be indexed and, in quantity, reduces how much a crawler trusts the file.",
     howToFix:
-      "Restore the page if the URL should work, or remove the entry if it should not. Sitemaps that are generated should be generated from the same source of truth as the pages themselves, so a removed page leaves the sitemap in the same deploy.",
+      "Read the status before deciding. A 404 or 410 means the page is gone: restore it if the URL should work, or remove the entry if it should not. A 401, 403 or 429 is an access control or a bot block rather than a missing page — allowlist the crawler in your WAF or bot-protection settings and re-check, because deleting a sitemap entry for a page that is merely defended fixes nothing. Sitemaps that are generated should be generated from the same source of truth as the pages themselves, so a removed page leaves the sitemap in the same deploy.",
   },
   "sitemap.redirected": {
     title: "Sitemap lists a URL that redirects",
@@ -556,7 +556,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "schema.breadcrumb-absent": {
     title: "No breadcrumb markup anywhere on the site",
     explanation:
-      "This site has more than 5 indexable pages and no page carries BreadcrumbList markup in its JSON-LD. Breadcrumb markup is what lets a search result show the path to a page — Home › Shoes › Trail — instead of a bare URL, and it tells search engines how the sections of the site relate to each other. On a site of any depth that hierarchy otherwise has to be guessed from URLs and links.",
+      "This site has at least 5 indexable pages and no page carries BreadcrumbList markup in its JSON-LD. Breadcrumb markup is what lets a search result show the path to a page — Home › Shoes › Trail — instead of a bare URL, and it tells search engines how the sections of the site relate to each other. On a site of any depth that hierarchy otherwise has to be guessed from URLs and links.",
     howToFix:
       "Add a BreadcrumbList block to the templates that sit below the homepage — categories, subcategories, product and article pages — listing each step with its position, name and URL, ending at the current page. Generate the trail from the same navigation data the visible breadcrumbs use, so the markup and what a visitor sees never disagree.",
   },

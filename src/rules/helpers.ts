@@ -8,8 +8,15 @@ import type {
   Severity,
 } from "./registry/types.js";
 
-/** A page whose on-page signals are meaningful: fetched OK as HTML with a 200. */
-export function isAuditable(page: PageRecord): boolean {
+/**
+ * A page whose on-page signals are meaningful: fetched OK as HTML with a 200.
+ *
+ * Takes the two columns it reads rather than a whole `PageRecord`, so a rule
+ * holding a narrower projection of `pages` — the hreflang join rules select
+ * four columns per target, not the row — asks the same question through the
+ * same function instead of restating the condition beside it.
+ */
+export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">): boolean {
   return page.fetchClass === "ok" && page.statusCode === 200;
 }
 

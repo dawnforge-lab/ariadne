@@ -36,7 +36,12 @@
  *    the probe is the rudest thing the crawler does: twenty back-to-back
  *    requests at the start of every crawl (hard rule 9). robots.txt has not
  *    been read yet, so its `Crawl-delay` cannot be honoured here; the config
- *    delay is the floor that can be.
+ *    delay is the floor that can be. Its `Disallow` rules are unread for the
+ *    same reason, which makes these the only fetches in the crawler not
+ *    covered by robots.txt — up to four origin roots plus the legacy hosts, at
+ *    most five hops each, once per crawl — because which host's robots.txt
+ *    governs the site is precisely what the probe exists to find out, and no
+ *    host can be asked for its rules before we know whether it is the site.
  */
 import { isIP } from "node:net";
 import { fetchPage, type FetchClass } from "./fetch-page.js";

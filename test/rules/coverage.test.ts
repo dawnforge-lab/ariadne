@@ -36,6 +36,18 @@ describe("checklist coverage", () => {
     ]);
   });
 
+  // The gate document's ruleset table states these three numbers. Pinned here
+  // so a rule added or dropped fails CI rather than quietly making that table
+  // wrong — and so "0 metric rules" stays a fact about Phase 3 rather than an
+  // omission nobody noticed.
+  it("pins the ruleset split the gate doc reports: 64 rules = 26 page + 38 query + 0 metric", () => {
+    const registry = buildRegistry();
+    expect(registry.all()).toHaveLength(64);
+    expect(registry.byKind("page")).toHaveLength(26);
+    expect(registry.byKind("query")).toHaveLength(38);
+    expect(registry.byKind("metric")).toHaveLength(0);
+  });
+
   it("accounts for all 47 crawl-derived checks: 37 claimed, 3 agent, 7 unclaimed", () => {
     // The arithmetic behind the pin above, stated so a drift in the universe
     // itself (an id added to or removed from `CRAWL_CHECK_IDS`) fails here

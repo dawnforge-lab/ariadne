@@ -227,6 +227,27 @@ describe("issue copy", () => {
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 
+  // `robotsUnreadable` lets `outcome === "absent"` through, so the rule also
+  // fires on a site that serves no robots.txt at all. Copy that spoke only of
+  // "the robots.txt contains no Sitemap: line" would describe a file that is
+  // not there, and its fix would tell a client to edit it.
+  it("sitemap.missing covers the site that serves no robots.txt either", () => {
+    const c = ISSUE_COPY["sitemap.missing"]!;
+    expect(`${c.explanation} ${c.howToFix}`).toMatch(/no robots\.txt|serves none|serves no robots/i);
+  });
+
+  // The rule fires on every non-200, non-redirect status, and `blocked` (401,
+  // 403, 429) is one of them. "Restore the page or remove the entry" is the
+  // wrong instruction for a URL a WAF is defending, so the fix has to branch
+  // the way `canonical.non-200-target`'s does.
+  it("sitemap.non-200 tells blocked apart from gone", () => {
+    const fix = ISSUE_COPY["sitemap.non-200"]!.howToFix;
+    expect(fix).toMatch(/\b401\b/);
+    expect(fix).toMatch(/\b403\b/);
+    expect(fix).toMatch(/\b429\b/);
+    expect(fix).toMatch(/WAF|bot-protection|allowlist/i);
+  });
+
   // The rule fires on `outcome === "absent"`, which is the site ANSWERING with
   // a 4xx. A server that could not serve robots.txt is a different finding
   // (`robots.check-skipped`), and copy blurring the two would tell a client to
@@ -273,10 +294,15 @@ describe("issue copy", () => {
 
   // The breadcrumb copy names the size of site it is advice for, and that
   // number is the rule's own floor. Same contract as the on-page thresholds.
-  it("quotes the breadcrumb page floor the rule actually uses", () => {
-    expect(ISSUE_COPY["schema.breadcrumb-absent"]!.explanation).toMatch(
-      new RegExp(`\\bmore than ${BREADCRUMB_PAGE_FLOOR} indexable pages\\b`),
+  // The gate is `indexablePages < BREADCRUMB_PAGE_FLOOR` — so the floor is
+  // inclusive and a site of exactly five pages fires. "More than five" would
+  // describe a rule one page less sensitive than the one that ships.
+  it("quotes the breadcrumb page floor the rule actually uses, inclusively", () => {
+    const c = ISSUE_COPY["schema.breadcrumb-absent"]!;
+    expect(c.explanation).toMatch(
+      new RegExp(`\\bat least ${BREADCRUMB_PAGE_FLOOR} indexable pages\\b`),
     );
+    expect(c.explanation).not.toMatch(new RegExp(`\\bmore than ${BREADCRUMB_PAGE_FLOOR}\\b`));
   });
 
   // The crawler reads JSON-LD and nothing else, so a site marked up in

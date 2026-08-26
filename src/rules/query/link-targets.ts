@@ -12,6 +12,7 @@ import {
   type PageRecord,
   type QueryRule,
 } from "../registry/registry.js";
+import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
 
 /** Source URLs listed on a broken-target finding. The count is never sampled. */
 export const SAMPLE_SOURCES = 10;
@@ -35,6 +36,12 @@ export const CANONICAL_BATCH = 500;
  *
  * 4xx only. A 5xx target is a server fault the page's own `http.server-error`
  * reports; calling it a broken link would point the client at the wrong repair.
+ *
+ * The `targets` CTE is capped at `URL_FINDING_CAP`, so the lateral runs for at
+ * most that many targets and the findings list never grows with the site. The
+ * `count(*) over ()` window sits after the grouping and before the `limit`, so
+ * it counts distinct broken TARGETS — the unit of the finding — and the exact
+ * total survives the cap (`noteTruncation`).
  */
 async function brokenInternalFindings(
   self: RuleIdentity,
@@ -46,18 +53,22 @@ async function brokenInternalFindings(
     target_url: string;
     status_code: number | null;
     inlink_count: number;
+    total_matches: number;
     sample_sources: string[];
   }>(sql`
     with targets as (
       select p.id as target_page_id, p.url as target_url, p.status_code,
-             count(*)::int as inlink_count
+             count(*)::int as inlink_count,
+             count(*) over ()::int as total_matches
       from links l
       join pages p on p.crawl_id = ${crawlId} and p.url = l.target_url
       where l.crawl_id = ${crawlId} and l.is_internal and p.fetch_class = 'client_error'
       group by p.id, p.url, p.status_code
+      order by p.url
+      limit ${URL_FINDING_CAP}
     )
     select t.target_page_id, t.target_url, t.status_code, t.inlink_count,
-           s.sample_sources
+           t.total_matches, s.sample_sources
     from targets t
     cross join lateral (
       select coalesce(array_agg(sample.url), array[]::text[]) as sample_sources
@@ -69,9 +80,10 @@ async function brokenInternalFindings(
         order by src.url
         limit ${SAMPLE_SOURCES}
       ) sample
-    ) s`);
+    ) s
+    order by t.target_url`);
 
-  return result.rows.map((row) =>
+  const findings = result.rows.map((row) =>
     queryFinding(self, {
       pageId: row.target_page_id,
       pageUrl: row.target_url,
@@ -84,6 +96,7 @@ async function brokenInternalFindings(
       dedupeKey: row.target_url,
     }),
   );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
 /** A page's canonical, the URL it resolves to, and the page row for that URL. */
