@@ -57,6 +57,10 @@ describe("issue copy", () => {
     }
   });
 
+  // TODO(Task 4): the rule constants (TITLE_MIN/MAX, META_MIN/MAX, THIN_WORDS,
+  // and the slow-response / depth thresholds) land with the rules. Re-point
+  // these assertions at the imported constants then, so the copy and the rule
+  // cannot drift apart; the literal substrings below are a placeholder pin.
   it("quotes thresholds that match the rule constants", () => {
     expect(ISSUE_COPY["title.too-short"]!.explanation).toContain("10 characters");
     expect(ISSUE_COPY["title.too-long"]!.explanation).toContain("60 characters");
@@ -73,12 +77,42 @@ describe("issue copy", () => {
     );
   });
 
-  it("does not overpromise what the analyzer detects", () => {
-    // content.placeholder matches the literal phrase only.
-    expect(ISSUE_COPY["content.placeholder"]!.explanation).toContain("lorem ipsum");
-    // images.missing-dimensions is about the absent attribute, not proven CLS.
-    expect(ISSUE_COPY["images.missing-dimensions"]!.explanation).toContain(
-      "attribute",
-    );
+  // The guards below are negative on purpose. A positive `toContain` still
+  // passes when someone APPENDS an overpromise to text that already says the
+  // right thing, so the forbidden claim is what has to be asserted against.
+  it("content.placeholder claims only the literal phrase it detects", () => {
+    const c = ISSUE_COPY["content.placeholder"]!;
+    expect(c.explanation).toContain("lorem ipsum");
+    // The analyzer matches /lorem ipsum/i in visible text and nothing else.
+    const widened = /\bTODO\b|\bTBC\b|dummy (?:text|copy|content|name)|placeholder (?:of any kind|text such as)|generic placeholder|any placeholder/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(widened);
+  });
+
+  it("images.missing-dimensions claims the absent attribute, not proven CLS", () => {
+    const c = ISSUE_COPY["images.missing-dimensions"]!;
+    expect(c.explanation).toContain("attribute");
+    // An empty attribute counts as present and CSS may already reserve the
+    // space, so layout shift may not be happening at all.
+    const certainty =
+      /is shifting|causes layout shift|will shift|will cause layout shift|results in layout shift|creates layout shift/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(certainty);
+  });
+
+  it("mobile.viewport-missing speaks only to the absent tag", () => {
+    const c = ISSUE_COPY["mobile.viewport-missing"]!;
+    // The rule fires on `!hasViewport`. It knows nothing about the contents of
+    // a viewport tag that does exist.
+    const misconfigured =
+      /misconfigured|incorrectly configured|incorrect viewport|wrong viewport|badly configured|invalid viewport/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(misconfigured);
+  });
+
+  it("headings.h1-multiple does not claim a ranking penalty", () => {
+    const c = ISSUE_COPY["headings.h1-multiple"]!;
+    // Multiple H1s are valid HTML and are not a ranking problem; the finding
+    // is about the outline and the likely templating accident.
+    const overclaim =
+      /dilut|penalt|hurts? (?:your )?rank|lower(?:s|ing)? (?:your )?rank|damages? (?:your )?rank/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 });

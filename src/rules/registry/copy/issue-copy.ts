@@ -79,11 +79,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Add a single H1 that states the page's main topic, consistent with the title tag. If the visual headline is already there but marked up as a div or a styled span, change the element rather than adding a second heading.",
   },
   "headings.h1-multiple": {
+    // Accuracy: multiple H1s are valid HTML and are not a ranking problem.
+    // Report the outline and the likely templating accident — do not claim a
+    // diluted signal or a penalty.
     title: "Multiple H1 headings",
     explanation:
-      "The page has more than one H1, which dilutes the main-topic signal and usually points to a templating mistake, such as a logo and a headline both marked up as H1.",
+      "The page has more than one H1. That is valid HTML and can be deliberate in a sectioned document, but on most templates it is an accident — a logo and a headline both marked up as H1 — and it leaves the outline with no single heading that names the page's subject.",
     howToFix:
-      "Keep one H1 for the page's main heading and demote the rest to H2 or H3. Elements that are not headings at all, such as a logo, should use a non-heading element.",
+      "If the extra H1s are accidental, keep one for the page's main heading and demote the rest to H2 or H3; elements that are not headings at all, such as a logo, should use a non-heading element. If the sectioning is deliberate, no change is needed.",
   },
   "headings.level-skip": {
     title: "Heading levels skip",
