@@ -136,9 +136,10 @@ describe("check universe", () => {
 /**
  * The two annotations that say WHY a check has no rule behind it yet, so the
  * coverage pin's remaining entries are explained rather than merely counted:
- * `RENDER_CHECKS` wait on the render pass, `METRIC_PENDING_CHECKS` on the
- * metric-rule kind the runner does not drive yet. Neither is `AGENT_CHECKS` —
- * those are judgement, and will never have a rule.
+ * `RENDER_CHECKS` wait on the render pass, `METRIC_PENDING_CHECKS` on metric
+ * rules not yet written (the runner drives the kind, and the link-graph four
+ * ship). Neither is `AGENT_CHECKS` — those are judgement, and will never have
+ * a rule.
  */
 describe("check annotations", () => {
   it("exports the render-gated and metric-pending lists", () => {

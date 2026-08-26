@@ -5,7 +5,16 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { finding, metricRow, present, queryFinding } from "../../src/rules/helpers.js";
+import {
+  finding,
+  metricRow,
+  metricRule,
+  present,
+  queryFinding,
+  type MetricIdentity,
+} from "../../src/rules/helpers.js";
+import { ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
+import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { mkPage } from "./mk-page.js";
 
 describe("present", () => {
@@ -147,5 +156,43 @@ describe("metricRow", () => {
     expect(metricRow({ id: "some.metric" }, { scope: "site", scopeValue: "x", value: {} })).toBeTruthy();
     // @ts-expect-error a page_type row must name the cohort it answers for
     expect(metricRow({ id: "some.metric" }, { scope: "page_type", value: {} })).toBeTruthy();
+  });
+});
+
+describe("metricRule", () => {
+  // The id is written once and reaches the body as `self`, so a rule cannot
+  // stamp its rows with an id different from the one the runner deletes by.
+  it("hands the body its own identity, and it is the registered id", async () => {
+    let seen: MetricIdentity | undefined;
+    const rule = metricRule("inlinks.distribution", ["CHECK-33"], "links", async (_db, _crawl, self) => {
+      seen = self;
+      return [metricRow(self, { scope: "site", value: { n: 1 } })];
+    });
+
+    const rows = await rule.run(undefined as never, "crawl_1");
+    expect(seen).toEqual({ id: "inlinks.distribution" });
+    expect(rows).toEqual([
+      { metricId: "inlinks.distribution", scope: "site", scopeValue: "", value: { n: 1 } },
+    ]);
+  });
+
+  // Not a default the caller may override — the kind has one severity, because
+  // a metric states a number and accuses no one.
+  it("registers as a metric rule that is always info, with the rule's own copy", () => {
+    const rule = metricRule("structure.depth-distribution", ["CHECK-31"], "technical", async () => []);
+    expect(rule.kind).toBe("metric");
+    expect(rule.severity).toBe("info");
+    expect(rule.category).toBe("technical");
+    expect(rule.checkIds).toEqual(["CHECK-31"]);
+    expect(rule.rulesetVersion).toBe(RULESET_VERSION);
+    expect(rule.title).toBe(ISSUE_COPY["structure.depth-distribution"]!.title);
+  });
+
+  // Copy is looked up at definition time, so a metric with none fails when the
+  // module loads rather than rendering as an unlabelled table.
+  it("refuses to define a metric that has no copy", () => {
+    expect(() => metricRule("no.such-metric", ["CHECK-31"], "links", async () => [])).toThrow(
+      /no copy for rule 'no.such-metric'/,
+    );
   });
 });

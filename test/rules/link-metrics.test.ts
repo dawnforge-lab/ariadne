@@ -578,6 +578,34 @@ describe("the link-graph metrics against the database", () => {
     expect(Object.keys(rows)).toHaveLength(31);
   });
 
+  // `links` has no foreign key to `pages`, so a link whose source row is
+  // missing is a database state nothing forbids. The two CHECK-33 metrics must
+  // not disagree about it: `inlinks.distribution` counts `source_page_id`
+  // without visiting `pages` at all, so `inlinks.sources-by-type` LEFT-joins
+  // the source rather than dropping the link on an inner join.
+  it("counts a link whose source page row is missing, and types it as untyped", async () => {
+    const danglingCrawl = await newCrawl();
+    await addPages(danglingCrawl, [{ path: "/target", pageType: "product", depth: 0 }]);
+    await db.insert(links).values({
+      crawlId: danglingCrawl,
+      sourcePageId: "page_no_such_row",
+      targetUrl: url("/target"),
+      targetPageId: null,
+      anchor: "from nowhere",
+      rel: null,
+      isInternal: true,
+      isNofollow: false,
+      position: 0,
+    });
+
+    // One inbound link, said by both metrics rather than by one of them.
+    const dist = await run("inlinks.distribution", danglingCrawl);
+    expect((dist["site|"] as { count: number; max: number }).max).toBe(1);
+    expect(await run("inlinks.sources-by-type", danglingCrawl)).toEqual({
+      "page_type|product": { sources: { [UNTYPED]: 1 } },
+    });
+  });
+
   it("answers a crawl with no cohort pages with an empty site row rather than silence", async () => {
     const emptyCrawl = await newCrawl();
     await addPages(emptyCrawl, [

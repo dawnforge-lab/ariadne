@@ -41,22 +41,28 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { metricRow } from "../helpers.js";
-import { copyFor } from "../registry/copy/index.js";
-import {
-  defineRule,
-  RULESET_VERSION,
-  type Metric,
-  type MetricRule,
-} from "../registry/registry.js";
+import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
+import type { Metric, MetricRule } from "../registry/registry.js";
 
 /**
  * The scope value a cohort of pages with no `page_type` is filed under.
  *
- * Parenthesised on purpose: `derivePageType` returns either a client-configured
- * type name or a detected URL template (`/blog/:id/:slug`), and neither can
- * ever be spelled `(untyped)` — so the sentinel cannot collide with a real
- * cohort and be read as one. The empty string was not available: it is what a
+ * Parenthesised so it reads as a label rather than as a template name a site
+ * might really have — but that is a courtesy to the reader, NOT a uniqueness
+ * claim. `derivePageType` returns a detected URL template (`/blog/:id/:slug`),
+ * which cannot be spelled this way, or a CLIENT-CONFIGURED name, which can:
+ * nothing stops a client calling a bucket `(untyped)`.
+ *
+ * That case is handled rather than argued away, and the handling is the reason
+ * the coalesce lives inside each cohort CTE instead of in an outer `GROUP BY`:
+ * a client-named `(untyped)` and the untyped pages MERGE into one cohort, one
+ * row, one scope value. A merge is the only sound answer — the two are
+ * indistinguishable by the time a reader has the table — and doing it in the
+ * cohort makes it structural. Coalescing later would instead produce two groups
+ * projecting one scope value, which is two rows for one primary key and a rule
+ * the runner rejects for answering the same question twice.
+ *
+ * The empty string was not available for the sentinel: it is what a
  * site-scoped row stores in the metrics primary key.
  */
 export const UNTYPED = "(untyped)";
@@ -88,11 +94,8 @@ function cohortFilter(crawlId: string): SQL {
  * about what it was would be worse than one.
  *
  * The `page_type` a cohort exposes is ALREADY coalesced, here and in the depth
- * cohort below, so everything downstream groups by a non-null column. Doing it
- * in the outer `GROUP BY` instead would leave a null cohort and a (hypothetical)
- * literal `(untyped)` cohort as two groups projecting one scope value — two
- * rows for one primary key, which the runner rejects as a rule answering the
- * same question twice.
+ * cohort below, so everything downstream groups by a non-null column — see
+ * `UNTYPED` for why that placement is the design rather than a convenience.
  *
  * `group by p.id` alone is enough to select `p.url` and `p.page_type` beside
  * the aggregate: `pages.id` is the table's primary key, so Postgres knows both
@@ -188,7 +191,7 @@ function nullableNum(value: unknown, column: string, ruleId: string): number | n
 async function distribution(
   db: Db,
   crawlId: string,
-  self: { id: string },
+  self: MetricIdentity,
   cohort: SQL,
 ): Promise<Metric[]> {
   const rows = await db.execute<DistributionRow>(sql`
@@ -242,7 +245,7 @@ type ExtremeRow = {
  * the rows would arrive in whatever order the plan produced and the lists would
  * be built out of order.
  */
-async function extremes(db: Db, crawlId: string, self: { id: string }): Promise<Metric[]> {
+async function extremes(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
   const rows = await db.execute<ExtremeRow>(sql`
     with cohort as (${inlinkCohort(crawlId)}),
     bottom as (select url, v from cohort order by v asc, url asc limit ${EXTREMES_LIST_CAP}),
@@ -290,7 +293,7 @@ type SourceTypeRow = {
  * "not computed", and "no page on this site links into this template" is a
  * finding worth stating.
  */
-async function sourcesByType(db: Db, crawlId: string, self: { id: string }): Promise<Metric[]> {
+async function sourcesByType(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
   const rows = await db.execute<SourceTypeRow>(sql`
     with target as (
       select p.id as id, p.url as url, coalesce(p.page_type, ${UNTYPED}) as target_type
@@ -304,7 +307,15 @@ async function sourcesByType(db: Db, crawlId: string, self: { id: string }): Pro
              t.id as target_id
       from links l
       join target t on t.url = l.target_url and l.source_page_id <> t.id
-      join pages s on s.id = l.source_page_id and s.crawl_id = ${crawlId}
+      -- LEFT, and the coalesce above is why it can be: the links table has no
+      -- foreign key to pages, so a source_page_id with no row behind it is a
+      -- database state nothing forbids. An inner join would silently DROP that
+      -- link — and inlinks.distribution counts it, since it reads
+      -- source_page_id without visiting pages at all. The two CHECK-33 metrics
+      -- would then disagree about the same site by however many dangling
+      -- sources it had. Left join instead, and such a source lands in the
+      -- untyped bucket with the pages the detector could not type.
+      left join pages s on s.id = l.source_page_id and s.crawl_id = ${crawlId}
       where l.crawl_id = ${crawlId}
     ),
     counts as (
@@ -352,66 +363,39 @@ const LINKS = "links";
 const TECHNICAL = "technical";
 
 /**
- * The four link-graph metrics. Every one is `info`: a metric states a number
- * about the site, and a number is not a fault — the judgement is the agent's.
+ * The four link-graph metrics.
+ *
+ * Each is assembled by `metricRule`, which writes the id once and hands it to
+ * the body as `self`: the id the registry keys, the id `copyFor` looks up and
+ * the id stamped on every row are then one string rather than three that agree
+ * today. Severity is not stated here because the kind has only one — see the
+ * factory.
  */
 export const linkMetrics: MetricRule[] = [
-  defineRule<MetricRule>({
-    kind: "metric",
-    id: "inlinks.distribution",
-    checkIds: ["CHECK-33"],
-    category: LINKS,
-    severity: "info",
-    ...copyFor("inlinks.distribution"),
-    rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Metric[]> =>
-      distribution(db, crawlId, { id: "inlinks.distribution" }, inlinkCohort(crawlId)),
-  }),
+  metricRule("inlinks.distribution", ["CHECK-33"], LINKS, async (db, crawlId, self) =>
+    distribution(db, crawlId, self, inlinkCohort(crawlId)),
+  ),
 
-  defineRule<MetricRule>({
-    kind: "metric",
-    id: "inlinks.extremes",
-    checkIds: ["CHECK-33"],
-    category: LINKS,
-    severity: "info",
-    ...copyFor("inlinks.extremes"),
-    rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Metric[]> =>
-      extremes(db, crawlId, { id: "inlinks.extremes" }),
-  }),
+  metricRule("inlinks.extremes", ["CHECK-33"], LINKS, async (db, crawlId, self) =>
+    extremes(db, crawlId, self),
+  ),
 
-  defineRule<MetricRule>({
-    kind: "metric",
-    id: "inlinks.sources-by-type",
-    checkIds: ["CHECK-33b"],
-    category: LINKS,
-    severity: "info",
-    ...copyFor("inlinks.sources-by-type"),
-    rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Metric[]> =>
-      sourcesByType(db, crawlId, { id: "inlinks.sources-by-type" }),
-  }),
+  metricRule("inlinks.sources-by-type", ["CHECK-33b"], LINKS, async (db, crawlId, self) =>
+    sourcesByType(db, crawlId, self),
+  ),
 
   // Depth is a property of the page row rather than of the link table, so its
   // cohort is a plain select — but it is the SAME cohort, which is what lets a
   // reader put the depth table beside the inlink table and read them as two
   // views of one set of pages.
-  defineRule<MetricRule>({
-    kind: "metric",
-    id: "structure.depth-distribution",
-    checkIds: ["CHECK-31"],
-    category: TECHNICAL,
-    severity: "info",
-    ...copyFor("structure.depth-distribution"),
-    rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Metric[]> =>
-      distribution(
-        db,
-        crawlId,
-        { id: "structure.depth-distribution" },
-        sql`select coalesce(p.page_type, ${UNTYPED}) as page_type, p.depth as v
-            from pages p
-            where ${cohortFilter(crawlId)}`,
-      ),
-  }),
+  metricRule("structure.depth-distribution", ["CHECK-31"], TECHNICAL, async (db, crawlId, self) =>
+    distribution(
+      db,
+      crawlId,
+      self,
+      sql`select coalesce(p.page_type, ${UNTYPED}) as page_type, p.depth as v
+          from pages p
+          where ${cohortFilter(crawlId)}`,
+    ),
+  ),
 ];

@@ -367,6 +367,23 @@ describe("issue copy", () => {
     expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain("twenty-five");
   });
 
+  // The metric-copy contract is that a reader can say what the table measured
+  // from the text alone — so every COLUMN of the value shape has to appear in
+  // it. p95 was the one the first draft left out: the number was in the jsonb
+  // and nowhere in the prose. Asserted for both distribution metrics, which
+  // share the shape, so the same omission cannot recur in the metrics Tasks 5
+  // and 6 copy from this pattern.
+  it("the distribution copy names every column of the shape, p95 included", () => {
+    for (const id of ["inlinks.distribution", "structure.depth-distribution"]) {
+      const text = ISSUE_COPY[id]!.explanation;
+      expect(text, `${id}: the count`).toMatch(/how many pages were measured/i);
+      expect(text, `${id}: min and max`).toMatch(/smallest and largest|shallowest and deepest/i);
+      expect(text, `${id}: the mean`).toContain("mean");
+      expect(text, `${id}: p25/median/p75`).toContain("quartiles");
+      expect(text, `${id}: p95`).toContain("95th percentile");
+    }
+  });
+
   // A metric states what was counted; it does not accuse the site of anything.
   // "Fix" language in a table's copy would turn a distribution into a fault
   // list, and the numbers at the bottom of a distribution are frequently fine.
