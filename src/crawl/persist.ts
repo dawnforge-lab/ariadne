@@ -368,6 +368,7 @@ export class PageWriter {
       hasAmp: analysis?.hasAmp ?? false,
       hasViewport: analysis?.hasViewport ?? false,
       hasLoremIpsum: analysis?.hasLoremIpsum ?? false,
+      hasSoft404Phrases: analysis?.hasSoft404Phrases ?? false,
       relNext: analysis?.relNext ?? null,
       relPrev: analysis?.relPrev ?? null,
       structuredDataParseErrors: analysis?.structuredDataParseErrors ?? 0,

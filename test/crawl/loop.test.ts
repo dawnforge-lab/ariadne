@@ -5,7 +5,14 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, links, pages, sitemapUrls } from "../../src/db/schema.js";
 import { frontierCounts } from "../../src/crawl/frontier.js";
-import { runCrawl, resumeCrawl, type CrawlConfig } from "../../src/crawl/loop.js";
+import {
+  runCrawl,
+  resumeCrawl,
+  type CrawlConfig,
+  type DiscoveryEvidence,
+  type NotFoundProbeSample,
+} from "../../src/crawl/loop.js";
+import { hostProbeStarts, type HostProbeResult } from "../../src/crawl/host-probe.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 
 function databaseUrl(): string {
@@ -58,6 +65,14 @@ let brokenServer: Server;
 let broken: string;
 let flappyHits = 0;
 let alwaysBrokenHits = 0;
+
+/**
+ * A site whose catch-all answers 200 with the same "not found" template for
+ * every unknown URL — the soft-404 site the known-404 probe exists to catch.
+ * robots.txt 404s (absent -> allow all) so the crawl itself is ordinary.
+ */
+let soft404Server: Server;
+let soft404: string;
 
 /**
  * Set by the poison test: the next `/` request deletes the running crawl row
@@ -233,6 +248,24 @@ beforeAll(async () => {
   });
   broken = await listen(brokenServer);
 
+  soft404Server = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/robots.txt") {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no robots here");
+      return;
+    }
+    if (path === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html(`<p>the home page of a site that never 404s</p>`));
+      return;
+    }
+    // Everything else: 200, with the same apologetic template every time.
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html(`<h1>Sorry</h1><p>This page cannot be found. Try the home page.</p>`));
+  });
+  soft404 = await listen(soft404Server);
+
   db = createDb(databaseUrl());
   await runMigrations(db);
 });
@@ -248,6 +281,7 @@ afterAll(async () => {
   await new Promise<void>((r) => closedServer.close(() => r()));
   await new Promise<void>((r) => brokenServer.close(() => r()));
   await new Promise<void>((r) => variantServer.close(() => r()));
+  await new Promise<void>((r) => soft404Server.close(() => r()));
 });
 
 function config(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
@@ -410,7 +444,11 @@ describe("runCrawl", () => {
   });
 
   it("applies robots rules to same-site origin variants", async () => {
-    const summary = await crawl(config({ siteUrl: variant }));
+    // Probe off: this is the one fixture addressed by name rather than by IP,
+    // so the host probe would synthesise `www.localhost` and ask the system
+    // resolver about it. The suite does not put made-up names on the wire —
+    // the probe's own tests inject a resolver instead.
+    const summary = await crawl(config({ siteUrl: variant, probeHosts: false }));
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
     // The www. spelling of /admin/x is same-origin by our own rule, so it is a
@@ -474,7 +512,9 @@ describe("runCrawl", () => {
     poisonNextPage = true;
     let thrown: unknown = null;
     try {
-      await runCrawl(db, config());
+      // The host probe is off for this one: it fetches `/` before the crawl
+      // does, so it would spring the trap before there is a loop to break.
+      await runCrawl(db, config({ probeHosts: false }));
     } catch (error) {
       thrown = error;
     }
@@ -486,6 +526,114 @@ describe("runCrawl", () => {
     const text = aggregate.errors.map((e) => String((e as Error).message ?? e)).join("\n");
     expect(text).toMatch(/frontier/); // the loop's error survived
     expect(text).toMatch(/pages/); // and so did the flush's
+  });
+});
+
+/**
+ * The crawl-level evidence the query rules read instead of fetching anything
+ * themselves (hard rule 3). Every assertion here is about a `crawls` column
+ * that a rule will later be the only consumer of.
+ */
+describe("crawl-level evidence", () => {
+  async function crawlRow(crawlId: string) {
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    if (row === undefined) throw new Error(`no crawls row for ${crawlId}`);
+    return row;
+  }
+
+  it("stores what discovery found, robots.txt verbatim included", async () => {
+    const summary = await crawl(config());
+    const row = await crawlRow(summary.crawlId);
+    const discovery = row.discovery as DiscoveryEvidence;
+
+    expect(discovery.robots.outcome).toBe("read");
+    expect(discovery.robots.raw).toContain("Disallow: /admin");
+    expect(discovery.robots.raw).toContain(`Sitemap: ${base}/sitemap.xml`);
+    expect(discovery.robots.crawlDelaySec).toBeNull();
+    expect(discovery.robots.note).toBeNull();
+    // `raw` is a 500KB prefix; a rule re-parsing it must know whether it is
+    // reading the whole file or the start of one.
+    expect(discovery.robots.truncated).toBe(false);
+    expect(discovery.sitemapSources).toEqual([`${base}/sitemap.xml`]);
+    expect(discovery.docsFetched).toBe(1);
+    expect(discovery.truncation.failures).toEqual([]);
+  });
+
+  it("records discovery even when robots.txt refuses the crawl", async () => {
+    const summary = await crawl(config({ siteUrl: flaky }));
+    const row = await crawlRow(summary.crawlId);
+    const discovery = row.discovery as DiscoveryEvidence;
+    expect(discovery.robots.outcome).toBe("unreachable");
+    expect(discovery.robots.raw).toBeNull();
+    // A crawl that never ran cannot have sampled a 404: it says so.
+    const probe = row.notfoundProbe as { skipped?: string };
+    expect(probe.skipped).toMatch(/robots/i);
+  });
+
+  it("probes a URL that cannot exist, and records the 404 it got", async () => {
+    const summary = await crawl(config());
+    const probe = (await crawlRow(summary.crawlId)).notfoundProbe as NotFoundProbeSample;
+    expect(probe.probeUrl).toMatch(
+      new RegExp(`^${base}/__ariadne-404-probe-[0-9a-f-]{36}$`),
+    );
+    expect(probe.statusCode).toBe(404);
+    expect(probe.fetchClass).toBe("client_error");
+    // No HTML was kept for a 404, so there is no template to fingerprint.
+    expect(probe.simhash).toBeNull();
+    expect(probe.wordCount).toBeNull();
+
+    // The probe is not a page: it never enters the frontier or the pages table.
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    expect(rows.some((r) => r.url.includes("__ariadne-404-probe-"))).toBe(false);
+    expect(summary.pagesCrawled).toBe(6);
+  });
+
+  it("fingerprints the template of a site that answers 200 for everything", async () => {
+    const summary = await crawl(config({ siteUrl: soft404 }));
+    const probe = (await crawlRow(summary.crawlId)).notfoundProbe as NotFoundProbeSample;
+    expect(probe.statusCode).toBe(200);
+    expect(probe.fetchClass).toBe("ok");
+    expect(probe.wordCount).toBeGreaterThan(0);
+    // Stored as the signed decimal string pages.simhash is compared against.
+    expect(probe.simhash).toMatch(/^-?\d+$/);
+  });
+
+  it("says why the probe was skipped on a site that yielded no pages", async () => {
+    const summary = await crawl(config({ siteUrl: closed }));
+    expect(summary.pagesCrawled).toBe(0);
+    const probe = (await crawlRow(summary.crawlId)).notfoundProbe as { skipped?: string };
+    expect(probe.skipped).toMatch(/no pages/i);
+  });
+
+  it("walks the host variants before the crawl starts", async () => {
+    const summary = await crawl(config());
+    const probe = (await crawlRow(summary.crawlId)).hostProbe as HostProbeResult;
+    expect(probe.variants.map((v) => v.start)).toEqual(hostProbeStarts(base));
+    // The fixture is addressed by IP, so there is no www spelling to invent —
+    // two starts, and no name this suite has to ask a real resolver about.
+    expect(probe.variants.map((v) => v.start)).toEqual([
+      `${base}/`,
+      `${base.replace("http://", "https://")}/`,
+    ]);
+
+    const apex = probe.variants.find((v) => v.start === `${base}/`);
+    expect(apex?.hops[0]?.statusCode).toBe(200);
+    expect(apex?.final).toBe(`${base}/`);
+  });
+
+  it("leaves the host probe null when the caller turns it off", async () => {
+    const summary = await crawl(config({ probeHosts: false }));
+    expect((await crawlRow(summary.crawlId)).hostProbe).toBeNull();
+  });
+
+  it("refuses a legacy host it cannot read, before the crawl row exists", async () => {
+    const before = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
+    await expect(
+      runCrawl(db, config({ legacyHosts: ["not a host"] })),
+    ).rejects.toThrow(/legacyHosts/);
+    const after = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
+    // Nothing was created: a config we cannot read is not a crawl that ran.
+    expect(after).toHaveLength(before.length);
   });
 });
 

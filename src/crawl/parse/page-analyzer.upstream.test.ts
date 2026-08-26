@@ -27,7 +27,8 @@
  * hand-folded `byAttr`, the missing dimensions in the same `img` walk as the
  * alt counter. Its third field, `hasLoremIpsum`, is stripped with the Task 6
  * additions: it is a derivation of `bodyText`, which the oracle already models,
- * not a separate DOM read.
+ * not a separate DOM read. Phase 3's `hasSoft404Phrases` is stripped for the
+ * same reason and on the same line.
  *
  * The fields Task 6 added (rel next/prev, domSize, textRatio, hreflang pairs,
  * structuredData, contentHash, simhash) are NOT part of the parity surface —
@@ -59,8 +60,9 @@ const EXTENSION_FIELDS = [
   "structuredDataParseErrors",
   "contentHash",
   "simhash",
-  // A derivation of bodyText, like the two hashes above it.
+  // Derivations of bodyText, like the two hashes above them.
   "hasLoremIpsum",
+  "hasSoft404Phrases",
 ] as const;
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
@@ -258,6 +260,7 @@ function expectParity(html: string) {
     contentHash: _contentHash,
     simhash: _simhash,
     hasLoremIpsum: _hasLoremIpsum,
+    hasSoft404Phrases: _hasSoft404Phrases,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);

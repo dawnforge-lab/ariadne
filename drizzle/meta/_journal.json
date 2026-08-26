@@ -22,6 +22,27 @@
       "when": 1787731918589,
       "tag": "0002_young_dexter_bennett",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787745717853,
+      "tag": "0003_curved_ghost_rider",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787758444248,
+      "tag": "0004_supreme_raider",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787760603147,
+      "tag": "0005_spicy_pete_wisdom",
+      "breakpoints": true
     }
   ]
 }

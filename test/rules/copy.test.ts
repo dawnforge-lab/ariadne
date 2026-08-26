@@ -8,6 +8,24 @@ import {
   TITLE_MIN,
 } from "../../src/rules/page/on-page.js";
 import { DEEP_DEPTH, SLOW_MS } from "../../src/rules/page/technical.js";
+import {
+  NEAR_DUPLICATE_HAMMING,
+  SOFT_404_WORDS,
+} from "../../src/rules/query/content.js";
+import { BREADCRUMB_PAGE_FLOOR } from "../../src/rules/query/structured-data.js";
+
+/**
+ * The content copy spells its distance out in words, so the threshold pin below
+ * has to spell the constant out too. Only the values the rule could plausibly
+ * take are here; an unmapped one fails the assertion rather than passing it.
+ */
+const NUMBER_WORDS: Record<number, string> = {
+  1: "one",
+  2: "two",
+  3: "three",
+  4: "four",
+  5: "five",
+};
 
 /**
  * Every rule id defined by the Phase 2 rule tables (plan tasks 4-6). Kept here
@@ -45,16 +63,62 @@ const PHASE_2_RULE_IDS = [
   "structure.deep-page",
 ];
 
+/**
+ * The query rules of the Phase 3 tables, listed the same way and for the same
+ * reason: copy lands with the rule, and a rule added without copy fails here as
+ * well as at registry build time.
+ */
+const PHASE_3_RULE_IDS = [
+  "redirect.chain",
+  "redirect.loop",
+  "links.broken-internal",
+  "canonical.non-200-target",
+  "canonical.non-indexable-target",
+  "links.orphan",
+  "links.orphan-skipped",
+  "hreflang.missing-return-link",
+  "hreflang.non-indexable-target",
+  "pagination.next-target-uncrawled",
+  "pagination.next-not-linked",
+  "pagination.canonical-to-other",
+  "robots.missing",
+  "robots.blocks-sitemap-urls",
+  "robots.check-skipped",
+  "sitemap.missing",
+  "sitemap.invalid",
+  "sitemap.non-200",
+  "sitemap.redirected",
+  "sitemap.non-indexable",
+  "sitemap.uncrawled",
+  "pages.not-in-sitemap",
+  "url.normalisation-variants",
+  "url.tracking-params-internal",
+  "url.parameter-pages-indexable",
+  "host.http-serves-200",
+  "host.duplicate-host-200",
+  "host.legacy-host-reachable",
+  "host.probe-skipped",
+  "content.soft-404",
+  "content.exact-duplicate",
+  "content.near-duplicate",
+  "schema.none-on-site",
+  "schema.product-incomplete",
+  "schema.breadcrumb-absent",
+  "schema.self-serving-reviews",
+];
+
+const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
+
 describe("issue copy", () => {
   it("throws on an unknown rule id", () => {
     expect(() => copyFor("no.such-rule")).toThrow(/no copy/);
   });
 
-  it("covers every Phase 2 rule id", () => {
-    for (const id of PHASE_2_RULE_IDS) {
+  it("covers every rule id the phase tables define, and nothing else", () => {
+    for (const id of ALL_RULE_IDS) {
       expect(() => copyFor(id), id).not.toThrow();
     }
-    expect(Object.keys(ISSUE_COPY).sort()).toEqual([...PHASE_2_RULE_IDS].sort());
+    expect(Object.keys(ISSUE_COPY).sort()).toEqual([...ALL_RULE_IDS].sort());
   });
 
   it("every entry has substantive, client-facing text", () => {
@@ -124,6 +188,156 @@ describe("issue copy", () => {
     const misconfigured =
       /misconfigured|incorrectly configured|incorrect viewport|wrong viewport|badly configured|invalid viewport/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(misconfigured);
+  });
+
+  // The rule is per SET now: it fires once per distinct cluster of alternates,
+  // not once for the crawl and not once per page. Copy saying "this site" or
+  // "this page" would describe the shape the rule used to have.
+  it("hreflang.missing-x-default speaks about a cluster, not a site or a page", () => {
+    const c = ISSUE_COPY["hreflang.missing-x-default"]!;
+    const wrongScope = /this (?:crawl|site|page)|the whole site|site-wide/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(wrongScope);
+  });
+
+  // rel=next/rel=prev stopped being a discovery or consolidation signal in
+  // 2019. The findings are about what the markup documents and about the HTML
+  // links that are missing beside it.
+  it("the pagination copy does not claim rel=next still consolidates a series", () => {
+    for (const id of [
+      "pagination.next-target-uncrawled",
+      "pagination.next-not-linked",
+      "pagination.canonical-to-other",
+    ]) {
+      const c = ISSUE_COPY[id]!;
+      const overclaim =
+        /rel=next (?:tells|lets|helps|allows|asks) (?:search engines|google|crawlers)|(?:search engines|google|crawlers) use rel=next|consolidat\w+ (?:the )?series (?:with|through|via) rel=next/i;
+      expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
+    }
+  });
+
+  // The engine never probes /sitemap.xml speculatively (a Phase 1 ruling), so
+  // the only sitemaps it can see are the ones robots.txt declares. "This site
+  // has no sitemap" is therefore a claim the rule cannot support: a sitemap
+  // nobody declares is exactly the site this fires on.
+  it("sitemap.missing claims an absent declaration, not an absent file", () => {
+    const c = ISSUE_COPY["sitemap.missing"]!;
+    expect(c.title.toLowerCase()).toContain("declared in robots.txt");
+    const overclaim =
+      /(?:site|there) (?:has|have|is|are) no sitemap|no sitemap (?:exists|at all|on (?:this|the) site)|does not have a sitemap/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  });
+
+  // `robotsUnreadable` lets `outcome === "absent"` through, so the rule also
+  // fires on a site that serves no robots.txt at all. Copy that spoke only of
+  // "the robots.txt contains no Sitemap: line" would describe a file that is
+  // not there, and its fix would tell a client to edit it.
+  it("sitemap.missing covers the site that serves no robots.txt either", () => {
+    const c = ISSUE_COPY["sitemap.missing"]!;
+    expect(`${c.explanation} ${c.howToFix}`).toMatch(/no robots\.txt|serves none|serves no robots/i);
+  });
+
+  // The rule fires on every non-200, non-redirect status, and `blocked` (401,
+  // 403, 429) is one of them. "Restore the page or remove the entry" is the
+  // wrong instruction for a URL a WAF is defending, so the fix has to branch
+  // the way `canonical.non-200-target`'s does.
+  it("sitemap.non-200 tells blocked apart from gone", () => {
+    const fix = ISSUE_COPY["sitemap.non-200"]!.howToFix;
+    expect(fix).toMatch(/\b401\b/);
+    expect(fix).toMatch(/\b403\b/);
+    expect(fix).toMatch(/\b429\b/);
+    expect(fix).toMatch(/WAF|bot-protection|allowlist/i);
+  });
+
+  // The rule fires on `outcome === "absent"`, which is the site ANSWERING with
+  // a 4xx. A server that could not serve robots.txt is a different finding
+  // (`robots.check-skipped`), and copy blurring the two would tell a client to
+  // write a file they may already have.
+  it("robots.missing does not treat a server failure as an absent file", () => {
+    const c = ISSUE_COPY["robots.missing"]!;
+    const blurred = /unreachable|could not be (?:fetched|reached|read)|timed out|server error/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(blurred);
+  });
+
+  // Same contract as the on-page thresholds: the numbers in the content copy
+  // are the rules' own constants, so changing one fails here until the prose
+  // changes with it.
+  it("quotes the content thresholds the rules actually use", () => {
+    expect(ISSUE_COPY["content.soft-404"]!.explanation).toMatch(
+      new RegExp(`\\b${SOFT_404_WORDS} words\\b`),
+    );
+    expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toContain(
+      `${NUMBER_WORDS[NEAR_DUPLICATE_HAMMING]} bits out of sixty-four`,
+    );
+  });
+
+  // The soft-404 rule fires on EITHER signal. Copy saying both are needed would
+  // describe a rule half as sensitive as the one that ships, and copy claiming
+  // the page was proved missing would overstate what a similarity measurement
+  // and a word count can establish.
+  it("content.soft-404 does not make either signal a requirement", () => {
+    const c = ISSUE_COPY["content.soft-404"]!;
+    expect(c.explanation).toContain("200");
+    const bothRequired =
+      /both signals|only when both|and also matches|must (?:also )?match the|combination of both/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(bothRequired);
+  });
+
+  // The near-duplicate rule measures a hamming distance between two content
+  // fingerprints. It knows nothing about who wrote what, and near-duplicate
+  // pages carry no ranking penalty — the finding is about consolidation.
+  it("content.near-duplicate claims similarity, not plagiarism or a penalty", () => {
+    const c = ISSUE_COPY["content.near-duplicate"]!;
+    const overclaim =
+      /plagiaris|scraped|stolen|copied from|duplicate content penalt|penalis|penaliz|will be penal/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  });
+
+  // The breadcrumb copy names the size of site it is advice for, and that
+  // number is the rule's own floor. Same contract as the on-page thresholds.
+  // The gate is `indexablePages < BREADCRUMB_PAGE_FLOOR` — so the floor is
+  // inclusive and a site of exactly five pages fires. "More than five" would
+  // describe a rule one page less sensitive than the one that ships.
+  it("quotes the breadcrumb page floor the rule actually uses, inclusively", () => {
+    const c = ISSUE_COPY["schema.breadcrumb-absent"]!;
+    expect(c.explanation).toMatch(
+      new RegExp(`\\bat least ${BREADCRUMB_PAGE_FLOOR} indexable pages\\b`),
+    );
+    expect(c.explanation).not.toMatch(new RegExp(`\\bmore than ${BREADCRUMB_PAGE_FLOOR}\\b`));
+  });
+
+  // The crawler reads JSON-LD and nothing else, so a site marked up in
+  // microdata or RDFa is invisible to these rules. Copy saying a site has no
+  // structured data, flatly, would be a claim about markup nobody looked at.
+  it("the site-scoped schema copy claims JSON-LD, not every markup format", () => {
+    for (const id of ["schema.none-on-site", "schema.breadcrumb-absent"]) {
+      const c = ISSUE_COPY[id]!;
+      expect(`${c.title} ${c.explanation}`, id).toContain("JSON-LD");
+      const overclaim =
+        /(?:has|have|uses?|carr(?:y|ies)) no structured data(?! .{0,20}JSON-LD)|no structured data (?:at all|of any kind|anywhere on the site\.)|no markup of any kind/i;
+      expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
+    }
+  });
+
+  // The presence blob behind the Product finding is the union across the page's
+  // Product blocks, so a field it names is missing from all of them. Copy about
+  // "the Product block" would misdescribe a page carrying several.
+  it("schema.product-incomplete speaks about the page's blocks, not one block", () => {
+    const c = ISSUE_COPY["schema.product-incomplete"]!;
+    expect(c.explanation).toContain("No Product block on this page");
+    const singular = /your Product block\b|the Product block on this page\b/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(singular);
+  });
+
+  // The self-serving finding is a statement about which snippets Google shows.
+  // It is not an accusation that the reviews are fabricated, and there is no
+  // penalty attached to publishing them.
+  it("schema.self-serving-reviews claims a policy, not fake reviews or a penalty", () => {
+    const c = ISSUE_COPY["schema.self-serving-reviews"]!;
+    // The copy has to say so, rather than merely avoid saying the opposite:
+    // "Google ignores your ratings" reads as a sanction unless it is denied.
+    expect(c.explanation).toMatch(/not a penalty/i);
+    const overclaim = /fake|fraudulent|fabricat|manual action|penalis|penaliz|will be penal/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 
   it("headings.h1-multiple does not claim a ranking penalty", () => {

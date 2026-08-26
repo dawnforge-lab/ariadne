@@ -1,7 +1,9 @@
 import { and, asc, eq, gt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { issues, pages } from "../db/schema.js";
-import type { Registry } from "./registry/registry.js";
+import { crawls, issues, pages } from "../db/schema.js";
+import { deriveFieldPresence } from "./derive/field-presence.js";
+import { deriveUrlParams } from "./derive/url-params.js";
+import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import type { Finding } from "./registry/types.js";
 
 /**
@@ -17,7 +19,36 @@ export interface RunSummary {
   pagesScanned: number;
   findings: number;
   byRule: Record<string, number>;
+  /** Rows each derivation wrote, by derivation name. */
+  derived: Record<string, number>;
 }
+
+/**
+ * A derivation: SQL that turns the crawl's raw rows into an inventory table.
+ *
+ * It returns a count of what it wrote, keyed by field name, so the run summary
+ * can say what was derived rather than leaving it invisible. Derivations write
+ * only their own table — never `issues` — which is what keeps "a rule reads the
+ * database and produces findings" true.
+ */
+type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
+
+/**
+ * The derivation phase, in order.
+ *
+ * Ordered and explicit rather than discovered: a derivation that reads another
+ * derivation's table would depend on this order, so the order is a list one can
+ * read rather than an emergent property of module loading. Every entry is
+ * idempotent over the crawl it is given — `deriveUrlParams` rebuilds its
+ * inventory table, `deriveFieldPresence` recomputes the column it fills — so a
+ * re-run over the same crawl leaves exactly what the first run left.
+ *
+ * The two are independent: one reads `pages`, the other `structured_data`, and
+ * neither reads what the other writes. The order between them is therefore
+ * arbitrary today, and stated rather than discovered so that it stops being
+ * arbitrary the moment one of them starts mattering.
+ */
+const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence];
 
 /**
  * Run every rule in `registry` over one crawl, writing `issues` rows.
@@ -36,6 +67,17 @@ export async function runRules(
   crawlId: string,
   registry: Registry,
 ): Promise<RunSummary> {
+  // A crawl id nothing knows selects no pages, and a run over no pages looks
+  // exactly like a clean site: zero findings, no error. Ask the `crawls` table
+  // first so a typo or a deleted crawl is an error rather than a green report
+  // about nothing (hard rule 7).
+  const crawl = await db
+    .select({ id: crawls.id })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  if (crawl.length === 0) throw new Error(`no such crawl '${crawlId}'`);
+
   // Metric rules exist in the registry's type but nothing here drives them.
   // Silently ignoring one would mean a registered rule that never runs and a
   // check that looks covered — so refuse the run instead.
@@ -45,7 +87,7 @@ export async function runRules(
     );
   }
 
-  const summary: RunSummary = { pagesScanned: 0, findings: 0, byRule: {} };
+  const summary: RunSummary = { pagesScanned: 0, findings: 0, byRule: {}, derived: {} };
   const buffer: Finding[] = [];
 
   const flush = async (): Promise<void> => {
@@ -60,6 +102,10 @@ export async function runRules(
             ruleId: f.ruleId,
             pageId: f.pageId,
             severity: f.severity,
+            // The ruleset that produced the row, stamped alongside it: a
+            // finding read back later says which rules judged it, without
+            // depending on the crawl row still being there to say so.
+            rulesetVersion: RULESET_VERSION,
             dedupeKey: f.dedupeKey,
             details: { pageUrl: f.pageUrl, ...f.evidence },
           })),
@@ -97,6 +143,27 @@ export async function runRules(
     }
     if (buffer.length >= INSERT_BATCH) await flush();
     cursor = batch[batch.length - 1]!.id;
+  }
+
+  // The derivation phase sits between the two rule phases, and its position is
+  // load-bearing in one direction: a query rule below may join the inventory a
+  // derivation just wrote, so the inventory has to be current before any of
+  // them runs. It reads the crawl's tables in SQL, so the page cursor above
+  // neither helps it nor constrains it. Page findings buffered so far are
+  // flushed first, so a derivation that throws leaves the evidence already
+  // gathered on disk rather than taking it down with it.
+  await flush();
+  for (const derive of derivations) {
+    try {
+      for (const [key, count] of Object.entries(await derive(db, crawlId))) {
+        summary.derived[`${derive.name}.${key}`] = count;
+      }
+    } catch (error) {
+      // Loud, like a rule that throws. A derivation that failed silently would
+      // leave the next run's rules joining a stale or empty inventory table and
+      // reporting whatever that implied (hard rule 7).
+      throw new Error(`derivation '${derive.name}' threw`, { cause: error });
+    }
   }
 
   // Query rules run after the page rules: they read the crawl's tables whole

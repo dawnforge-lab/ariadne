@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable, text, integer, bigint, boolean, jsonb, timestamp, real,
   primaryKey, index, uniqueIndex,
@@ -14,6 +15,33 @@ export const crawls = pgTable("crawls", {
   pagesCrawled: integer("pages_crawled").notNull().default(0),
   pagesTotal: integer("pages_total"),
   renderPassCount: integer("render_pass_count").notNull().default(0),
+  // Three crawl-level evidence blobs the query rules read instead of fetching
+  // (hard rule 3: rules read the database). All three are nullable, and a null
+  // does NOT mean the same thing in each — what a rule may conclude from one
+  // depends on when its writer runs:
+  //
+  //  - `discovery` (what robots.txt said and what the sitemap walk found) is
+  //    written by `runCrawl` unconditionally, immediately after `discover()`
+  //    and before the frontier is seeded or anything branches on it. There is
+  //    no path that crawls a site and leaves it null. A null is therefore not
+  //    "not attempted": it is a row no completed discovery produced — one that
+  //    predates the column, or a crawl that died inside discovery — and the
+  //    robots and sitemap rules THROW on it rather than judging a site on
+  //    evidence that is not there (hard rule 7). See
+  //    src/rules/query/crawl-evidence.ts.
+  //  - `hostProbe` (the www/apex/http variant walk) is skipped entirely when
+  //    the caller passes `probeHosts: false`, and has no "skipped" shape to
+  //    record that in. A null here genuinely is "not attempted", and a rule
+  //    reading it must report a skipped check rather than a finding.
+  //  - `notfoundProbe` (the synthetic-404 sample the soft-404 rule compares
+  //    pages against) always ends up written once the crawl reaches that step:
+  //    either a sample, or a `{ skipped: <reason> }` object naming why it was
+  //    not taken. A null means the crawl never got that far — it is still
+  //    running, or it failed before the probe — which is again "not attempted"
+  //    and again a skipped check, not a finding.
+  discovery: jsonb("discovery_jsonb"),
+  hostProbe: jsonb("host_probe_jsonb"),
+  notfoundProbe: jsonb("notfound_probe_jsonb"),
 });
 
 export const pages = pgTable("pages", {
@@ -76,6 +104,11 @@ export const pages = pgTable("pages", {
   hasViewport: boolean("has_viewport").notNull().default(false),
   // Placeholder copy shipped to production (CHECK-40).
   hasLoremIpsum: boolean("has_lorem_ipsum").notNull().default(false),
+  // Body text carrying a "page not found" phrase (CHECK-13). One of the two
+  // soft-404 signals; the other is a simhash match against the site's own 404
+  // template. A phrase alone is not a verdict — a real article about broken
+  // links contains the words too — so the rule pairs it with a word count.
+  hasSoft404Phrases: boolean("has_soft404_phrases").notNull().default(false),
   relNext: text("rel_next"),
   relPrev: text("rel_prev"),
   rendered: boolean("rendered").notNull().default(false),
@@ -85,6 +118,35 @@ export const pages = pgTable("pages", {
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),
   index("pages_crawl_type").on(t.crawlId, t.pageType),
+  // The rule runner's page cursor: `where crawl_id = $1 and id > $2 order by
+  // id limit 500`. Without this the runner sorts the crawl's whole page set
+  // once per batch, which is the memory contract's cost moved into Postgres.
+  index("pages_crawl_id").on(t.crawlId, t.id),
+  // The simhash bands `content.near-duplicate` joins on: four 16-bit slices of
+  // the signed simhash, each one an expression index so the pair join's
+  // `(a.simhash >> k) & 65535 = (b.simhash >> k) & 65535` can be answered from
+  // an index instead of by examining every pair. Measured on 5,000 pages: 2.9s
+  // without them (nested loop, quadratic), 0.11s with them (BitmapOr across all
+  // four arms).
+  //
+  // TEXTUAL COUPLING, and it is not a soft one. Postgres matches an expression
+  // index by comparing the expression's parse tree with the query's, so:
+  //
+  //  - band 0 MUST be written `(simhash >> 0) & 65535`, exactly as the rule
+  //    writes it. `int8shr(simhash, 0)` is NOT constant-folded away, so an
+  //    index on the simpler `simhash & 65535` does not match the rule's band-0
+  //    predicate and that arm falls back to a sequential scan;
+  //  - one arm that fails to match kills the WHOLE BitmapOr — Postgres cannot
+  //    use indexes for an OR unless every branch is indexable — and it does so
+  //    silently, as a slow query rather than an error.
+  //
+  // So these four expressions and the four band predicates in
+  // `nearDuplicateFindings` (src/rules/query/content.ts) must stay spelled
+  // identically. Change one, change the other, and re-check with EXPLAIN.
+  index("pages_simhash_band0").on(t.crawlId, sql`((${t.simhash} >> 0) & 65535)`),
+  index("pages_simhash_band1").on(t.crawlId, sql`((${t.simhash} >> 16) & 65535)`),
+  index("pages_simhash_band2").on(t.crawlId, sql`((${t.simhash} >> 32) & 65535)`),
+  index("pages_simhash_band3").on(t.crawlId, sql`((${t.simhash} >> 48) & 65535)`),
 ]);
 
 export const links = pgTable("links", {
@@ -119,7 +181,17 @@ export const structuredData = pgTable("structured_data", {
   schemaType: text("schema_type").notNull(),
   raw: jsonb("raw_jsonb").notNull(),
   fieldPresence: jsonb("field_presence_jsonb"),
-}, (t) => [index("sd_crawl_type").on(t.crawlId, t.schemaType)]);
+}, (t) => [
+  index("sd_crawl_type").on(t.crawlId, t.schemaType),
+  // COUPLED to `deriveFieldPresence`'s batch query (src/rules/derive/field-presence.ts),
+  // which streams the crawl's blocks by a `page_id` cursor: `where crawl_id = $1
+  // and page_id > $cursor … order by page_id limit N`. Without this index every
+  // batch rescans every profiled row of the crawl and the derivation is
+  // quadratic in the number of pages carrying structured data — a slow query,
+  // never an error, which is exactly the failure that hides. Change the cursor
+  // there, change this index here (the `pages_simhash_band*` precedent).
+  index("sd_crawl_page").on(t.crawlId, t.pageId),
+]);
 
 export const sitemapUrls = pgTable("sitemap_urls", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
@@ -142,6 +214,11 @@ export const issues = pgTable("issues", {
   ruleId: text("rule_id").notNull(),
   pageId: text("page_id"),
   severity: text("severity").notNull(), // critical|warning|info
+  // The ruleset that produced this row. Defaulted rather than backfilled: the
+  // empty string is honestly "written before the stamp existed", where a
+  // backfilled version number would be a claim about which rules ran that
+  // nobody can check.
+  rulesetVersion: text("ruleset_version").notNull().default(""),
   dedupeKey: text("dedupe_key").notNull(),
   details: jsonb("details_jsonb").notNull(),
 }, (t) => [uniqueIndex("issues_dedupe").on(t.crawlId, t.ruleId, t.dedupeKey),

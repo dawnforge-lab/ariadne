@@ -48,7 +48,7 @@ import { XMLParser } from "fast-xml-parser";
 import robotsParserImport from "robots-parser";
 import { request } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
-import { isSameOrigin } from "./parse/url-utils.js";
+import { isSameOrigin, onRulesOrigin } from "./parse/url-utils.js";
 import {
   blockedAddressMessage,
   decodeBody,
@@ -499,37 +499,6 @@ function classifyRobotsFailure(doc: DocResult): "absent" | "unreachable" | "retr
   if (doc.refused) return "unreachable";
   if (doc.status !== null && doc.status >= 400 && doc.status < 500) return "absent";
   return "retry";
-}
-
-/**
- * Rewrite a same-site URL onto the origin the rules were read from, for the
- * purposes of the robots check only.
- *
- * robots-parser answers `undefined` for any URL whose origin differs from the
- * robots.txt it parsed, and `undefined` means "no rule forbids this" — so a
- * site that serves both `example.com` and `www.example.com` (or both schemes)
- * without redirecting would have every rule silently skipped for whichever
- * spelling a link happened to use, and `Disallow: /admin` would not hold.
- * `isSameOrigin` is the crawl boundary: URLs it admits are the same site by
- * our own rule, so the same path rules apply to them. It is asymmetric about
- * an http->https upgrade, so both directions are tried — the rules origin can
- * be the upgraded one when robots.txt redirected to https.
- *
- * The rewrite never leaves this function: the URL enqueued and fetched is the
- * one the caller passed. A genuinely external URL is not rewritten and keeps
- * the old answer (no rules of ours apply to another site).
- */
-function onRulesOrigin(url: string, rulesOrigin: string): string {
-  if (!isSameOrigin(url, rulesOrigin) && !isSameOrigin(rulesOrigin, url)) return url;
-  try {
-    const parsed = new URL(url);
-    const origin = new URL(rulesOrigin);
-    parsed.protocol = origin.protocol;
-    parsed.host = origin.host;
-    return parsed.href;
-  } catch {
-    return url;
-  }
 }
 
 async function fetchRobots(

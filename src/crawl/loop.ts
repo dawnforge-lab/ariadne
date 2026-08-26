@@ -48,6 +48,7 @@ import { crawls, sitemapUrls } from "../db/schema.js";
 import { RULESET_VERSION } from "../rules/registry/registry.js";
 import { discover, type DiscoveryResult, type DiscoveryTruncation, type RobotsInfo } from "./discovery.js";
 import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
+import { hostProbeStarts, probeHostVariants } from "./host-probe.js";
 import {
   completeUrl,
   enqueueUrls,
@@ -78,7 +79,80 @@ export interface CrawlConfig {
    * field, a CLI flag or an env var.
    */
   allowPrivate?: boolean;
+  /**
+   * Walk the host's other spellings before crawling (see host-probe). Defaults
+   * to on: it costs four chains paced by `perHostDelayMs`, and it is the only
+   * evidence the host rules (CHECK-13/14/15) have. Set false to skip it — the
+   * rules then report the check as skipped rather than passing it.
+   */
+  probeHosts?: boolean;
+  /**
+   * Domains the site used to live on, probed alongside its own spellings. A
+   * bare host or a full http(s) URL; anything else throws rather than being
+   * quietly dropped (see hostProbeStarts).
+   */
+  legacyHosts?: string[];
 }
+
+/**
+ * `crawls.discovery_jsonb`: what the crawl learned before it fetched a page.
+ *
+ * `robots.raw` is the robots.txt text as served (discovery caps the read at
+ * 500KB), stored verbatim so the rules can re-parse it against the URLs the
+ * crawl found instead of re-fetching it — hard rule 3, in a column.
+ * `sitemapSources` is the sitemap documents the walk was *pointed at*, so
+ * "no sitemap is declared" and "the declared sitemap could not be read" stay
+ * different facts: the second one shows up in `truncation.failures` with a
+ * non-empty `sitemapSources`.
+ */
+export interface DiscoveryEvidence {
+  robots: {
+    outcome: RobotsInfo["outcome"];
+    crawlDelaySec: number | null;
+    note: string | null;
+    raw: string | null;
+    /**
+     * `raw` is a 500KB prefix, not the whole file. It travels with the text
+     * because a rule that re-parses a truncated robots.txt would find no
+     * `Disallow` for every rule past the cap and conclude the URL is allowed —
+     * the same silent "not disallowed" an unreachable robots.txt is refused
+     * for (RFC 9309 §2.3.1.4). A rule reading `raw` must check this and refuse
+     * to conclude, not conclude quietly.
+     */
+    truncated: boolean;
+  };
+  sitemapSources: string[];
+  truncation: DiscoveryTruncation;
+  /** Sitemap documents attempted. Lifted out of `truncation` for the rules. */
+  docsFetched: number;
+}
+
+/** `crawls.notfound_probe_jsonb` when the probe ran: the site's 404 template. */
+export interface NotFoundProbeSample {
+  probeUrl: string;
+  statusCode: number | null;
+  fetchClass: FetchClass;
+  /** The template's length, when it answered 200 with HTML. Else null. */
+  wordCount: number | null;
+  /**
+   * The template's simhash as `String(BigInt.asIntN(64, …))` — the same signed
+   * spelling `pages.simhash` is stored in, so the soft-404 rule can compare
+   * the two in SQL without converting either. Null unless the probe got 200
+   * HTML back.
+   */
+  simhash: string | null;
+}
+
+/**
+ * `crawls.notfound_probe_jsonb` when the probe did not run. A null column
+ * would be indistinguishable from a crawl that predates the probe; this says
+ * which decision was taken and why (hard rule 7).
+ */
+export interface SkippedProbe {
+  skipped: string;
+}
+
+export type NotFoundProbeEvidence = NotFoundProbeSample | SkippedProbe;
 
 /**
  * The values a caller that does not care gets. Not applied inside `runCrawl` —
@@ -295,6 +369,8 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
     perHostDelayMs: raw["perHostDelayMs"],
     maxConcurrency: raw["maxConcurrency"],
     allowPrivate: raw["allowPrivate"],
+    probeHosts: raw["probeHosts"],
+    legacyHosts: raw["legacyHosts"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -310,8 +386,22 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
       );
     }
   }
-  if (config.allowPrivate !== undefined && typeof config.allowPrivate !== "boolean") {
-    throw new Error(`resumeCrawl: crawl ${crawlId} config.allowPrivate is not a boolean`);
+  // The optional fields: absent is fine, present-and-wrong is not. A stored
+  // `probeHosts: "false"` must not resume as "probe on" (it is truthy) or as
+  // "probe off" (a guess) — it must stop.
+  for (const field of ["allowPrivate", "probeHosts"] as const) {
+    if (config[field] !== undefined && typeof config[field] !== "boolean") {
+      throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a boolean`);
+    }
+  }
+  if (
+    config.legacyHosts !== undefined &&
+    (!Array.isArray(config.legacyHosts) ||
+      !config.legacyHosts.every((host) => typeof host === "string"))
+  ) {
+    throw new Error(
+      `resumeCrawl: crawl ${crawlId} config.legacyHosts is not an array of strings`,
+    );
   }
   return config as CrawlConfig;
 }
@@ -337,6 +427,11 @@ function validateConfig(config: CrawlConfig): void {
   }
   if (normalizeUrl(config.siteUrl) === null) {
     throw new Error(`CrawlConfig.siteUrl is not an http(s) URL: ${config.siteUrl}`);
+  }
+  if (config.probeHosts !== false) {
+    // Throws on a legacyHosts entry that names no host — here, before the
+    // crawls row exists, rather than four fetches into the run.
+    hostProbeStarts(config.siteUrl, config.legacyHosts ?? []);
   }
 }
 
@@ -381,10 +476,35 @@ async function runToCompletion(
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
 
+  // INSERTION 1 — the host probe, before discovery. It asks what the site's
+  // *other names* do, which is a question the crawl proper can never answer:
+  // everything after this line happens under the one spelling the crawl was
+  // seeded with, robots.txt included. Four chains, up to five hops each, one
+  // at a time and paced by `perHostDelayMs` — robots.txt is not readable yet,
+  // so the config delay is the spacing it can honour; see host-probe.
+  if (config.probeHosts !== false) {
+    const hostProbe = await probeHostVariants(config.siteUrl, {
+      userAgent: config.userAgent,
+      allowPrivate,
+      legacyHosts: config.legacyHosts,
+      perHostDelayMs: config.perHostDelayMs,
+      timeoutMs: FETCH_TIMEOUT_MS,
+    });
+    await db.update(crawls).set({ hostProbe }).where(eq(crawls.id, crawlId));
+  }
+
   const discovery = await discover(config.siteUrl, {
     userAgent: config.userAgent,
     allowPrivate,
   });
+
+  // INSERTION 2 — discovery's own findings, written before anything branches on
+  // them. A crawl that refuses to run because robots.txt is unreachable is
+  // exactly the crawl whose discovery evidence a reader most needs.
+  await db
+    .update(crawls)
+    .set({ discovery: discoveryEvidence(discovery) })
+    .where(eq(crawls.id, crawlId));
 
   // Complete disallow: robots.txt could not be read, which is not permission
   // (RFC 9309 §2.3.1.4). The crawl fails loudly rather than reporting a clean
@@ -395,6 +515,9 @@ async function runToCompletion(
     // Whatever an earlier run of this crawl already did stands — a resume that
     // finds robots.txt down must not rewrite the row's page count to zero.
     const crawled = (await frontierCounts(db, crawlId)).done;
+    await writeNotFoundProbe(db, crawlId, {
+      skipped: `not probed: ${note}`,
+    });
     await closeCrawl(db, crawlId, "failed", crawled);
     return summarise(db, crawlId, "failed", crawled, emptyWriterStats(), discovery, note);
   }
@@ -645,7 +768,16 @@ async function runToCompletion(
     );
   }
 
+  // INSERTION 3 — one last fetch, of a URL that cannot exist, so the rules can
+  // tell a real 404 from a site that answers 200 for everything. It runs after
+  // the loop's errors have been dealt with (a crawl that is failing does not
+  // get to make another request) and before the row is closed.
   const status = aborted ? "cancelled" : "finished";
+  await probeKnownMissing(db, crawlId, config, discovery, gate, {
+    allowPrivate,
+    pagesCrawled,
+    aborted,
+  });
   await closeCrawl(db, crawlId, status, pagesCrawled);
   return summarise(
     db,
@@ -658,6 +790,106 @@ async function runToCompletion(
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
   );
+}
+
+/** The `crawls.discovery_jsonb` row for one discovery result. */
+function discoveryEvidence(discovery: DiscoveryResult): DiscoveryEvidence {
+  return {
+    robots: {
+      outcome: discovery.robots.outcome,
+      crawlDelaySec: discovery.robots.crawlDelaySec,
+      note: discovery.robots.note,
+      raw: discovery.robots.raw,
+      truncated: discovery.robots.truncated,
+    },
+    // The documents the walk was pointed at. Today that is exactly what
+    // robots.txt declared, because `discover` is called without
+    // `extraSitemaps`; a caller that starts passing them must add them here,
+    // or "the site declares no sitemap" becomes a lie.
+    sitemapSources: [...discovery.robots.sitemapUrls],
+    truncation: discovery.truncation,
+    docsFetched: discovery.truncation.docsFetched,
+  };
+}
+
+async function writeNotFoundProbe(
+  db: Db,
+  crawlId: string,
+  probe: NotFoundProbeEvidence,
+): Promise<void> {
+  await db.update(crawls).set({ notfoundProbe: probe }).where(eq(crawls.id, crawlId));
+}
+
+/**
+ * Fetch one URL that cannot exist and record what came back.
+ *
+ * This is the site's own answer to "what do you do with a URL you do not
+ * have", and there is no other way to get it: a soft-404 site returns 200 for
+ * every wrong URL, so a crawl of real URLs can never see the template. When
+ * the answer *is* 200 HTML, the template's simhash and word count go into the
+ * row and become the fingerprint the soft-404 rule (CHECK-16) compares crawled
+ * pages against — `String(BigInt.asIntN(64, …))`, the same signed spelling
+ * `pages.simhash` uses, so the comparison is one SQL expression.
+ *
+ * It is one fetch, through the same politeness gate as any other (hard rule 9)
+ * and the same URL policy (hard rule 5, inside `fetchPage`), and it produces no
+ * `pages` row and no frontier entry: it is not a page of the site.
+ *
+ * Every reason not to probe is written down instead of leaving the column null
+ * (hard rule 7): a null means "this crawl predates the probe", and a reader
+ * cannot be left guessing which of the two it is looking at.
+ */
+async function probeKnownMissing(
+  db: Db,
+  crawlId: string,
+  config: CrawlConfig,
+  discovery: DiscoveryResult,
+  gate: HostGate,
+  opts: { allowPrivate: boolean; pagesCrawled: number; aborted: boolean },
+): Promise<void> {
+  if (opts.aborted) {
+    // The caller asked us to stop. Issuing another request would be the one
+    // thing an abort is meant to prevent; a resume will take the sample.
+    await writeNotFoundProbe(db, crawlId, {
+      skipped: "crawl cancelled before the known-404 probe",
+    });
+    return;
+  }
+  if (opts.pagesCrawled === 0) {
+    await writeNotFoundProbe(db, crawlId, {
+      skipped: "no pages crawled: nothing to compare a 404 template against",
+    });
+    return;
+  }
+
+  const probeUrl = `${new URL(config.siteUrl).origin}/__ariadne-404-probe-${randomUUID()}`;
+  if (!discovery.robots.isAllowed(probeUrl)) {
+    await writeNotFoundProbe(db, crawlId, {
+      skipped: `robots.txt disallows the probe path (${probeUrl})`,
+    });
+    return;
+  }
+
+  await gate.acquire(new URL(probeUrl).host);
+  const result = await fetchPage(probeUrl, {
+    userAgent: config.userAgent,
+    allowPrivate: opts.allowPrivate,
+    timeoutMs: FETCH_TIMEOUT_MS,
+  });
+  // Only a 200 with HTML carries a template. Everything else — the 404 we
+  // hoped for, a redirect, a block — is recorded as the class it was.
+  const analysis =
+    result.fetchClass === "ok" && result.body !== null
+      ? analyzePage(result.body, probeUrl)
+      : null;
+
+  await writeNotFoundProbe(db, crawlId, {
+    probeUrl,
+    statusCode: result.statusCode,
+    fetchClass: result.fetchClass,
+    wordCount: analysis?.wordCount ?? null,
+    simhash: analysis === null ? null : String(BigInt.asIntN(64, analysis.simhash)),
+  });
 }
 
 function toOutcome(result: FetchResult): BatchOutcome {

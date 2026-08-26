@@ -20,10 +20,32 @@ export interface Metric {
   value: Record<string, unknown>;
 }
 
+/**
+ * The report's top-level grouping. A closed union rather than a free string:
+ * the categories are what the report and the action plan sort findings into,
+ * so a one-off spelling ("structure", "mobile") is a group of one nobody asked
+ * for. A new rule belongs in one of these; if it genuinely does not, the union
+ * is what gets extended, deliberately, in one place.
+ */
+export type RuleCategory =
+  | "on-page"
+  | "canonical"
+  | "indexability"
+  | "hreflang"
+  | "technical"
+  | "crawl"
+  | "redirects"
+  | "links"
+  | "sitemap"
+  | "url"
+  | "host"
+  | "content"
+  | "structured-data";
+
 interface RuleMeta {
   id: string;               // 'canonical.non-200-target'
   checkIds: string[];       // ['CHECK-19'] — traces to the sf-audit checklist
-  category: string;
+  category: RuleCategory;
   severity: Severity;
   title: string;
   explanation: string;      // client-facing

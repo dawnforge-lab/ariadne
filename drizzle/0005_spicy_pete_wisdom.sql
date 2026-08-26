@@ -1,0 +1,1 @@
+CREATE INDEX "sd_crawl_page" ON "structured_data" USING btree ("crawl_id","page_id");

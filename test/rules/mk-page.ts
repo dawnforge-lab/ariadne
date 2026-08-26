@@ -60,6 +60,7 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     hasAmp: false,
     hasViewport: true,
     hasLoremIpsum: false,
+    hasSoft404Phrases: false,
     relNext: null,
     relPrev: null,
     rendered: false,
@@ -67,6 +68,39 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     renderedLinkCount: null,
     ...overrides,
   };
+}
+
+/**
+ * The `pages` columns `is_indexable` is derived from. The query-rule DB tests
+ * describe their rows with specs of this shape and let `writerIndexable` fill
+ * the flag in, rather than stating it themselves.
+ */
+export interface IndexabilitySpec {
+  fetchClass?: string;
+  /** Null for a fetch that got no HTTP answer at all (timeout, network error). */
+  statusCode?: number | null;
+  robotsMeta?: string;
+  xRobotsTag?: string;
+}
+
+/**
+ * `is_indexable` exactly as `PageWriter` computes it (see `isIndexable` in
+ * src/crawl/persist.ts): a plain boolean, true only for a 200 OK with no
+ * noindex directive. Derived rather than passed in, so no test can insert a
+ * combination the crawler could never write and then assert a rule's behaviour
+ * on it.
+ *
+ * Shared by every query-rule DB test that inserts `pages` rows directly —
+ * three of them now — so "what the writer would have stored" is answered once.
+ */
+export function writerIndexable(s: IndexabilitySpec): boolean {
+  const noindex = (v: string | undefined): boolean => /\bnoindex\b|\bnone\b/i.test(v ?? "");
+  return (
+    (s.statusCode ?? 200) === 200 &&
+    (s.fetchClass ?? "ok") === "ok" &&
+    !noindex(s.robotsMeta) &&
+    !noindex(s.xRobotsTag)
+  );
 }
 
 /**

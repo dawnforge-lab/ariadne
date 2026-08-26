@@ -24,13 +24,14 @@
  *   images.missing-alt / missing-dimensions     every img has alt, width, height
  *   performance.slow-response                   answered immediately
  *   structure.deep-page                         linked from the hub, depth 1
- *   hreflang.invalid-code                       no hreflang declarations
+ *   hreflang.* (all four)                       no hreflang declarations
+ *   links.orphan                                linked from the hub
+ *   pagination.*                                no rel=next, no rel=prev
  *
- * `hreflang.missing-x-default` is the one rule this page cannot defend itself
- * against, because it is site-scoped: if any fixture anywhere declares hreflang
- * without an x-default, the finding is written with a null page id. It attaches
- * to no URL, so it never lands on `/control` — the harness maps only
- * page-attached findings to paths, which is what keeps that true.
+ * Every rule in the registry is now page-attached, so nothing reaches this page
+ * except through its own markup and its own place in the link graph — which is
+ * what makes "fires nothing" a claim about the page rather than about how the
+ * harness maps findings.
  *
  * If a new rule lands and this page starts firing it, the fix is to add the
  * missing signal HERE, in one place, rather than to loosen the rule.

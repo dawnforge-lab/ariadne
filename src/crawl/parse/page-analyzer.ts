@@ -84,6 +84,13 @@
  * same reason `contentHash` and `simhash` are not — it is a derivation of
  * `bodyText`, which the oracle already holds the port to, not a separate piece
  * of DOM reading.
+ *
+ * Phase 3 (P3-T2) added `hasSoft404Phrases` on exactly the same footing as
+ * `hasLoremIpsum`: same visible-text accumulator, same end-of-parse
+ * derivation, same exclusion from the parity surface (it is a `bodyText`
+ * derivation, not a DOM read, so `EXTENSION_FIELDS` strips it). It exists
+ * because the soft-404 rule (CHECK-16) needs a phrase signal it can read in
+ * SQL, and the crawl is the only place the page's text is ever in memory.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
@@ -156,6 +163,15 @@ export interface PageAnalysis {
    * noscript and svg subtrees cannot trigger it.
    */
   hasLoremIpsum: boolean;
+  /**
+   * The page's visible text contains one of `SOFT_404_PHRASES` — the wording a
+   * "not found" page uses when it forgot to say 404 in its status line. On its
+   * own it is not a finding (a blog post about 404 errors says these words
+   * too); the rule pairs it with a thin body and the site's own 404 template.
+   * Read off the same accumulator as `wordCount`, so a phrase inside a script,
+   * style, noscript or svg subtree cannot raise it.
+   */
+  hasSoft404Phrases: boolean;
   links: PageLink[];
   /** First `<link rel=next>` href; null when absent or href-less. */
   relNext: string | null;
@@ -256,6 +272,43 @@ const MAX_LD_JSON_DEPTH = 5;
  * apart here even when an element boundary separates them in the markup.
  */
 const LOREM_IPSUM = /lorem ipsum/i;
+/**
+ * The wording of a "not found" page, matched against the visible text on the
+ * same terms as LOREM_IPSUM (never the raw HTML, and whitespace is already
+ * collapsed, so a phrase split across an element boundary still matches).
+ *
+ * Phrases, never a bare "404": product codes, room numbers, years and error
+ * *documentation* all contain it, and this flag feeds a rule that calls a
+ * 200-status page broken. A false positive here is a false finding there, so
+ * the list buys precision with the cost of missing a page whose only signal is
+ * the number — which the template fingerprint in `notfound_probe_jsonb`
+ * catches instead.
+ *
+ * Exported so the test suite pins the list itself rather than a sample of it.
+ */
+export const SOFT_404_PHRASES = [
+  "page not found",
+  "page cannot be found",
+  "page can't be found",
+  "404 error",
+  "error 404",
+  "404 not found",
+  "no longer available",
+  "nothing was found",
+  "this page doesn't exist",
+  "this page does not exist",
+] as const;
+/**
+ * The phrase list as one alternation, LOREM_IPSUM's twin in form as well as in
+ * use. Typographic apostrophes are folded into the character class: "this page
+ * doesn’t exist" is the same sentence as "this page doesn't exist", and a list
+ * that only knew the ASCII form would silently miss most real copy. The
+ * phrases contain nothing else a regex reads specially.
+ */
+const SOFT_404_PATTERN = new RegExp(
+  SOFT_404_PHRASES.map((phrase) => phrase.replace(/'/g, "['‘’]")).join("|"),
+  "i",
+);
 
 interface OpenAnchor {
   href: string;
@@ -661,6 +714,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     hasAmp,
     hasViewport,
     hasLoremIpsum: LOREM_IPSUM.test(bodyText),
+    hasSoft404Phrases: SOFT_404_PATTERN.test(bodyText),
     links: Array.from(linksByTarget.values()),
     relNext: relNext ?? null,
     relPrev: relPrev ?? null,
@@ -702,6 +756,7 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     hasAmp: raw.hasAmp,
     hasViewport: raw.hasViewport,
     hasLoremIpsum: raw.hasLoremIpsum,
+    hasSoft404Phrases: raw.hasSoft404Phrases,
     links: raw.links.map(({ href, anchor, rel, nofollow, position }) => ({
       href,
       anchor,

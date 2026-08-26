@@ -1,4 +1,4 @@
-import { finding, isAuditable, pageRule } from "../helpers.js";
+import { finding, isAuditable, pageRule, present } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
 
 /**
@@ -14,10 +14,20 @@ export const THIN_WORDS = 150;
 
 const CATEGORY = "on-page";
 
-/** Present means "has non-whitespace text": a `<title> </title>` is missing. */
-function present(value: string | null): value is string {
-  return value !== null && value.trim() !== "";
-}
+/**
+ * The two rules in this file that are about the page's BODY rather than its
+ * head. They report under `content`, beside the cross-page content rules
+ * (`content.soft-404`, `content.exact-duplicate`, `content.near-duplicate`),
+ * because the report groups by category and a client reading the content
+ * section should find every content finding in it — a thin page and a duplicate
+ * page are the same conversation, and the fact that one is decided from a
+ * single row and the other from a join is our implementation detail, not theirs.
+ *
+ * They stay in this file: they read a `PageRecord` and nothing else, which is
+ * what makes a page rule, and moving them would only put the same code under a
+ * different name.
+ */
+const CONTENT = "content";
 
 /**
  * The index of the first heading that is more than one level below the heading
@@ -96,13 +106,13 @@ export const onPageRules: PageRule[] = [
       : [finding(self, p, { headingOrder: p.headingOrder, skipAt })];
   }),
 
-  pageRule("content.thin", ["CHECK-40", "CHECK-13"], CATEGORY, "warning", (p, self) =>
+  pageRule("content.thin", ["CHECK-40", "CHECK-13"], CONTENT, "warning", (p, self) =>
     isAuditable(p) && p.isIndexable === true && p.wordCount !== null && p.wordCount < THIN_WORDS
       ? [finding(self, p, { wordCount: p.wordCount, threshold: THIN_WORDS })]
       : [],
   ),
 
-  pageRule("content.placeholder", ["CHECK-40"], CATEGORY, "warning", (p, self) =>
+  pageRule("content.placeholder", ["CHECK-40"], CONTENT, "warning", (p, self) =>
     isAuditable(p) && p.hasLoremIpsum ? [finding(self, p, { wordCount: p.wordCount })] : [],
   ),
 ];

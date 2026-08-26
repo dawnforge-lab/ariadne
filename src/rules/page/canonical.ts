@@ -1,31 +1,22 @@
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
-import { finding, isAuditable, pageRule } from "../helpers.js";
+import { finding, isAuditable, pageRule, present } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
 import { hasNoindex } from "./indexability.js";
 
 const CATEGORY = "canonical";
 
 /**
- * A canonical declaration that names something. `<link rel=canonical href="">`
- * reaches the database as an empty string rather than a null, and an empty href
- * declares no URL — treating it as a declaration would hide the page from
- * `canonical.missing` while every other rule read it as a self-canonical and
- * stayed quiet too, which is exactly the always-passes hole the build plan
- * forbids. Blank is "not declared", everywhere in this file.
- */
-function declared(value: string | null): value is string {
-  return value !== null && value.trim() !== "";
-}
-
-/**
  * The canonical the page effectively declares. The HTML `<link rel=canonical>`
  * wins over the HTTP `Link` header because that is the order search engines
  * apply when both are present; `canonical.html-header-conflict` is what reports
  * the disagreement, so the other rules can work from one value.
+ *
+ * `present` is what "declares" means here: `<link rel=canonical href="">`
+ * reaches the database as an empty string, and an empty href names no URL.
  */
 function effectiveCanonical(page: PageRecord): string | null {
-  if (declared(page.canonicalHtml)) return page.canonicalHtml;
-  return declared(page.canonicalHeader) ? page.canonicalHeader : null;
+  if (present(page.canonicalHtml)) return page.canonicalHtml;
+  return present(page.canonicalHeader) ? page.canonicalHeader : null;
 }
 
 /**
@@ -42,7 +33,7 @@ function resolveCanonical(canonical: string, pageUrl: string): string | null {
   return normalizeUrl(canonical, pageUrl);
 }
 
-interface CanonicalTarget {
+export interface CanonicalTarget {
   /** The declared value, verbatim, for the evidence. */
   canonical: string;
   /** The normalized target, or null when the declared value does not parse. */
@@ -51,7 +42,18 @@ interface CanonicalTarget {
   pointsElsewhere: boolean;
 }
 
-function canonicalTarget(page: PageRecord): CanonicalTarget | null {
+/**
+ * What a page's canonical declaration comes to: the declared value, where it
+ * resolves, and whether that is somewhere other than this page — or `null` when
+ * the page declares no canonical at all.
+ *
+ * Exported because the query rules that judge the canonical's *target*
+ * (`canonical.non-200-target`, `canonical.non-indexable-target`) need the same
+ * answer these page rules work from. One resolution, one precedence order
+ * (HTML over header), one normalizer — a second copy in the query layer would
+ * be free to disagree with this one about what a page canonicalises to.
+ */
+export function resolveEffectiveCanonical(page: PageRecord): CanonicalTarget | null {
   const canonical = effectiveCanonical(page);
   if (canonical === null) return null;
   const resolved = resolveCanonical(canonical, page.url);
@@ -76,7 +78,7 @@ export const canonicalRules: PageRule[] = [
   // carries `unparseable` so the report can say which it is.
   pageRule("canonical.points-elsewhere", ["CHECK-17"], CATEGORY, "info", (p, self) => {
     if (!isAuditable(p)) return [];
-    const target = canonicalTarget(p);
+    const target = resolveEffectiveCanonical(p);
     if (target === null) return [];
     if (target.resolved === null)
       return [
@@ -98,7 +100,7 @@ export const canonicalRules: PageRule[] = [
 
   pageRule("canonical.html-header-conflict", ["CHECK-18"], CATEGORY, "warning", (p, self) => {
     const { canonicalHtml: html, canonicalHeader: header } = p;
-    if (!isAuditable(p) || !declared(html) || !declared(header)) return [];
+    if (!isAuditable(p) || !present(html) || !present(header)) return [];
     // A value that does not resolve falls back to its literal text rather than
     // to null, so two different malformed declarations stay two declarations
     // instead of collapsing into "no conflict".
@@ -114,7 +116,7 @@ export const canonicalRules: PageRule[] = [
   // the fact and the agent judges whether the site treats the two as one.
   pageRule("canonical.cross-domain", ["CHECK-20"], CATEGORY, "info", (p, self) => {
     if (!isAuditable(p)) return [];
-    const target = canonicalTarget(p);
+    const target = resolveEffectiveCanonical(p);
     if (target === null || target.resolved === null) return [];
     const canonicalHost = new URL(target.resolved).hostname;
     const pageHost = new URL(p.url).hostname.toLowerCase();
@@ -129,7 +131,7 @@ export const canonicalRules: PageRule[] = [
   // not a contradiction — `canonical.points-elsewhere` reports the malformation.
   pageRule("directive.canonical-noindex-conflict", ["CHECK-21"], CATEGORY, "warning", (p, self) => {
     if (!isAuditable(p) || !hasNoindex(p)) return [];
-    const target = canonicalTarget(p);
+    const target = resolveEffectiveCanonical(p);
     return target !== null && target.pointsElsewhere
       ? [
           finding(self, p, {

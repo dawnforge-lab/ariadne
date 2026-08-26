@@ -45,4 +45,28 @@ describe("schema", () => {
       expect(cols, `${gone} should be dropped`).not.toContain(gone);
     }
   });
+
+  it("carries the Phase 3 evidence columns the query rules read", async () => {
+    const res = await db.execute(sql`
+      select table_name, column_name from information_schema.columns
+      where table_schema = 'public'`);
+    const cols = new Set(res.rows.map((r) => `${String(r.table_name)}.${String(r.column_name)}`));
+    for (const c of [
+      "pages.has_soft404_phrases",
+      "crawls.discovery_jsonb",
+      "crawls.host_probe_jsonb",
+      "crawls.notfound_probe_jsonb",
+      "issues.ruleset_version",
+    ]) {
+      expect([...cols], `missing ${c}`).toContain(c);
+    }
+  });
+
+  // The rule runner streams pages by (crawl_id, id) cursor. Without this index
+  // every batch is a sort of the crawl's whole page set.
+  it("indexes the page cursor the rule runner streams on", async () => {
+    const res = await db.execute(sql`
+      select indexname from pg_indexes where schemaname = 'public' and tablename = 'pages'`);
+    expect(res.rows.map((r) => r.indexname)).toContain("pages_crawl_id");
+  });
 });

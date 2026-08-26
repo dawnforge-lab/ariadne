@@ -61,7 +61,10 @@ describe("onPageRules metadata", () => {
     for (const r of onPageRules) {
       expect(r.kind, r.id).toBe("page");
       expect(r.checkIds.length, r.id).toBeGreaterThan(0);
-      expect(r.category, r.id).toBe("on-page");
+      // The two body rules report under `content`, beside the cross-page
+      // content rules, so a client reading the content section of a report
+      // finds every content finding there (see `CONTENT` in on-page.ts).
+      expect(r.category, r.id).toBe(r.id.startsWith("content.") ? "content" : "on-page");
       expect(r.title.length, r.id).toBeGreaterThan(5);
       expect(r.rulesetVersion, r.id).toBeTruthy();
     }

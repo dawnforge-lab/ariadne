@@ -13,12 +13,18 @@
  *
  * Changes, each marked at its site below:
  *  - `expectedIssues` is remapped from upstream's audit-issue ids to Ariadne's
- *    rule ids. Where an absorbed page targets something Ariadne has no rule for
- *    yet — duplicates, orphans, broken internal links, redirect chains and
- *    loops, all of which are link-graph or cross-page questions belonging to
- *    the query and metric rules of a later phase — the page is kept with
- *    `expectedIssues: []` and a comment naming what it is waiting for. The
- *    content is the point; deleting it would mean absorbing it twice.
+ *    rule ids. Phase 3's query rules claimed most of what Phase 2 left waiting —
+ *    duplicates, orphans, broken internal links, redirect chains and loops all
+ *    have their rule and their expectation now. What is still `expectedIssues:
+ *    []` with a comment is either a page whose finding belongs to another URL
+ *    (a chain's middle hop, the page holding a broken link) or a page waiting on
+ *    a metric rule that does not exist yet (duplicate titles and meta
+ *    descriptions, dead ends). The content is the point; deleting it would mean
+ *    absorbing it twice.
+ *  - Task 9 added the site's sitemap, and with it two link-graph facts a handler
+ *    cannot express: `inSitemap` and `linkedFromHub` (see `Fixture`). Both are
+ *    set here only where the arrangement is the fixture — the orphan, the deep
+ *    chain, and the pages the sitemap deliberately does or does not list.
  *  - `/status/server-error` answers 503 rather than upstream's 500. The fixture
  *    app's contract calls for a 503 route, Ariadne classifies both as
  *    `server_error` (fetch-page: ≥ 500 with no bot-challenge markers in the
@@ -339,9 +345,10 @@ const imagesMissingAlt: Fixture = {
 /**
  * The duplicate family — same page at two URLs, two pages sharing a title, two
  * pages sharing a meta description. Ariadne answers all three with cross-page
- * SQL (`contentHash` / `simhash` / grouped titles), which is a later phase's
- * query and metric rules, so these carry no expectations yet. The content is
- * exactly what those rules will need.
+ * SQL (`contentHash` / `simhash` / grouped titles). The first of the three now
+ * has its rule (`content.exact-duplicate`, CHECK-39) and its expectation below;
+ * duplicate titles and meta descriptions are still a later phase's metric
+ * rules, so those two pairs carry no expectations yet.
  */
 const DUP_TITLE = "Pumpkin Spice Latte Recipe";
 const DUP_META =
@@ -361,14 +368,17 @@ const DUP_BODY = article({
   ],
 });
 
-function duplicateBody(path: string): Fixture {
+function duplicateBody(path: string, expectedIssues: string[] = []): Fixture {
   return {
     path,
     category: CONTENT,
     name: "Duplicate content (same page, two URLs)",
-    // Later phase: duplicate-content / duplicate-title / duplicate-meta are
-    // cross-page query rules.
-    expectedIssues: [],
+    // `content.exact-duplicate` reports the GROUP once, on its lexically first
+    // member, so the expectation belongs to `/content/duplicate-a` alone — the
+    // `-b` copy is named in that finding's evidence rather than carrying one of
+    // its own. Duplicate titles and duplicate meta descriptions are still a
+    // later phase (metric rules).
+    expectedIssues,
     handler: (req, res) =>
       serve(req, res, () => ({
         title: DUP_TITLE,
@@ -497,11 +507,20 @@ const dupMetaB: Fixture = {
 
 const INDEX = "indexability";
 
+/**
+ * The site's one noindexed sitemap entry (Task 9), which is why
+ * `sitemap.non-indexable` lands here: a URL a sitemap asks a search engine to
+ * crawl, answering 200 with a directive telling it not to keep the result.
+ *
+ * It is also the target of two Phase 3 fixtures — `/authored3/canonical-to-noindex`
+ * and `/authored3/hreflang-noindex` — for the same property. Nothing about this
+ * page changes for them; it is named by them.
+ */
 const noindexMeta: Fixture = {
   path: "/index/noindex-meta",
   category: INDEX,
   name: "Noindex (robots meta)",
-  expectedIssues: ["indexability.noindex"],
+  expectedIssues: ["indexability.noindex", "sitemap.non-indexable"],
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "A page set to noindex",
@@ -530,6 +549,9 @@ const noindexHeader: Fixture = {
   category: INDEX,
   name: "Noindex (X-Robots-Tag header)",
   expectedIssues: ["indexability.noindex"],
+  // Off the sitemap: `/index/noindex-meta` above is the listed noindexed entry,
+  // and one is what the rule needs.
+  inSitemap: false,
   handler: (req, res) =>
     serve(
       req,
@@ -629,17 +651,23 @@ const canonicalConflict: Fixture = {
 const STATUS = "status";
 
 /**
- * Upstream reached this URL through the sitemap; our site has no sitemap, so it
- * is linked from the hub like everything else. Ariadne reports a 404 as a
- * `client_error` page row and says so in the crawl summary; the rules that read
- * *who linked to it* are the link-graph query rules of a later phase, which is
- * why this page and `/links/broken-internal-link` below expect nothing yet.
+ * Upstream reached this URL through the sitemap, and since Task 9 so do we: it
+ * is the site's one deliberately dead sitemap entry, as well as being linked
+ * from the hub. Ariadne reports a 404 as a `client_error` page row and says so
+ * in the crawl summary.
+ *
+ * Two rules land here and each is about a different publisher of the dead URL:
+ * `links.broken-internal` is target-centric — one finding for the URL, counting
+ * the pages that link to it — so it lands HERE rather than on
+ * `/links/broken-internal-link` below, which is the page holding the link. And
+ * `sitemap.non-200` is the same URL's other appearance: a line of XML telling
+ * search engines to go and fetch it.
  */
 const notFound: Fixture = {
   path: "/status/not-found",
   category: STATUS,
   name: "Page returns 404",
-  expectedIssues: [],
+  expectedIssues: ["links.broken-internal", "sitemap.non-200"],
   handler: (req, res) =>
     serve(
       req,
@@ -676,6 +704,10 @@ const serverError: Fixture = {
   category: STATUS,
   name: "Server error (503)",
   expectedIssues: ["http.server-error"],
+  // Off the sitemap: one dead entry (`/status/not-found`) is what
+  // `sitemap.non-200` needs, and listing this one too would put a second copy of
+  // that finding on a page whose subject is the 5xx itself.
+  inSitemap: false,
   handler: (req, res) =>
     serve(
       req,
@@ -707,6 +739,8 @@ const blocked: Fixture = {
   category: STATUS,
   name: "Crawler blocked (403)",
   expectedIssues: ["crawl.blocked"],
+  // Off the sitemap, for the same reason as the 503 above.
+  inSitemap: false,
   handler: (req, res) =>
     serve(
       req,
@@ -737,7 +771,9 @@ const brokenInternalLink: Fixture = {
   path: "/links/broken-internal-link",
   category: STATUS,
   name: "Broken internal link",
-  // Later phase: "this page links to a URL that 404s" is a link-graph query rule.
+  // The finding for this page's dead link is written against the TARGET, so it
+  // is `/status/not-found` that expects `links.broken-internal`, not this page.
+  // This page is the inlink the finding counts.
   expectedIssues: [],
   handler: (req, res) =>
     serve(req, res, () => ({
@@ -761,15 +797,23 @@ const REDIRECT = "redirect";
 
 /**
  * The chain and the loop. Ariadne records every hop as its own `redirect` page
- * row today; naming a chain as a chain, and a loop as a loop, needs the hop
- * graph — a later phase's query rules. The pages are here so those rules have a
- * chain and a loop to find.
+ * row, and the redirect query rules walk that graph: `redirect.chain` is
+ * reported once, at the chain's HEAD (the redirect nothing else points at), so
+ * `/redirect/chain-1` carries it and the middle hop carries nothing.
+ *
+ * The loop is the headless case the walk's second pass exists for: nothing
+ * outside `/redirect/loop` redirects to it, so it is no chain's head and only a
+ * walk seeded from the page itself finds the cycle.
+ *
+ * The chain's head is also the site's one redirecting sitemap entry (Task 9), so
+ * it carries `sitemap.redirected` as well: a sitemap should list destinations,
+ * and this one lists a URL that moves twice before it lands.
  */
 const redirectChain: Fixture = {
   path: "/redirect/chain-1",
   category: REDIRECT,
   name: "Redirect chain (3 hops)",
-  expectedIssues: [],
+  expectedIssues: ["redirect.chain", "sitemap.redirected"],
   handler: (_req, res) => redirect(res, "/redirect/chain-2", 301),
 };
 
@@ -777,7 +821,11 @@ const redirectChainMid: Fixture = {
   path: "/redirect/chain-2",
   category: REDIRECT,
   name: "Redirect chain (middle hop)",
+  // The chain is reported at its head, above; a middle hop is not a second
+  // chain. Off the sitemap: the head is the listed entry, and a second listed
+  // hop would be a second `sitemap.redirected` finding for one chain.
   expectedIssues: [],
+  inSitemap: false,
   handler: (_req, res) => redirect(res, "/", 301),
 };
 
@@ -785,7 +833,8 @@ const redirectLoop: Fixture = {
   path: "/redirect/loop",
   category: REDIRECT,
   name: "Redirect loop",
-  expectedIssues: [],
+  expectedIssues: ["redirect.loop"],
+  inSitemap: false,
   handler: (_req, res) => redirect(res, "/redirect/loop", 302),
 };
 
@@ -803,6 +852,9 @@ const trailingSlashRedirect: Fixture = {
   category: REDIRECT,
   name: "Trailing-slash redirect (non-slash form)",
   expectedIssues: [],
+  // A sitemap should list the destination, and this site's does: the slash form
+  // below is listed and this one is not.
+  inSitemap: false,
   handler: (_req, res) => redirect(res, TRAILING_SLASH_CANONICAL, 301),
 };
 
@@ -884,16 +936,21 @@ const STRUCTURE = "structure";
 
 /**
  * Upstream kept this page out of its catalog and in its sitemap, so nothing
- * linked to it. Our site has no sitemap and the hub links every fixture, so the
- * page is not actually orphaned here — and Ariadne's orphan check is a
- * link-graph query rule of a later phase in any case. Kept for its content;
- * Task 9 or that phase can give it a sitemap-only route.
+ * linked to it. Task 9 restored exactly that arrangement: the site now publishes
+ * a sitemap, this page is listed in it, and the hub does not link it — so the
+ * only route to it is the sitemap, and `links.orphan` says so with
+ * `inSitemap: true` in its evidence.
+ *
+ * A floor rather than an exact set, like the rest of the absorbed collection:
+ * the prose is upstream's and was written to demonstrate one thing, not to be
+ * silent about the rest.
  */
 const orphan: Fixture = {
   path: "/structure/orphan",
   category: STRUCTURE,
   name: "Orphan page",
-  expectedIssues: [],
+  linkedFromHub: false,
+  expectedIssues: ["links.orphan"],
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "An orphan page",
@@ -917,8 +974,11 @@ const orphan: Fixture = {
 };
 
 /**
- * Later phase: "this page links nowhere" is a link-graph query rule. The page
- * genuinely has no anchors, which is what that rule will need.
+ * Still unclaimed after Phase 3: "this page links nowhere" is a dead-end metric
+ * over the link graph, and no rule in the registry asks the question yet (the
+ * link-graph rules Phase 3 shipped are `links.orphan` and its skip twin, which
+ * are about INBOUND links). The page genuinely has no anchors, which is what
+ * that metric will need when it lands.
  */
 const noOutgoingLinks: Fixture = {
   path: "/structure/no-outgoing-links",
@@ -952,6 +1012,14 @@ const noOutgoingLinks: Fixture = {
  * reachable only from the one above it, so a page's depth is its number. With
  * the hub at depth 0 and `structure.deep-page` firing above depth 5, `/deep/6`
  * and `/deep/7` are the buried pages.
+ *
+ * NO RUNG IS IN THE SITEMAP, and that is load-bearing rather than tidy: the
+ * crawl loop enqueues every sitemap entry at depth 0 before the first fetch, so
+ * a listed page is a depth-0 page whatever links to it. Listing the chain would
+ * flatten it, `structure.deep-page` would fire nowhere, and the fixture would
+ * quietly stop being about depth at all. The price is that each rung is an
+ * indexable 200 the sitemap omits, so each also fires `pages.not-in-sitemap` —
+ * which is true of them, and is stated in the exact set on the last rung.
  */
 const DEEP_CHAIN_LENGTH = 7;
 const DEEP_DEPTH_THRESHOLD = 5;
@@ -968,10 +1036,24 @@ function deepRung(level: number): Fixture {
     // clear the threshold would be filler on seven pages nobody looks at. The
     // honest thing is to say so — and until the exact pin below went on, nobody
     // had, because a containment assertion never asks what else fired.
-    expectedIssues:
-      level > DEEP_DEPTH_THRESHOLD
-        ? ["content.thin", "structure.deep-page"]
-        : ["content.thin"],
+    // Rung 2 carries a third: the rungs are one template with a number
+    // substituted, so several of them are near-duplicates of each other — 2
+    // pairs with 4, 5 and 6 inside the three-bit band, and each pair is
+    // reported once, on the lexically first of the two, which is why rung 2 is
+    // the only one carrying the finding. Also not an accident to be papered
+    // over — it is exactly what CHECK-39 is about, and the pin in
+    // harness.test.ts quotes every pair and its distance.
+    // Every rung, the first included, also fires `pages.not-in-sitemap`: the
+    // chain is deliberately unlisted (see the header above) and the rungs are
+    // indexable 200s, so the sitemap rule is right about all of them. It is
+    // spelled out here rather than only on the exact rung so the list reads as
+    // the complete account it is.
+    expectedIssues: [
+      "content.thin",
+      "pages.not-in-sitemap",
+      ...(level > DEEP_DEPTH_THRESHOLD ? ["structure.deep-page"] : []),
+      ...(level === 2 ? ["content.near-duplicate"] : []),
+    ],
     // The last rung is pinned exactly rather than as a floor: unlike the rest
     // of the absorbed collection its body is ours (the chain was rebuilt for
     // Ariadne's depth threshold), so its complete finding set is something we
@@ -979,6 +1061,10 @@ function deepRung(level: number): Fixture {
     // true of it; a third finding appearing there would mean these pages had
     // stopped being what they were built to be.
     exact: level === DEEP_CHAIN_LENGTH,
+    // Only the first rung is linked from the hub: every other one is reachable
+    // solely from the rung above, which is what gives these pages their depth.
+    linkedFromHub: level === 1,
+    inSitemap: false,
     handler: (req, res) =>
       serve(req, res, () => ({
         title: `Deep click-path, level ${level}`,
@@ -1057,7 +1143,7 @@ export const absorbedFixtures: Fixture[] = [
   headingSkip,
   thinContent,
   imagesMissingAlt,
-  duplicateBody("/content/duplicate-a"),
+  duplicateBody("/content/duplicate-a", ["content.exact-duplicate"]),
   duplicateBody("/content/duplicate-b"),
   dupTitleA,
   dupTitleB,
