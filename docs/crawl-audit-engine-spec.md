@@ -187,7 +187,7 @@ Every rule carries:
 {
   id: string                  // 'canonical.non-200-target'
   checkIds: string[]          // ['CHECK-19'] — traces to the checklist
-  category: string
+  category: RuleCategory      // the closed union in src/rules/registry/types.ts
   severity: 'critical' | 'warning' | 'info'
   title: string
   explanation: string         // client-facing, plain English

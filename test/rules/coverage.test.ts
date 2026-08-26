@@ -9,7 +9,9 @@
  * The assertion is equality, not a ceiling, so it fails in both directions —
  * a check quietly dropped by a rule shows up as an addition, and a check newly
  * claimed shows up as a removal that must be deleted from the literal in the
- * same commit as the rule that claims it. Phase 3 empties this list.
+ * same commit as the rule that claims it. Phase 3 took this list from 29 to
+ * the seven below, and each of the seven is annotated with the phase that can
+ * answer it: the render pass (Phase 5) or the metric runner (Phase 4).
  *
  * Note the pin only ever *subtracts* from `CRAWL_CHECK_IDS`: rules claiming
  * checks outside those 47 (today CHECK-49, CHECK-50 and CHECK-52, from
@@ -26,7 +28,7 @@ import {
 } from "../../src/rules/registry/registry.js";
 
 describe("checklist coverage", () => {
-  it("pins exactly which crawl-derived checks remain unclaimed (Phase 3 empties this)", () => {
+  it("pins exactly which crawl-derived checks remain unclaimed (the render + metric seven)", () => {
     const unclaimed = buildRegistry().unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS]);
     expect(unclaimed.sort()).toEqual([
       "CHECK-01","CHECK-02","CHECK-08","CHECK-29",
@@ -67,13 +69,26 @@ describe("checklist coverage", () => {
   // The annotations are only worth carrying if they describe the pin above.
   // A check that gains a rule must leave its annotation list in the same
   // commit, or the list is a stale reason for an absence that ended.
-  it("every annotated check is one of the unclaimed ones, and says why it is", () => {
-    const unclaimed = new Set(
-      buildRegistry().unclaimedChecks(CRAWL_CHECK_IDS, AGENT_CHECKS),
-    );
+  it("the annotations are exactly the unclaimed set, and each says why it is unclaimed", () => {
+    const unclaimedList = buildRegistry().unclaimedChecks(CRAWL_CHECK_IDS, AGENT_CHECKS);
+    const unclaimed = new Set(unclaimedList);
     for (const c of RENDER_CHECKS)
       expect(unclaimed.has(c), `${c} is claimed — drop it from RENDER_CHECKS`).toBe(true);
     for (const c of METRIC_PENDING_CHECKS)
       expect(unclaimed.has(c), `${c} is claimed — drop it from METRIC_PENDING_CHECKS`).toBe(true);
+
+    // And the other direction, which is what makes the annotation and the pin
+    // one fact rather than two that agree today: EVERY unclaimed check carries
+    // a reason. Phase 3 emptied the pin down to these two causes — the render
+    // pass (Phase 5) and the metric runner (Phase 4) — so an unclaimed check
+    // annotated by neither list is either a check whose reason nobody wrote
+    // down, or a rule that quietly stopped claiming one. Equality on the sorted
+    // arrays also catches a duplicate across the two lists, which set-wise
+    // containment would not.
+    expect(
+      [...RENDER_CHECKS, ...METRIC_PENDING_CHECKS].sort(),
+      "the pin and its annotations have drifted: every unclaimed check needs a " +
+        "reason, and every reason needs a still-unclaimed check",
+    ).toEqual([...unclaimedList].sort());
   });
 });
