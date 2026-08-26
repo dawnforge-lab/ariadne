@@ -11,7 +11,7 @@
  * reads the same result, so adding a fixture costs a page fetch, not a crawl.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlSummary } from "../../src/crawl/loop.js";
@@ -86,8 +86,8 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
  *
  * Its two siblings are NOT here: `content.exact-duplicate` is claimed by the
  * duplicate pair the absorbed collection already serves, and
- * `content.near-duplicate` by two rungs of the deep click-chain, whose bodies
- * are one template with a number substituted. Both are pinned below.
+ * `content.near-duplicate` by several rungs of the deep click-chain, whose
+ * bodies are one template with a number substituted. Both are pinned below.
  */
 
 /**
@@ -429,7 +429,7 @@ describe("the fixture site end to end", () => {
     ]).not.toContain("hreflang.missing-x-default");
   });
 
-  it("the duplicate rules see the site's real duplicates, end to end", () => {
+  it("the duplicate rules see the site's real duplicates, end to end", async () => {
     // The simhash round trip, through the real crawler for once: an unsigned
     // 64-bit value from the analyzer, stored as a signed bigint by the writer,
     // compared by four band equalities and a `bit_count` XOR inside Postgres.
@@ -444,18 +444,34 @@ describe("the fixture site end to end", () => {
       pageTypes: ["/content/duplicate-a", "/content/duplicate-b"],
     });
 
-    // The click-chain's rungs are one template with a number substituted, and
-    // this pair is the one that lands inside the three-bit band. Pinning the
-    // distance, not just the rule id, is what makes this an assertion about the
-    // fingerprints rather than about two pages happening to be similar.
-    expect(detailsByPath.get("/deep/2\ncontent.near-duplicate")).toEqual({
-      pageUrl: `${app.base}/deep/2`,
-      urlA: `${app.base}/deep/2`,
-      urlB: `${app.base}/deep/4`,
-      hamming: 3,
-      pageTypeA: "/deep/:id",
-      pageTypeB: "/deep/:id",
-    });
+    // The click-chain's rungs are one template with a number substituted, so
+    // several of them land inside the three-bit band. Read from the `issues`
+    // rows rather than from `detailsByPath`, which is keyed by path and rule and
+    // therefore keeps only the LAST of the pairs a page belongs to — and the
+    // pair join has no ORDER BY, so which one that is depends on the plan.
+    //
+    // The SET is deterministic even though the order is not: the cap is nowhere
+    // near, so every pair inside the band is reported. Pinning the pairs and
+    // their distances is what makes this an assertion about the fingerprints
+    // rather than about two pages happening to be similar.
+    const pairs = (
+      await db
+        .select()
+        .from(issues)
+        .where(
+          and(eq(issues.crawlId, summary.crawlId), eq(issues.ruleId, "content.near-duplicate")),
+        )
+    )
+      .map((row) => {
+        const d = row.details as { urlA: string; urlB: string; hamming: number };
+        return `${d.urlA.replace(app.base, "")} ~${d.hamming}~ ${d.urlB.replace(app.base, "")}`;
+      })
+      .sort();
+    expect(pairs).toEqual([
+      "/deep/2 ~1~ /deep/6",
+      "/deep/2 ~3~ /deep/4",
+      "/deep/2 ~3~ /deep/5",
+    ]);
 
     // And nowhere else. A group is reported once, on its first member, and a
     // pair once, on the first of the two — so a second page carrying either

@@ -983,11 +983,12 @@ function deepRung(level: number): Fixture {
     // honest thing is to say so — and until the exact pin below went on, nobody
     // had, because a containment assertion never asks what else fired.
     // Rung 2 carries a third: the rungs are one template with a number
-    // substituted, so some of them are near-duplicates of each other, and 2 and
-    // 4 are the pair that lands inside the three-bit band (the finding is
-    // reported once, on the lexically first of the two). Also not an accident
-    // to be papered over — it is exactly what CHECK-39 is about, and the pin in
-    // harness.test.ts quotes the pair and the distance.
+    // substituted, so several of them are near-duplicates of each other — 2
+    // pairs with 4, 5 and 6 inside the three-bit band, and each pair is
+    // reported once, on the lexically first of the two, which is why rung 2 is
+    // the only one carrying the finding. Also not an accident to be papered
+    // over — it is exactly what CHECK-39 is about, and the pin in
+    // harness.test.ts quotes every pair and its distance.
     expectedIssues: [
       "content.thin",
       ...(level > DEEP_DEPTH_THRESHOLD ? ["structure.deep-page"] : []),

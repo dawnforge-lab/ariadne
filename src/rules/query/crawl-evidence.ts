@@ -419,21 +419,71 @@ export function robotsUnreadable(discovery: DiscoveryEvidence): string | null {
 }
 
 /**
- * Mark the last of a capped list of findings with the exact total.
+ * The `truncated` note a capped rule writes into its last finding's evidence,
+ * in the two shapes it can honestly take. Declared here, beside both functions
+ * that produce it, so the report layer has one contract to read and the
+ * difference between them is visible in the type rather than in prose.
  *
- * The count comes from a `count(*) over ()` window in the rule's own query, or
- * from a full pass that stopped *listing* at the cap — never from the length of
- * what was kept — so a truncated list still says how big the real problem is.
+ * `total` is a promise: the rule counted every case, and listed some of them.
+ * `atLeast` is the weaker claim a rule makes when counting the rest would cost
+ * more than the cap was there to save — it says how many were SEEN, and
+ * nothing about how many exist. A reader may render "and N more" from `total`;
+ * from `atLeast` the honest rendering is "and at least N more".
+ *
+ * A rule that has an exact count must use `total`. Putting a known-incomplete
+ * number in that field would be the same defect as a rule that always passes:
+ * a true-looking answer to a question nothing behind it answered.
+ */
+export interface ExactTruncation {
+  reported: number;
+  total: number;
+}
+export interface LowerBoundTruncation {
+  reported: number;
+  atLeast: number;
+}
+export type TruncationNote = ExactTruncation | LowerBoundTruncation;
+
+/**
+ * Write a truncation note onto the last of a capped list of findings.
+ *
  * The note rides on the last finding rather than on a site-scoped extra row: an
  * extra row under the same rule id would render the rule's own client-facing
  * copy over a URL-less "and 4,000 more", which is not what that copy says.
  */
-export function noteTruncation(findings: Finding[], total: number): Finding[] {
+function noteOnLast(findings: Finding[], note: TruncationNote): Finding[] {
   const last = findings[findings.length - 1];
-  if (last === undefined || total <= findings.length) return findings;
+  if (last === undefined) return findings;
   findings[findings.length - 1] = {
     ...last,
-    evidence: { ...last.evidence, truncated: { reported: findings.length, total } },
+    evidence: { ...last.evidence, truncated: note },
   };
   return findings;
+}
+
+/**
+ * Mark a capped list of findings with the EXACT total.
+ *
+ * The count comes from a `count(*) over ()` window in the rule's own query, or
+ * from a full pass that stopped *listing* at the cap — never from the length of
+ * what was kept — so a truncated list still says how big the real problem is.
+ */
+export function noteTruncation(findings: Finding[], total: number): Finding[] {
+  if (total <= findings.length) return findings;
+  return noteOnLast(findings, { reported: findings.length, total });
+}
+
+/**
+ * Mark a capped list of findings with a LOWER BOUND: how many cases the rule
+ * saw before it stopped looking.
+ *
+ * For the rule whose cap is on the scan itself rather than on the listing —
+ * `content.near-duplicate` selects `cap + 1` pairs out of a join it must not
+ * run to completion, so `seen` is `cap + 1` and the real number is unknown and
+ * unknowable at that price. Everything else about the note is `noteTruncation`'s
+ * behaviour, including where it lands.
+ */
+export function noteAtLeastTruncation(findings: Finding[], seen: number): Finding[] {
+  if (seen <= findings.length) return findings;
+  return noteOnLast(findings, { reported: findings.length, atLeast: seen });
 }

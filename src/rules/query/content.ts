@@ -39,6 +39,7 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import {
+  noteAtLeastTruncation,
   noteTruncation,
   readCrawlEvidence,
   readNotFoundProbe,
@@ -327,17 +328,27 @@ function pairKey(urlA: string, urlB: string): string {
  * by distance: two identical pages are 0 bits apart and would otherwise be
  * reported twice, once by each rule, with two different fixes attached.
  *
- * **What this costs today.** There is no index behind the bands, so Postgres
- * runs the join as a nested loop and tests the four band equalities per pair:
- * measured on this project's dev database, 5,000 pages take ~2.9s, and the
- * shape is quadratic, so 50,000 pages is minutes rather than seconds. It stays
- * inside the memory contract — the loop streams and the LIMIT stops it early on
- * a site that HAS near-duplicates — but the healthy large site is the slow case,
- * because nothing matches and every pair is examined. The measured remedy is
- * four expression indexes on `(crawl_id, (simhash >> k) & 65535)`, which turn
- * the inner side into a BitmapOr index scan: the same 5,000 pages then take
- * ~0.11s. That is a schema change with a cost on the crawl's write path, so it
- * is a decision to take deliberately rather than a line to slip into this rule.
+ * **The four band predicates below are coupled, textually, to the four
+ * expression indexes `pages_simhash_band0..3`** (migration 0004; declared in
+ * src/db/schema.ts, where the same warning is written from the other side).
+ * Postgres matches an expression index by comparing parse trees, so band 0 must
+ * keep saying `(a.simhash >> 0) & 65535` — `int8shr(x, 0)` is not folded away,
+ * and an index on a simpler spelling would not match it. And a single arm that
+ * fails to match takes the WHOLE BitmapOr with it, because Postgres will not use
+ * indexes for an OR unless every branch is indexable. That failure is silent: a
+ * slow query, not an error. Change a band here, change its index there, and
+ * confirm with EXPLAIN that all four `Bitmap Index Scan`s are still in the plan.
+ *
+ * **What this costs.** With the indexes, 5,000 pages measured ~0.11s on a fresh
+ * table (against ~2.9s without them, as a quadratic nested loop). Two caveats
+ * that belong in the 50k gate's expectations rather than in a footnote:
+ *  - expression indexes have no statistics until the table is ANALYZEd, and the
+ *    planner will not choose a plan it cannot cost. A freshly loaded `pages` is
+ *    exactly that table, so a gate crawl that runs the rules immediately after
+ *    writing 50,000 rows should ANALYZE first or expect the planner to guess.
+ *  - 0.11s is the HEALTHY site, whose band values are spread. Band skew — a few
+ *    thousand templated pages sharing a band value — measured ~521ms: bounded,
+ *    because the `LIMIT` still stops the scan, but not closed.
  *
  * One finding per PAIR, capped at `NEAR_DUPLICATE_PAIR_CAP`. The note on a
  * truncated list says `atLeast`, not a total — and that word is the honest one:
@@ -395,17 +406,10 @@ async function nearDuplicateFindings(db: Db, crawlId: string): Promise<Finding[]
     });
   });
 
-  const last = findings[findings.length - 1];
-  if (result.rows.length > NEAR_DUPLICATE_PAIR_CAP && last !== undefined) {
-    findings[findings.length - 1] = {
-      ...last,
-      evidence: {
-        ...last.evidence,
-        truncated: { reported: findings.length, atLeast: findings.length + 1 },
-      },
-    };
-  }
-  return findings;
+  // `rows.length` is the number of pairs the query SAW — `cap + 1` when the
+  // limit cut it — which is exactly the lower bound this note may claim. The
+  // other two rules in this file hand `noteTruncation` an exact `count(*)`.
+  return noteAtLeastTruncation(findings, result.rows.length);
 }
 
 export const contentRules: QueryRule[] = [

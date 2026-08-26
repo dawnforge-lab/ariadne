@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable, text, integer, bigint, boolean, jsonb, timestamp, real,
   primaryKey, index, uniqueIndex,
@@ -121,6 +122,31 @@ export const pages = pgTable("pages", {
   // id limit 500`. Without this the runner sorts the crawl's whole page set
   // once per batch, which is the memory contract's cost moved into Postgres.
   index("pages_crawl_id").on(t.crawlId, t.id),
+  // The simhash bands `content.near-duplicate` joins on: four 16-bit slices of
+  // the signed simhash, each one an expression index so the pair join's
+  // `(a.simhash >> k) & 65535 = (b.simhash >> k) & 65535` can be answered from
+  // an index instead of by examining every pair. Measured on 5,000 pages: 2.9s
+  // without them (nested loop, quadratic), 0.11s with them (BitmapOr across all
+  // four arms).
+  //
+  // TEXTUAL COUPLING, and it is not a soft one. Postgres matches an expression
+  // index by comparing the expression's parse tree with the query's, so:
+  //
+  //  - band 0 MUST be written `(simhash >> 0) & 65535`, exactly as the rule
+  //    writes it. `int8shr(simhash, 0)` is NOT constant-folded away, so an
+  //    index on the simpler `simhash & 65535` does not match the rule's band-0
+  //    predicate and that arm falls back to a sequential scan;
+  //  - one arm that fails to match kills the WHOLE BitmapOr — Postgres cannot
+  //    use indexes for an OR unless every branch is indexable — and it does so
+  //    silently, as a slow query rather than an error.
+  //
+  // So these four expressions and the four band predicates in
+  // `nearDuplicateFindings` (src/rules/query/content.ts) must stay spelled
+  // identically. Change one, change the other, and re-check with EXPLAIN.
+  index("pages_simhash_band0").on(t.crawlId, sql`((${t.simhash} >> 0) & 65535)`),
+  index("pages_simhash_band1").on(t.crawlId, sql`((${t.simhash} >> 16) & 65535)`),
+  index("pages_simhash_band2").on(t.crawlId, sql`((${t.simhash} >> 32) & 65535)`),
+  index("pages_simhash_band3").on(t.crawlId, sql`((${t.simhash} >> 48) & 65535)`),
 ]);
 
 export const links = pgTable("links", {
