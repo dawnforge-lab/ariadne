@@ -29,13 +29,13 @@ describe("checklist coverage", () => {
   it("pins exactly which crawl-derived checks remain unclaimed (Phase 3 empties this)", () => {
     const unclaimed = buildRegistry().unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS]);
     expect(unclaimed.sort()).toEqual([
-      "CHECK-01","CHECK-02","CHECK-03","CHECK-06","CHECK-07","CHECK-08","CHECK-09",
+      "CHECK-01","CHECK-02","CHECK-08",
       "CHECK-14","CHECK-15","CHECK-27","CHECK-28","CHECK-29","CHECK-30",
       "CHECK-33","CHECK-33b","CHECK-34","CHECK-39","CHECK-43","CHECK-44","CHECK-45","CHECK-46",
     ]);
   });
 
-  it("accounts for all 47 crawl-derived checks: 23 claimed, 3 agent, 21 unclaimed", () => {
+  it("accounts for all 47 crawl-derived checks: 27 claimed, 3 agent, 17 unclaimed", () => {
     // The arithmetic behind the pin above, stated so a drift in the universe
     // itself (an id added to or removed from `CRAWL_CHECK_IDS`) fails here
     // rather than silently changing what "unclaimed" means.
@@ -47,7 +47,8 @@ describe("checklist coverage", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(AGENT_CHECKS).toHaveLength(3);
     expect(claimedInUniverse.sort()).toEqual([
-      "CHECK-04","CHECK-05","CHECK-10","CHECK-11","CHECK-12","CHECK-13","CHECK-16",
+      "CHECK-03","CHECK-04","CHECK-05","CHECK-06","CHECK-07","CHECK-09",
+      "CHECK-10","CHECK-11","CHECK-12","CHECK-13","CHECK-16",
       "CHECK-17","CHECK-18","CHECK-19","CHECK-20","CHECK-21","CHECK-22","CHECK-23",
       "CHECK-24","CHECK-25","CHECK-26","CHECK-31","CHECK-32",
       "CHECK-35","CHECK-36","CHECK-37","CHECK-40",

@@ -63,6 +63,16 @@ const PHASE_3_RULE_IDS = [
   "pagination.next-target-uncrawled",
   "pagination.next-not-linked",
   "pagination.canonical-to-other",
+  "robots.missing",
+  "robots.blocks-sitemap-urls",
+  "robots.check-skipped",
+  "sitemap.missing",
+  "sitemap.invalid",
+  "sitemap.non-200",
+  "sitemap.redirected",
+  "sitemap.non-indexable",
+  "sitemap.uncrawled",
+  "pages.not-in-sitemap",
 ];
 
 const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
@@ -171,6 +181,28 @@ describe("issue copy", () => {
         /rel=next (?:tells|lets|helps|allows|asks) (?:search engines|google|crawlers)|(?:search engines|google|crawlers) use rel=next|consolidat\w+ (?:the )?series (?:with|through|via) rel=next/i;
       expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
     }
+  });
+
+  // The engine never probes /sitemap.xml speculatively (a Phase 1 ruling), so
+  // the only sitemaps it can see are the ones robots.txt declares. "This site
+  // has no sitemap" is therefore a claim the rule cannot support: a sitemap
+  // nobody declares is exactly the site this fires on.
+  it("sitemap.missing claims an absent declaration, not an absent file", () => {
+    const c = ISSUE_COPY["sitemap.missing"]!;
+    expect(c.title.toLowerCase()).toContain("declared in robots.txt");
+    const overclaim =
+      /(?:site|there) (?:has|have|is|are) no sitemap|no sitemap (?:exists|at all|on (?:this|the) site)|does not have a sitemap/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  });
+
+  // The rule fires on `outcome === "absent"`, which is the site ANSWERING with
+  // a 4xx. A server that could not serve robots.txt is a different finding
+  // (`robots.check-skipped`), and copy blurring the two would tell a client to
+  // write a file they may already have.
+  it("robots.missing does not treat a server failure as an absent file", () => {
+    const c = ISSUE_COPY["robots.missing"]!;
+    const blurred = /unreachable|could not be (?:fetched|reached|read)|timed out|server error/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(blurred);
   });
 
   it("headings.h1-multiple does not claim a ranking penalty", () => {

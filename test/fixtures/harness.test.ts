@@ -36,7 +36,12 @@ function databaseUrl(): string {
  * not serve today: a canonical or an hreflang alternate pointing at a URL the
  * crawl fetched and found broken or noindexed, a page nothing links to (the
  * hub links every fixture, which is what makes the crawl reach them all), and
- * a paginated series. Phase 3's fixture task (Task 9) authors those pages and
+ * a paginated series, and — for the sitemap rules — a sitemap at all. The
+ * fixture site deliberately publishes none today (see app.ts), so every rule
+ * that joins `sitemap_urls` to `pages` has nothing to read: Task 9 authors a
+ * declared sitemap listing a 404, a redirect, a noindexed page, a URL the crawl
+ * cannot reach and a URL robots.txt disallows, and leaves at least one
+ * indexable page off it. Phase 3's fixture task (Task 9) authors those pages and
  * DELETES this list, at which point the last assertion below becomes the strict
  * "every registered rule fires somewhere" it wants to be. The same pattern, and
  * the same promise, as Phase 2's Task 8 -> 9.
@@ -53,9 +58,16 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "hreflang.missing-return-link",
   "hreflang.non-indexable-target",
   "links.orphan",
+  "pages.not-in-sitemap",
   "pagination.canonical-to-other",
   "pagination.next-not-linked",
   "pagination.next-target-uncrawled",
+  "robots.blocks-sitemap-urls",
+  "sitemap.invalid",
+  "sitemap.non-200",
+  "sitemap.non-indexable",
+  "sitemap.redirected",
+  "sitemap.uncrawled",
 ];
 
 /**
@@ -70,13 +82,31 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
  * `test/rules/link-graph-query.test.ts`, which builds the incomplete crawls
  * directly.
  *
+ * `robots.missing` fires when the site ANSWERS 4xx for /robots.txt. The fixture
+ * app serves one for the whole site — allow-all, which is what lets the crawl
+ * reach every fixture — and a robots.txt either exists for a site or does not.
+ * No page could provoke this without removing the file the rest of the harness
+ * depends on. `test/rules/robots-query.test.ts` builds both sites directly.
+ *
+ * `robots.check-skipped` fires when the stored robots.txt cannot be re-parsed
+ * soundly: a file past the 500KB read cap, or one the server never served. The
+ * first would mean a fixture app serving half a megabyte of directives, the
+ * second a crawl that fails outright (an unreachable robots.txt is a complete
+ * disallow, so `runCrawl` closes the crawl as failed and nothing is crawled at
+ * all). Both are properties of an unhealthy crawl, like `links.orphan-skipped`
+ * above, and both are covered by the same DB test file.
+ *
  * Unlike `UNCLAIMED_UNTIL_TASK_9` this list does not empty: it is a permanent,
  * named exemption. Task 9 deletes that list and leaves this one, so the
  * every-rule-fires assertion stays strict about every rule a fixture COULD
  * provoke. Adding an id here is a claim that no page can provoke it, and it
  * needs the same kind of paragraph as the one above.
  */
-const SKIP_HARNESS_CLAIMS: string[] = ["links.orphan-skipped"];
+const SKIP_HARNESS_CLAIMS: string[] = [
+  "links.orphan-skipped",
+  "robots.check-skipped",
+  "robots.missing",
+];
 
 let db: Db;
 let app: FixtureApp;
@@ -106,11 +136,11 @@ const issuesByPath = new Map<string, Set<string>>();
 const detailsByPath = new Map<string, unknown>();
 /**
  * Findings that belong to no URL, by rule id, with the evidence the rule wrote.
- * No registered rule writes one on THIS crawl any more — `links.orphan-skipped`
- * writes a site-scoped finding only when the crawl was incomplete, and this one
- * is not — so the map is asserted empty. It is still collected rather than
- * dropped: a site-scoped finding appearing here is a rule that changed shape,
- * and the assertion below is where that surfaces instead of vanishing.
+ * One registered rule writes one on THIS crawl: the fixture site's robots.txt
+ * declares no sitemap, which is `sitemap.missing`. The map is asserted exactly,
+ * so a second site-scoped finding — a rule that changed shape, or one whose
+ * skip condition started matching a healthy crawl — surfaces here instead of
+ * vanishing.
  */
 const siteFindings = new Map<string, unknown>();
 /**
@@ -263,13 +293,25 @@ describe("the fixture site end to end", () => {
     expect([...(issuesByPath.get("/control") ?? new Set<string>())]).toEqual([]);
   });
 
-  it("no finding on this crawl is site-scoped", () => {
-    // `hreflang.missing-x-default` used to be the registry's one site-scoped
-    // rule and is now per declaration SET, landing on a URL. The only rule that
-    // can still write a null-page finding is `links.orphan-skipped`, and only
-    // when the crawl was incomplete — this one drains its frontier and stops
-    // well short of maxPages, so it must not.
-    expect([...siteFindings.keys()]).toEqual([]);
+  it("the only site-scoped finding is the sitemap the site never declares", () => {
+    // The fixture app serves a robots.txt with no `Sitemap:` line on purpose
+    // (see app.ts: every page is reached by link, so no fixture is quietly
+    // rescued by a sitemap). That is exactly what CHECK-06 reports, once, for
+    // the crawl rather than for a URL.
+    //
+    // Everything else must stay off this list. `links.orphan-skipped` and
+    // `robots.check-skipped` write null-page findings only when the crawl was
+    // incomplete or its robots.txt unreadable — this crawl drains its frontier,
+    // stops well short of maxPages and reads a two-line robots.txt — and
+    // `robots.missing` needs a site that answers 404 for it.
+    expect([...siteFindings.keys()]).toEqual(["sitemap.missing"]);
+    expect(siteFindings.get("sitemap.missing")).toEqual({
+      // `runRules` writes `pageUrl` into every details blob; a site-scoped
+      // finding names no page, so it is null here.
+      pageUrl: null,
+      robotsOutcome: "read",
+      sitemapSources: [],
+    });
   });
 
   it("the hreflang fixtures' declarations reach the rules that judge them", () => {
@@ -316,11 +358,11 @@ describe("the fixture site end to end", () => {
     // but it proves nothing: a rule "covered" only by the hub would be a rule
     // no fixture was ever written for.
     //
-    // `siteFindings` still seeds the set, and is empty today. A site-scoped
-    // rule has no page to land on — it is provoked by a fixture's markup but
-    // written against the crawl — so counting one towards coverage regardless
-    // of which page produced it would be correct. The assertion above is what
-    // holds "no page" honest while there are none.
+    // `siteFindings` seeds the set, and holds `sitemap.missing` today. A
+    // site-scoped rule has no page to land on — it is provoked by the site as a
+    // whole rather than by one fixture's markup — so counting it towards
+    // coverage regardless of which page produced it is correct. The assertion
+    // above is what holds the contents of that map honest.
     const fired = new Set(siteFindings.keys());
     for (const fixture of allFixtures()) {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);

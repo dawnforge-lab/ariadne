@@ -9,6 +9,8 @@ import { linkGraphRules } from "./query/link-graph.js";
 import { linkTargetRules } from "./query/link-targets.js";
 import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
+import { robotsRules } from "./query/robots.js";
+import { sitemapRules } from "./query/sitemap.js";
 
 /**
  * The ruleset: every rule the engine ships, registered in one place.
@@ -30,6 +32,8 @@ export function buildRegistry(): Registry {
     ...linkTargetRules,
     ...linkGraphRules,
     ...paginationRules,
+    ...robotsRules,
+    ...sitemapRules,
   ]) {
     r.register(rule);
   }

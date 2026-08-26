@@ -251,6 +251,90 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Re-run or resume the crawl so the queue drains: raise the page limit if the crawl stopped at its cap, and give it a wider limit than the site's known page count. Once a crawl completes with an empty queue, the orphan check runs on its own.",
   },
 
+  // -------------------------------------------------------------- robots.txt
+  // Three ids for one check, and the third is the reason the split exists:
+  // "we could not read your robots.txt well enough to judge it" cannot be
+  // rendered under either of the other two titles without saying something
+  // untrue. Accuracy note for `robots.missing`: the rule fires only when the
+  // site ANSWERED that there is no robots.txt (a 4xx). It must not be worded
+  // as though a server error also means the file is absent.
+  "robots.missing": {
+    title: "Site has no robots.txt",
+    explanation:
+      "The site answered the request for /robots.txt with a not-found response, so there is no robots.txt. That is valid and means crawlers may fetch everything, which is often exactly right for a small site. What is lost is the file's other job: it is where search engines look for the sitemap declaration, and where you would exclude anything that should not be crawled.",
+    howToFix:
+      "Add a robots.txt at the site root if you have anything to say in it — at minimum a Sitemap: line pointing at your sitemap, which is how crawlers find it without being told. Leave the crawling rules permissive unless there is a section that genuinely should not be fetched; blocking pages here does not keep them out of the index.",
+  },
+  "robots.blocks-sitemap-urls": {
+    title: "robots.txt blocks URLs the sitemap lists",
+    explanation:
+      "The site's robots.txt disallows URLs that its own sitemap publishes, so the two files contradict each other: the sitemap invites crawlers to these pages and robots.txt forbids fetching them. A blocked URL cannot be read, so it is not indexed on its own merits — at best it appears as a bare URL with no title or description. The finding names the URL and the line of robots.txt that blocks it, judged for the user agent this crawl identified as.",
+    howToFix:
+      "Decide which file is right. If the pages should be found, narrow or remove the Disallow rule that covers them. If they should not, take them out of the sitemap — and if the aim is to keep them out of the index rather than out of the crawl, use a noindex directive on the page instead, which only works if crawlers are allowed to fetch it.",
+  },
+  "robots.check-skipped": {
+    title: "robots.txt checks could not be run on this crawl",
+    explanation:
+      "The checks that read the contents of robots.txt — whether it blocks URLs the sitemap lists, and whether it declares a sitemap — need the whole file. This crawl does not have it: either the file is larger than the 500KB this crawler reads, so what was stored is a prefix, or the server never served it. Concluding from a partial file would mean reporting every rule past the cut-off as absent, so the checks did not run rather than reporting an answer this crawl cannot stand behind.",
+    howToFix:
+      "If robots.txt is over 500KB, that is itself worth fixing: search engines apply their own size limits and ignore whatever falls past them, so the rules at the end of the file are not being honoured either. Cut it down to the directives that matter. If the file could not be fetched at all, fix the server error and re-run the crawl.",
+  },
+
+  // ----------------------------------------------------------------- sitemap
+  // Accuracy note for `sitemap.missing`: this engine does not guess at
+  // /sitemap.xml. The only sitemaps it knows about are the ones robots.txt
+  // declares, so the copy says "not declared in robots.txt" and must never say
+  // "the site has no sitemap" — the site may well have one nobody points at.
+  "sitemap.missing": {
+    title: "No sitemap is declared in robots.txt",
+    explanation:
+      "The site's robots.txt contains no Sitemap: line, so nothing tells a crawler where the sitemap is. The site may still have one — this is a statement about the declaration, not about the file — but a sitemap that is never announced is one search engines have to be told about by hand, and one that no crawler, including this one, can find on its own. A declared sitemap is the cheapest way to tell search engines which URLs you consider canonical and how recently each changed.",
+    howToFix:
+      "Publish a sitemap if there is not one, then add a Sitemap: line to robots.txt naming its absolute URL. Submit it in Search Console as well: the declaration makes it discoverable, the submission makes its coverage reportable.",
+  },
+  "sitemap.invalid": {
+    title: "A sitemap document could not be read",
+    explanation:
+      "One or more of the sitemap documents this site declares could not be parsed: the finding lists each one with the reason — a server error, a response that is not XML at all (usually an HTML error page served with a 200), or a document whose root element is neither urlset nor sitemapindex. URLs in a document that cannot be read are invisible to search engines exactly as they are to this crawl.",
+    howToFix:
+      "Open each URL listed and check what actually comes back. A sitemap must be well-formed XML with a urlset or sitemapindex root, served with a 200 and an XML content type. Where a sitemap index names shards that no longer exist, remove those entries rather than leaving them to error.",
+  },
+  "sitemap.non-200": {
+    title: "Sitemap lists a URL that does not return 200",
+    explanation:
+      "This URL is published in the site's sitemap and answered with something other than a 200 when it was fetched — the finding carries the status. A sitemap is a list of URLs you are asking search engines to index, so an error page in it wastes crawl budget on a URL that cannot be indexed and, in quantity, reduces how much a crawler trusts the file.",
+    howToFix:
+      "Restore the page if the URL should work, or remove the entry if it should not. Sitemaps that are generated should be generated from the same source of truth as the pages themselves, so a removed page leaves the sitemap in the same deploy.",
+  },
+  "sitemap.redirected": {
+    title: "Sitemap lists a URL that redirects",
+    explanation:
+      "This URL is published in the site's sitemap and redirects somewhere else. It is not an error, but it is the wrong URL to publish: a sitemap should name the destination — the canonical URL that answers with a 200 — so crawlers reach it in one request instead of two, and so the file agrees with the canonical tags on the pages themselves.",
+    howToFix:
+      "Replace the entry with the URL it redirects to. Where a whole class of entries redirects the same way — an http to https upgrade, or a trailing-slash rule — the sitemap generator is emitting the wrong form and fixing it there corrects every entry at once.",
+  },
+  "sitemap.non-indexable": {
+    title: "Sitemap lists a page excluded from the index",
+    explanation:
+      "This URL is published in the site's sitemap and the page it serves tells search engines not to index it, through a robots meta tag or an X-Robots-Tag header. The two are direct contradictions: the sitemap asks for the page to be indexed and the page refuses. Search engines follow the page, so the entry achieves nothing except making the sitemap a less reliable signal.",
+    howToFix:
+      "Decide which is right. If the page should rank, remove the noindex directive; if it should not, remove it from the sitemap. Filtered, paginated and thank-you pages usually belong in the second group.",
+  },
+  "sitemap.uncrawled": {
+    title: "Sitemap lists a URL this crawl did not reach",
+    explanation:
+      "This URL is published in the site's sitemap and this crawl has no record of fetching it. That is most often a limit of the crawl rather than a fault on the site — a page cap, a depth cap, or a URL robots.txt disallowed — so it is reported as information, not as a defect. It is worth checking, because the same URL being unreachable to a search engine would mean a published page nobody can find.",
+    howToFix:
+      "Check whether the URL is reachable by following links from the homepage, and whether robots.txt allows it. If it is only reachable through the sitemap, give it internal links. If the crawl simply stopped short, re-run it with a higher page limit before treating this as a finding.",
+  },
+  "pages.not-in-sitemap": {
+    title: "Indexable page is not listed in the sitemap",
+    explanation:
+      "This page was crawled, returns a 200 and is open to indexing, and the site's sitemap does not list it. The sitemap is how a site states which URLs it considers worth indexing, so a page missing from it is discovered only by links — slower to be found, slower to be re-crawled after a change, and absent from the coverage reporting a submitted sitemap gives you. Some absences are deliberate; this is reported as information for that reason.",
+    howToFix:
+      "Add the page to the sitemap, or fix the generator that should have added it — sitemaps built from a stale export drift from the site with every release. If the page is deliberately excluded from the sitemap but still indexable, make sure that is a decision someone made rather than an oversight.",
+  },
+
   // --------------------------------------------------------------- hreflang
   "hreflang.invalid-code": {
     title: "Invalid hreflang code",

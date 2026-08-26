@@ -8,6 +8,7 @@ import { buildRegistry } from "../../src/rules/index.js";
 import { PAGE_BATCH, runRules } from "../../src/rules/run.js";
 import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import type { MetricRule, PageRecord, PageRule } from "../../src/rules/registry/types.js";
+import { mkDiscovery } from "./mk-discovery.js";
 import { mkPage } from "./mk-page.js";
 
 function databaseUrl(): string {
@@ -26,12 +27,15 @@ describe("buildRegistry", () => {
     expect(ids).toContain("http.server-error");
     expect(ids).toContain("hreflang.invalid-code");
     // Phase 2's 28 page and hreflang rules, plus the Phase 3 redirect,
-    // link/canonical-target, orphan, hreflang-join and pagination query rules.
+    // link/canonical-target, orphan, hreflang-join, pagination, robots and
+    // sitemap query rules.
     expect(ids).toContain("redirect.loop");
     expect(ids).toContain("links.broken-internal");
     expect(ids).toContain("links.orphan");
     expect(ids).toContain("pagination.next-not-linked");
-    expect(ids.length).toBe(40);
+    expect(ids).toContain("robots.blocks-sitemap-urls");
+    expect(ids).toContain("sitemap.missing");
+    expect(ids.length).toBe(50);
   });
 
   it("registers both kinds the runner drives", () => {
@@ -50,13 +54,21 @@ describe("runRules against the database", () => {
    * not reach, and no frontier rows. `links.orphan` refuses to judge an
    * incomplete crawl and writes a skipped finding instead, so a crawl row
    * without a readable `maxPages` would add that finding to every case below.
+   *
+   * The discovery evidence is here for the same reason as `maxPages`: the
+   * robots and sitemap rules read it, refuse a row that has none, and report
+   * a site whose robots.txt declares no sitemap. The default `mkDiscovery` is
+   * the healthy site — robots.txt read whole, one declared sitemap, nothing
+   * truncated — so those rules stay silent and each assertion below is about
+   * the page rule it names.
    */
   async function newCrawl(): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
       id,
       siteUrl: SITE,
-      config: { maxPages: 10_000 },
+      config: { maxPages: 10_000, userAgent: "AriadneBot-test" },
+      discovery: mkDiscovery(),
       rulesetVersion: "test",
     });
     createdCrawls.push(id);
