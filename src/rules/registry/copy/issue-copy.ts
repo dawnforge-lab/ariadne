@@ -528,4 +528,45 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped.",
   },
+
+  // -------------------------------------------------------- structured data
+  //
+  // Accuracy, for all four: the crawler reads JSON-LD and nothing else. A site
+  // marking itself up in microdata or RDFa is invisible to these rules, so no
+  // copy here may say a site "has no structured data" flatly — the claim is
+  // always about the JSON-LD this crawl found.
+  "schema.none-on-site": {
+    title: "No JSON-LD structured data anywhere on the site",
+    explanation:
+      "This crawl found no JSON-LD on any page. Structured data is how a page states in machine-readable form what it is — a product, an article, an organisation, a recipe — and it is what search engines and AI assistants read when they build a rich result or answer a question by citing a source. Without it, everything about the site has to be inferred from its prose. Note that only JSON-LD is read here: markup embedded as microdata or RDFa would not appear in this crawl.",
+    howToFix:
+      "Add JSON-LD to the templates that matter most first: an Organization (or LocalBusiness) block on the homepage, and the type that describes the money pages — Product on product pages, Article on editorial, FAQPage where you genuinely answer questions. Validate each template with Google's Rich Results Test, and keep the markup generated from the same data the page displays so the two cannot drift apart.",
+  },
+  "schema.product-incomplete": {
+    // Accuracy: the presence blob behind this finding is the UNION across the
+    // page's Product blocks, so a field named here is missing from all of them.
+    // Copy saying "your Product block" (singular) would misdescribe a page that
+    // carries several.
+    title: "Product markup is missing required fields",
+    explanation:
+      "No Product block on this page provides every field a product rich result needs. Google will not show the price, availability or rating snippet for a product whose markup is incomplete, so the listing falls back to a plain blue link while competitors' show the price. The fields listed with this finding are the ones missing from all of the page's Product markup, not from one block of it — note that an offers block counts only when it carries a price or a priceSpecification.",
+    howToFix:
+      "Fill in the missing required fields on the product template — name, image and a priced offers block — generating them from the same product data the page renders, so a product with no image or no price in the catalogue shows the same gap in both places. Add the recommended fields where you honestly have them (description, sku, brand, and ratings or reviews you actually collect), then confirm the page passes Google's Rich Results Test.",
+  },
+  "schema.breadcrumb-absent": {
+    title: "No breadcrumb markup anywhere on the site",
+    explanation:
+      "This site has more than 5 indexable pages and no page carries BreadcrumbList markup in its JSON-LD. Breadcrumb markup is what lets a search result show the path to a page — Home › Shoes › Trail — instead of a bare URL, and it tells search engines how the sections of the site relate to each other. On a site of any depth that hierarchy otherwise has to be guessed from URLs and links.",
+    howToFix:
+      "Add a BreadcrumbList block to the templates that sit below the homepage — categories, subcategories, product and article pages — listing each step with its position, name and URL, ending at the current page. Generate the trail from the same navigation data the visible breadcrumbs use, so the markup and what a visitor sees never disagree.",
+  },
+  "schema.self-serving-reviews": {
+    // Accuracy: this is a policy statement about which reviews Google shows,
+    // not a claim that the reviews are fake or that the site is penalised.
+    title: "A business rates itself in its own markup",
+    explanation:
+      "This page's Organization or LocalBusiness markup carries a rating or reviews about the business itself. Google's review-snippet policy treats ratings an entity publishes about itself as self-serving and ignores them, so the stars never appear in search results even though the markup is technically valid. It is not a penalty and the reviews may be perfectly genuine — the markup simply does not earn a rich result where it is.",
+    howToFix:
+      "Move the ratings to something a review can legitimately be about: Product, Service, Book, Course, Recipe and similar types all support review snippets, so a rating on the page for what you sell counts where the same rating on your company block does not. Keep the customer reviews visible on the page either way, and let independent review platforms carry the business-level rating.",
+  },
 };

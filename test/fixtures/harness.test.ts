@@ -65,6 +65,8 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "pagination.next-not-linked",
   "pagination.next-target-uncrawled",
   "robots.blocks-sitemap-urls",
+  "schema.product-incomplete",
+  "schema.self-serving-reviews",
   "sitemap.invalid",
   "sitemap.non-200",
   "sitemap.non-indexable",
@@ -74,6 +76,29 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
   "url.parameter-pages-indexable",
   "url.tracking-params-internal",
 ];
+
+/**
+ * The two structured-data entries need JSON-LD, and no fixture serves any
+ * today: `schema.product-incomplete` needs a `Product` block missing one of
+ * name, image or a priced offer, and `schema.self-serving-reviews` an
+ * `Organization` or `LocalBusiness` block carrying `aggregateRating` or
+ * `review`. Task 9 authors both pages (the plan names them).
+ *
+ * Their two siblings are the mirror image and are NOT here: with no JSON-LD
+ * anywhere on the site, `schema.none-on-site` and `schema.breadcrumb-absent`
+ * both fire on this crawl, site-scoped, and are asserted below.
+ *
+ * **The two halves are mutually exclusive, and Task 9 has to settle it.** The
+ * moment a fixture serves the Product block above, the site HAS structured data
+ * and `schema.none-on-site` can never fire here again — its condition is "zero
+ * blocks for the crawl", which is exactly what claiming CHECK-44 and CHECK-46
+ * destroys. So Task 9 authors those two pages, deletes their entries from this
+ * list, and moves `schema.none-on-site` into `SKIP_HARNESS_CLAIMS` with a
+ * paragraph saying that a fixture site proving the other three cannot prove it
+ * (its behaviour is covered directly by test/rules/structured-data-query.test.ts).
+ * `schema.breadcrumb-absent` survives: it stays true as long as no fixture
+ * publishes a `BreadcrumbList`, and nothing in the plan asks one to.
+ */
 
 /**
  * `content.soft-404` needs a page the fixture site does not serve: one that
@@ -349,7 +374,7 @@ describe("the fixture site end to end", () => {
     expect([...(issuesByPath.get("/control") ?? new Set<string>())]).toEqual([]);
   });
 
-  it("the site-scoped findings are the undeclared sitemap and the plaintext host", () => {
+  it("the site-scoped findings are the sitemap, the plaintext host and the missing JSON-LD", () => {
     // The fixture app serves a robots.txt with no `Sitemap:` line on purpose
     // (see app.ts: every page is reached by link, so no fixture is quietly
     // rescued by a sitemap). That is exactly what CHECK-06 reports, once, for
@@ -367,10 +392,32 @@ describe("the fixture site end to end", () => {
     // incomplete or its robots.txt unreadable — this crawl drains its frontier,
     // stops well short of maxPages and reads a two-line robots.txt — and
     // `robots.missing` needs a site that answers 404 for it.
+    //
+    // The last two are the structured-data pair: no fixture serves a line of
+    // JSON-LD, so the crawl stored no `structured_data` rows at all — which is
+    // CHECK-43 — and among the rows it did not store there is no
+    // `BreadcrumbList` on a site well past the five-page floor, which is
+    // CHECK-45. Task 9 authors the JSON-LD fixtures the other two rules need
+    // and, in doing so, silences `schema.none-on-site` here for good (see the
+    // paragraph above `UNCLAIMED_UNTIL_TASK_9`).
     expect([...siteFindings.keys()].sort()).toEqual([
       "host.http-serves-200",
+      "schema.breadcrumb-absent",
+      "schema.none-on-site",
       "sitemap.missing",
     ]);
+
+    // Both carry the same evidence — how many pages of this site a search
+    // engine could index — and the number is checked against the `pages` rows
+    // the crawl actually wrote rather than pinned as a literal, so adding a
+    // fixture does not turn into an unrelated failure here.
+    const indexablePages = [...pageByPath.values()].filter(
+      (p) => p.fetchClass === "ok" && p.statusCode === 200 && p.isIndexable,
+    ).length;
+    expect(indexablePages).toBeGreaterThanOrEqual(5);
+    for (const id of ["schema.none-on-site", "schema.breadcrumb-absent"]) {
+      expect(siteFindings.get(id), id).toEqual({ pageUrl: null, indexablePages });
+    }
     expect(siteFindings.get("sitemap.missing")).toEqual({
       // `runRules` writes `pageUrl` into every details blob; a site-scoped
       // finding names no page, so it is null here.

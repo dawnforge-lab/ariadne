@@ -12,6 +12,7 @@ import {
   NEAR_DUPLICATE_HAMMING,
   SOFT_404_WORDS,
 } from "../../src/rules/query/content.js";
+import { BREADCRUMB_PAGE_FLOOR } from "../../src/rules/query/structured-data.js";
 
 /**
  * The content copy spells its distance out in words, so the threshold pin below
@@ -100,6 +101,10 @@ const PHASE_3_RULE_IDS = [
   "content.soft-404",
   "content.exact-duplicate",
   "content.near-duplicate",
+  "schema.none-on-site",
+  "schema.product-incomplete",
+  "schema.breadcrumb-absent",
+  "schema.self-serving-reviews",
 ];
 
 const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS];
@@ -263,6 +268,49 @@ describe("issue copy", () => {
     const c = ISSUE_COPY["content.near-duplicate"]!;
     const overclaim =
       /plagiaris|scraped|stolen|copied from|duplicate content penalt|penalis|penaliz|will be penal/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  });
+
+  // The breadcrumb copy names the size of site it is advice for, and that
+  // number is the rule's own floor. Same contract as the on-page thresholds.
+  it("quotes the breadcrumb page floor the rule actually uses", () => {
+    expect(ISSUE_COPY["schema.breadcrumb-absent"]!.explanation).toMatch(
+      new RegExp(`\\bmore than ${BREADCRUMB_PAGE_FLOOR} indexable pages\\b`),
+    );
+  });
+
+  // The crawler reads JSON-LD and nothing else, so a site marked up in
+  // microdata or RDFa is invisible to these rules. Copy saying a site has no
+  // structured data, flatly, would be a claim about markup nobody looked at.
+  it("the site-scoped schema copy claims JSON-LD, not every markup format", () => {
+    for (const id of ["schema.none-on-site", "schema.breadcrumb-absent"]) {
+      const c = ISSUE_COPY[id]!;
+      expect(`${c.title} ${c.explanation}`, id).toContain("JSON-LD");
+      const overclaim =
+        /(?:has|have|uses?|carr(?:y|ies)) no structured data(?! .{0,20}JSON-LD)|no structured data (?:at all|of any kind|anywhere on the site\.)|no markup of any kind/i;
+      expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
+    }
+  });
+
+  // The presence blob behind the Product finding is the union across the page's
+  // Product blocks, so a field it names is missing from all of them. Copy about
+  // "the Product block" would misdescribe a page carrying several.
+  it("schema.product-incomplete speaks about the page's blocks, not one block", () => {
+    const c = ISSUE_COPY["schema.product-incomplete"]!;
+    expect(c.explanation).toContain("No Product block on this page");
+    const singular = /your Product block\b|the Product block on this page\b/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(singular);
+  });
+
+  // The self-serving finding is a statement about which snippets Google shows.
+  // It is not an accusation that the reviews are fabricated, and there is no
+  // penalty attached to publishing them.
+  it("schema.self-serving-reviews claims a policy, not fake reviews or a penalty", () => {
+    const c = ISSUE_COPY["schema.self-serving-reviews"]!;
+    // The copy has to say so, rather than merely avoid saying the opposite:
+    // "Google ignores your ratings" reads as a sanction unless it is denied.
+    expect(c.explanation).toMatch(/not a penalty/i);
+    const overclaim = /fake|fraudulent|fabricat|manual action|penalis|penaliz|will be penal/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 

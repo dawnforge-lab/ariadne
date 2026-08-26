@@ -13,6 +13,7 @@ import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
 import { robotsRules } from "./query/robots.js";
 import { sitemapRules } from "./query/sitemap.js";
+import { structuredDataRules } from "./query/structured-data.js";
 import { urlHygieneRules } from "./query/url-hygiene.js";
 
 /**
@@ -40,6 +41,7 @@ export function buildRegistry(): Registry {
     ...urlHygieneRules,
     ...hostRules,
     ...contentRules,
+    ...structuredDataRules,
   ]) {
     r.register(rule);
   }

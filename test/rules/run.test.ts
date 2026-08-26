@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, issues, pages, urlParams } from "../../src/db/schema.js";
+import { crawls, hreflang, issues, pages, structuredData, urlParams } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { PAGE_BATCH, runRules } from "../../src/rules/run.js";
 import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
@@ -38,7 +38,8 @@ describe("buildRegistry", () => {
     expect(ids).toContain("url.normalisation-variants");
     expect(ids).toContain("host.http-serves-200");
     expect(ids).toContain("content.near-duplicate");
-    expect(ids.length).toBe(60);
+    expect(ids).toContain("schema.product-incomplete");
+    expect(ids.length).toBe(64);
   });
 
   it("registers both kinds the runner drives", () => {
@@ -226,8 +227,16 @@ describe("runRules against the database", () => {
 
     const summary = await runRules(db, mine, buildRegistry());
     expect(summary.pagesScanned).toBe(1);
-    expect(summary.findings).toBe(0);
-    expect(await db.select().from(issues).where(eq(issues.crawlId, mine))).toHaveLength(0);
+
+    // The one finding is about the CRAWL, not about the page: a synthetic crawl
+    // stores no `structured_data` rows, and `schema.none-on-site` reports a site
+    // that publishes no JSON-LD once, site-scoped. Named exactly rather than
+    // tolerated as a count, so a page rule that started firing on the clean page
+    // — the thing this test is about — still fails here.
+    const written = await db.select().from(issues).where(eq(issues.crawlId, mine));
+    expect(written.map((r) => r.ruleId)).toEqual(["schema.none-on-site"]);
+    expect(written[0]!.pageId).toBeNull();
+    expect(summary.findings).toBe(1);
   });
 
   // The derivation phase. It is part of the run rather than a step a caller
@@ -235,20 +244,47 @@ describe("runRules against the database", () => {
   // parameter inventory beside its findings — and the summary says how much was
   // written, because a phase that reported nothing would be a phase nobody
   // would notice had stopped running.
-  it("derives the crawl's url_params inventory, and says how much it wrote", async () => {
+  it("derives the crawl's url_params inventory and field presence, saying how much it wrote", async () => {
     const crawlId = await newCrawl();
+    const listing = mkRow(crawlId, "/list?colour=red&utm_source=news", {
+      depth: 0,
+      discoveredVia: "seed",
+    });
     await db.insert(pages).values([
       mkRow(crawlId, "/", { depth: 0, discoveredVia: "seed" }),
-      mkRow(crawlId, "/list?colour=red&utm_source=news", { depth: 0, discoveredVia: "seed" }),
+      listing,
+    ]);
+    await db.insert(structuredData).values([
+      {
+        crawlId,
+        pageId: listing.id,
+        schemaType: "Product",
+        raw: { "@type": "Product", name: "A product with nothing else" },
+      },
     ]);
 
     const summary = await runRules(db, crawlId, buildRegistry());
-    expect(summary.derived).toEqual({ "deriveUrlParams.params": 2 });
+    expect(summary.derived).toEqual({
+      "deriveUrlParams.params": 2,
+      "deriveFieldPresence.blocks": 1,
+    });
 
     const rows = await db.select().from(urlParams).where(eq(urlParams.crawlId, crawlId));
     expect(
       Object.fromEntries(rows.map((r) => [r.paramName, r.isTracking])),
     ).toEqual({ colour: false, utm_source: true });
+
+    // The derivation runs BEFORE the query rules, which is what lets
+    // `schema.product-incomplete` read a presence blob it did not compute — the
+    // ordering the runner's `derivations` list exists to guarantee.
+    const blocks = await db
+      .select()
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    expect(blocks[0]!.fieldPresence).toMatchObject({
+      required: { name: true, image: false, offers: false },
+    });
+    expect(summary.byRule["schema.product-incomplete"]).toBe(1);
 
     // Re-running the whole runner is safe, inventory included: the derivation
     // rebuilds its rows rather than adding to them.

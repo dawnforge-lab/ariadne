@@ -1,6 +1,7 @@
 import { and, asc, eq, gt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, issues, pages } from "../db/schema.js";
+import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import type { Finding } from "./registry/types.js";
@@ -37,11 +38,17 @@ type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
  *
  * Ordered and explicit rather than discovered: a derivation that reads another
  * derivation's table would depend on this order, so the order is a list one can
- * read rather than an emergent property of module loading. Every entry writes
- * per-crawl inventory that is deleted and rebuilt on each run, so a re-run over
- * the same crawl leaves exactly what the first run left.
+ * read rather than an emergent property of module loading. Every entry is
+ * idempotent over the crawl it is given — `deriveUrlParams` rebuilds its
+ * inventory table, `deriveFieldPresence` recomputes the column it fills — so a
+ * re-run over the same crawl leaves exactly what the first run left.
+ *
+ * The two are independent: one reads `pages`, the other `structured_data`, and
+ * neither reads what the other writes. The order between them is therefore
+ * arbitrary today, and stated rather than discovered so that it stops being
+ * arbitrary the moment one of them starts mattering.
  */
-const derivations: Derivation[] = [deriveUrlParams];
+const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence];
 
 /**
  * Run every rule in `registry` over one crawl, writing `issues` rows.

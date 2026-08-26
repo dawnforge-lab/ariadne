@@ -154,6 +154,25 @@ export async function readCrawlEvidence(
   };
 }
 
+/**
+ * The crawl exists — the whole of what a rule needs when its finding comes
+ * entirely from a SQL join over the crawl's own tables.
+ *
+ * The same gate `readCrawlEvidence` opens with, without the discovery blob:
+ * a rule that neither reads robots.txt nor the sitemap walk must not start
+ * throwing because a `discovery_jsonb` it never looks at is malformed, and must
+ * not answer `[]` for a crawl id nothing knows — an empty scan reads exactly
+ * like a healthy site (the `sitemap` rules' precedent, and `runRules`' own).
+ */
+export async function assertCrawl(db: Db, crawlId: string, ruleId: string): Promise<void> {
+  const rows = await db
+    .select({ id: crawls.id })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  if (rows.length === 0) throw new Error(`${ruleId}: no such crawl '${crawlId}'`);
+}
+
 /** The crawl row the host rules read: the seed URL, and the probe or its absence. */
 export interface HostProbeEvidence {
   siteUrl: string;
