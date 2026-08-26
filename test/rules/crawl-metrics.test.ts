@@ -13,35 +13,25 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, pages, sitemapUrls } from "../../src/db/schema.js";
+import { issues, pages, sitemapUrls } from "../../src/db/schema.js";
 import {
   crawlMetrics,
   SITEMAP_DOC_ROWS_CAP,
   SITEMAP_URL_CAP,
 } from "../../src/rules/metric/crawl-metrics.js";
-import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
+import type { Metric } from "../../src/rules/registry/types.js";
 import { mkDiscovery } from "./mk-discovery.js";
+import { databaseUrl, dropCrawls, metricLookup, newMetricCrawl } from "./metric-db.js";
 import { normalised, writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-
-function databaseUrl(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
-  return url;
-}
 
 const SITE = "https://crawl-metrics.example";
 const url = (path: string): string => `${SITE}${path}`;
 
-const byId = new Map(crawlMetrics.map((r) => [r.id, r]));
-function rule(id: string): MetricRule {
-  const r = byId.get(id);
-  if (!r) throw new Error(`no rule '${id}' in crawlMetrics`);
-  return r;
-}
+const rule = metricLookup(crawlMetrics, "crawlMetrics");
 
 describe("crawlMetrics metadata", () => {
   it("defines the two metrics of the phase-4 table, with their checks", () => {
@@ -69,19 +59,11 @@ describe("the crawl metrics against the database", () => {
   let db: Db;
   const createdCrawls: string[] = [];
 
-  async function newCrawl(discovery: unknown = mkDiscovery()): Promise<string> {
-    const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({
-      id,
-      siteUrl: SITE,
+  const newCrawl = async (discovery: unknown = mkDiscovery()): Promise<string> =>
+    newMetricCrawl(db, SITE, createdCrawls, {
       config: { userAgent: "AriadneBot-test", maxPages: 500 },
-      rulesetVersion: "test",
-      status: "finished",
       discovery: discovery as Record<string, unknown> | null,
     });
-    createdCrawls.push(id);
-    return id;
-  }
 
   async function addPages(crawlId: string, specs: PageSpec[]): Promise<void> {
     await db.insert(pages).values(
@@ -133,7 +115,7 @@ describe("the crawl metrics against the database", () => {
   });
 
   afterAll(async () => {
-    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await dropCrawls(db, createdCrawls);
     await closeDb(db);
   });
 

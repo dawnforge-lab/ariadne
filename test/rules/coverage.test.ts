@@ -11,8 +11,10 @@
  * claimed shows up as a removal that must be deleted from the literal in the
  * same commit as the rule that claims it. Phase 3 took this list from 29 to
  * seven, Phase 4's link-graph metrics took it to five, and its URL and sitemap
- * metrics took it to the three below — all of them annotated with the one phase
- * left that can answer them: the render pass (Phase 5).
+ * metrics took it to three — which are now exactly `RENDER_CHECKS`, the one
+ * annotation left, naming the one phase that can answer them: the render pass
+ * (Phase 5). The pin is asserted against that constant rather than against a
+ * re-typed literal, so there is one list rather than two that agree today.
  *
  * Note the pin only ever *subtracts* from `CRAWL_CHECK_IDS`: rules claiming
  * checks outside those 47 (today CHECK-49, CHECK-50 and CHECK-52, from
@@ -24,17 +26,45 @@ import { buildRegistry } from "../../src/rules/index.js";
 import {
   AGENT_CHECKS,
   CRAWL_CHECK_IDS,
-  METRIC_PENDING_CHECKS,
   RENDER_CHECKS,
 } from "../../src/rules/registry/registry.js";
+
+/**
+ * The metric rules allowed to carry an AGENT check's id, by check.
+ *
+ * A metric produces no findings and passes nothing, so it may supply EVIDENCE
+ * for a judgement it does not make — but that exception is a door, and this
+ * object is the list of who may walk through it. Every agent check appears
+ * here, and the two that no rule may touch at all appear with an empty list:
+ * without them, "metrics are exempt from the agent-check guard" would be a
+ * blanket permission, and a metric that started claiming CHECK-41 or CHECK-42
+ * would fail nothing.
+ *
+ * Adding an entry is a deliberate act with the same argument behind it that
+ * CHECK-38 has: the rule must be a metric, and the check must be one whose
+ * verdict the metric leaves to the agent.
+ */
+const AGENT_CHECK_EVIDENCE: Record<string, string[]> = {
+  // Whether a page matches the intent it targets is judgement. These two
+  // measure the text — a word-count distribution per template, and how alike a
+  // template's pages are — and hand the numbers to the agent.
+  "CHECK-38": ["content.metrics-by-type", "content.template-similarity"],
+  // Content quality and E-E-A-T. Nothing a crawl stores is evidence a rule
+  // could summarise without also implying the verdict, so no rule of any kind
+  // claims either.
+  "CHECK-41": [],
+  "CHECK-42": [],
+};
 
 describe("checklist coverage", () => {
   it("pins exactly which crawl-derived checks remain unclaimed (the render three)", () => {
     const unclaimed = buildRegistry().unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS]);
     // CHECK-33 and CHECK-33b left this list with the link-graph metrics, then
     // CHECK-08 (`sitemap.structure`) and CHECK-29 (`url.param-volumes`) with
-    // the sitemap and URL metrics. What remains is the render pass alone.
-    expect(unclaimed.sort()).toEqual(["CHECK-01","CHECK-02","CHECK-34"]);
+    // the sitemap and URL metrics. What remains is the render pass alone —
+    // pinned against the CONSTANT rather than against a re-typed literal, so
+    // the pin and the annotation are one fact and cannot drift apart.
+    expect(unclaimed.sort()).toEqual([...RENDER_CHECKS].sort());
   });
 
   // The gate document's ruleset table states these three numbers — the Phase 4
@@ -96,7 +126,7 @@ describe("checklist coverage", () => {
     // `content.template-similarity` therefore carry CHECK-38 as EVIDENCE for a
     // judgement they do not make.
     const judging = new Set(
-      buildRegistry()
+      registry
         .all()
         .filter((r) => r.kind !== "metric")
         .flatMap((r) => r.checkIds),
@@ -106,46 +136,60 @@ describe("checklist coverage", () => {
     }
   });
 
-  // The other direction of the same ruling: an agent check a metric claims must
-  // be claimed BY A METRIC AND NOTHING ELSE. Asserted positively so the
-  // exception above cannot quietly widen — a page rule added to CHECK-38 would
-  // fail the guard, and a metric silently dropping the id would fail this.
-  it("CHECK-38 is evidenced by metric rules and judged by none", () => {
+  // The other direction of the same ruling, for EVERY agent check rather than
+  // for the one that has a claimant: an agent check's evidence is an explicit
+  // allowlist, and every claimant on it must be a metric.
+  //
+  // The guard above exempts metrics from the agent-check prohibition BY KIND,
+  // which on its own is a blanket permission — a metric that started claiming
+  // CHECK-41 would pass it silently. This is what closes that: the claimant set
+  // of each agent check is pinned exactly, so a new claim fails CI until
+  // someone adds it to `AGENT_CHECK_EVIDENCE` on purpose, and a metric that
+  // dropped CHECK-38 fails it just as loudly.
+  it("each agent check's evidence is exactly its allowlist, and every claimant is a metric", () => {
     const registry = buildRegistry();
-    const claimants = registry.all().filter((r) => r.checkIds.includes("CHECK-38"));
-    expect(claimants.map((r) => r.id).sort()).toEqual([
-      "content.metrics-by-type",
-      "content.template-similarity",
-    ]);
-    for (const r of claimants) expect(r.kind, r.id).toBe("metric");
-    // And it stays out of the unclaimed pin: the agent owns it either way.
-    expect(registry.unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS])).not.toContain(
-      "CHECK-38",
+
+    // Every agent check is answered by the allowlist — a fourth id added to
+    // AGENT_CHECKS with no entry here would otherwise be exempt by omission,
+    // which is the hole this test exists to close.
+    expect([...AGENT_CHECKS].sort(), "every AGENT check needs an evidence entry").toEqual(
+      Object.keys(AGENT_CHECK_EVIDENCE).sort(),
     );
+
+    for (const [agentCheck, allowed] of Object.entries(AGENT_CHECK_EVIDENCE)) {
+      const claimants = registry.all().filter((r) => r.checkIds.includes(agentCheck));
+      expect(claimants.map((r) => r.id).sort(), `${agentCheck} claimants`).toEqual(
+        [...allowed].sort(),
+      );
+      for (const r of claimants) expect(r.kind, `${r.id} claims ${agentCheck}`).toBe("metric");
+      // And an agent check stays out of the unclaimed pin whether or not a
+      // metric evidences it: the agent owns the verdict either way.
+      expect(registry.unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS])).not.toContain(
+        agentCheck,
+      );
+    }
   });
 
-  // The annotations are only worth carrying if they describe the pin above.
-  // A check that gains a rule must leave its annotation list in the same
-  // commit, or the list is a stale reason for an absence that ended.
-  it("the annotations are exactly the unclaimed set, and each says why it is unclaimed", () => {
+  // The annotation is only worth carrying if it describes the pin above. A
+  // check that gains a rule must leave its annotation list in the same commit,
+  // or the list is a stale reason for an absence that ended.
+  it("the annotation is exactly the unclaimed set, and it says why each is unclaimed", () => {
     const unclaimedList = buildRegistry().unclaimedChecks(CRAWL_CHECK_IDS, AGENT_CHECKS);
     const unclaimed = new Set(unclaimedList);
     for (const c of RENDER_CHECKS)
       expect(unclaimed.has(c), `${c} is claimed — drop it from RENDER_CHECKS`).toBe(true);
-    for (const c of METRIC_PENDING_CHECKS)
-      expect(unclaimed.has(c), `${c} is claimed — drop it from METRIC_PENDING_CHECKS`).toBe(true);
 
     // And the other direction, which is what makes the annotation and the pin
     // one fact rather than two that agree today: EVERY unclaimed check carries
-    // a reason. Phase 3 emptied the pin down to these two causes — the render
-    // pass (Phase 5) and the metric runner (Phase 4) — so an unclaimed check
-    // annotated by neither list is either a check whose reason nobody wrote
-    // down, or a rule that quietly stopped claiming one. Equality on the sorted
-    // arrays also catches a duplicate across the two lists, which set-wise
-    // containment would not.
+    // a reason. Phase 3 emptied the pin down to two causes — the render pass
+    // (Phase 5) and the metric runner (Phase 4) — and Phase 4 discharged the
+    // second, so an unclaimed check outside `RENDER_CHECKS` is either a check
+    // whose reason nobody wrote down, or a rule that quietly stopped claiming
+    // one. Equality on the sorted arrays, so an id on the annotation that is no
+    // longer unclaimed fails here too.
     expect(
-      [...RENDER_CHECKS, ...METRIC_PENDING_CHECKS].sort(),
-      "the pin and its annotations have drifted: every unclaimed check needs a " +
+      [...RENDER_CHECKS].sort(),
+      "the pin and its annotation have drifted: every unclaimed check needs a " +
         "reason, and every reason needs a still-unclaimed check",
     ).toEqual([...unclaimedList].sort());
   });

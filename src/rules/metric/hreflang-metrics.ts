@@ -10,12 +10,15 @@
  * and it is a number rather than a fault, so it belongs here.
  *
  * Same properties as every metric: computed by Postgres, over the shared cohort
- * (`./cohort.js`), with a null `page_type` under the `UNTYPED` sentinel.
+ * (`./cohort.js`), with a null `page_type` under the `UNTYPED` sentinel, and a
+ * crawl id nothing knows REFUSED rather than answered (`assertCrawl`; see
+ * property 5 in `./link-metrics.js`).
  */
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
+import { assertCrawl } from "../query/crawl-evidence.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { COHORT_PAGE_TYPE, cohortFilter, nullableNum, num, text } from "./cohort.js";
 
@@ -51,6 +54,10 @@ type CoverageRow = {
  * absent metric row means the rule did not run.
  */
 async function coverage(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
+  // An unknown crawl produces the same site row an empty cohort does —
+  // `0 / 0`, coverage null. Refused instead.
+  await assertCrawl(db, crawlId, self.id);
+
   const aggregates = sql`
     count(*) filter (where covered)::int as pages_with_hreflang,
     count(*)::int as indexable_pages,

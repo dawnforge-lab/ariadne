@@ -12,13 +12,16 @@
  *
  * The properties the link-graph metrics state hold here too, and for the same
  * reasons: every number is computed by Postgres, the cohort is the shared one
- * (`./cohort.js` — fetched OK, 200, indexable), and a null `page_type` groups
- * under the `UNTYPED` sentinel rather than vanishing.
+ * (`./cohort.js` — fetched OK, 200, indexable), a null `page_type` groups under
+ * the `UNTYPED` sentinel rather than vanishing, and a crawl id nothing knows is
+ * REFUSED rather than answered with the empty table it would otherwise
+ * aggregate to (`assertCrawl`; see property 5 in `./link-metrics.js`).
  */
 import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
+import { assertCrawl } from "../query/crawl-evidence.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { COHORT_PAGE_TYPE, cohortFilter, nullableNum, num, text } from "./cohort.js";
 
@@ -144,6 +147,10 @@ const RATIO = "ratio";
  * has no indexable pages" is an answer rather than a silence.
  */
 async function contentByType(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
+  // An unknown crawl aggregates to that same `count: 0` site row, which is a
+  // different fact wearing the same shape. Refused instead.
+  await assertCrawl(db, crawlId, self.id);
+
   const aggregates = sql`${statsAggregates(sql`words`, WORDS, 2)},
     ${statsAggregates(sql`ratio`, RATIO, 4)}`;
   const rows = await db.execute<StatsRow>(sql`
@@ -235,6 +242,10 @@ async function templateSimilarity(
   crawlId: string,
   self: MetricIdentity,
 ): Promise<Metric[]> {
+  // No site row means an unknown crawl produces NO rows at all — the same
+  // silence a site with no template of two fingerprinted pages produces.
+  await assertCrawl(db, crawlId, self.id);
+
   const round2 = (expr: SQL): SQL => sql`round((${expr})::numeric, 2)::float8`;
   const pct = (q: string): SQL =>
     round2(sql`percentile_cont(${sql.raw(q)}) within group (order by pr.hamming)`);

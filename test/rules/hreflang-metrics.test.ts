@@ -8,31 +8,26 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, pages } from "../../src/db/schema.js";
+import { hreflang, pages } from "../../src/db/schema.js";
 import { UNTYPED } from "../../src/rules/metric/cohort.js";
 import { hreflangMetrics } from "../../src/rules/metric/hreflang-metrics.js";
-import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
+import {
+  databaseUrl,
+  dropCrawls,
+  expectRefusesUnknownCrawl,
+  metricLookup,
+  metricRowsByScope,
+  newMetricCrawl,
+} from "./metric-db.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-
-function databaseUrl(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
-  return url;
-}
 
 const SITE = "https://hreflang-metrics.example";
 const url = (path: string): string => `${SITE}${path}`;
 
-const byId = new Map(hreflangMetrics.map((r) => [r.id, r]));
-function rule(id: string): MetricRule {
-  const r = byId.get(id);
-  if (!r) throw new Error(`no rule '${id}' in hreflangMetrics`);
-  return r;
-}
+const rule = metricLookup(hreflangMetrics, "hreflangMetrics");
 
 describe("hreflangMetrics metadata", () => {
   it("defines the one metric of the phase-4 table, with its check and severity", () => {
@@ -62,19 +57,8 @@ describe("hreflang.coverage against the database", () => {
     alternates?: number;
   }
 
-  async function newCrawl(): Promise<string> {
-    const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({
-      id,
-      siteUrl: SITE,
-      config: { maxPages: 500 },
-      rulesetVersion: "test",
-      status: "finished",
-      pagesCrawled: 9,
-    });
-    createdCrawls.push(id);
-    return id;
-  }
+  const newCrawl = async (): Promise<string> =>
+    newMetricCrawl(db, SITE, createdCrawls, { pagesCrawled: 9 });
 
   async function addPages(crawlId: string, specs: PageSpec[]): Promise<void> {
     const rows = specs.map((s) => ({
@@ -105,11 +89,8 @@ describe("hreflang.coverage against the database", () => {
     if (declarations.length > 0) await db.insert(hreflang).values(declarations);
   }
 
-  async function run(crawlId: string): Promise<Record<string, unknown>> {
-    const rows: Metric[] = await rule("hreflang.coverage").run(db, crawlId);
-    for (const row of rows) expect(row.metricId).toBe("hreflang.coverage");
-    return Object.fromEntries(rows.map((m) => [`${m.scope}|${m.scopeValue}`, m.value]));
-  }
+  const run = async (crawlId: string): Promise<Record<string, unknown>> =>
+    metricRowsByScope(db, rule("hreflang.coverage"), crawlId);
 
   /**
    * THE SITE UNDER TEST. Seven cohort pages, three of which publish hreflang.
@@ -153,7 +134,7 @@ describe("hreflang.coverage against the database", () => {
   });
 
   afterAll(async () => {
-    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await dropCrawls(db, createdCrawls);
     await closeDb(db);
   });
 
@@ -229,5 +210,12 @@ describe("hreflang.coverage against the database", () => {
     expect(await run(emptyCrawl)).toEqual({
       "site|": { pagesWithHreflang: 0, indexablePages: 0, coveragePct: null },
     });
+  });
+
+  it("refuses a crawl id nothing knows, rather than answering an empty table", async () => {
+    // The empty-cohort row just above is exactly what an unknown crawl id would
+    // aggregate to — `0 of 0`, coverage null — so the rule gates on the crawl
+    // existing before it counts anything (hard rule 7).
+    await expectRefusesUnknownCrawl(db, hreflangMetrics);
   });
 });

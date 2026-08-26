@@ -15,35 +15,30 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, links, pages } from "../../src/db/schema.js";
+import { links, pages } from "../../src/db/schema.js";
 import { UNTYPED } from "../../src/rules/metric/cohort.js";
 import {
   EXTREMES_LIST_CAP,
   linkMetrics,
   SOURCE_TYPE_CAP,
 } from "../../src/rules/metric/link-metrics.js";
-import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
+import {
+  databaseUrl,
+  dropCrawls,
+  expectRefusesUnknownCrawl,
+  metricLookup,
+  metricRowsByScope,
+  newMetricCrawl,
+} from "./metric-db.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-
-function databaseUrl(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
-  return url;
-}
 
 const SITE = "https://link-metrics.example";
 const url = (path: string): string => `${SITE}${path}`;
 
-const byId = new Map(linkMetrics.map((r) => [r.id, r]));
-function rule(id: string): MetricRule {
-  const r = byId.get(id);
-  if (!r) throw new Error(`no rule '${id}' in linkMetrics`);
-  return r;
-}
+const rule = metricLookup(linkMetrics, "linkMetrics");
 
 describe("linkMetrics metadata", () => {
   it("defines the four metrics of the phase-4 table", () => {
@@ -93,19 +88,8 @@ describe("the link-graph metrics against the database", () => {
     depth: number;
   }
 
-  async function newCrawl(): Promise<string> {
-    const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({
-      id,
-      siteUrl: SITE,
-      config: { maxPages: 500 },
-      rulesetVersion: "test",
-      status: "finished",
-      pagesCrawled: 12,
-    });
-    createdCrawls.push(id);
-    return id;
-  }
+  const newCrawl = async (): Promise<string> =>
+    newMetricCrawl(db, SITE, createdCrawls, { pagesCrawled: 12 });
 
   /** Insert the pages, returning path -> page id. */
   async function addPages(crawlId: string, specs: PageSpec[]): Promise<Map<string, string>> {
@@ -171,11 +155,8 @@ describe("the link-graph metrics against the database", () => {
   }
 
   /** One metric rule's rows, keyed by `<scope>|<scopeValue>`. */
-  async function run(id: string, crawlId: string): Promise<Record<string, unknown>> {
-    const rows: Metric[] = await rule(id).run(db, crawlId);
-    for (const row of rows) expect(row.metricId, `${id} row identity`).toBe(id);
-    return Object.fromEntries(rows.map((m) => [`${m.scope}|${m.scopeValue}`, m.value]));
-  }
+  const run = async (id: string, crawlId: string): Promise<Record<string, unknown>> =>
+    metricRowsByScope(db, rule(id), crawlId);
 
   /**
    * THE SITE UNDER TEST. Twelve pages: ten in the cohort every metric measures
@@ -265,7 +246,7 @@ describe("the link-graph metrics against the database", () => {
   });
 
   afterAll(async () => {
-    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await dropCrawls(db, createdCrawls);
     await closeDb(db);
   });
 
@@ -624,10 +605,19 @@ describe("the link-graph metrics against the database", () => {
 
   it("says nothing about a crawl id that owns no pages", async () => {
     // Not an error and not a fabrication: the metrics are computed over the
-    // crawl's rows, and a crawl with none has an empty cohort. The runner is
-    // what refuses an unknown crawl id.
+    // crawl's rows, and a crawl with none has an empty cohort. The pair of this
+    // test is the one below — a crawl that EXISTS and owns no pages is silence,
+    // a crawl id nothing knows is an error, and the whole point is that the two
+    // do not look alike.
     const otherCrawl = await newCrawl();
     const rows = await run("inlinks.sources-by-type", otherCrawl);
     expect(rows).toEqual({});
+  });
+
+  it("refuses a crawl id nothing knows, rather than answering an empty table", async () => {
+    // The empty answers pinned just above are what an unknown crawl would
+    // produce too — `count: 0`, two empty lists, no cohort rows — so each rule
+    // gates on the crawl existing first (hard rule 7, `runRules`' precedent).
+    await expectRefusesUnknownCrawl(db, linkMetrics);
   });
 });

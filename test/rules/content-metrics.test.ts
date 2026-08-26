@@ -20,11 +20,10 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pages } from "../../src/db/schema.js";
+import { pages } from "../../src/db/schema.js";
 import { UNTYPED } from "../../src/rules/metric/cohort.js";
 import {
   contentMetrics,
@@ -32,24 +31,20 @@ import {
   TEMPLATE_NEAR_BITS,
   TEMPLATE_SAMPLE_PAGES,
 } from "../../src/rules/metric/content-metrics.js";
-import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
+import {
+  databaseUrl,
+  dropCrawls,
+  expectRefusesUnknownCrawl,
+  metricLookup,
+  metricRowsByScope,
+  newMetricCrawl,
+} from "./metric-db.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-
-function databaseUrl(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
-  return url;
-}
 
 const SITE = "https://content-metrics.example";
 const url = (path: string): string => `${SITE}${path}`;
 
-const byId = new Map(contentMetrics.map((r) => [r.id, r]));
-function rule(id: string): MetricRule {
-  const r = byId.get(id);
-  if (!r) throw new Error(`no rule '${id}' in contentMetrics`);
-  return r;
-}
+const rule = metricLookup(contentMetrics, "contentMetrics");
 
 describe("contentMetrics metadata", () => {
   it("defines the two metrics of the phase-4 table", () => {
@@ -100,19 +95,8 @@ describe("the content metrics against the database", () => {
     id?: string;
   }
 
-  async function newCrawl(): Promise<string> {
-    const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({
-      id,
-      siteUrl: SITE,
-      config: { maxPages: 500 },
-      rulesetVersion: "test",
-      status: "finished",
-      pagesCrawled: 10,
-    });
-    createdCrawls.push(id);
-    return id;
-  }
+  const newCrawl = async (): Promise<string> =>
+    newMetricCrawl(db, SITE, createdCrawls, { pagesCrawled: 10 });
 
   async function addPages(crawlId: string, specs: PageSpec[]): Promise<void> {
     await db.insert(pages).values(
@@ -136,11 +120,8 @@ describe("the content metrics against the database", () => {
   }
 
   /** One metric rule's rows, keyed by `<scope>|<scopeValue>`. */
-  async function run(id: string, crawlId: string): Promise<Record<string, unknown>> {
-    const rows: Metric[] = await rule(id).run(db, crawlId);
-    for (const row of rows) expect(row.metricId, `${id} row identity`).toBe(id);
-    return Object.fromEntries(rows.map((m) => [`${m.scope}|${m.scopeValue}`, m.value]));
-  }
+  const run = async (id: string, crawlId: string): Promise<Record<string, unknown>> =>
+    metricRowsByScope(db, rule(id), crawlId);
 
   /**
    * THE SITE UNDER TEST for `content.metrics-by-type`. Eight cohort pages
@@ -188,7 +169,7 @@ describe("the content metrics against the database", () => {
   });
 
   afterAll(async () => {
-    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await dropCrawls(db, createdCrawls);
     await closeDb(db);
   });
 
@@ -408,6 +389,14 @@ describe("the content metrics against the database", () => {
     const otherCrawl = await newCrawl();
     expect(await run("content.template-similarity", otherCrawl)).toEqual({});
     expect(Object.keys(await run("content.metrics-by-type", otherCrawl))).toEqual(["site|"]);
+  });
+
+  it("refuses a crawl id nothing knows, rather than answering an empty table", async () => {
+    // The pair of the test above, and the reason it is a separate one: a crawl
+    // that EXISTS and owns no pages produces the empty site row and the silence
+    // just pinned, so an unknown crawl id answered the same way would be two
+    // different facts wearing one shape (hard rule 7).
+    await expectRefusesUnknownCrawl(db, contentMetrics);
   });
 
   it("pins the two distance thresholds the shares are cut at", () => {

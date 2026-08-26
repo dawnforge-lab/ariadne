@@ -3,7 +3,7 @@
  * pages sit at the ends of that distribution, which templates link into which,
  * and how far from the seed the site's pages sit.
  *
- * These are the first metric rules. Four properties hold across all of them and
+ * These are the first metric rules. Five properties hold across all of them and
  * are stated once here rather than four times below:
  *
  *  1. **Every number is computed by Postgres.** Percentiles are
@@ -32,6 +32,17 @@
  *     bad are exactly the ones a naive inner join would drop. Same lesson, same
  *     rule as the orphan check.
  *
+ *  5. **A crawl id nothing knows is refused, not answered.** Every one of these
+ *     queries aggregates over `pages` filtered by `crawl_id`, so an id with no
+ *     row behind it produces a table of zeroes — `count: 0`, every statistic
+ *     null, empty lists — which is EXACTLY the answer a real crawl with no
+ *     indexable pages gets. Two different facts must not share one shape, so
+ *     each rule opens with `assertCrawl` and throws instead (hard rule 7, and
+ *     `runRules`' own precedent). The gate is the one in
+ *     `../query/crawl-evidence.js` rather than a copy per file: the crawl
+ *     metrics and the URL metric already take it there, and a second definition
+ *     of "does this crawl exist" is a second answer waiting to disagree.
+ *
  * `page_type` cohorts group by the crawler's own template detection
  * (`derivePageType`). The column is nullable, so a null groups under the
  * documented sentinel `UNTYPED` rather than vanishing: a cohort of pages the
@@ -44,6 +55,7 @@ import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
+import { assertCrawl } from "../query/crawl-evidence.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { COHORT_PAGE_TYPE, cohortFilter, nullableNum, num, UNTYPED } from "./cohort.js";
 
@@ -145,6 +157,9 @@ async function distribution(
   self: MetricIdentity,
   cohort: SQL,
 ): Promise<Metric[]> {
+  // Property 5: an unknown crawl would otherwise be a `count: 0` site row.
+  await assertCrawl(db, crawlId, self.id);
+
   const rows = await db.execute<DistributionRow>(sql`
     with cohort as (${cohort})
     select 'site' as scope, '' as scope_value, ${DISTRIBUTION_AGGREGATES} from cohort
@@ -197,6 +212,9 @@ type ExtremeRow = {
  * be built out of order.
  */
 async function extremes(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
+  // Property 5: an unknown crawl would otherwise be two empty lists.
+  await assertCrawl(db, crawlId, self.id);
+
   const rows = await db.execute<ExtremeRow>(sql`
     with cohort as (${inlinkCohort(crawlId)}),
     bottom as (select url, v from cohort order by v asc, url asc limit ${EXTREMES_LIST_CAP}),
@@ -245,6 +263,10 @@ type SourceTypeRow = {
  * finding worth stating.
  */
 async function sourcesByType(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
+  // Property 5: an unknown crawl would otherwise be no rows at all — the same
+  // silence a crawl with no cohort pages legitimately produces.
+  await assertCrawl(db, crawlId, self.id);
+
   const rows = await db.execute<SourceTypeRow>(sql`
     with target as (
       select p.id as id, p.url as url, ${COHORT_PAGE_TYPE} as target_type

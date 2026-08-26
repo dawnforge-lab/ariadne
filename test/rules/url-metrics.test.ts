@@ -11,31 +11,20 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pages } from "../../src/db/schema.js";
+import { pages } from "../../src/db/schema.js";
 import { deriveUrlParams } from "../../src/rules/derive/url-params.js";
 import { TOP_PARAMS_CAP, urlMetrics } from "../../src/rules/metric/url-metrics.js";
-import type { Metric, MetricRule } from "../../src/rules/registry/types.js";
+import type { Metric } from "../../src/rules/registry/types.js";
+import { databaseUrl, dropCrawls, metricLookup, newMetricCrawl } from "./metric-db.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
-
-function databaseUrl(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
-  return url;
-}
 
 const SITE = "https://url-metrics.example";
 const url = (path: string): string => `${SITE}${path}`;
 
-const byId = new Map(urlMetrics.map((r) => [r.id, r]));
-function rule(id: string): MetricRule {
-  const r = byId.get(id);
-  if (!r) throw new Error(`no rule '${id}' in urlMetrics`);
-  return r;
-}
+const rule = metricLookup(urlMetrics, "urlMetrics");
 
 describe("urlMetrics metadata", () => {
   it("defines the one metric of the phase-4 table, with its checks and severity", () => {
@@ -62,18 +51,7 @@ describe("url.param-volumes against the database", () => {
     path: string;
   }
 
-  async function newCrawl(): Promise<string> {
-    const id = `crawl_${randomUUID()}`;
-    await db.insert(crawls).values({
-      id,
-      siteUrl: SITE,
-      config: { maxPages: 500 },
-      rulesetVersion: "test",
-      status: "finished",
-    });
-    createdCrawls.push(id);
-    return id;
-  }
+  const newCrawl = async (): Promise<string> => newMetricCrawl(db, SITE, createdCrawls);
 
   async function addPages(crawlId: string, specs: PageSpec[]): Promise<void> {
     await db.insert(pages).values(
@@ -143,7 +121,7 @@ describe("url.param-volumes against the database", () => {
   });
 
   afterAll(async () => {
-    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await dropCrawls(db, createdCrawls);
     await closeDb(db);
   });
 

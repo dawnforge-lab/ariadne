@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_CHECKS,
   CRAWL_CHECK_IDS,
-  METRIC_PENDING_CHECKS,
   RENDER_CHECKS,
   defineRule,
   Registry,
@@ -134,36 +133,30 @@ describe("check universe", () => {
 });
 
 /**
- * The two annotations that say WHY a check has no rule behind it yet, so the
+ * The one annotation left that says WHY a check has no rule behind it, so the
  * coverage pin's remaining entries are explained rather than merely counted:
- * `RENDER_CHECKS` wait on the render pass, `METRIC_PENDING_CHECKS` on metric
- * rules not yet written (the runner drives the kind, and the link-graph four
- * ship). Neither is `AGENT_CHECKS` — those are judgement, and will never have
- * a rule.
+ * `RENDER_CHECKS` wait on the render pass. `METRIC_PENDING_CHECKS` was the
+ * other, and Phase 4 deleted it — its four ids are claimed by metric rules, and
+ * an annotation with nothing to annotate is a reason nobody needs (see the
+ * `RENDER_CHECKS` doc comment). Neither list is `AGENT_CHECKS` — those are
+ * judgement, and will never have a rule.
  */
 describe("check annotations", () => {
-  it("exports the render-gated and metric-pending lists", () => {
+  it("exports the render-gated list", () => {
     expect(RENDER_CHECKS).toEqual(["CHECK-01", "CHECK-02", "CHECK-34"]);
-    // CHECK-33 and CHECK-33b left the list with the link-graph metrics that
-    // claim them, then CHECK-08 with `sitemap.structure` and CHECK-29 with
-    // `url.param-volumes`. Empty means every check whose answer is a site-wide
-    // number now has a metric behind it — not that the annotation is unused.
-    expect(METRIC_PENDING_CHECKS).toEqual([]);
   });
 
   it("every annotated check is part of the crawl-derived universe", () => {
-    for (const c of [...RENDER_CHECKS, ...METRIC_PENDING_CHECKS])
-      expect(CRAWL_CHECK_IDS, c).toContain(c);
+    for (const c of RENDER_CHECKS) expect(CRAWL_CHECK_IDS, c).toContain(c);
   });
 
   // Disjoint at runtime, not just by inspection: a check that appears on two
   // lists claims two different reasons for having no rule, and one of them is
   // a lie the coverage pin would carry forward.
-  it("the three annotation lists are pairwise disjoint", () => {
+  it("the annotation lists are pairwise disjoint", () => {
     const lists: [string, readonly string[]][] = [
       ["AGENT_CHECKS", AGENT_CHECKS],
       ["RENDER_CHECKS", RENDER_CHECKS],
-      ["METRIC_PENDING_CHECKS", METRIC_PENDING_CHECKS],
     ];
     for (const [nameA, a] of lists) {
       expect(new Set(a).size, `${nameA} repeats an id`).toBe(a.length);
