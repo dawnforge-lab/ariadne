@@ -13,9 +13,39 @@ export interface Finding {
   dedupeKey: string;
 }
 
+/**
+ * What a metric row is the answer FOR.
+ *
+ * `site` is the crawl as a whole and names nothing; the others each name one
+ * thing in `scope_value`, and the pair is part of the metrics primary key.
+ *
+ *  - `page_type` — one cohort of pages, named by the crawler's own template
+ *    detection (`derivePageType`), with the untyped pages under the `UNTYPED`
+ *    sentinel.
+ *  - `sitemap_doc` — one sitemap document, named by the URL it was fetched
+ *    from. It exists because `sitemap.structure` has per-document rows and a
+ *    sitemap document is NOT a page type: filing `https://site/sitemap-1.xml`
+ *    under `page_type` would put a URL where every other reader of that scope
+ *    expects a template name, and every consumer that groups the two scopes
+ *    together — the report, the agent, a future `page_type` join — would read
+ *    it as a cohort of pages that does not exist. A scope is a claim about what
+ *    a row counts, so a new kind of row gets a new scope rather than a
+ *    borrowed one (hard rule 7).
+ *
+ * Closed, like `RuleCategory`, and for the same reason: the runner deletes and
+ * rewrites metric rows by (crawl, metric, scope, scope value), so a one-off
+ * spelling is a row nothing recomputes. `METRIC_SCOPES` below is the same list
+ * as a value, because the runner checks a rule's return at the JavaScript
+ * boundary where the type system has seen nothing.
+ */
+export type MetricScope = "site" | "page_type" | "sitemap_doc";
+
+/** `MetricScope` as a value — what `runRules` validates a returned row against. */
+export const METRIC_SCOPES: readonly MetricScope[] = ["site", "page_type", "sitemap_doc"];
+
 export interface Metric {
   metricId: string;
-  scope: "site" | "page_type";
+  scope: MetricScope;
   scopeValue: string;
   value: Record<string, unknown>;
 }

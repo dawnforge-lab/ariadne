@@ -102,6 +102,18 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
   ) {
     return bad("has no truncation.failures array of {url, reason}");
   }
+  // `sitemap.structure` reads these two, so they are checked rather than
+  // carried: `oversizedDocsSkipped` is a COLUMN of that metric's site row, and
+  // an `undefined` reaching a jsonb value would store `null` where a count
+  // belongs; `entryLimited` is the flag that turns every count in that table
+  // from a total into a floor, and a non-boolean reads as falsy — the metric
+  // would state a truncated sitemap's numbers as complete ones.
+  if (typeof truncation["oversizedDocsSkipped"] !== "number") {
+    return bad("has a non-numeric truncation.oversizedDocsSkipped");
+  }
+  if (typeof truncation["entryLimited"] !== "boolean") {
+    return bad("has a non-boolean truncation.entryLimited");
+  }
 
   if (typeof value["docsFetched"] !== "number") return bad("has a non-numeric docsFetched");
 
@@ -114,10 +126,11 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
       truncated: robots["truncated"],
     },
     sitemapSources: sources as string[],
-    // Only `failures` is checked, because only `failures` is read by a rule
-    // (`sitemap.invalid`). The counters beside it are carried through as
-    // stored: a rule that starts branching on one of them must add its check
-    // above rather than trusting this cast.
+    // `failures`, `oversizedDocsSkipped` and `entryLimited` are checked above,
+    // because those are the three a rule reads (`sitemap.invalid`, and
+    // `sitemap.structure`'s site row). The counters beside them are carried
+    // through as stored: a rule that starts branching on one of them must add
+    // its check above rather than trusting this cast.
     truncation: truncation as unknown as DiscoveryTruncation,
     docsFetched: value["docsFetched"],
   };

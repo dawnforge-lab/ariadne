@@ -372,8 +372,17 @@ function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
   return noteTruncation([...byCycle.values()], cycles.size);
 }
 
-const CHAIN: RuleIdentity = { id: "redirect.chain", severity: "warning" };
-const LOOP: RuleIdentity = { id: "redirect.loop", severity: "critical" };
+/**
+ * The two redirect-graph rules' identities.
+ *
+ * Exported because `redirect.volume` (src/rules/metric/crawl-metrics.ts) counts
+ * the `issues` rows these two wrote, and it selects them BY ID. A metric that
+ * spelled `'redirect.chain'` in its own SQL would go silently to zero the day
+ * either rule was renamed — a metric reading "no chains on this site" about a
+ * site whose chains are sitting in the issues table (hard rule 7).
+ */
+export const CHAIN: RuleIdentity = { id: "redirect.chain", severity: "warning" };
+export const LOOP: RuleIdentity = { id: "redirect.loop", severity: "critical" };
 
 /**
  * The redirect-graph rules. Both read the same walk; each runs it for itself

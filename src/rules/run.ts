@@ -4,7 +4,7 @@ import { crawls, issues, metrics, pages } from "../db/schema.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
-import type { Finding, Metric } from "./registry/types.js";
+import { METRIC_SCOPES, type Finding, type Metric } from "./registry/types.js";
 
 /**
  * Pages read per round trip — the memory contract: never the whole table.
@@ -247,16 +247,17 @@ export async function runRules(
             "a metric rule writes only its own id",
         );
       }
-      if (m.scope !== "site" && m.scope !== "page_type") {
+      if (!(METRIC_SCOPES as readonly string[]).includes(m.scope)) {
         throw new Error(`rule '${rule.id}' emitted an unknown metric scope '${m.scope}'`);
       }
-      // A cohort row is the answer for one group of pages; without a name the
-      // group is unidentifiable, and the empty string is already spoken for —
-      // it is what a site-scoped row stores in the primary key.
-      if (m.scope === "page_type" && m.scopeValue === "") {
+      // Every scope but `site` names the one thing its row is about — a page
+      // type, a sitemap document. Without that name the row identifies nothing,
+      // and the empty string is already spoken for: it is what a site-scoped row
+      // stores in the primary key.
+      if (m.scope !== "site" && m.scopeValue === "") {
         throw new Error(
-          `rule '${rule.id}' emitted a 'page_type' row with no scope value — ` +
-            "a cohort without a name identifies no pages",
+          `rule '${rule.id}' emitted a '${m.scope}' row with no scope value — ` +
+            "a scoped row without a name identifies nothing",
         );
       }
       // And the symmetric defect. There is one site per crawl, so a site row

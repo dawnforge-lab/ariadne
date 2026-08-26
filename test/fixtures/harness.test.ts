@@ -746,13 +746,26 @@ describe("the fixture site end to end", () => {
   it("the structured-data fixtures name the field that is missing and the rating that is self-serving", () => {
     // The field names are what a client goes and adds, so they are pinned rather
     // than counted: the Product block carries a name and a priced offer and no
-    // image, and three of the five recommended fields are absent too.
+    // image, and eight of the twelve recommended fields are absent too. The two
+    // that are NOT absent are the pair read out of the offer — the fixture's
+    // offer carries both a currency and an availability — which is this
+    // collection's proof that the widened CHECK-44 profile reads them from
+    // inside `offers` rather than looking for top-level keys.
     expect(
       detailsByPath.get("/authored3/product-incomplete\nschema.product-incomplete"),
     ).toEqual({
       pageUrl: `${app.base}/authored3/product-incomplete`,
       missingRequired: ["image"],
-      missingRecommended: ["brand", "aggregateRating", "review"],
+      missingRecommended: [
+        "brand",
+        "gtin",
+        "mpn",
+        "aggregateRating",
+        "review",
+        "color",
+        "material",
+        "size",
+      ],
     });
 
     expect(detailsByPath.get("/authored3/reviews\nschema.self-serving-reviews")).toEqual({

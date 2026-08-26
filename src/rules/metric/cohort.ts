@@ -90,6 +90,22 @@ export function nullableNum(value: unknown, column: string, ruleId: string): num
 }
 
 /**
+ * A boolean column from a SQL row, checked the same way.
+ *
+ * The driver returns Postgres `bool` as a JavaScript boolean, so what this
+ * catches is a column that stopped being one — a `count(*) > 0` rewritten as a
+ * `count(*)`, a boolean built by string concatenation. `{isTracking: "f"}` in a
+ * jsonb column is truthy to every later reader, which is the quietest possible
+ * way for a flag to invert.
+ */
+export function bool(value: unknown, column: string, ruleId: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${ruleId}: column '${column}' came back as ${typeof value}, not a boolean`);
+  }
+  return value;
+}
+
+/**
  * A text column from a SQL row, checked the same way and for the same reason:
  * a `scope_value` that arrived as something other than a string would be
  * stringified into the metrics primary key as `[object Object]`.

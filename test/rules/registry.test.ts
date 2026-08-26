@@ -145,9 +145,10 @@ describe("check annotations", () => {
   it("exports the render-gated and metric-pending lists", () => {
     expect(RENDER_CHECKS).toEqual(["CHECK-01", "CHECK-02", "CHECK-34"]);
     // CHECK-33 and CHECK-33b left the list with the link-graph metrics that
-    // claim them; the two below wait on the sitemap-structure and
-    // URL-parameter metrics.
-    expect(METRIC_PENDING_CHECKS).toEqual(["CHECK-08", "CHECK-29"]);
+    // claim them, then CHECK-08 with `sitemap.structure` and CHECK-29 with
+    // `url.param-volumes`. Empty means every check whose answer is a site-wide
+    // number now has a metric behind it — not that the annotation is unused.
+    expect(METRIC_PENDING_CHECKS).toEqual([]);
   });
 
   it("every annotated check is part of the crawl-derived universe", () => {

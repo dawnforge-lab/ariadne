@@ -5,6 +5,7 @@ import type {
   Finding,
   Metric,
   MetricRule,
+  MetricScope,
   PageRecord,
   PageRule,
   RuleCategory,
@@ -98,10 +99,11 @@ export function queryFinding(
  * `scopeValue`, because the two scopes ask for different things and the optional
  * spelling let a caller write both of the rows the runner refuses:
  *
- *   - `page_type` REQUIRES a name. A cohort row is the answer for one group of
- *     pages; without a name it identifies no group, and the empty string is
- *     already spoken for — it is what a site row stores in the composite primary
- *     key `(crawl_id, metric_id, scope, scope_value)`.
+ *   - every scope but `site` REQUIRES a name. A `page_type` row is the answer
+ *     for one group of pages and a `sitemap_doc` row the answer for one sitemap
+ *     document; without a name neither identifies what it counted, and the empty
+ *     string is already spoken for — it is what a site row stores in the
+ *     composite primary key `(crawl_id, metric_id, scope, scope_value)`.
  *   - `site` ACCEPTS no name. There is one site per crawl, so a scope value on
  *     it would key a second "site" row and answer the same question twice.
  *
@@ -127,7 +129,11 @@ export function metricRow(
   self: MetricIdentity,
   m:
     | { scope: "site"; value: Record<string, unknown> }
-    | { scope: "page_type"; scopeValue: string; value: Record<string, unknown> },
+    | {
+        scope: Exclude<MetricScope, "site">;
+        scopeValue: string;
+        value: Record<string, unknown>;
+      },
 ): Metric {
   // Each field named rather than spread, for `queryFinding`'s reason: a spread
   // of `m` would carry whatever else the caller's object holds — a `metricId`
@@ -136,7 +142,7 @@ export function metricRow(
   if (m.scope === "site") {
     return { metricId: self.id, scope: "site", scopeValue: "", value: m.value };
   }
-  return { metricId: self.id, scope: "page_type", scopeValue: m.scopeValue, value: m.value };
+  return { metricId: self.id, scope: m.scope, scopeValue: m.scopeValue, value: m.value };
 }
 
 /**

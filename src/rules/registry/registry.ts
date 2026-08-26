@@ -56,12 +56,19 @@ export const RENDER_CHECKS: readonly string[] = ["CHECK-01", "CHECK-02", "CHECK-
  * they belong to the metric rules. Listed so the coverage pin's remainder says
  * *why* each check is still unclaimed instead of leaving a reader to guess.
  *
- * The list shrinks as the metric rules land, one id leaving in the same commit
- * as the rule that claims it: CHECK-33 and CHECK-33b left with the link-graph
- * metrics. The two below are the sitemap-structure and URL-parameter metrics,
- * still to be written.
+ * The list shrank as the metric rules landed, one id leaving in the same commit
+ * as the rule that claimed it: CHECK-33 and CHECK-33b with the link-graph
+ * metrics, then CHECK-08 (`sitemap.structure`) and CHECK-29
+ * (`url.param-volumes`). It is now EMPTY — every check whose answer is a
+ * site-wide number has a metric behind it, and the coverage pin's remainder is
+ * the render pass alone.
+ *
+ * Kept rather than deleted: it is half of the coverage test's annotation
+ * contract (every unclaimed check carries a reason, every reason a still-
+ * unclaimed check), and the next check that waits on a metric belongs here
+ * rather than in a comment somewhere.
  */
-export const METRIC_PENDING_CHECKS: readonly string[] = ["CHECK-08", "CHECK-29"];
+export const METRIC_PENDING_CHECKS: readonly string[] = [];
 
 export function defineRule<T extends AnyRule>(rule: T): T {
   const fail = (msg: string): never => {

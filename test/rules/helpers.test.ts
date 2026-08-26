@@ -128,6 +128,22 @@ describe("metricRow", () => {
     expect(m.value).toEqual({ median: 3 });
   });
 
+  it("carries a sitemap document's URL through as the scope value", () => {
+    // The scope that is not a cohort of pages: a `sitemap_doc` row answers for
+    // one document, named by the URL it was fetched from.
+    const m = metricRow(
+      { id: "sitemap.structure" },
+      {
+        scope: "sitemap_doc",
+        scopeValue: "https://example.com/sitemap-products.xml",
+        value: { urls: 3, breaches50k: false },
+      },
+    );
+    expect(m.scope).toBe("sitemap_doc");
+    expect(m.scopeValue).toBe("https://example.com/sitemap-products.xml");
+    expect(m.value).toEqual({ urls: 3, breaches50k: false });
+  });
+
   // The identity is the rule's, never the payload's — `queryFinding`'s reason,
   // with a sharper edge: the runner deletes a metric rule's rows by
   // `metric_id = <rule id>` before inserting its fresh set, so a row that
@@ -156,6 +172,8 @@ describe("metricRow", () => {
     expect(metricRow({ id: "some.metric" }, { scope: "site", scopeValue: "x", value: {} })).toBeTruthy();
     // @ts-expect-error a page_type row must name the cohort it answers for
     expect(metricRow({ id: "some.metric" }, { scope: "page_type", value: {} })).toBeTruthy();
+    // @ts-expect-error and a sitemap_doc row must name its document
+    expect(metricRow({ id: "some.metric" }, { scope: "sitemap_doc", value: {} })).toBeTruthy();
   });
 });
 

@@ -54,7 +54,10 @@ describe("buildRegistry", () => {
     expect(ids).toContain("content.metrics-by-type");
     expect(ids).toContain("content.template-similarity");
     expect(ids).toContain("hreflang.coverage");
-    expect(ids.length).toBe(71);
+    expect(ids).toContain("url.param-volumes");
+    expect(ids).toContain("redirect.volume");
+    expect(ids).toContain("sitemap.structure");
+    expect(ids.length).toBe(74);
   });
 
   it("registers every kind the runner drives", () => {
@@ -516,6 +519,49 @@ describe("runRules against the database", () => {
     // Validated before anything is written: the rule's whole set is refused,
     // not the bad row alone.
     expect(await readMetrics(crawlId)).toEqual({});
+  });
+
+  // The same refusal for the scope that is not a cohort of pages: a
+  // `sitemap_doc` row names one sitemap document, and a nameless one identifies
+  // no document while colliding with the site row's key. Asserted separately
+  // from the `page_type` case because the check is what makes a NEW scope safe
+  // to add — a scope the runner validated only by name would accept the
+  // nameless row it is there to refuse.
+  it("refuses a sitemap_doc row with no scope value, and stores a named one", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const nameless = new Registry();
+    nameless.register(
+      mkMetricRule("test.nameless-doc", async () => [
+        { metricId: "test.nameless-doc", scope: "sitemap_doc", scopeValue: "", value: { n: 1 } },
+      ]),
+    );
+    await expect(runRules(db, crawlId, nameless)).rejects.toThrow(/test\.nameless-doc/);
+    expect(await readMetrics(crawlId)).toEqual({});
+
+    // And the row the scope exists for, through the runner and back out of the
+    // table: a document URL in `scope_value`, where a `page_type` value would
+    // have been a template name.
+    const named = new Registry();
+    named.register(
+      mkMetricRule("test.docs", async () => [
+        metricRow({ id: "test.docs" }, { scope: "site", value: { docs: 1 } }),
+        metricRow(
+          { id: "test.docs" },
+          {
+            scope: "sitemap_doc",
+            scopeValue: "https://example.com/sitemap-products.xml",
+            value: { urls: 3 },
+          },
+        ),
+      ]),
+    );
+    expect((await runRules(db, crawlId, named)).byMetric).toEqual({ "test.docs": 2 });
+    expect(await readMetrics(crawlId)).toEqual({
+      "test.docs|site|": { docs: 1 },
+      "test.docs|sitemap_doc|https://example.com/sitemap-products.xml": { urls: 3 },
+    });
   });
 
   // The symmetric defect: one site per crawl means a site row that names

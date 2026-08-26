@@ -10,9 +10,9 @@
  * a check quietly dropped by a rule shows up as an addition, and a check newly
  * claimed shows up as a removal that must be deleted from the literal in the
  * same commit as the rule that claims it. Phase 3 took this list from 29 to
- * seven and Phase 4's link-graph metrics took it to the five below; each is
- * annotated with the phase that can answer it: the render pass (Phase 5) or
- * the metric rules still to be written (Phase 4).
+ * seven, Phase 4's link-graph metrics took it to five, and its URL and sitemap
+ * metrics took it to the three below — all of them annotated with the one phase
+ * left that can answer them: the render pass (Phase 5).
  *
  * Note the pin only ever *subtracts* from `CRAWL_CHECK_IDS`: rules claiming
  * checks outside those 47 (today CHECK-49, CHECK-50 and CHECK-52, from
@@ -29,30 +29,32 @@ import {
 } from "../../src/rules/registry/registry.js";
 
 describe("checklist coverage", () => {
-  it("pins exactly which crawl-derived checks remain unclaimed (the render three + metric two)", () => {
+  it("pins exactly which crawl-derived checks remain unclaimed (the render three)", () => {
     const unclaimed = buildRegistry().unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS]);
-    // CHECK-33 and CHECK-33b left this list with the link-graph metrics.
-    expect(unclaimed.sort()).toEqual([
-      "CHECK-01","CHECK-02","CHECK-08","CHECK-29","CHECK-34",
-    ]);
+    // CHECK-33 and CHECK-33b left this list with the link-graph metrics, then
+    // CHECK-08 (`sitemap.structure`) and CHECK-29 (`url.param-volumes`) with
+    // the sitemap and URL metrics. What remains is the render pass alone.
+    expect(unclaimed.sort()).toEqual(["CHECK-01","CHECK-02","CHECK-34"]);
   });
 
-  // The gate document's ruleset table states these three numbers. Pinned here
-  // so a rule added or dropped fails CI rather than quietly making that table
-  // wrong — and so the metric count is a number someone has to update
-  // deliberately rather than one that drifts as Phase 4 lands its rules.
-  it("pins the ruleset split the gate doc reports: 71 rules = 26 page + 38 query + 7 metric", () => {
+  // The gate document's ruleset table states these three numbers — the Phase 4
+  // gate doc, which is written at the end of the phase against what CI pins
+  // here. Pinned so a rule added or dropped fails CI rather than quietly making
+  // that table wrong, and so the metric count is a number someone has to update
+  // deliberately rather than one that drifts as Phase 4 lands its rules. (The
+  // Phase 3 gate doc's table is a record of what shipped then; it is not
+  // updated, and these numbers have moved past it.)
+  it("pins the ruleset split the gate doc reports: 74 rules = 26 page + 38 query + 10 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(71);
+    expect(registry.all()).toHaveLength(74);
     expect(registry.byKind("page")).toHaveLength(26);
     expect(registry.byKind("query")).toHaveLength(38);
-    // The link-graph four, plus the two content metrics and hreflang coverage.
-    // Phase 4's remaining metric rules land in later tasks, each raising this
-    // number in the commit that registers it.
-    expect(registry.byKind("metric")).toHaveLength(7);
+    // The link-graph four, the two content metrics and hreflang coverage, plus
+    // the URL-parameter, redirect-volume and sitemap-structure metrics.
+    expect(registry.byKind("metric")).toHaveLength(10);
   });
 
-  it("accounts for all 47 crawl-derived checks: 39 claimed, 3 agent, 5 unclaimed", () => {
+  it("accounts for all 47 crawl-derived checks: 41 claimed, 3 agent, 3 unclaimed", () => {
     // The arithmetic behind the pin above, stated so a drift in the universe
     // itself (an id added to or removed from `CRAWL_CHECK_IDS`) fails here
     // rather than silently changing what "unclaimed" means.
@@ -69,10 +71,11 @@ describe("checklist coverage", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(AGENT_CHECKS).toHaveLength(3);
     expect(claimedInUniverse.sort()).toEqual([
-      "CHECK-03","CHECK-04","CHECK-05","CHECK-06","CHECK-07","CHECK-09",
+      "CHECK-03","CHECK-04","CHECK-05","CHECK-06","CHECK-07","CHECK-08","CHECK-09",
       "CHECK-10","CHECK-11","CHECK-12","CHECK-13","CHECK-14","CHECK-15","CHECK-16",
       "CHECK-17","CHECK-18","CHECK-19","CHECK-20","CHECK-21","CHECK-22","CHECK-23",
-      "CHECK-24","CHECK-25","CHECK-26","CHECK-27","CHECK-28","CHECK-30","CHECK-31","CHECK-32",
+      "CHECK-24","CHECK-25","CHECK-26","CHECK-27","CHECK-28","CHECK-29",
+      "CHECK-30","CHECK-31","CHECK-32",
       "CHECK-33","CHECK-33b",
       "CHECK-35","CHECK-36","CHECK-37","CHECK-39","CHECK-40",
       "CHECK-43","CHECK-44","CHECK-45","CHECK-46",

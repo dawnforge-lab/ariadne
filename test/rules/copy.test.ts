@@ -22,6 +22,12 @@ import {
   TEMPLATE_NEAR_BITS,
   TEMPLATE_SAMPLE_PAGES,
 } from "../../src/rules/metric/content-metrics.js";
+import {
+  SITEMAP_DOC_ROWS_CAP,
+  SITEMAP_URL_CAP,
+} from "../../src/rules/metric/crawl-metrics.js";
+import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 
 /**
  * The content copy spells its distance out in words, so the threshold pin below
@@ -130,6 +136,9 @@ const PHASE_4_METRIC_IDS = [
   "content.metrics-by-type",
   "content.template-similarity",
   "hreflang.coverage",
+  "url.param-volumes",
+  "redirect.volume",
+  "sitemap.structure",
 ];
 
 const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS, ...PHASE_4_METRIC_IDS];
@@ -470,6 +479,65 @@ describe("issue copy", () => {
     // "100% coverage" as "the international setup is sound".
     const overclaim = /(?:sets|declarations) are (?:complete|correct|valid)|correctly configured/i;
     expect(text).not.toMatch(overclaim);
+  });
+
+  // The same contract for the task 6 metrics: every column of every value shape
+  // has to be findable in the prose, because a number that reaches a client
+  // without a sentence explaining it is a number nobody can defend.
+  it("url.param-volumes names every column of its shape, the cap and the tie-break", () => {
+    const text = ISSUE_COPY["url.param-volumes"]!.explanation;
+    expect(text, "totalParams").toMatch(/how many distinct parameter names/i);
+    expect(text, "trackingParams").toMatch(/how many of those are tracking parameters/i);
+    // The three columns of a `topParams` entry: name, occurrences, isTracking.
+    expect(text, "topParams.occurrences").toMatch(/the number of URLs it appears on/i);
+    expect(text, "topParams.isTracking").toMatch(/whether it is one of the tracking ones/i);
+    expect(text, "parameterisedPages").toMatch(/how many crawled pages carry a query string/i);
+    expect(text, "parameterisedIndexablePages").toMatch(
+      /how many of those returned 200 and are indexable/i,
+    );
+    // The cap is the rule's own constant, and the tie-break is what makes the
+    // list the same twenty on every run (the on-page-threshold contract).
+    expect(TOP_PARAMS_CAP).toBe(20);
+    expect(text, "the cap").toContain("twenty");
+    expect(text, "the tie-break").toMatch(/ties broken by name/i);
+  });
+
+  it("redirect.volume names every column and what its counts are capped by", () => {
+    const text = ISSUE_COPY["redirect.volume"]!.explanation;
+    expect(text, "redirectPages").toMatch(/how many of the URLs this crawl requested/i);
+    expect(text, "totalPages").toMatch(/out of how many pages were fetched in total/i);
+    expect(text, "ratioPct").toMatch(/percentage rounded to one decimal place/i);
+    expect(text, "chains and loops").toMatch(/how many redirect chains and how many redirect loops/i);
+    // The counts are exact even where the FINDINGS listing was capped, and the
+    // copy has to say so: a reader comparing the table with the findings list
+    // would otherwise take the difference for an error.
+    expect(text, "the finding cap").toMatch(
+      new RegExp(`counted in full even where that list was capped at the first ${URL_FINDING_CAP}`, "i"),
+    );
+    expect(text, "the null share").toMatch(/no percentage rather than zero/i);
+  });
+
+  it("sitemap.structure names every column of both its shapes", () => {
+    const text = ISSUE_COPY["sitemap.structure"]!.explanation;
+    expect(text, "docs").toMatch(/number of documents that contributed at least one entry/i);
+    expect(text, "totalUrls").toMatch(/total number of entries stored across them/i);
+    expect(text, "oversizedDocsSkipped").toMatch(/dropped whole for being too large to read/i);
+    expect(text, "urlCapBreaches").toMatch(/how many documents carry more than the 50,000/i);
+    // `entryCapReached` changes what every other number means, so it is copy
+    // rather than a footnote.
+    expect(text, "entryCapReached").toMatch(/whether the crawl's own entry cap stopped collection/i);
+    expect(text, "the floor that implies").toMatch(/a floor rather than a total/i);
+    // The per-document row: scope value, urls, breaches50k.
+    expect(text, "the doc row's identity").toMatch(/named by the URL it was fetched from/i);
+    expect(text, "urls").toMatch(/how many entries it contributed/i);
+    expect(text, "breaches50k").toMatch(/whether that is past 50,000/i);
+    // Both caps are the rule's own constants.
+    expect(SITEMAP_URL_CAP).toBe(50_000);
+    expect(text, "the protocol cap").toContain("50,000");
+    expect(SITEMAP_DOC_ROWS_CAP).toBe(50);
+    expect(text, "the listing cap").toMatch(
+      new RegExp(`largest ${SITEMAP_DOC_ROWS_CAP} documents are listed`, "i"),
+    );
   });
 
   // A metric states what was counted; it does not accuse the site of anything.
