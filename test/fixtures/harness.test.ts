@@ -399,7 +399,7 @@ describe("the fixture site end to end", () => {
     // `BreadcrumbList` on a site well past the five-page floor, which is
     // CHECK-45. Task 9 authors the JSON-LD fixtures the other two rules need
     // and, in doing so, silences `schema.none-on-site` here for good (see the
-    // paragraph above `UNCLAIMED_UNTIL_TASK_9`).
+    // paragraph below `UNCLAIMED_UNTIL_TASK_9`).
     expect([...siteFindings.keys()].sort()).toEqual([
       "host.http-serves-200",
       "schema.breadcrumb-absent",

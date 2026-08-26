@@ -63,12 +63,32 @@ export const BREADCRUMB_TYPE = "BreadcrumbList";
 export const BREADCRUMB_PAGE_FLOOR = 5;
 
 /**
+ * How many indexable 200 pages a crawl needs before "this site publishes no
+ * structured data" is a statement about the site rather than about the crawl.
+ *
+ * One. The bar is deliberately at the bottom — the check is whether a site uses
+ * structured data at all, and a single page is enough to have an answer — but it
+ * is not zero: a crawl that read nothing has seen no markup and no absence of
+ * markup either. See `noneOnSiteFindings` for what the floor does and does not
+ * distinguish.
+ */
+export const NONE_PAGE_FLOOR = 1;
+
+/**
  * The types Google's review-snippet policy calls self-serving when they carry
  * their own rating, and the two fields that carry it.
  *
  * Reviews of a PRODUCT are exactly what the markup is for; reviews an
  * organisation publishes about itself are the case the policy names, and
  * Google ignores them for rich results.
+ *
+ * Matched as exact `@type` strings, so the SUBTYPES of LocalBusiness —
+ * `Restaurant`, `Store`, `Dentist` and the rest of that branch — are not
+ * reported, and neither are the subtypes of Organization. The policy covers
+ * them; this rule under-reports them, which is the safe direction (a missed
+ * finding, never a false one) but is a real gap: a restaurant rating itself
+ * goes unnamed here. Widening it means enumerating the schema.org hierarchy,
+ * which is a data set this engine does not carry today.
  */
 export const SELF_SERVING_TYPES: readonly string[] = ["Organization", "LocalBusiness"];
 export const SELF_SERVING_FIELDS: readonly string[] = ["aggregateRating", "review"];
@@ -134,11 +154,21 @@ async function siteShape(
  * Info, and site-scoped. It is one decision to make — "should this site publish
  * structured data" — rather than a fault on any one page, and the answer is
  * sometimes no.
+ *
+ * **The one-page floor.** A crawl with no indexable page is silent: "this site
+ * publishes no structured data" would be a claim about a site this crawl never
+ * read. That floor is `indexablePages`, not "pages fetched", so it conflates two
+ * situations — a crawl that reached nothing at all, and a crawl that reached a
+ * site whose every page is noindexed or non-200. The second goes unreported
+ * here, deliberately: a site with nothing to index has no rich result to earn,
+ * and its real problem is the noindex, which the indexability rules report by
+ * name. The number the finding carries is the same one the floor is drawn on,
+ * so a reader is never told a threshold was applied to a figure they cannot see.
  */
 async function noneOnSiteFindings(db: Db, crawlId: string): Promise<Finding[]> {
   await assertCrawl(db, crawlId, NONE.id);
   const { hasBlocks, indexablePages } = await siteShape(db, crawlId, null);
-  if (hasBlocks) return [];
+  if (hasBlocks || indexablePages < NONE_PAGE_FLOOR) return [];
   return [
     queryFinding(NONE, {
       pageId: null,
@@ -245,9 +275,20 @@ function missingFields(
  * The SQL is a pre-filter and `missingFields` is the authority: a row whose
  * blob turns out to name no missing required field produces no finding, and
  * because the SQL admitted it that disagreement is a defect rather than a
- * silence — it throws, like `content.soft-404`'s unexplained match. Null and
- * malformed blobs are deliberately pulled INTO that check rather than filtered
- * out, so a derivation that did not run is loud instead of invisible.
+ * silence — it throws, like `content.soft-404`'s unexplained match.
+ *
+ * **Every non-conforming blob is pulled INTO that check rather than filtered
+ * out**, which is what makes the refusal loud rather than decorative. The
+ * predicate is deliberately wider than "carries a false", because
+ * `jsonb_path_exists` runs in lax mode and answers *false* — not an error — for
+ * a blob that is a scalar, an array, or an object with no `required` at all, and
+ * an all-true blob derived under an older profile would also slip past a
+ * false-only test. So the WHERE clause admits: a null blob; anything that is not
+ * an object; a missing or non-object `required`/`recommended`; a group that does
+ * not judge every field the profile names (the stale-profile case); a value that
+ * is not a boolean; and, finally, a real false. Each of the first five lands on
+ * a named branch of `missingFields`, which throws telling the reader to re-run
+ * the rules.
  */
 async function productFindings(db: Db, crawlId: string): Promise<Finding[]> {
   await assertCrawl(db, crawlId, PRODUCT_INCOMPLETE.id);
@@ -269,6 +310,22 @@ async function productFindings(db: Db, crawlId: string): Promise<Finding[]> {
     from product pr
     join pages p on p.crawl_id = ${crawlId} and p.id = pr.page_id
     where pr.presence is null
+       -- "is distinct from", not "<>": a missing key makes jsonb_typeof NULL,
+       -- and NULL <> 'object' is NULL — which a WHERE clause reads as "no",
+       -- so the blob that omits a whole group would be the one shape to escape.
+       or jsonb_typeof(pr.presence) is distinct from 'object'
+       or jsonb_typeof(pr.presence -> 'required') is distinct from 'object'
+       or jsonb_typeof(pr.presence -> 'recommended') is distinct from 'object'
+       or not coalesce(
+            jsonb_exists_all(pr.presence -> 'required', ${sql.param([
+              ...profile.required,
+            ])}::text[]), false)
+       or not coalesce(
+            jsonb_exists_all(pr.presence -> 'recommended', ${sql.param([
+              ...profile.recommended,
+            ])}::text[]), false)
+       or jsonb_path_exists(pr.presence, '$.required.* ? (@.type() != "boolean")')
+       or jsonb_path_exists(pr.presence, '$.recommended.* ? (@.type() != "boolean")')
        or jsonb_path_exists(pr.presence, '$.required.* ? (@ == false)')
     order by p.url
     limit ${URL_FINDING_CAP}`);

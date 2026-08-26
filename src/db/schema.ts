@@ -181,7 +181,17 @@ export const structuredData = pgTable("structured_data", {
   schemaType: text("schema_type").notNull(),
   raw: jsonb("raw_jsonb").notNull(),
   fieldPresence: jsonb("field_presence_jsonb"),
-}, (t) => [index("sd_crawl_type").on(t.crawlId, t.schemaType)]);
+}, (t) => [
+  index("sd_crawl_type").on(t.crawlId, t.schemaType),
+  // COUPLED to `deriveFieldPresence`'s batch query (src/rules/derive/field-presence.ts),
+  // which streams the crawl's blocks by a `page_id` cursor: `where crawl_id = $1
+  // and page_id > $cursor … order by page_id limit N`. Without this index every
+  // batch rescans every profiled row of the crawl and the derivation is
+  // quadratic in the number of pages carrying structured data — a slow query,
+  // never an error, which is exactly the failure that hides. Change the cursor
+  // there, change this index here (the `pages_simhash_band*` precedent).
+  index("sd_crawl_page").on(t.crawlId, t.pageId),
+]);
 
 export const sitemapUrls = pgTable("sitemap_urls", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),

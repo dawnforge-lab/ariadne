@@ -206,6 +206,29 @@ describe("the structured-data rules against the database", () => {
       expect((await run(ID, crawlId))[0]!.evidence).toEqual({ indexablePages: 1 });
     });
 
+    it("is silent on a crawl with no indexable page at all", async () => {
+      // A crawl that reached nothing has seen neither markup nor its absence,
+      // and "this site publishes no structured data" would be a claim about a
+      // site nobody read. The floor is drawn on the same number the finding
+      // carries as evidence.
+      const empty = await newCrawl();
+      expect(await run(ID, empty)).toHaveLength(0);
+
+      const allNoindex = await newCrawl();
+      await addPages(allNoindex, [
+        { path: "/hidden", robotsMeta: "noindex" },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+      ]);
+      // The same silence covers a site whose every page is noindexed: it has no
+      // rich result to earn, and its actual problem is the noindex, which the
+      // indexability rules report by name.
+      expect(await run(ID, allNoindex)).toHaveLength(0);
+
+      // And one indexable page is enough to have an answer.
+      await addPages(allNoindex, [{ path: "/visible" }]);
+      expect(await run(ID, allNoindex)).toHaveLength(1);
+    });
+
     it("is silent as soon as one block of any type was stored", async () => {
       // Any type at all: the check is whether the site uses structured data,
       // not whether it uses the two types this engine profiles.
@@ -386,6 +409,58 @@ describe("the structured-data rules against the database", () => {
       await deriveFieldPresence(db, crawlId);
 
       expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("refuses every presence blob that is not one the derivation would write", async () => {
+      // The SQL that selects candidates is a pre-filter, and `jsonb_path_exists`
+      // runs in lax mode: it answers *false*, not an error, for a blob that is a
+      // scalar or an array or has no `required` at all, and an all-true blob
+      // derived under an older profile carries no `false` either. Each of these
+      // shapes has to REACH the JavaScript check, or the loud refusal is
+      // decorative and a broken derivation reads as a site with tidy markup.
+      const shapes: Record<string, unknown> = {
+        "/scalar": "not a presence blob",
+        "/array": [{ required: { name: false } }],
+        "/no-required": { recommended: { sku: true } },
+        "/required-not-object": { required: "name", recommended: {} },
+        // Judged under a profile that did not know about `offers`: every field
+        // it does name is true, so nothing here is false.
+        "/stale-profile": {
+          required: { name: true, image: true },
+          recommended: {
+            description: true,
+            sku: true,
+            brand: true,
+            aggregateRating: true,
+            review: true,
+          },
+        },
+        // A value that is not a boolean says nothing about the field.
+        "/not-boolean": {
+          required: { name: true, image: "yes", offers: true },
+          recommended: {
+            description: true,
+            sku: true,
+            brand: true,
+            aggregateRating: true,
+            review: true,
+          },
+        },
+      };
+
+      for (const [path, blob] of Object.entries(shapes)) {
+        const crawlId = await crawlOfPages(1);
+        const ids = await addPages(crawlId, [{ path }]);
+        await addBlocks(crawlId, [
+          { pageId: ids.get(path)!, type: "Product", raw: { "@type": "Product" } },
+        ]);
+        await db
+          .update(structuredData)
+          .set({ fieldPresence: blob })
+          .where(eq(structuredData.crawlId, crawlId));
+
+        await expect(run(ID, crawlId), path).rejects.toThrow(/field presence/i);
+      }
     });
 
     it("refuses to judge a Product whose presence was never derived", async () => {
