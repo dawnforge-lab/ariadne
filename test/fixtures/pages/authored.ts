@@ -81,7 +81,7 @@ function healthyBody(opts: {
 const placeholderCopy: Fixture = {
   path: "/authored/lorem",
   category: CONTENT,
-  name: "Placeholder copy (lorem ipsum) left in the body",
+  name: "Placeholder copy left in the body",
   expectedIssues: ["content.placeholder"],
   exact: true,
   handler: (req, res) =>

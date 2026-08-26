@@ -36,6 +36,15 @@ export async function runRules(
   crawlId: string,
   registry: Registry,
 ): Promise<RunSummary> {
+  // Metric rules exist in the registry's type but nothing here drives them.
+  // Silently ignoring one would mean a registered rule that never runs and a
+  // check that looks covered — so refuse the run instead.
+  if (registry.byKind("metric").length > 0) {
+    throw new Error(
+      "runRules does not drive metric rules yet — extend the runner before registering metric rules",
+    );
+  }
+
   const summary: RunSummary = { pagesScanned: 0, findings: 0, byRule: {} };
   const buffer: Finding[] = [];
 

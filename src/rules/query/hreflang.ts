@@ -45,20 +45,23 @@ export const hreflangRules: QueryRule[] = [
         select h.page_id, h.hreflang_code, h.target_url, p.url as page_url
         from hreflang h join pages p on p.id = h.page_id
         where h.crawl_id = ${crawlId}`);
+      // The analyzer stores the attribute verbatim, so `hreflang="en-GB "` — a
+      // formatting artefact, not a mistake — arrives with its whitespace. Trim
+      // before judging it; surrounding space is not what makes a code invalid.
       return res.rows
-        .filter((r) => {
-          const code = String(r.hreflang_code);
-          return code.toLowerCase() !== "x-default" && !HREFLANG_CODE.test(code);
-        })
+        .map((r) => ({ ...r, code: String(r.hreflang_code).trim() }))
+        .filter(
+          ({ code }) => code.toLowerCase() !== "x-default" && !HREFLANG_CODE.test(code),
+        )
         .map((r) => ({
           ruleId: "hreflang.invalid-code",
           pageId: String(r.page_id),
           pageUrl: String(r.page_url),
           severity: "warning" as const,
-          evidence: { code: r.hreflang_code, targetUrl: r.target_url },
+          evidence: { code: r.code, targetUrl: r.target_url },
           // One finding per declaration, not per page: a page can carry several
           // broken codes and each is a separate thing to fix.
-          dedupeKey: `${r.page_url}#${r.hreflang_code}`,
+          dedupeKey: `${r.page_url}#${r.code}`,
         }));
     },
   }),
@@ -75,8 +78,11 @@ export const hreflangRules: QueryRule[] = [
     ...copyFor("hreflang.missing-x-default"),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
+      // `trim` for the same reason as invalid-code: a stored `"x-default "`
+      // is a real fallback declaration, and missing it would report the whole
+      // site as lacking one.
       const counts = await db.execute<{ xd: string; total: string }>(sql`
-        select count(*) filter (where lower(hreflang_code) = 'x-default') as xd,
+        select count(*) filter (where lower(trim(hreflang_code)) = 'x-default') as xd,
                count(*) as total
         from hreflang where crawl_id = ${crawlId}`);
       const row = counts.rows[0]!;

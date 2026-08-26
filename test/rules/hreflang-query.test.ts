@@ -172,6 +172,27 @@ describe("hreflangRules against the database", () => {
       );
     });
 
+    // The analyzer stores the attribute verbatim, so a code the author padded
+    // with a space reaches the rule padded. It is a valid code either way.
+    it("does not fire on a valid code carrying surrounding whitespace", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/padded"]);
+      await addHreflang(crawlId, ids.get("/padded")!, [["en-GB ", `${SITE}/en-gb`]]);
+
+      expect(await rule("hreflang.invalid-code").run(db, crawlId)).toHaveLength(0);
+    });
+
+    it("reports the trimmed code, in the evidence and the dedupe key", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/padded-bad"]);
+      await addHreflang(crawlId, ids.get("/padded-bad")!, [["english-uk ", `${SITE}/uk`]]);
+
+      const findings = await rule("hreflang.invalid-code").run(db, crawlId);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.evidence.code).toBe("english-uk");
+      expect(findings[0]!.dedupeKey).toBe(`${SITE}/padded-bad#english-uk`);
+    });
+
     it("reads only its own crawl", async () => {
       const other = await newCrawl();
       const otherIds = await addPages(other, ["/foreign"]);
@@ -209,7 +230,9 @@ describe("hreflangRules against the database", () => {
     });
 
     it("is silent when one x-default exists anywhere in the crawl, whatever its case", async () => {
-      for (const code of ["x-default", "X-Default"]) {
+      // The padded form counts too: the analyzer stores the attribute verbatim,
+      // and a stray space must not report the whole site as lacking a fallback.
+      for (const code of ["x-default", "X-Default", " x-default "]) {
         const crawlId = await newCrawl();
         const ids = await addPages(crawlId, ["/a", "/fallback"]);
         await addHreflang(crawlId, ids.get("/a")!, [["en", `${SITE}/a`]]);
