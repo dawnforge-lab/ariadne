@@ -11,10 +11,20 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { absorbedFixtures } from "./pages/absorbed.js";
 import { authoredFixtures } from "./pages/authored.js";
+import { authoredP3Fixtures } from "./pages/authored-p3.js";
 import { controlFixture } from "./pages/control.js";
 
 export interface Fixture {
-  /** Path this fixture is served at, e.g. "/head/missing-title". */
+  /**
+   * Path this fixture is served at, e.g. "/head/missing-title".
+   *
+   * A path may carry a query string (`/authored3/tracked?utm_source=…`), and
+   * then it is the whole request target that identifies the fixture: the app
+   * matches the raw URL first and the path alone second (see `startFixtureApp`),
+   * the hub links this exact string, and the harness keys its assertions on
+   * pathname + search. That is what lets a parameterised URL be a fixture with
+   * expectations of its own rather than a page nothing can assert about.
+   */
   path: string;
   /** Grouping, for reading a failure quickly. */
   category: string;
@@ -39,13 +49,46 @@ export interface Fixture {
    * engineer.
    */
   exact?: boolean;
+  /**
+   * Whether `/sitemap.xml` lists this fixture's URL. Default true.
+   *
+   * The default is what keeps the sitemap rules honest rather than deafening:
+   * `pages.not-in-sitemap` fires on EVERY indexable 200 the sitemap omits, so a
+   * site whose sitemap listed a handful of pages would put that finding on most
+   * of the collection and every `exact` list would have to carry it. Listing by
+   * default and opting out one page at a time makes each omission a decision
+   * with a reason beside it, and there are only three reasons in the whole
+   * collection:
+   *
+   *  - the page is not an indexable 200 (a 404, a redirect, a noindex), so a
+   *    listing would fire a sitemap rule on a page that is not what this fixture
+   *    is about — except for the three entries deliberately left listed, which
+   *    are exactly what `sitemap.non-200`, `sitemap.redirected` and
+   *    `sitemap.non-indexable` report;
+   *  - the page's DEPTH is the thing under test. Sitemap entries are enqueued at
+   *    depth 0 before the crawl starts (see the crawl loop's seeding), so a
+   *    listed page is a depth-0 page whatever links to it — which would quietly
+   *    flatten the deep click-path and silence `structure.deep-page`;
+   *  - `/authored3/unlisted`, which exists to be the page the sitemap forgot.
+   */
+  inSitemap?: boolean;
+  /**
+   * Whether the hub links this fixture. Default true.
+   *
+   * The hub is what makes one crawl from the seed reach the whole collection, so
+   * opting out means the page is reachable only through the sitemap — which is
+   * the definition of the orphan `links.orphan` reports, and the shape
+   * `pagination.next-not-linked` needs for the page a `rel=next` points at.
+   */
+  linkedFromHub?: boolean;
   handler: (req: IncomingMessage, res: ServerResponse) => void;
 }
 
 /**
  * Every fixture the site serves: the pages absorbed from badseo, the pages
- * authored here for the rules that absorb left unclaimed, and the control.
+ * authored in Phase 2 for the rules absorb left unclaimed, the Phase 3 pages
+ * authored for the query rules, and the control.
  */
 export function allFixtures(): Fixture[] {
-  return [...absorbedFixtures, ...authoredFixtures, controlFixture];
+  return [...absorbedFixtures, ...authoredFixtures, ...authoredP3Fixtures, controlFixture];
 }

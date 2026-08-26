@@ -204,6 +204,11 @@ const canonicalNoindex: Fixture = {
     "indexability.noindex",
   ],
   exact: true,
+  // Off the sitemap (Task 9): a listed noindexed page is `sitemap.non-indexable`
+  // and `/index/noindex-meta` is the fixture that claims it. Listing this one
+  // too would add that finding to a page whose subject is the contradiction in
+  // its own head.
+  inSitemap: false,
   handler: (req, res) =>
     serve(req, res, (self) => ({
       title: "Canonical and noindex together",
@@ -237,6 +242,8 @@ const noindexConflict: Fixture = {
   name: "Robots meta and X-Robots-Tag disagree",
   expectedIssues: ["indexability.meta-header-conflict", "indexability.noindex"],
   exact: true,
+  // Off the sitemap, for the reason given on the fixture above.
+  inSitemap: false,
   handler: (req, res) =>
     serve(
       req,

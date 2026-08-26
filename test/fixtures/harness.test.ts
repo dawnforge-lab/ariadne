@@ -19,6 +19,8 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, hreflang, issues, pages } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
+import { THIN_WORDS } from "../../src/rules/page/on-page.js";
+import { SOFT_404_WORDS } from "../../src/rules/query/content.js";
 import { runRules } from "../../src/rules/run.js";
 import type { Registry } from "../../src/rules/registry/registry.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
@@ -32,111 +34,17 @@ function databaseUrl(): string {
 }
 
 /**
- * Rules no fixture claims yet. Each needs a page shape the fixture site does
- * not serve today: a canonical or an hreflang alternate pointing at a URL the
- * crawl fetched and found broken or noindexed, a page nothing links to (the
- * hub links every fixture, which is what makes the crawl reach them all), and
- * a paginated series, and — for the sitemap rules — a sitemap at all. The
- * fixture site deliberately publishes none today (see app.ts), so every rule
- * that joins `sitemap_urls` to `pages` has nothing to read: Task 9 authors a
- * declared sitemap listing a 404, a redirect, a noindexed page, a URL the crawl
- * cannot reach and a URL robots.txt disallows, and leaves at least one
- * indexable page off it. Phase 3's fixture task (Task 9) authors those pages and
- * DELETES this list, at which point the last assertion below becomes the strict
- * "every registered rule fires somewhere" it wants to be. The same pattern, and
- * the same promise, as Phase 2's Task 8 -> 9.
+ * Rules NO fixture can claim, because their firing condition is a property of an
+ * unhealthy crawl, of a site this one cannot also be, or of the absence of
+ * something another fixture had to publish.
  *
- * It is asserted exactly, not as a floor: a rule that quietly stops firing
- * shows up here as an unexpected addition, and a rule Task 9 claims without
- * removing its entry shows up as an unexpected absence. The other Phase 3 rules
- * are not here because the absorbed redirect and 404 pages, and the authored
- * hreflang pair, already provoke them — see their `expectedIssues`.
- */
-const UNCLAIMED_UNTIL_TASK_9: string[] = [
-  "canonical.non-200-target",
-  "canonical.non-indexable-target",
-  "content.soft-404",
-  "host.legacy-host-reachable",
-  "hreflang.missing-return-link",
-  "hreflang.non-indexable-target",
-  "links.orphan",
-  "pages.not-in-sitemap",
-  "pagination.canonical-to-other",
-  "pagination.next-not-linked",
-  "pagination.next-target-uncrawled",
-  "robots.blocks-sitemap-urls",
-  "schema.product-incomplete",
-  "schema.self-serving-reviews",
-  "sitemap.invalid",
-  "sitemap.non-200",
-  "sitemap.non-indexable",
-  "sitemap.redirected",
-  "sitemap.uncrawled",
-  "url.normalisation-variants",
-  "url.parameter-pages-indexable",
-  "url.tracking-params-internal",
-];
-
-/**
- * The two structured-data entries need JSON-LD, and no fixture serves any
- * today: `schema.product-incomplete` needs a `Product` block missing one of
- * name, image or a priced offer, and `schema.self-serving-reviews` an
- * `Organization` or `LocalBusiness` block carrying `aggregateRating` or
- * `review`. Task 9 authors both pages (the plan names them).
- *
- * Their two siblings are the mirror image and are NOT here: with no JSON-LD
- * anywhere on the site, `schema.none-on-site` and `schema.breadcrumb-absent`
- * both fire on this crawl, site-scoped, and are asserted below.
- *
- * **The two halves are mutually exclusive, and Task 9 has to settle it.** The
- * moment a fixture serves the Product block above, the site HAS structured data
- * and `schema.none-on-site` can never fire here again — its condition is "zero
- * blocks for the crawl", which is exactly what claiming CHECK-44 and CHECK-46
- * destroys. So Task 9 authors those two pages, deletes their entries from this
- * list, and moves `schema.none-on-site` into `SKIP_HARNESS_CLAIMS` with a
- * paragraph saying that a fixture site proving the other three cannot prove it
- * (its behaviour is covered directly by test/rules/structured-data-query.test.ts).
- * `schema.breadcrumb-absent` survives: it stays true as long as no fixture
- * publishes a `BreadcrumbList`, and nothing in the plan asks one to.
- */
-
-/**
- * `content.soft-404` needs a page the fixture site does not serve: one that
- * answers 200 while being a "page not found". Either signal would claim it — a
- * short page carrying not-found wording, or a body within four bits of what the
- * site returns for a URL that cannot exist — and the second is the interesting
- * one, because it also needs the app to serve 200 for unknown paths, which
- * would change what several other fixtures see. Task 9 authors the page (and,
- * if it takes the template route, the 200-for-everything handler behind it).
- *
- * Its two siblings are NOT here: `content.exact-duplicate` is claimed by the
- * duplicate pair the absorbed collection already serves, and
- * `content.near-duplicate` by several rungs of the deep click-chain, whose
- * bodies are one template with a number substituted. Both are pinned below.
- */
-
-/**
- * What the three URL/host entries above need, since none of them is simply a
- * page with something wrong in its head:
- *
- *  - `url.normalisation-variants` needs two paths that differ only in case or a
- *    trailing slash and BOTH answer 200. The absorbed trailing-slash fixture is
- *    deliberately not that: its non-slash form redirects, which is the
- *    configuration the rule stays quiet about (see the rule's own comment).
- *  - `url.tracking-params-internal` needs a page linking to another fixture with
- *    a `utm_*` or `gclid` parameter on the href.
- *  - `url.parameter-pages-indexable` needs an indexable 200 at a URL with a
- *    query string whose canonical names itself.
- *  - `host.legacy-host-reachable` is the odd one: it needs a SECOND origin that
- *    answers 200, passed to the crawl as `legacyHosts`. That is a second
- *    fixture server on another port plus one line of crawl config, not a page —
- *    so if Task 9 decides not to build it, this id moves to
- *    `SKIP_HARNESS_CLAIMS` with a paragraph saying so, rather than staying here.
- */
-
-/**
- * Rules NO fixture can ever claim, because their firing condition is a property
- * of an unhealthy crawl rather than of a page the site could serve.
+ * There is no second list beside this one any more. Phase 2 left ten rules
+ * unclaimed and Phase 3 left twenty-two; Task 9 authored the pages, the sitemap
+ * and the second host name they needed, and the assertion at the bottom of this
+ * file is now the strict "every registered rule fires somewhere" it was always
+ * meant to become. Adding an id here is a claim that no page could provoke it,
+ * and it needs a paragraph of its own saying why, plus the test that covers the
+ * rule directly.
  *
  * `links.orphan-skipped` fires only when the crawl did not finish — a frontier
  * that never drained, or a crawl stopped at its page cap. This harness asserts
@@ -147,10 +55,11 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
  * directly.
  *
  * `robots.missing` fires when the site ANSWERS 4xx for /robots.txt. The fixture
- * app serves one for the whole site — allow-all, which is what lets the crawl
- * reach every fixture — and a robots.txt either exists for a site or does not.
- * No page could provoke this without removing the file the rest of the harness
- * depends on. `test/rules/robots-query.test.ts` builds both sites directly.
+ * app serves one for the whole site — allow-all bar `/private/`, which is what
+ * lets the crawl reach every fixture — and a robots.txt either exists for a site
+ * or does not. No page could provoke this without removing the file the rest of
+ * the harness depends on. `test/rules/robots-query.test.ts` builds both sites
+ * directly.
  *
  * `robots.check-skipped` fires when the stored robots.txt cannot be re-parsed
  * soundly: a file past the 500KB read cap, or one the server never served. The
@@ -163,23 +72,40 @@ const UNCLAIMED_UNTIL_TASK_9: string[] = [
  * `host.probe-skipped` fires when the crawl recorded no host probe at all,
  * which happens only when a crawl is started with `probeHosts: false`. This
  * harness runs one crawl, with the probe on — asserted below, since
- * `host.http-serves-200` fires from it — so provoking this rule would mean
- * turning off the evidence three other host rules read. A property of how the
- * crawl was started, like the two skips above, and covered by
- * `test/rules/host-query.test.ts`.
+ * `host.http-serves-200` and `host.legacy-host-reachable` both fire from it — so
+ * provoking this rule would mean turning off the evidence three other host rules
+ * read. A property of how the crawl was started, like the two skips above, and
+ * covered by `test/rules/host-query.test.ts`.
  *
  * `host.duplicate-host-200` needs the www and apex spellings of one host to
- * BOTH answer 200 over https. The fixture app is plain HTTP on 127.0.0.1: an
- * IP literal has no `www.` twin (see `hostnameSpellings`), and nothing on the
- * loopback serves TLS a crawl would accept, so neither half of the condition
- * can exist here however many pages Task 9 authors. Covered by the same DB test
- * file, which builds the probe rows directly.
+ * BOTH answer 200 over https. The fixture app is plain HTTP addressed by an IP
+ * literal: an IP has no `www.` twin (see `hostnameSpellings`), and nothing on the
+ * loopback serves TLS a crawl would accept, so neither half of the condition can
+ * exist here however many pages or names are added. Its sibling
+ * `host.legacy-host-reachable` IS claimed, by the second name this same server
+ * answers to (`app.legacyBase`, passed as `legacyHosts`) — that one needs a
+ * reachable extra origin, which is buildable, while this one needs two TLS
+ * spellings of one host, which is not. Covered by the same DB test file, which
+ * builds the probe rows directly.
  *
- * Unlike `UNCLAIMED_UNTIL_TASK_9` this list does not empty: it is a permanent,
- * named exemption. Task 9 deletes that list and leaves this one, so the
- * every-rule-fires assertion stays strict about every rule a fixture COULD
- * provoke. Adding an id here is a claim that no page can provoke it, and it
- * needs the same kind of paragraph as the one above.
+ * `sitemap.missing` fires when robots.txt declares no `Sitemap:` line. It fired
+ * on every crawl of this site until Task 9, and it can never fire again: the
+ * fixture app now declares two sitemaps, which is what the five rules joining
+ * `sitemap_urls` to `pages` needed to have anything at all to read. The trade is
+ * one way round — a site with a sitemap cannot also be a site without one — and
+ * this is the direction that buys five claimed rules for one exempted. The rule
+ * itself is covered directly by `test/rules/sitemap-query.test.ts`, which builds
+ * a crawl whose discovery evidence names no sitemap source.
+ *
+ * `schema.none-on-site` is the same trade in the structured-data family. Its
+ * condition is "this crawl stored no JSON-LD of any type", and
+ * `/authored3/product-incomplete` and `/authored3/reviews` had to publish some
+ * for `schema.product-incomplete` and `schema.self-serving-reviews` to be
+ * claimed at all. One rule out, two in. Its sibling `schema.breadcrumb-absent`
+ * survives and is asserted below: no fixture publishes a `BreadcrumbList`, and
+ * none should — it is the only site-scoped structured-data rule a site with
+ * markup can still provoke. `test/rules/structured-data-query.test.ts` covers
+ * the exempted rule directly, on a crawl with no blocks at all.
  */
 const SKIP_HARNESS_CLAIMS: string[] = [
   "host.duplicate-host-200",
@@ -187,6 +113,8 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   "links.orphan-skipped",
   "robots.check-skipped",
   "robots.missing",
+  "schema.none-on-site",
+  "sitemap.missing",
 ];
 
 let db: Db;
@@ -213,17 +141,27 @@ const issuesByPath = new Map<string, Set<string>>();
  * `${path}\n${ruleId}` -> the details the rule wrote. A rule id alone says a
  * finding landed; the details say it landed on the right evidence, which is
  * what makes a fixture load-bearing rather than decorative.
+ *
+ * **LAST WRITE WINS.** A rule that writes SEVERAL findings for one page — the
+ * two hreflang join rules do, one per member of a cluster, and so does
+ * `content.near-duplicate` per pair — leaves only the last of them here, and
+ * which one that is depends on the order the rows came back in. Pin those from
+ * the `issues` table instead, reading the whole set for the rule id and
+ * asserting it as a set (`the hreflang clusters` and `the duplicate rules`
+ * below do exactly that).
  */
 const detailsByPath = new Map<string, unknown>();
 /**
- * Findings that belong to no URL, by rule id, with the evidence the rule wrote.
- * One registered rule writes one on THIS crawl: the fixture site's robots.txt
- * declares no sitemap, which is `sitemap.missing`. The map is asserted exactly,
- * so a second site-scoped finding — a rule that changed shape, or one whose
- * skip condition started matching a healthy crawl — surfaces here instead of
- * vanishing.
+ * Findings that belong to no URL, by rule id, with the evidence each one wrote.
+ *
+ * An ARRAY per rule, because a site-scoped rule may legitimately speak more than
+ * once: `host.http-serves-200` writes one finding per plaintext spelling, and
+ * this site has two names. The keys are asserted exactly and the multi-finding
+ * rules are asserted by their evidence, so a rule that changed shape — or one
+ * whose skip condition started matching a healthy crawl — surfaces here instead
+ * of vanishing.
  */
-const siteFindings = new Map<string, unknown>();
+const siteFindings = new Map<string, unknown[]>();
 /**
  * Path -> the hreflang codes the page at that path declared, sorted, read
  * straight from the `hreflang` table. This is the input side of the site-scoped
@@ -231,6 +169,47 @@ const siteFindings = new Map<string, unknown>();
  * stopped contributing fails an assertion instead of quietly not mattering.
  */
 const hreflangByPath = new Map<string, string[]>();
+
+/**
+ * A details blob serialised with its keys in a fixed order, for sorting.
+ *
+ * `JSON.stringify` alone would not do: `issues.details` is a jsonb column, and
+ * Postgres stores an object's keys ordered by length and then by bytes rather
+ * than as written — so the first characters of the serialised form would be
+ * whichever key happened to be shortest, and the sort below would order findings
+ * by a field nobody chose. Sorting the keys puts the blob's fields in a fixed,
+ * readable order instead, so the sequence an assertion is written against comes
+ * from the evidence rather than from how Postgres happened to store it.
+ */
+function stableKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableKey).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([key, member]) => `${key}:${stableKey(member)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Every finding one rule wrote on this crawl, as its details blobs, sorted.
+ *
+ * The escape hatch from `detailsByPath` for a rule that writes SEVERAL findings
+ * for one page: that map is keyed by path and rule and therefore keeps only the
+ * last of them. The sort is by serialised content rather than by any one field,
+ * because these queries have no ORDER BY and the row order is the planner's
+ * business — the SET is what the assertion is about.
+ */
+async function findingSet(ruleId: string): Promise<unknown[]> {
+  const rows = await db
+    .select()
+    .from(issues)
+    .where(and(eq(issues.crawlId, summary.crawlId), eq(issues.ruleId, ruleId)));
+  return rows
+    .map((row) => row.details)
+    .sort((a, b) => (stableKey(a) < stableKey(b) ? -1 : 1));
+}
 
 beforeAll(async () => {
   db = createDb(databaseUrl());
@@ -244,6 +223,11 @@ beforeAll(async () => {
     userAgent: "AriadneBot-fixture",
     perHostDelayMs: 0,
     maxConcurrency: 8,
+    // The second name the fixture server answers to. It is the same machine and
+    // the same site — which is exactly what a legacy domain from a rebrand is —
+    // and it is the only way `host.legacy-host-reachable` can be exercised
+    // through the real probe rather than from hand-built evidence.
+    legacyHosts: [app.legacyBase],
     // The sanctioned test-only use: the fixture site is on 127.0.0.1.
     allowPrivate: true,
   });
@@ -273,7 +257,7 @@ beforeAll(async () => {
     // A null page id is a site-scoped finding: it belongs to the crawl, not to
     // a URL, so it maps to no path — which is what keeps it off /control.
     if (row.pageId === null) {
-      siteFindings.set(row.ruleId, row.details);
+      siteFindings.set(row.ruleId, [...(siteFindings.get(row.ruleId) ?? []), row.details]);
       continue;
     }
     const path = pathById.get(row.pageId);
@@ -374,83 +358,235 @@ describe("the fixture site end to end", () => {
     expect([...(issuesByPath.get("/control") ?? new Set<string>())]).toEqual([]);
   });
 
-  it("the site-scoped findings are the sitemap, the plaintext host and the missing JSON-LD", () => {
-    // The fixture app serves a robots.txt with no `Sitemap:` line on purpose
-    // (see app.ts: every page is reached by link, so no fixture is quietly
-    // rescued by a sitemap). That is exactly what CHECK-06 reports, once, for
-    // the crawl rather than for a URL.
+  it("the site-scoped findings are the two host names, the sitemap's own faults and the missing breadcrumbs", async () => {
+    // Six rules write a null-page finding on this crawl, and each of them is a
+    // statement about the SITE rather than about a URL:
     //
-    // The second is the fixture server itself: it listens on plain HTTP at
-    // 127.0.0.1, so the host probe's http variant answers 200 at an `http://`
-    // URL instead of redirecting to https — which is precisely CHECK-14, and
-    // true of this site. It also proves the probe RAN, which is what puts
-    // `host.probe-skipped` in `SKIP_HARNESS_CLAIMS` rather than in the list
-    // above it.
+    //  - `host.http-serves-200` twice, because this server answers to two names
+    //    and both of them serve a page over plain HTTP. That is CHECK-14, true
+    //    of both spellings, and reporting it once would hide one of them.
+    //  - `host.legacy-host-reachable` for the second of those names, which the
+    //    crawl was given as `legacyHosts`: an origin that is not one of the
+    //    site's own spellings and still serves the site under its own name.
+    //    Between them these two prove the probe RAN, which is what puts
+    //    `host.probe-skipped` in `SKIP_HARNESS_CLAIMS` rather than anywhere else.
+    //  - `robots.blocks-sitemap-urls` and `sitemap.uncrawled` for the same URL,
+    //    `/private/hidden`: robots.txt disallows it, so the crawl never enqueued
+    //    it, so it has no `pages` row. Two rules, two fixes — take it out of the
+    //    sitemap, or stop disallowing it — which is why they are not one finding.
+    //  - `sitemap.invalid` for the second declared document, which answers 200
+    //    with an HTML error page.
+    //  - `schema.breadcrumb-absent`, because no fixture publishes a
+    //    `BreadcrumbList` and the site is well past the five-page floor.
     //
     // Everything else must stay off this list. `links.orphan-skipped` and
     // `robots.check-skipped` write null-page findings only when the crawl was
     // incomplete or its robots.txt unreadable — this crawl drains its frontier,
-    // stops well short of maxPages and reads a two-line robots.txt — and
-    // `robots.missing` needs a site that answers 404 for it.
-    //
-    // The last two are the structured-data pair: no fixture serves a line of
-    // JSON-LD, so the crawl stored no `structured_data` rows at all — which is
-    // CHECK-43 — and among the rows it did not store there is no
-    // `BreadcrumbList` on a site well past the five-page floor, which is
-    // CHECK-45. Task 9 authors the JSON-LD fixtures the other two rules need
-    // and, in doing so, silences `schema.none-on-site` here for good (see the
-    // paragraph below `UNCLAIMED_UNTIL_TASK_9`).
+    // stops well short of maxPages and reads a five-line robots.txt — and
+    // `robots.missing` needs a site that answers 4xx for it. `sitemap.missing`
+    // and `schema.none-on-site` were both live here until Task 9 and can never
+    // fire again, which is what their `SKIP_HARNESS_CLAIMS` paragraphs are about.
     expect([...siteFindings.keys()].sort()).toEqual([
       "host.http-serves-200",
+      "host.legacy-host-reachable",
+      "robots.blocks-sitemap-urls",
       "schema.breadcrumb-absent",
-      "schema.none-on-site",
-      "sitemap.missing",
+      "sitemap.invalid",
+      "sitemap.uncrawled",
     ]);
 
-    // Both carry the same evidence — how many pages of this site a search
-    // engine could index — and the number is checked against the `pages` rows
-    // the crawl actually wrote rather than pinned as a literal, so adding a
-    // fixture does not turn into an unrelated failure here.
+    // The breadcrumb finding carries how many pages of this site a search engine
+    // could index, and the number is checked against the `pages` rows the crawl
+    // actually wrote rather than pinned as a literal, so adding a fixture does
+    // not turn into an unrelated failure here.
     const indexablePages = [...pageByPath.values()].filter(
       (p) => p.fetchClass === "ok" && p.statusCode === 200 && p.isIndexable,
     ).length;
     expect(indexablePages).toBeGreaterThanOrEqual(5);
-    for (const id of ["schema.none-on-site", "schema.breadcrumb-absent"]) {
-      expect(siteFindings.get(id), id).toEqual({ pageUrl: null, indexablePages });
-    }
-    expect(siteFindings.get("sitemap.missing")).toEqual({
-      // `runRules` writes `pageUrl` into every details blob; a site-scoped
-      // finding names no page, so it is null here.
-      pageUrl: null,
-      robotsOutcome: "read",
-      sitemapSources: [],
-    });
+    // `runRules` writes `pageUrl` into every details blob; a site-scoped finding
+    // names no page, so it is null here.
+    expect(siteFindings.get("schema.breadcrumb-absent")).toEqual([
+      { pageUrl: null, indexablePages },
+    ]);
 
-    // The http variant of the site's own origin, with the single hop the probe
-    // walked: the fixture server answered the root itself rather than
-    // redirecting anywhere.
-    const httpFinding = siteFindings.get("host.http-serves-200");
-    expect(httpFinding).toMatchObject({
-      pageUrl: `${app.base}/`,
-      variant: `${app.base}/`,
-      hops: [{ url: `${app.base}/`, statusCode: 200, fetchClass: "ok", location: null }],
-    });
+    // Both plaintext spellings, each with the single hop its chain walked: the
+    // fixture server answered the root itself rather than redirecting anywhere.
+    // Sorted, because the order the two variants are probed in is the probe's
+    // business and not something this assertion should depend on.
+    const httpVariants = (siteFindings.get("host.http-serves-200") ?? [])
+      .map((d) => (d as { variant: string }).variant)
+      .sort();
+    expect(httpVariants).toEqual([`${app.base}/`, `${app.legacyBase}/`].sort());
+    for (const finding of siteFindings.get("host.http-serves-200") ?? []) {
+      const variant = (finding as { variant: string }).variant;
+      expect(finding).toMatchObject({
+        pageUrl: variant,
+        hops: [{ url: variant, statusCode: 200, fetchClass: "ok", location: null }],
+      });
+    }
+
+    // The legacy name, and only that one: the site's own spellings are excluded
+    // by subtraction from `hostProbeStarts`, so a rule that started reporting
+    // them would show up here as a second entry rather than as a silent change.
+    expect(siteFindings.get("host.legacy-host-reachable")).toEqual([
+      {
+        pageUrl: `${app.legacyBase}/`,
+        variant: `${app.legacyBase}/`,
+        hops: [
+          { url: `${app.legacyBase}/`, statusCode: 200, fetchClass: "ok", location: null },
+        ],
+      },
+    ]);
+
+    // The blocked URL, from both sides. `matchedBy` quotes the line of the file
+    // that decided, which is what makes the finding a place in a document rather
+    // than a claim to be taken on trust.
+    const blockedUrl = `${app.base}/private/hidden`;
+    expect(siteFindings.get("robots.blocks-sitemap-urls")).toEqual([
+      {
+        pageUrl: blockedUrl,
+        url: blockedUrl,
+        userAgent: "AriadneBot-fixture",
+        matchedBy: { line: 3, text: "Disallow: /private/" },
+      },
+    ]);
+    expect(siteFindings.get("sitemap.uncrawled")).toEqual([
+      // `attempted: false` is the shape that matters: there is no `pages` row at
+      // all, because the crawl refused to enqueue a URL robots.txt disallows.
+      // A URL that was fetched and failed would carry a fetch class instead.
+      { pageUrl: blockedUrl, url: blockedUrl, attempted: false },
+    ]);
+
+    expect(siteFindings.get("sitemap.invalid")).toEqual([
+      {
+        pageUrl: null,
+        failures: [
+          {
+            url: `${app.base}/sitemap-broken.xml`,
+            // The HTML error page that document serves opens with a doctype, and
+            // a DTD in a sitemap is refused before the XML parser is handed the
+            // bytes. See the fixture app's own comment.
+            reason: "refused: <!DOCTYPE declaration in a sitemap (entity-expansion risk)",
+          },
+        ],
+        failureCount: 1,
+      },
+    ]);
   });
 
-  it("the hreflang fixtures' declarations reach the rules that judge them", () => {
+  it("the sitemap's deliberate mistakes land on the URLs that carry them", () => {
+    // One entry per fault, each on the page the entry names — the join is
+    // `sitemap_urls.url = pages.url` and these three assertions are what proves
+    // the two spellings agree end to end, through the crawler that wrote both.
+    expect(detailsByPath.get("/status/not-found\nsitemap.non-200")).toEqual({
+      pageUrl: `${app.base}/status/not-found`,
+      url: `${app.base}/status/not-found`,
+      statusCode: 404,
+      fetchClass: "client_error",
+    });
+    expect(detailsByPath.get("/redirect/chain-1\nsitemap.redirected")).toEqual({
+      pageUrl: `${app.base}/redirect/chain-1`,
+      url: `${app.base}/redirect/chain-1`,
+      statusCode: 301,
+      redirectUrl: `${app.base}/redirect/chain-2`,
+    });
+    expect(detailsByPath.get("/index/noindex-meta\nsitemap.non-indexable")).toEqual({
+      pageUrl: `${app.base}/index/noindex-meta`,
+      url: `${app.base}/index/noindex-meta`,
+      robotsMeta: "noindex, follow",
+      xRobotsTag: null,
+    });
+
+    // And the other direction: the indexable pages the sitemap does not list.
+    // Two KINDS of omission — `/authored3/unlisted` is the page the file
+    // forgot, and the deep click-path's seven rungs are left out because a
+    // sitemap entry is enqueued at depth 0 and would flatten the chain (see
+    // `Fixture.inSitemap`). Asserted as the exact set, so a fixture that fell
+    // off the sitemap by accident fails here rather than passing quietly.
+    const unlisted = [...issuesByPath]
+      .filter(([, ids]) => ids.has("pages.not-in-sitemap"))
+      .map(([path]) => path)
+      .sort();
+    expect(unlisted).toEqual([
+      "/authored3/unlisted",
+      "/deep/1",
+      "/deep/2",
+      "/deep/3",
+      "/deep/4",
+      "/deep/5",
+      "/deep/6",
+      "/deep/7",
+    ]);
+  });
+
+  it("the paginated series proves all three pagination rules", () => {
+    const url = (path: string): string => `${app.base}${path}`;
+
+    // Page 2: the canonical folds it into page 1, and its rel=next names a page
+    // nothing links to. Page 1 is the control for both and fires nothing, which
+    // the exact-set assertion above already holds.
+    expect(detailsByPath.get("/authored3/paged-2\npagination.canonical-to-other")).toEqual({
+      pageUrl: url("/authored3/paged-2"),
+      canonical: url("/authored3/paged-1"),
+      resolvedTo: url("/authored3/paged-1"),
+      relPrev: url("/authored3/paged-1"),
+    });
+    expect(detailsByPath.get("/authored3/paged-2\npagination.next-not-linked")).toEqual({
+      pageUrl: url("/authored3/paged-2"),
+      relNext: url("/authored3/paged-3"),
+      resolvedTo: url("/authored3/paged-3"),
+    });
+
+    // Page 3: its own rel=next names a page no link and no sitemap entry
+    // mentions, so the crawl never fetched it and the engine can say nothing
+    // about it beyond that.
+    expect(detailsByPath.get("/authored3/paged-3\npagination.next-target-uncrawled")).toEqual({
+      pageUrl: url("/authored3/paged-3"),
+      relNext: url("/authored3/paged-4"),
+      resolvedTo: url("/authored3/paged-4"),
+    });
+    expect(pageByPath.has("/authored3/paged-4")).toBe(false);
+  });
+
+  it("the orphans are exactly the two pages nothing links to", () => {
+    // Both reached the crawl through the sitemap and nothing else, which is what
+    // `discoveredVia` and `inSitemap` say. `/authored3/paged-3` is the
+    // load-bearing one: it renders its own URL as a link, the way a pagination
+    // control does, and an anti-join that counted a page's link to ITSELF as an
+    // inbound link would report it as reachable.
+    const orphans = [...issuesByPath]
+      .filter(([, ids]) => ids.has("links.orphan"))
+      .map(([path]) => path)
+      .sort();
+    expect(orphans).toEqual(["/authored3/paged-3", "/structure/orphan"]);
+
+    for (const path of orphans) {
+      expect(detailsByPath.get(`${path}\nlinks.orphan`), path).toEqual({
+        pageUrl: `${app.base}${path}`,
+        inSitemap: true,
+        discoveredVia: "sitemap",
+        // No `caveat`: the crawl failed no URL, so no page's outbound links went
+        // unread and nothing qualifies the finding.
+      });
+    }
+  });
+
+  it("the hreflang fixtures' declarations reach the rules that judge them", async () => {
     // Which fixture declared what, asserted exactly — both as the map of
-    // declarations that went in, and as the set the finding named on the way
-    // out.
+    // declarations that went in, and as the findings that came out.
     //
     // This is what makes each hreflang fixture load-bearing rather than
     // decorative. Asserting the rule id alone would be satisfied by whichever
-    // page happened to declare a cluster, and the other could be deleted
-    // without a test noticing. Pinning the codes, and the targets the finding
-    // carries, means removing either page or changing what it declares fails
-    // here.
+    // page happened to declare a cluster, and the others could be deleted
+    // without a test noticing. Pinning the codes, and the targets each finding
+    // carries, means removing a page or changing what it declares fails here.
     expect(Object.fromEntries(hreflangByPath)).toEqual({
       "/authored/hreflang-bad-code": ["english-uk"],
       "/authored/hreflang-no-xdefault": ["de", "en"],
+      "/authored3/hreflang-a": ["en", "fr", "x-default"],
+      "/authored3/hreflang-b": ["en", "fr", "x-default"],
+      "/authored3/hreflang-noindex": ["de", "en", "x-default"],
+      "/authored3/hreflang-one-way": ["de", "en", "x-default"],
     });
 
     // The x-default finding belongs to the two-alternate cluster, not to the
@@ -474,6 +610,121 @@ describe("the fixture site end to end", () => {
     expect([
       ...(issuesByPath.get("/authored/hreflang-bad-code") ?? new Set<string>()),
     ]).not.toContain("hreflang.missing-x-default");
+
+    // The two join rules write one finding per CLUSTER MEMBER, so a page can
+    // carry several and `detailsByPath` would keep only the last of them (see
+    // its declaration). Both are read as whole sets out of `issues` instead.
+    expect(await findingSet("hreflang.missing-return-link")).toEqual([
+      {
+        pageUrl: `${app.base}/authored3/hreflang-noindex`,
+        target: `${app.base}/index/noindex-meta`,
+        targetHasHreflang: false,
+      },
+      {
+        pageUrl: `${app.base}/authored3/hreflang-one-way`,
+        target: `${app.base}/authored3/hreflang-mute`,
+        targetHasHreflang: false,
+      },
+    ]);
+    // The reciprocated pair is absent from that list, which is the whole point
+    // of having it: `/authored3/hreflang-a` and `-b` name each other and fire
+    // nothing.
+    expect(await findingSet("hreflang.non-indexable-target")).toEqual([
+      {
+        pageUrl: `${app.base}/authored3/hreflang-noindex`,
+        target: `${app.base}/index/noindex-meta`,
+        targetFetchClass: "ok",
+        targetIndexable: false,
+      },
+    ]);
+  });
+
+  it("the soft 404 fires on wording alone, because the site has no 404 template", async () => {
+    // The rule has two signal paths and this site can only offer one. The
+    // crawl's own probe asks for a URL that cannot exist and the fixture app
+    // answers a real 404, so there is no 200 body to fingerprint and the
+    // template path is unavailable — asserted from the stored probe rather than
+    // inferred from the finding, because "no template" and "a template that
+    // happened not to match" are different crawls with the same silence.
+    const [crawlRow] = await db
+      .select({ probe: crawls.notfoundProbe })
+      .from(crawls)
+      .where(eq(crawls.id, summary.crawlId));
+    expect(crawlRow?.probe).toMatchObject({ statusCode: 404, simhash: null });
+
+    // So the only signal left is the wording, and the page's length is what
+    // makes that wording mean something: over `THIN_WORDS` (or it would be a
+    // thin page as well) and under `SOFT_404_WORDS` (or an article about broken
+    // links would qualify). The bounds are read from the rules rather than
+    // restated, so a threshold that moves fails here instead of drifting.
+    const details = detailsByPath.get("/authored3/soft-404\ncontent.soft-404") as {
+      signals: string[];
+      wordCount: number;
+    };
+    expect(details.signals).toEqual(["phrases"]);
+    expect(details.wordCount).toBeGreaterThanOrEqual(THIN_WORDS);
+    expect(details.wordCount).toBeLessThan(SOFT_404_WORDS);
+    // `hammingToTemplate` appears only when a distance was computed; there was
+    // no template, so the blob carries the two fields above and nothing else.
+    expect(details).toEqual({
+      pageUrl: `${app.base}/authored3/soft-404`,
+      signals: ["phrases"],
+      wordCount: details.wordCount,
+    });
+  });
+
+  it("the URL-hygiene fixtures name the right URLs", () => {
+    // Two spellings of one path, both answering 200. The finding lands on the
+    // group's first URL under the DATABASE's collation — the lowercase one on
+    // the documented postgres:16 container; see the fixture's own paragraph —
+    // and the other member is in the evidence beside it, in the same order.
+    expect(detailsByPath.get("/authored3/case\nurl.normalisation-variants")).toEqual({
+      pageUrl: `${app.base}/authored3/case`,
+      urlNormalised: `${app.base}/authored3/case`.toLowerCase(),
+      variants: [`${app.base}/authored3/case`, `${app.base}/authored3/Case`],
+      count: 2,
+    });
+
+    // One page, two findings, about two different things: the LINK that carries
+    // a campaign tag, and the PAGE that declares the tagged address canonical.
+    const tracked = `${app.base}/authored3/tracked?utm_source=newsletter`;
+    expect(
+      detailsByPath.get(
+        "/authored3/tracked?utm_source=newsletter\nurl.tracking-params-internal",
+      ),
+    ).toEqual({
+      pageUrl: tracked,
+      targetUrl: tracked,
+      params: ["utm_source"],
+      // The hub's link, and only that one. The sitemap lists the same URL and is
+      // not a link, which is what this count would notice if the rule ever
+      // started reading `sitemap_urls`.
+      inlinkCount: 1,
+    });
+    expect(
+      detailsByPath.get(
+        "/authored3/tracked?utm_source=newsletter\nurl.parameter-pages-indexable",
+      ),
+    ).toEqual({ pageUrl: tracked, url: tracked, params: ["utm_source"] });
+  });
+
+  it("the structured-data fixtures name the field that is missing and the rating that is self-serving", () => {
+    // The field names are what a client goes and adds, so they are pinned rather
+    // than counted: the Product block carries a name and a priced offer and no
+    // image, and three of the five recommended fields are absent too.
+    expect(
+      detailsByPath.get("/authored3/product-incomplete\nschema.product-incomplete"),
+    ).toEqual({
+      pageUrl: `${app.base}/authored3/product-incomplete`,
+      missingRequired: ["image"],
+      missingRecommended: ["brand", "aggregateRating", "review"],
+    });
+
+    expect(detailsByPath.get("/authored3/reviews\nschema.self-serving-reviews")).toEqual({
+      pageUrl: `${app.base}/authored3/reviews`,
+      schemaType: "Organization",
+      fields: ["aggregateRating"],
+    });
   });
 
   it("the duplicate rules see the site's real duplicates, end to end", async () => {
@@ -535,11 +786,11 @@ describe("the fixture site end to end", () => {
     // but it proves nothing: a rule "covered" only by the hub would be a rule
     // no fixture was ever written for.
     //
-    // `siteFindings` seeds the set, and holds `sitemap.missing` today. A
-    // site-scoped rule has no page to land on — it is provoked by the site as a
-    // whole rather than by one fixture's markup — so counting it towards
-    // coverage regardless of which page produced it is correct. The assertion
-    // above is what holds the contents of that map honest.
+    // `siteFindings` seeds the set. A site-scoped rule has no page to land on —
+    // it is provoked by the site as a whole rather than by one fixture's markup
+    // — so counting it towards coverage regardless of which page produced it is
+    // correct. The assertion above is what holds the contents of that map
+    // honest.
     const fired = new Set(siteFindings.keys());
     for (const fixture of allFixtures()) {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);
@@ -551,12 +802,16 @@ describe("the fixture site end to end", () => {
       .map((rule) => rule.id)
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
+    // The strict form, at last: every registered rule fires on this one crawl,
+    // save the seven `SKIP_HARNESS_CLAIMS` name and explain. A new rule arrives
+    // here with no fixture and fails immediately, which is the point — the
+    // alternative is a rule nobody has ever seen speak.
     expect(
       unfired,
       "a rule that fires nowhere is a rule no fixture proves — author a fixture " +
-        "that makes it speak, or remove the id from UNCLAIMED_UNTIL_TASK_9 once " +
-        "one exists",
-    ).toEqual([...UNCLAIMED_UNTIL_TASK_9].sort());
+        "that makes it speak, or add it to SKIP_HARNESS_CLAIMS with a paragraph " +
+        "saying why no page could",
+    ).toEqual([]);
 
     // The exemption is asserted, not assumed. An id listed as unfireable that
     // then fires is a rule whose condition is not what the list claims, and it

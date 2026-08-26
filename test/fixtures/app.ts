@@ -2,19 +2,34 @@
  * The fixture site: a `node:http` server that serves the fixture collection
  * over real HTTP so the real crawler can crawl it.
  *
- * Three things this server owns beyond dispatch:
- *  - **The hub.** `/` links every fixture path, so one crawl from the seed
- *    reaches the whole collection at depth 1. The deep click-path is the single
- *    exception: only its first rung is linked, because the point of those pages
- *    is how far from the seed they are (see DEEP_CHAIN_TAIL).
- *  - **robots.txt.** Allow all, no crawl-delay, no `Sitemap:` line. The site
- *    deliberately has no sitemap: every page is reached by link, so a fixture
- *    that is not linked is not crawled, and that is a visible failure rather
- *    than a page the sitemap quietly rescued.
- *  - **404 for everything else**, including `/sitemap.xml`.
+ * Five things this server owns beyond dispatch:
+ *  - **The hub.** `/` links every fixture that asks to be linked, so one crawl
+ *    from the seed reaches the collection at depth 1. A fixture with
+ *    `linkedFromHub: false` is reachable only through the sitemap, which is what
+ *    makes it an orphan (see `Fixture.linkedFromHub`); the deep click-path is
+ *    the other opt-out, because the point of those pages is how far from the
+ *    seed they are.
+ *  - **robots.txt.** Allow all except `/private/`, and two `Sitemap:` lines.
+ *    The disallowed prefix is not decoration: `/private/hidden` is listed in the
+ *    sitemap and is therefore a URL the site publishes and its own robots.txt
+ *    forbids, which is what `robots.blocks-sitemap-urls` reports and, since the
+ *    crawl never enqueues it, what `sitemap.uncrawled` reports too.
+ *  - **`/sitemap.xml`.** Every fixture that did not opt out, plus the hub, plus
+ *    the one URL robots.txt blocks. Four of the entries are deliberately wrong
+ *    in four different ways — a 404, a redirect, a noindexed page, and a URL
+ *    that is never fetched — and one indexable page is deliberately left off.
+ *    See `sitemapXml`.
+ *  - **`/sitemap-broken.xml`**, the second declared document: a 200 that is not
+ *    XML at all, which is the commonest broken sitemap in the wild and what
+ *    `sitemap.invalid` reports.
+ *  - **404 for everything else.**
  *
- * Bound to 127.0.0.1 on port 0. Crawling it needs `allowPrivate: true`, which
- * is the sanctioned test-only use of that flag (see CrawlConfig).
+ * The listener binds every interface rather than 127.0.0.1 alone, so the site
+ * answers to `localhost` as well as to the IP it is crawled by — that second
+ * name is the `legacyHosts` entry the harness passes, and the only way
+ * `host.legacy-host-reachable` can be exercised end to end (the `listenByName`
+ * precedent in test/crawl/loop.test.ts). Crawling it needs `allowPrivate: true`,
+ * which is the sanctioned test-only use of that flag (see CrawlConfig).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -25,15 +40,26 @@ import { escapeHtml, selfUrl } from "./render.js";
 export interface FixtureApp {
   /** Origin, no trailing slash: `http://127.0.0.1:{port}`. */
   base: string;
+  /**
+   * The same server under a second name: `http://localhost:{port}`. Passed to
+   * the crawl as a `legacyHosts` entry, where it plays the domain a rebranded
+   * site used to live on and never redirected away.
+   */
+  legacyBase: string;
   close(): Promise<void>;
 }
 
+/** The prefix robots.txt disallows. No fixture is served under it. */
+const ROBOTS_BLOCKED_PREFIX = "/private/";
 /**
- * Rungs of the deep click-path the hub must NOT link. `/deep/1` is the
- * entrance; every rung after it is reachable only from the rung above, which is
- * what gives those pages their depth.
+ * The one sitemap entry that is not a fixture: a URL the site publishes and its
+ * own robots.txt disallows, so the crawl never fetches it and no `pages` row
+ * exists for it.
  */
-const DEEP_CHAIN_TAIL = /^\/deep\/(?!1$)\d+$/;
+const ROBOTS_BLOCKED_PATH = `${ROBOTS_BLOCKED_PREFIX}hidden`;
+
+/** The second declared sitemap document: a 200 that is not a sitemap. */
+const BROKEN_SITEMAP_PATH = "/sitemap-broken.xml";
 
 /**
  * The hub is not a fixture and nothing is asserted about it, but it is still
@@ -43,7 +69,7 @@ const DEEP_CHAIN_TAIL = /^\/deep\/(?!1$)\d+$/;
  */
 function hubHtml(fixtures: readonly Fixture[], self: string): string {
   const links = fixtures
-    .filter((f) => !DEEP_CHAIN_TAIL.test(f.path))
+    .filter((f) => f.linkedFromHub !== false)
     .map((f) => `<li><a href="${escapeHtml(f.path)}">${escapeHtml(f.name)}</a></li>`)
     .join("\n");
   return `<!doctype html>
@@ -65,6 +91,33 @@ ${links}
 </main>
 </body>
 </html>`;
+}
+
+/**
+ * The declared sitemap: the hub, every fixture that did not opt out, and the
+ * robots-blocked URL.
+ *
+ * Entries are absolute (the protocol requires it, and `discover` refuses a
+ * relative `<loc>` rather than guessing at one) and are written against the
+ * Host header this request arrived on, for the same reason a fixture's canonical
+ * is: the port is only known once the server is listening.
+ *
+ * The order is the fixture order, which puts the hub first and keeps a diff of
+ * this document readable. Nothing reads the order.
+ */
+function sitemapXml(fixtures: readonly Fixture[], origin: string): string {
+  const paths = [
+    "/",
+    ...fixtures.filter((f) => f.inSitemap !== false).map((f) => f.path),
+    ROBOTS_BLOCKED_PATH,
+  ];
+  const entries = paths
+    .map((path) => `  <url><loc>${escapeHtml(`${origin}${path}`)}</loc></url>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${entries}
+</urlset>`;
 }
 
 function send(res: ServerResponse, status: number, contentType: string, body: string): void {
@@ -90,20 +143,58 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
   }
 
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    // Query strings are not part of a fixture's identity: the canonical-conflict
-    // page is asked for with `?via=…` and must still be itself.
-    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    const target = req.url ?? "/";
+    // A fixture may BE a query string (`/authored3/tracked?utm_source=…`), so
+    // the whole request target is tried first. Falling back to the path alone is
+    // what keeps a query from being part of a fixture's identity by accident:
+    // the canonical-conflict page is asked for with `?via=…` and must still be
+    // itself.
+    const path = target.split("?")[0] ?? "/";
 
     if (path === "/") {
       send(res, 200, "text/html; charset=utf-8", hubHtml(fixtures, selfUrl(req)));
       return;
     }
     if (path === "/robots.txt") {
-      send(res, 200, "text/plain; charset=utf-8", "User-agent: *\nAllow: /\n");
+      const origin = new URL(selfUrl(req)).origin;
+      send(
+        res,
+        200,
+        "text/plain; charset=utf-8",
+        [
+          "User-agent: *",
+          "Allow: /",
+          `Disallow: ${ROBOTS_BLOCKED_PREFIX}`,
+          `Sitemap: ${origin}/sitemap.xml`,
+          `Sitemap: ${origin}${BROKEN_SITEMAP_PATH}`,
+          "",
+        ].join("\n"),
+      );
+      return;
+    }
+    if (path === "/sitemap.xml") {
+      const origin = new URL(selfUrl(req)).origin;
+      send(res, 200, "application/xml; charset=utf-8", sitemapXml(fixtures, origin));
+      return;
+    }
+    if (path === BROKEN_SITEMAP_PATH) {
+      // A 200 carrying an HTML error page, which is what a great many sites
+      // serve for a sitemap path their CMS no longer handles. Its `<!doctype
+      // html>` is what `discover` refuses on first — a DTD in a sitemap is an
+      // entity-expansion risk and the document is dropped before the XML parser
+      // sees it — so this fixture exercises that refusal rather than the
+      // no-`<urlset>`-root branch behind it. Either way the document is a
+      // declared sitemap that could not be read, which is `sitemap.invalid`.
+      send(
+        res,
+        200,
+        "text/html; charset=utf-8",
+        "<!doctype html><title>Sitemap unavailable</title><h1>Sitemap unavailable</h1><p>This sitemap could not be generated.</p>",
+      );
       return;
     }
 
-    const fixture = byPath.get(path);
+    const fixture = byPath.get(target) ?? byPath.get(path);
     if (fixture === undefined) {
       send(res, 404, "text/html; charset=utf-8", "<!doctype html><title>404</title><p>No fixture here.</p>");
       return;
@@ -111,11 +202,13 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
     fixture.handler(req, res);
   });
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  // Every interface, so the site answers to both of its names (see the header).
+  await new Promise<void>((resolve) => server.listen(0, resolve));
   const address = server.address() as AddressInfo;
 
   return {
     base: `http://127.0.0.1:${address.port}`,
+    legacyBase: `http://localhost:${address.port}`,
     close: () => new Promise<void>((resolve, reject) =>
       server.close((error) => (error === undefined ? resolve() : reject(error))),
     ),
