@@ -101,7 +101,6 @@ export interface PageSpec {
   viewport?: boolean;
   /** Raw HTML appended to `<head>` — extra link tags, JSON-LD, hreflang. */
   headExtra?: string;
-  lang?: string;
   bodyHtml: string;
 }
 
@@ -130,8 +129,11 @@ export function renderDocument(spec: PageSpec): string {
   }
   if (spec.headExtra !== undefined) head.push(spec.headExtra);
 
+  // `lang` is fixed rather than a knob: every fixture page is in English, and
+  // no rule reads the attribute. A per-page override would be a seam nothing
+  // uses, and an unused seam is a claim the fixture set does not back up.
   return `<!doctype html>
-<html lang="${spec.lang ?? "en"}">
+<html lang="en">
 <head>
 ${head.join("\n")}
 </head>

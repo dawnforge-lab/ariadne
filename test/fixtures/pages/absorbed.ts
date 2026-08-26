@@ -962,7 +962,23 @@ function deepRung(level: number): Fixture {
     path: `/deep/${level}`,
     category: STRUCTURE,
     name: `Deep click-path, level ${level}`,
-    expectedIssues: level > DEEP_DEPTH_THRESHOLD ? ["structure.deep-page"] : [],
+    // Every rung is under THIN_WORDS, so every rung fires `content.thin` as
+    // well. That is not an accident to be padded away: the chain exists to be
+    // long, not to be read, and the two hundred words each rung would need to
+    // clear the threshold would be filler on seven pages nobody looks at. The
+    // honest thing is to say so — and until the exact pin below went on, nobody
+    // had, because a containment assertion never asks what else fired.
+    expectedIssues:
+      level > DEEP_DEPTH_THRESHOLD
+        ? ["content.thin", "structure.deep-page"]
+        : ["content.thin"],
+    // The last rung is pinned exactly rather than as a floor: unlike the rest
+    // of the absorbed collection its body is ours (the chain was rebuilt for
+    // Ariadne's depth threshold), so its complete finding set is something we
+    // engineered and can therefore assert. Depth and length are the two things
+    // true of it; a third finding appearing there would mean these pages had
+    // stopped being what they were built to be.
+    exact: level === DEEP_CHAIN_LENGTH,
     handler: (req, res) =>
       serve(req, res, () => ({
         title: `Deep click-path, level ${level}`,

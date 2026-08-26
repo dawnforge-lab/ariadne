@@ -31,30 +31,6 @@ function databaseUrl(): string {
   return url;
 }
 
-/**
- * Rules no fixture claims yet. Task 9 authors the missing pages and DELETES
- * this list, at which point the third assertion below becomes the strict "every
- * registered rule fires somewhere" it wants to be.
- *
- * It is asserted exactly, not as a floor: a rule that quietly stops firing
- * shows up here as an unexpected addition, and a rule Task 9 claims without
- * removing its entry shows up as an unexpected absence. Every id in it was
- * hand-checked against the fixture collection — none of the absorbed pages or
- * the control page targets any of these.
- */
-const UNCLAIMED_UNTIL_TASK_9: string[] = [
-  "canonical.cross-domain",
-  "canonical.missing",
-  "canonical.multiple",
-  "content.placeholder",
-  "directive.canonical-noindex-conflict",
-  "hreflang.invalid-code",
-  "hreflang.missing-x-default",
-  "images.missing-dimensions",
-  "indexability.meta-header-conflict",
-  "mobile.viewport-missing",
-];
-
 let db: Db;
 let app: FixtureApp;
 let summary: CrawlSummary;
@@ -166,11 +142,24 @@ describe("the fixture site end to end", () => {
 
   it("every fixture's expected issues fire on its path", () => {
     for (const fixture of allFixtures()) {
-      for (const ruleId of fixture.expectedIssues) {
+      const fired = [...(issuesByPath.get(fixture.path) ?? new Set<string>())].sort();
+
+      // The authored fixtures declare the COMPLETE set (see `Fixture.exact`):
+      // each is the control page with one thing deliberately broken, so a rule
+      // they did not name is a rule that should not have fired, and a
+      // containment assertion would let it through in silence.
+      if (fixture.exact === true) {
         expect(
-          [...(issuesByPath.get(fixture.path) ?? new Set<string>())],
-          `${fixture.path} should fire ${ruleId}`,
-        ).toContain(ruleId);
+          fired,
+          `${fixture.path} must fire exactly the issues it declares`,
+        ).toEqual([...fixture.expectedIssues].sort());
+        continue;
+      }
+
+      // The absorbed pages declare a floor: upstream built them to demonstrate
+      // one issue, not to be quiet about the rest.
+      for (const ruleId of fixture.expectedIssues) {
+        expect(fired, `${fixture.path} should fire ${ruleId}`).toContain(ruleId);
       }
     }
   });
@@ -195,10 +184,35 @@ describe("the fixture site end to end", () => {
     expect([...(issuesByPath.get("/control") ?? new Set<string>())]).toEqual([]);
   });
 
+  it("the site-scoped findings belong to the crawl and to no fixture path", () => {
+    // `hreflang.missing-x-default` is the only site-scoped rule in the
+    // registry today: the hreflang fixtures declare alternates and none
+    // declares an x-default, so the crawl's annotation set is missing its
+    // fallback. It is written once, with a null page id.
+    expect([...siteFindings].sort()).toEqual(["hreflang.missing-x-default"]);
+
+    // The attribution guard. A site-scoped finding names no URL, so it must
+    // reach no fixture's path — not the hreflang pages that provoked it, and
+    // above all not `/control`, whose whole claim is that nothing lands on it.
+    for (const fixture of allFixtures()) {
+      expect(
+        [...(issuesByPath.get(fixture.path) ?? new Set<string>())],
+        `${fixture.path} must not be blamed for a site-scoped finding`,
+      ).not.toContain("hreflang.missing-x-default");
+    }
+  });
+
   it("every registered rule fires on at least one fixture", () => {
     // Fixture paths only. The hub is crawled and judged like any other page,
     // but it proves nothing: a rule "covered" only by the hub would be a rule
     // no fixture was ever written for.
+    //
+    // `siteFindings` seeds the set because a site-scoped rule has no page to
+    // land on: it is provoked by a fixture's markup — here, the hreflang pages'
+    // declarations — but written against the crawl. Counting it towards
+    // coverage regardless of which page produced it is correct precisely
+    // because there is no page to attribute it to; the assertion above is what
+    // holds that "no page" honest.
     const fired = new Set(siteFindings);
     for (const fixture of allFixtures()) {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);
@@ -211,8 +225,9 @@ describe("the fixture site end to end", () => {
       .sort();
     expect(
       unfired,
-      "a rule that fires nowhere is a rule no fixture proves — add a fixture, " +
-        "or remove the id from UNCLAIMED_UNTIL_TASK_9 once one exists",
-    ).toEqual([...UNCLAIMED_UNTIL_TASK_9].sort());
+      "a rule that fires nowhere is a rule no fixture proves — author a fixture " +
+        "that makes it speak, or the rule is untested by the only test that " +
+        "exercises the whole engine",
+    ).toEqual([]);
   });
 });

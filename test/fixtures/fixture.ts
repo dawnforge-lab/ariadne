@@ -10,6 +10,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { absorbedFixtures } from "./pages/absorbed.js";
+import { authoredFixtures } from "./pages/authored.js";
 import { controlFixture } from "./pages/control.js";
 
 export interface Fixture {
@@ -19,18 +20,32 @@ export interface Fixture {
   category: string;
   name: string;
   /**
-   * Rule ids that MUST fire on this path. Not "the only rules that may fire":
-   * a page can trip a rule it was not built for, and the harness asserts
-   * containment. The one page that must fire *nothing* is `/control`.
+   * Rule ids that fire on this path. Read as a floor by default — a page can
+   * trip a rule it was not built for, and the harness asserts containment —
+   * unless `exact` says otherwise. The one page that must fire *nothing* is
+   * `/control`.
    */
   expectedIssues: string[];
+  /**
+   * Whether `expectedIssues` is the COMPLETE set of rules the page fires rather
+   * than a floor. The authored fixtures set it: each one starts from the
+   * control recipe and breaks exactly the signals its name promises, so any
+   * other finding is either a defect in the page or a rule that has grown too
+   * eager, and a containment assertion would notice neither.
+   *
+   * The absorbed pages leave it unset. Their content came from upstream to
+   * demonstrate one issue, not to be silent about the other twenty-seven, so
+   * pinning their full finding set would be asserting something we did not
+   * engineer.
+   */
+  exact?: boolean;
   handler: (req: IncomingMessage, res: ServerResponse) => void;
 }
 
 /**
- * Every fixture the site serves. Task 9 adds to this collection — the absorbed
- * pages and the control page are what Task 8 put in it.
+ * Every fixture the site serves: the pages absorbed from badseo, the pages
+ * authored here for the rules that absorb left unclaimed, and the control.
  */
 export function allFixtures(): Fixture[] {
-  return [...absorbedFixtures, controlFixture];
+  return [...absorbedFixtures, ...authoredFixtures, controlFixture];
 }
