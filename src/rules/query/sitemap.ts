@@ -187,10 +187,24 @@ export const sitemapRules: QueryRule[] = [
     },
   }),
 
-  // A listed URL that answered with something other than a 200. Redirects are
-  // excluded and reported by `sitemap.redirected`: a redirect is a working
-  // answer pointing elsewhere, with a different fix (list the destination),
-  // and billing it here as well would put two findings on one line of XML.
+  // A listed URL that answered with something other than a 200.
+  //
+  // The condition is the STATUS CODE, not `fetch_class`, and the difference is
+  // what the rule is honest about — the `canonical.non-200-target` precedent:
+  //  - `status_code is null` is a fetch that got no HTTP answer at all (a
+  //    timeout, a connection failure, a refused address). We learned nothing
+  //    about that URL, and "does not return 200" would be a claim about a
+  //    response that never arrived. `sitemap.uncrawled` reports it, because
+  //    what is true of it is that this crawl never reached the page.
+  //  - a 200 that was not HTML (`non_html` — a PDF or an image, both perfectly
+  //    legitimate sitemap entries) or one whose body ran past the size cap
+  //    (`too_large`) DID return 200. Firing here would put a status of 200 in
+  //    the evidence of a finding titled "does not return 200".
+  //
+  // Redirects are excluded and reported by `sitemap.redirected`: a redirect is
+  // a working answer pointing elsewhere, with a different fix (list the
+  // destination), and billing it here too would put two findings on one line
+  // of XML.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_200.id,
@@ -204,7 +218,8 @@ export const sitemapRules: QueryRule[] = [
         NON_200,
         db,
         crawlId,
-        sql`p.fetch_class <> 'redirect' and not (p.fetch_class = 'ok' and p.status_code = 200)`,
+        sql`p.fetch_class <> 'redirect'
+            and p.status_code is not null and p.status_code <> 200`,
         (row) => ({
           url: row.url,
           statusCode: row.status_code,
@@ -256,9 +271,21 @@ export const sitemapRules: QueryRule[] = [
       ),
   }),
 
-  // A listed URL with no `pages` row at all. Usually the crawl's own boundary
-  // — a page cap, a depth cap, a URL robots.txt disallowed — rather than a
-  // fault on the site, which is why it is info and why its copy says so.
+  // A listed URL this crawl has no usable record of, which is TWO shapes in
+  // the database and one thing to tell a client:
+  //  - no `pages` row at all: the crawl never attempted the URL. Usually its
+  //    own boundary — a page cap, a depth cap, a URL robots.txt disallowed.
+  //  - a `pages` row with a null status: the crawl attempted it and got no
+  //    HTTP answer back (a timeout, a connection failure, an address the
+  //    policy refused at connect time). Nothing is known about the page.
+  //
+  // The second belongs here rather than in `sitemap.non-200`, which would have
+  // to invent a status to report, and it must not be silent: an attempted-and-
+  // failed URL HAS a row, so the "no row" test alone would drop it. `attempted`
+  // says which shape it is, and `fetchClass` names the failure.
+  //
+  // Info either way: the crawl not reaching a URL is a limit of this crawl
+  // first, and a fault on the site only once someone confirms it.
   defineRule<QueryRule>({
     kind: "query",
     id: UNCRAWLED.id,
@@ -269,24 +296,32 @@ export const sitemapRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
-      const result = await db.execute<{ url: string; total_matches: number }>(sql`
-        select s.url, count(*) over ()::int as total_matches
+      const result = await db.execute<{
+        url: string;
+        page_id: string | null;
+        fetch_class: string | null;
+        total_matches: number;
+      }>(sql`
+        select s.url, p.id as page_id, p.fetch_class,
+               count(*) over ()::int as total_matches
         from sitemap_urls s
+        left join pages p on p.crawl_id = ${crawlId} and p.url = s.url
         where s.crawl_id = ${crawlId}
-          and not exists (
-            select 1 from pages p
-            where p.crawl_id = ${crawlId} and p.url = s.url
-          )
+          and (p.id is null or p.status_code is null)
         order by s.url
         limit ${URL_FINDING_CAP}`);
 
       const findings = result.rows.map((row) =>
         queryFinding(UNCRAWLED, {
-          // No page row is the finding, so there is no page id to name.
-          pageId: null,
+          // The failed attempt has a row, and the finding belongs on it: that
+          // row is where the fetch outcome lives. A URL never attempted has
+          // none, and there is nothing to name.
+          pageId: row.page_id,
           pageUrl: row.url,
           evidence: {
             url: row.url,
+            attempted: row.page_id !== null,
+            ...(row.page_id === null ? {} : { fetchClass: row.fetch_class, statusCode: null }),
             ...(normalizationSensitive(row.url) ? { normalizationSensitive: true } : {}),
           },
           dedupeKey: row.url,

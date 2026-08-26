@@ -313,6 +313,24 @@ describe("the sitemap rules against the database", () => {
     expect(await run("sitemap.redirected", crawlId)).toHaveLength(1);
   });
 
+  // A 200 is a 200. A PDF (`non_html`) and a body that ran past the size cap
+  // (`too_large`) are both legitimate sitemap entries that answered, so a
+  // finding titled "does not return 200" carrying `statusCode: 200` would
+  // contradict itself. Neither is uncrawled either: both were fetched.
+  it("says nothing about a listed URL that answered 200 without being HTML", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/brochure.pdf", fetchClass: "non_html" },
+      { path: "/huge", fetchClass: "too_large" },
+    ]);
+    await addSitemapUrls(crawlId, ["/brochure.pdf", "/huge"]);
+
+    for (const id of ["sitemap.non-200", "sitemap.redirected", "sitemap.non-indexable"]) {
+      expect(await run(id, crawlId), id).toHaveLength(0);
+    }
+    expect(await run("sitemap.uncrawled", crawlId)).toHaveLength(0);
+  });
+
   it("reports a sitemap entry the crawl never fetched", async () => {
     const crawlId = await newCrawl();
     await addPages(crawlId, [{ path: "/ok" }]);
@@ -327,7 +345,36 @@ describe("the sitemap rules against the database", () => {
       pageUrl: url("/never-reached"),
       dedupeKey: url("/never-reached"),
     });
-    expect(found[0]!.evidence).toEqual({ url: url("/never-reached") });
+    expect(found[0]!.evidence).toEqual({ url: url("/never-reached"), attempted: false });
+  });
+
+  // A fetch that got no HTTP answer has a `pages` row with a null status, so
+  // the "no row" test alone would drop it — and `sitemap.non-200` must not
+  // claim it "does not return 200" when no response arrived at all. It is
+  // reported here, as a URL the crawl did not reach, with the failure named.
+  it("reports a listed URL whose fetch failed before any answer came back", async () => {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [
+      { path: "/slow", fetchClass: "timeout", statusCode: null },
+    ]);
+    await addSitemapUrls(crawlId, ["/slow"]);
+
+    expect(await run("sitemap.non-200", crawlId)).toHaveLength(0);
+
+    const found = await run("sitemap.uncrawled", crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!).toMatchObject({
+      // The row exists, so the finding names it: that row is where the fetch
+      // outcome lives.
+      pageId: ids.get("/slow"),
+      pageUrl: url("/slow"),
+    });
+    expect(found[0]!.evidence).toEqual({
+      url: url("/slow"),
+      attempted: true,
+      fetchClass: "timeout",
+      statusCode: null,
+    });
   });
 
   // The join is exact on the URL, and `sitemap_urls.url` is the published
@@ -346,6 +393,7 @@ describe("the sitemap rules against the database", () => {
     expect(found).toHaveLength(1);
     expect(found[0]!.evidence).toEqual({
       url: url("/x#section"),
+      attempted: false,
       normalizationSensitive: true,
     });
   });

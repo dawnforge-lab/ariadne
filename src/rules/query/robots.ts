@@ -1,6 +1,7 @@
 import { and, asc, eq, gt } from "drizzle-orm";
 import robotsParserImport from "robots-parser";
 
+import { onRulesOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
 import { sitemapUrls } from "../../db/schema.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
@@ -80,10 +81,19 @@ async function eachSitemapUrl(
  * Three deliberate silences:
  *  - `isAllowed(...) === false` is the firing condition, NOT
  *    `isDisallowed(...) === true`. robots-parser defines the second as the
- *    negation of the first, so the `undefined` it returns for a URL on another
- *    host — or one it could not parse — inverts into "disallowed" and would
- *    report every cross-origin sitemap entry as blocked. A robots.txt governs
- *    its own origin (RFC 9309 §2.2.1); about anything else it says nothing.
+ *    negation of the first, so the `undefined` it returns for a URL it cannot
+ *    parse, or one belonging to a genuinely different site, inverts into
+ *    "disallowed" and would report every such sitemap entry as blocked. A
+ *    robots.txt governs its own origin (RFC 9309 §2.2.1); about another site
+ *    it says nothing.
+ *
+ *    "Another origin" here means another SITE, not another spelling of this
+ *    one. Every entry is put through `onRulesOrigin` first — the same rewrite
+ *    the crawler's own robots check uses — so a sitemap listing
+ *    `https://www.site.com/admin` while robots.txt was read from the apex is
+ *    judged by the rules that actually governed the crawl. Without it this
+ *    rule would report as allowed the very URLs the crawler itself refused to
+ *    fetch.
  *  - an absent robots.txt (`raw === null`, outcome `absent`) disallows nothing:
  *    allow-all is the protocol's own reading of a 404 (§2.3.1.3).
  *  - a robots.txt this crawl could not read whole is refused outright, by the
@@ -101,7 +111,9 @@ async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   if (raw === null) return [];
 
   const userAgent = userAgentOf(evidence, BLOCKS.id, crawlId);
-  const parsed = robotsParser(new URL("/robots.txt", evidence.siteUrl).href, raw);
+  const robotsUrl = new URL("/robots.txt", evidence.siteUrl).href;
+  const rulesOrigin = new URL(robotsUrl).origin;
+  const parsed = robotsParser(robotsUrl, raw);
   // Split once, not once per URL: `raw` is up to 500KB and the cap allows 200
   // findings, so the naive spelling would rebuild the array 200 times.
   const lines = raw.split(/\r?\n/);
@@ -113,7 +125,10 @@ async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   const findings: Finding[] = [];
   let total = 0;
   await eachSitemapUrl(db, crawlId, (url) => {
-    if (parsed.isAllowed(url, userAgent) !== false) return;
+    // Judged under the rules origin, reported under the spelling the sitemap
+    // published: `judged` never leaves this function.
+    const judged = onRulesOrigin(url, rulesOrigin);
+    if (parsed.isAllowed(judged, userAgent) !== false) return;
     total++;
     if (findings.length >= URL_FINDING_CAP) return;
 
@@ -121,7 +136,7 @@ async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
     // is a place in a file rather than a claim to be taken on trust. -1 means
     // robots-parser matched no numbered rule, and then there is nothing honest
     // to quote.
-    const line = parsed.getMatchingLineNumber(url, userAgent);
+    const line = parsed.getMatchingLineNumber(judged, userAgent);
     const text = line > 0 ? lines[line - 1] : undefined;
     findings.push(
       queryFinding(BLOCKS, {

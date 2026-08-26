@@ -202,6 +202,28 @@ describe("the robots rules against the database", () => {
     expect(await run("robots.blocks-sitemap-urls", crawlId)).toHaveLength(0);
   });
 
+  // A sitemap that lists the www spelling while robots.txt was read from the
+  // apex (or the other way round) is the same site by the crawl's own boundary
+  // rule — the crawler refused to enqueue those URLs, judging them against
+  // exactly these rules. robots-parser answers `undefined` for a different
+  // origin, so without the rewrite this rule would report as allowed the very
+  // URLs the crawl would not fetch.
+  it("judges a www/apex spelling of the same site by this robots.txt", async () => {
+    const crawlId = await newCrawl(
+      mkDiscovery({ robots: { raw: "User-agent: *\nDisallow: /admin\n" } }),
+    );
+    await addSitemapUrls(crawlId, ["https://www.robots.example/admin/secret"]);
+
+    const found = await run("robots.blocks-sitemap-urls", crawlId);
+    expect(found).toHaveLength(1);
+    // Reported under the spelling the sitemap published, not the rewritten one.
+    expect(found[0]!.pageUrl).toBe("https://www.robots.example/admin/secret");
+    expect(found[0]!.evidence).toMatchObject({
+      url: "https://www.robots.example/admin/secret",
+      matchedBy: { line: 2, text: "Disallow: /admin" },
+    });
+  });
+
   it("matches the crawl's own user agent, not a generic one", async () => {
     const raw = `User-agent: ${UA}\nDisallow: /admin\n\nUser-agent: *\nAllow: /\n`;
     const blocked = await newCrawl(mkDiscovery({ robots: { raw } }));

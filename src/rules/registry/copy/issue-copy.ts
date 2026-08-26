@@ -320,12 +320,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Decide which is right. If the page should rank, remove the noindex directive; if it should not, remove it from the sitemap. Filtered, paginated and thank-you pages usually belong in the second group.",
   },
+  // Accuracy: two shapes, one statement. The finding covers a URL the crawl
+  // never attempted AND one it attempted without getting any HTTP answer back;
+  // `attempted` in the evidence says which. Copy that named only the first
+  // would be false of half the findings.
   "sitemap.uncrawled": {
     title: "Sitemap lists a URL this crawl did not reach",
     explanation:
-      "This URL is published in the site's sitemap and this crawl has no record of fetching it. That is most often a limit of the crawl rather than a fault on the site — a page cap, a depth cap, or a URL robots.txt disallowed — so it is reported as information, not as a defect. It is worth checking, because the same URL being unreachable to a search engine would mean a published page nobody can find.",
+      "This URL is published in the site's sitemap and this crawl has no usable record of it. Either it was never fetched — a page limit, a depth limit, or a URL robots.txt disallows — or the request was made and no response came back at all: a timeout, a connection failure, or an address the crawler refused to connect to. The evidence says which, and names the failure where there was one. This is reported as information rather than as a defect, because the first case is usually a limit of the crawl; the second is worth confirming, since a URL you publish that does not answer is one a search engine cannot index either.",
     howToFix:
-      "Check whether the URL is reachable by following links from the homepage, and whether robots.txt allows it. If it is only reachable through the sitemap, give it internal links. If the crawl simply stopped short, re-run it with a higher page limit before treating this as a finding.",
+      "Check the evidence first. If the URL was never attempted, see whether it is reachable by following links from the homepage and whether robots.txt allows it — a URL reachable only through the sitemap needs internal links — and re-run the crawl with a higher page limit if it simply stopped short. If the attempt failed, request the URL yourself and fix whatever did not answer.",
   },
   "pages.not-in-sitemap": {
     title: "Indexable page is not listed in the sitemap",

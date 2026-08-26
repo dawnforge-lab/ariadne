@@ -2,8 +2,11 @@
  * Adapted from open-seo (MIT), src/server/lib/audit/url-utils.ts
  * @ c469a48ae90ab58413b198fe3d1ac1aa90a9b070.
  * Changes: none to behaviour — the module was self-contained (no framework
- * imports) and every export is carried over verbatim. Only this provenance
- * header and the doc comment on detectUrlTemplate's slug rule were added.
+ * imports) and every export is carried over verbatim. Added: this provenance
+ * header, the doc comment on detectUrlTemplate's slug rule, and one
+ * Ariadne-authored export, `onRulesOrigin` (moved here from
+ * src/crawl/discovery.ts so the rule layer can use it without importing the
+ * fetch stack — see its own comment).
  */
 
 /**
@@ -136,6 +139,43 @@ export function isSameOrigin(url: string, origin: string): boolean {
     return isHttpToHttpsUpgrade;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Rewrite a same-site URL onto the origin a robots.txt was read from, for the
+ * purposes of a robots check only.
+ *
+ * robots-parser answers `undefined` for any URL whose origin differs from the
+ * robots.txt it parsed, and `undefined` means "no rule forbids this" — so a
+ * site that serves both `example.com` and `www.example.com` (or both schemes)
+ * without redirecting would have every rule silently skipped for whichever
+ * spelling a link or a sitemap `<loc>` happened to use, and `Disallow: /admin`
+ * would not hold. `isSameOrigin` is the crawl boundary: URLs it admits are the
+ * same site by our own rule, so the same path rules apply to them. It is
+ * asymmetric about an http->https upgrade, so both directions are tried — the
+ * rules origin can be the upgraded one when robots.txt redirected to https.
+ *
+ * The rewrite never leaves this function: the URL enqueued, fetched or reported
+ * is the one the caller passed. A genuinely external URL is not rewritten and
+ * keeps the old answer (no rules of ours apply to another site).
+ *
+ * Ariadne addition, not upstream. It lives here rather than in the crawler
+ * because both the crawl-time robots check (src/crawl/discovery.ts) and the
+ * rule that re-parses the stored robots.txt (src/rules/query/robots.ts) must
+ * ask the question the same way, and the rule layer must not import the fetch
+ * stack to do it.
+ */
+export function onRulesOrigin(url: string, rulesOrigin: string): string {
+  if (!isSameOrigin(url, rulesOrigin) && !isSameOrigin(rulesOrigin, url)) return url;
+  try {
+    const parsed = new URL(url);
+    const origin = new URL(rulesOrigin);
+    parsed.protocol = origin.protocol;
+    parsed.host = origin.host;
+    return parsed.href;
+  } catch {
+    return url;
   }
 }
 

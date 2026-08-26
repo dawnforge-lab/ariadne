@@ -52,7 +52,12 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
     // crawl chose not to look" — it is a row this engine's crawl loop did not
     // produce. Refusing loudly beats judging a site on evidence that is not
     // there (hard rule 7).
-    return bad("is missing (the crawl recorded no robots/sitemap discovery)");
+    return bad(
+      "is missing: `runCrawl` writes it before the frontier is seeded, so this " +
+        "row either predates the discovery evidence or belongs to a crawl that " +
+        "failed inside discovery — re-crawl the site to produce a row the " +
+        "robots and sitemap rules can read",
+    );
   }
   if (!isRecord(value)) return bad("is not an object");
 

@@ -15,12 +15,29 @@ export const crawls = pgTable("crawls", {
   pagesTotal: integer("pages_total"),
   renderPassCount: integer("render_pass_count").notNull().default(0),
   // Three crawl-level evidence blobs the query rules read instead of fetching
-  // (hard rule 3: rules read the database). Each is nullable because each
-  // records something the crawl may not have done: `discovery` is what robots
-  // and sitemap discovery found, `hostProbe` is the www/apex/http variant
-  // walk, `notfoundProbe` is the synthetic-404 sample the soft-404 rule
-  // compares pages against. A null means "not attempted", which the rules
-  // report as a skipped check rather than passing over in silence.
+  // (hard rule 3: rules read the database). All three are nullable, and a null
+  // does NOT mean the same thing in each — what a rule may conclude from one
+  // depends on when its writer runs:
+  //
+  //  - `discovery` (what robots.txt said and what the sitemap walk found) is
+  //    written by `runCrawl` unconditionally, immediately after `discover()`
+  //    and before the frontier is seeded or anything branches on it. There is
+  //    no path that crawls a site and leaves it null. A null is therefore not
+  //    "not attempted": it is a row no completed discovery produced — one that
+  //    predates the column, or a crawl that died inside discovery — and the
+  //    robots and sitemap rules THROW on it rather than judging a site on
+  //    evidence that is not there (hard rule 7). See
+  //    src/rules/query/crawl-evidence.ts.
+  //  - `hostProbe` (the www/apex/http variant walk) is skipped entirely when
+  //    the caller passes `probeHosts: false`, and has no "skipped" shape to
+  //    record that in. A null here genuinely is "not attempted", and a rule
+  //    reading it must report a skipped check rather than a finding.
+  //  - `notfoundProbe` (the synthetic-404 sample the soft-404 rule compares
+  //    pages against) always ends up written once the crawl reaches that step:
+  //    either a sample, or a `{ skipped: <reason> }` object naming why it was
+  //    not taken. A null means the crawl never got that far — it is still
+  //    running, or it failed before the probe — which is again "not attempted"
+  //    and again a skipped check, not a finding.
   discovery: jsonb("discovery_jsonb"),
   hostProbe: jsonb("host_probe_jsonb"),
   notfoundProbe: jsonb("notfound_probe_jsonb"),
