@@ -247,7 +247,10 @@ import the gate's modules with and without that one line and print
 | crawl + rules + fixture modules | 122.3 MB | 137.5 MB |
 | the same, **plus** `run-render.js` | 197.2 MB | 186.2 MB |
 
-**Roughly 55–65 MB, paid at import, before a browser exists.** RAM is still
+**Roughly 50–75 MB, paid at import, before a browser exists** — the two samples
+are **+74.9 MB** and **+48.7 MB**, and the band is quoted wide enough to contain
+both of them rather than narrowed to a midpoint two measurements cannot support.
+RAM is still
 O(concurrency): the fixture, the config and the concurrency are unchanged, and
 **747.6 MB of HTML** passed through a process that peaked under 280 MB —
 `sum(html_bytes) = 783,899,244` over this crawl's 50,000 `pages` rows, 15,678
@@ -370,6 +373,18 @@ here if they arrived — 2,000 of them across this pass. The `notFound` counter 
 those requests never reached the socket. No favicon request either: headless
 Chromium does not fetch one.
 
+**The `third-party 0 request(s) aborted` line proves nothing, and is printed
+anyway.** This fixture references no other origin at all — no analytics tag, no
+font host, no CDN — so there was never a third-party request for the renderer to
+abort, and zero here is *structural*, not a demonstration that the block works.
+The line is in the record because a non-zero value would be news (a fixture that
+had grown an outbound reference), not because a zero is evidence. **The blocking
+mechanism is proven in `test/crawl/renderer.test.ts`**, where a second HTTP
+server on another port is the witness: its request log is asserted to be
+unchanged across a render of a page that carries both a `<script>` and an
+`<img>` pointing at it, so the requests did not merely go unread — they never
+left the machine.
+
 **What this run does NOT measure, stated plainly.** The residual burst the
 renderer cannot mitigate is `script`, `stylesheet` and `xhr`/`fetch` — the four
 resource types a client-rendered page needs to build its DOM at all, which is
@@ -419,7 +434,8 @@ for Phase 4's reason: the phase wall also contains the runner's per-rule
 delete-then-insert transactions for the 200,023 metric rows this pass wrote,
 which happen outside each rule's `run`. The process peak (453.7 MB) sits inside
 that writing, as it did in Phase 4 — **+66.3 MB over Phase 4's 387.4 MB, of which
-55–65 MB is the Playwright import's floor** (measured above). The metric phase's
+50–75 MB is the Playwright import's floor** (measured above: +74.9 MB and
++48.7 MB on two samples, so the +66.3 MB sits inside the band). The metric phase's
 own appetite is therefore roughly unchanged, and the pathology behind it —
 40,003-row metrics held whole before the first insert — is unchanged and still on
 the backlog.
@@ -730,6 +746,18 @@ Named here so that nothing in this document reads as more closed than it is.
    phases' worth of evidence behind it.
 5. **A `markCrawlFailed` surface.** Disclosure 2 above.
 6. **Persisting the resolved render config.** Disclosure 3 above.
+7. **The browser tree's own bound.** This phase measured the Chromium process
+   tree (816.2 MB across 10 processes at its peak, an upper bound) and reported
+   it *beside* the gated number rather than inside it, because build plan rule 6
+   is written about the Node process and `process.memoryUsage.rss()` cannot see
+   a child's address space. That is the honest reading of the rule as written,
+   and it leaves the pipeline's largest single memory consumer recorded but
+   ungated. **Phase 6 decides two things:** whether the browser tree gets a
+   bound of its own — a gated ceiling, at a stated `renderConcurrency`, measured
+   with PSS rather than summed RSS if the number is to be a total and not an
+   upper bound — and whether rule 6's wording is amended for a pipeline that now
+   necessarily spawns a browser, so that "RAM O(concurrency), never O(URLs)"
+   says which process (or processes) it is a claim about.
 
 ## Machine
 
@@ -772,3 +800,25 @@ twenty-eight minutes and wants a machine, not a runner.
 The run leaves its rows in the dev database under crawl id
 `crawl_661a5a7a-70e3-40c3-899a-6dd6b602df6b`, so every figure above can be
 re-queried. `delete from crawls where id = '…'` cascades.
+
+**Leaving them there has a price, and it is paid by the local test suite.**
+50,000 `pages` rows and 1,149,940 `links` rows sit in the same dev database the
+tests run against, and the rule runner's preamble issues `ANALYZE` over seven
+tables before every rules pass. With this crawl resident that preamble costs
+**about 5.1 seconds per `runRules` call** — so every test that drives the rule
+runner pays it, several times over in some files. Measured: `test/rules/run.test.ts`
+takes **134s** with the crawl in the database, against sub-second before it
+existed. Under `vitest`'s parallel file execution that is also enough to push an
+individual test past the **30s per-test timeout** and produce a red suite that
+has nothing to do with the code under test.
+
+So: **delete the gate crawl before treating a local suite's timing or greenness
+as meaningful.**
+
+```sql
+delete from crawls where id = 'crawl_661a5a7a-70e3-40c3-899a-6dd6b602df6b';
+vacuum (parallel 0, analyze);
+```
+
+CI is unaffected — it builds a fresh `postgres:16` service per run and no gate
+crawl has ever existed in it.
