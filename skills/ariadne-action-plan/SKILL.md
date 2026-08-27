@@ -152,8 +152,12 @@ different lanes, and the lane split in Step 2 separates them into
 ruleset `content.thin` claims CHECK-40 and CHECK-13, so a check-keyed intake picks
 it up twice and would hand the same 22 URLs to two teams — and both tabs would pass
 their own row-count test while the plan double-counted the site. The rule goes to
-the higher-ranked of the checks that admit it (Step 5's ranking, lowest `ruleId` as
-the tiebreak); the other check's line in the Summary index names the tab that owns
+the higher-ranked of the checks that admit it — Step 5's ranking with a check's
+`count` read as the sum of its rules' counts, and the numerically lowest `checkId`
+as the final tiebreak. (`ruleId` cannot break this tie: the contested rule is the
+same rule on both sides, so every rule-level field is identical by construction.
+CHECK-13 vs CHECK-40 with equal priority, severity and summed counts resolves to
+CHECK-13.) The other check's line in the Summary index names the tab that owns
 it instead of repeating its rows. If losing that rule leaves the other check with
 no rules at all, it is not a tab — it is a cross-reference.
 
@@ -421,8 +425,19 @@ LANE_FILL = {                      # the lane is a colour and a column; the ORDE
     "decide": "FFEB9C",
 }
 
+def fit_tab_name(name):
+    # Step 5's rule: past 31 chars, cut the SUBJECT, never the lane suffix —
+    # "(platform)"/"(pages)" is what keeps two sibling tabs distinct.
+    if len(name) <= 31:
+        return name
+    subject, sep, lane = name.rpartition(" (")
+    if not sep:
+        return name[:31]
+    suffix = " (" + lane
+    return subject[: 31 - len(suffix)] + suffix
+
 def add_tab(wb, name, description, headers, rows, lane):
-    ws = wb.create_sheet(title=name[:31])
+    ws = wb.create_sheet(title=fit_tab_name(name))
     ws.sheet_properties.tabColor = LANE_FILL[lane]
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(headers), 1))
     cell = ws.cell(row=1, column=1, value=description)
