@@ -347,11 +347,19 @@ document.body.insertAdjacentHTML('afterbegin', ${JSON.stringify(
  * pass waits for `domcontentloaded` and THEN settles. A navigation started
  * before the first of those aborts the very `page.goto` the pass is awaiting,
  * which is a different (and less interesting) failure than the one these two
- * fixtures are for. Thirty milliseconds is comfortably after parsing a document
- * this size on a loopback server and comfortably inside any settle the harness
- * configures.
+ * fixtures are for. A timer cannot preempt the parser's own task, so any delay
+ * at all buys that ordering: five milliseconds is the smallest that is also
+ * obviously enough.
+ *
+ * AND NEAR-IMMEDIATE RATHER THAN "COMFORTABLE", because comfort was measured
+ * against the wrong thing. The number that matters is the margin against the
+ * harness's settle (`RENDER_SETTLE_MS`, 500ms): at 5ms that is **100×**, where
+ * 30ms against a 300ms settle was 10× — and a 7.5× margin of the same shape is
+ * what lost the race under load in test/crawl/renderer.test.ts during the
+ * phase-5 review. The settle only ever ends by expiring, so it is free to be
+ * wide; the timer is the thing that must be certain to have fired.
  */
-const REDIRECT_DELAY_MS = 30;
+const REDIRECT_DELAY_MS = 5;
 
 function redirectScript(target: string): string {
   return `<script>

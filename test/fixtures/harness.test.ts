@@ -130,13 +130,21 @@ const SKIP_HARNESS_CLAIMS: string[] = [
  *
  * Production settles for three seconds (`RENDERER_DEFAULTS.settleMs`), which
  * over sixty-nine pages would be three and a half minutes of waiting for
- * scripts that finished in five milliseconds. 300ms is an order of magnitude
- * more than the fixture site's own JavaScript needs — the two redirect pages
- * fire theirs after 30ms and are the slowest thing here — and the DEFAULT is
- * pinned by test/crawl/renderer.test.ts rather than exercised again by this
- * file.
+ * scripts that finished in five milliseconds. The DEFAULT is pinned by
+ * test/crawl/renderer.test.ts rather than exercised again by this file, so what
+ * this number has to be is *wide enough that no fixture's script can lose the
+ * race*, not realistic.
+ *
+ * THE MARGIN, stated: the slowest script on this site is either redirect page's
+ * timer, armed for `REDIRECT_DELAY_MS` (5ms, test/fixtures/pages/render-p5.ts).
+ * 500ms is a **100×** margin against it. The previous pairing here was 30ms
+ * against 300ms — 10×, ledgered as such — and a 7.5× margin of exactly that
+ * shape is what a loaded machine broke in test/crawl/renderer.test.ts during
+ * the phase-5 review. A settle only ever ends by expiring, so widening it costs
+ * wall and nothing else: 68 renders at concurrency 4 pay about 3.4 extra
+ * seconds for it.
  */
-const RENDER_SETTLE_MS = 300;
+const RENDER_SETTLE_MS = 500;
 
 /**
  * The render budget this harness runs with: 100% of the crawl, both other knobs
@@ -149,7 +157,7 @@ const RENDER_SETTLE_MS = 300;
  * false, and the selected set is exactly the candidate set. A smaller percentage
  * would make the assertion a statement about which candidates happened to sort
  * first, which proves nothing about the fixtures this task added. The BUDGET CUT
- * itself is covered directly by test/crawl/select.test.ts.
+ * itself is covered directly by test/crawl/render-select.test.ts.
  */
 const RENDER_BUDGET_PCT = 100;
 
@@ -1201,7 +1209,7 @@ describe("the fixture site end to end", () => {
     // SET of paths it fired on. A containment check would be satisfied by a
     // rule that had grown eager enough to fire on half the site, which for a
     // diff rule is the likeliest way to be wrong: every one of them compares
-    // two counts, and a threshold that slipped would land on the fifty-nine
+    // two counts, and a threshold that slipped would land on the sixty-four
     // other pages this crawl rendered.
     const firedOn = (ruleId: string): string[] =>
       [...issuesByPath]

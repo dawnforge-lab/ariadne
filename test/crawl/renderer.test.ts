@@ -14,9 +14,16 @@
  * observable each, with every count hand-derived from the markup below.
  *
  * Timing: the renderer's real settle is 3s and its real navigation timeout is
- * 15s. Both are configuration, and the tests drive them down (settle 150ms,
- * timeout 1s) so the suite stays fast — the DEFAULTS themselves are pinned as
- * constants, once, rather than paid for in every test.
+ * 15s. Both are configuration. The SETTLE is driven down (500ms) everywhere,
+ * because every page here finishes its script in single-digit milliseconds and
+ * a settle only ever ends by expiring. The NAVIGATION TIMEOUT is not: it is
+ * left at the production 15s for every test but the one that renders `/hang`,
+ * which gets its own renderer at 1s. A shortened navigation timeout is a
+ * DEADLINE ON A REAL PAGE ANSWERING, and applying it to tests that are not
+ * about deadlines is how a loaded machine fails a test that has nothing wrong
+ * with it — the hazard the final review named, alongside the settle margin
+ * below that a loaded machine actually did lose. The DEFAULTS themselves are
+ * pinned as constants, once, rather than paid for in every test.
  */
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -49,9 +56,25 @@ function databaseUrl(): string {
   return url;
 }
 
-/** Test settle: long enough for an injected script, short enough to be free. */
-const SETTLE_MS = 150;
-/** Test navigation timeout, for the page that never answers. */
+/**
+ * Test settle: long enough for an injected script, short enough to be free.
+ *
+ * THE MARGIN ARITHMETIC, because this number lost a race once. The slowest
+ * script on this fixture site is the redirect timer, armed for
+ * `REDIRECT_DELAY_MS` (5ms) — so the settle must outlast a 5ms timer under
+ * whatever load the suite is running against. 500ms is a **100× margin**. The
+ * previous pairing was 20ms against a 150ms settle (7.5×), and run B of the
+ * final review lost it: the settle expired before the browser's timer fired,
+ * and the redirect assertions failed on a machine, not on a bug.
+ */
+const SETTLE_MS = 500;
+/**
+ * Navigation timeout for the ONE test that renders `/hang` — the page that
+ * answers headers and then nothing. That test can only end by waiting this out,
+ * so it is 1s rather than the production 15s, and it is applied by that test's
+ * own renderer. Nothing else in this file shortens the navigation timeout: see
+ * the module header.
+ */
 const NAV_TIMEOUT_MS = 1_000;
 
 // ---------------------------------------------------------------------------
@@ -86,12 +109,25 @@ document.body.insertAdjacentHTML('beforeend',
 </body></html>`;
 }
 
+/**
+ * How long after parsing the redirect pages wait before sending themselves on.
+ *
+ * Near-immediate rather than zero, and the reason is the renderer's contract:
+ * the pass waits for `domcontentloaded` and THEN settles, so a navigation that
+ * started before the first of those would abort the very `page.goto` being
+ * awaited — a different failure from the one these fixtures are for. A timer
+ * cannot preempt the parser's own task, so any delay at all is enough for
+ * ordering; 5ms is the smallest that is also obviously enough. Against
+ * `SETTLE_MS` (500ms) that is a 100× margin — see `SETTLE_MS`.
+ */
+const REDIRECT_DELAY_MS = 5;
+
 /** `/js-redirect`: a page that sends itself somewhere else after paint. */
 function jsRedirectHtml(target: string): string {
   return `<!doctype html><html lang="en"><head><title>Off we go</title></head>
 <body><p>Redirecting</p><script>setTimeout(function(){location.replace(${JSON.stringify(
     target,
-  )});}, 20);</script></body></html>`;
+  )});}, ${REDIRECT_DELAY_MS});</script></body></html>`;
 }
 
 /**
@@ -203,7 +239,9 @@ describe("PageRenderer", () => {
       origin: site.base,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
-      navigationTimeoutMs: NAV_TIMEOUT_MS,
+      // No `navigationTimeoutMs`: the production 15s. Every page this renderer
+      // is pointed at answers, so the timeout is never meant to be reached and
+      // shortening it would only add a way to fail under load.
       settleMs: SETTLE_MS,
       allowPrivate: true,
       onRequestBlocked: (url) => blocked.push(url),
@@ -238,6 +276,8 @@ describe("PageRenderer", () => {
   });
 
   it("records where a page sent itself with JavaScript", async () => {
+    // Margin: the fixture's timer is armed for 5ms and the settle is 500ms, so
+    // the browser has 100× the timer's own delay to fire it in (see SETTLE_MS).
     const result = await renderer.render(`${site.base}/js-redirect`);
 
     expect(result.error).toBeNull();
@@ -279,6 +319,7 @@ describe("PageRenderer", () => {
   });
 
   it("blocks an off-site navigation and records it as the redirect", async () => {
+    // Same 5ms-against-500ms margin as the same-origin redirect above.
     const before = third.hits.length;
 
     const result = await renderer.render(`${site.base}/offsite-redirect`);
@@ -303,14 +344,33 @@ describe("PageRenderer", () => {
   });
 
   it("classifies a navigation that never finishes as a timeout", async () => {
-    const result = await renderer.render(`${site.base}/hang`);
+    // THE ONE TEST THAT SHORTENS THE NAVIGATION TIMEOUT, and it gets its own
+    // browser to do it in. `/hang` sends headers and then goes quiet, so this
+    // test can only end by waiting the timeout out: 1s here rather than the
+    // production 15s the shared renderer above keeps. The cost is one extra
+    // Chromium launch; the alternative — the shared renderer at 1s — puts a 1s
+    // deadline on every OTHER test's real navigation, which is a way for a busy
+    // machine to fail a test about anything but timeouts.
+    const hangRenderer = await PageRenderer.launch({
+      origin: site.base,
+      userAgent: "AriadneBot/0.1 (render test)",
+      perHostDelayMs: 0,
+      navigationTimeoutMs: NAV_TIMEOUT_MS,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+    try {
+      const result = await hangRenderer.render(`${site.base}/hang`);
 
-    expect(result.rendered).toBe(false);
-    expect(result.error).toBe(
-      `timeout: navigation did not reach domcontentloaded within ${NAV_TIMEOUT_MS}ms`,
-    );
-    expect(result.wordCount).toBeNull();
-    expect(result.redirectUrl).toBeNull();
+      expect(result.rendered).toBe(false);
+      expect(result.error).toBe(
+        `timeout: navigation did not reach domcontentloaded within ${NAV_TIMEOUT_MS}ms`,
+      );
+      expect(result.wordCount).toBeNull();
+      expect(result.redirectUrl).toBeNull();
+    } finally {
+      await hangRenderer.close();
+    }
   });
 
   it("classifies a navigation the server refuses to answer", async () => {
@@ -358,7 +418,9 @@ describe("runRenderPass", () => {
       renderBudgetPct: 100,
       allowPrivate: true,
       settleMs: SETTLE_MS,
-      navigationTimeoutMs: NAV_TIMEOUT_MS,
+      // No `navigationTimeoutMs`: the pass gets the production 15s. Only the
+      // `/hang` test below overrides it, because only that test is about a
+      // navigation deadline — see the module header.
       renderConcurrency: 2,
       ...overrides,
     } as Parameters<typeof runRenderPass>[2];
@@ -528,7 +590,14 @@ describe("runRenderPass", () => {
   it("records a failed render as evidence and never retries it", async () => {
     const crawlId = await newCrawl(["/hang"]);
 
-    const summary = await runRenderPass(db, crawlId, passConfig());
+    // The other half of the `/hang` pair, and the only pass in this file that
+    // shortens the navigation timeout: this URL never answers, so the pass can
+    // only get its failure by waiting the deadline out.
+    const summary = await runRenderPass(
+      db,
+      crawlId,
+      passConfig({ navigationTimeoutMs: NAV_TIMEOUT_MS }),
+    );
 
     expect(summary.rendered).toBe(0);
     expect(summary.failures).toBe(1);

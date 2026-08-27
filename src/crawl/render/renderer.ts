@@ -158,7 +158,7 @@ interface Measurement {
  *
  * THE FILTER-LINK PREDICATE IS SPELLED IN TWO PLACES AND MUST STAY IDENTICAL:
  * here, over `HTMLAnchorElement.href` (the DOM's *resolved* href), and in
- * `filters.js-only` (src/rules/page|query/render-diff.ts, P5-T5) over
+ * `filters.js-only` (src/rules/query/render-diff.ts, P5-T5) over
  * `links.target_url`, which is the crawl's resolved href. An anchor is a filter
  * link when its resolved href contains `?` OR matches /filter|facet|sort/i.
  * Change one and the rule compares two different questions and fires on the

@@ -193,10 +193,14 @@ interface PhaseRss {
  * sample; that is too expensive to run every 2s next to the thing being timed.
  *
  * `/proc` is a live directory: a process can exit between `readdir` and the read
- * of its `stat`. Those two errnos are the only thing skipped here, and skipping
- * them is not a fallback hiding a failure (hard rule 7) — a process that no
- * longer exists has no RSS, and a sample that threw would report the browser as
- * costing nothing.
+ * of its `stat`. `ENOENT` and `ESRCH` — the two errnos the kernel reports for
+ * exactly that — are the only thing skipped here, BY NAME, and every other errno
+ * is rethrown. Skipping those two is not a fallback hiding a failure (hard rule
+ * 7): a process that no longer exists has no RSS, and a sample that threw for it
+ * would report the browser as costing nothing. Anything else — `EACCES` under a
+ * `hidepid` mount, say — means this reader cannot see the machine it claims to
+ * be measuring, and that must stop the gate rather than quietly shrink its
+ * browser figure.
  */
 function childRssBytes(rootPid: number): { bytes: number; count: number } {
   const pageSize = 4096;
@@ -213,8 +217,10 @@ function childRssBytes(rootPid: number): { bytes: number; count: number } {
     try {
       stat = readFileSync(`/proc/${pid}/stat`, "utf8");
       statm = readFileSync(`/proc/${pid}/statm`, "utf8");
-    } catch {
-      // The process exited between the readdir and here. See the header.
+    } catch (error) {
+      // The process exited between the readdir and here — and ONLY that. See
+      // the header: any other errno is this reader failing, not a pid vanishing.
+      if (!isVanishedProcessError(error)) throw error;
       continue;
     }
     // `comm` is parenthesised and may itself contain spaces and parentheses, so
@@ -251,6 +257,19 @@ function childRssBytes(rootPid: number): { bytes: number; count: number } {
     }
   }
   return { bytes, count };
+}
+
+/**
+ * Whether a `/proc` read failed because its process is gone.
+ *
+ * The two errnos the kernel uses for a pid that vanished between the `readdir`
+ * and the read: `ENOENT` (the directory entry is already unlinked) and `ESRCH`
+ * (the entry survives but the task behind it does not). Nothing else counts —
+ * see `childRssBytes`'s header.
+ */
+function isVanishedProcessError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
 }
 
 /**
@@ -673,7 +692,13 @@ async function main(): Promise<number> {
       // THE BUDGET CONTRACT, asserted on the count the pass was ALLOWED to make
       // rather than the count it happened to make — a pass that selected 3,000
       // pages and crashed after 400 has still broken the contract.
-      const renderCeiling = (summary.pagesCrawled * GATE_RENDER_PCT) / 100;
+      // `ceil`, because that is the arithmetic the selection itself does:
+      // `min(ceil(pages × pct/100), renderMaxPages)` in select.ts. Comparing
+      // against the un-rounded product fails a pass that obeyed its budget
+      // exactly — a 30-page smoke run is allowed ceil(1.5) = 2 seats and would
+      // be reported here as over a ceiling of 1.5. At 50,000 pages the two
+      // agree, so this is a hole in the small sizes, not in the gate run.
+      const renderCeiling = Math.ceil((summary.pagesCrawled * GATE_RENDER_PCT) / 100);
       if (render.selection.selected.length > renderCeiling) {
         console.error(
           `FAIL: render pass selected ${render.selection.selected.length} URLs, over the ` +
@@ -876,10 +901,12 @@ async function main(): Promise<number> {
   } finally {
     sampler.stop();
     await closeDb(db);
-    // The happy path closed the fixture the moment the crawl ended; this is the
-    // error path, where the crawl or the rule pass threw first. Guarded by a
-    // flag rather than by swallowing the second close's error, which would be a
-    // fallback hiding a real one (hard rule 7).
+    // The happy path closed the fixture after the render pass — the last phase
+    // that is allowed to fetch — and before the rule pass, which is not. This is
+    // the error path, where the crawl, the render pass or the rule pass threw
+    // before that close was reached. Guarded by a flag rather than by swallowing
+    // the second close's error, which would be a fallback hiding a real one
+    // (hard rule 7).
     if (site !== null && siteOpen) await site.close();
   }
 }
