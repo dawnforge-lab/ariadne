@@ -790,7 +790,9 @@ installs. Otherwise unchanged: `ubuntu-latest`, a health-checked `postgres:16`
 service, Node 22, then `npm ci` → `npx tsc --noEmit` → `npm run db:migrate` →
 `npm test`, on push to `main` and every pull request.
 
-**First CI run on this branch: pending the pull request.**
+**First CI run on this branch: PR #4, `test` pass in 2m40s (chromium install
+included) —
+<https://github.com/dawnforge-lab/ariadne/actions/runs/33071526262/job/98514731957>.**
 
 The gate script is not part of CI and is not meant to be — this run took
 twenty-eight minutes and wants a machine, not a runner.
