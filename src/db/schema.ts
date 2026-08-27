@@ -335,7 +335,11 @@ export const metrics = pgTable("metrics", {
 export const frontier = pgTable("frontier", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
   url: text("url").notNull(),
-  state: text("state").notNull().default("pending"), // pending|leased|done|failed
+  // pending|leased|done|failed|render_pending — the first four are the crawl
+  // pass's, `render_pending` is the render pass's (a `done` row the render
+  // selection promoted; it goes back to `done` once rendered). See
+  // src/crawl/frontier.ts, which is the authority on the state machine.
+  state: text("state").notNull().default("pending"),
   depth: integer("depth").notNull(),
   discoveredVia: text("discovered_via").notNull(),
   attempts: integer("attempts").notNull().default(0),

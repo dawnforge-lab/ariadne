@@ -490,7 +490,9 @@ describe("runCrawl", () => {
     expect(summary.pagesCrawled).toBe(0);
     expect(summary.robots.outcome).toBe("read");
     expect(summary.note).toMatch(/nothing to crawl/);
-    expect(summary.frontier).toEqual({ pending: 0, leased: 0, done: 0, failed: 0 });
+    expect(summary.frontier).toEqual({
+      pending: 0, leased: 0, done: 0, failed: 0, renderPending: 0,
+    });
   });
 
   it("lets our own errors kill the run, and marks the crawl failed", async () => {

@@ -666,6 +666,7 @@ describe("PageWriter", () => {
         leased: 3,
         done: 0,
         failed: 0,
+        renderPending: 0,
       });
 
       await writer.flush();
@@ -675,6 +676,7 @@ describe("PageWriter", () => {
         leased: 0,
         done: 3,
         failed: 0,
+        renderPending: 0,
       });
     });
 
@@ -698,6 +700,7 @@ describe("PageWriter", () => {
         leased: 0,
         done: 1,
         failed: 1,
+        renderPending: 0,
       });
     });
 
@@ -747,6 +750,7 @@ describe("PageWriter", () => {
           leased: 2,
           done: 0,
           failed: 0,
+          renderPending: 0,
         });
       } finally {
         await db.execute(sql.raw("drop trigger if exists ariadne_test_boom_trg on frontier"));

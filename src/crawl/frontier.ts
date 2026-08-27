@@ -29,6 +29,14 @@
  * far worse — reading them as available. Do not reshape it into a read then a
  * write: that gap is exactly where two workers crawl the same URL twice.
  *
+ * The frontier serves TWO passes. The crawl pass owns `pending` / `leased`; the
+ * render pass owns `render_pending`, which `selectRenderSet` (src/crawl/render/
+ * select.ts) promotes `done` rows into, `leaseRenderUrls` hands out, and
+ * `completeUrls` settles back to `done` when the render — successful or
+ * recorded as failed — is written. The two passes share no state value, which
+ * is what makes their leases unable to collide; `leaseRenderUrls` says why that
+ * matters more than it looks.
+ *
  * The URL a row is keyed by is `normalizeUrl` output (url-utils), which is the
  * single frontier-key authority. This module does not normalise: it stores the
  * key it is given, so a caller that skips normalisation gets duplicate rows
@@ -52,10 +60,43 @@ export interface FrontierCounts {
   leased: number;
   done: number;
   failed: number;
+  /**
+   * Selected for the render pass and not yet rendered. These URLs have ALREADY
+   * BEEN CRAWLED — a render row is a `done` row the selection promoted — so a
+   * caller counting how much of the site is in the record must count them
+   * alongside `done`; `crawledRows` does exactly that, and is what the loop
+   * uses so a resume after a render selection does not re-crawl the site.
+   */
+  renderPending: number;
 }
 
-/** The states a frontier row may be in. Anything else is a defect. */
-const STATES = ["pending", "leased", "done", "failed"] as const;
+/**
+ * The states a frontier row may be in. Anything else is a defect.
+ *
+ * `render_pending` is the render pass's, and it is the ONLY state that pass
+ * ever puts a row in — see `leaseRenderUrls` for why a render lease does not
+ * move the row to `leased`.
+ */
+const STATES = ["pending", "leased", "done", "failed", "renderPending"] as const;
+
+/** `FrontierCounts` key -> the string stored in `frontier.state`. */
+const STATE_COLUMN: Record<(typeof STATES)[number], string> = {
+  pending: "pending",
+  leased: "leased",
+  done: "done",
+  failed: "failed",
+  renderPending: "render_pending",
+};
+
+/**
+ * How many of the crawl's URLs have been fetched and written: `done` plus the
+ * ones the render selection took out of `done`. Two states, one fact — and
+ * stating it once is what keeps a resume from reading a render selection as
+ * "these pages were never crawled" and fetching them all again.
+ */
+export function crawledRows(counts: FrontierCounts): number {
+  return counts.done + counts.renderPending;
+}
 
 export interface EnqueueItem {
   url: string;
@@ -141,6 +182,11 @@ export async function enqueueUrls(
  * URLs sit idle. The loop's 180s is comfortably above any single page's
  * worst case (a 20s fetch timeout) without stalling a resume for long.
  *
+ * The state filter is `pending` (plus an expired `leased`) and must stay that
+ * way: it is the whole of the render pass's invisibility to this one. A
+ * `render_pending` row is a page this crawl has already fetched, and leasing it
+ * here would re-fetch it — see `leaseRenderUrls`.
+ *
  * This is the concurrency-safety core — see the module header before changing
  * its shape.
  */
@@ -151,14 +197,7 @@ export async function leaseBatch(
   n: number,
   leaseSeconds: number,
 ): Promise<LeasedUrl[]> {
-  if (!Number.isInteger(n) || n < 1) {
-    throw new RangeError(`leaseBatch: n must be an integer ≥ 1, got ${n}`);
-  }
-  if (!Number.isFinite(leaseSeconds) || leaseSeconds < 0) {
-    throw new RangeError(
-      `leaseBatch: leaseSeconds must be ≥ 0, got ${leaseSeconds}`,
-    );
-  }
+  validateLease("leaseBatch", n, leaseSeconds);
 
   const res = await db.execute(sql`
     update frontier set state = 'leased', lease_id = ${leaseId},
@@ -173,12 +212,108 @@ export async function leaseBatch(
       for update skip locked)
     returning url, depth, discovered_via, attempts`);
 
-  return res.rows.map((r) => ({
+  return toLeased(res.rows);
+}
+
+/** The two arguments both lease paths share, checked the same way in both. */
+function validateLease(fn: string, n: number, leaseSeconds: number): void {
+  if (!Number.isInteger(n) || n < 1) {
+    throw new RangeError(`${fn}: n must be an integer ≥ 1, got ${n}`);
+  }
+  if (!Number.isFinite(leaseSeconds) || leaseSeconds < 0) {
+    throw new RangeError(`${fn}: leaseSeconds must be ≥ 0, got ${leaseSeconds}`);
+  }
+}
+
+function toLeased(rows: readonly Record<string, unknown>[]): LeasedUrl[] {
+  return rows.map((r) => ({
     url: r["url"] as string,
     depth: Number(r["depth"]),
     discoveredVia: r["discovered_via"] as string,
     attempts: Number(r["attempts"]),
   }));
+}
+
+/**
+ * Claim up to `n` URLs of the RENDER pass for `leaseId` for `leaseSeconds`.
+ *
+ * The same mechanism as `leaseBatch` — an `UPDATE` over a `SELECT … FOR UPDATE
+ * SKIP LOCKED` sub-select, a `lease_id`, a `leased_until` deadline that is a
+ * crash-resume mechanism rather than a lock — over the rows `selectRenderSet`
+ * moved to `render_pending`.
+ *
+ * ONE DELIBERATE DIFFERENCE, and it is the reason the two passes cannot
+ * collide: a render lease does NOT move the row to `leased`. It writes the
+ * lease fields and leaves the state where it is, so a render row is never in
+ * any state `leaseBatch` looks at — not while it is held, and not after the
+ * deadline passes, which is exactly when a shared `leased` state would have
+ * handed a rendered page back to the crawler to fetch a second time (rule 9).
+ * The cost is that `frontierCounts` reports a held render row as
+ * `renderPending`, which is true: it is still owed a render.
+ *
+ * URL order rather than the crawl's depth-then-age order: the render set is a
+ * selection, not a discovery frontier, and `selectRenderSet` already returns it
+ * in URL order. Two workers still get disjoint batches — that is SKIP LOCKED's
+ * job, not the ORDER BY's — but a single-worker pass then renders in a stable,
+ * reproducible order.
+ *
+ * The batch is sorted on the way out, and that is not belt and braces: an
+ * `UPDATE … RETURNING` emits rows in the order it happened to update them, not
+ * in the sub-select's `ORDER BY`, so the ORDER BY chooses WHICH rows are leased
+ * and this sort chooses the order they are worked in. Bounded by `n`.
+ */
+export async function leaseRenderUrls(
+  db: Db,
+  crawlId: string,
+  leaseId: string,
+  n: number,
+  leaseSeconds: number,
+): Promise<LeasedUrl[]> {
+  validateLease("leaseRenderUrls", n, leaseSeconds);
+
+  const res = await db.execute(sql`
+    update frontier set lease_id = ${leaseId},
+      leased_until = now() + make_interval(secs => ${leaseSeconds}::double precision),
+      attempts = attempts + 1
+    where (crawl_id, url) in (
+      select crawl_id, url from frontier
+      where crawl_id = ${crawlId}
+        and state = 'render_pending'
+        and (leased_until is null or leased_until < now())
+      order by url asc
+      limit ${n}
+      for update skip locked)
+    returning url, depth, discovered_via, attempts`);
+
+  return toLeased(res.rows).sort((a, b) => (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
+}
+
+/**
+ * Clear render leases so the rows can be picked up immediately — the render
+ * pass's `releaseLeases`, for a graceful shutdown.
+ *
+ * It cannot be `releaseLeases`: that one moves rows to `pending`, and a
+ * `render_pending` row moved to `pending` would be leased by the CRAWL and
+ * fetched again. This clears the lease fields and leaves the state alone, which
+ * is all a render row's lease ever was.
+ *
+ * `leaseId` is the worker's own on a graceful shutdown; `null` is every live
+ * render lease in the crawl, an operator action for a pass whose worker is
+ * known dead. Returns the number of rows released.
+ */
+export async function releaseRenderLeases(
+  db: Db,
+  crawlId: string,
+  leaseId: string | null,
+): Promise<number> {
+  const scope = leaseId === null ? sql`` : sql` and lease_id = ${leaseId}`;
+  const res = await db.execute(sql`
+    update frontier set lease_id = null, leased_until = null
+    where crawl_id = ${crawlId}
+      and state = 'render_pending'
+      and leased_until is not null${scope}
+    returning url`);
+  return res.rows.length;
 }
 
 /**
@@ -325,9 +460,11 @@ export async function frontierCounts(
     .where(eq(frontier.crawlId, crawlId))
     .groupBy(frontier.state);
 
-  const counts: FrontierCounts = { pending: 0, leased: 0, done: 0, failed: 0 };
+  const counts: FrontierCounts = {
+    pending: 0, leased: 0, done: 0, failed: 0, renderPending: 0,
+  };
   for (const row of rows) {
-    const state = STATES.find((s) => s === row.state);
+    const state = STATES.find((s) => STATE_COLUMN[s] === row.state);
     if (state === undefined) {
       throw new Error(
         `frontierCounts: crawl ${crawlId} has ${row.n} row(s) in unknown state "${row.state}"`,

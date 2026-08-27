@@ -140,7 +140,7 @@ describe("frontier", () => {
     expect(await completeUrls(db, crawlId, [`${SITE}/e`])).toBe(1);
 
     const counts = await frontierCounts(db, crawlId);
-    expect(counts).toEqual({ pending: 0, leased: 0, done: 1, failed: 0 });
+    expect(counts).toEqual({ pending: 0, leased: 0, done: 1, failed: 0, renderPending: 0 });
     const rows = await db.select().from(frontier).where(eq(frontier.crawlId, crawlId));
     expect(rows[0]?.leaseId).toBeNull();
     expect(rows[0]?.leasedUntil).toBeNull();
@@ -163,6 +163,7 @@ describe("frontier", () => {
       leased: 0,
       done: 2_500,
       failed: 0,
+      renderPending: 0,
     });
   });
 
@@ -210,7 +211,7 @@ describe("frontier", () => {
 
     expect(await releaseLeases(db, crawlId, "mine")).toBe(1);
     const counts = await frontierCounts(db, crawlId);
-    expect(counts).toEqual({ pending: 1, leased: 1, done: 0, failed: 0 });
+    expect(counts).toEqual({ pending: 1, leased: 1, done: 0, failed: 0, renderPending: 0 });
 
     // null means "every lease in this crawl" — the operator-driven reclaim.
     expect(await releaseLeases(db, crawlId, null)).toBe(1);
