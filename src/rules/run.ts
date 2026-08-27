@@ -101,12 +101,15 @@ export async function runRules(
   // minutes instead of seconds (the `sd_crawl_page` and simhash-band
   // precedents in schema.ts: a missing index is a slow query, never an error).
   //
-  // One statement over the six tables the rules actually read. `metrics` is
-  // deliberately absent: no rule reads it — the metric phase only writes it.
+  // One statement over every table a rule or a derivation reads —
+  // `structured_data` included, since three of the schema query rules select
+  // from it and `deriveFieldPresence` scans it. `metrics` is deliberately
+  // absent: no rule reads it — the metric phase only writes it.
+  //
   // Loud by construction: no catch, so a failed ANALYZE aborts the run rather
   // than leaving it to judge the site on whatever plan it gets (hard rule 7).
   await db.execute(
-    sql`ANALYZE pages, links, sitemap_urls, url_params, hreflang, issues`,
+    sql`ANALYZE pages, links, sitemap_urls, url_params, hreflang, issues, structured_data`,
   );
 
   const summary: RunSummary = {
@@ -194,6 +197,24 @@ export async function runRules(
       throw new Error(`derivation '${derive.name}' threw`, { cause: error });
     }
   }
+
+  // Statistics again, for the two tables the derivation phase just rewrote —
+  // and this one is not belt-and-braces, it is the case the top-of-run ANALYZE
+  // cannot cover.
+  //
+  // On a crawl's FIRST rules run, `url_params` is EMPTY when the statement
+  // above runs: the derivation that fills it has not happened yet. So the
+  // planner is not merely uninformed about that table, it is taught that the
+  // table holds nothing and it believes it — and then `deriveUrlParams` writes
+  // a row per parameter and the URL-hygiene query rules join it. Same seam for
+  // `structured_data`, whose `field_presence_jsonb` `deriveFieldPresence` has
+  // just rewritten for every block on the crawl, which is what
+  // `schema.product-incomplete` reads.
+  //
+  // Same idiom as above and for the same reason: no catch, because a plan
+  // built on statistics that describe an empty table is a slow query and never
+  // an error (hard rule 7).
+  await db.execute(sql`ANALYZE url_params, structured_data`);
 
   // Query rules run after the page rules: they read the crawl's tables whole
   // (in SQL), so they are unaffected by the page cursor.

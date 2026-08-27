@@ -100,8 +100,22 @@
  * computes them with those very selectors. That is load-bearing rather than
  * tidy: the render pass runs `document.querySelectorAll('nav a[href]').length`
  * in a real browser and CHECK-34 compares its answer with this one, so the
- * tokenizer has to agree with the selector about nesting and about malformed
- * markup, or the check compares two different questions.
+ * tokenizer has to agree with the selector about nesting and about every
+ * malformed case tried, or the check compares two different questions.
+ *
+ * ONE KNOWN, PERMANENT DIVERGENCE, and it is a property of the port rather
+ * than a defect in it. An `<a href>` left open across a container boundary —
+ * `<a href="/x"><nav><a href="/y">y</a></nav></a>` — makes the DOM report 2
+ * for `nav a[href]` where this counts 1. The outer anchor is in the tree
+ * builder's list of active formatting elements, so the adoption agency
+ * algorithm RECONSTRUCTS it inside the `<nav>`: the browser genuinely holds an
+ * anchor element the token stream never contained. Counting it would require
+ * the tree correction a DOM does and this file exists not to do (hard rule 4),
+ * so the divergence is pinned by a named test in the parity file rather than
+ * fixed, and it bounds the comparison: a raw nav/footer count can be UNDER the
+ * rendered one by 1 per unclosed `<a>` crossing a container boundary, and
+ * never over. CHECK-34's threshold must tolerate ±1 for that reason (Task 5 —
+ * the same note is on `pages.nav_link_count` in src/db/schema.ts).
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";

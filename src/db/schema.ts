@@ -128,6 +128,17 @@ export const pages = pgTable("pages", {
   // (see the analyzer's parity oracle). NOT NULL with a 0 default because a
   // page with no HTML has no nav — a 200 that served a PDF, a 404, a timeout —
   // and 0 is that fact, not a missing value.
+  //
+  // FOR THE RULE THAT COMPARES THESE WITH THE RENDERED COUNTS (CHECK-34): they
+  // carry a known −1 floor. An `<a href>` left open across a `<nav>` / `<footer>`
+  // boundary is reconstructed INSIDE the container by a browser's tree builder
+  // (the adoption agency algorithm), so the rendered DOM holds one anchor per
+  // such tag that the raw byte stream never contained. A streaming tokenizer
+  // cannot see it without being a DOM (hard rule 4), so the raw count can be
+  // under the rendered one by 1 per unclosed anchor and is never over. The
+  // threshold must tolerate ±1: a difference of one is malformed HTML, not
+  // JavaScript-only navigation. Pinned by a named test in
+  // src/crawl/parse/page-analyzer.upstream.test.ts.
   navLinkCount: integer("nav_link_count").notNull().default(0),
   footerLinkCount: integer("footer_link_count").notNull().default(0),
   // Which of the analyzer's `FRAMEWORK_MARKERS` the raw HTML carried, in that

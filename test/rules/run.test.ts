@@ -321,35 +321,65 @@ describe("runRules against the database", () => {
   // the same findings, slowly — so the only way the ANALYZE can be known to
   // still be there is to watch Postgres record it.
   //
-  // The exclusion of `metrics` from the list is deliberate (no rule reads it)
-  // but deliberately NOT asserted here: autovacuum may analyze any table at
-  // any moment, so "this table was not analyzed" is not a property a test can
-  // hold without becoming flaky. The runner's own comment carries that half.
-  it("analyzes the tables the rules read before it reads them", async () => {
+  // Both statements are pinned here, by count rather than by timestamp: the
+  // top-of-run one over every table a rule reads, and the second one over the
+  // two tables the derivation phase rewrites in between.
+  it("analyzes every table the rules read, and the derivation-fed pair twice", async () => {
     const crawlId = await newCrawl();
-    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+    const listing = mkRow(crawlId, "/list?colour=red", { depth: 0, discoveredVia: "seed" });
+    await db.insert(pages).values([listing]);
+    await db.insert(structuredData).values([
+      {
+        crawlId,
+        pageId: listing.id,
+        schemaType: "Product",
+        raw: { "@type": "Product", name: "A product with nothing else" },
+      },
+    ]);
 
-    const analyzedAt = async (): Promise<Record<string, number>> => {
-      const { rows } = await db.execute<{ relname: string; last_analyze: string | null }>(
-        sql`select relname, last_analyze from pg_stat_user_tables
-            where relname in ('pages', 'links', 'sitemap_urls', 'url_params', 'hreflang', 'issues')`,
+    // `analyze_count`, not `last_analyze`: it counts MANUAL analyzes per table
+    // (autovacuum's are counted separately, in `autoanalyze_count`), so the
+    // delta says how many times the run analyzed each table and no ordering
+    // between tables has to be inferred from timestamps.
+    const analyzeCounts = async (): Promise<Record<string, number>> => {
+      const { rows } = await db.execute<{ relname: string; analyze_count: string }>(
+        sql`select relname, analyze_count from pg_stat_user_tables
+            where relname in ('pages', 'links', 'sitemap_urls', 'url_params',
+                              'hreflang', 'issues', 'structured_data', 'metrics')`,
       );
-      return Object.fromEntries(
-        rows.map((r) => [r.relname, r.last_analyze === null ? 0 : Date.parse(r.last_analyze)]),
-      );
+      return Object.fromEntries(rows.map((r) => [r.relname, Number(r.analyze_count)]));
     };
 
-    const before = await analyzedAt();
+    const before = await analyzeCounts();
     await runRules(db, crawlId, buildRegistry());
-    const after = await analyzedAt();
+    const after = await analyzeCounts();
+    const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
 
-    for (const table of ["pages", "links", "sitemap_urls", "url_params", "hreflang", "issues"]) {
-      expect(after[table], `${table} has no pg_stat row`).toBeDefined();
-      expect(
-        after[table]! > (before[table] ?? 0),
-        `${table} was not analyzed by the run`,
-      ).toBe(true);
+    // The counters are database-wide and vitest runs test files in parallel
+    // against one database, so another file's `runRules` can land inside this
+    // window. The assertions are therefore RATIOS against `pages`, which every
+    // run analyzes exactly once: N concurrent runs move `pages` by N and the
+    // derivation-fed pair by 2N, so the relationship holds however many there
+    // were. `runRules` is the only thing in the repo that issues an ANALYZE,
+    // which is what makes `pages` a usable clock here.
+    const runs = delta("pages");
+    expect(runs, "the run did not analyze pages at all").toBeGreaterThanOrEqual(1);
+    // Once per run, at the top, before the first rule reads them.
+    for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+      expect(delta(table), `${table} was not analyzed once per run`).toBe(runs);
     }
+    // And twice per run for the two tables the derivation phase rewrites
+    // mid-run: once at the top (where, on a crawl's first run, `url_params` is
+    // still EMPTY and the planner is taught exactly that) and once across the
+    // derivation seam, before the query rules that join them.
+    for (const table of ["url_params", "structured_data"]) {
+      expect(delta(table), `${table} was not analyzed twice per run`).toBe(2 * runs);
+    }
+    // `metrics` is deliberately absent from both statements: no rule reads it,
+    // the metric phase only writes it. That exclusion IS assertable here —
+    // unlike a claim about `last_analyze`, which autovacuum could move at any
+    // moment — because `analyze_count` only ever counts a manual ANALYZE.
+    expect(delta("metrics")).toBe(0);
   });
 
   // A crawl id nothing knows produces no pages, which is indistinguishable

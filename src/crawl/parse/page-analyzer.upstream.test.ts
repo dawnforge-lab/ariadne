@@ -42,7 +42,11 @@
  * they are DOM reads whose specification IS the selector (`nav a[href]`,
  * `footer a[href]`, an attribute or an id presence), and the render pass runs
  * those selectors in a real browser to produce the numbers CHECK-34 compares
- * these against.
+ * these against. Parity holds on every malformed case tried here save one, and
+ * that one is PINNED rather than fixed: an `<a href>` left open across a
+ * container boundary is reconstructed inside the container by the tree
+ * builder's adoption agency algorithm, so the DOM holds an anchor the token
+ * stream never contained. See "the one divergence" test at the end.
  *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
@@ -452,7 +456,9 @@ describe("analyzeHtml parity with the DOM reference", () => {
   // by hand-counted cases because the DOM selector is what the render pass
   // will run in a real browser: if the tokenizer and `querySelectorAll`
   // disagree about a malformed page, CHECK-34 compares two numbers that were
-  // never answering the same question.
+  // never answering the same question. Where they DO disagree — one case, an
+  // open `<a>` crossing a container boundary — the disagreement is pinned by
+  // its own test below rather than asserted away.
   it("matches nav and footer link counts, container by container", () => {
     expectParity(`<html><body>
       <nav><a href="/a">A</a><a href="/b">B</a><a>no href</a><a href="">empty</a></nav>
@@ -492,6 +498,60 @@ describe("analyzeHtml parity with the DOM reference", () => {
     expectParity(`<html><head>
       <link rel="canonical" href="/a"><link rel="canonical" href="/b">
       <link rel="canonical" href="/c"></head><body><p>x</p></body></html>`);
+  });
+});
+
+/**
+ * The one place the tokenizer and the DOM genuinely disagree, asserted in both
+ * directions so it cannot move without a test failing.
+ *
+ * `<a href="/x"><nav><a href="/y">y</a></nav></a>`: the outer anchor is still
+ * open when `<nav>` starts, which puts it in the tree builder's list of ACTIVE
+ * FORMATTING ELEMENTS. The adoption agency algorithm then reconstructs it
+ * inside the `<nav>`, so a browser's DOM holds TWO anchors in there — one of
+ * which corresponds to no start tag in the byte stream. A streaming tokenizer
+ * has no such list and no tree correction (hard rule 4: no DOM on the hot
+ * path), so it counts the one anchor it was actually handed.
+ *
+ * The direction is fixed and the size is bounded: the raw count is UNDER the
+ * rendered one by exactly 1 per unclosed `<a>` crossing a container boundary,
+ * and never over. That is what makes it a tolerable known error rather than an
+ * unknown one — CHECK-34 must not treat a difference of 1 as evidence of
+ * JavaScript-only navigation (see the analyzer's header and the
+ * `nav_link_count` comment in src/db/schema.ts).
+ */
+describe("the one divergence from the DOM: an open <a> crossing a container", () => {
+  const count = (html: string) => {
+    const $ = cheerio.load(html);
+    const streamed = analyzeHtml(html, PAGE_URL);
+    return {
+      streamedNav: streamed.navLinkCount,
+      domNav: $("nav a[href]").length,
+      streamedFooter: streamed.footerLinkCount,
+      domFooter: $("footer a[href]").length,
+    };
+  };
+
+  it("undercounts a nav by one when an open anchor is reconstructed inside it", () => {
+    expect(count(`<html><body><a href="/x"><nav><a href="/y">y</a></nav></a></body></html>`))
+      .toMatchObject({ streamedNav: 1, domNav: 2 });
+  });
+
+  it("does the same when the outer anchor is never closed at all", () => {
+    expect(count(`<html><body><a href="/x"><nav><a href="/y">y</a></nav></body></html>`))
+      .toMatchObject({ streamedNav: 1, domNav: 2 });
+  });
+
+  it("does the same for a footer", () => {
+    expect(count(`<html><body><a href="/x"><footer><a href="/y">y</a></footer></a></body></html>`))
+      .toMatchObject({ streamedFooter: 1, domFooter: 2 });
+  });
+
+  it("agrees again once the outer anchor is closed before the container", () => {
+    // The same markup, well formed: no active formatting element to
+    // reconstruct, so nothing is cloned and the two counts meet.
+    expect(count(`<html><body><a href="/x">x</a><nav><a href="/y">y</a></nav></body></html>`))
+      .toMatchObject({ streamedNav: 1, domNav: 1 });
   });
 });
 
