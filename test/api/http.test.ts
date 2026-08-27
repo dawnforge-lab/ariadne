@@ -75,7 +75,7 @@ interface Res {
 async function call(
   method: string,
   path: string,
-  opts: { token?: string | null; body?: unknown; raw?: string } = {},
+  opts: { token?: string | null; body?: unknown; raw?: string; base?: string } = {},
 ): Promise<Res> {
   const headers: Record<string, string> = {};
   const token = opts.token === undefined ? `Bearer ${TOKEN}` : opts.token;
@@ -85,7 +85,7 @@ async function call(
   else if (opts.body !== undefined) payload = JSON.stringify(opts.body);
   if (payload !== undefined) headers["content-type"] = "application/json";
 
-  const res = await fetch(`${base}${path}`, {
+  const res = await fetch(`${opts.base ?? base}${path}`, {
     method,
     headers,
     ...(payload === undefined ? {} : { body: payload }),
@@ -96,6 +96,61 @@ async function call(
     body: text === "" ? {} : (JSON.parse(text) as Record<string, unknown>),
     headers: res.headers,
   };
+}
+
+/** Wait for something to become true, or say what never happened. */
+async function waitFor(
+  what: string,
+  predicate: () => boolean,
+  deadlineMs = 15_000,
+): Promise<void> {
+  const until = Date.now() + deadlineMs;
+  while (!predicate()) {
+    if (Date.now() > until) throw new Error(`waitFor: ${what} never happened`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+interface Rig {
+  api: ApiServer;
+  base: string;
+  log: string[];
+}
+
+/**
+ * A server whose database fails in one named way.
+ *
+ * The two things this file has to prove about failure — that a broken queue
+ * runner does not take the process down, and that an unexpected throw becomes a
+ * 500 with a correlation id and nothing else — both need an error the API
+ * cannot produce on its own. A `Proxy` over the real `Db` supplies exactly one:
+ * every method is forwarded and bound to the real handle except the one named
+ * here, which throws. Nothing is stubbed, nothing is mocked, and the code under
+ * test is the real path.
+ */
+async function riggedServer(broken: Record<string, () => never>): Promise<Rig> {
+  const log: string[] = [];
+  const rigged = new Proxy(db, {
+    get(target, prop) {
+      if (typeof prop === "string" && prop in broken) return broken[prop];
+      const value = Reflect.get(target, prop) as unknown;
+      return typeof value === "function"
+        ? (value as (...args: unknown[]) => unknown).bind(target)
+        : value;
+    },
+  }) as Db;
+
+  const api = createApiServer({
+    db: rigged,
+    config: {
+      token: TOKEN,
+      allowedDomains: ["127.0.0.1"],
+      crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+      log: (line) => log.push(line),
+    },
+  });
+  const bound = await api.listen(0);
+  return { api, base: `http://127.0.0.1:${bound.port}`, log };
 }
 
 /** Poll a crawl until it stops moving. Returns its final detail. */
@@ -423,6 +478,54 @@ describe("domain allowlist", () => {
     await settle(String(res.body["crawlId"]));
   });
 
+  // `legacyHosts` is the second way a crawl names a host, and for a while it was
+  // the unguarded one. The host probe fetches every entry's origin root BEFORE
+  // any robots.txt has been read (host-probe.ts: "the only fetches in the
+  // crawler not covered by robots.txt"), so an allowlist that checked only
+  // `siteUrl` let an authorised caller point a branded crawler anywhere.
+  it("403s a legacy host nobody allowlisted, naming it and saying why it matters", async () => {
+    const res = await call("POST", "/crawls", {
+      body: { siteUrl: `${site}/`, legacyHosts: ["victim.example"] },
+    });
+    expect(res.status).toBe(403);
+    expect(String(res.body["error"])).toContain("victim.example");
+    expect(String(res.body["error"])).toContain("robots.txt");
+  });
+
+  it("gates a legacy host even when the probe is switched off", async () => {
+    // Nothing would be fetched — but the entry is written to the crawl row, and
+    // a resume that turns probing on would fetch a host this server never
+    // authorised. The row must not carry it.
+    const res = await call("POST", "/crawls", {
+      body: { siteUrl: `${site}/`, probeHosts: false, legacyHosts: ["victim.example"] },
+    });
+    expect(res.status).toBe(403);
+    expect(String(res.body["error"])).toContain("victim.example");
+  });
+
+  it("400s a malformed legacyHosts entry at accept time, not mid-crawl", async () => {
+    const res = await call("POST", "/crawls", {
+      body: { siteUrl: `${site}/`, legacyHosts: ["not a host"] },
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("legacyHosts");
+  });
+
+  it("accepts an allowlisted legacy host, and does not gate the site's own spellings", async () => {
+    // `www.localhost` as the seed means the probe's own family includes the
+    // apex `localhost`, which `*.localhost` does NOT cover — and it must not be
+    // refused, because that family IS the site (isSameOrigin admits it). The
+    // legacy host is the extra one, and it is on the list in its own right.
+    const port = new URL(named).port;
+    const res = await startCrawl({
+      siteUrl: `http://www.localhost:${port}/`,
+      maxPages: 1,
+      legacyHosts: ["old.localhost"],
+    });
+    expect(res.status).toBe(202);
+    await settle(String(res.body["crawlId"]));
+  });
+
   it("refuses every crawl when the allowlist is empty, but still answers queries", async () => {
     const started = await fetch(`${closedBase}/crawls`, {
       method: "POST",
@@ -657,6 +760,116 @@ describe("GET /crawls", () => {
     const bad = await call("GET", "/crawls?cursor=not-a-cursor");
     expect(bad.status).toBe(400);
     expect(String(bad.body["error"])).toContain("cursor");
+  });
+});
+
+describe("failure containment", () => {
+  it("survives a queue runner that cannot even record its own failure", async () => {
+    // The queue's promise is held by nobody until `close()`. `runQueued` catches
+    // the crawl's errors, but its catch writes to the database — so a database
+    // that is gone makes the catch throw too, and in Node 22 an unhandled
+    // rejection ends the process. One bad crawl would take the server with it.
+    const rig = await riggedServer({
+      update: () => {
+        throw new Error("database is unavailable (test rig)");
+      },
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const res = await call("POST", "/crawls", {
+        base: rig.base,
+        body: { siteUrl: `${site}/`, maxPages: 1 },
+      });
+      expect(res.status).toBe(202);
+      const crawlId = String(res.body["crawlId"]);
+      createdCrawls.push(crawlId);
+
+      // Wait on the line BOTH worlds produce — the crawl's own failure — so
+      // that the assertions below are reached whether or not the fix is in
+      // place. Waiting on the fix's own log line instead would fail this test
+      // on a missing message and never demonstrate the fatal part.
+      await waitFor("the crawl reported that it threw", () =>
+        rig.log.some((line) => line.includes("threw —")),
+      );
+      // Give a rejection its turn to go unhandled before we look for one.
+      await new Promise((r) => setTimeout(r, 200));
+      expect(unhandled, "the queue left a rejection for nobody to handle").toEqual([]);
+
+      // And the failure is not silent: the runner says it could not record it.
+      expect(
+        rig.log.some((line) => line.includes("the queue runner itself failed")),
+        "the runner swallowed its own failure",
+      ).toBe(true);
+
+      // And the honest consequence, read through a working connection: the row
+      // is still 'queued', because the update that would have closed it is the
+      // thing that failed. Visible, not silently lost.
+      const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+      expect(rows[0]?.status).toBe("queued");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await rig.api.close();
+    }
+  });
+
+  it("turns an unexpected throw into a 500 with a correlation id, and keeps the stack in the log", async () => {
+    const rig = await riggedServer({
+      select: () => {
+        throw new Error("boom from /srv/ariadne/internal/secret.ts");
+      },
+    });
+    try {
+      const res = await call("GET", "/crawls/crawl_anything", { base: rig.base });
+      expect(res.status).toBe(500);
+      expect(res.body["error"]).toBe("internal error");
+      const correlationId = String(res.body["correlationId"]);
+      expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
+
+      // Nothing about the inside of the process crossed the wire.
+      const wire = JSON.stringify(res.body);
+      expect(wire).not.toContain("boom");
+      expect(wire).not.toContain("secret.ts");
+      expect(wire).not.toContain("at ");
+
+      // And all of it reached the log, under that id.
+      const logged = rig.log.find((line) => line.includes(correlationId));
+      expect(logged, "no log line carried the correlation id").toBeDefined();
+      expect(logged).toContain("boom from /srv/ariadne/internal/secret.ts");
+      expect(logged).toContain("at "); // the stack, not just the message
+      expect(logged).toContain("/crawls/crawl_anything");
+    } finally {
+      await rig.api.close();
+    }
+  });
+
+  it("maps a render-pass DEFECT to 500, not to the 409 its message prefix once bought", async () => {
+    // The exact error the reviewer named: `runRenderPass` throws this
+    // `RangeError` for a bad renderConcurrency, and its message begins
+    // `runRenderPass: ` like every guard's does. Under the old prefix match it
+    // became "the crawl is busy, try later" — advice to retry OUR bug. It is
+    // injected here rather than provoked because the service never passes
+    // renderConcurrency, which is precisely why nothing else can catch this.
+    const rig = await riggedServer({
+      execute: () => {
+        throw new RangeError(
+          "runRenderPass: renderConcurrency must be an integer ≥ 1, got 0",
+        );
+      },
+    });
+    try {
+      const id = await seedCrawl({ status: "finished", discovery: DISCOVERY });
+      const res = await call("POST", `/crawls/${id}/render`, { base: rig.base });
+      expect(res.status).toBe(500);
+      expect(res.body["error"]).toBe("internal error");
+      expect(typeof res.body["correlationId"]).toBe("string");
+    } finally {
+      await rig.api.close();
+    }
   });
 });
 

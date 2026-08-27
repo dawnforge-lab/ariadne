@@ -163,11 +163,30 @@ function assertAllowlistEntry(entry: string): void {
  * Is `host` a crawl target this server permits?
  *
  * Matching is on the HOST ONLY — never the port, never the scheme, never a
- * path. `example.com` matches `example.com` and nothing else; `*.example.com`
+ * path. `example.com` matches the string `example.com`; `*.example.com`
  * matches `a.example.com` and `a.b.example.com` but NOT `example.com` itself,
  * which is the standard reading of the wildcard and the one that lets an
  * operator permit the subdomains of a site without permitting its apex. List
  * both when both are wanted.
+ *
+ * WHAT AN ENTRY ACTUALLY AUTHORISES IS WIDER THAN ITS STRING, and an operator
+ * needs to know that before writing one. This function answers about one
+ * hostname; the crawler it gates does not work in hostnames, it works in
+ * *sites*. Two consequences, both real:
+ *
+ *  - **The origin-variant family comes with the entry.** The crawl boundary is
+ *    `isSameOrigin`, which treats `example.com` and `www.example.com`, and
+ *    `http://` and `https://`, as one site — so permitting `example.com` and
+ *    seeding a crawl there permits fetches to all four spellings. That is the
+ *    engine's definition of "the same site", not a leak: a crawl that refused
+ *    the www spelling of its own seed would crawl half of most sites. What it
+ *    does NOT extend to is a *different* name: `shop.example.com` is another
+ *    site and needs its own entry (or a wildcard).
+ *  - **The host probe reaches further, and is gated separately.** It walks the
+ *    variant family above plus every `legacyHosts` entry, before any robots.txt
+ *    has been read. The extra hosts are checked against this allowlist one by
+ *    one — see `checkLegacyHosts` in src/api/service.ts — precisely because
+ *    they are outside the family an entry carries.
  *
  * Case is folded and a trailing root dot is stripped, because `Example.COM.`
  * and `example.com` are one host and a policy that could be stepped around by

@@ -60,8 +60,12 @@ import {
   type CrawlConfig,
 } from "../crawl/loop.js";
 import { frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
-import { runRenderPass, type RenderPassSummary } from "../crawl/render/run-render.js";
-import { normalizeUrl } from "../crawl/parse/url-utils.js";
+import {
+  RenderPassRefusal,
+  runRenderPass,
+  type RenderPassSummary,
+} from "../crawl/render/run-render.js";
+import { hostProbeStarts, normalizeUrl } from "../crawl/parse/url-utils.js";
 import { isUrlAllowed } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
@@ -332,6 +336,11 @@ export class ApiService {
    * though the crawl loop re-applies it at enqueue and `fetchPage` re-applies
    * it at connect: a caller who names a blocked host deserves a 403 now, not a
    * crawl row that fails later for a reason they must go and read.
+   *
+   * THE SEED IS NOT THE ONLY HOST A CRAWL FETCHES. `legacyHosts` adds hosts the
+   * host probe visits before any robots.txt has been read, so they go through
+   * the same two checks — see `checkLegacyHosts`, which is where the allowlist
+   * would otherwise have had a hole big enough to drive a crawler through.
    */
   async startCrawl(input: StartCrawlInput): Promise<CrawlAccepted> {
     if (this.closed) {
@@ -368,6 +377,8 @@ export class ApiService {
         `siteUrl refused by the URL policy: ${verdict.reason ?? "no reason given"}`,
       );
     }
+
+    await this.checkLegacyHosts(siteUrl, input.legacyHosts, allowPrivate);
 
     const crawlConfig = this.effectiveConfig(siteUrl, input);
     try {
@@ -652,10 +663,27 @@ export class ApiService {
       done: Promise.resolve(),
     };
     this.running = entry;
-    entry.done = this.runQueued(next, controller.signal).finally(() => {
-      if (this.running === entry) this.running = null;
-      this.pump();
-    });
+    // NOTHING AWAITS THIS PROMISE UNTIL `close()`, so it must not be able to
+    // reject. `runQueued` already catches the crawl's own errors — but its
+    // catch block writes to the database, and a database that is gone makes
+    // BOTH the run and its own record-keeping throw. That rejection would then
+    // sit unhandled on a promise nobody is holding, and an unhandled rejection
+    // ends the process in Node 22: one bad crawl would take the whole API
+    // server down with it.
+    //
+    // The catch is before the `finally` deliberately, so `entry.done` is a
+    // settled, non-rejecting promise by the time `close()` awaits it.
+    entry.done = this.runQueued(next, controller.signal)
+      .catch((error: unknown) => {
+        this.log(
+          `api: crawl ${entry.crawlId} — the queue runner itself failed and could not ` +
+            `record it: ${messageOf(error)}`,
+        );
+      })
+      .finally(() => {
+        if (this.running === entry) this.running = null;
+        this.pump();
+      });
   }
 
   /**
@@ -699,6 +727,83 @@ export class ApiService {
     const index = this.waiting.findIndex((e) => e.crawlId === crawlId);
     if (index < 0) return null;
     return this.running === null ? index : index + 1;
+  }
+
+  /**
+   * The allowlist, applied to the hosts `legacyHosts` adds to the crawl.
+   *
+   * WHY THIS EXISTS AT ALL. `legacyHosts` is not decoration: `probeHostVariants`
+   * fetches the origin root of every one of them, up to five hops each, and
+   * those fetches are — by host-probe.ts's own account — the ONLY fetches in
+   * the crawler not covered by robots.txt, because which host's robots.txt
+   * governs the site is exactly what the probe is trying to find out. Gating
+   * only `siteUrl` therefore left `{siteUrl: <allowed>, legacyHosts:
+   * ["victim.example"]}` as a way to point a branded crawler at any host on the
+   * internet with an operator's allowlist in force and no rules read first.
+   *
+   * WHAT IS GATED, precisely: the hosts the probe would fetch that are NOT the
+   * site's own spellings. `hostProbeStarts(siteUrl)` is the family the crawler
+   * already treats as this one site — apex/www × http/https, the same variants
+   * `isSameOrigin` admits into the crawl — and an allowlist entry authorises
+   * that family (see `isHostAllowed`). Everything `legacyHosts` ADDS is a
+   * different site by every definition the engine has, so each one must be
+   * allowlisted in its own right, and each one gets the URL policy applied to
+   * it as well.
+   *
+   * The subtraction is done with `hostProbeStarts` itself rather than by
+   * re-deriving the spellings here, for the reason its own docblock gives: it
+   * is the probe's contract, and the host rules already subtract with it.
+   *
+   * RUN EVEN WHEN `probeHosts` IS FALSE. Nothing is fetched in that case, but
+   * the entries are still written to the crawl row, and a resume that turns
+   * probing on would fetch hosts this server never authorised. The row must not
+   * carry a host the allowlist would have refused.
+   *
+   * A malformed entry is a 400 here — `hostProbeStarts` throws on one — rather
+   * than an error the crawl discovers after it has been accepted, queued and
+   * started.
+   */
+  private async checkLegacyHosts(
+    siteUrl: string,
+    legacyHosts: readonly string[] | undefined,
+    allowPrivate: boolean,
+  ): Promise<void> {
+    if (legacyHosts === undefined || legacyHosts.length === 0) return;
+
+    let ownSpellings: string[];
+    let everyStart: string[];
+    try {
+      ownSpellings = hostProbeStarts(siteUrl);
+      everyStart = hostProbeStarts(siteUrl, legacyHosts);
+    } catch (error) {
+      throw new ServiceError("VALIDATION", messageOf(error));
+    }
+
+    const own = new Set(ownSpellings);
+    const checked = new Set<string>();
+    for (const start of everyStart) {
+      if (own.has(start)) continue;
+      const host = new URL(start).hostname;
+      if (checked.has(host)) continue;
+      checked.add(host);
+
+      if (!isHostAllowed(host, this.config.allowedDomains)) {
+        throw new ServiceError(
+          "FORBIDDEN",
+          `legacyHosts names '${host}', which is not in this server's crawl allowlist: ` +
+            `the host probe fetches every legacy host, and those fetches are the only ` +
+            `ones the crawler makes before it has read anybody's robots.txt`,
+        );
+      }
+      const verdict = await isUrlAllowed(start, { allowPrivate });
+      if (!verdict.allowed) {
+        throw new ServiceError(
+          "FORBIDDEN",
+          `legacyHosts entry '${host}' refused by the URL policy: ` +
+            `${verdict.reason ?? "no reason given"}`,
+        );
+      }
+    }
   }
 
   private effectiveConfig(siteUrl: string, input: StartCrawlInput): CrawlConfig {
@@ -791,27 +896,24 @@ export class ApiService {
 /**
  * Map a `runRenderPass` throw onto a service refusal.
  *
- * TEXTUAL COUPLING, stated because it is load-bearing: the driver signals its
- * guards with plain `Error`s, and this reads their message prefix. Every one of
- * them begins `runRenderPass: `, and the only one that is a missing crawl says
- * `no such crawl`. A guard that changes its wording without changing this turns
- * a 409 into a 500 — noisy, not silent, which is why a prefix match is
- * acceptable here at all. The alternative, re-checking the three conditions in
- * the service, is worse: two copies of a liveness rule that must agree.
+ * The driver's deliberate refusals are `RenderPassRefusal`s and carry the
+ * answer they need (`live` → 409, `missing` → 404); everything else it throws
+ * is a defect and is returned untouched, to become a 500 with a correlation id.
  *
- * Anything without the prefix is NOT mapped. A `RangeError` from a bad render
- * concurrency, a failed write, a Playwright launch failure — those are ours,
- * and they surface as a 500 with a correlation id.
+ * This used to match on the message prefix, and that was wrong in a way worth
+ * recording: `runRenderPass`'s `RangeError` for a bad `renderConcurrency` also
+ * begins `runRenderPass: `, so our own bug was being handed to the caller as
+ * "the crawl is busy, try later". The type is carried by the throw now, and the
+ * guards' wording is free to change without changing this function.
  */
 function mapRenderPassError(error: unknown): unknown {
-  if (!(error instanceof Error) || !error.message.startsWith("runRenderPass: ")) {
-    return error;
-  }
-  const message = error.message.slice("runRenderPass: ".length);
-  if (error.message.startsWith("runRenderPass: no such crawl")) {
-    return new ServiceError("NOT_FOUND", message);
-  }
-  return new ServiceError("CONFLICT", message);
+  if (!(error instanceof RenderPassRefusal)) return error;
+  // The `runRenderPass: ` prefix is the driver naming itself to a log reader.
+  // A caller of the API already knows which endpoint they called.
+  const message = error.message.startsWith("runRenderPass: ")
+    ? error.message.slice("runRenderPass: ".length)
+    : error.message;
+  return new ServiceError(error.reason === "missing" ? "NOT_FOUND" : "CONFLICT", message);
 }
 
 /**
