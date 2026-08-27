@@ -3,12 +3,15 @@
  *
  * It does four things in order, and the order is the design.
  *
- *  1. **Refuse to run over a live crawl.** `selectRenderSet` upserts frontier
- *     rows into `render_pending`; a row a crawl worker holds a lease on would
- *     be taken out from under it, and the URL would then be both "being
- *     fetched" and "waiting to be rendered". The check is `leased > 0` and it
- *     throws — a skip would be the silent fallback (rule 7) that lets a crawl
- *     and a render pass corrupt each other quietly.
+ *  1. **Refuse to run unless this crawl is finished and unattended.**
+ *     `selectRenderSet` upserts frontier rows into `render_pending` and demotes
+ *     the ones it does not name, and it is allowed to assume nobody else is
+ *     touching them. Three ways that can be false, each thrown with its own
+ *     message: a crawl worker holding leases (`leased > 0`), ANOTHER RENDER
+ *     PASS holding render leases (`render_pending` with a live `leased_until` —
+ *     invisible to `leased`, because a render lease does not change state), and
+ *     a paused crawl with queued work (`pending > 0`). A skip would be the
+ *     silent fallback (rule 7) that lets two passes corrupt each other quietly.
  *  2. **Select.** One statement chooses the set and puts it in the frontier
  *     (src/crawl/render/select.ts).
  *  3. **Render.** `renderConcurrency` workers, each leasing ONE URL at a time
@@ -51,6 +54,7 @@ import { crawls } from "../../db/schema.js";
 import {
   completeUrls,
   frontierCounts,
+  heldRenderLeases,
   leaseRenderUrls,
   releaseRenderLeases,
 } from "../frontier.js";
@@ -143,17 +147,45 @@ export async function runRenderPass(
     );
   }
 
-  // STEP 1. The crawl must be over. A leased row is a URL a worker is fetching
-  // right now, and `selectRenderSet` would upsert `render_pending` straight
-  // over its lease — the worker would then complete a row the render pass
-  // believes it owns, and the selection array and the frontier would stop being
-  // the same fact. Nothing is written before this check passes.
+  // STEP 1. NOBODY ELSE MAY BE WORKING THIS CRAWL. `selectRenderSet` promotes
+  // rows into `render_pending` and demotes the ones it does not name, in one
+  // statement, and it is allowed to assume it is alone (see its header). Three
+  // separate ways that assumption can be false, each with its own message —
+  // "someone else is here" is not an actionable error, "a crawl worker holds 4
+  // URLs" is. Nothing is written before all three pass.
   const before = await frontierCounts(db, crawlId);
   if (before.leased > 0) {
     throw new Error(
       `runRenderPass: crawl ${crawlId} has ${before.leased} leased URL(s) — the render ` +
         `pass may not run over a live crawl (it would steal the crawler's rows). ` +
         `Wait for the crawl to finish, or release its leases if its workers are known dead.`,
+    );
+  }
+  // A render lease leaves the row's state at `render_pending`, so it is
+  // invisible to the check above and to `frontierCounts` alike — a concurrent
+  // render pass is the ONE conflict neither of them can see. Its rows would be
+  // demoted to `done` by our selection while its workers went on rendering and
+  // completing them.
+  const heldRenders = await heldRenderLeases(db, crawlId);
+  if (heldRenders > 0) {
+    throw new Error(
+      `runRenderPass: crawl ${crawlId} has ${heldRenders} render URL(s) leased by another ` +
+        `render pass — two passes may not share a crawl (this one's selection would ` +
+        `demote rows that one is rendering). Wait for it, or call releaseRenderLeases ` +
+        `if its worker is known dead.`,
+    );
+  }
+  // A crawl that is merely PAUSED — no lease outstanding, work still queued —
+  // is not finished, and the render pass reading its half-crawled page set
+  // would sample a site that does not exist yet. Worse, a resumed crawl leases
+  // rows we are rendering. `failed` is not checked: those rows are spent, and a
+  // crawl that gave up on 3 URLs is still a finished crawl.
+  if (before.pending > 0) {
+    throw new Error(
+      `runRenderPass: crawl ${crawlId} has ${before.pending} pending URL(s) — the render ` +
+        `pass may not run over an unfinished crawl (its selection would be taken from a ` +
+        `partial page set, and a resume would re-lease the rows it promoted). ` +
+        `Finish or cancel the crawl first.`,
     );
   }
 

@@ -289,6 +289,35 @@ export async function leaseRenderUrls(
 }
 
 /**
+ * How many render rows are leased RIGHT NOW — `render_pending` with a deadline
+ * still in the future.
+ *
+ * `frontierCounts` cannot answer this and must not be made to: a render lease
+ * deliberately leaves the row's state alone (see `leaseRenderUrls`), so every
+ * held render row counts as `renderPending` there, exactly like an unleased
+ * one. That is the right answer for "how much is still owed a render" and the
+ * wrong one for "is another render pass running", which is what `runRenderPass`
+ * has to ask before it re-selects — a second pass's selection would demote the
+ * rows the first one is holding.
+ *
+ * Expired leases are excluded on purpose: a lease past its deadline is a dead
+ * worker's, and reclaiming it is the whole resume mechanism.
+ */
+export async function heldRenderLeases(db: Db, crawlId: string): Promise<number> {
+  const res = await db.execute(sql`
+    select count(*)::int as n from frontier
+    where crawl_id = ${crawlId}
+      and state = 'render_pending'
+      and leased_until is not null
+      and leased_until > now()`);
+  const n = res.rows[0]?.["n"];
+  if (typeof n !== "number") {
+    throw new Error(`heldRenderLeases: count came back as ${typeof n}, not a number`);
+  }
+  return n;
+}
+
+/**
  * Clear render leases so the rows can be picked up immediately — the render
  * pass's `releaseLeases`, for a graceful shutdown.
  *

@@ -22,7 +22,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -32,7 +32,9 @@ import {
   enqueueUrls,
   frontierCounts,
   leaseBatch,
+  leaseRenderUrls,
 } from "../../src/crawl/frontier.js";
+import { selectRenderSet } from "../../src/crawl/render/select.js";
 import {
   PageRenderer,
   RENDERER_DEFAULTS,
@@ -92,10 +94,16 @@ function jsRedirectHtml(target: string): string {
   )});}, 20);</script></body></html>`;
 }
 
-/** `/third-party`: pulls an image and a script from another origin. */
+/**
+ * `/third-party`: four subresources, one of each combination that matters —
+ * another origin's script and image (both aborted as third-party), this site's
+ * own image (aborted as paint-only) and this site's own script (allowed, and it
+ * appends a word, which is how the test proves it ran).
+ */
 function thirdPartyHtml(otherOrigin: string): string {
   return `<!doctype html><html lang="en"><head><title>Third party</title>
-<script src="${otherOrigin}/tracker.js"></script></head>
+<script src="${otherOrigin}/tracker.js"></script>
+<script src="/own.js" defer></script></head>
 <body><p>one two three</p><img src="${otherOrigin}/pixel.png" alt="pixel" width="1" height="1">
 <img src="/own.png" alt="ours" width="1" height="1"></body></html>`;
 }
@@ -130,6 +138,12 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/own.png") {
       res.writeHead(200, { "content-type": "image/png" });
       res.end(Buffer.alloc(0));
+      return;
+    }
+    if (path === "/own.js") {
+      res.writeHead(200, { "content-type": "text/javascript" });
+      // A fourth word, appended only if this file was fetched AND executed.
+      res.end("document.body.insertAdjacentHTML('beforeend', '<p>four</p>');");
       return;
     }
     if (path === "/hang") {
@@ -233,21 +247,35 @@ describe("PageRenderer", () => {
     expect(result.wordCount).toBe(CSR_RENDERED_WORDS);
   });
 
-  it("never lets a third-party request leave, and renders the page anyway", async () => {
+  it("blocks third-party and paint-only requests, and renders the page anyway", async () => {
     blocked.length = 0;
-    const before = third.hits.length;
+    const beforeThird = third.hits.length;
+    const beforeSite = site.hits.length;
 
     const result = await renderer.render(`${site.base}/third-party`);
 
     expect(result.error).toBeNull();
     expect(result.rendered).toBe(true);
-    expect(result.wordCount).toBe(3);
-    // The evidence that matters: the other origin was never asked.
-    expect(third.hits.length).toBe(before);
+
+    // 1. THIRD PARTY: the other origin was never asked. Not "we ignored the
+    // response" — the request never left the machine.
+    expect(third.hits.length).toBe(beforeThird);
     expect(blocked.sort()).toEqual([`${third.base}/pixel.png`, `${third.base}/tracker.js`]);
     expect(result.blockedRequests).toBe(2);
-    // The site's own subresource was allowed through.
-    expect(site.hits.some((h) => h.path === "/own.png")).toBe(true);
+
+    // 2. PAINT-ONLY, SAME ORIGIN: the site's own image is aborted too. It
+    // cannot move a word count or an anchor count, and every one skipped is one
+    // fewer request in the burst a browser makes at a client's server.
+    const paths = site.hits.slice(beforeSite).map((h) => h.path);
+    expect(paths).not.toContain("/own.png");
+    expect(result.skippedPaintRequests).toBe(1);
+
+    // 3. DOM-BUILDING, SAME ORIGIN: the site's own script is allowed, and the
+    // word it appends is the proof it both arrived and ran. Blocking these
+    // would make every client-rendered page look empty — the exact defect this
+    // pass exists to detect.
+    expect(paths).toContain("/own.js");
+    expect(result.wordCount).toBe(4);
   });
 
   it("blocks an off-site navigation and records it as the redirect", async () => {
@@ -407,6 +435,45 @@ describe("runRenderPass", () => {
     expect((await frontierCounts(db, crawlId)).renderPending).toBe(0);
   });
 
+  it("refuses to run while another render pass holds leases", async () => {
+    const crawlId = await newCrawl(["/csr", "/static/8"]);
+    // The other pass: it selected, and its worker is holding a URL. Note that
+    // this leaves NO row in state 'leased' — a render lease does not change
+    // state — so the live-crawl check above cannot see this at all.
+    await selectRenderSet(db, crawlId, { renderBudgetPct: 100 });
+    const held = await leaseRenderUrls(db, crawlId, "other-render-worker", 1, 600);
+    expect(held.length).toBe(1);
+    expect((await frontierCounts(db, crawlId)).leased).toBe(0);
+
+    await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow(
+      /another render pass/i,
+    );
+    // The other pass's rows are exactly where it left them.
+    expect((await frontierCounts(db, crawlId)).renderPending).toBe(2);
+
+    // An EXPIRED render lease is a dead worker's, and reclaiming it is the
+    // resume mechanism — so it must not keep the guard shut forever.
+    await db.execute(sql`
+      update frontier set leased_until = now() - interval '1 hour'
+      where crawl_id = ${crawlId} and leased_until is not null`);
+    const summary = await runRenderPass(db, crawlId, passConfig());
+    expect(summary.rendered).toBe(2);
+  });
+
+  it("refuses to run over a paused crawl with queued URLs", async () => {
+    const crawlId = await newCrawl(["/csr"]);
+    // No lease outstanding, but the crawl is not finished: a URL is still
+    // queued. Rendering now would sample a site that does not exist yet.
+    await enqueueUrls(db, crawlId, [
+      { url: `${site.base}/not-yet-crawled`, depth: 1, discoveredVia: "link" },
+    ]);
+
+    await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow(
+      /unfinished crawl/i,
+    );
+    expect((await frontierCounts(db, crawlId)).renderPending).toBe(0);
+  });
+
   it("renders the selection, writes the columns and settles the frontier", async () => {
     const crawlId = await newCrawl(["/csr", "/js-redirect"]);
 
@@ -465,18 +532,25 @@ describe("runRenderPass", () => {
     const paths = ["/static/1", "/static/2", "/static/3"];
     const crawlId = await newCrawl(paths);
     const before = site.hits.length;
+    // A SECOND OF DELAY AGAINST 50ms OF TOLERANCE, deliberately. The bug this
+    // test exists to catch — acquiring the gate before launching the context,
+    // so our own setup was spent out of the site's spacing — cost ~57ms and
+    // slipped under a 400ms/50ms margin. The regression has to be impossible to
+    // hide in timer noise, so the signal is 20x the noise.
+    const delayMs = 1_000;
+    const epsilonMs = 50;
 
-    await runRenderPass(db, crawlId, passConfig({ perHostDelayMs: 400, renderConcurrency: 3 }));
+    await runRenderPass(db, crawlId, passConfig({ perHostDelayMs: delayMs, renderConcurrency: 3 }));
 
+    // Measured at the SERVER, not in the renderer: what politeness means is
+    // when the request arrived, not when we decided to make it.
     const arrivals = site.hits
       .slice(before)
       .filter((h) => h.path.startsWith("/static/"))
       .map((h) => h.at);
     expect(arrivals.length).toBe(3);
-    // 350ms rather than 400: the gate claims its slot before sleeping, so the
-    // spacing is the delay minus whatever the timer and the browser round off.
-    expect(arrivals[1]! - arrivals[0]!).toBeGreaterThanOrEqual(350);
-    expect(arrivals[2]! - arrivals[1]!).toBeGreaterThanOrEqual(350);
+    expect(arrivals[1]! - arrivals[0]!).toBeGreaterThanOrEqual(delayMs - epsilonMs);
+    expect(arrivals[2]! - arrivals[1]!).toBeGreaterThanOrEqual(delayMs - epsilonMs);
   });
 
   it("leaves its selection alone when the pass is aborted before it starts", async () => {
@@ -508,6 +582,7 @@ describe("runRenderPass", () => {
       redirectUrl: null,
       error: null,
       blockedRequests: 0,
+      skippedPaintRequests: 0,
     };
 
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);

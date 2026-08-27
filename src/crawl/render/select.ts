@@ -34,7 +34,10 @@
  * longer names, so running it while a crawl or a render pass is live would take
  * URLs out from under that worker — the same caveat `releaseLeases(db, id,
  * null)` carries, and for the same reason. `runRenderPass` (run-render.ts)
- * ENFORCES that caveat before it calls this function.
+ * ENFORCES that caveat before it calls this function, in all three of its
+ * shapes: a crawl worker's leases, another render pass's leases (which leave
+ * the state at `render_pending` and are therefore invisible to a `leased`
+ * check), and a paused crawl's queued rows.
  *
  * `renderSelectionStats` is the same decision asked read-only: the coverage
  * metric has to quote the sampling story long after the selection object is

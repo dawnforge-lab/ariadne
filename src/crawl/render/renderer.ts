@@ -15,11 +15,17 @@
  *    context is even created, and again inside the route handler for any
  *    document the page navigates *itself* to. A refusal is a classified
  *    `render_error`, never a skipped URL.
- *  - **Politeness (rule 9).** Every navigation passes through a `HostGate`, so
- *    the render pass spaces its hits on a host exactly as the crawl does. A
- *    browser is a burstier client than a fetch — one navigation can be a dozen
- *    subresource requests — which is why the gate is the renderer's own and not
- *    something a caller may forget to wire.
+ *  - **Politeness (rule 9), in two halves.** Every navigation passes through a
+ *    `HostGate`, so the render pass spaces its hits on a host exactly as the
+ *    crawl does — that is why the gate is the renderer's own and not something
+ *    a caller may forget to wire. But a browser is a burstier client than a
+ *    fetch: the gate spaces the *documents*, and each document is still a burst
+ *    of subresource requests the gate never sees. So the second half is the
+ *    route handler aborting the same-origin requests that cannot affect the
+ *    measurement — `image`, `media`, `font` (`PAINT_ONLY_RESOURCES`). What
+ *    remains of the burst is script, stylesheet and xhr/fetch, which a
+ *    client-rendered page needs to build the DOM at all; that residual is
+ *    bounded by the site's own code and is measured at the phase-5 gate.
  *  - **No third-party traffic.** Route interception aborts every request whose
  *    origin is not the crawl's. We are auditing one site; pulling a client's
  *    analytics, ad and font vendors into the record would be both impolite and
@@ -60,6 +66,16 @@ export const RENDERER_DEFAULTS = {
   settleMs: 3_000,
 } as const;
 
+/**
+ * Same-origin request types this pass aborts: they decide how the page LOOKS,
+ * never what it SAYS. Nothing here can move `innerText` or an `a[href]` count,
+ * so nothing here can change a single column this pass writes — and each one
+ * skipped is one fewer request in the burst a browser makes at a client's
+ * server. Anything that can build DOM (script, stylesheet, xhr, fetch,
+ * document) is deliberately absent.
+ */
+const PAINT_ONLY_RESOURCES: ReadonlySet<string> = new Set(["image", "media", "font"]);
+
 export interface RendererOptions {
   /** The crawl's own origin. Every request to another one is aborted. */
   origin: string;
@@ -99,12 +115,31 @@ export interface RenderResult {
   navLinkCount: number | null;
   footerLinkCount: number | null;
   filterLinkCount: number | null;
-  /** Where the page navigated itself to, if that is not where it started. */
+  /**
+   * Where the page navigated itself to, if that is not where it started.
+   *
+   * FOR THE RULE THAT READS THIS (`redirect.js`, CHECK-10, P5-T5): it is set on
+   * FAILED renders too, and that is the commonest case rather than an edge one.
+   * A page that sends itself to another origin has its navigation aborted here
+   * (we record where it wanted to go and do not follow it), which leaves
+   * Chromium on its own error surface with no DOM of this site's to measure —
+   * so the row is `rendered = false`, `render_error = 'off-site navigation: …'`,
+   * and `rendered_redirect_url` set. **The rule must gate on
+   * `rendered_redirect_url is not null` (with `fetch_class = 'ok'`), NEVER on
+   * `rendered = true`**: a non-null redirect URL is itself the render evidence,
+   * and gating on `rendered` would silently drop every off-site JS redirect —
+   * the most serious shape of the defect the check exists to find.
+   */
   redirectUrl: string | null;
   /** Why a render that was attempted produced nothing. Null on success. */
   error: string | null;
   /** Third-party requests aborted. Diagnostic; not stored on the page row. */
   blockedRequests: number;
+  /**
+   * Same-origin subresources aborted because they only affect paint (images,
+   * media, fonts). Diagnostic; not stored on the page row.
+   */
+  skippedPaintRequests: number;
 }
 
 /** What `MEASURE_SCRIPT` hands back. Counts only — no HTML crosses the seam. */
@@ -222,7 +257,7 @@ export class PageRenderer {
   async render(url: string): Promise<RenderResult> {
     const verdict = await isUrlAllowed(url, { allowPrivate: this.opts.allowPrivate });
     if (!verdict.allowed) {
-      return failure(url, `policy refusal: ${verdict.reason ?? "refused"}`, null, 0);
+      return failure(url, `policy refusal: ${verdict.reason ?? "refused"}`, null, 0, 0);
     }
 
     const context = await this.browser.newContext({
@@ -235,6 +270,7 @@ export class PageRenderer {
 
     // Mutated by the route handler, read after the navigation settles.
     let blocked = 0;
+    let skipped = 0;
     /** Where the page tried to send itself, off this origin. */
     let offSite: string | null = null;
     /** A navigation this pass refused on policy grounds. */
@@ -274,6 +310,22 @@ export class PageRenderer {
         await route.abort("blockedbyclient");
         return;
       }
+
+      // SAME-ORIGIN, BUT PAINT-ONLY. An image, a video and a font cannot change
+      // `innerText` or the anchor counts — they change what the page LOOKS like,
+      // and this pass measures what it SAYS. Aborting them is the other half of
+      // politeness: one navigation is otherwise a burst of dozens of requests at
+      // the client's own server, which is precisely the shape that got us
+      // throttled at yellow.com.mt (rule 9). Script, stylesheet, xhr and fetch
+      // stay allowed — a client-rendered page needs all four to build the DOM
+      // this pass exists to measure — so a residual burst remains, bounded by
+      // the site's own code and measured at the phase-5 gate.
+      if (PAINT_ONLY_RESOURCES.has(request.resourceType())) {
+        skipped += 1;
+        await route.abort("blockedbyclient");
+        return;
+      }
+
       await route.continue();
     });
 
@@ -299,12 +351,12 @@ export class PageRenderer {
       const finalUrl = page.url();
       if (!isHttpUrl(finalUrl)) {
         if (refusedNavigation !== null) {
-          return failure(url, `policy refusal: ${refusedNavigation}`, null, blocked);
+          return failure(url, `policy refusal: ${refusedNavigation}`, null, blocked, skipped);
         }
         if (offSite !== null) {
-          return failure(url, `off-site navigation: ${offSite}`, offSite, blocked);
+          return failure(url, `off-site navigation: ${offSite}`, offSite, blocked, skipped);
         }
-        return failure(url, `navigation error: browser ended on ${finalUrl}`, null, blocked);
+        return failure(url, `navigation error: browser ended on ${finalUrl}`, null, blocked, skipped);
       }
 
       const measured = (await page.evaluate(MEASURE_SCRIPT)) as Measurement;
@@ -323,16 +375,17 @@ export class PageRenderer {
         redirectUrl: offSite ?? navigatedTo(url, finalUrl),
         error: null,
         blockedRequests: blocked,
+        skippedPaintRequests: skipped,
       };
     } catch (error) {
       // Order matters: a page that redirected itself before it finished loading
       // aborts its own navigation, and "we stopped it" is a truer classification
       // than the `net::ERR_ABORTED` the browser reports for it.
       if (refusedNavigation !== null) {
-        return failure(url, `policy refusal: ${refusedNavigation}`, null, blocked);
+        return failure(url, `policy refusal: ${refusedNavigation}`, null, blocked, skipped);
       }
       if (offSite !== null) {
-        return failure(url, `off-site navigation: ${offSite}`, offSite, blocked);
+        return failure(url, `off-site navigation: ${offSite}`, offSite, blocked, skipped);
       }
       if (error instanceof playwrightErrors.TimeoutError) {
         return failure(
@@ -340,9 +393,10 @@ export class PageRenderer {
           `timeout: navigation did not reach domcontentloaded within ${this.opts.navigationTimeoutMs}ms`,
           null,
           blocked,
+          skipped,
         );
       }
-      return failure(url, `navigation error: ${firstLine(error)}`, null, blocked);
+      return failure(url, `navigation error: ${firstLine(error)}`, null, blocked, skipped);
     } finally {
       // Closing the context closes its pages and releases the browser's memory
       // for them. Without it a pass is O(URLs) contexts and the memory contract
@@ -362,6 +416,7 @@ function failure(
   error: string,
   redirectUrl: string | null,
   blockedRequests: number,
+  skippedPaintRequests: number,
 ): RenderResult {
   return {
     url,
@@ -374,6 +429,7 @@ function failure(
     redirectUrl,
     error,
     blockedRequests,
+    skippedPaintRequests,
   };
 }
 

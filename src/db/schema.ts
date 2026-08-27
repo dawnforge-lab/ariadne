@@ -166,6 +166,16 @@ export const pages = pgTable("pages", {
   renderedFilterLinkCount: integer("rendered_filter_link_count"),
   // Where the page navigated itself to while rendering (a JS redirect): a URL
   // the HTTP layer never saw a Location header for.
+  //
+  // THIS COLUMN IS NOT GATED BY `rendered`, and the rule that reads it
+  // (`redirect.js`, CHECK-10) must not gate on `rendered` either. When the
+  // target is another origin the render pass records it and refuses to follow
+  // it, which leaves the browser with no DOM of this site's to measure — so the
+  // row is `rendered = false` with `render_error = 'off-site navigation: …'`
+  // AND this column set. That is the most serious shape of the defect, so the
+  // gate is `rendered_redirect_url is not null` (plus `fetch_class = 'ok'`, to
+  // leave HTTP-level redirects to the redirect rules): a non-null value here is
+  // itself render evidence.
   renderedRedirectUrl: text("rendered_redirect_url"),
   // Why a render that was ATTEMPTED produced nothing. Non-null here and null
   // in the four columns above is a rendered-and-failed page, which is a
