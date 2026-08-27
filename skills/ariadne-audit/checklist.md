@@ -2099,7 +2099,8 @@ define is refused BY NAME, so an empty page always means "nothing found" and nev
 "you asked wrong". Two refusals are routine and both are informative:
 
 - `checkId 'CHECK-08' is claimed only by metric rules … it is measured, not found` —
-  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33 and CHECK-33b answer this way.
+  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38
+  answer this way.
 - `checkId 'CHECK-41' is claimed by no rule` — an agent check. There is no engine
   answer and there is not meant to be one.
 
