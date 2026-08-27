@@ -120,9 +120,11 @@ export const SCHEMA_PROFILES: Readonly<Record<string, SchemaProfile>> = {
   Product: {
     required: ["name", "image", "offers"],
     /**
-     * CHECK-44's recommended list, read off the sf-audit checklist
-     * (`~/.claude/skills/sf-audit/checklist.md`, lines 1334-1364; the field
-     * lists are lines 1341-1351):
+     * CHECK-44's recommended list, read off the audit checklist. It was read at
+     * the frozen sf-audit original (`~/.claude/skills/sf-audit/checklist.md`,
+     * lines 1334-1364; the field lists are lines 1341-1351) and the check now
+     * lives in-repo at `skills/ariadne-audit/checklist.md`, where the field lists
+     * are unchanged:
      *
      *  - `description`, `sku`, `brand` — the checklist calls these REQUIRED
      *    (line 1342). They stay recommended here, unchanged by this widening:

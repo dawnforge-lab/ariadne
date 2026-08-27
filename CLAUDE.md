@@ -68,8 +68,11 @@ either direction; the seam is the network API only.
    adaptive back-off on blocks. We crawl client sites with permission; being
    throttled by a WAF is our bug, not theirs (see the yellow.com.mt incident in
    `docs/talos-integration.md`).
-10. **Rules carry `checkIds`** tracing to the sf-audit checklist
-    (`~/.claude/skills/sf-audit/checklist.md`); coverage is a CI query.
+10. **Rules carry `checkIds`** tracing to the audit checklist, which lives in this
+    repository at `skills/ariadne-audit/checklist.md` and is the living authority;
+    coverage is a CI query. It was imported once from the frozen sf-audit original
+    (`~/.claude/skills/sf-audit/checklist.md`) — the file's provenance header records
+    the source sha and what changed. Fix a check in-repo; never re-import.
 
 ## Pinned upstream shas
 
