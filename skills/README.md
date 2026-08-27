@@ -17,6 +17,8 @@ land in the same commit.
 | `ariadne-crawl/SKILL.md` | Start a crawl, poll it, render it, judge it. The crawl half of the surface, plus the politeness and failure paths. |
 | `ariadne-audit/SKILL.md` | The audit orchestrator: analytics context, the checklist walk, the agent checks, and the findings file it writes. |
 | `ariadne-audit/checklist.md` | **The audit checklist — 82 checks.** The living authority (CLAUDE.md hard rule 10): the rule registry's `checkIds` trace to the ids in this file, and `test/rules/coverage.test.ts` asserts the coverage in CI. |
+| `ariadne-report/SKILL.md` | The markdown deliverable: the engine's numbers quoted verbatim, severity argued into priority, and every unaudited check named. |
+| `ariadne-action-plan/SKILL.md` | The Excel deliverable: one tab per issue worth fixing, each the full URL list from `issue_urls` with the rule's evidence as columns. |
 
 `checklist.md` was imported once from `~/.claude/skills/sf-audit/checklist.md`, whose
 sha and import date are in the provenance header at the top of the file. **That source
@@ -31,6 +33,8 @@ is better, because it keeps the installed skill and the repository in step:
 ```bash
 ln -s "$PWD/skills/ariadne-crawl" ~/.claude/skills/ariadne-crawl
 ln -s "$PWD/skills/ariadne-audit" ~/.claude/skills/ariadne-audit
+ln -s "$PWD/skills/ariadne-report" ~/.claude/skills/ariadne-report
+ln -s "$PWD/skills/ariadne-action-plan" ~/.claude/skills/ariadne-action-plan
 ```
 
 A copy needs re-copying after every pull, and a stale copy of a skill is worse than no
@@ -58,8 +62,16 @@ statement of intent:
 ## What consumes what
 
 ```
-ariadne-crawl  ──crawlId──▶  ariadne-audit  ──ariadne-findings.json──▶  deliverables
+                                                     ┌─▶ ariadne-report       (markdown)
+ariadne-crawl ──crawlId──▶ ariadne-audit ──findings──┤
+                                                     └─▶ ariadne-action-plan  (xlsx)
 ```
+
+Both deliverable skills read the findings file AND go back to the engine: the
+report quotes `metrics_get` verbatim, and the action plan's tab bodies are live
+`issue_urls` pages over the same `crawlId`. Neither writes anything from memory,
+and neither invents fix text — the fix is the findings file's `recommendation`,
+because the registry's how-to-fix copy does not cross the query surface.
 
 The findings file's shape is defined in `ariadne-audit/SKILL.md`, Phase 4. It is an
 INTERFACE: the skills that turn an audit into a report or an action plan read those
