@@ -336,7 +336,7 @@ export async function runCrawl(
   config: CrawlConfig,
   signal?: AbortSignal,
 ): Promise<CrawlSummary> {
-  validateConfig(config);
+  validateCrawlConfig(config);
 
   const crawlId = `crawl_${randomUUID()}`;
   await db.insert(crawls).values({
@@ -381,7 +381,7 @@ export async function resumeCrawl(
   }
 
   const config = opts.config ?? parseStoredConfig(row.config, crawlId);
-  validateConfig(config);
+  validateCrawlConfig(config);
 
   if (opts.reclaimLeases === true) {
     await releaseLeases(db, crawlId, null);
@@ -412,8 +412,13 @@ export async function resumeCrawl(
  *
  * The running crawl is unaffected: `execute` gets the caller's config object,
  * not this copy. Only what outlives the process is trimmed.
+ *
+ * Exported because `runCrawl` is no longer the only writer of a `crawls` row:
+ * the API's queue creates the row when a crawl is ACCEPTED and runs it later
+ * (src/api/service.ts), and it must strip the flag by the same authority rather
+ * than by a second copy of the rule that could drift from this one.
  */
-function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
+export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
   const { allowPrivate: _allowPrivate, ...rest } = config;
   return rest;
 }
@@ -430,10 +435,16 @@ function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> 
  * turns it on. Off is the value the escape hatch has unless a caller says
  * otherwise in this call, which is the whole point of the strip; leaving it
  * off is the documented behaviour, not a guess covering a failure.
+ *
+ * Exported for the second reader of that column: the API's render endpoint
+ * builds its `RenderPassConfig` from the crawl's own stored config, so the
+ * render pass cannot end up with a different user agent or a different per-host
+ * delay than the crawl it belongs to (rule 9). Its messages name the crawl
+ * rather than a function, because two callers now raise them.
  */
-function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
+export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   if (typeof value !== "object" || value === null) {
-    throw new Error(`resumeCrawl: crawl ${crawlId} has no readable config`);
+    throw new Error(`crawl ${crawlId}: stored config is not readable`);
   }
   const raw = value as Record<string, unknown>;
   const config = {
@@ -459,7 +470,7 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   ] as const) {
     if (typeof config[field] !== expected) {
       throw new Error(
-        `resumeCrawl: crawl ${crawlId} config.${field} is ${typeof config[field]}, expected ${expected}`,
+        `crawl ${crawlId}: stored config.${field} is ${typeof config[field]}, expected ${expected}`,
       );
     }
   }
@@ -468,7 +479,7 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   // "probe off" (a guess) — it must stop.
   for (const field of ["probeHosts"] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
-      throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a boolean`);
+      throw new Error(`crawl ${crawlId}: stored config.${field} is not a boolean`);
     }
   }
   // Same ruling for the render budget: a stored `renderMaxPages: "500"` must
@@ -480,7 +491,7 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
     "renderSamplePerType",
   ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "number") {
-      throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a number`);
+      throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
     }
   }
   if (
@@ -489,13 +500,22 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
       !config.legacyHosts.every((host) => typeof host === "string"))
   ) {
     throw new Error(
-      `resumeCrawl: crawl ${crawlId} config.legacyHosts is not an array of strings`,
+      `crawl ${crawlId}: stored config.legacyHosts is not an array of strings`,
     );
   }
   return config as CrawlConfig;
 }
 
-function validateConfig(config: CrawlConfig): void {
+/**
+ * Range-check a crawl configuration, throwing on anything a crawl must not be
+ * started with.
+ *
+ * Exported because the API validates a request body BEFORE the crawl row
+ * exists: a `maxPages: 0` supplied over the wire is a 400 with this function's
+ * own message, not a crawl row that is created, queued, and only then found to
+ * be unrunnable.
+ */
+export function validateCrawlConfig(config: CrawlConfig): void {
   const positiveInts = [
     ["maxPages", config.maxPages],
     ["maxDepth", config.maxDepth],

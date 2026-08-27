@@ -9,7 +9,19 @@ export const crawls = pgTable("crawls", {
   siteUrl: text("site_url").notNull(),
   config: jsonb("config_jsonb").notNull(),
   rulesetVersion: text("ruleset_version").notNull(),
-  status: text("status").notNull().default("running"), // running|finished|failed|cancelled
+  // queued|running|finished|failed|cancelled. `running` and the three terminal
+  // values are written by the crawl loop (src/crawl/loop.ts, `CrawlSummary
+  // .status`); `queued` is written by the API's crawl queue, which creates the
+  // row when a crawl is ACCEPTED and runs it when its turn comes
+  // (src/api/service.ts) — so a queued row is durable work that no process has
+  // started, and it is never a summary outcome.
+  //
+  // Free text, no enum constraint, so adding a value is a code change and not a
+  // migration — which means every consumer must be audited by hand when one is
+  // added. Today there are exactly two readers: `runRenderPass`'s liveness
+  // guard (src/crawl/render/run-render.ts), which refuses `running` and
+  // `queued`, and the API's crawl serialisation. No rule reads this column.
+  status: text("status").notNull().default("running"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   pagesCrawled: integer("pages_crawled").notNull().default(0),

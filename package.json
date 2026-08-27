@@ -8,7 +8,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "api:serve": "tsx src/api/serve.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",

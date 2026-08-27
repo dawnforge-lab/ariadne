@@ -190,6 +190,19 @@ export async function runRenderPass(
   // that died mid-run and was never resumed or marked failed. Both leave a
   // frontier in flight; `finished`, `cancelled` and `failed` do not.
   const status = await crawlStatus(db, crawlId);
+  // A crawl that has not started yet is unsafe for the same reason a live one
+  // is, one step earlier: `queued` is the API queue's accepted-but-not-yet-run
+  // state (src/api/service.ts), and the worker that picks it up will seed a
+  // frontier straight over the rows this pass promoted. It is also empty, so
+  // there is nothing to render — but "nothing selected" is the wrong answer to
+  // give for it, because it reads like a crawl with no suspects.
+  if (status === "queued") {
+    throw new Error(
+      `runRenderPass: crawl ${crawlId} is 'queued' — it has not run yet, so there is ` +
+        `nothing to render, and the worker that dequeues it would seed a frontier over ` +
+        `this pass's selection. Wait for it to finish.`,
+    );
+  }
   if (status === "running") {
     throw new Error(
       `runRenderPass: crawl ${crawlId} is still marked 'running' — the render pass may ` +

@@ -331,7 +331,9 @@ describe("runRules against the database", () => {
   //
   // Both statements are pinned here, by count rather than by timestamp: the
   // top-of-run one over every table a rule reads, and the second one over the
-  // two tables the derivation phase rewrites in between.
+  // two tables the derivation phase rewrites in between. The measurement is
+  // taken against database-wide counters, so it is retried until a window is
+  // clean — see the comment on the loop.
   it("analyzes every table the rules read, and the derivation-fed pair twice", async () => {
     const crawlId = await newCrawl();
     const listing = mkRow(crawlId, "/list?colour=red", { depth: 0, discoveredVia: "seed" });
@@ -358,37 +360,67 @@ describe("runRules against the database", () => {
       return Object.fromEntries(rows.map((r) => [r.relname, Number(r.analyze_count)]));
     };
 
-    const before = await analyzeCounts();
-    await runRules(db, crawlId, buildRegistry());
-    const after = await analyzeCounts();
-    const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
+    // WHY THIS IS MEASURED REPEATEDLY RATHER THAN ONCE. The counters are
+    // database-wide, vitest runs test files in parallel against one database,
+    // and `runRules` is called from three of them (this one, the fixture
+    // harness, and the API's rules endpoint). Ratios against `pages` were the
+    // first attempt at absorbing that and they are NOT sufficient, because the
+    // run issues TWO statements: `ANALYZE pages, links, …` at the top and
+    // `ANALYZE url_params, structured_data` across the derivation seam. A
+    // concurrent run whose first statement landed before this window and whose
+    // second lands inside it moves the pair by 1 and `pages` by 0 — no ratio
+    // survives that, and the observed failure was exactly it (3 where 2 was
+    // expected, with `runs` = 1).
+    //
+    // So a window is either CLEAN — every invariant below holds together, which
+    // a sliced window cannot fake — or it is discarded and measured again.
+    // `runRules` is idempotent over the same crawl (issue inserts conflict away,
+    // the derivations rebuild), so re-measuring is free of side effects. A real
+    // regression fails every attempt and the last set of problems is reported.
+    const ATTEMPTS = 4;
+    let problems: string[] = [];
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+      const before = await analyzeCounts();
+      await runRules(db, crawlId, buildRegistry());
+      const after = await analyzeCounts();
+      const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
 
-    // The counters are database-wide and vitest runs test files in parallel
-    // against one database, so another file's `runRules` can land inside this
-    // window. The assertions are therefore RATIOS against `pages`, which every
-    // run analyzes exactly once: N concurrent runs move `pages` by N and the
-    // derivation-fed pair by 2N, so the relationship holds however many there
-    // were. `runRules` is the only thing in the repo that issues an ANALYZE,
-    // which is what makes `pages` a usable clock here.
-    const runs = delta("pages");
-    expect(runs, "the run did not analyze pages at all").toBeGreaterThanOrEqual(1);
-    // Once per run, at the top, before the first rule reads them.
-    for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
-      expect(delta(table), `${table} was not analyzed once per run`).toBe(runs);
+      const runs = delta("pages");
+      problems = [];
+      if (runs < 1) problems.push("the run did not analyze pages at all");
+      // Once per run, at the top, before the first rule reads them.
+      for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+        if (delta(table) !== runs) {
+          problems.push(`${table} moved ${delta(table)}, expected ${runs} (once per run)`);
+        }
+      }
+      // And twice per run for the two tables the derivation phase rewrites
+      // mid-run: once at the top (where, on a crawl's first run, `url_params` is
+      // still EMPTY and the planner is taught exactly that) and once across the
+      // derivation seam, before the query rules that join them.
+      for (const table of ["url_params", "structured_data"]) {
+        if (delta(table) !== 2 * runs) {
+          problems.push(`${table} moved ${delta(table)}, expected ${2 * runs} (twice per run)`);
+        }
+      }
+      // `metrics` is deliberately absent from both statements: no rule reads it,
+      // the metric phase only writes it. That exclusion IS assertable here —
+      // unlike a claim about `last_analyze`, which autovacuum could move at any
+      // moment — because `analyze_count` only ever counts a manual ANALYZE.
+      if (delta("metrics") !== 0) {
+        problems.push(`metrics moved ${delta("metrics")}, expected 0 (no rule reads it)`);
+      }
+      if (problems.length === 0) break;
     }
-    // And twice per run for the two tables the derivation phase rewrites
-    // mid-run: once at the top (where, on a crawl's first run, `url_params` is
-    // still EMPTY and the planner is taught exactly that) and once across the
-    // derivation seam, before the query rules that join them.
-    for (const table of ["url_params", "structured_data"]) {
-      expect(delta(table), `${table} was not analyzed twice per run`).toBe(2 * runs);
-    }
-    // `metrics` is deliberately absent from both statements: no rule reads it,
-    // the metric phase only writes it. That exclusion IS assertable here —
-    // unlike a claim about `last_analyze`, which autovacuum could move at any
-    // moment — because `analyze_count` only ever counts a manual ANALYZE.
-    expect(delta("metrics")).toBe(0);
-  });
+    expect(
+      problems.join("; "),
+      `no clean ANALYZE measurement in ${ATTEMPTS} attempts — if this persists, the ` +
+        `run's ANALYZE statements have changed, not the concurrency`,
+    ).toBe("");
+    // Four full runs of the rule set, so the default 30s test timeout is not
+    // the thing that reports a regression: without this, a genuinely missing
+    // ANALYZE fails as "timed out" instead of naming the counter that moved.
+  }, 180_000);
 
   // A crawl id nothing knows produces no pages, which is indistinguishable
   // from a crawl that found nothing: the run would "succeed" over an empty
