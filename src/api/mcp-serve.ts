@@ -41,18 +41,45 @@ if (config.allowedDomains.length === 0) {
 }
 
 let shuttingDown = false;
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.error(`ariadne mcp: ${signal} — closing (a running crawl is cancelled, not killed)`);
-    mcp
-      .close()
-      .then(() => closeDb(db))
-      .then(() => process.exit(0))
-      .catch((error: unknown) => {
-        console.error(`ariadne mcp: shutdown failed — ${String(error)}`);
-        process.exit(1);
-      });
-  });
+
+/**
+ * Close once, whatever asked: a signal, or the client hanging up.
+ *
+ * The crawl in flight is aborted rather than killed — the loop's graceful path
+ * leaves the run `cancelled` with its frontier intact, so a restart resumes it.
+ */
+function shutdown(why: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`ariadne mcp: ${why} — closing (a running crawl is cancelled, not killed)`);
+  mcp
+    .close()
+    .then(() => closeDb(db))
+    .then(() => process.exit(0))
+    .catch((error: unknown) => {
+      console.error(`ariadne mcp: shutdown failed — ${String(error)}`);
+      process.exit(1);
+    });
 }
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => shutdown(signal));
+}
+
+/**
+ * THE CLIENT HANGING UP IS A SHUTDOWN, and nothing else says so.
+ *
+ * On stdio the client's death arrives as EOF on our standard input and as
+ * nothing else at all: no signal is sent to a child whose parent simply exits,
+ * and the SDK's stdio transport does not subscribe to the stream's end. Without
+ * this, a dropped pipe leaves this process alive holding the connection pool —
+ * and, worse, still fetching a real site on behalf of a client that is gone,
+ * which is a crawl nobody can stop and nobody is reading (rule 9).
+ *
+ * Both events are handled because they are not the same one: `end` fires when
+ * the readable side is exhausted, `close` when the descriptor goes — a pipe that
+ * is destroyed rather than ended can give the second without the first. The
+ * guard inside `shutdown` makes the overlap harmless.
+ */
+process.stdin.on("end", () => shutdown("stdin closed (the client hung up)"));
+process.stdin.on("close", () => shutdown("stdin closed (the client hung up)"));

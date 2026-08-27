@@ -25,6 +25,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -389,6 +390,27 @@ describe("the tool surface", () => {
     expect(schema.required).toEqual(["siteUrl"]);
   });
 
+  it("tells the reader that an empty answer may mean 'not measured yet'", async () => {
+    // THE HARD-RULE-1 FAILURE AT THE TRANSPORT. A finished-but-unjudged crawl
+    // answers `{items: []}` on the read tools, and an agent that skips
+    // crawl_rules and quotes "no metrics measured" into a client report has
+    // written a rule that always passes — from the outside. The tools that can
+    // be read that way say so in their own descriptions, because an agent reads
+    // the tool it is calling and not the server's instructions.
+    const listed = await client.listTools();
+    for (const name of ["metrics_get", "issue_urls", "pages_query"]) {
+      const description = listed.tools.find((t) => t.name === name)?.description ?? "";
+      expect(description, `${name} lets an empty answer read as 'nothing found'`).toContain(
+        "NOT MEASURED YET",
+      );
+    }
+    // issues_list carries the same warning in its own words: it is the triage
+    // view *of a judged crawl*.
+    expect(listed.tools.find((t) => t.name === "issues_list")?.description ?? "").toContain(
+      "judged crawl",
+    );
+  });
+
   it("refuses an argument nobody allowed, naming it", async () => {
     const answer = await call("issues_list", { crawlId: seededCrawlId, serverity: "critical" });
     expect(answer.isError).toBe(true);
@@ -685,6 +707,47 @@ describe("failure containment", () => {
       await rig.mcp.close();
     }
   });
+});
+
+describe("the stdio entrypoint", () => {
+  it("exits when the client hangs up: EOF on stdin is a shutdown, not a hang", async () => {
+    // On stdio the client's death arrives as EOF and as nothing else — no
+    // signal reaches a child whose parent simply exited, and the SDK's
+    // transport does not subscribe to the stream's end. A server that stayed up
+    // would hold the pool, and could still be fetching a real site for a client
+    // that is gone (rule 9). This is the wiring, not the protocol: the spawn is
+    // real, the crawl is not.
+    const child = spawn(process.execPath, ["node_modules/.bin/tsx", "src/api/mcp-serve.ts"], {
+      cwd: new URL("../../", import.meta.url).pathname,
+      env: { ...process.env, DATABASE_URL: databaseUrl(), ARIADNE_ALLOWED_DOMAINS: "127.0.0.1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString("utf8");
+      });
+      const until = Date.now() + 30_000;
+      while (!stderr.includes("serving on stdio")) {
+        if (child.exitCode !== null) throw new Error(`mcp:serve exited early — ${stderr}`);
+        if (Date.now() > until) throw new Error(`mcp:serve never booted — ${stderr}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      child.stdin.end();
+      const exit = await new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`still running after EOF — ${stderr}`)), 20_000);
+        child.once("exit", (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+      });
+      expect(exit).toBe(0);
+      expect(stderr).toContain("the client hung up");
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }
+  }, 60_000);
 });
 
 describe("boot configuration", () => {

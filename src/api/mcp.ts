@@ -348,6 +348,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Every finding one rule recorded on one crawl: {url, evidence}. This is " +
         "the action-plan feed — the list you hand a developer — and the counterpart " +
         "to issues_list's five-URL sample.\n\n" +
+        "It reads findings crawl_rules wrote. On a crawl that has not been judged " +
+        "every rule answers {items: []}, and so does a rule that simply found " +
+        "nothing — the two are indistinguishable here, so an empty answer means NOT " +
+        "MEASURED YET until you have confirmed the rules ran. Reach this tool " +
+        "through issues_list, which only names rules that actually found something.\n\n" +
         "url is null for a site-wide finding (a fact about the crawl, not about a " +
         "page). evidence is the rule's own testimony, verbatim: its shape is the " +
         "rule's, so read the fields it gives you rather than expecting a fixed " +
@@ -378,6 +383,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "scopeValue, value, title, explanation, checkIds, category}. These are the " +
         "quotable numbers for a report — value crosses verbatim as the metric rule " +
         "wrote it, so its shape belongs to the metric.\n\n" +
+        "A crawl nobody has judged has no metrics AT ALL: crawl_rules is what " +
+        "writes them, and until it has run this tool answers {items: []}. That " +
+        "empty answer means NOT MEASURED YET — never 'this site has nothing worth " +
+        "measuring'. Check crawl_status/crawl_rules before you quote a number that " +
+        "is not there.\n\n" +
         "Filters, each refused by name if it names nothing this crawl measured:\n" +
         `  metricId   — a single metric, e.g. redirect.volume\n` +
         `  scope      — the cohort kind: ${METRIC_SCOPES_HINT}\n` +
@@ -419,6 +429,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "renderError}. Use it to answer questions about the site itself — how deep " +
         "the blog is, which product pages are non-indexable, what a render " +
         "actually added — rather than about its faults.\n\n" +
+        "WHICH PASS WROTE WHAT, because a filter can outrun the evidence. The rows " +
+        "themselves — url, statusCode, fetchClass, pageType, indexable, depth, " +
+        "wordCount — are written by the CRAWL, so they are complete as soon as it " +
+        "finishes and crawl_rules is not needed for them. rendered, " +
+        "renderedWordCount and renderError are written by crawl_render: before that " +
+        "pass has run, rendered is false on every page and 'rendered: true' answers " +
+        "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
+        "rendered'. Check crawl_status's renderPassCount before reading anything " +
+        "into a rendered filter.\n\n" +
         "Filters:\n" +
         "  pageType   — a template cohort as this crawl typed it; '(untyped)' for " +
         "the pages it could not type\n" +
