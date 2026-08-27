@@ -11,10 +11,17 @@
  * claimed shows up as a removal that must be deleted from the literal in the
  * same commit as the rule that claims it. Phase 3 took this list from 29 to
  * seven, Phase 4's link-graph metrics took it to five, and its URL and sitemap
- * metrics took it to three — which are now exactly `RENDER_CHECKS`, the one
- * annotation left, naming the one phase that can answer them: the render pass
- * (Phase 5). The pin is asserted against that constant rather than against a
- * re-typed literal, so there is one list rather than two that agree today.
+ * metrics took it to three — the render three, CHECK-01, CHECK-02 and
+ * CHECK-34, which no rule could answer until a browser had run the page's
+ * JavaScript. **Phase 5's render diff rules claim all three, and the list is
+ * now empty.** `RENDER_CHECKS` was the constant that annotated them and it is
+ * deleted with them: 44 of the 47 crawl-derived checks have a rule, and the
+ * other three are the agent's judgement.
+ *
+ * An empty pin is a stronger assertion than the lists that preceded it, not a
+ * weaker one. It says every crawl-derived check either has a rule behind it or
+ * is one of the three `AGENT_CHECKS`, and the moment a check is added to the
+ * universe without a claimant this fails.
  *
  * Note the pin only ever *subtracts* from `CRAWL_CHECK_IDS`: rules claiming
  * checks outside those 47 (today CHECK-49, CHECK-50 and CHECK-52, from
@@ -23,11 +30,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildRegistry } from "../../src/rules/index.js";
-import {
-  AGENT_CHECKS,
-  CRAWL_CHECK_IDS,
-  RENDER_CHECKS,
-} from "../../src/rules/registry/registry.js";
+import { AGENT_CHECKS, CRAWL_CHECK_IDS } from "../../src/rules/registry/registry.js";
 
 /**
  * The metric rules allowed to carry an AGENT check's id, by check.
@@ -57,34 +60,48 @@ const AGENT_CHECK_EVIDENCE: Record<string, string[]> = {
 };
 
 describe("checklist coverage", () => {
-  it("pins exactly which crawl-derived checks remain unclaimed (the render three)", () => {
+  it("pins the unclaimed set: nothing is left", () => {
     const unclaimed = buildRegistry().unclaimedChecks([...CRAWL_CHECK_IDS], [...AGENT_CHECKS]);
     // CHECK-33 and CHECK-33b left this list with the link-graph metrics, then
     // CHECK-08 (`sitemap.structure`) and CHECK-29 (`url.param-volumes`) with
-    // the sitemap and URL metrics. What remains is the render pass alone —
-    // pinned against the CONSTANT rather than against a re-typed literal, so
-    // the pin and the annotation are one fact and cannot drift apart.
-    expect(unclaimed.sort()).toEqual([...RENDER_CHECKS].sort());
+    // the sitemap and URL metrics, and finally CHECK-01, CHECK-02 and CHECK-34
+    // with the render diff rules. Empty, and asserted as a literal because
+    // there is no annotation constant left to assert it against — that is the
+    // point of the phase rather than an accident of it.
+    expect(unclaimed).toEqual([]);
   });
 
-  // The gate document's ruleset table states these three numbers — the Phase 4
+  // The gate document's ruleset table states these four numbers — the Phase 5
   // gate doc, which is written at the end of the phase against what CI pins
   // here. Pinned so a rule added or dropped fails CI rather than quietly making
-  // that table wrong, and so the metric count is a number someone has to update
-  // deliberately rather than one that drifts as Phase 4 lands its rules. (The
-  // Phase 3 gate doc's table is a record of what shipped then; it is not
-  // updated, and these numbers have moved past it.)
-  it("pins the ruleset split the gate doc reports: 74 rules = 26 page + 38 query + 10 metric", () => {
+  // that table wrong. (Earlier gate docs' tables are records of what shipped
+  // then; they are not updated, and these numbers have moved past them.)
+  //
+  // THE ARITHMETIC, verified against the registry rather than taken from the
+  // plan (whose kind split was an authoring estimate). Phase 4 ended at 74 =
+  // 26 page + 38 query + 10 metric. Phase 5 adds five rules, and the split
+  // moved from the estimate because all four finding rules are query-kind: the
+  // three diffs and the JS redirect all read stored columns through SQL rather
+  // than being handed a `PageRecord`, and `filters.js-only` could not be a page
+  // rule at all — its raw side is a question about the `links` table.
+  //
+  //   page    26 + 0 = 26
+  //   query   38 + 4 = 42   (content.csr-dependent, nav.js-only,
+  //                          filters.js-only, redirect.js)
+  //   metric  10 + 1 = 11   (render.coverage)
+  //   total   74 + 5 = 79
+  it("pins the ruleset split the gate doc reports: 79 rules = 26 page + 42 query + 11 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(74);
+    expect(registry.all()).toHaveLength(79);
     expect(registry.byKind("page")).toHaveLength(26);
-    expect(registry.byKind("query")).toHaveLength(38);
+    expect(registry.byKind("query")).toHaveLength(42);
     // The link-graph four, the two content metrics and hreflang coverage, plus
-    // the URL-parameter, redirect-volume and sitemap-structure metrics.
-    expect(registry.byKind("metric")).toHaveLength(10);
+    // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
+    // the render pass's coverage.
+    expect(registry.byKind("metric")).toHaveLength(11);
   });
 
-  it("accounts for all 47 crawl-derived checks: 41 claimed, 3 agent, 3 unclaimed", () => {
+  it("accounts for all 47 crawl-derived checks: 44 claimed, 3 agent, 0 unclaimed", () => {
     // The arithmetic behind the pin above, stated so a drift in the universe
     // itself (an id added to or removed from `CRAWL_CHECK_IDS`) fails here
     // rather than silently changing what "unclaimed" means.
@@ -101,12 +118,16 @@ describe("checklist coverage", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(AGENT_CHECKS).toHaveLength(3);
     expect(claimedInUniverse.sort()).toEqual([
+      // The render three, claimed in Phase 5: CHECK-01 by
+      // `content.csr-dependent` (and evidenced by `render.coverage`), CHECK-02
+      // by `filters.js-only`, CHECK-34 by `nav.js-only`.
+      "CHECK-01","CHECK-02",
       "CHECK-03","CHECK-04","CHECK-05","CHECK-06","CHECK-07","CHECK-08","CHECK-09",
       "CHECK-10","CHECK-11","CHECK-12","CHECK-13","CHECK-14","CHECK-15","CHECK-16",
       "CHECK-17","CHECK-18","CHECK-19","CHECK-20","CHECK-21","CHECK-22","CHECK-23",
       "CHECK-24","CHECK-25","CHECK-26","CHECK-27","CHECK-28","CHECK-29",
       "CHECK-30","CHECK-31","CHECK-32",
-      "CHECK-33","CHECK-33b",
+      "CHECK-33","CHECK-33b","CHECK-34",
       "CHECK-35","CHECK-36","CHECK-37","CHECK-39","CHECK-40",
       "CHECK-43","CHECK-44","CHECK-45","CHECK-46",
     ]);
@@ -170,27 +191,24 @@ describe("checklist coverage", () => {
     }
   });
 
-  // The annotation is only worth carrying if it describes the pin above. A
-  // check that gains a rule must leave its annotation list in the same commit,
-  // or the list is a stale reason for an absence that ended.
-  it("the annotation is exactly the unclaimed set, and it says why each is unclaimed", () => {
-    const unclaimedList = buildRegistry().unclaimedChecks(CRAWL_CHECK_IDS, AGENT_CHECKS);
-    const unclaimed = new Set(unclaimedList);
-    for (const c of RENDER_CHECKS)
-      expect(unclaimed.has(c), `${c} is claimed — drop it from RENDER_CHECKS`).toBe(true);
-
-    // And the other direction, which is what makes the annotation and the pin
-    // one fact rather than two that agree today: EVERY unclaimed check carries
-    // a reason. Phase 3 emptied the pin down to two causes — the render pass
-    // (Phase 5) and the metric runner (Phase 4) — and Phase 4 discharged the
-    // second, so an unclaimed check outside `RENDER_CHECKS` is either a check
-    // whose reason nobody wrote down, or a rule that quietly stopped claiming
-    // one. Equality on the sorted arrays, so an id on the annotation that is no
-    // longer unclaimed fails here too.
+  // The annotation contract, after the last annotation was discharged.
+  //
+  // The rule it enforced — every unclaimed check carries a written reason, and
+  // every written reason names a still-unclaimed check — used to be an equality
+  // between the pin and a constant. With `RENDER_CHECKS` deleted there is no
+  // constant left, and the same contract collapses into a single statement:
+  // NOTHING is unclaimed without a reason because nothing is unclaimed. This is
+  // therefore the assertion that has to fail first if a future phase adds a
+  // check to the universe with no rule and no annotation to explain it — the
+  // reason it is kept as its own test rather than folded into the pin above.
+  it("no crawl-derived check is unclaimed and unexplained", () => {
+    const unclaimed = buildRegistry().unclaimedChecks(CRAWL_CHECK_IDS, AGENT_CHECKS);
     expect(
-      [...RENDER_CHECKS].sort(),
-      "the pin and its annotation have drifted: every unclaimed check needs a " +
-        "reason, and every reason needs a still-unclaimed check",
-    ).toEqual([...unclaimedList].sort());
+      unclaimed,
+      "a check with no rule behind it needs an annotation constant saying which " +
+        "phase can answer it, and a test pinning the pin against that constant — " +
+        "the shape `RENDER_CHECKS` and `METRIC_PENDING_CHECKS` had before their " +
+        "rules landed",
+    ).toEqual([]);
   });
 });

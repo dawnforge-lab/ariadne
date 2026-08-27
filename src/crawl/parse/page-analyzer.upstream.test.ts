@@ -37,6 +37,17 @@
  * tokenizer never sees as open-tag events. They are covered directly in
  * test/crawl/analyzer-extensions.test.ts; `expectParity` strips them.
  *
+ * Phase 5 (P5-T2) added `navLinkCount`, `footerLinkCount` and
+ * `frameworkMarkers`, and all three are modelled here rather than stripped:
+ * they are DOM reads whose specification IS the selector (`nav a[href]`,
+ * `footer a[href]`, an attribute or an id presence), and the render pass runs
+ * those selectors in a real browser to produce the numbers CHECK-34 compares
+ * these against. Parity holds on every malformed case tried here save one, and
+ * that one is PINNED rather than fixed: an `<a href>` left open across a
+ * container boundary is reconstructed inside the container by the tree
+ * builder's adoption agency algorithm, so the DOM holds an anchor the token
+ * stream never contained. See "the one divergence" test at the end.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -44,6 +55,7 @@ import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
 import {
   analyzeHtml,
+  FRAMEWORK_MARKERS,
   INLINE_TEXT_TAGS,
   type RawPageAnalysis,
 } from "./page-analyzer.js";
@@ -216,6 +228,23 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
 
   const hasViewport = byAttr("meta", "name", "viewport").length > 0;
 
+  // The Phase 5 captures, and the reason they belong on the parity surface:
+  // both are literally `document.querySelectorAll('nav a[href]').length` and
+  // its footer twin — the numbers the render pass reads in a real browser and
+  // compares these against — so the selector IS the specification, and the
+  // depth counters in the port have to agree with it on nesting and on
+  // malformed markup or CHECK-34 compares two different questions.
+  const navLinkCount = $("nav a[href]").length;
+  const footerLinkCount = $("footer a[href]").length;
+  const frameworkMarkers = FRAMEWORK_MARKERS.filter((marker) =>
+    marker === "__NEXT_DATA__"
+      ? // An id: matched verbatim, and by attribute rather than by `#id`
+        // selector so no CSS escaping question enters the oracle.
+        $("script[id]").filter((_, el) => $(el).attr("id") === "__NEXT_DATA__")
+          .length > 0
+      : $(`[${marker}]`).length > 0,
+  );
+
   const hasAmp =
     byRel("link", "amphtml").length > 0 ||
     $("html").attr("amp") !== undefined ||
@@ -238,6 +267,9 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     imagesMissingDimensions,
     hasAmp,
     hasViewport,
+    navLinkCount,
+    footerLinkCount,
+    frameworkMarkers,
     links: Array.from(linksByTarget.values()),
     bodyText,
     h1s,
@@ -420,10 +452,106 @@ describe("analyzeHtml parity with the DOM reference", () => {
       </body></html>`);
   });
 
+  // The Phase 5 (P5-T2) captures. Held to the oracle rather than covered only
+  // by hand-counted cases because the DOM selector is what the render pass
+  // will run in a real browser: if the tokenizer and `querySelectorAll`
+  // disagree about a malformed page, CHECK-34 compares two numbers that were
+  // never answering the same question. Where they DO disagree — one case, an
+  // open `<a>` crossing a container boundary — the disagreement is pinned by
+  // its own test below rather than asserted away.
+  it("matches nav and footer link counts, container by container", () => {
+    expectParity(`<html><body>
+      <nav><a href="/a">A</a><a href="/b">B</a><a>no href</a><a href="">empty</a></nav>
+      <footer><a href="/c">C</a><a href="mailto:x@y.test">mail</a></footer>
+      <a href="/outside">outside</a>
+      </body></html>`);
+  });
+
+  it("matches a nav nested inside a footer, which counts for both", () => {
+    expectParity(
+      `<html><body><footer><nav><a href="/x">x</a></nav><a href="/y">y</a></footer></body></html>`,
+    );
+  });
+
+  it("matches when a footer close implicitly closes an open nav", () => {
+    expectParity(
+      `<html><body><footer><nav><a href="/x">x</a></footer><a href="/after">after</a></body></html>`,
+    );
+  });
+
+  it("matches nested navs and a stray close tag", () => {
+    expectParity(
+      `<html><body></nav><nav><a href="/1">1</a><nav><a href="/2">2</a></nav><a href="/3">3</a></nav></body></html>`,
+    );
+  });
+
+  it("matches the framework markers, each one and all of them", () => {
+    expectParity(
+      `<html ng-app="shopApp"><body><div data-reactroot=""><p>x</p></div>
+       <script id="__NEXT_DATA__" type="application/json">{"page":"/"}</script></body></html>`,
+    );
+    expectParity(`<html><body><div id="root"></div><script id="app">{}</script></body></html>`);
+    expectParity(`<html><body><script id="__next_data__">{}</script></body></html>`);
+  });
+
   it("matches when every canonical is counted", () => {
     expectParity(`<html><head>
       <link rel="canonical" href="/a"><link rel="canonical" href="/b">
       <link rel="canonical" href="/c"></head><body><p>x</p></body></html>`);
+  });
+});
+
+/**
+ * The one place the tokenizer and the DOM genuinely disagree, asserted in both
+ * directions so it cannot move without a test failing.
+ *
+ * `<a href="/x"><nav><a href="/y">y</a></nav></a>`: the outer anchor is still
+ * open when `<nav>` starts, which puts it in the tree builder's list of ACTIVE
+ * FORMATTING ELEMENTS. The adoption agency algorithm then reconstructs it
+ * inside the `<nav>`, so a browser's DOM holds TWO anchors in there — one of
+ * which corresponds to no start tag in the byte stream. A streaming tokenizer
+ * has no such list and no tree correction (hard rule 4: no DOM on the hot
+ * path), so it counts the one anchor it was actually handed.
+ *
+ * The direction is fixed and the size is bounded: the raw count is UNDER the
+ * rendered one by exactly 1 per unclosed `<a>` crossing a container boundary,
+ * and never over. That is what makes it a tolerable known error rather than an
+ * unknown one — CHECK-34 must not treat a difference of 1 as evidence of
+ * JavaScript-only navigation (see the analyzer's header and the
+ * `nav_link_count` comment in src/db/schema.ts).
+ */
+describe("the one divergence from the DOM: an open <a> crossing a container", () => {
+  const count = (html: string) => {
+    const $ = cheerio.load(html);
+    const streamed = analyzeHtml(html, PAGE_URL);
+    return {
+      streamedNav: streamed.navLinkCount,
+      domNav: $("nav a[href]").length,
+      streamedFooter: streamed.footerLinkCount,
+      domFooter: $("footer a[href]").length,
+    };
+  };
+
+  it("undercounts a nav by one when an open anchor is reconstructed inside it", () => {
+    expect(count(`<html><body><a href="/x"><nav><a href="/y">y</a></nav></a></body></html>`))
+      .toMatchObject({ streamedNav: 1, domNav: 2 });
+  });
+
+  it("does the same when the outer anchor is never closed at all", () => {
+    expect(count(`<html><body><a href="/x"><nav><a href="/y">y</a></nav></body></html>`))
+      .toMatchObject({ streamedNav: 1, domNav: 2 });
+  });
+
+  it("does the same for a footer", () => {
+    expect(count(`<html><body><a href="/x"><footer><a href="/y">y</a></footer></a></body></html>`))
+      .toMatchObject({ streamedFooter: 1, domFooter: 2 });
+  });
+
+  it("agrees again once the outer anchor is closed before the container", () => {
+    // The same markup, well formed: no active formatting element to
+    // reconstruct, so nothing is cloned and the two counts meet.
+    expect(count(`<html><body><a href="/x">x</a><nav><a href="/y">y</a></nav></body></html>`))
+      .toMatchObject({ streamedNav: 1, domNav: 1 });
   });
 });
 

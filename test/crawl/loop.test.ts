@@ -4,7 +4,8 @@ import { and, eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, links, pages, sitemapUrls } from "../../src/db/schema.js";
-import { frontierCounts } from "../../src/crawl/frontier.js";
+import { frontierCounts, leaseBatch } from "../../src/crawl/frontier.js";
+import { PageWriter } from "../../src/crawl/persist.js";
 import {
   runCrawl,
   resumeCrawl,
@@ -489,7 +490,9 @@ describe("runCrawl", () => {
     expect(summary.pagesCrawled).toBe(0);
     expect(summary.robots.outcome).toBe("read");
     expect(summary.note).toMatch(/nothing to crawl/);
-    expect(summary.frontier).toEqual({ pending: 0, leased: 0, done: 0, failed: 0 });
+    expect(summary.frontier).toEqual({
+      pending: 0, leased: 0, done: 0, failed: 0, renderPending: 0,
+    });
   });
 
   it("lets our own errors kill the run, and marks the crawl failed", async () => {
@@ -664,5 +667,71 @@ describe("resumeCrawl", () => {
     expect(rows).toHaveLength(6);
     // The resumed run only wrote the pages the first run had not.
     expect(resumed.writer.pages).toBe(6 - first.pagesCrawled);
+  });
+
+  it("re-fetches a URL whose page row a hard kill left in the buffer", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    expect(first.status).toBe("cancelled");
+
+    // The worker that gets killed: it leases a URL, fetches it, buffers the
+    // page row — and the process dies before the buffer is flushed. Dropping
+    // the writer with rows still in it is what a SIGKILL does to them.
+    const doomed = await leaseBatch(db, first.crawlId, "worker_killed", 1, 600);
+    const lost = doomed[0];
+    if (lost === undefined) throw new Error("expected the cancelled crawl to leave work");
+    const writer = new PageWriter(db, first.crawlId);
+    await writer.addPage(
+      lost,
+      {
+        url: lost.url,
+        statusCode: 200,
+        fetchClass: "ok",
+        contentType: "text/html",
+        redirectUrl: null,
+        body: null,
+        htmlBytes: 32,
+        responseTimeMs: 1,
+        canonicalHeader: null,
+        xRobotsTag: null,
+        disallowedReason: null,
+      },
+      null,
+      { complete: true },
+    );
+
+    // Nothing durable, and — this is the fix — nothing marked done either. The
+    // crawl still owes this URL, so the evidence is recoverable by re-fetching
+    // it rather than lost behind a frontier row claiming the work was finished.
+    const buffered = await db
+      .select()
+      .from(pages)
+      .where(and(eq(pages.crawlId, first.crawlId), eq(pages.url, lost.url)));
+    expect(buffered).toEqual([]);
+    const owed = await db
+      .select({ state: frontier.state })
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, first.crawlId), eq(frontier.url, lost.url)));
+    expect(owed[0]?.state).toBe("leased");
+
+    // A fresh loop over the same crawl. `reclaimLeases` is the crash-resume
+    // path: the dead worker's lease is released rather than waited out.
+    const resumed = await resumeCrawl(db, first.crawlId, {
+      config: config({ perHostDelayMs: 0 }),
+      reclaimLeases: true,
+    });
+
+    expect(resumed.status).toBe("finished");
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, first.crawlId));
+    // The lost URL was crawled again, and the site's page set is whole — one
+    // row per URL, because the (crawl, url) conflict still absorbs re-crawls.
+    expect(rows.map((r) => r.url)).toContain(lost.url);
+    expect(rows).toHaveLength(6);
+    expect(await frontierCounts(db, first.crawlId)).toMatchObject({
+      pending: 0,
+      leased: 0,
+      done: 6,
+    });
   });
 });

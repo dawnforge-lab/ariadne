@@ -2,11 +2,42 @@
  * The crawl loop's write path: one `addPage` per fetched URL, batched inserts
  * into `pages` / `links` / `hreflang` / `structured_data`.
  *
+ * The page buffer is also the crawl's durability anchor. Each buffered page
+ * row carries the frontier URL it settles, and `flushPages` inserts the rows
+ * and marks those URLs `done` in ONE transaction. Nothing outside this class
+ * completes a frontier row on the success path any more, and the reason is a
+ * failure mode the loop could not fix on its own: it used to complete a URL as
+ * soon as its page row had been *buffered*, so a process killed outright
+ * (SIGKILL, OOM, power) lost up to `batchSize - 1` page rows that the frontier
+ * already recorded as finished, and no resume would fetch them again (build
+ * plan §7, "hard-kill durability"). Now the two facts commit together: a URL is
+ * `done` only if its page row is in the database, and a kill between them can
+ * only cost a re-fetch.
+ *
+ * The child tables are not part of that transaction. They are additive
+ * evidence hanging off a page row, and rolling a page row back because a link
+ * insert failed would delete the audit's primary fact to protect a secondary
+ * one. The loop keeps their window narrow instead, by flushing the writer at
+ * the end of every leased batch.
+ *
+ * KNOW WHAT THAT COSTS, because the fix above sharpened it. A kill between the
+ * `pages` commit and the child inserts leaves up to `batchSize - 1` `links`,
+ * `hreflang` and `structured_data` rows unwritten for pages the frontier now
+ * marks `done` — and unlike the page rows, they are UNRECOVERABLE: the URL is
+ * finished, so no resume re-fetches it, and a page with no link rows reads
+ * exactly like a page that genuinely had no links. The rules cannot tell the
+ * two apart. The window is one leased batch rather than one full buffer, which
+ * is a smaller hole, not a closed one. Closing it means moving the child
+ * inserts into the same transaction and accepting the trade this paragraph
+ * opens with.
+ *
  * The memory contract lives here as much as in the analyzer, and the exact
  * bound matters. Two separate things are bounded:
- *  - The persistent buffers. Each is ≤ `batchSize` at all times — not "on
- *    average", not "after `addPage` returns": rows are appended one at a time
- *    and the buffer is drained the instant it fills. A mega-menu page with
+ *  - The persistent buffers. Each is ≤ `batchSize` at all times — the page
+ *    buffer counted in `{ row, complete }` pairs, which add one boolean to a
+ *    row and copy nothing. Not "on average", not "after `addPage` returns":
+ *    rows are appended one at a time and the buffer is drained the instant it
+ *    fills. A mega-menu page with
  *    2000 links pushes twenty 100-row batches through the buffer instead of
  *    holding a 2000-row one.
  *  - The transient per-call arrays. `addPage` materialises the row objects for
@@ -48,6 +79,7 @@ import { hreflang, links, pages, structuredData } from "../db/schema.js";
 import type { FetchResult } from "./fetch-page.js";
 import type { PageAnalysis } from "./parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
+import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
 
 const DEFAULT_BATCH_SIZE = 100;
@@ -85,7 +117,29 @@ export interface PageWriterStats {
   hreflangUnresolved: number;
 }
 
+/**
+ * What the caller says about the frontier row behind a page.
+ *
+ * `complete: false` is for a URL the caller is settling itself — the loop
+ * marks a URL whose retries are spent `failed`, and a flush that then marked it
+ * `done` would overwrite the crawl's own account of what happened. It is a
+ * required argument rather than an option with a default because "does this
+ * page row finish this URL" has no safe assumption: guessing `true` resurrects
+ * failures, guessing `false` strands leases.
+ */
+export interface AddPageOpts {
+  /** Mark this URL `done` in the transaction that commits its page row. */
+  complete: boolean;
+}
+
 type PageRow = typeof pages.$inferInsert;
+
+/** A page row waiting to be written, and the frontier URL it settles. */
+interface BufferedPage {
+  row: PageRow;
+  complete: boolean;
+}
+
 type LinkRow = typeof links.$inferInsert;
 type HreflangRow = typeof hreflang.$inferInsert;
 type StructuredDataRow = typeof structuredData.$inferInsert;
@@ -94,7 +148,7 @@ export class PageWriter {
   private readonly batchSize: number;
   private readonly pageTypePatterns: PageTypePattern[] | undefined;
 
-  private readonly pageBuffer: PageRow[] = [];
+  private readonly pageBuffer: BufferedPage[] = [];
   private readonly linkBuffer: LinkRow[] = [];
   private readonly hreflangBuffer: HreflangRow[] = [];
   private readonly structuredDataBuffer: StructuredDataRow[] = [];
@@ -133,16 +187,24 @@ export class PageWriter {
    * redirect, a timeout. Those still get a `pages` row: the fetch outcome is
    * the audit fact, and a URL that vanished from the table would be a silent
    * failure.
+   *
+   * `opts.complete` decides whether this page row also finishes the URL's
+   * frontier row. It is not acted on here — buffering a row is not writing it,
+   * and that gap is the whole bug this argument exists to close. The
+   * completion happens in `flushPages`, with the insert.
    */
   async addPage(
     item: PageWriterItem,
     fetch: FetchResult,
     analysis: PageAnalysis | null,
+    opts: AddPageOpts,
   ): Promise<string> {
     const pageId = `page_${randomUUID()}`;
 
-    await this.push(this.pageBuffer, [this.pageRow(pageId, item, fetch, analysis)], () =>
-      this.flushPages(),
+    await this.push(
+      this.pageBuffer,
+      [{ row: this.pageRow(pageId, item, fetch, analysis), complete: opts.complete }],
+      () => this.flushPages(),
     );
 
     if (analysis !== null) {
@@ -202,7 +264,10 @@ export class PageWriter {
    * A batch that fails is lost: its rows were taken out of the buffer before
    * the insert. That is the transparent outcome — the error names the table
    * and the row count, and the caller decides — not a silent retry that could
-   * double-write rows the database may in fact have committed.
+   * double-write rows the database may in fact have committed. For `pages` the
+   * loss is also recoverable: the transaction took the frontier completions
+   * down with it, so those URLs are still unfinished and a resume re-fetches
+   * precisely them.
    */
   async flush(): Promise<void> {
     const drains: Array<[string, () => Promise<void>]> = [
@@ -271,22 +336,48 @@ export class PageWriter {
     this.counts[counter] += written;
   }
 
+  /**
+   * Write the buffered page rows and complete their frontier URLs, atomically.
+   *
+   * The transaction is the fix for hard-kill durability (see the module
+   * header): outside it, a crash between the insert and the completion leaves
+   * either a page nobody will ever mark done (harmless — the resume re-fetches
+   * it and the conflict absorbs the row) or a URL marked done whose page row
+   * never landed (a hole in the audit that no resume will fill). Only one
+   * ordering is safe, and a transaction is how the database enforces it rather
+   * than how we remember to.
+   *
+   * The completion is deliberately unconditional on the insert's outcome: a
+   * page row dropped by the `(crawl_id, url)` conflict means the page is
+   * already in the table under a row this crawl wrote, so the URL is settled
+   * either way. `completeUrls` is a no-op for a URL with no frontier row, which
+   * is what makes the writer usable without a frontier at all.
+   */
   private async flushPages(): Promise<void> {
-    await this.drain("pages", "pages", this.pageBuffer, async (batch) => {
-      // A redirect target can already have been crawled under its own row, and
-      // (crawl_id, url) is unique. The loser of that race keeps its minted
-      // pageId on its child rows, which then point at a page row that does not
-      // exist. That is deliberate: de-duplicating here would need a per-crawl
-      // set of URLs in memory, which is exactly the O(URLs) structure the
-      // memory contract forbids. Link resolution is a SQL join on target_url,
-      // not on these ids, so it is unaffected.
-      const inserted = await this.db
-        .insert(pages)
-        .values(batch)
-        .onConflictDoNothing({ target: [pages.crawlId, pages.url] })
-        .returning({ id: pages.id });
-      return inserted.length;
-    });
+    await this.drain("pages", "pages", this.pageBuffer, async (batch) =>
+      this.db.transaction(async (tx) => {
+        // A redirect target can already have been crawled under its own row,
+        // and (crawl_id, url) is unique. The loser of that race keeps its
+        // minted pageId on its child rows, which then point at a page row that
+        // does not exist. That is deliberate: de-duplicating here would need a
+        // per-crawl set of URLs in memory, which is exactly the O(URLs)
+        // structure the memory contract forbids. Link resolution is a SQL join
+        // on target_url, not on these ids, so it is unaffected.
+        const inserted = await tx
+          .insert(pages)
+          .values(batch.map((buffered) => buffered.row))
+          .onConflictDoNothing({ target: [pages.crawlId, pages.url] })
+          .returning({ id: pages.id });
+
+        await completeUrls(
+          tx,
+          this.crawlId,
+          batch.filter((buffered) => buffered.complete).map((buffered) => buffered.row.url),
+        );
+
+        return inserted.length;
+      }),
+    );
   }
 
   private async flushLinks(): Promise<void> {
@@ -385,6 +476,14 @@ export class PageWriter {
       hasSoft404Phrases: analysis?.hasSoft404Phrases ?? false,
       relNext: analysis?.relNext ?? null,
       relPrev: analysis?.relPrev ?? null,
+      // A page with no HTML has no navigation and no framework tell, so the
+      // no-analysis case is 0/0/[] rather than a null: the columns are NOT
+      // NULL, and "this page served a PDF" is not "we do not know how many nav
+      // links it had". The render-side twins are the ones that stay null, and
+      // they are written by the render pass, never here.
+      navLinkCount: analysis?.navLinkCount ?? 0,
+      footerLinkCount: analysis?.footerLinkCount ?? 0,
+      frameworkMarkers: analysis?.frameworkMarkers ?? [],
       structuredDataParseErrors: analysis?.structuredDataParseErrors ?? 0,
     };
   }

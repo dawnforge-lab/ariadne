@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -57,7 +57,15 @@ describe("buildRegistry", () => {
     expect(ids).toContain("url.param-volumes");
     expect(ids).toContain("redirect.volume");
     expect(ids).toContain("sitemap.structure");
-    expect(ids.length).toBe(74);
+    // And Phase 5's render rules: the three diffs between the raw HTML and the
+    // rendered DOM, the JavaScript redirect, and the coverage metric that says
+    // how much of the crawl those four could speak for.
+    expect(ids).toContain("content.csr-dependent");
+    expect(ids).toContain("nav.js-only");
+    expect(ids).toContain("filters.js-only");
+    expect(ids).toContain("redirect.js");
+    expect(ids).toContain("render.coverage");
+    expect(ids.length).toBe(79);
   });
 
   it("registers every kind the runner drives", () => {
@@ -312,6 +320,74 @@ describe("runRules against the database", () => {
     expect(await db.select().from(urlParams).where(eq(urlParams.crawlId, crawlId))).toHaveLength(
       rows.length,
     );
+  });
+
+  // Planner statistics, and why this is a test rather than a comment: the
+  // Phase 4 gate disclosed that the rules run had usable statistics only
+  // because autovacuum happened to analyze mid-crawl. Nothing about that is
+  // observable from a run's output — a planner working from "0 rows" produces
+  // the same findings, slowly — so the only way the ANALYZE can be known to
+  // still be there is to watch Postgres record it.
+  //
+  // Both statements are pinned here, by count rather than by timestamp: the
+  // top-of-run one over every table a rule reads, and the second one over the
+  // two tables the derivation phase rewrites in between.
+  it("analyzes every table the rules read, and the derivation-fed pair twice", async () => {
+    const crawlId = await newCrawl();
+    const listing = mkRow(crawlId, "/list?colour=red", { depth: 0, discoveredVia: "seed" });
+    await db.insert(pages).values([listing]);
+    await db.insert(structuredData).values([
+      {
+        crawlId,
+        pageId: listing.id,
+        schemaType: "Product",
+        raw: { "@type": "Product", name: "A product with nothing else" },
+      },
+    ]);
+
+    // `analyze_count`, not `last_analyze`: it counts MANUAL analyzes per table
+    // (autovacuum's are counted separately, in `autoanalyze_count`), so the
+    // delta says how many times the run analyzed each table and no ordering
+    // between tables has to be inferred from timestamps.
+    const analyzeCounts = async (): Promise<Record<string, number>> => {
+      const { rows } = await db.execute<{ relname: string; analyze_count: string }>(
+        sql`select relname, analyze_count from pg_stat_user_tables
+            where relname in ('pages', 'links', 'sitemap_urls', 'url_params',
+                              'hreflang', 'issues', 'structured_data', 'metrics')`,
+      );
+      return Object.fromEntries(rows.map((r) => [r.relname, Number(r.analyze_count)]));
+    };
+
+    const before = await analyzeCounts();
+    await runRules(db, crawlId, buildRegistry());
+    const after = await analyzeCounts();
+    const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
+
+    // The counters are database-wide and vitest runs test files in parallel
+    // against one database, so another file's `runRules` can land inside this
+    // window. The assertions are therefore RATIOS against `pages`, which every
+    // run analyzes exactly once: N concurrent runs move `pages` by N and the
+    // derivation-fed pair by 2N, so the relationship holds however many there
+    // were. `runRules` is the only thing in the repo that issues an ANALYZE,
+    // which is what makes `pages` a usable clock here.
+    const runs = delta("pages");
+    expect(runs, "the run did not analyze pages at all").toBeGreaterThanOrEqual(1);
+    // Once per run, at the top, before the first rule reads them.
+    for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+      expect(delta(table), `${table} was not analyzed once per run`).toBe(runs);
+    }
+    // And twice per run for the two tables the derivation phase rewrites
+    // mid-run: once at the top (where, on a crawl's first run, `url_params` is
+    // still EMPTY and the planner is taught exactly that) and once across the
+    // derivation seam, before the query rules that join them.
+    for (const table of ["url_params", "structured_data"]) {
+      expect(delta(table), `${table} was not analyzed twice per run`).toBe(2 * runs);
+    }
+    // `metrics` is deliberately absent from both statements: no rule reads it,
+    // the metric phase only writes it. That exclusion IS assertable here —
+    // unlike a claim about `last_analyze`, which autovacuum could move at any
+    // moment — because `analyze_count` only ever counts a manual ANALYZE.
+    expect(delta("metrics")).toBe(0);
   });
 
   // A crawl id nothing knows produces no pages, which is indistinguishable

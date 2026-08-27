@@ -11,6 +11,12 @@ import {
   structuredData,
 } from "../../src/db/schema.js";
 import { PageWriter } from "../../src/crawl/persist.js";
+import {
+  enqueueUrls,
+  failUrl,
+  frontierCounts,
+  leaseBatch,
+} from "../../src/crawl/frontier.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
 import type { PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
 
@@ -42,6 +48,9 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     hasViewport: false,
     hasLoremIpsum: false,
     hasSoft404Phrases: false,
+    navLinkCount: 7,
+    footerLinkCount: 4,
+    frameworkMarkers: ["__NEXT_DATA__"],
     links: [
       { href: `${SITE}/one`, anchor: "one", rel: null, nofollow: false, position: 0 },
       {
@@ -142,7 +151,7 @@ describe("PageWriter", () => {
     const writer = new PageWriter(db, crawlId, { batchSize: 100 });
     for (let i = 0; i < 250; i++) {
       const url = `${SITE}/p/${i}`;
-      await writer.addPage(item(url), makeFetch(url), makeAnalysis());
+      await writer.addPage(item(url), makeFetch(url), makeAnalysis(), { complete: true });
     }
     await writer.flush();
 
@@ -163,7 +172,9 @@ describe("PageWriter", () => {
       position: i,
     }));
     const url = `${SITE}/hub`;
-    await writer.addPage(item(url), makeFetch(url), makeAnalysis({ links: many }));
+    await writer.addPage(item(url), makeFetch(url), makeAnalysis({ links: many }), {
+      complete: true,
+    });
 
     // 250 link rows with batchSize 100 means two full batches already went to
     // the database *inside* addPage; only the 50-row remainder is still held.
@@ -241,7 +252,7 @@ describe("PageWriter", () => {
       ],
     ];
     for (const [url, fetch, analysis] of cases) {
-      await writer.addPage(item(url), fetch, analysis);
+      await writer.addPage(item(url), fetch, analysis, { complete: true });
     }
     await writer.flush();
 
@@ -264,6 +275,7 @@ describe("PageWriter", () => {
       item(url),
       makeFetch(url),
       makeAnalysis({ simhash: unsigned }),
+      { complete: true },
     );
     await writer.flush();
 
@@ -284,6 +296,7 @@ describe("PageWriter", () => {
       item(url),
       makeFetch(url),
       makeAnalysis({ structuredData: [], structuredDataParseErrors: 3 }),
+      { complete: true },
     );
     await writer.flush();
 
@@ -308,6 +321,7 @@ describe("PageWriter", () => {
           { code: "es", href: "http://[bad" },
         ],
       }),
+      { complete: true },
     );
     await writer.flush();
 
@@ -326,7 +340,9 @@ describe("PageWriter", () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     const url = `${SITE}/links`;
-    const pageId = await writer.addPage(item(url), makeFetch(url), makeAnalysis());
+    const pageId = await writer.addPage(item(url), makeFetch(url), makeAnalysis(), {
+      complete: true,
+    });
     await writer.flush();
 
     const rows = await db
@@ -353,7 +369,9 @@ describe("PageWriter", () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     const url = `${SITE}/Mixed/Case/?b=2&a=1`;
-    await writer.addPage(item(url, 2, "sitemap"), makeFetch(url), makeAnalysis());
+    await writer.addPage(item(url, 2, "sitemap"), makeFetch(url), makeAnalysis(), {
+      complete: true,
+    });
     await writer.flush();
 
     const [row] = await db
@@ -391,8 +409,11 @@ describe("PageWriter", () => {
         redirectUrl: `${SITE}/target?b=2&a=1#section`,
       }),
       null,
+      { complete: true },
     );
-    await writer.addPage(item(`${SITE}/stays`), makeFetch(`${SITE}/stays`), makeAnalysis());
+    await writer.addPage(item(`${SITE}/stays`), makeFetch(`${SITE}/stays`), makeAnalysis(), {
+      complete: true,
+    });
     await writer.flush();
 
     const rows = await db
@@ -429,7 +450,11 @@ describe("PageWriter", () => {
         imagesMissingDimensions: 3,
         hasLoremIpsum: true,
         hasSoft404Phrases: true,
+        navLinkCount: 21,
+        footerLinkCount: 9,
+        frameworkMarkers: ["__NEXT_DATA__", "data-reactroot"],
       }),
+      { complete: true },
     );
     await writer.flush();
 
@@ -440,6 +465,14 @@ describe("PageWriter", () => {
         imagesMissingDimensions: pages.imagesMissingDimensions,
         hasLoremIpsum: pages.hasLoremIpsum,
         hasSoft404Phrases: pages.hasSoft404Phrases,
+        navLinkCount: pages.navLinkCount,
+        footerLinkCount: pages.footerLinkCount,
+        frameworkMarkers: pages.frameworkMarkers,
+        renderedNavLinkCount: pages.renderedNavLinkCount,
+        renderedFooterLinkCount: pages.renderedFooterLinkCount,
+        renderedFilterLinkCount: pages.renderedFilterLinkCount,
+        renderedRedirectUrl: pages.renderedRedirectUrl,
+        renderError: pages.renderError,
       })
       .from(pages)
       .where(eq(pages.crawlId, crawlId));
@@ -448,13 +481,24 @@ describe("PageWriter", () => {
     expect(row?.imagesMissingDimensions).toBe(3);
     expect(row?.hasLoremIpsum).toBe(true);
     expect(row?.hasSoft404Phrases).toBe(true);
+    expect(row?.navLinkCount).toBe(21);
+    expect(row?.footerLinkCount).toBe(9);
+    expect(row?.frameworkMarkers).toEqual(["__NEXT_DATA__", "data-reactroot"]);
+    // The render-side twins belong to the render pass and to nothing else: the
+    // HTML crawl leaves them null, which is what says this page was never
+    // rendered rather than rendered and found to have no navigation.
+    expect(row?.renderedNavLinkCount).toBeNull();
+    expect(row?.renderedFooterLinkCount).toBeNull();
+    expect(row?.renderedFilterLinkCount).toBeNull();
+    expect(row?.renderedRedirectUrl).toBeNull();
+    expect(row?.renderError).toBeNull();
   });
 
   it("strips a trailing slash from url_normalised", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     for (const url of [`${SITE}/x/`, `${SITE}/`]) {
-      await writer.addPage(item(url), makeFetch(url), makeAnalysis());
+      await writer.addPage(item(url), makeFetch(url), makeAnalysis(), { complete: true });
     }
     await writer.flush();
 
@@ -473,7 +517,7 @@ describe("PageWriter", () => {
       pageTypePatterns: [{ pattern: "/products/", pageType: "product" }],
     });
     const url = `${SITE}/products/blue-widget`;
-    await writer.addPage(item(url), makeFetch(url), makeAnalysis());
+    await writer.addPage(item(url), makeFetch(url), makeAnalysis(), { complete: true });
     await writer.flush();
 
     const [row] = await db
@@ -496,6 +540,7 @@ describe("PageWriter", () => {
         contentType: "text/html",
       }),
       null,
+      { complete: true },
     );
     await writer.flush();
 
@@ -511,6 +556,12 @@ describe("PageWriter", () => {
     expect(row?.imagesMissingDimensions).toBe(0);
     expect(row?.hasLoremIpsum).toBe(false);
     expect(row?.hasSoft404Phrases).toBe(false);
+    // Same reading for the nav captures: no HTML, no navigation. These three
+    // are NOT NULL columns, so 0/0/[] is the value, and it is a fact about the
+    // page rather than a stand-in for a missing one.
+    expect(row?.navLinkCount).toBe(0);
+    expect(row?.footerLinkCount).toBe(0);
+    expect(row?.frameworkMarkers).toEqual([]);
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);
@@ -520,8 +571,8 @@ describe("PageWriter", () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     const url = `${SITE}/twice`;
-    await writer.addPage(item(url), makeFetch(url), null);
-    await writer.addPage(item(url), makeFetch(url), null);
+    await writer.addPage(item(url), makeFetch(url), null, { complete: true });
+    await writer.addPage(item(url), makeFetch(url), null, { complete: true });
     await writer.flush();
     expect(await countOf(pages, crawlId)).toBe(1);
   });
@@ -547,6 +598,7 @@ describe("PageWriter", () => {
           },
         ],
       }),
+      { complete: true },
     );
 
     let caught: unknown;
@@ -577,11 +629,169 @@ describe("PageWriter", () => {
     });
   });
 
+  /**
+   * The hard-kill contract (build plan §7). A crawl marked a URL `done` as soon
+   * as its page row was *buffered*, so a SIGKILL took up to `batchSize - 1`
+   * pages with it and no resume ever fetched them again. These four tests are
+   * the contract that replaced it: the frontier row moves only when the page
+   * row commits, and the two move together.
+   */
+  describe("hard-kill durability", () => {
+    /** Seed `urls` into the frontier of `crawlId` and lease them all. */
+    async function leased(crawlId: string, urls: string[]): Promise<void> {
+      await enqueueUrls(
+        db,
+        crawlId,
+        urls.map((url) => ({ url, depth: 1, discoveredVia: "link" })),
+      );
+      await leaseBatch(db, crawlId, "w1", urls.length, 600);
+    }
+
+    it("a buffered page row leaves its URL leased, and a flush finishes both", async () => {
+      const crawlId = await newCrawl();
+      const urls = [`${SITE}/buffered/1`, `${SITE}/buffered/2`, `${SITE}/buffered/3`];
+      await leased(crawlId, urls);
+
+      // Fewer pages than the batch size: nothing has reached the database.
+      const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+      for (const url of urls) {
+        await writer.addPage(item(url), makeFetch(url), null, { complete: true });
+      }
+
+      // The kill lands here. The frontier still owes every one of these URLs,
+      // so a resume re-fetches exactly what the buffer was holding.
+      expect(await countOf(pages, crawlId)).toBe(0);
+      expect(await frontierCounts(db, crawlId)).toEqual({
+        pending: 0,
+        leased: 3,
+        done: 0,
+        failed: 0,
+        renderPending: 0,
+      });
+
+      await writer.flush();
+      expect(await countOf(pages, crawlId)).toBe(3);
+      expect(await frontierCounts(db, crawlId)).toEqual({
+        pending: 0,
+        leased: 0,
+        done: 3,
+        failed: 0,
+        renderPending: 0,
+      });
+    });
+
+    it("completes only the URLs the caller said it was not settling itself", async () => {
+      const crawlId = await newCrawl();
+      const mine = `${SITE}/settled/by-writer`;
+      const theirs = `${SITE}/settled/by-caller`;
+      await leased(crawlId, [mine, theirs]);
+
+      const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+      await writer.addPage(item(mine), makeFetch(mine), null, { complete: true });
+      await writer.addPage(item(theirs), makeFetch(theirs), null, { complete: false });
+      // What the crawl loop does with a URL whose retries are spent, before the
+      // flush that writes its row. A completion here would overwrite it.
+      await failUrl(db, crawlId, theirs, { requeue: false, maxAttempts: 3 });
+      await writer.flush();
+
+      expect(await countOf(pages, crawlId)).toBe(2);
+      expect(await frontierCounts(db, crawlId)).toEqual({
+        pending: 0,
+        leased: 0,
+        done: 1,
+        failed: 1,
+        renderPending: 0,
+      });
+    });
+
+    it("rolls the page rows back when the completion fails mid-transaction", async () => {
+      const crawlId = await newCrawl();
+      const ok = `${SITE}/atomic/ok`;
+      const boom = `${SITE}/atomic/boom`;
+      await leased(crawlId, [ok, boom]);
+
+      // A failure inside the transaction, raised by Postgres itself: the
+      // completion of `boom` throws after the page rows have been inserted.
+      // Without one transaction around the pair, this is precisely the state
+      // the bug produced — rows written, URLs still owed, or the reverse.
+      await db.execute(
+        sql.raw(`create or replace function ariadne_test_boom() returns trigger
+                 language plpgsql as $$ begin
+                   raise exception 'boom: injected mid-transaction failure';
+                 end $$`),
+      );
+      await db.execute(
+        sql.raw(`create trigger ariadne_test_boom_trg before update on frontier
+                 for each row when (new.url = '${boom}')
+                 execute function ariadne_test_boom()`),
+      );
+
+      try {
+        const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+        for (const url of [ok, boom]) {
+          await writer.addPage(item(url), makeFetch(url), null, { complete: true });
+        }
+
+        let caught: unknown;
+        try {
+          await writer.flush();
+        } catch (error) {
+          caught = error;
+        }
+        // Loud, and named: the page flush is the failure, not a silent skip.
+        expect(caught).toBeInstanceOf(AggregateError);
+        expect((caught as AggregateError).message).toContain("pages");
+
+        // Both halves are gone: no page rows, and no URL marked done — not even
+        // the one whose completion would have succeeded on its own.
+        expect(await countOf(pages, crawlId)).toBe(0);
+        expect(await frontierCounts(db, crawlId)).toEqual({
+          pending: 0,
+          leased: 2,
+          done: 0,
+          failed: 0,
+          renderPending: 0,
+        });
+      } finally {
+        await db.execute(sql.raw("drop trigger if exists ariadne_test_boom_trg on frontier"));
+        await db.execute(sql.raw("drop function if exists ariadne_test_boom()"));
+      }
+    });
+
+    it("completes a URL whose page row lost the (crawl, url) conflict", async () => {
+      // The redirect-target race: another handler wrote this crawl's row for
+      // the URL first, so this insert drops the duplicate and returns nothing.
+      // The URL is still crawled and still owed a completion — leaving it
+      // leased would send the resume back for a page that is already there.
+      const crawlId = await newCrawl();
+      const url = `${SITE}/atomic/duplicate`;
+      await leased(crawlId, [url]);
+      await db.insert(pages).values({
+        id: `page_${randomUUID()}`,
+        crawlId,
+        url,
+        urlNormalised: url.toLowerCase(),
+        statusCode: 200,
+        fetchClass: "ok",
+        depth: 1,
+        discoveredVia: "redirect",
+      });
+
+      const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+      await writer.addPage(item(url), makeFetch(url), null, { complete: true });
+      await writer.flush();
+
+      expect(await countOf(pages, crawlId)).toBe(1);
+      expect(writer.stats().pages).toBe(0); // the row was dropped, and says so
+      expect((await frontierCounts(db, crawlId)).done).toBe(1);
+    });
+  });
+
   it("flush is idempotent and reports what it wrote", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
     const url = `${SITE}/flush`;
-    await writer.addPage(item(url), makeFetch(url), makeAnalysis());
+    await writer.addPage(item(url), makeFetch(url), makeAnalysis(), { complete: true });
     await writer.flush();
     await writer.flush();
     await writer.flush();

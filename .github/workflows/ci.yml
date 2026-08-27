@@ -31,6 +31,33 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The render pass drives a real Chromium (src/crawl/render/renderer.ts),
+      # and so do the tests that prove it: test/crawl/renderer.test.ts and the
+      # end-to-end harness, which renders sixty-nine fixture pages. A runner
+      # without the browser fails those suites at `chromium.launch`, so the
+      # install is a build step, not an optional extra.
+      #
+      # The version comes from package-lock.json rather than from
+      # package.json's range: the browser build a Playwright release downloads
+      # is pinned to that release, so a cache keyed on `^1.62.1` would serve a
+      # 1.62.1 browser to a 1.63 client after the next lockfile bump. Read out
+      # of the lockfile, the key changes exactly when the downloaded bytes do.
+      - name: Resolve the locked Playwright version
+        id: playwright
+        run: |
+          echo "version=$(node -p "require('./package-lock.json').packages['node_modules/playwright'].version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+      # Run unconditionally, cache hit or miss. On a hit the browser download is
+      # skipped and this costs seconds; `--with-deps` still installs the system
+      # libraries Chromium links against, which live in /usr and are not part of
+      # the cached directory. ubuntu-latest runs as a normal user with an
+      # unprivileged-namespace sandbox available, so no sandbox flags are wired
+      # here — the renderer launches headless Chromium with its defaults, which
+      # is what production does.
+      - run: npx playwright install --with-deps chromium
       - run: npx tsc --noEmit
       - run: npm run db:migrate
       - run: npm test

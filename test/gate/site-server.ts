@@ -37,8 +37,41 @@ export interface GateSite {
   base: string;
   /** How many crawlable HTML URLs this site has, `/` included. */
   pages: number;
+  /** A snapshot of what this server has answered so far. See `ServedCounts`. */
+  served(): ServedCounts;
   close(): Promise<void>;
 }
+
+/**
+ * Three integers, and deliberately not one per URL.
+ *
+ * The module header forbids this file growing state keyed by URL — that would
+ * make the fixture, rather than the crawler, the thing the gate measures. Three
+ * counters are O(1) for any site size and cost one increment on a path this
+ * handler was already classifying, so they are inside that rule rather than an
+ * exception to it.
+ *
+ * They exist for the phase-5 gate's politeness question. The render pass aborts
+ * same-origin `image`/`media`/`font` subresources and every third-party request
+ * (src/crawl/render/renderer.ts), and the only way to know an abort reached the
+ * WIRE rather than merely a counter inside the renderer is to ask the server
+ * what it was asked for. Every page of this fixture carries four `<img>` tags,
+ * so a render phase that leaves `notFound` unmoved is the block working: those
+ * `/media/…` requests would 404 here if they arrived.
+ */
+export interface ServedCounts {
+  /** A page path that exists: `/`, `/products/pN`, `/blog/N`. */
+  html: number;
+  /** `robots.txt`, the sitemap index, a sitemap shard. */
+  meta: number;
+  /** Everything else — a `/media/…` image, `/favicon.ico`, an invented URL. */
+  notFound: number;
+  /** The sum. Every request this server has answered. */
+  total: number;
+}
+
+/** What `respond` decided a path was, so the caller can count it. */
+type ServedClass = "html" | "meta" | "notFound";
 
 /** Internal links emitted per page. */
 const LINKS_PER_PAGE = 20;
@@ -313,31 +346,37 @@ function send(res: ServerResponse, status: number, contentType: string, body: st
   res.end(buffer);
 }
 
-/** The whole site as one pure function: a path in, a response out. */
-function respond(path: string, site: Layout, base: string, res: ServerResponse): void {
+/**
+ * The whole site as one pure function: a path in, a response out.
+ *
+ * It also returns what it decided the path was, so the caller can count it
+ * without re-deciding — one classification, one place (see `ServedCounts`).
+ */
+function respond(path: string, site: Layout, base: string, res: ServerResponse): ServedClass {
   if (path === "/robots.txt") {
     send(res, 200, "text/plain; charset=utf-8", robotsTxt(base));
-    return;
+    return "meta";
   }
   if (path === "/sitemap.xml") {
     send(res, 200, "application/xml; charset=utf-8", sitemapIndex(base));
-    return;
+    return "meta";
   }
   const shard = /^\/sitemap-(\d+)\.xml$/.exec(path);
   if (shard !== null) {
     const n = Number(shard[1]);
     if (n < SITEMAP_SHARDS) {
       send(res, 200, "application/xml; charset=utf-8", sitemapShard(n, site, base));
-      return;
+      return "meta";
     }
   }
 
   const index = indexOfPath(path, site);
   if (index === null) {
     send(res, 404, "text/html; charset=utf-8", "<!doctype html><title>404</title><h1>Not found</h1>");
-    return;
+    return "notFound";
   }
   send(res, 200, "text/html; charset=utf-8", renderPage(index, site, base));
+  return "html";
 }
 
 /**
@@ -372,11 +411,14 @@ export async function startSiteServer(pages: number): Promise<GateSite> {
   const site = layout(pages);
   let base = "";
 
+  const served: ServedCounts = { html: 0, meta: 0, notFound: 0, total: 0 };
+
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     // Query strings and fragments are not part of this site's URL space; the
     // path alone decides the response, which is the determinism promise.
     const path = (req.url ?? "/").split("?")[0] ?? "/";
-    respond(path, site, base, res);
+    served[respond(path, site, base, res)] += 1;
+    served.total += 1;
   });
 
   // The crawler holds 16 sockets open across a run of several minutes; the
@@ -398,6 +440,9 @@ export async function startSiteServer(pages: number): Promise<GateSite> {
   return {
     base,
     pages,
+    // A copy, not the live object: a caller that took two readings and got the
+    // same mutable reference twice would compare a number with itself.
+    served: () => ({ ...served }),
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.closeAllConnections();

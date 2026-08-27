@@ -1,13 +1,26 @@
 /**
- * The Phase 4 gate: the WHOLE pipeline over 50,000 pages in one process —
- * crawl, then every rule of every kind — staying under 512MB of RSS.
+ * The whole-pipeline gate: 50,000 pages through every pass this engine has, in
+ * ONE process, staying under 512MB of RSS.
  *
  * Phase 1 measured the crawler alone (169.5 MB peak, docs/gates/phase-1.md).
- * Phase 4 adds the half that was missing: the rule pass. It scans the 50,000
- * `pages` rows through 26 page rules, runs the two derivations, then 38 query
- * rules and 10 metric rules that read the crawl's tables whole — in SQL, never
- * into the heap (hard rule 3). The 512MB contract covers the process, so it
- * covers both halves.
+ * Phase 4 added the half that was missing — the rule pass — and this script was
+ * written for it. Phase 5 adds the pass BETWEEN them: a budgeted render pass
+ * that drives a real Chromium over a selection of the crawl (spec §5). So the
+ * script now runs three phases, in the order production runs them:
+ *
+ *   crawl  →  render  →  rules
+ *
+ * WHY IT IS THIS SCRIPT AND NOT A SECOND ONE. The gate's only hard memory
+ * number is the peak RSS of a process that does all of it, and there is exactly
+ * one way to measure that: do all of it in one process. A `scripts/gate-render.ts`
+ * beside this one would have to crawl 50,000 pages itself to have anything to
+ * render, and would then be this file with a different name — or it would skip
+ * the crawl, and measure a render pass against a peak that no longer contains
+ * the crawler. The render phase is therefore inserted here, and the consequence
+ * is stated rather than hidden: **`docs/gates/phase-4.md`'s reproduction command
+ * now runs three phases, not two.** That document is immutable and its numbers
+ * stand as the record of the tree they were measured on; the supersession is
+ * noted in `docs/gates/phase-5.md`.
  *
  * Run it the way the gate is defined:
  *
@@ -17,32 +30,54 @@
  * without it an unbounded structure merely makes the machine swap; with it, the
  * process dies at the boundary and says so.
  *
+ * WHEN THE FIXTURE CLOSES, AND WHY IT MOVED. Phase 4 closed the fixture web
+ * server the instant the crawl ended, so that a rule reaching for the network
+ * (hard rule 2) got a connection refused rather than a page. The render pass
+ * *must* fetch — that is what it is — so the fixture now stays up through it and
+ * closes immediately after. The rule pass still faces a dead socket, which is
+ * the property that was worth having.
+ *
  * WHAT IS GATED AND WHAT IS MERELY RECORDED
  *
  *  - **Gated:** peak RSS across the whole process, ≤ 512MB. Over the line is a
  *    non-zero exit; the script itself takes no heap snapshot. Finding the
  *    unbounded structure with one is the operator's next step, and raising the
- *    line is not an option (build plan rule 6).
- *    Also gated: the crawl reaching exactly the fixture's page count, and the
- *    rule pass scanning exactly the pages the crawl wrote — a rule pass that
- *    silently judged half a site would otherwise read as a fast one.
- *  - **Recorded, not gated:** every wall time here. This is the first
- *    measurement of the rule pass at scale, so it is the baseline rather than a
- *    threshold. Two rules are printed by name whatever they rank, for two
- *    different reasons:
+ *    line is not an option (build plan rule 6). The 512MB contract is about
+ *    THIS process — the browser's own processes are children with their own
+ *    address spaces, so their RSS is measured and reported beside the gated
+ *    number rather than folded into it (see `childRssBytes`).
+ *    Also gated: the crawl reaching exactly the fixture's page count; the rule
+ *    pass scanning exactly the pages the crawl wrote (a rule pass that silently
+ *    judged half a site would otherwise read as a fast one); and the render
+ *    pass rendering **no more than `GATE_RENDER_PCT` of the crawled URLs**,
+ *    which is the budget contract of spec §5 asserted rather than trusted.
+ *  - **Recorded, not gated:** every wall time here, and every number the render
+ *    pass produces except the count above. Two rules are printed by name
+ *    whatever they rank, for two different reasons:
  *      - `content.near-duplicate` — the simhash banding join, quadratic within
  *        a band. Phase 3's gate doc measured it on a 5k corpus and explicitly
  *        mandated a re-measure here. This is that mandate.
  *      - `content.template-similarity` — a Phase 4 rule, so Phase 3 mandated
  *        nothing about it; its OWN header flags a cost linear in the number of
  *        page types, and that flag has never been measured at scale.
+ *    And the render pass's own numbers are printed in full — selection stats,
+ *    per-render mean, failures by class, and what the fixture server was asked
+ *    for while the browser was running (the politeness residual, measured at the
+ *    wire rather than argued from the renderer's own counters).
  *
  * `allowPrivate: true` is the same sanctioned use as Phase 1: the site under
  * test is a loopback fixture (test/gate/site-server.ts).
  */
+import { readdirSync, readFileSync } from "node:fs";
+
 import { sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../src/db/client.js";
 import { CRAWL_DEFAULTS, runCrawl } from "../src/crawl/loop.js";
+import {
+  RENDER_PASS_DEFAULTS,
+  runRenderPass,
+  type RenderPassSummary,
+} from "../src/crawl/render/run-render.js";
 import { buildRegistry } from "../src/rules/index.js";
 import {
   Registry,
@@ -54,9 +89,17 @@ import {
 import { runRules } from "../src/rules/run.js";
 import { startSiteServer } from "../test/gate/site-server.js";
 
-/** The gate's two numbers. Both are the build plan's, not this script's. */
+/** The gate's three numbers. All are the build plan's, not this script's. */
 const GATE_PAGES = 50_000;
 const GATE_PEAK_RSS_BYTES = 512 * 1024 * 1024;
+/**
+ * The render budget, as a share of the crawled URLs — spec §5's "never more
+ * than 5% of the site leaves through a browser". `RENDER_DEFAULTS.renderBudgetPct`
+ * is the same number on the production side; it is restated here rather than
+ * imported ON PURPOSE, so that a gate assertion cannot be satisfied by editing
+ * the constant the code under test reads.
+ */
+const GATE_RENDER_PCT = 5;
 
 /** How often RSS is sampled — the Phase 1 interval, so the two are comparable. */
 const SAMPLE_MS = 2_000;
@@ -123,6 +166,110 @@ interface PhaseRss {
   peakBytes: number;
   /** Milliseconds from the start of the phase to its peak. */
   peakAtMs: number;
+  /** Peak summed RSS of this process's descendants. See `childRssBytes`. */
+  childPeakBytes: number;
+  /** How many descendants were alive at that peak. */
+  childPeakCount: number;
+}
+
+/**
+ * The RSS of every descendant of this process, summed, with a count.
+ *
+ * WHY THIS EXISTS AND WHAT IT IS WORTH. The 512MB contract is about the Node
+ * process (build plan rule 6), and `process.memoryUsage.rss()` reports exactly
+ * that — it cannot see Chromium, which Playwright runs as a child with its own
+ * address space and its own renderer/GPU/zygote children under it. Reporting
+ * only the gated number would let the phase-5 gate doc say "the render pass cost
+ * 12MB" about a pass that ran half a gigabyte of browser next door. So the
+ * browser tree is measured, and reported BESIDE the gated figure rather than
+ * added to it.
+ *
+ * **It is an upper bound, not a total.** RSS counts every resident page a
+ * process maps, and Chromium's processes share a great deal — the binary, the
+ * zygote's heap, shared memory buffers — so summing their RSS counts those pages
+ * once per process. The honest statement of the number is "no more than this",
+ * and that is how the gate doc must quote it. A true figure would need PSS
+ * (`/proc/<pid>/smaps_rollup`), which costs a kernel page walk per process per
+ * sample; that is too expensive to run every 2s next to the thing being timed.
+ *
+ * `/proc` is a live directory: a process can exit between `readdir` and the read
+ * of its `stat`. `ENOENT` and `ESRCH` — the two errnos the kernel reports for
+ * exactly that — are the only thing skipped here, BY NAME, and every other errno
+ * is rethrown. Skipping those two is not a fallback hiding a failure (hard rule
+ * 7): a process that no longer exists has no RSS, and a sample that threw for it
+ * would report the browser as costing nothing. Anything else — `EACCES` under a
+ * `hidepid` mount, say — means this reader cannot see the machine it claims to
+ * be measuring, and that must stop the gate rather than quietly shrink its
+ * browser figure.
+ */
+function childRssBytes(rootPid: number): { bytes: number; count: number } {
+  const pageSize = 4096;
+  /** pid → ppid, for every process on the machine. */
+  const parents = new Map<number, number>();
+  /** pid → resident pages, for the same. */
+  const resident = new Map<number, number>();
+
+  for (const entry of readdirSync("/proc")) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    let stat: string;
+    let statm: string;
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      statm = readFileSync(`/proc/${pid}/statm`, "utf8");
+    } catch (error) {
+      // The process exited between the readdir and here — and ONLY that. See
+      // the header: any other errno is this reader failing, not a pid vanishing.
+      if (!isVanishedProcessError(error)) throw error;
+      continue;
+    }
+    // `comm` is parenthesised and may itself contain spaces and parentheses, so
+    // the fields after it are found from the LAST ')' rather than by splitting
+    // the whole line — the classic /proc/stat parsing trap.
+    const close = stat.lastIndexOf(")");
+    if (close < 0) continue;
+    const after = stat.slice(close + 2).split(" ");
+    // After `comm` the fields are: state, ppid, … — ppid is the second.
+    const ppid = Number(after[1]);
+    const pages = Number(statm.split(" ")[1]);
+    if (!Number.isInteger(ppid) || !Number.isInteger(pages)) continue;
+    parents.set(pid, ppid);
+    resident.set(pid, pages);
+  }
+
+  let bytes = 0;
+  let count = 0;
+  for (const pid of parents.keys()) {
+    if (pid === rootPid) continue;
+    // Walk up to the root. The hop limit is not a guess about depth: /proc can
+    // hand back a cycle if a pid was reused mid-scan, and an unbounded walk
+    // would hang the sampler on it.
+    let cursor = pid;
+    for (let hop = 0; hop < 64; hop++) {
+      const parent = parents.get(cursor);
+      if (parent === undefined || parent <= 1) break;
+      if (parent === rootPid) {
+        bytes += (resident.get(pid) ?? 0) * pageSize;
+        count += 1;
+        break;
+      }
+      cursor = parent;
+    }
+  }
+  return { bytes, count };
+}
+
+/**
+ * Whether a `/proc` read failed because its process is gone.
+ *
+ * The two errnos the kernel uses for a pid that vanished between the `readdir`
+ * and the read: `ENOENT` (the directory entry is already unlinked) and `ESRCH`
+ * (the entry survives but the task behind it does not). Nothing else counts —
+ * see `childRssBytes`'s header.
+ */
+function isVanishedProcessError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
 }
 
 /**
@@ -136,7 +283,13 @@ interface PhaseRss {
 function startRssSampler(): {
   peakBytes: () => number;
   peakAtMs: () => number;
-  startPhase: () => void;
+  /**
+   * `children` turns on the /proc walk for this phase. Off by default: only the
+   * render phase has children, and walking every process on the machine every
+   * two seconds beside a crawl that is being timed is work the measurement does
+   * not need.
+   */
+  startPhase: (opts?: { children?: boolean }) => void;
   endPhase: () => PhaseRss;
   stop: () => void;
 } {
@@ -146,6 +299,9 @@ function startRssSampler(): {
   let phasePeak = peak;
   let phaseStartedAt = startedAt;
   let phasePeakAt = 0;
+  let watchChildren = false;
+  let childPeak = 0;
+  let childPeakCount = 0;
 
   const sample = (): void => {
     const rss = process.memoryUsage.rss();
@@ -156,6 +312,13 @@ function startRssSampler(): {
     if (rss > phasePeak) {
       phasePeak = rss;
       phasePeakAt = Date.now() - phaseStartedAt;
+    }
+    if (watchChildren) {
+      const children = childRssBytes(process.pid);
+      if (children.bytes > childPeak) {
+        childPeak = children.bytes;
+        childPeakCount = children.count;
+      }
     }
   };
   const timer = setInterval(sample, SAMPLE_MS);
@@ -168,15 +331,25 @@ function startRssSampler(): {
       return peak;
     },
     peakAtMs: () => peakAt,
-    startPhase: () => {
+    startPhase: (opts = {}) => {
       phaseStartedAt = Date.now();
       phasePeak = process.memoryUsage.rss();
       phasePeakAt = 0;
+      watchChildren = opts.children === true;
+      childPeak = 0;
+      childPeakCount = 0;
       sample();
     },
     endPhase: () => {
       sample();
-      return { peakBytes: phasePeak, peakAtMs: phasePeakAt };
+      const phase = {
+        peakBytes: phasePeak,
+        peakAtMs: phasePeakAt,
+        childPeakBytes: childPeak,
+        childPeakCount,
+      };
+      watchChildren = false;
+      return phase;
     },
     stop: () => clearInterval(timer),
   };
@@ -317,8 +490,9 @@ async function main(): Promise<number> {
   } else {
     console.log(
       isGate
-        ? `PHASE 4 GATE — full pipeline over ${GATE_PAGES.toLocaleString()} pages, ` +
-            `peak RSS must stay under ${GATE_PEAK_RSS_BYTES / MB}MB`
+        ? `PHASE 5 GATE — crawl + render + rules over ${GATE_PAGES.toLocaleString()} pages, ` +
+            `peak RSS must stay under ${GATE_PEAK_RSS_BYTES / MB}MB and the render pass ` +
+            `under ${GATE_RENDER_PCT}% of them`
         : `SMOKE RUN — ${pages.toLocaleString()} pages. NOT the gate (set GATE_PAGES=${GATE_PAGES} for that).`,
     );
   }
@@ -344,6 +518,13 @@ async function main(): Promise<number> {
   const sampler = startRssSampler();
   const site = reuse === null ? await startSiteServer(pages) : null;
   let siteOpen = site !== null;
+  /**
+   * What the render phase measured, or null on a rules-only run — where there
+   * is no fixture to render and the numbers would be another run's.
+   */
+  let renderReport: { summary: RenderPassSummary; ms: number; rss: PhaseRss } | null = null;
+  /** The crawl phase's own peak, kept for the three-phase summary at the end. */
+  let crawlPeakBytes = 0;
 
   try {
     let crawlId: string;
@@ -361,9 +542,21 @@ async function main(): Promise<number> {
       console.log("");
       console.log("— crawl phase —");
 
-      sampler.startPhase();
-      const crawlStartedAt = Date.now();
-      const summary = await runCrawl(db, {
+      // ONE CONFIG OBJECT, TWO PASSES. `RenderPassConfig` is satisfied
+      // structurally by a `CrawlConfig`, deliberately (run-render.ts's header):
+      // the render pass inherits the crawl's user agent and its per-host
+      // spacing, so a site cannot see two differently-behaved clients from one
+      // audit (rule 9). Handing both passes the same object is that design
+      // used rather than described.
+      //
+      // THE THREE RENDER KNOBS ARE DELIBERATELY ABSENT. `renderBudgetPct`,
+      // `renderMaxPages` and `renderSamplePerType` are left unset, so the pass
+      // resolves `RENDER_DEFAULTS` — and `crawls.config_jsonb` records a crawl
+      // that named none of them. That is the shape a default-configured
+      // production crawl has, and it is the shape `render.coverage` re-resolves
+      // its numbers from; the gate runs it rather than a configuration nobody
+      // ships. The drift that shape exposes is disclosed in docs/gates/phase-5.md.
+      const config = {
         siteUrl: `${site.base}/`,
         maxPages: budget,
         maxDepth: CRAWL_DEFAULTS.maxDepth,
@@ -375,9 +568,14 @@ async function main(): Promise<number> {
         allowPrivate: true,
         // Left at its default (on) deliberately: the host rules read the probe,
         // and Phase 1's gate crawl ran with it on too.
-      });
+      };
+
+      sampler.startPhase();
+      const crawlStartedAt = Date.now();
+      const summary = await runCrawl(db, config);
       const crawlMs = Date.now() - crawlStartedAt;
       const crawlRss = sampler.endPhase();
+      crawlPeakBytes = crawlRss.peakBytes;
       crawlId = summary.crawlId;
 
       console.log(line("crawl id", summary.crawlId));
@@ -404,12 +602,120 @@ async function main(): Promise<number> {
         console.error(`FAIL: crawled ${summary.pagesCrawled} pages, expected exactly ${pages}`);
         return 1;
       }
-      // The fixture is closed the moment the crawl is done: nothing in the rule
-      // pass may fetch (hard rule 2), and a site still listening would leave
-      // that claim untested. If a rule reaches for the network below, it now
-      // gets a connection refused rather than a page.
+
+      // ——— render phase ———
+      //
+      // The fixture is still up, and must be: this pass drives a real browser
+      // at it. The crawl's own `status` is `finished` by now, which is what
+      // `runRenderPass` requires before it will touch the frontier.
+      console.log("");
+      console.log("— render phase —");
+
+      const servedBefore = site.served();
+      sampler.startPhase({ children: true });
+      const renderStartedAt = Date.now();
+      // `onRequestBlocked` counts THIRD-PARTY aborts. On this fixture the
+      // number is expected to be zero — every URL the pages reference is
+      // same-origin — and zero is the point: it is the one number that can
+      // distinguish "the third-party block worked" from "there was nothing to
+      // block", once read beside the server's own request counters below.
+      let thirdPartyBlocked = 0;
+      const render = await runRenderPass(db, crawlId, config, {
+        onRequestBlocked: () => {
+          thirdPartyBlocked += 1;
+        },
+      });
+      const renderMs = Date.now() - renderStartedAt;
+      const renderRss = sampler.endPhase();
+      const servedAfter = site.served();
+
+      const attempted = render.rendered + render.failures;
+      console.log(line("budget", `${render.selection.budget} of ${pages.toLocaleString()} URLs`));
+      console.log(
+        line(
+          "candidates",
+          `${render.selection.suspects} suspect + ${render.selection.sampled} sampled = ` +
+            `${render.selection.suspects + render.selection.sampled}` +
+            `${render.selection.truncated ? " (truncated to the budget)" : ""}`,
+        ),
+      );
+      console.log(line("selected", render.selection.selected.length.toLocaleString()));
+      console.log(line("rendered", render.rendered.toLocaleString()));
+      console.log(line("failures", render.failures.toLocaleString()));
+      console.log(line("unrendered", render.unrendered.toLocaleString()));
+      console.log(line("elapsed", seconds(renderMs)));
+      // Wall ÷ renders, which at `renderConcurrency` workers is a THROUGHPUT
+      // figure and not one render's latency: four workers each spending ~3.4s
+      // (a navigation plus the 3s settle) produce a mean near 0.85s. Labelled
+      // with the concurrency so the two are never read as the same number.
+      const concurrency = RENDER_PASS_DEFAULTS.renderConcurrency;
+      console.log(
+        line(
+          "per render",
+          attempted === 0
+            ? "n/a (nothing rendered)"
+            : `${(renderMs / attempted).toFixed(0)}ms wall/render at concurrency ${concurrency} ` +
+              `(≈${((renderMs * concurrency) / attempted).toFixed(0)}ms per render latency)`,
+        ),
+      );
+      console.log(
+        line("peak RSS", `${megabytes(renderRss.peakBytes)} (at +${(renderRss.peakAtMs / 1000).toFixed(0)}s)`),
+      );
+      console.log(
+        line(
+          "browser RSS",
+          `${megabytes(renderRss.childPeakBytes)} across ${renderRss.childPeakCount} child ` +
+            `process(es) at its peak — NOT gated, and an upper bound (shared pages ` +
+            `counted once per process)`,
+        ),
+      );
+      console.log(
+        line(
+          "fixture served",
+          `${(servedAfter.total - servedBefore.total).toLocaleString()} requests during this ` +
+            `phase — ${servedAfter.html - servedBefore.html} html, ` +
+            `${servedAfter.meta - servedBefore.meta} meta, ` +
+            `${servedAfter.notFound - servedBefore.notFound} 404`,
+        ),
+      );
+      console.log(line("third-party", `${thirdPartyBlocked} request(s) aborted`));
+
+      // The pass's own invariant, checked rather than trusted: a URL is leased
+      // once, rendered once and completed once, so nothing may be left over.
+      if (attempted !== render.selection.selected.length || render.unrendered !== 0) {
+        console.error(
+          `FAIL: render pass attempted ${attempted} of ${render.selection.selected.length} ` +
+            `selected URLs and left ${render.unrendered} in render_pending`,
+        );
+        return 1;
+      }
+      // THE BUDGET CONTRACT, asserted on the count the pass was ALLOWED to make
+      // rather than the count it happened to make — a pass that selected 3,000
+      // pages and crashed after 400 has still broken the contract.
+      // `ceil`, because that is the arithmetic the selection itself does:
+      // `min(ceil(pages × pct/100), renderMaxPages)` in select.ts. Comparing
+      // against the un-rounded product fails a pass that obeyed its budget
+      // exactly — a 30-page smoke run is allowed ceil(1.5) = 2 seats and would
+      // be reported here as over a ceiling of 1.5. At 50,000 pages the two
+      // agree, so this is a hole in the small sizes, not in the gate run.
+      const renderCeiling = Math.ceil((summary.pagesCrawled * GATE_RENDER_PCT) / 100);
+      if (render.selection.selected.length > renderCeiling) {
+        console.error(
+          `FAIL: render pass selected ${render.selection.selected.length} URLs, over the ` +
+            `${GATE_RENDER_PCT}% ceiling of ${renderCeiling} for a ${summary.pagesCrawled}-page crawl`,
+        );
+        return 1;
+      }
+      renderReport = { summary: render, ms: renderMs, rss: renderRss };
+
+      // NOW the fixture closes — after the pass that is supposed to fetch and
+      // before the pass that is not. Nothing in the rule pass may fetch (hard
+      // rule 2), and a site still listening would leave that claim untested. If
+      // a rule reaches for the network below, it gets a connection refused
+      // rather than a page.
       await site.close();
       siteOpen = false;
+      console.log("");
       console.log(line("fixture", "closed — the rule pass has no site to fetch from"));
     }
 
@@ -508,12 +814,58 @@ async function main(): Promise<number> {
       console.log(line(String(rows), id));
     }
 
+    // ——— the four render checks, answered from the rows this run wrote ———
+    //
+    // The point of printing them is that a ZERO here is a real answer and has
+    // to be readable as one. Three of the four rules speak only about pages
+    // that were rendered, so "no findings" means either "this site's HTML holds
+    // everything" or "nothing was rendered" — and `render.coverage`, printed
+    // beside them, is the row that tells the two apart (its own header says so).
+    // The gate doc quotes both together for exactly that reason.
+    console.log("");
+    console.log("— the render checks on this crawl —");
+    const renderIssues = await db.execute<{ rule_id: string; n: number }>(sql`
+      select rule_id, count(*)::int as n from issues
+      where crawl_id = ${crawlId}
+        and rule_id in ('content.csr-dependent', 'nav.js-only', 'filters.js-only', 'redirect.js')
+      group by rule_id order by rule_id`);
+    const byRule = new Map(renderIssues.rows.map((row) => [row.rule_id, row.n]));
+    for (const [id, check] of [
+      ["content.csr-dependent", "CHECK-01"],
+      ["filters.js-only", "CHECK-02"],
+      ["nav.js-only", "CHECK-34"],
+      ["redirect.js", "CHECK-10"],
+    ] as const) {
+      console.log(line(String(byRule.get(id) ?? 0), `${id} (${check}) findings`));
+    }
+    const coverage = await db.execute<{ value_jsonb: unknown }>(sql`
+      select value_jsonb from metrics
+      where crawl_id = ${crawlId} and metric_id = 'render.coverage' and scope = 'site'`);
+    const coverageRow = coverage.rows[0];
+    if (coverageRow === undefined) {
+      // A gate that printed nothing here would be a gate whose render evidence
+      // has no denominator, and every zero above would be unreadable.
+      console.error("FAIL: render.coverage wrote no site row for this crawl");
+      return 1;
+    }
+    console.log(line("render.coverage", JSON.stringify(coverageRow.value_jsonb)));
+
     const peak = sampler.peakBytes();
     console.log("");
+    if (renderReport !== null) {
+      console.log(
+        line(
+          "phase peaks",
+          `crawl ${megabytes(crawlPeakBytes)}, render ${megabytes(renderReport.rss.peakBytes)} ` +
+            `(+ browser ${megabytes(renderReport.rss.childPeakBytes)}, not gated), ` +
+            `rules ${megabytes(rulesRss.peakBytes)}`,
+        ),
+      );
+    }
     console.log(
       line(
         "PEAK RSS",
-        `${megabytes(peak)} across both phases (at +${(sampler.peakAtMs() / 1000).toFixed(0)}s), ` +
+        `${megabytes(peak)} across every phase (at +${(sampler.peakAtMs() / 1000).toFixed(0)}s), ` +
           `contract ${GATE_PEAK_RSS_BYTES / MB} MB`,
       ),
     );
@@ -549,10 +901,12 @@ async function main(): Promise<number> {
   } finally {
     sampler.stop();
     await closeDb(db);
-    // The happy path closed the fixture the moment the crawl ended; this is the
-    // error path, where the crawl or the rule pass threw first. Guarded by a
-    // flag rather than by swallowing the second close's error, which would be a
-    // fallback hiding a real one (hard rule 7).
+    // The happy path closed the fixture after the render pass — the last phase
+    // that is allowed to fetch — and before the rule pass, which is not. This is
+    // the error path, where the crawl, the render pass or the rule pass threw
+    // before that close was reached. Guarded by a flag rather than by swallowing
+    // the second close's error, which would be a fallback hiding a real one
+    // (hard rule 7).
     if (site !== null && siteOpen) await site.close();
   }
 }

@@ -5,7 +5,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier } from "../../src/db/schema.js";
 import {
-  completeUrl,
+  completeUrls,
   enqueueUrls,
   failUrl,
   frontierCounts,
@@ -133,19 +133,55 @@ describe("frontier", () => {
     expect(again[0]?.attempts).toBe(2);
   });
 
-  it("completeUrl marks done and clears the lease", async () => {
+  it("completeUrls marks done and clears the lease", async () => {
     const crawlId = await newCrawl();
     await enqueueUrls(db, crawlId, [seed(`${SITE}/e`)]);
     await leaseBatch(db, crawlId, "w1", 10, 60);
-    await completeUrl(db, crawlId, `${SITE}/e`);
+    expect(await completeUrls(db, crawlId, [`${SITE}/e`])).toBe(1);
 
     const counts = await frontierCounts(db, crawlId);
-    expect(counts).toEqual({ pending: 0, leased: 0, done: 1, failed: 0 });
+    expect(counts).toEqual({ pending: 0, leased: 0, done: 1, failed: 0, renderPending: 0 });
     const rows = await db.select().from(frontier).where(eq(frontier.crawlId, crawlId));
     expect(rows[0]?.leaseId).toBeNull();
     expect(rows[0]?.leasedUntil).toBeNull();
     // A done row is never leased again.
     expect(await leaseBatch(db, crawlId, "w2", 10, 60)).toEqual([]);
+  });
+
+  it("completeUrls completes a whole flush's worth of URLs in one call", async () => {
+    // Well past the 65,535-parameter ceiling read as an IN list, so the
+    // chunking is exercised rather than assumed. A URL this crawl never had is
+    // in the list too: it updates nothing, and is counted as nothing.
+    const crawlId = await newCrawl();
+    const urls = Array.from({ length: 2_500 }, (_, i) => `${SITE}/bulk/${i}`);
+    await enqueueUrls(db, crawlId, urls.map((url) => seed(url, 1, "link")));
+    await leaseBatch(db, crawlId, "w1", 2_500, 60);
+
+    expect(await completeUrls(db, crawlId, [...urls, `${SITE}/never-seen`])).toBe(2_500);
+    expect(await frontierCounts(db, crawlId)).toEqual({
+      pending: 0,
+      leased: 0,
+      done: 2_500,
+      failed: 0,
+      renderPending: 0,
+    });
+  });
+
+  it("completing nothing is a no-op, not a malformed statement", async () => {
+    const crawlId = await newCrawl();
+    await enqueueUrls(db, crawlId, [seed(`${SITE}/untouched`)]);
+    expect(await completeUrls(db, crawlId, [])).toBe(0);
+    expect((await frontierCounts(db, crawlId)).pending).toBe(1);
+  });
+
+  it("completeUrls never reaches another crawl's identical URL", async () => {
+    const mine = await newCrawl();
+    const theirs = await newCrawl();
+    await enqueueUrls(db, mine, [seed(`${SITE}/shared`)]);
+    await enqueueUrls(db, theirs, [seed(`${SITE}/shared`)]);
+
+    expect(await completeUrls(db, mine, [`${SITE}/shared`])).toBe(1);
+    expect((await frontierCounts(db, theirs)).pending).toBe(1);
   });
 
   it("failUrl requeues until maxAttempts then marks failed", async () => {
@@ -175,7 +211,7 @@ describe("frontier", () => {
 
     expect(await releaseLeases(db, crawlId, "mine")).toBe(1);
     const counts = await frontierCounts(db, crawlId);
-    expect(counts).toEqual({ pending: 1, leased: 1, done: 0, failed: 0 });
+    expect(counts).toEqual({ pending: 1, leased: 1, done: 0, failed: 0, renderPending: 0 });
 
     // null means "every lease in this crawl" — the operator-driven reclaim.
     expect(await releaseLeases(db, crawlId, null)).toBe(1);

@@ -3,6 +3,7 @@ import { contentMetrics } from "./metric/content-metrics.js";
 import { crawlMetrics } from "./metric/crawl-metrics.js";
 import { hreflangMetrics } from "./metric/hreflang-metrics.js";
 import { linkMetrics } from "./metric/link-metrics.js";
+import { renderMetrics } from "./metric/render-metrics.js";
 import { urlMetrics } from "./metric/url-metrics.js";
 import { onPageRules } from "./page/on-page.js";
 import { statusRules } from "./page/status.js";
@@ -16,6 +17,8 @@ import { linkGraphRules } from "./query/link-graph.js";
 import { linkTargetRules } from "./query/link-targets.js";
 import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
+import { renderDiffRules } from "./query/render-diff.js";
+import { renderRedirectRules } from "./query/render-redirect.js";
 import { robotsRules } from "./query/robots.js";
 import { sitemapRules } from "./query/sitemap.js";
 import { structuredDataRules } from "./query/structured-data.js";
@@ -47,6 +50,13 @@ export function buildRegistry(): Registry {
     ...hostRules,
     ...contentRules,
     ...structuredDataRules,
+    // The render pass's query rules: the three diffs between the raw HTML and
+    // the rendered DOM, and the JavaScript redirect. Registered here with the
+    // other query rules because that is what they are — they read stored
+    // columns and nothing else; the render pass that filled those columns is a
+    // separate stage of the crawl (src/crawl/render), not part of a rule.
+    ...renderDiffRules,
+    ...renderRedirectRules,
     // The metric kind. Registered in the same list because a rule is a rule to
     // the registry — the runner is what tells the kinds apart, driving these
     // last, after everything that writes evidence.
@@ -55,6 +65,7 @@ export function buildRegistry(): Registry {
     ...hreflangMetrics,
     ...urlMetrics,
     ...crawlMetrics,
+    ...renderMetrics,
   ]) {
     r.register(rule);
   }

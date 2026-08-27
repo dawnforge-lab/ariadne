@@ -49,5 +49,11 @@ licence body is identical for both and reproduced once here.
 
 ## npm dependencies
 
-undici, htmlparser2, robots-parser, fast-xml-parser, pg, drizzle-orm — each
-under its own licence as published on npm; see node_modules/<pkg>/LICENSE.
+undici, htmlparser2, robots-parser, fast-xml-parser, pg, drizzle-orm,
+playwright — each under its own licence as published on npm; see
+node_modules/<pkg>/LICENSE.
+
+Playwright (Apache-2.0) is a runtime dependency of the render pass
+(src/crawl/render). It downloads a Chromium build on `npx playwright install
+chromium`; that browser is not vendored into this repository and carries its
+own upstream licences.

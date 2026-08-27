@@ -575,6 +575,49 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Move the ratings to something a review can legitimately be about: Product, Service, Book, Course, Recipe and similar types all support review snippets, so a rating on the page for what you sell counts where the same rating on your company block does not. Keep the customer reviews visible on the page either way, and let independent review platforms carry the business-level rating.",
   },
 
+  // ------------------------------------------------------------ render diffs
+  //
+  // The four rules that compare what the HTML said with what a browser showed
+  // after the page's JavaScript ran. Two standing accuracy constraints on this
+  // group, both of them things the crawl cannot know and the copy must not
+  // imply:
+  //
+  //  1. It never says "search engines cannot see this". Google renders, with a
+  //     delay and a budget nobody outside Google can measure. What these rules
+  //     establish is that the content is not in the first response, which is a
+  //     cost and a risk rather than an invisibility.
+  //  2. It never speaks for pages nobody rendered. Every one of these findings
+  //     is about the page it names, measured in a real browser; the share of the
+  //     site that was measured at all is `render.coverage`'s subject.
+  "content.csr-dependent": {
+    title: "Page content only appears after JavaScript runs",
+    explanation:
+      "Rendering this page in a real browser produced at least twice as many words as its HTML contains, and at least 150 words more. The finding names both counts and the difference between them. That means the substance of the page is assembled by JavaScript rather than served in the response: the first thing a crawler receives is a shell, and the text a visitor reads arrives afterwards. Search engines do render pages, but on their own schedule and their own budget, so content that is only in the rendered result is indexed later than content in the HTML and sometimes not at all.",
+    howToFix:
+      "Serve the page's main content in the first HTML response — server-side rendering, static generation or a prerendered snapshot for the templates that matter commercially. The client-side app can still take over afterwards; what changes is that the words exist before it does. Where a full change of rendering strategy is out of reach, prioritise by template: the pages that earn traffic first, the interactive parts of the site last.",
+  },
+  "nav.js-only": {
+    title: "Navigation links only exist after JavaScript runs",
+    explanation:
+      "The HTML of this page carries fewer than 5 links inside its nav and footer, while rendering it in a browser produced at least 10 — and at least twice as many as the HTML held. The finding names the nav and footer counts on each side, and the totals it compared. The site's own navigation is therefore built by JavaScript: a crawler reading the response finds almost no way onward from this page, so the pages the menu leads to are discovered late, through other links, or not at all. Where the navigation is the main route into a section, that section depends entirely on rendering happening.",
+    howToFix:
+      "Render the primary navigation and the footer server-side, as ordinary anchors with real href attributes, and let JavaScript enhance them rather than create them. A menu that opens with script is fine; a menu whose links exist only once script has run is not. Check the result by loading the page with JavaScript disabled: the links that matter for discovery should still be there and still be clickable.",
+  },
+  "filters.js-only": {
+    title: "Filter and sort links only exist after JavaScript runs",
+    explanation:
+      "This page's HTML contains no links that look like filters — no address carrying a query string, and none whose address mentions filter, facet or sort — while rendering it in a browser produced at least 5 of them. The finding names both sides. The faceted navigation is therefore assembled by JavaScript, which cuts two ways: the filtered views are not reachable by a crawler reading the response, so any of them worth ranking is invisible; and if rendering does reach them, a facet space that was never designed to be crawled can expand into far more URLs than the site has pages.",
+    howToFix:
+      "Decide first whether the filtered views should be indexed at all. Where a filter produces a page worth ranking — a colour, a size, a location people actually search for — give it a real link with a real URL that returns that view on its own. Where it does not, keep the facets out of the crawl deliberately rather than accidentally: a canonical to the unfiltered listing, or a robots.txt rule for the parameter, so the decision is recorded rather than resting on whether a crawler runs JavaScript that day.",
+  },
+  "redirect.js": {
+    title: "Page redirects itself with JavaScript",
+    explanation:
+      "This URL answered a plain 200 over HTTP and then sent the browser somewhere else once its JavaScript ran. The finding names the URL asked for and the URL it navigated to. Nothing in the HTTP response says a redirect happened, so to anything reading the response this is a live page — links to it pass no signal onward, and a search engine has to render the page before it learns the content is elsewhere. Where the destination is on another site, the render was stopped at that point and the finding says so, which is why some of these carry a render error beside the destination.",
+    howToFix:
+      "Replace the script with a server-side redirect: a 301 where the move is permanent, a 302 where it is not. That way the redirect is in the response header, every client sees it without executing anything, and the ranking signals of the old URL are passed to the new one. Where the redirect is conditional — a language or country choice — serve the chosen page directly from the server for that request rather than bouncing the browser after it has loaded.",
+  },
+
   // ------------------------------------------------------------------ metrics
   //
   // A metric's copy answers three different questions from an issue's, and the
@@ -668,5 +711,12 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "How this site's sitemap entries are distributed across sitemap documents. The site row gives the number of documents that contributed at least one entry, the total number of entries stored across them, how many documents were fetched and then dropped whole for being too large to read, how many documents carry more than the 50,000 entries the sitemaps protocol allows in one file, and whether the crawl's own entry cap stopped collection — when it did, every count here is a floor rather than a total. Each other row is one sitemap document, named by the URL it was fetched from, with how many entries it contributed and whether that is past 50,000. An entry listed in several documents is counted once, under the first document it was found in, and a sitemap index carries no entries of its own so it appears only through its children. The largest 50 documents are listed; the document count in the site row says how many there are in total.",
     howToFix:
       "Read the document list as the maintenance story: a site of any size whose entries all sit in one document has no way to see which section of the site is stale, and no way to submit or diagnose one part of it separately. Splitting by content type — products, collections, articles, pages — costs nothing and makes the sitemap a tool rather than a formality. A document past 50,000 entries has to be split whatever else is true, since the entries past the limit are not read. A document dropped for its size is entries this crawl never saw at all, so treat the numbers here as incomplete until it is split and re-crawled.",
+  },
+  "render.coverage": {
+    title: "How much of the crawl was rendered in a browser",
+    explanation:
+      "How much of this crawl was opened a second time in a real browser, and what the selection that chose those pages had to work with. Rendering is expensive, so it is never run over a whole site: the numbers here are what makes the JavaScript findings quotable, because they say how large the sample behind them was. The first number is how many pages the crawl read in total. Then the selection, in the order it was made: the budget, how many pages the render pass was allowed to open, which is a percentage of the crawl capped by an absolute ceiling; how many candidates were suspects, pages whose HTML looked incomplete — a long document with almost no words in it, a page with no title, a page carrying a front-end framework marker, or a page that links nowhere; how many were sampled, pages taken from each template regardless of suspicion so that a template nothing looked wrong about is still represented, with a page that is both counted once as a suspect; how many were selected in the end, which is the budget or the number of candidates, whichever is smaller; and whether the selection was truncated, meaning a candidate was dropped for want of a seat, in which case the number selected is the budget rather than the need. Last, what came of it: how many pages are recorded as rendered, and how many render failures were recorded, a render that was attempted and produced nothing, kept as a row rather than dropped. Those last two need not add up to the number selected, and a difference is not an error: a crawl selected more than once keeps the earlier pass's rendered pages, which were measured even though this selection does not name them.",
+    howToFix:
+      "Read this table before quoting any of the JavaScript findings, and read the two sides of it against each other. Pages rendered against pages crawled is the sample size: a handful of renders over a large site means the findings are examples of a problem rather than a count of it, and the absence of a finding says nothing about the pages nobody opened. A truncated selection means the budget, not the site, decided where the pass stopped — raise it and re-run if the sample looks too thin to argue from. Suspects far above the budget is itself a signal worth quoting: it means a large part of the site looks, from its HTML alone, like it is not the whole page. Render failures are worth a look on their own, since a page a browser could not finish loading is a page a search engine may struggle with too.",
   },
 };

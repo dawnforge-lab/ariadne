@@ -38,6 +38,12 @@
  * moment their lease deadline passes. A resume that will not wait out that
  * deadline passes `reclaimLeases: true`, which is safe only when no other
  * worker is live on the crawl.
+ *
+ * That resume is only as honest as the `done` marks it trusts, so this file no
+ * longer writes them: a URL is completed by `PageWriter.flushPages`, inside the
+ * transaction that commits its page row. A process killed between the fetch and
+ * that commit costs one re-fetch. Before, it cost the page — the frontier said
+ * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
@@ -50,7 +56,7 @@ import { discover, type DiscoveryResult, type DiscoveryTruncation, type RobotsIn
 import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
 import {
-  completeUrl,
+  crawledRows,
   enqueueUrls,
   failUrl,
   frontierCounts,
@@ -60,13 +66,25 @@ import {
   type FrontierCounts,
   type LeasedUrl,
 } from "./frontier.js";
+import {
+  RENDER_DEFAULTS,
+  resolveRenderConfig,
+  type RenderSelectionConfig,
+} from "./render/select.js";
 import { analyzePage } from "./parse/page-analyzer.js";
 import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
 import { isUrlAllowed } from "./url-policy.js";
 
-export interface CrawlConfig {
+/**
+ * `RenderSelectionConfig` is extended rather than restated: the render pass's
+ * three knobs (`renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`) are
+ * part of a crawl's configuration — they are stored on the `crawls` row with
+ * everything else and read back by a resume — but the module that ACTS on them
+ * owns their meaning, their defaults (`RENDER_DEFAULTS`) and their validation.
+ */
+export interface CrawlConfig extends RenderSelectionConfig {
   siteUrl: string;
   maxPages: number;
   maxDepth: number;
@@ -165,6 +183,9 @@ export const CRAWL_DEFAULTS = {
   userAgent: "AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)",
   perHostDelayMs: 1000,
   maxConcurrency: 16,
+  // The render pass's three, from the module that spends them. Spread rather
+  // than copied so there is one place a budget can be changed.
+  ...RENDER_DEFAULTS,
 } as const;
 
 export interface CrawlSummary {
@@ -380,6 +401,9 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
     allowPrivate: raw["allowPrivate"],
     probeHosts: raw["probeHosts"],
     legacyHosts: raw["legacyHosts"],
+    renderBudgetPct: raw["renderBudgetPct"],
+    renderMaxPages: raw["renderMaxPages"],
+    renderSamplePerType: raw["renderSamplePerType"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -401,6 +425,18 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   for (const field of ["allowPrivate", "probeHosts"] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
       throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a boolean`);
+    }
+  }
+  // Same ruling for the render budget: a stored `renderMaxPages: "500"` must
+  // not resume as a NaN budget that renders nothing and says nothing.
+  // `validateConfig` then range-checks whatever is genuinely a number.
+  for (const field of [
+    "renderBudgetPct",
+    "renderMaxPages",
+    "renderSamplePerType",
+  ] as const) {
+    if (config[field] !== undefined && typeof config[field] !== "number") {
+      throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a number`);
     }
   }
   if (
@@ -442,6 +478,10 @@ function validateConfig(config: CrawlConfig): void {
     // crawls row exists, rather than four fetches into the run.
     hostProbeStarts(config.siteUrl, config.legacyHosts ?? []);
   }
+  // The render budget, checked by the module that will spend it. A nonsense
+  // budget stops the crawl at line one rather than after the last page, where
+  // the render pass would have been the one to find out.
+  resolveRenderConfig(config);
 }
 
 /**
@@ -464,9 +504,9 @@ async function execute(
     return await runToCompletion(db, crawlId, config, signal);
   } catch (error) {
     try {
-      // The frontier's own `done` count, not a counter held in this process:
+      // The frontier's own crawled count, not a counter held in this process:
       // it is the honest number, and it survives whatever went wrong.
-      await closeCrawl(db, crawlId, "failed", (await frontierCounts(db, crawlId)).done);
+      await closeCrawl(db, crawlId, "failed", crawledRows(await frontierCounts(db, crawlId)));
     } catch (closeError) {
       throw new AggregateError(
         [error, closeError],
@@ -523,7 +563,7 @@ async function runToCompletion(
       discovery.robots.note ?? "robots.txt unreachable: complete disallow in force";
     // Whatever an earlier run of this crawl already did stands — a resume that
     // finds robots.txt down must not rewrite the row's page count to zero.
-    const crawled = (await frontierCounts(db, crawlId)).done;
+    const crawled = crawledRows(await frontierCounts(db, crawlId));
     await writeNotFoundProbe(db, crawlId, {
       skipped: `not probed: ${note}`,
     });
@@ -544,10 +584,19 @@ async function runToCompletion(
   // The frontier is the crawl's memory: on a resume these numbers come back
   // non-zero and the run continues against the same budget rather than
   // starting a second crawl inside the first one's row.
+  //
+  // `crawledRows` rather than `done` alone, and both numbers below count
+  // `render_pending`: a render selection MOVES rows out of `done`, and a resume
+  // that read those as uncrawled would re-fetch every rendered page and would
+  // let the frontier grow past `maxPages` by however many rows the selection
+  // took (hard rule 7 — the miscount would be silent).
   const startCounts = await frontierCounts(db, crawlId);
-  let pagesCrawled = startCounts.done;
+  let pagesCrawled = crawledRows(startCounts);
   let frontierRows =
-    startCounts.pending + startCounts.leased + startCounts.done + startCounts.failed;
+    startCounts.pending +
+    startCounts.leased +
+    startCounts.failed +
+    crawledRows(startCounts);
 
   /**
    * Enqueue candidates that pass every gate, never letting the frontier grow
@@ -643,7 +692,13 @@ async function runToCompletion(
           ? analyzePage(result.body, item.url)
           : null;
 
-      await writer.addPage(item, result, analysis);
+      // The frontier row is settled by the writer, in the transaction that
+      // commits this page row — never here, where the row is only buffered.
+      // A page whose retries are spent is the loop's to settle instead: it
+      // becomes `failed` below, and a completion would overwrite that.
+      await writer.addPage(item, result, analysis, {
+        complete: !TRANSIENT.has(result.fetchClass),
+      });
 
       if (analysis !== null && item.depth < config.maxDepth) {
         await enqueue(
@@ -662,8 +717,6 @@ async function runToCompletion(
       if (TRANSIENT.has(result.fetchClass)) {
         // Retries spent. The row is written, and the frontier says so.
         await failUrl(db, crawlId, item.url, { requeue: false, maxAttempts: MAX_ATTEMPTS });
-      } else {
-        await completeUrl(db, crawlId, item.url);
       }
       return { outcome: toOutcome(result), persisted: true };
     } finally {
@@ -749,6 +802,18 @@ async function runToCompletion(
       if (errors.length > 1) {
         throw new AggregateError(errors, `crawl loop: ${errors.length} URLs threw`);
       }
+
+      // The batch ends where its lease does. Completion now lives in the
+      // writer's flush, so leaving rows buffered would leave their frontier
+      // rows `leased` — and two things go wrong if that outlives the lease
+      // this batch was sized for (leaseSecondsFor): another worker re-leases
+      // and re-fetches URLs we have already crawled (rule 9), and the
+      // drain check above never fires, because a frontier whose last URLs are
+      // sitting in this buffer never reports `leased === 0`. Flushing here
+      // costs a smaller insert and buys back both. The batch's errors are
+      // raised first: those rows go out in the shutdown flush below, and a
+      // flush that threw here would replace the error that explains the crawl.
+      await writer.flush();
     }
     if (signal?.aborted === true) aborted = true;
   } catch (error) {
