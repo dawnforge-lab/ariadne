@@ -17,6 +17,11 @@
  *    liveness protocol. `releaseLeases` exists only to make a *graceful*
  *    shutdown instant instead of waiting out the deadline.
  *
+ *    The other half of resume is `completeUrls`: a row leaves `leased` for
+ *    `done` in the *same transaction* that commits its page row, so a resume
+ *    re-fetches exactly the URLs whose evidence a hard kill took with it. A
+ *    `done` row is a promise that the page is in the database.
+ *
  * Concurrency safety lives in one statement, `leaseBatch`: an `UPDATE` whose
  * row set comes from a `SELECT … FOR UPDATE SKIP LOCKED` sub-select. Two
  * workers leasing at the same instant get disjoint batches because the second
@@ -176,15 +181,60 @@ export async function leaseBatch(
   }));
 }
 
-/** Mark one URL finished. Its lease is cleared; it is never leased again. */
-export async function completeUrl(
-  db: Db,
+/**
+ * URLs per completion statement — the same 16-bit parameter ceiling that shapes
+ * `INSERT_CHUNK_ROWS`, read for an `IN` list: one URL is one parameter, plus
+ * the crawl id. The wall is far away at one parameter per row, but the driver's
+ * stack-overflow-while-assembling failure is not, and a caller completing a
+ * whole flush's worth of URLs should never have to know either number.
+ */
+const COMPLETE_CHUNK_URLS = 1_000;
+
+/**
+ * What `completeUrls` needs of its connection. Deliberately wider than `Db`:
+ * `PageWriter` calls this *inside* `db.transaction`, and the `tx` it is handed
+ * is not a `Db`. That call is the whole point of the batch form — a page row
+ * and its frontier completion land together or not at all, so a process killed
+ * outright can never leave a URL marked `done` whose page row was still sitting
+ * in a buffer (build plan §7, "hard-kill durability").
+ */
+type Executor = Pick<Db, "execute">;
+
+/**
+ * Mark URLs finished. Their leases are cleared; they are never leased again.
+ * Returns the number of frontier rows actually moved to `done` — a URL with no
+ * row in this crawl updates nothing and is counted as nothing.
+ *
+ * A URL is completed only once its evidence is durable. The crawl loop no
+ * longer calls this: `PageWriter.flushPages` does, in the transaction that
+ * inserts the page rows, which is what makes "the frontier says done" and "the
+ * page row exists" the same fact rather than two facts a SIGKILL can separate.
+ *
+ * A call larger than `COMPLETE_CHUNK_URLS` becomes several statements. Unlike
+ * `enqueueUrls`, those statements are not independent: the caller runs them in
+ * one transaction, so a chunk that fails takes the whole completion with it.
+ */
+export async function completeUrls(
+  db: Executor,
   crawlId: string,
-  url: string,
-): Promise<void> {
-  await db.execute(sql`
-    update frontier set state = 'done', lease_id = null, leased_until = null
-    where crawl_id = ${crawlId} and url = ${url}`);
+  urls: readonly string[],
+): Promise<number> {
+  if (urls.length === 0) return 0;
+
+  let completed = 0;
+  for (let i = 0; i < urls.length; i += COMPLETE_CHUNK_URLS) {
+    const chunk = urls.slice(i, i + COMPLETE_CHUNK_URLS);
+    const list = sql.join(
+      chunk.map((url) => sql`${url}`),
+      sql`, `,
+    );
+    const res = await db.execute(sql`
+      update frontier set state = 'done', lease_id = null, leased_until = null
+      where crawl_id = ${crawlId} and url in (${list})
+      returning url`);
+    completed += res.rows.length;
+  }
+  return completed;
 }
 
 /**

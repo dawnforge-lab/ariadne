@@ -38,6 +38,12 @@
  * moment their lease deadline passes. A resume that will not wait out that
  * deadline passes `reclaimLeases: true`, which is safe only when no other
  * worker is live on the crawl.
+ *
+ * That resume is only as honest as the `done` marks it trusts, so this file no
+ * longer writes them: a URL is completed by `PageWriter.flushPages`, inside the
+ * transaction that commits its page row. A process killed between the fetch and
+ * that commit costs one re-fetch. Before, it cost the page — the frontier said
+ * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
@@ -50,7 +56,6 @@ import { discover, type DiscoveryResult, type DiscoveryTruncation, type RobotsIn
 import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
 import {
-  completeUrl,
   enqueueUrls,
   failUrl,
   frontierCounts,
@@ -643,7 +648,13 @@ async function runToCompletion(
           ? analyzePage(result.body, item.url)
           : null;
 
-      await writer.addPage(item, result, analysis);
+      // The frontier row is settled by the writer, in the transaction that
+      // commits this page row — never here, where the row is only buffered.
+      // A page whose retries are spent is the loop's to settle instead: it
+      // becomes `failed` below, and a completion would overwrite that.
+      await writer.addPage(item, result, analysis, {
+        complete: !TRANSIENT.has(result.fetchClass),
+      });
 
       if (analysis !== null && item.depth < config.maxDepth) {
         await enqueue(
@@ -662,8 +673,6 @@ async function runToCompletion(
       if (TRANSIENT.has(result.fetchClass)) {
         // Retries spent. The row is written, and the frontier says so.
         await failUrl(db, crawlId, item.url, { requeue: false, maxAttempts: MAX_ATTEMPTS });
-      } else {
-        await completeUrl(db, crawlId, item.url);
       }
       return { outcome: toOutcome(result), persisted: true };
     } finally {
@@ -749,6 +758,18 @@ async function runToCompletion(
       if (errors.length > 1) {
         throw new AggregateError(errors, `crawl loop: ${errors.length} URLs threw`);
       }
+
+      // The batch ends where its lease does. Completion now lives in the
+      // writer's flush, so leaving rows buffered would leave their frontier
+      // rows `leased` — and two things go wrong if that outlives the lease
+      // this batch was sized for (leaseSecondsFor): another worker re-leases
+      // and re-fetches URLs we have already crawled (rule 9), and the
+      // drain check above never fires, because a frontier whose last URLs are
+      // sitting in this buffer never reports `leased === 0`. Flushing here
+      // costs a smaller insert and buys back both. The batch's errors are
+      // raised first: those rows go out in the shutdown flush below, and a
+      // flush that threw here would replace the error that explains the crawl.
+      await writer.flush();
     }
     if (signal?.aborted === true) aborted = true;
   } catch (error) {

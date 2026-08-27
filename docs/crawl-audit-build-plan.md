@@ -266,19 +266,24 @@ Phase 1 shipped with these open. Evidence and measurements are in
 `docs/gates/phase-1.md`; this section is the tracking record so Phase 2 sees
 them.
 
-### Hard-kill durability (open, decide in Phase 2)
+### Hard-kill durability (CLOSED in Phase 5, task 1)
 
-The loop marks a frontier row `done` once `PageWriter.addPage` has *buffered*
-the page row, and the insert happens when the buffer fills (`batchSize` 100).
-A process killed outright (SIGKILL, OOM, power) loses up to `batchSize - 1`
-rows per table while the frontier already records those URLs as finished, so a
-resume does not re-fetch them. Every graceful path — abort, error, normal
-finish — flushes first, so only a hard kill is exposed.
+The loop marked a frontier row `done` once `PageWriter.addPage` had *buffered*
+the page row, and the insert happened when the buffer filled (`batchSize` 100).
+A process killed outright (SIGKILL, OOM, power) lost up to `batchSize - 1`
+rows per table while the frontier already recorded those URLs as finished, so a
+resume did not re-fetch them. Every graceful path — abort, error, normal
+finish — flushed first, so only a hard kill was exposed.
 
-**Fix direction:** complete the frontier row only after its page row is
-durable (flush-then-complete, or complete in the same transaction as the
-flush). Decide before the frontier's state machine grows a `render_pending`
-state in Phase 5.
+**Fixed** by the second of the two directions this section offered: the page
+insert and the frontier completion share one transaction. `PageWriter` records
+each buffered page row's frontier URL and `flushPages` calls the new batch
+`completeUrls` inside `db.transaction`, so a URL is `done` only when its page
+row has committed and a kill between the two costs a re-fetch rather than the
+page. The loop no longer completes anything on the success path (`failUrl` is
+untouched) and flushes the writer at the end of every leased batch, which keeps
+a URL's completion inside the lease that authorised its fetch. Done before the
+frontier's state machine grew `render_pending`, as this section asked.
 
 ### Before the first real-site crawl
 

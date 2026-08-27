@@ -158,7 +158,8 @@ failed on its first enqueue** — this fixture at the first attempt. `enqueueUrl
 now inserts in chunks of 1,000 rows, with a regression test at 20,000 URLs
 (`test/crawl/frontier.test.ts`).
 
-**2. A hard kill loses buffered rows (not fixed, not modelled).** The loop marks
+**2. A hard kill loses buffered rows (fixed in Phase 5, task 1 — the record of
+the defect as Phase 1 shipped it follows).** The loop marks
 a frontier row `done` as soon as `PageWriter.addPage` has *buffered* its page
 row — the insert happens when the buffer reaches 100. A process killed outright
 (SIGKILL, OOM, power) therefore loses up to `batchSize - 1` rows per table while
