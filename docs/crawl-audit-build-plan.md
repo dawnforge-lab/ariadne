@@ -57,7 +57,7 @@ survives is ~700 lines of borrowed code, all of it readable in an afternoon.
 | **BAD** | [`every-app/open-seo`](https://github.com/every-app/open-seo), `badseo/` | MIT (same repo) | B | Fixture page content. We write our own harness. |
 | **SN** | [`StJudeWasHere/seonaut`](https://github.com/stjudewashere/seonaut) | MIT | B (text) + C | Issue copy is a text lift. The Go reporters are reference, not a port. |
 | **SM** | [`seo-skills/seo-audit-skill`](https://github.com/seo-skills/seo-audit-skill) | MIT | C | Coverage checklist only. |
-| **CHK** | `~/.claude/skills/sf-audit/checklist.md` | internal | spec | 82 checks, 47 crawl-derived. The authority. |
+| **CHK** | `skills/ariadne-audit/checklist.md` | internal | spec | 82 checks, 47 crawl-derived. The authority (imported 2026-08-27 from the now-frozen `~/.claude/skills/sf-audit/checklist.md`; see the file's provenance header). |
 
 ### Do not use
 

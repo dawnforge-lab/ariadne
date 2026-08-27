@@ -1458,8 +1458,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `metrics_get` with `metricId: "content.template-similarity"` — how alike the
     pages of each template are, which is where "every product description is the
     same paragraph" shows up
-  Quote both, then judge. `issues_list` with `checkId: "CHECK-38"` is refused: there
-  are no findings behind an agent check.
+  Quote both, then judge. `issues_list` with `checkId: "CHECK-38"` is refused with the
+  metric-only message — the two rules above are all this check has, and neither of
+  them finds anything.
 - **Visual**: Navigate to 5 key page types (homepage, product, collection, blog, info page). Visually assess:
   1. Content depth — is there substantial, useful content?
   2. Intent match — does the page serve the likely search intent (informational vs transactional)?
@@ -1565,10 +1566,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-41: E-E-A-T signals
 - **Priority**: Medium | **Requires**: Visual + DevTools + Manual
 - **AGENT CHECK — no engine evidence at all.** Nothing a crawl stores is evidence for
-  E-E-A-T that a rule could summarise without also implying the verdict, so no rule
-  of any kind claims this check: `issues_list` and `metrics_get` with
-  `checkId: "CHECK-41"` are both refused. The work below is the whole check, and the
-  findings record must carry what you actually saw, not a score with nothing under it.
+  E-E-A-T that a rule could summarise without also implying the verdict, so no rule of
+  any kind claims this check. `issues_list` with `checkId: "CHECK-41"` is refused
+  ("claimed by no rule"), and `metrics_get` has no `checkId` parameter at all — it
+  filters by `metricId`, `scope` and `scopeValue`, and passing a `checkId` is rejected
+  by the tool schema before the service sees it. There is no engine answer to look up.
+  The work below is the whole check, and the findings record must carry what you
+  actually saw, not a score with nothing under it.
 - **Important**: E-E-A-T is not just about surface signals (badges, bios). It must be
   assessed through the actual content, site structure, and topical depth.
 - **Experience & Expertise** (assess through content):

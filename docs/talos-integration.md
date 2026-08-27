@@ -71,5 +71,7 @@ crawler inside Talos. The intended shape:
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos
   repo (`.serena/memories/`).
-- The audit checklist both systems serve: `~/.claude/skills/sf-audit/checklist.md`
-  (82 checks; the 47 crawl-derived ones are Ariadne's scope).
+- The audit checklist both systems serve: `skills/ariadne-audit/checklist.md`
+  (82 checks; the 47 crawl-derived ones are Ariadne's scope). It moved in-repo in
+  Phase 6 and is the living authority; the sf-audit original it was imported from is
+  frozen source, recorded in the file's provenance header.

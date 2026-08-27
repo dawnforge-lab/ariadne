@@ -122,8 +122,10 @@ audit makes.
 ## Phase 2 — the engine-answered checks
 
 The checklist's crawl-derived range is CHECK-01 to CHECK-46 (47 checks, counting
-CHECK-33b). Of those, **44 have rules behind them**; the other three — CHECK-38,
-CHECK-41, CHECK-42 — are judgement and belong to Phase 3.
+CHECK-33b). **45 of them have a rule behind them** — 44 with finding rules, plus
+CHECK-38, whose two metric rules supply evidence and pass no verdict. Only CHECK-41
+and CHECK-42 have no rule of any kind. Three of the 47 are judgement — CHECK-38,
+CHECK-41 and CHECK-42 — and belong to Phase 3 whatever evidence exists for them.
 
 ### 2.1 Sweep first, then walk
 
@@ -144,11 +146,12 @@ of three ways:
 - **No rows, and the check is claimed by a finding rule** → candidate PASS. It is a
   PASS only because the `crawl_rules` summary says the rules ran; cite that summary
   in the evidence.
-- **No rows because the check is measured, not found** → the metrics sweep has it:
-  CHECK-08, CHECK-29, CHECK-33 and CHECK-33b are metric-only, and `issues_list` with
-  their `checkId` is refused with a pointer to `metrics_get` rather than answered
-  empty. That refusal is a useful thing to see once; it is not an error to work
-  around.
+- **No rows because the check is measured, not found** → the metrics sweep has it.
+  Five checks are metric-only — CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38
+  — and `issues_list` with their `checkId` is refused with a pointer to `metrics_get`
+  rather than answered empty. That refusal is a useful thing to see once; it is not an
+  error to work around. (CHECK-38's metrics are evidence for a judgement you still
+  make yourself — see Phase 3.)
 
 ### 2.2 Reading the answers
 

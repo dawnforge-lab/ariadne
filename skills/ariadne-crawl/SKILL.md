@@ -23,7 +23,7 @@ different job and the one that goes wrong silently if nobody does it.
 
 ## Prerequisites
 
-Check all four before starting. Each failure has a person who can fix it, and none
+Check all five before starting. Each failure has a person who can fix it, and none
 of them is worked around.
 
 1. **A server is running.** Either transport, over the same service:
@@ -37,7 +37,13 @@ of them is worked around.
    (`*.example.com`). An empty list refuses every crawl and answers every query.
 3. **Every legacy host is on it too**, separately, if you plan to pass
    `legacyHosts` — the probe fetches those before it has read anyone's robots.txt.
-4. **Permission to crawl.** We crawl client sites with consent. If nobody has said
+4. **Chromium, if you intend to render.** The render pass drives a real browser
+   through Playwright: `npx playwright install chromium`, once per machine. Without
+   it `crawl_render` fails at launch, and it fails UNHELPFULLY — a missing browser is
+   not one of the render pass's own refusals, so it surfaces as
+   `{"error": "internal error", "correlationId": …}` with the reason in the server's
+   log. Install it before the first render rather than diagnosing that.
+5. **Permission to crawl.** We crawl client sites with consent. If nobody has said
    yes, stop and ask; this is not a technical prerequisite you can satisfy with a
    flag.
 
@@ -224,6 +230,13 @@ It is refused when:
 
 This tool is for cleaning up after a crashed server. It is not a cancel button, and
 using it on a crawl that is merely slow loses the crawl.
+
+**`crawl_render` answering `{"error": "internal error", "correlationId": …}`** — the
+render pass's own refusals (crawl still running, another worker rendering, no
+discovery evidence) all come back as sentences naming the reason, so an anonymous
+internal error is something else. On a fresh machine it is almost always the missing
+browser: run `npx playwright install chromium` and try again. Otherwise the stack is
+in the server's log under that correlation id, and that is where to look.
 
 **A fetch failure inside the crawl is not a crawl failure.** Individual URLs that
 404, time out or get blocked are recorded as classified rows and become findings —
