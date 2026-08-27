@@ -24,7 +24,9 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, links, pages } from "../../src/db/schema.js";
 import {
+  completeUrls,
   enqueueUrls,
+  failUrl,
   frontierCounts,
   leaseBatch,
   leaseRenderUrls,
@@ -254,6 +256,60 @@ describe("selectRenderSet", () => {
     ]);
     // The healthy page was never selected, so it never gained a row.
     expect(rows).toHaveLength(2);
+  });
+
+  /**
+   * The frontier row a double fetch leaves behind: `failed` with its retries
+   * spent, beside a page row that is a perfectly good ok/200.
+   *
+   * The sequence is the real one, run through the real functions rather than
+   * hand-set — an expired lease lets two workers hold the same URL; worker 1
+   * writes the page row and completes the URL; worker 2 then finishes its own
+   * attempt, spends the last retry and calls `failUrl`, which overwrites `done`
+   * with `failed`. The evidence exists and the frontier disagrees.
+   *
+   * The selection reads the PAGE row, so it promotes that row like any other.
+   * This pins both halves of why that is right: the page is selected, and it
+   * still cannot be crawled again.
+   */
+  it("promotes a failed row whose page row is a good 200, and never re-crawls it", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/crashed", frameworkMarkers: ["__NEXT_DATA__"], depth: 2 },
+    ]);
+
+    await enqueueUrls(db, crawlId, [
+      { url: url("/crashed"), depth: 2, discoveredVia: "link" },
+    ]);
+    await leaseBatch(db, crawlId, "worker-1", 1, 60);
+    // Worker 1 commits its page row and the completion together.
+    expect(await completeUrls(db, crawlId, [url("/crashed")])).toBe(1);
+    // Worker 2, holding the same URL off an expired lease, spends its last
+    // retry and overwrites `done` with `failed`.
+    await failUrl(db, crawlId, url("/crashed"), { requeue: false, maxAttempts: 1 });
+    expect(await frontierCounts(db, crawlId)).toEqual({
+      pending: 0, leased: 0, done: 0, failed: 1, renderPending: 0,
+    });
+
+    const result = await selectRenderSet(db, crawlId, {
+      renderBudgetPct: 100,
+      renderSamplePerType: 0,
+    });
+    expect(result.selected).toEqual([url("/crashed")]);
+
+    const rows = await db
+      .select()
+      .from(frontier)
+      .where(eq(frontier.crawlId, crawlId));
+    expect(rows.map((r) => [r.state, r.depth, r.discoveredVia, r.attempts])).toEqual([
+      // Promoted, its crawl-pass provenance intact and its spent attempts
+      // reset — the render pass is a fresh attempt budget.
+      ["render_pending", 2, "link", 0],
+    ]);
+
+    // And the promotion did not hand the URL back to the crawl: `render_pending`
+    // matches neither of leaseBatch's two state disjuncts.
+    expect(await leaseBatch(db, crawlId, "worker-3", 10, 60)).toEqual([]);
   });
 
   /**

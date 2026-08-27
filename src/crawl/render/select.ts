@@ -251,6 +251,20 @@ export async function selectRenderSet(
         insert into frontier (crawl_id, url, state, depth, discovered_via)
         select ${crawlId}, c.url, 'render_pending', c.depth, 'render'
         from picked p join cohort c on c.url = p.url
+        --
+        -- THE CONFLICTING ROW IS USUALLY 'done', AND SOMETIMES 'failed'. The
+        -- second case is reachable and is deliberately treated the same way.
+        -- An expired lease produces a double fetch: worker 1 writes the page
+        -- row and marks the URL done, worker 2 then finishes its own attempt of
+        -- the same URL, spends the last retry and calls failUrl, which
+        -- overwrites the row to 'failed', attempts 3. The frontier then says
+        -- failed while a perfectly good ok/200 page row exists — and it is the
+        -- page row this selection reads. Promoting that row to render_pending
+        -- is the honest answer: the evidence the render pass diffs against is
+        -- present, so the page is render-eligible on exactly the terms every
+        -- other selected page is. It also cannot resurrect the URL into the
+        -- CRAWL pass (rule 9): render_pending is invisible to leaseBatch in
+        -- every state, held or expired, so the page is never fetched again.
         on conflict (crawl_id, url) do update
           set state = 'render_pending',
               lease_id = null,

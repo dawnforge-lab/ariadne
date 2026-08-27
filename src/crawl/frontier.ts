@@ -292,10 +292,20 @@ export async function leaseRenderUrls(
  * Clear render leases so the rows can be picked up immediately — the render
  * pass's `releaseLeases`, for a graceful shutdown.
  *
- * It cannot be `releaseLeases`: that one moves rows to `pending`, and a
- * `render_pending` row moved to `pending` would be leased by the CRAWL and
- * fetched again. This clears the lease fields and leaves the state alone, which
- * is all a render row's lease ever was.
+ * It cannot be `releaseLeases`, and the reason is quieter than it looks. That
+ * function's WHERE is `state = 'leased'`, which a `render_pending` row never
+ * matches — so calling it on a render pass would not misplace a single row, it
+ * would report 0 released and do NOTHING, leaving every lease standing until
+ * its deadline expired. A shutdown that silently fails to release is exactly
+ * the shape of no-op hard rule 7 exists to prevent: the pass looks cleanly
+ * closed and its URLs are unavailable for minutes.
+ *
+ * (Moving a render row to `pending` would be the worse bug — the crawl would
+ * lease and re-fetch a page it has already fetched — which is why the fix is a
+ * separate function rather than widening `releaseLeases`'s state filter.)
+ *
+ * This clears the lease fields and leaves the state alone, which is all a
+ * render row's lease ever was.
  *
  * `leaseId` is the worker's own on a graceful shutdown; `null` is every live
  * render lease in the crawl, an operator action for a pass whose worker is
