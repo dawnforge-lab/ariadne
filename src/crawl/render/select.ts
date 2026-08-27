@@ -37,7 +37,9 @@
  * ENFORCES that caveat before it calls this function, in all three of its
  * shapes: a crawl worker's leases, another render pass's leases (which leave
  * the state at `render_pending` and are therefore invisible to a `leased`
- * check), and a paused crawl's queued rows.
+ * check), and a crawl whose row still says `running` (live, or dead mid-run
+ * and never resumed or marked failed). A finished-but-capped crawl with
+ * `pending` rows is deliberately renderable — see run-render.ts's header.
  *
  * `renderSelectionStats` is the same decision asked read-only: the coverage
  * metric has to quote the sampling story long after the selection object is
