@@ -3,8 +3,8 @@
  *
  * This module is transport-neutral by construction — plain arguments in, plain
  * data out, typed errors — because it has two callers. `src/api/http.ts` is
- * routing and serialisation over it; `src/api/mcp.ts` (Task 4) will be a second
- * transport over the SAME functions, not over the HTTP routes. Nothing here
+ * routing and serialisation over it; `src/api/mcp.ts` is a second transport
+ * over the SAME functions, not over the HTTP routes. Nothing here
  * knows about status codes, headers, JSON text or MCP tool shapes: it raises
  * `ServiceError` with a code, and each transport maps that code to whatever its
  * protocol calls a refusal.
@@ -82,7 +82,7 @@ import {
 } from "../rules/registry/types.js";
 import { UNTYPED } from "../rules/metric/cohort.js";
 import { runRules, type RunSummary } from "../rules/run.js";
-import { isHostAllowed, type ApiServerConfig } from "./config.js";
+import { isHostAllowed, type ServiceConfig } from "./config.js";
 
 /**
  * The four ways a request can be refused for a reason the caller can act on.
@@ -154,8 +154,14 @@ type FieldKind = "string" | "number" | "boolean" | "string[]";
  * config and letting the extra keys ride along — is how a field that was never
  * meant to cross the wire crosses it, which is precisely the failure
  * `allowPrivate` demonstrates below.
+ *
+ * EXPORTED because the MCP transport advertises a schema rather than parsing a
+ * body: `crawl_start`'s tool schema names these fields with a description each,
+ * and a test asserts the two sets are equal. A field added here and forgotten
+ * there would be a field the HTTP surface accepts and the agent surface cannot
+ * see — which is how a second, quietly smaller API appears.
  */
-const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
+export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
   siteUrl: "string",
   maxPages: "number",
   maxDepth: "number",
@@ -485,7 +491,7 @@ export class ApiService {
 
   constructor(
     private readonly db: Db,
-    private readonly config: ApiServerConfig,
+    private readonly config: ServiceConfig,
   ) {
     // Built once, here: `buildRegistry` runs `defineRule` over every rule, so a
     // rule missing its client-facing copy throws at server construction rather

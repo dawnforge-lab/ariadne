@@ -15,29 +15,32 @@
 import type { CrawlConfig } from "../crawl/loop.js";
 
 /**
- * The construction config of one API server.
+ * What one engine instance may do, whoever is asking: POLICY, not identity.
+ *
+ * This is the half of the configuration the service layer reads, and it is
+ * deliberately separate from the bearer token below, because the two transports
+ * differ on identity and agree on policy. `src/api/http.ts` authenticates a
+ * network caller with a token; `src/api/mcp.ts` authenticates nobody, because
+ * an MCP caller on stdio is the process that started this one (see
+ * `loadMcpConfig`). Both construct an `ApiService` over this object, so the
+ * allowlist binds BOTH transports and does so in ONE place — `startCrawl`,
+ * where the crawl is accepted — rather than once per transport.
  *
  * `crawlDefaults` IS A PROCESS-TRUST SEAM AND IS DELIBERATELY NOT REACHABLE
  * FROM THE WIRE. It is code-level: whoever constructs the server is the process
  * that holds the database handle and the token, so it may set crawl fields the
- * HTTP surface refuses to accept from a client — `allowPrivate` above all,
- * which is how the test suite crawls its 127.0.0.1 fixture server and which a
- * request body may never carry (`parseStartCrawlInput` returns 400 if it is
- * present at all, per build-plan §7 item 3 and Task 1's persistence strip).
- *
- * The same trust model applies to the MCP transport (Task 4): MCP callers reach
- * the process over stdio and are therefore process-trusted, HTTP callers are
- * token-trusted, and the allowlist binds BOTH. What never happens is a network
- * client naming a field in this object.
+ * surface refuses to accept from a client — `allowPrivate` above all, which is
+ * how the test suite crawls its 127.0.0.1 fixture server and which a request
+ * body (or an MCP tool argument) may never carry (`parseStartCrawlInput`
+ * refuses it if it is present at all, per build-plan §7 item 3 and Task 1's
+ * persistence strip).
  *
  * Precedence when a crawl is started: `CRAWL_DEFAULTS` (+ the API's own
- * `maxPages` default) < `crawlDefaults` < the request body's validated fields.
- * The request wins over the process default for everything the request is
- * allowed to say, which is every field except `allowPrivate`.
+ * `maxPages` default) < `crawlDefaults` < the request's validated fields. The
+ * request wins over the process default for everything the request is allowed
+ * to say, which is every field except `allowPrivate`.
  */
-export interface ApiServerConfig {
-  /** Required. Compared constant-time against `Authorization: Bearer <token>`. */
-  token: string;
+export interface ServiceConfig {
   /**
    * Hosts a crawl may be pointed at. Exact host (`example.com`) or a subdomain
    * wildcard (`*.example.com`). An empty array refuses every crawl trigger.
@@ -46,8 +49,8 @@ export interface ApiServerConfig {
   /** See the warning above. Code-level only; never wired to env or wire. */
   crawlDefaults?: Partial<CrawlConfig>;
   /**
-   * Where `GET /crawls/:id/export` writes its files. Defaults to `exports/`
-   * under the process's working directory.
+   * Where `GET /crawls/:id/export` (and the MCP `export_crawl` tool) writes its
+   * files. Defaults to `exports/` under the process's working directory.
    *
    * The directory is a server property rather than a request parameter, and
    * that is the whole point: a caller names a crawl and a dataset, never a
@@ -65,11 +68,32 @@ export interface ApiServerConfig {
   log?: (line: string) => void;
 }
 
+/**
+ * The construction config of one HTTP API server: the policy above, plus the
+ * credential that says *who* is asking.
+ *
+ * The token is the HTTP transport's alone. It is not a service-layer concern
+ * and never was — `ApiService` does not read it — which is why the split
+ * exists: the MCP transport needs every field of `ServiceConfig` and none of
+ * this one, and an `ApiServerConfig` is still accepted anywhere a
+ * `ServiceConfig` is wanted.
+ */
+export interface ApiServerConfig extends ServiceConfig {
+  /** Required. Compared constant-time against `Authorization: Bearer <token>`. */
+  token: string;
+}
+
 /** Config read from the environment by the `api:serve` entrypoint. */
 export interface LoadedApiConfig {
   token: string;
   allowedDomains: string[];
   port: number;
+  databaseUrl: string;
+}
+
+/** Config read from the environment by the `mcp:serve` entrypoint. */
+export interface LoadedMcpConfig {
+  allowedDomains: string[];
   databaseUrl: string;
 }
 
@@ -130,6 +154,42 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): LoadedApiCo
     port,
     databaseUrl,
   };
+}
+
+/**
+ * Read the MCP server's configuration from the environment.
+ *
+ * TWO DELIBERATE DIFFERENCES FROM `loadApiConfig`, and both are the trust model
+ * rather than convenience:
+ *
+ *  - **No token, and none is invented.** The MCP transport this repo ships is
+ *    stdio: the client speaks to this process over its own standard input,
+ *    which means the client either started it or was handed its pipes. That is
+ *    process trust, and it is the same trust `crawlDefaults` already rests on.
+ *    A bearer token here would authenticate the caller to itself — a ritual,
+ *    not a control — and the *real* control is that the process holds the
+ *    database handle. `ARIADNE_API_TOKEN` is ignored (not refused: one
+ *    environment usually configures both entrypoints).
+ *
+ *    This stops being true the moment the server is mounted on a network
+ *    transport. If that day comes, authentication is not optional and does not
+ *    belong in this function's silence.
+ *
+ *  - **The allowlist is still read, and is still allowed to be empty.** Process
+ *    trust says who may ask; it says nothing about which hosts may be crawled,
+ *    and obligation 2 binds both transports. An empty list is the same stated
+ *    posture it is over HTTP — every crawl trigger refused, every query
+ *    answered — and `createMcpServer` says so on stderr at boot.
+ *
+ * `DATABASE_URL` is required for the same reason as over HTTP: the server holds
+ * the database handle, and there is nothing to answer without one.
+ */
+export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): LoadedMcpConfig {
+  const databaseUrl = (env["DATABASE_URL"] ?? "").trim();
+  if (databaseUrl === "") {
+    throw new Error("DATABASE_URL must be set: the MCP server holds the database handle");
+  }
+  return { allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]), databaseUrl };
 }
 
 /**

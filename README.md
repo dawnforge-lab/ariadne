@@ -36,8 +36,14 @@ opportunity). Neither side does the other's job.
 
 TypeScript (Node 22), no crawl framework — own loop over a Postgres frontier.
 Dependencies kept deliberately small: `undici`, `htmlparser2`, `robots-parser`,
-`fast-xml-parser`, `playwright` (render pass only), `pg` + `drizzle-orm`.
-`cheerio` in devDependencies only, as a parity oracle in tests.
+`fast-xml-parser`, `playwright` (render pass only), `pg` + `drizzle-orm`, and
+`@modelcontextprotocol/sdk` + `zod` (agent surface only — the MCP transport and
+its tool schemas). `cheerio` in devDependencies only, as a parity oracle in
+tests.
+
+Two transports, one service layer: `npm run api:serve` (HTTP, bearer-token
+trust) and `npm run mcp:serve` (MCP over stdio, process trust). The crawl
+domain allowlist binds both.
 
 Hard memory contract: RAM is O(concurrency), not O(URLs). 50k pages under
 512MB is the Phase 1 gate; 1M under 512MB is the target.
