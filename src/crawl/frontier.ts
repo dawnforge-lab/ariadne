@@ -213,6 +213,16 @@ type Executor = Pick<Db, "execute">;
  * A call larger than `COMPLETE_CHUNK_URLS` becomes several statements. Unlike
  * `enqueueUrls`, those statements are not independent: the caller runs them in
  * one transaction, so a chunk that fails takes the whole completion with it.
+ *
+ * The list is sorted first, and that is a lock-ordering rule rather than
+ * tidiness. This holds row locks on many frontier rows until the transaction
+ * commits, where the single-row autocommit UPDATE it replaced held one at a
+ * time and could not deadlock. Two workers completing overlapping sets in
+ * opposite orders would deadlock — and overlap is not hypothetical: it is
+ * exactly what an expired lease and its double-fetch produce. Sorting gives
+ * every caller the same direction: chunk k always covers URLs below chunk
+ * k + 1, so two transactions walk the same ranges the same way instead of
+ * head-on. (The copy is bounded by the caller's batch, not by the crawl.)
  */
 export async function completeUrls(
   db: Executor,
@@ -221,9 +231,11 @@ export async function completeUrls(
 ): Promise<number> {
   if (urls.length === 0) return 0;
 
+  const ordered = [...urls].sort();
+
   let completed = 0;
-  for (let i = 0; i < urls.length; i += COMPLETE_CHUNK_URLS) {
-    const chunk = urls.slice(i, i + COMPLETE_CHUNK_URLS);
+  for (let i = 0; i < ordered.length; i += COMPLETE_CHUNK_URLS) {
+    const chunk = ordered.slice(i, i + COMPLETE_CHUNK_URLS);
     const list = sql.join(
       chunk.map((url) => sql`${url}`),
       sql`, `,

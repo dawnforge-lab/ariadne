@@ -266,7 +266,7 @@ Phase 1 shipped with these open. Evidence and measurements are in
 `docs/gates/phase-1.md`; this section is the tracking record so Phase 2 sees
 them.
 
-### Hard-kill durability (CLOSED in Phase 5, task 1)
+### Hard-kill durability (CLOSED in Phase 5, task 1 for `pages`; child-table rows remain exposed)
 
 The loop marked a frontier row `done` once `PageWriter.addPage` had *buffered*
 the page row, and the insert happened when the buffer filled (`batchSize` 100).
@@ -284,6 +284,17 @@ page. The loop no longer completes anything on the success path (`failUrl` is
 untouched) and flushes the writer at the end of every leased batch, which keeps
 a URL's completion inside the lease that authorised its fetch. Done before the
 frontier's state machine grew `render_pending`, as this section asked.
+
+**Residual, and it is not small.** The defect above was "up to `batchSize - 1`
+rows **per table**", and only `pages` is fixed. `links`, `hreflang` and
+`structured_data` are still written outside that transaction, so a kill between
+the page commit and the child inserts loses up to one leased batch of child
+rows for pages the frontier now marks `done`. That loss is *unrecoverable*
+where the old one was not: the URL is finished, no resume re-fetches it, and a
+page with no link rows is indistinguishable from a page that had none — a
+silent false negative for every rule that counts child rows. Closing it means
+moving the child inserts into the same transaction, which trades away the
+property that a failing `links` insert must not destroy the page row.
 
 ### Before the first real-site crawl
 

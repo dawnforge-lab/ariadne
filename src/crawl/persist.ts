@@ -20,6 +20,17 @@
  * one. The loop keeps their window narrow instead, by flushing the writer at
  * the end of every leased batch.
  *
+ * KNOW WHAT THAT COSTS, because the fix above sharpened it. A kill between the
+ * `pages` commit and the child inserts leaves up to `batchSize - 1` `links`,
+ * `hreflang` and `structured_data` rows unwritten for pages the frontier now
+ * marks `done` — and unlike the page rows, they are UNRECOVERABLE: the URL is
+ * finished, so no resume re-fetches it, and a page with no link rows reads
+ * exactly like a page that genuinely had no links. The rules cannot tell the
+ * two apart. The window is one leased batch rather than one full buffer, which
+ * is a smaller hole, not a closed one. Closing it means moving the child
+ * inserts into the same transaction and accepting the trade this paragraph
+ * opens with.
+ *
  * The memory contract lives here as much as in the analyzer, and the exact
  * bound matters. Two separate things are bounded:
  *  - The persistent buffers. Each is ≤ `batchSize` at all times — the page
