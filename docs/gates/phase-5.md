@@ -247,7 +247,7 @@ import the gate's modules with and without that one line and print
 | crawl + rules + fixture modules | 122.3 MB | 137.5 MB |
 | the same, **plus** `run-render.js` | 197.2 MB | 186.2 MB |
 
-**Roughly 50–75 MB, paid at import, before a browser exists** — the two samples
+**Roughly 45–75 MB, paid at import, before a browser exists** — the two samples
 are **+74.9 MB** and **+48.7 MB**, and the band is quoted wide enough to contain
 both of them rather than narrowed to a midpoint two measurements cannot support.
 RAM is still
@@ -434,7 +434,7 @@ for Phase 4's reason: the phase wall also contains the runner's per-rule
 delete-then-insert transactions for the 200,023 metric rows this pass wrote,
 which happen outside each rule's `run`. The process peak (453.7 MB) sits inside
 that writing, as it did in Phase 4 — **+66.3 MB over Phase 4's 387.4 MB, of which
-50–75 MB is the Playwright import's floor** (measured above: +74.9 MB and
+45–75 MB is the Playwright import's floor** (measured above: +74.9 MB and
 +48.7 MB on two samples, so the +66.3 MB sits inside the band). The metric phase's
 own appetite is therefore roughly unchanged, and the pathology behind it —
 40,003-row metrics held whole before the first insert — is unchanged and still on
