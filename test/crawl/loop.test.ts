@@ -735,3 +735,77 @@ describe("resumeCrawl", () => {
     });
   });
 });
+
+/**
+ * Build-plan §7 "before the first real-site crawl", item 3.
+ *
+ * `allowPrivate` is a test-only escape hatch. The defect these pin is that it
+ * used to be written into `crawls.config_jsonb` with everything else, so every
+ * resume of that crawl — days later, from a row nobody reads — silently
+ * switched it back on. A dangerous setting that carries itself forward without
+ * anyone re-stating the intent is the silent fallback hard rule 7 forbids.
+ */
+describe("allowPrivate is not persisted", () => {
+  it("is stripped from the config the crawls row stores", async () => {
+    const summary = await crawl(config());
+    const rows = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
+    const stored = rows[0]?.config as Record<string, unknown>;
+
+    // Gone entirely, not stored as false: the row should not carry the field
+    // at all, so nobody reading it can mistake it for a decision.
+    expect(stored).not.toHaveProperty("allowPrivate");
+    // …and nothing else was lost on the way out.
+    expect(stored).toMatchObject({
+      siteUrl: base,
+      maxPages: 100,
+      maxDepth: 10,
+      userAgent: "AriadneBot-test",
+      perHostDelayMs: 0,
+      maxConcurrency: 4,
+    });
+  });
+
+  it("does not come back on a resume that does not re-assert it", async () => {
+    const first = await crawl(config());
+    expect(first.pagesCrawled).toBeGreaterThan(0);
+
+    // No `config` — so the resume runs on what the row holds, and the row does
+    // not hold the escape hatch. The fixture server is on 127.0.0.1, so
+    // url-policy now refuses its robots.txt, which is complete disallow
+    // (RFC 9309 §2.3.1.4) and a `failed` crawl rather than a quiet no-op.
+    const resumed = await resumeCrawl(db, first.crawlId, { reclaimLeases: true });
+    expect(resumed.status).toBe("failed");
+    expect(resumed.note).toMatch(/robots\.txt unreachable/);
+    expect(resumed.note).toMatch(/refused by URL policy/);
+  });
+
+  it("comes back when the caller re-asserts it in the resume config", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    expect(first.status).toBe("cancelled");
+
+    // The same resume, with the hatch re-stated at the call site — explicit,
+    // in the open, and scoped to this call. That is the whole contract.
+    const resumed = await resumeCrawl(db, first.crawlId, {
+      config: config({ perHostDelayMs: 0 }),
+      reclaimLeases: true,
+    });
+    expect(resumed.status).toBe("finished");
+  });
+
+  it("ignores an allowPrivate left in a stored config by an older writer", async () => {
+    const summary = await crawl(config());
+    // A row as the pre-strip code would have written it — or as a hand edit
+    // would. Reading it back must not be the thing that turns the hatch on.
+    const stored = { ...(config() as unknown as Record<string, unknown>), allowPrivate: true };
+    await db
+      .update(crawls)
+      .set({ config: stored })
+      .where(eq(crawls.id, summary.crawlId));
+
+    const resumed = await resumeCrawl(db, summary.crawlId, { reclaimLeases: true });
+    expect(resumed.status).toBe("failed");
+    expect(resumed.note).toMatch(/robots\.txt unreachable/);
+  });
+});

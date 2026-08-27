@@ -9,6 +9,9 @@
  *    uncompressed spelling (0:0:0:0:0:ffff:7f00:1), the IPv4-compatible form
  *    (::127.0.0.1) and the NAT64 prefix (64:ff9b::7f00:1). Replaced with a
  *    full 16-byte parser plus a 2000::/3 global-unicast allowlist.
+ *  - 6to4 (2002::/16) and Teredo (2001::/32) evaluated on the IPv4 address
+ *    they embed rather than waved through by that allowlist (build-plan §7,
+ *    "before the first real-site crawl"). See embeddedIpv4s.
  *  - IPv4 literal parsing tightened to a strict dotted quad (upstream's
  *    Number() coercion read "10..0.1" as 10.0.0.1 and "0x7f.0.0.1" as
  *    127.0.0.1; WHATWG URL canonicalises those before we ever see them).
@@ -195,18 +198,96 @@ function mappedIpv4(bytes: number[]): number[] | null {
   return bytes.slice(12, 16);
 }
 
+/** An IPv4 address carried inside an IPv6 one, and what it is called there. */
+interface EmbeddedIpv4 {
+  /** Reads into a refusal: "6to4 IPv6 address (2002::/16) tunnelling to a …". */
+  prefix: string;
+  octets: number[];
+}
+
+/**
+ * The IPv4 addresses a 6to4 or Teredo address carries inside it.
+ *
+ * Both live inside 2000::/3 and both are, in substance, an IPv4 destination
+ * wearing an IPv6 spelling — so the global-unicast allowlist below waved them
+ * straight through. `2002:7f00:1::1` is 127.0.0.1 and
+ * `2001:0:4136:e378:8000:63bf:3f57:fefe` is 192.168.1.1, and neither was being
+ * asked about. This is the same hole `::ffff:169.254.169.254` was, two RFCs
+ * further along.
+ *
+ * **6to4 (RFC 3056 §2).** `2002:V4ADDR::/48` — the tunnel endpoint's IPv4
+ * address is bits 16-47, in the clear. One address, no ambiguity.
+ *
+ * **Teredo (RFC 4380 §4).** `2001:0000::/32`, then four fields:
+ *   bits 32-63   the Teredo SERVER's IPv4, in the clear
+ *   bits 64-79   flags
+ *   bits 80-95   the client's UDP port, obfuscated (XOR 0xFFFF)
+ *   bits 96-127  the CLIENT's IPv4, obfuscated (XOR 0xFFFFFFFF)
+ * The obfuscation is not a secret — §5.1.1 states it exists only to stop NATs
+ * rewriting an address they recognise in a payload — so undoing it is reading,
+ * not decryption.
+ *
+ * Our reading, stated because the RFC leaves the choice to the reader: the
+ * CLIENT address (the obfuscated last 32 bits) is the meaningful endpoint —
+ * it is the host the packets are ultimately for, and it is the field an SSRF
+ * would put `192.168.0.1` in. The server address is not the client and must
+ * not be mistaken for it. We check BOTH anyway, and name which one failed:
+ * reaching a Teredo address means relaying through that server, so a server in
+ * private space is a private destination too, and neither field has any
+ * business pointing into RFC1918 on a crawl of the public web. Refusing the
+ * pair costs us nothing real and refusing only one would leave half a hole.
+ *
+ * Returns an empty array for every other address, which is the overwhelming
+ * majority — the two prefixes are matched exactly (`2002::/16`, `2001:0::/32`)
+ * so ordinary global unicast such as 2001:4860:4860::8888 is untouched.
+ */
+function embeddedIpv4s(bytes: number[]): EmbeddedIpv4[] {
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) {
+    return [
+      {
+        prefix: "6to4 IPv6 address (2002::/16) tunnelling to a",
+        octets: bytes.slice(2, 6),
+      },
+    ];
+  }
+  if (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x00 && bytes[3] === 0x00) {
+    return [
+      {
+        prefix: "Teredo IPv6 address (2001::/32) whose client is a",
+        // De-obfuscated: XOR 0xFFFFFFFF, RFC 4380 §4.
+        octets: bytes.slice(12, 16).map((byte) => byte ^ 0xff),
+      },
+      {
+        prefix: "Teredo IPv6 address (2001::/32) whose server is a",
+        octets: bytes.slice(4, 8),
+      },
+    ];
+  }
+  return [];
+}
+
 /**
  * Allowlist rather than denylist: only 2000::/3 (global unicast) is crawlable.
  * That refuses ::1, ::, ::a.b.c.d, fc00::/7, fe80::/10, fec0::/10, ff00::/8
  * and 64:ff9b::/96 in every spelling, without enumerating them. IPv4-mapped
  * addresses defer to the IPv4 policy so ::ffff:127.0.0.1 is refused while a
  * mapped public address is not.
+ *
+ * The allowlist alone is not enough, though: 6to4 and Teredo addresses sit
+ * inside 2000::/3 and carry an IPv4 destination in their own bits, so they
+ * defer to the IPv4 policy too — see embeddedIpv4s. A 6to4 or Teredo address
+ * whose embedded IPv4 is public is still crawlable; it is the embedding that
+ * is checked, not the form.
  */
 function ipv6Reason(bytes: number[]): string | null {
   const mapped = mappedIpv4(bytes);
   if (mapped !== null) {
     const reason = ipv4Reason(mapped);
     return reason === null ? null : `IPv4-mapped ${reason}`;
+  }
+  for (const embedded of embeddedIpv4s(bytes)) {
+    const reason = ipv4Reason(embedded.octets);
+    if (reason !== null) return `${embedded.prefix} ${reason}`;
   }
   if (((bytes[0] ?? 0) & 0xe0) === 0x20) return null;
   return "non-global IPv6 address (loopback, link-local, unique-local, multicast or reserved)";
@@ -378,31 +459,39 @@ export interface UrlPolicyOpts {
 }
 
 /**
- * The IPv4 address a host denotes: a dotted quad, or the IPv4 inside an
- * IPv4-mapped IPv6 literal. Both spellings must reach the same verdict —
- * ::ffff:a9fe:a9fe is 169.254.169.254 wearing a hat.
+ * Every IPv4 address a host denotes: a dotted quad, the IPv4 inside an
+ * IPv4-mapped IPv6 literal, or the one(s) a 6to4 / Teredo address embeds. All
+ * of those spellings must reach the same verdict — ::ffff:a9fe:a9fe,
+ * 2002:a9fe:a9fe:: and 2001:0:4136:e378:8000:63bf:5601:5601 are all
+ * 169.254.169.254 wearing a hat.
  */
-function hostAsIpv4(host: string): number[] | null {
+function hostAsIpv4s(host: string): number[][] {
   const v4 = parseIpv4(host);
-  if (v4 !== null) return v4;
+  if (v4 !== null) return [v4];
   const v6 = parseIpv6(host);
-  return v6 === null ? null : mappedIpv4(v6);
+  if (v6 === null) return [];
+  const mapped = mappedIpv4(v6);
+  if (mapped !== null) return [mapped];
+  return embeddedIpv4s(v6).map((embedded) => embedded.octets);
 }
 
 /**
  * The floor the test-only allowPrivate escape hatch cannot lift. If
  * allowPrivate ever leaks out of the test suite, the crawler still cannot
  * reach a cloud metadata service — the payload of almost every real SSRF.
- * Goes through hostAsIpv4 so a mapped spelling ([::ffff:a9fe:a9fe]) cannot
- * step around the link-local test.
+ * Goes through hostAsIpv4s so no alternative spelling of 169.254.169.254 —
+ * mapped, 6to4-tunnelled or Teredo-obfuscated — steps around the link-local
+ * test. The hatch relaxes the policy; it does not relax the floor, and a
+ * spelling the floor cannot read would be a hole in it.
  */
 function hardBlockedReason(host: string): string | null {
   if (host !== "localhost" && BLOCKED_HOSTS.has(host)) {
     return `blocked host name (${host})`;
   }
-  const v4 = hostAsIpv4(host);
-  if (v4 !== null && v4[0] === 169 && v4[1] === 254) {
-    return "link-local IPv4 address (169.254.0.0/16)";
+  for (const v4 of hostAsIpv4s(host)) {
+    if (v4[0] === 169 && v4[1] === 254) {
+      return "link-local IPv4 address (169.254.0.0/16)";
+    }
   }
   return null;
 }

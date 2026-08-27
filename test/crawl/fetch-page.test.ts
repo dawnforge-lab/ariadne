@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { gzipSync } from "node:zlib";
 import { fetchPage } from "../../src/crawl/fetch-page.js";
 import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
 
@@ -8,9 +9,58 @@ let base: string;
 let port: number;
 const OPTS = { userAgent: "AriadneBot-test", allowPrivate: true };
 
+/** The `accept-encoding` the last request to /echo-accept-encoding carried. */
+let lastAcceptEncoding: string | undefined;
+
+/** `<html>…</html>` padded to exactly `bytes`, so a length assertion is exact. */
+function htmlOfSize(bytes: number): string {
+  const shell = "<html><title>z</title></html>";
+  return shell.slice(0, -7) + "x".repeat(bytes - shell.length) + "</html>";
+}
+
 beforeAll(async () => {
   server = createServer((req, res) => {
-    if (req.url === "/ok") {
+    if (req.url === "/gzip-ok") {
+      // 200 html, gzipped on the wire. The decompressed length is what
+      // htmlBytes must report — not the ~60 bytes that actually crossed it.
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from(htmlOfSize(4096), "utf-8")));
+    } else if (req.url === "/gzip-exactly-1mib") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from(htmlOfSize(1024 * 1024), "utf-8")));
+    } else if (req.url === "/gzip-bomb") {
+      // ~5KB on the wire, 8MiB decompressed: under any wire-byte cap, far over
+      // the body cap. The whole point of capping the inflated side.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.alloc(8 * 1024 * 1024, 0x61)));
+    } else if (req.url === "/gzip-lying") {
+      // Claims gzip, sends plain text. zlib refuses it (Z_DATA_ERROR).
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end("<html><title>not actually gzip</title></html>");
+    } else if (req.url === "/brotli") {
+      // A coding we never advertised. The bytes are irrelevant — we cannot
+      // decode the label, so we never look at them.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "br");
+      res.end(Buffer.from([0x1b, 0x00, 0x00, 0x00]));
+    } else if (req.url === "/gzip-identity") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "identity");
+      res.end("<html><title>identity</title></html>");
+    } else if (req.url === "/gzip-pdf") {
+      // Gzipped non-HTML: drained unread, so no CPU is spent inflating it.
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from("%PDF-")));
+    } else if (req.url === "/echo-accept-encoding") {
+      lastAcceptEncoding = req.headers["accept-encoding"] as string | undefined;
+      res.setHeader("content-type", "text/html");
+      res.end("<html></html>");
+    } else if (req.url === "/ok") {
       res.setHeader("content-type", "text/html; charset=utf-8");
       res.setHeader("link", '<https://ex.com/canon>; rel="canonical"');
       res.setHeader("x-robots-tag", "noindex");
@@ -183,6 +233,69 @@ describe("fetchPage", () => {
 
   it("classifies non-html", async () => {
     expect((await fetchPage(`${base}/pdf`, OPTS)).fetchClass).toBe("non_html");
+  });
+
+  // Build-plan §7 "before the first real-site crawl", item 1. Every one of
+  // these bites on the open internet and none of them on a fixture server that
+  // does not compress.
+  describe("gzip transport encoding", () => {
+    it("asks for gzip", async () => {
+      lastAcceptEncoding = undefined;
+      const r = await fetchPage(`${base}/echo-accept-encoding`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(lastAcceptEncoding).toBe("gzip");
+    });
+
+    it("inflates a gzipped page and reports the decompressed size", async () => {
+      const r = await fetchPage(`${base}/gzip-ok`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(r.body).toContain("<title>z</title>");
+      expect(r.body?.length).toBe(4096);
+      // Not the wire bytes: gzip of 4KB of 'x' is a couple of dozen bytes.
+      expect(r.htmlBytes).toBe(4096);
+    });
+
+    it("accepts a gzipped body of exactly 1MiB decompressed", async () => {
+      const r = await fetchPage(`${base}/gzip-exactly-1mib`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(r.htmlBytes).toBe(1024 * 1024);
+      expect(r.body?.length).toBe(1024 * 1024);
+    });
+
+    it("refuses a body that expands past the cap — classified, not truncated", async () => {
+      const r = await fetchPage(`${base}/gzip-bomb`, OPTS);
+      // The failure is classified. A page row holding the first MiB of a bomb
+      // would read to every rule as a real 8MiB-of-nothing page.
+      expect(r.fetchClass).toBe("too_large");
+      expect(r.body).toBeNull();
+      expect(r.htmlBytes).toBe(1024 * 1024);
+      expect(r.statusCode).toBe(200);
+    });
+
+    it("classifies a content-encoding we never advertised, and names it", async () => {
+      const r = await fetchPage(`${base}/brotli`, OPTS);
+      expect(r.fetchClass).toBe("network_error");
+      expect(r.body).toBeNull();
+      expect(r.disallowedReason).toBe("unsupported content-encoding (br)");
+    });
+
+    it("classifies a body that claims gzip and is not", async () => {
+      const r = await fetchPage(`${base}/gzip-lying`, OPTS);
+      expect(r.fetchClass).toBe("network_error");
+      expect(r.body).toBeNull();
+    });
+
+    it("reads content-encoding: identity as no encoding", async () => {
+      const r = await fetchPage(`${base}/gzip-identity`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(r.body).toContain("identity");
+    });
+
+    it("still classifies a gzipped non-html body as non_html", async () => {
+      const r = await fetchPage(`${base}/gzip-pdf`, OPTS);
+      expect(r.fetchClass).toBe("non_html");
+      expect(r.body).toBeNull();
+    });
   });
 
   it("treats application/xhtml+xml as html", async () => {

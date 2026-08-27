@@ -14,8 +14,9 @@
  * Fetch semantics are OpenSEO's decisions (site-audit-workflow-helpers.ts
  * @ c469a48ae90ab58413b198fe3d1ac1aa90a9b070), read as reference and
  * re-implemented over undici rather than lifted: manual redirects so every hop
- * is its own row, a 1MiB body cap, and the bot-challenge classification table.
- * Divergences from that table are marked "CHANGED" at their line.
+ * is its own row, a 1MiB body cap (spent on decompressed bytes — see
+ * readCappedDecoded), and the bot-challenge classification table. Divergences
+ * from that table are marked "CHANGED" at their line.
  *
  * The plumbing under all of that — connection pools, the connect-time address
  * guard, the capped reader, charset decoding, error classification — lives in
@@ -26,6 +27,7 @@
 import { request } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
 import {
+  ACCEPT_ENCODING,
   blockedAddressMessage,
   decodeBody,
   headerValue,
@@ -33,12 +35,18 @@ import {
   isTimeout,
   mimeType,
   newAgent,
-  readCapped,
+  readCappedDecoded,
   sharedAgent,
   type DnsLookupFn,
   type HeaderBag,
 } from "./http.js";
 
+/**
+ * The body cap, spent on **decompressed** bytes (see readCappedDecoded). It
+ * bounds the wire read too, because the reader stops inflating and destroys
+ * the socket the moment the cap is reached — a compressed body can therefore
+ * never cost more than ~1MiB of transfer either.
+ */
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
@@ -96,7 +104,14 @@ export interface FetchResult {
   redirectUrl: string | null;
   /** Decoded html text, ≤ 1MiB; null for every class except `ok`. */
   body: string | null;
-  /** Body bytes actually received, capped at MAX_BODY. */
+  /**
+   * How many bytes of body we hold, capped at MAX_BODY. For the classes that
+   * keep a body this is the html's own size — the **decompressed** length when
+   * the response was gzipped, so it means the same thing whether or not the
+   * origin compresses, and matches what the analyzer measures. For the classes
+   * whose body is drained unread (redirects, non-HTML, 4xx) it is the wire
+   * bytes, which is what those cost us.
+   */
   htmlBytes: number;
   /** Time to response headers, not to the last body byte. */
   responseTimeMs: number;
@@ -104,9 +119,11 @@ export interface FetchResult {
   canonicalHeader: string | null;
   xRobotsTag: string | null;
   /**
-   * Why something was refused, in plain words. Set on `disallowed` (the URL
-   * or the address it resolved to), and on `redirect` when the Location was
-   * dropped rather than passed on. Null otherwise.
+   * Why this row has no usable body or target, in plain words. Set on
+   * `disallowed` (the URL or the address it resolved to), on `redirect` when
+   * the Location was dropped rather than passed on, and on the
+   * `network_error` a response we cannot decode produces (a `content-encoding`
+   * we never advertised). Null otherwise.
    */
   disallowedReason: string | null;
 }
@@ -291,6 +308,12 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       headers: {
         "user-agent": opts.userAgent,
         accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        // undici's `request` does not decode transport encodings (unlike
+        // `fetch`), so asking for gzip means we own the inflating — see
+        // readCappedDecoded, which is also why only gzip is offered. Worth
+        // owning: HTML compresses 4-6x, and a crawl that refuses compression
+        // is four times the bandwidth on someone else's origin (rule 9).
+        "accept-encoding": ACCEPT_ENCODING,
       },
       // Manual redirects: a 3xx is its own row and the crawl loop enqueues the
       // target (which re-enters url-policy on the way in), so chains and loops
@@ -320,7 +343,12 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     // challenge page and a 404's html are drained and dropped, not buffered.
     const keepBody =
       !isRedirect && (statusCode === 503 || (isHtml && statusClass === "ok"));
-    const read = await readCapped(response.body, MAX_BODY, keepBody);
+    const read = await readCappedDecoded(
+      response.body,
+      headerValue(headers, "content-encoding"),
+      MAX_BODY,
+      keepBody,
+    );
 
     if (isRedirect) {
       const target = await resolveRedirectTarget(
@@ -352,7 +380,19 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       fetchClass = classifyStatus(statusCode, headers, snippet);
     }
     if (fetchClass === "ok" && !isHtml) fetchClass = "non_html";
+    // Decompressed, not wire: a 40KB body that inflates past MAX_BODY is a
+    // `too_large` row with no body, never a page row holding the first MiB of
+    // it. Precedence is unchanged — the status still wins, so a 500 with a
+    // 5MB body is `server_error`.
     if (fetchClass === "ok" && read.truncated) fetchClass = "too_large";
+    // A 200 whose bytes we cannot decode is a page we did not get. Say which
+    // coding defeated us rather than recording an empty page (rule 7). A
+    // non-`ok` class keeps its own, more specific verdict: a 503 we could not
+    // decode is still a 503, we simply could not check it for challenge
+    // markers.
+    if (fetchClass === "ok" && read.unsupportedEncoding !== null) {
+      fetchClass = "network_error";
+    }
 
     return {
       url,
@@ -368,7 +408,10 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       responseTimeMs,
       canonicalHeader,
       xRobotsTag,
-      disallowedReason: null,
+      disallowedReason:
+        read.unsupportedEncoding === null
+          ? null
+          : `unsupported content-encoding (${read.unsupportedEncoding})`,
     };
   } catch (error) {
     // Our bug, not theirs — surface it loudly instead of burying it in a
@@ -383,6 +426,9 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     if (deadlineHit || isTimeout(error)) {
       return emptyResult(url, "timeout", responseTimeMs);
     }
+    // Also where a body that claimed `content-encoding: gzip` and was not gzip
+    // lands (zlib Z_DATA_ERROR / Z_BUF_ERROR out of readCappedDecoded): the
+    // response was unreadable, which is a failed fetch and not an empty page.
     return emptyResult(url, "network_error", responseTimeMs);
   } finally {
     clearTimeout(timer);

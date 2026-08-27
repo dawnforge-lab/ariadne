@@ -95,6 +95,10 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * TEST ONLY. Threaded through to url-policy, fetch-page and discovery so the
    * suite can crawl a 127.0.0.1 fixture server. Never wire this to an API
    * field, a CLI flag or an env var.
+   *
+   * It is also the one field that is NOT persisted on the `crawls` row: a
+   * resume must re-assert it in `ResumeOpts.config` rather than inherit it.
+   * See storableConfig.
    */
   allowPrivate?: boolean;
   /**
@@ -295,6 +299,10 @@ export interface ResumeOpts {
    * Overrides the config stored on the `crawls` row. Use it to change pacing
    * or raise `maxPages` for the continuation; omit it to resume exactly as the
    * crawl was configured.
+   *
+   * It is also the ONLY way to resume with `allowPrivate` on: the flag is
+   * never persisted, so a resume that needs it (fixture-server tests and gate
+   * scripts) must re-state it here. See storableConfig.
    */
   config?: CrawlConfig;
   signal?: AbortSignal;
@@ -327,7 +335,7 @@ export async function runCrawl(
   await db.insert(crawls).values({
     id: crawlId,
     siteUrl: config.siteUrl,
-    config,
+    config: storableConfig(config),
     rulesetVersion: RULESET_VERSION,
     status: "running",
   });
@@ -381,10 +389,40 @@ export async function resumeCrawl(
 }
 
 /**
+ * The config as `crawls.config_jsonb` should hold it: everything except
+ * `allowPrivate` (build-plan §7, "before the first real-site crawl").
+ *
+ * `allowPrivate` is a test-only escape hatch that admits loopback and RFC1918
+ * targets. Persisting it would make it *durable* — every resume of that crawl
+ * would silently re-enable it, months later, in a process nobody was thinking
+ * about, from a row nobody reads. That is exactly the silent fallback this
+ * project forbids (hard rule 7): the dangerous setting would carry itself
+ * forward without anyone re-stating the intent.
+ *
+ * So the row does not carry it, and `parseStoredConfig` does not restore it. A
+ * resume that genuinely needs it — the fixture-server gate scripts, and only
+ * those — re-asserts it in `ResumeOpts.config`, at the call site, in the open.
+ *
+ * The running crawl is unaffected: `execute` gets the caller's config object,
+ * not this copy. Only what outlives the process is trimmed.
+ */
+function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
+  const { allowPrivate: _allowPrivate, ...rest } = config;
+  return rest;
+}
+
+/**
  * A stored config is data we wrote, but it has been through a jsonb column and
  * possibly a schema change, so it is validated rather than trusted. A resume
  * on a config we cannot read must stop, not guess: guessing here would silently
  * re-crawl a site at the wrong pace.
+ *
+ * `allowPrivate` is deliberately not among the fields read back. `runCrawl`
+ * strips it on the way in (see storableConfig), and a row that has one anyway —
+ * written before this rule, or edited by hand — must not be the thing that
+ * turns it on. Off is the value the escape hatch has unless a caller says
+ * otherwise in this call, which is the whole point of the strip; leaving it
+ * off is the documented behaviour, not a guess covering a failure.
  */
 function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   if (typeof value !== "object" || value === null) {
@@ -398,7 +436,6 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
     userAgent: raw["userAgent"],
     perHostDelayMs: raw["perHostDelayMs"],
     maxConcurrency: raw["maxConcurrency"],
-    allowPrivate: raw["allowPrivate"],
     probeHosts: raw["probeHosts"],
     legacyHosts: raw["legacyHosts"],
     renderBudgetPct: raw["renderBudgetPct"],
@@ -422,7 +459,7 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   // The optional fields: absent is fine, present-and-wrong is not. A stored
   // `probeHosts: "false"` must not resume as "probe on" (it is truthy) or as
   // "probe off" (a guess) — it must stop.
-  for (const field of ["allowPrivate", "probeHosts"] as const) {
+  for (const field of ["probeHosts"] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
       throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a boolean`);
     }
