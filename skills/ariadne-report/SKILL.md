@@ -104,10 +104,18 @@ Sweep them: `metrics_get` with `crawlId` and no other filter, following
   `structure.depth-distribution` answers `{count, min, max, mean, median, p25, p75, p95}`,
   `sitemap.structure` answers something else entirely — so the table's columns are
   the value's own keys, not a set you chose in advance.
-- The metric's `title` is the table's caption. The `explanation` is the sentence
-  that tells the client what the number counted; use it once, under the table, in
-  the metric's own words. It is written for a reader, and rewriting it is how a
-  precise statement about what was measured becomes a vague one.
+- The metric's `title` is the table's caption. The `explanation` is what tells the
+  client what the number counted; use it once, under the table, in the metric's own
+  words. It is written for a reader, and rewriting it is how a precise statement
+  about what was measured becomes a vague one.
+- **Explanations are long, and trimming one is a declared act.** Quote it in full
+  when it runs to 120 words or fewer. Past that, quote its first paragraph — or,
+  where it is a single paragraph, its first two sentences — and follow the quote
+  with the marker *(explanation truncated; full text ships with the finding)*.
+  Never elide silently, never with a bare ellipsis, and never trim mid-sentence:
+  a reader who cannot see that something was cut cannot ask for the rest, and the
+  cut usually lands on the clause that says when the number is a floor rather than
+  a total.
 - `scope` and `scopeValue` are a column, never dropped. A `site` row and a
   `page_type` row are different claims, and a table that mixes them without saying
   which is which is a table nobody can act on. `(untyped)` is its own cohort — the

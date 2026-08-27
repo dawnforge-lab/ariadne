@@ -60,12 +60,57 @@ Any of these missing is a stop, named out loud, with what would fix it.
 
 ## Step 1 — decide what goes in
 
-Walk the findings file's `checks`. A check contributes to the plan when its
-`verdict` is `FAIL` or `AGENT`, it has a `recommendation`, and its evidence names
-at least one rule with a non-zero `count`. Then, for each such rule, decide
-whether it earns a tab.
+Five stages, in this order. The order is the point: gates before exclusions
+generate candidates you then take back out, and a cut before the merge hides work
+that should have been consolidated instead of dropped. Two agents running these
+five stages over one findings file build the same workbook.
 
-**A rule earns a tab if it clears any one of these gates:**
+```
+1a intake (by CHECK) → 1b exclusions → 1c gates → 1d consolidation → 1e rank and cut
+```
+
+### 1a — Intake, keyed by check
+
+Walk the findings file's `checks`. A check enters the pipeline when its `verdict`
+is `FAIL` or `AGENT`. Two kinds of candidate come out:
+
+- **Rule-backed candidates.** The check's `evidence` carries `finding` entries with
+  a `count` above zero. Each named rule is a candidate, and its tab body is an
+  `issue_urls` feed.
+- **Check-level candidates.** An `AGENT` check whose evidence is `observation`
+  entries and nothing else. There is no rule, so there is no `issue_urls` feed: the
+  tab body is the observations — their `urls`, their `summary`, their `detail` —
+  one row per URL observed, and the fix is the check's `recommendation` exactly as
+  a rule-backed tab's is. CHECK-41 and CHECK-42 are the standing examples. A check
+  nobody wrote a rule for is still work somebody does, and it does not get to
+  disappear because the engine had nothing to say about it.
+
+**The intake is keyed by check, and so is the ledger.** Every check that enters
+here leaves through exactly one door: a tab of its own, a block inside a family
+tab, or a line under *Considered, not included*. The same holds for every rule
+inside a rule-backed check. If you cannot name the door a check went through, the
+plan is not finished.
+
+### 1b — Exclusions, applied before the gates
+
+A candidate leaves here, and its reason is what the ledger records:
+
+- **E1 — `verdict` is `SKIP`.** Nothing was measured, so there is nothing to
+  action: the fix is a re-crawl or a connected data source, and the report says so.
+- **E2 — no `recommendation`.** This is a stop rather than an exclusion. A `FAIL`
+  or `AGENT` that needs a fix and carries no fix text is a hole in the audit: go
+  back and get one. Do not write it yourself, and do not quietly drop the check.
+- **E3 — the fix is a decision nobody has framed.** If the audit set out the
+  options, this is a *Decide first* tab (Step 2). If it did not, the check stays in
+  the report until somebody chooses, and comes back here once they have.
+- **E4 — small.** All three of: engine `severity` is `info`; `count` <
+  `max(10, 1% of crawl.pagesCrawled)`; and the affected pages are not on a page
+  type Phase 0 named as traffic or revenue. **That is what "small" means in this
+  skill** — the same floor G3 uses, so nothing can be both small and voluminous.
+
+### 1c — Gates
+
+Over what survived 1b. **A candidate needs one gate:**
 
 - **G1 — graded critical in context.** The findings file's `severity` for the
   check is `critical`. That is the auditor's judgement, already made on this site.
@@ -84,21 +129,87 @@ whether it earns a tab.
 - **G5 — the audit asked for it.** The check's `priority` is Critical or High in
   the findings file and the recommendation is a concrete change.
 
-**A rule does not earn a tab when** its fix is a decision rather than an action
-(consolidate or differentiate? redirect or canonical?) with no decision yet made —
-that belongs in the report, and comes back here once the client has chosen; when
-its verdict is `SKIP` (nothing was measured, so there is nothing to action — the
-fix is a re-crawl or a connected data source, and the report says so); or when it
-is `info` severity, small, and off the templates that matter.
+The gates generate candidates; they do not size the plan. G2 admits a category at
+any count above zero, so on a tidy site it will hand you nine one-row candidates.
+Sizing is 1d and 1e, and it happens after the gates rather than instead of them.
 
-**Nothing is dropped silently.** Every rule with findings that did not get a tab is
-listed on the Summary sheet under *Considered, not included*, with its count and a
-one-line reason. A finding that vanishes between the audit and the deliverable is
-indistinguishable from a finding nobody made — which is exactly the failure the
-engine's no-silent-fallback rule exists to prevent, applied to a spreadsheet.
+### 1d — Consolidation
 
-Aim for six to ten tabs. A twenty-tab workbook is a database export, and the team
-that receives it does the triage you were supposed to do.
+Group the surviving candidates by the checklist `section` the findings file carries
+on every check. Inside a section, every candidate whose row count is **below the
+volume floor** (`max(10, 1% of crawl.pagesCrawled)`, the same number E4 and G3 use)
+merges into one **family tab**, named for what the section is about rather than for
+any rule in it: `Sitemap hygiene`, `Canonical hygiene`, `Hreflang hygiene`.
+Candidates at or above the floor keep a tab of their own.
+
+**The merge criterion, in one sentence: same checklist section, both below the
+volume floor, remedies of the same kind.** Where a section's small candidates need
+genuinely different work — regenerate a file versus rewrite copy — they fall in
+different lanes, and the lane split in Step 2 separates them into
+`Sitemap hygiene (platform)` and `Sitemap hygiene (pages)`.
+
+**A rule claimed by two checks belongs to one tab.** `checkIds` is a list: on this
+ruleset `content.thin` claims CHECK-40 and CHECK-13, so a check-keyed intake picks
+it up twice and would hand the same 22 URLs to two teams — and both tabs would pass
+their own row-count test while the plan double-counted the site. The rule goes to
+the higher-ranked of the checks that admit it (Step 5's ranking, lowest `ruleId` as
+the tiebreak); the other check's line in the Summary index names the tab that owns
+it instead of repeating its rows. If losing that rule leaves the other check with
+no rules at all, it is not a tab — it is a cross-reference.
+
+**A check's own rules merge by default, and the fix text is why.** The findings
+file carries one `recommendation` per CHECK, not per rule, so four rules under
+CHECK-07 would otherwise become four tabs with the identical Fix string — four
+copies of one instruction, and a team that works them four times. The default is
+one tab per check, named for the check's subject, with a block per rule inside it
+(`sitemap.non-200`, `sitemap.non-indexable`, `sitemap.redirected` each a block
+under one *Sitemap hygiene* tab). Regenerating the sitemap is one change and it
+closes all three.
+
+Split into per-rule tabs when the remedies genuinely differ, and there are three
+pieces of evidence that flip it: the check's `notes` prescribe different work for
+different rules; the rules land in different lanes (Step 2); or one rule alone is
+at or above the volume floor while its siblings are trivial — a 4,000-row list and
+a 2-row list are not one work item however alike their fixes read. When you split,
+each tab's Fix column carries the check's recommendation plus the one clause that
+distinguishes that rule, and the Summary's tab index shows them as siblings.
+
+Inside a family tab, each merged rule or check is its own block: a block row naming
+the rule id, its check ids, its count and its fix, then that block's header row and
+its rows. The columns are the union across the family, so an evidence key one rule
+writes and another does not is an empty cell, never a dropped column. Blocks are
+ordered by Step 5's ranking.
+
+A family of one is still a family tab, named for its section. Next quarter's
+re-run then adds a second small rule to it without renaming the tab, which is what
+"a re-run diffs cleanly" has to mean over time as well as within a run.
+
+### 1e — Rank and cut
+
+Rank every tab by Step 5's ordering and keep the top ten. Everything below the cut
+goes to *Considered, not included* with its rank, its count and the reason "below
+the cut at rank N".
+
+Three protections. A candidate whose findings-file `priority` is `Critical` is
+never cut. **Neither is one at or above the volume floor**: the target exists to
+stop a workbook filling with one-row tabs, so a cut that drops a 23-row work item
+while keeping a one-row family tab has inverted its own purpose — the cut may only
+take below-floor candidates. And every cut candidate is recorded on its own line,
+never "and 14 others".
+
+When those protections leave more than ten tabs, the plan is bigger than the target
+and the Summary sheet says so in a sentence. That is the honest outcome: the cut
+does not get to decide quietly that a site has less wrong with it than it has.
+
+Six to ten tabs is the target because a twenty-tab workbook is a database export,
+and the team that receives one does the triage you were supposed to do.
+
+**Nothing is dropped silently, and the claim is over checks.** Every check that
+entered 1a, and every rule inside one, is either in a tab, in a family block, or on
+the *Considered, not included* list with its count and a one-line reason. A finding
+that vanishes between the audit and the deliverable is indistinguishable from a
+finding nobody made — the failure the engine's no-silent-fallback rule exists to
+prevent, applied to a spreadsheet.
 
 ## Step 2 — split by who does the work
 
@@ -147,6 +258,20 @@ ambiguous row.
   written per page by people and is fixed the same way.
 - **The recommendation's own verb.** "Regenerate the sitemap from…" is platform.
   "Rewrite the descriptions on…" is page-by-page. "Choose whether…" is decide-first.
+
+**Which rows go where, when a tab splits.** The lane is decided for the rule and
+then applied row by row, and the split follows the same evidence the inference did:
+the rows in the cohort or cohorts that triggered the platform inference go to the
+platform tab, and every remaining row goes to the pages tab. Nothing is duplicated
+across the two and nothing is left out — the two tabs' row counts sum to the count
+`issues_list` reported, and that is the completeness test for a split rule.
+
+A row's cohort comes from the page type the evidence already carries where the rule
+wrote one; otherwise from `pages_query` — filter by `pageType` for the cohorts you
+care about and match on `url`, or list the pages once and index them locally, which
+is the cheaper option when several rules split. A row whose URL is not in the pages
+listing at all (a site-scoped finding, a sitemap URL the crawl never reached) goes
+to the platform lane: nobody edits it page by page.
 
 **The honest limit.** Ariadne does not record WHERE on a page a link sits. There is
 no link-position or XPath column on this surface — the `links` table is never
@@ -205,6 +330,11 @@ The tab body is the URL plus the rule's own evidence, flattened.
 - **Never drop a key** because most rows lack it, and never fill a blank with a
   zero or an "N/A" — a rule that recorded nothing there recorded nothing there.
   Leave the cell empty.
+- **One further key may be collapsed, and only under a test.** Several rules write
+  the finding's own URL again under `url` as well as `pageUrl` — the sitemap rules
+  do. Drop such a key only when its value equals column 1 on EVERY row of that
+  rule, and name the dropped key in the block header so the collapse is visible.
+  Any row where it differs means it was never a duplicate: keep the column.
 - **Nested values** — arrays and objects — go in as compact JSON in one cell. The
   evidence shape belongs to the rule, and flattening `headingOrder: [1,4,4]` into
   three columns invents a schema the rule never had.
@@ -219,28 +349,55 @@ The tab body is the URL plus the rule's own evidence, flattened.
 **Deterministic order, because a re-run should diff cleanly.** Summary is always
 sheet 1. Then the tabs, sorted by:
 
-1. lane rank — Platform, Page-by-page, Decide first;
-2. plan priority — P1 through P4 (the report's ladder, if a report exists;
-   otherwise the findings file's `priority`);
-3. engine severity — critical, warning, info;
-4. `count`, descending;
-5. `ruleId`, ascending — the final tiebreak, so the order is total.
+1. **the findings file's `priority`** — `Critical`, `High`, `Medium`, `Low`, in
+   that rank; a check with no priority sorts last;
+2. engine severity — critical, warning, info;
+3. `count`, descending;
+4. `ruleId`, ascending — the final tiebreak, so the order is total.
 
-**Tab names** are derived from the rule id by a fixed transformation, so the same
-crawl always names its tabs the same way: take the rule id, replace `.` with ` `,
-append the lane in parentheses where a rule split across lanes, and cut to Excel's
-31-character limit. Excel also forbids `[ ] : * ? / \` in a sheet name and demands
-uniqueness; when a truncation collides, append `-2`, `-3`.
+A family tab or a merged check ranks by its highest-ranked member, with its lowest
+`ruleId` as the tiebreak. This is also the ranking 1e cuts against.
+
+**The ordering never reads the report.** `priority` is a field in the findings
+file, written by the audit, one of four known values. The report's P1–P4 ladder is
+narrative — it is argued in prose, for a human, and parsing it back out of a
+markdown document to sort a spreadsheet would make the workbook depend on how
+somebody phrased a sentence. The two agree because both are arguing from the same
+audit; only one of them is machine-readable, and it is the one that sorts tabs.
+
+Lane is not part of the ordering. It is a column, a tab colour, and how the Summary
+sheet groups its index — a developer wants the platform tabs together, and gets
+them there, without the sheet order depending on a judgement call.
+
+**Tab names** come from a fixed transformation, so the same findings file always
+names its tabs the same way:
+
+- a **rule tab** takes the rule id with `.` replaced by a space — `content thin`;
+- a **check tab** (a check's rules merged, 1d) takes the check's subject —
+  `Sitemap URLs`, and its check id in the Summary index rather than in the name;
+- a **family tab** takes its section's subject plus `hygiene` —
+  `Sitemap hygiene`;
+- any tab split across lanes appends the lane in parentheses —
+  `Sitemap hygiene (platform)`.
+
+Then cut to Excel's 31-character limit — **cutting the subject, never the lane
+suffix**: `Crawlability & Robots hygiene (platform)` and the same name with
+`(pages)` truncate to the identical 31 characters, and a workbook builder that
+silently renames the collision has just produced two tabs nobody can tell apart.
+Excel forbids `[ ] : * ? / \` in a sheet name and demands uniqueness; when a
+truncation still collides, append `-2`, `-3`, and put the full name in the
+Summary's tab index where there is room for it.
 
 **The Summary sheet** carries, in this order:
 
 - what the document is, and the one sentence about lanes;
 - the crawl it came from: `crawlId`, site, crawl dates, `pagesCrawled`,
   `rulesetVersion` — so a reader can tell how old the URLs are;
-- the tab index: tab name, lane, priority, engine severity, rule id, check ids,
-  row count;
-- **Considered, not included**: every rule with findings that got no tab, its
-  count and the reason;
+- the tab index, grouped by lane: tab name, lane, priority, engine severity, rule
+  id(s), check ids, row count;
+- **Considered, not included**: every check and every rule that entered 1a and got
+  no tab and no family block, with its count and its one-line reason — an
+  exclusion code from 1b, or "below the cut at rank N" from 1e;
 - anything from `crawl.caveats` that bounds the row counts (a page cap reached, a
   partial render pass), because a developer reading a tab of 200 URLs deserves to
   know the crawl stopped at 500 pages;
@@ -258,7 +415,7 @@ import json, openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-LANE_FILL = {                      # lane, not severity: the sheet is sorted by who works it
+LANE_FILL = {                      # the lane is a colour and a column; the ORDER is Step 5's
     "platform": "FFC7CE",
     "pages": "C6EFCE",
     "decide": "FFEB9C",
@@ -307,10 +464,12 @@ in the conversation:
 
 ## Before you hand it over
 
-- Every tab's row count equals the `count` `issues_list` reported for its rule, or
-  the tab says on its face that it is a slice and how big the whole is.
+- Every tab's row count equals the `count` `issues_list` reported for its rule (for
+  a rule split across lanes, the two tabs' counts sum to it), or the tab says on
+  its face that it is a slice and how big the whole is.
 - Every tab's `Fix` column came from a `recommendation` in the findings file.
-- Every rule with findings is either a tab or a line under *Considered, not
-  included*. There is no third place for one to go.
+- Every check that entered 1a, and every rule inside one, is a tab, a family block,
+  or a line under *Considered, not included*. There is no fourth place to go, and
+  an `AGENT` check with no rule behind it is covered by that sentence too.
 - Every URL in the workbook came from the crawl id in the findings file.
 - The workbook opens, and the tabs are in the deterministic order above.
