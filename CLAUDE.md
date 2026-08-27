@@ -34,6 +34,9 @@ either direction; the seam is the network API only.
   `docker run -d --name ariadne-pg -p 5440:5432 -e POSTGRES_USER=ariadne -e POSTGRES_PASSWORD=ariadne -e POSTGRES_DB=ariadne postgres:16`
   (port 5440 — 5432 and 5439 are taken on this machine by other projects).
 - `DATABASE_URL=postgresql://ariadne:ariadne@localhost:5440/ariadne`
+- **Chromium** for the render pass: `npx playwright install chromium`, once per
+  machine. Without it `test/crawl/renderer.test.ts` fails at launch — it drives
+  a real browser against a real fixture server, deliberately (no stub).
 - Tests: `npm test` (vitest). Typecheck: `npx tsc --noEmit`. Both must stay clean.
 - Migrations: drizzle-kit, applied with `npm run db:migrate`. Never hand-apply SQL.
 

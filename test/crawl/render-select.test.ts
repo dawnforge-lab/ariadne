@@ -34,6 +34,7 @@ import {
 } from "../../src/crawl/frontier.js";
 import {
   RENDER_DEFAULTS,
+  renderSelectionStats,
   selectRenderSet,
   SUSPICION,
   type RenderSelection,
@@ -452,6 +453,28 @@ describe("selectRenderSet", () => {
       [url("/h/1")]: "done",
       [url("/h/2")]: "done",
     });
+  });
+
+  it("recomputes the same stats afterwards, without touching the frontier", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, BUDGET_SITE);
+    const cfg = { renderBudgetPct: 100, renderMaxPages: 4, renderSamplePerType: 3 };
+
+    const selected = await selectRenderSet(db, crawlId, cfg);
+    const before = await frontierState(crawlId);
+
+    // `render.coverage` (P5-T5) has to quote the sampling story after the pass
+    // has run and the selection object is long gone. These are the same four
+    // numbers, from the same CTEs, and asking for them changes nothing.
+    const stats = await renderSelectionStats(db, crawlId, cfg);
+    expect(stats).toEqual({
+      budget: selected.budget,
+      suspects: selected.suspects,
+      sampled: selected.sampled,
+      truncated: selected.truncated,
+    });
+    expect(stats).toEqual({ budget: 4, suspects: 5, sampled: 3, truncated: true });
+    expect(await frontierState(crawlId)).toEqual(before);
   });
 
   it("takes the percentage when it is the smaller of the two bounds", async () => {

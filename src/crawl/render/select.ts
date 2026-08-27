@@ -33,9 +33,15 @@
  * moves frontier rows into `render_pending` and demotes render rows it no
  * longer names, so running it while a crawl or a render pass is live would take
  * URLs out from under that worker — the same caveat `releaseLeases(db, id,
- * null)` carries, and for the same reason.
+ * null)` carries, and for the same reason. `runRenderPass` (run-render.ts)
+ * ENFORCES that caveat before it calls this function.
+ *
+ * `renderSelectionStats` is the same decision asked read-only: the coverage
+ * metric has to quote the sampling story long after the selection object is
+ * gone, and these numbers have no column to live in. Both share `candidateCte`
+ * so there is one spelling of "suspect" in the codebase.
  */
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 
 /**
@@ -171,73 +177,11 @@ export async function selectRenderSet(
   }
 
   const res = await db.execute(sql`
-      with cohort as (
-        -- The renderable pages: fetched OK with a 200 body. Deliberately NOT
-        -- filtered on is_indexable — the metric layer's cohort (src/rules/metric/
-        -- cohort.ts) excludes noindex pages because they compete for nothing,
-        -- but a noindex page built entirely by JavaScript is exactly the
-        -- evidence this pass exists to collect.
-        select p.id, p.url, p.depth,
-               -- The metric layer's UNTYPED convention, spelled here rather
-               -- than imported: a client-configured page type of '(untyped)'
-               -- and a page with none MERGE into one cohort, which is the only
-               -- sound answer once the two are indistinguishable.
-               coalesce(nullif(p.page_type, ''), '(untyped)') as cohort_type,
-               p.word_count, p.html_bytes, p.title, p.framework_markers
-        from pages p
-        where p.crawl_id = ${crawlId}
-          and p.fetch_class = 'ok'
-          and p.status_code = 200
-      ),
-      budget as (
-        -- Over EVERY crawled URL, not over the cohort: the bound being enforced
-        -- is "no more than pct% of this crawl leaves through a browser".
-        select least(
-          ceil((select count(*) from pages where crawl_id = ${crawlId})::numeric
-               * ${renderBudgetPct} / 100)::int,
-          ${renderMaxPages}::int) as n
-      ),
-      suspects as (
-        select c.url from cohort c
-        where
-          -- A long document with almost nothing in it.
-          (c.word_count < ${SUSPICION.thinWordCount}
-            and c.html_bytes > ${SUSPICION.thinHtmlBytes})
-          -- A page with no title at all, big enough that it should have one.
-          or ((c.title is null or c.title = '')
-            and c.html_bytes > ${SUSPICION.titlelessHtmlBytes})
-          -- A client-side framework's hydration marker in the raw HTML.
-          or jsonb_array_length(c.framework_markers) > 0
-          -- A page that links nowhere. Hard rule 3: asked of the links table,
-          -- never of a link list in memory.
-          or not exists (
-            select 1 from links l
-            where l.crawl_id = ${crawlId} and l.source_page_id = c.id)
-      ),
-      sample as (
-        select r.url from (
-          select c.url,
-                 row_number() over (
-                   partition by c.cohort_type order by c.url asc) as rn
-          from cohort c
-        ) r
-        where r.rn <= ${renderSamplePerType}
-      ),
-      candidates as (
-        -- min(tier) is what makes a page that is BOTH a suspect and a sample
-        -- member count once, on the suspect side.
-        select url, min(tier) as tier from (
-          select url, 0 as tier from suspects
-          union all
-          select url, 1 as tier from sample
-        ) t group by url
-      ),
-      stats as (
-        select count(*) filter (where tier = 0)::int as suspects,
-               count(*) filter (where tier = 1)::int as sampled,
-               count(*)::int as total
-        from candidates
-      ),
+      with ${candidateCte(crawlId, {
+        renderBudgetPct,
+        renderMaxPages,
+        renderSamplePerType,
+      })},
       picked as (
         select c.url, c.tier from candidates c
         order by c.tier asc, c.url asc
@@ -329,6 +273,135 @@ export async function selectRenderSet(
   }
 
   return { selected, budget, suspects, sampled, truncated: total > budget };
+}
+
+/**
+ * The selection stats WITHOUT selecting: `budget`, `suspects`, `sampled` and
+ * the candidate total, computed from exactly the CTEs `selectRenderSet` uses
+ * and writing nothing.
+ *
+ * This exists because the numbers have nowhere to be stored. `render.coverage`
+ * (P5-T5) has to quote the sampling story after the pass has run, and `crawls`
+ * carries no render evidence blob — the phase's migration added page columns
+ * only, and `config_jsonb` is the crawl's input, not a results column. So the
+ * stats are RECOMPUTED rather than persisted, which is sound for exactly one
+ * reason worth stating: every column the decision reads (`word_count`,
+ * `html_bytes`, `title`, `framework_markers`, and the `links` rows) is written
+ * by the CRAWL pass, and the render pass writes only `rendered_*` columns. The
+ * inputs cannot move under a render, so this returns the same numbers before
+ * the pass, during it, and a week later.
+ *
+ * It shares `candidateCte` with `selectRenderSet` rather than restating the
+ * predicate: two spellings of "suspect" would eventually disagree, and the
+ * coverage metric would then describe a selection that never happened.
+ */
+export async function renderSelectionStats(
+  db: Db,
+  crawlId: string,
+  cfg: RenderSelectionConfig,
+): Promise<Omit<RenderSelection, "selected">> {
+  const resolved = resolveRenderConfig(cfg);
+
+  const res = await db.execute(sql`
+      with ${candidateCte(crawlId, resolved)}
+      select b.n as budget, s.suspects, s.sampled, s.total
+      from budget b cross join stats s`);
+
+  const head = res.rows[0];
+  if (head === undefined) {
+    throw new Error(`renderSelectionStats: crawl '${crawlId}' returned no row`);
+  }
+  const budget = int(head["budget"], "budget");
+  const suspects = int(head["suspects"], "suspects");
+  const sampled = int(head["sampled"], "sampled");
+  const total = int(head["total"], "total");
+  if (suspects + sampled !== total) {
+    throw new Error(
+      `renderSelectionStats: ${suspects} suspects + ${sampled} sampled ≠ ${total} candidates`,
+    );
+  }
+  return { budget, suspects, sampled, truncated: total > budget };
+}
+
+/**
+ * The read-only half of the selection: everything up to and including the
+ * candidate set and its counts, as CTEs a caller appends its own to.
+ *
+ * ONE SPELLING, TWO CALLERS — `selectRenderSet`, which follows it with the
+ * data-modifying CTEs that promote the chosen rows, and `renderSelectionStats`,
+ * which follows it with nothing. The fragment ends without a trailing comma so
+ * both can say what comes next.
+ */
+function candidateCte(crawlId: string, cfg: ResolvedRenderConfig): SQL {
+  const { renderBudgetPct, renderMaxPages, renderSamplePerType } = cfg;
+  return sql`
+      cohort as (
+        -- The renderable pages: fetched OK with a 200 body. Deliberately NOT
+        -- filtered on is_indexable — the metric layer's cohort (src/rules/metric/
+        -- cohort.ts) excludes noindex pages because they compete for nothing,
+        -- but a noindex page built entirely by JavaScript is exactly the
+        -- evidence this pass exists to collect.
+        select p.id, p.url, p.depth,
+               -- The metric layer's UNTYPED convention, spelled here rather
+               -- than imported: a client-configured page type of '(untyped)'
+               -- and a page with none MERGE into one cohort, which is the only
+               -- sound answer once the two are indistinguishable.
+               coalesce(nullif(p.page_type, ''), '(untyped)') as cohort_type,
+               p.word_count, p.html_bytes, p.title, p.framework_markers
+        from pages p
+        where p.crawl_id = ${crawlId}
+          and p.fetch_class = 'ok'
+          and p.status_code = 200
+      ),
+      budget as (
+        -- Over EVERY crawled URL, not over the cohort: the bound being enforced
+        -- is "no more than pct% of this crawl leaves through a browser".
+        select least(
+          ceil((select count(*) from pages where crawl_id = ${crawlId})::numeric
+               * ${renderBudgetPct} / 100)::int,
+          ${renderMaxPages}::int) as n
+      ),
+      suspects as (
+        select c.url from cohort c
+        where
+          -- A long document with almost nothing in it.
+          (c.word_count < ${SUSPICION.thinWordCount}
+            and c.html_bytes > ${SUSPICION.thinHtmlBytes})
+          -- A page with no title at all, big enough that it should have one.
+          or ((c.title is null or c.title = '')
+            and c.html_bytes > ${SUSPICION.titlelessHtmlBytes})
+          -- A client-side framework's hydration marker in the raw HTML.
+          or jsonb_array_length(c.framework_markers) > 0
+          -- A page that links nowhere. Hard rule 3: asked of the links table,
+          -- never of a link list in memory.
+          or not exists (
+            select 1 from links l
+            where l.crawl_id = ${crawlId} and l.source_page_id = c.id)
+      ),
+      sample as (
+        select r.url from (
+          select c.url,
+                 row_number() over (
+                   partition by c.cohort_type order by c.url asc) as rn
+          from cohort c
+        ) r
+        where r.rn <= ${renderSamplePerType}
+      ),
+      candidates as (
+        -- min(tier) is what makes a page that is BOTH a suspect and a sample
+        -- member count once, on the suspect side.
+        select url, min(tier) as tier from (
+          select url, 0 as tier from suspects
+          union all
+          select url, 1 as tier from sample
+        ) t group by url
+      ),
+      stats as (
+        select count(*) filter (where tier = 0)::int as suspects,
+               count(*) filter (where tier = 1)::int as sampled,
+               count(*)::int as total
+        from candidates
+      )`;
 }
 
 /**
