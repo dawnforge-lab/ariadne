@@ -15,12 +15,17 @@
  *
  * ## The routes
  *
- *   POST /crawls                  accept a crawl (allowlist + URL policy) -> 202
- *   GET  /crawls                  list crawls, newest first, paginated
- *   GET  /crawls/:id              one crawl: status, counts, frontier, timings
- *   POST /crawls/:id/fail         close a crashed crawl (running + no live lease)
- *   POST /crawls/:id/render       run the render pass
- *   POST /crawls/:id/rules        run the rules
+ *   POST /crawls                       accept a crawl (allowlist + URL policy) -> 202
+ *   GET  /crawls                       list crawls, newest first, paginated
+ *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings
+ *   POST /crawls/:id/fail              close a crawl nobody is working
+ *   POST /crawls/:id/render            run the render pass
+ *   POST /crawls/:id/rules             run the rules
+ *   GET  /crawls/:id/issues            findings grouped by rule (the triage view)
+ *   GET  /crawls/:id/issues/:rule/urls one rule's findings, URL by URL
+ *   GET  /crawls/:id/metrics           the measured numbers, with their copy
+ *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
+ *   GET  /crawls/:id/export            write a dataset to disk, answer with the path
  *
  * ## What a caller can never be told
  *
@@ -208,6 +213,78 @@ function buildRoutes(): Route[] {
         return { status: 200, body: await service.runRulesForCrawl(param(ctx, "id")) };
       },
     },
+    // THE QUERY SURFACE. Every one of these is a GET whose whole body is
+    // `{items, nextCursor}` — one pagination shape, so an agent that learns to
+    // follow a cursor once can follow every listing here. The filters are read
+    // off the query string and handed to the service AS STRINGS: this file does
+    // not know what a severity is, and validation belongs where the answer does
+    // (an unknown value is a 400 naming the field, never an empty page).
+    {
+      method: "GET",
+      pattern: ["crawls", id, "issues"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listIssues(param(ctx, "id"), {
+          ...optionalString(ctx.query, "severity"),
+          ...optionalString(ctx.query, "checkId"),
+          ...optionalString(ctx.query, "ruleId"),
+          ...optionalString(ctx.query, "category"),
+          ...optionalString(ctx.query, "pageType"),
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "issues", { param: "ruleId" }, "urls"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listIssueUrls(param(ctx, "id"), param(ctx, "ruleId"), {
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "metrics"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listMetrics(param(ctx, "id"), {
+          ...optionalString(ctx.query, "metricId"),
+          ...optionalString(ctx.query, "scope"),
+          ...optionalString(ctx.query, "scopeValue"),
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "pages"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listPages(param(ctx, "id"), {
+          ...optionalString(ctx.query, "pageType"),
+          ...optionalNumber(ctx.query, "statusCode"),
+          ...optionalBoolean(ctx.query, "indexable"),
+          ...optionalBoolean(ctx.query, "rendered"),
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "export"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.exportCrawl(param(ctx, "id"), {
+          ...optionalString(ctx.query, "dataset"),
+        }),
+      }),
+    },
   ];
 }
 
@@ -369,6 +446,26 @@ function optionalNumber(query: URLSearchParams, name: string): Record<string, nu
 function optionalString(query: URLSearchParams, name: string): Record<string, string> {
   const raw = query.get(name);
   return raw === null ? {} : { [name]: raw };
+}
+
+/**
+ * A boolean query parameter, spelled `true` or `false` and nothing else.
+ *
+ * NOT truthiness. `indexable=1`, `indexable=yes` and `indexable=no` would all
+ * be *something* under a permissive reading, and the third would silently mean
+ * `true` — a filter that returns the opposite of what was asked for. Two
+ * spellings, and everything else is a 400 naming the parameter.
+ */
+function optionalBoolean(query: URLSearchParams, name: string): Record<string, boolean> {
+  const raw = query.get(name);
+  if (raw === null) return {};
+  if (raw !== "true" && raw !== "false") {
+    throw new ServiceError(
+      "VALIDATION",
+      `query parameter '${name}' must be 'true' or 'false', got '${clip(raw)}'`,
+    );
+  }
+  return { [name]: raw === "true" };
 }
 
 class BodyTooLarge extends Error {}

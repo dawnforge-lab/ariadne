@@ -46,6 +46,17 @@ export interface ApiServerConfig {
   /** See the warning above. Code-level only; never wired to env or wire. */
   crawlDefaults?: Partial<CrawlConfig>;
   /**
+   * Where `GET /crawls/:id/export` writes its files. Defaults to `exports/`
+   * under the process's working directory.
+   *
+   * The directory is a server property rather than a request parameter, and
+   * that is the whole point: a caller names a crawl and a dataset, never a
+   * path. An API that took a destination from the wire would be a file-write
+   * primitive with a bearer token in front of it. The response carries the
+   * path the server chose so a human or a pipeline can pick the file up.
+   */
+  exportDir?: string;
+  /**
    * Where the server writes its own diagnostics — a queue pick-up, a crawl that
    * threw, the stack behind a 500. Never the response body (a stack trace in a
    * tenant-visible response is obligation 6's failure). Defaults to

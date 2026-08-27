@@ -644,6 +644,35 @@ describe("POST /crawls/:id/fail", () => {
     expect(String(res.body["error"])).toContain("'finished'");
   });
 
+  // A queued row nobody holds was the gap this endpoint left open: visible in
+  // `GET /crawls`, `queuePosition: null` — work a dead process accepted and
+  // nothing will ever run — and until now not closeable either, because the
+  // endpoint asked for 'running'. The process-truth test is the same one the
+  // running case makes: this server refuses to close work IT is holding.
+  it("closes a queued row no process is holding", async () => {
+    const id = await seedCrawl({ status: "queued" });
+    const res = await call("POST", `/crawls/${id}/fail`);
+    expect(res.status).toBe(200);
+    expect(res.body["status"]).toBe("failed");
+    expect(res.body["finishedAt"]).not.toBeNull();
+  });
+
+  it("409s a queued crawl this server is holding in its own queue", async () => {
+    // Two crawls with a per-host delay: the second waits behind the first, in
+    // THIS process's queue, so its row is 'queued' and `queuePosition` is a
+    // number. That is live work, not an orphan.
+    const first = await startCrawl({ siteUrl: `${site}/`, maxPages: 3, perHostDelayMs: 400 });
+    const second = await startCrawl({ siteUrl: `${site}/`, maxPages: 3, perHostDelayMs: 400 });
+    const secondId = String(second.body["crawlId"]);
+
+    const res = await call("POST", `/crawls/${secondId}/fail`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("this server");
+
+    await settle(String(first.body["crawlId"]));
+    await settle(secondId);
+  }, 60_000);
+
   it("404s an unknown crawl", async () => {
     const res = await call("POST", "/crawls/crawl_missing/fail");
     expect(res.status).toBe(404);
