@@ -460,18 +460,37 @@ describe("runRenderPass", () => {
     expect(summary.rendered).toBe(2);
   });
 
-  it("refuses to run over a paused crawl with queued URLs", async () => {
+  it("refuses to run while the crawl row still says running", async () => {
     const crawlId = await newCrawl(["/csr"]);
-    // No lease outstanding, but the crawl is not finished: a URL is still
-    // queued. Rendering now would sample a site that does not exist yet.
-    await enqueueUrls(db, crawlId, [
-      { url: `${site.base}/not-yet-crawled`, depth: 1, discoveredVia: "link" },
-    ]);
+    // No lease outstanding — a live crawl between batches, or one that died
+    // mid-run and was never resumed or marked failed. Its frontier is in
+    // flight either way, and its next lease would take rows we promoted.
+    await db.update(crawls).set({ status: "running" }).where(eq(crawls.id, crawlId));
 
-    await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow(
-      /unfinished crawl/i,
-    );
+    await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow(/'running'/);
     expect((await frontierCounts(db, crawlId)).renderPending).toBe(0);
+  });
+
+  it("renders a finished crawl that stopped at maxPages with URLs still queued", async () => {
+    const crawlId = await newCrawl(["/csr"]);
+    // What a capped crawl looks like: `finished`, with the frontier it never
+    // got to still `pending`. On a real site this is the NORMAL outcome, so
+    // refusing a queued frontier would refuse most crawls there are — the
+    // guard asks whether the crawl stopped, not whether it drained.
+    await enqueueUrls(db, crawlId, [
+      { url: `${site.base}/never-reached`, depth: 1, discoveredVia: "link" },
+    ]);
+    expect((await frontierCounts(db, crawlId)).pending).toBe(1);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.rendered).toBe(1);
+    expect((await pageRow(crawlId, "/csr")).rendered).toBe(true);
+    // The URL the crawl never reached is left exactly where it was: the render
+    // pass selects out of `pages`, and that URL has no page row.
+    const counts = await frontierCounts(db, crawlId);
+    expect(counts.pending).toBe(1);
+    expect(counts.renderPending).toBe(0);
   });
 
   it("renders the selection, writes the columns and settles the frontier", async () => {

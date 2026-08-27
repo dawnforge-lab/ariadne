@@ -10,8 +10,14 @@
  *     message: a crawl worker holding leases (`leased > 0`), ANOTHER RENDER
  *     PASS holding render leases (`render_pending` with a live `leased_until` —
  *     invisible to `leased`, because a render lease does not change state), and
- *     a paused crawl with queued work (`pending > 0`). A skip would be the
- *     silent fallback (rule 7) that lets two passes corrupt each other quietly.
+ *     a crawl whose row still says `running` (live, or dead mid-run and never
+ *     resumed). A skip would be the silent fallback (rule 7) that lets two
+ *     passes corrupt each other quietly.
+ *
+ *     NOT a condition: a frontier with `pending` rows in it. A crawl that hit
+ *     `maxPages` is finished by definition and leaves its queue behind, which
+ *     on a real site is the normal outcome — refusing it would refuse most
+ *     crawls there are.
  *  2. **Select.** One statement chooses the set and puts it in the frontier
  *     (src/crawl/render/select.ts).
  *  3. **Render.** `renderConcurrency` workers, each leasing ONE URL at a time
@@ -175,17 +181,21 @@ export async function runRenderPass(
         `if its worker is known dead.`,
     );
   }
-  // A crawl that is merely PAUSED — no lease outstanding, work still queued —
-  // is not finished, and the render pass reading its half-crawled page set
-  // would sample a site that does not exist yet. Worse, a resumed crawl leases
-  // rows we are rendering. `failed` is not checked: those rows are spent, and a
-  // crawl that gave up on 3 URLs is still a finished crawl.
-  if (before.pending > 0) {
+  // And the crawl must have STOPPED. Not "must have drained": a crawl that hit
+  // `maxPages` is `finished` with a frontier full of `pending` rows by design,
+  // and on a real site that is the normal outcome, so refusing a queued
+  // frontier would refuse most crawls there are. What is actually unsafe is a
+  // crawl whose row still says `running` — either a live one between leases
+  // (its next `leaseBatch` is coming for rows we would have promoted) or one
+  // that died mid-run and was never resumed or marked failed. Both leave a
+  // frontier in flight; `finished`, `cancelled` and `failed` do not.
+  const status = await crawlStatus(db, crawlId);
+  if (status === "running") {
     throw new Error(
-      `runRenderPass: crawl ${crawlId} has ${before.pending} pending URL(s) — the render ` +
-        `pass may not run over an unfinished crawl (its selection would be taken from a ` +
-        `partial page set, and a resume would re-lease the rows it promoted). ` +
-        `Finish or cancel the crawl first.`,
+      `runRenderPass: crawl ${crawlId} is still marked 'running' — the render pass may ` +
+        `not run over a crawl that has not stopped (a live worker's next lease would ` +
+        `take rows this pass promoted, and a crashed crawl's frontier is mid-flight). ` +
+        `Resume it to completion, or mark it failed or cancelled first.`,
     );
   }
 
@@ -248,6 +258,26 @@ export async function runRenderPass(
     unrendered: after.renderPending,
     elapsedMs: Date.now() - started,
   };
+}
+
+/**
+ * The crawl's own verdict on whether it is still going.
+ *
+ * A missing row throws here rather than being read as "not running": a render
+ * pass over a crawl that does not exist is a caller bug, and `selectRenderSet`
+ * would only discover it one statement later (rule 7).
+ */
+async function crawlStatus(db: Db, crawlId: string): Promise<string> {
+  const rows = await db
+    .select({ status: crawls.status })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error(`runRenderPass: no such crawl '${crawlId}'`);
+  }
+  return row.status;
 }
 
 /**
