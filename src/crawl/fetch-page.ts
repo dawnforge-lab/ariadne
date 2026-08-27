@@ -79,6 +79,17 @@ const CHALLENGE_BODY_MARKERS = [
 
 const HTML_MIME_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 
+/**
+ * How a fetch ended. Stored verbatim in `pages.fetch_class`.
+ *
+ * Adding a member here is not a local change. `loop`'s TRANSIENT set decides
+ * whether the URL is fetched again, `politeness`'s BACKPRESSURE set decides
+ * whether the window collapses, and a dozen rules name classes in SQL. A new
+ * member that nobody placed in those two sets silently gets both defaults —
+ * not retried, not throttling — which may be right, but only if someone said
+ * so. Audit all three when you add one; the sets carry a note naming the
+ * member most likely to be misfiled.
+ */
 export type FetchClass =
   | "ok"
   | "redirect"
@@ -89,6 +100,15 @@ export type FetchClass =
   | "network_error"
   | "non_html"
   | "too_large"
+  /**
+   * The response carried a `content-encoding` we do not implement, so its
+   * bytes are unreadable to us. Distinct from `network_error` because it is
+   * DETERMINISTIC: the same request gets the same undecodable answer, so it
+   * must stay out of the retry bucket (see loop's TRANSIENT). Some CDNs ignore
+   * `accept-encoding` and answer `br` regardless; three fetches of that is
+   * three times the rudeness for the same non-answer (rule 9).
+   */
+  | "unsupported_encoding"
   | "disallowed";
 
 export interface FetchResult {
@@ -121,9 +141,20 @@ export interface FetchResult {
   /**
    * Why this row has no usable body or target, in plain words. Set on
    * `disallowed` (the URL or the address it resolved to), on `redirect` when
-   * the Location was dropped rather than passed on, and on the
-   * `network_error` a response we cannot decode produces (a `content-encoding`
-   * we never advertised). Null otherwise.
+   * the Location was dropped rather than passed on, and on
+   * `unsupported_encoding` (naming the coding we could not read). Null
+   * otherwise.
+   *
+   * **This is persisted**, as `pages.fetch_reason` — the class alone is not an
+   * explanation, and a reason that lived only in this object would be an
+   * argument about transparency that was false the moment the row was written
+   * (hard rule 7). Anything put here reaches an operator's report, so it is
+   * built from the response and the URL policy only: never a stack trace,
+   * never a local path.
+   *
+   * The name is now narrower than the job — it predates the other two uses —
+   * but renaming it ripples through `persist`, the column and the rule layer
+   * for no behavioural gain.
    */
   disallowedReason: string | null;
 }
@@ -267,10 +298,13 @@ function emptyResult(
  * Classification precedence, in order, so the reason a row carries is the
  * most specific true thing about it:
  *   disallowed -> redirect (3xx) -> status (blocked / 4xx / 5xx) ->
- *   non_html -> too_large -> ok
+ *   non_html -> too_large -> unsupported_encoding -> ok
  * A 500 with a 5MB html body is `server_error`, not `too_large`: the status
  * is why the page is unusable. A 200 pdf is `non_html` whatever its size,
- * because we never wanted its bytes.
+ * because we never wanted its bytes. A 503 we could not decode stays a 503.
+ *
+ * `timeout` and `network_error` are outside that order: they are what happens
+ * when there is no response to classify at all.
  *
  * `body` is populated only for `ok`. Every other class has a body that is
  * either absent, unusable, or not worth carrying into the rule engine.
@@ -385,13 +419,14 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     // it. Precedence is unchanged — the status still wins, so a 500 with a
     // 5MB body is `server_error`.
     if (fetchClass === "ok" && read.truncated) fetchClass = "too_large";
-    // A 200 whose bytes we cannot decode is a page we did not get. Say which
-    // coding defeated us rather than recording an empty page (rule 7). A
-    // non-`ok` class keeps its own, more specific verdict: a 503 we could not
-    // decode is still a 503, we simply could not check it for challenge
-    // markers.
+    // A 200 whose bytes we cannot decode is a page we did not get. Its own
+    // class, not `network_error`: the failure is deterministic, so it must not
+    // land in loop's retry bucket. Say which coding defeated us rather than
+    // recording an empty page (rule 7). A non-`ok` class keeps its own, more
+    // specific verdict: a 503 we could not decode is still a 503, we simply
+    // could not check it for challenge markers.
     if (fetchClass === "ok" && read.unsupportedEncoding !== null) {
-      fetchClass = "network_error";
+      fetchClass = "unsupported_encoding";
     }
 
     return {

@@ -260,6 +260,13 @@ const MAX_ATTEMPTS = 3;
  * Fetch classes worth trying again: the site did not answer, so we learned
  * nothing about the URL. Everything else *is* an answer — a 404, a block, a
  * redirect, a PDF — and asking twice would only be rude.
+ *
+ * `unsupported_encoding` is deliberately NOT here, and it is the member most
+ * likely to be added by mistake because it reads like a failure. It is an
+ * answer: the server replied, in a coding we cannot read, and it will reply
+ * the same way every time (some CDNs return `br` whatever `accept-encoding`
+ * says). Retrying a deterministic non-answer is three times the load for the
+ * same result — the exact rudeness this set's own rule forbids.
  */
 const TRANSIENT: ReadonlySet<FetchClass> = new Set<FetchClass>([
   "timeout",

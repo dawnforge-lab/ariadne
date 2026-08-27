@@ -57,6 +57,13 @@
       "when": 1787816206951,
       "tag": "0007_bent_blindfold",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787837729695,
+      "tag": "0008_deep_kang",
+      "breakpoints": true
     }
   ]
 }

@@ -63,12 +63,16 @@ describe("CrawlWindow", () => {
   it("treats non-blocking failure classes as clean", () => {
     // client_error / non_html / too_large are the site's business, not a
     // throttling signal: the window must not collapse on a wall of 404s.
+    // `unsupported_encoding` joins them for the same reason — a CDN that
+    // answers `br` whatever we asked for answers it just as fast however
+    // slowly we crawl, so backing off buys nothing.
     const w = new CrawlWindow({ initial: 4, max: 16 });
     w.onBatchSettled([
       { ...ok(), fetchClass: "client_error" },
       { ...ok(), fetchClass: "non_html" },
       { ...ok(), fetchClass: "too_large" },
       { ...ok(), fetchClass: "redirect" },
+      { ...ok(), fetchClass: "unsupported_encoding" },
     ]);
     expect(w.size()).toBe(5);
   });

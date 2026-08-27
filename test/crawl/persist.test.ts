@@ -630,6 +630,80 @@ describe("PageWriter", () => {
   });
 
   /**
+   * `pages.fetch_reason`. A classified failure whose reason lived only in the
+   * `FetchResult` object was an argument about transparency that was false the
+   * moment the row hit disk: `network_error` with nothing beside it is a row
+   * nobody can act on (hard rule 7). These pin that the reason survives the
+   * write, for both shapes that produce one.
+   */
+  describe("fetch reason", () => {
+    it("persists the reason on an undecodable response", async () => {
+      const crawlId = await newCrawl();
+      const url = `${SITE}/brotli`;
+      const writer = new PageWriter(db, crawlId, { batchSize: 1 });
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          fetchClass: "unsupported_encoding",
+          body: null,
+          disallowedReason: "unsupported content-encoding (br)",
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+
+      const row = (
+        await db.select().from(pages).where(eq(pages.url, url))
+      )[0];
+      expect(row?.fetchClass).toBe("unsupported_encoding");
+      // The class says what happened; only this says which coding did it.
+      expect(row?.fetchReason).toBe("unsupported content-encoding (br)");
+    });
+
+    it("persists the reason a redirect target was dropped", async () => {
+      const crawlId = await newCrawl();
+      const url = `${SITE}/moved-js`;
+      const writer = new PageWriter(db, crawlId, { batchSize: 1 });
+      await writer.addPage(
+        item(url),
+        makeFetch(url, {
+          statusCode: 302,
+          fetchClass: "redirect",
+          body: null,
+          redirectUrl: null,
+          disallowedReason: "redirect target refused: unsupported scheme (javascript:)",
+        }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+
+      const row = (
+        await db.select().from(pages).where(eq(pages.url, url))
+      )[0];
+      expect(row?.fetchClass).toBe("redirect");
+      expect(row?.redirectUrl).toBeNull();
+      // Without this, a refused `Location` is indistinguishable from a 3xx
+      // that simply had none — the pre-existing hole the column also closes.
+      expect(row?.fetchReason).toContain("javascript:");
+    });
+
+    it("leaves the reason null on a page that worked", async () => {
+      const crawlId = await newCrawl();
+      const url = `${SITE}/fine`;
+      const writer = new PageWriter(db, crawlId, { batchSize: 1 });
+      await writer.addPage(item(url), makeFetch(url), null, { complete: true });
+      await writer.flush();
+
+      const row = (
+        await db.select().from(pages).where(eq(pages.url, url))
+      )[0];
+      expect(row?.fetchReason).toBeNull();
+    });
+  });
+
+  /**
    * The hard-kill contract (build plan §7). A crawl marked a URL `done` as soon
    * as its page row was *buffered*, so a SIGKILL took up to `batchSize - 1`
    * pages with it and no resume ever fetched them again. These four tests are

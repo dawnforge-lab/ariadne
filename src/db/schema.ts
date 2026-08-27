@@ -51,7 +51,22 @@ export const pages = pgTable("pages", {
   urlNormalised: text("url_normalised").notNull(),
   pageType: text("page_type"),
   statusCode: integer("status_code"),
-  fetchClass: text("fetch_class").notNull(),   // ok|redirect|client_error|server_error|blocked|timeout|network_error|non_html|too_large
+  // ok|redirect|client_error|server_error|blocked|timeout|network_error|
+  // non_html|too_large|unsupported_encoding|disallowed — the `FetchClass`
+  // union in src/crawl/fetch-page.ts is the authority; this comment tracks it.
+  fetchClass: text("fetch_class").notNull(),
+  // Why this row has no usable body or redirect target, in the words the fetch
+  // layer produced (`FetchResult.disallowedReason`). Null for a page that
+  // simply worked, and null for a failure whose class already says everything
+  // — a 404 needs no sentence.
+  //
+  // It exists because a class alone is not an explanation, and hard rule 7
+  // asks for the error to be *visible*, not merely counted: `unsupported_
+  // encoding` without "(br)" and `redirect` with a silently dropped Location
+  // are both rows a reader can only guess at. Tenant-safe by construction —
+  // the fetch layer builds these from the response and the URL policy, never
+  // from a stack trace or a local path.
+  fetchReason: text("fetch_reason"),
   contentType: text("content_type"),
   redirectUrl: text("redirect_url"),
   // The same target as `redirect_url`, put through `normalizeUrl` — the

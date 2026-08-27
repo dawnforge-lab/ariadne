@@ -77,6 +77,18 @@ let soft404Server: Server;
 let soft404: string;
 
 /**
+ * A site whose pages answer with a `content-encoding` we never advertised.
+ * The commonest real shape is a CDN that ignores `accept-encoding` and serves
+ * brotli regardless — a deterministic non-answer, and the reason
+ * `unsupported_encoding` must stay out of the retry bucket. robots.txt 404s
+ * (absent -> allow all) so the crawl itself is ordinary.
+ */
+let brotliServer: Server;
+let brotli: string;
+/** Every non-robots path the brotli site was asked for, in order. */
+let brotliHits: string[] = [];
+
+/**
  * Set by the poison test: the next `/` request deletes the running crawl row
  * out from under the loop, which makes the handler's enqueue *and* the
  * writer's flush fail with foreign-key violations.
@@ -268,6 +280,21 @@ beforeAll(async () => {
   });
   soft404 = await listen(soft404Server);
 
+  brotliServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/robots.txt") {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no robots here");
+      return;
+    }
+    brotliHits.push(path);
+    // A coding we never asked for. The bytes are irrelevant: we cannot decode
+    // the label, so we never look at them.
+    res.writeHead(200, { "content-type": "text/html", "content-encoding": "br" });
+    res.end(Buffer.from([0x1b, 0x00, 0x00, 0x00]));
+  });
+  brotli = await listen(brotliServer);
+
   db = createDb(databaseUrl());
   await runMigrations(db);
 });
@@ -283,6 +310,8 @@ afterAll(async () => {
   await new Promise<void>((r) => closedServer.close(() => r()));
   await new Promise<void>((r) => brokenServer.close(() => r()));
   await new Promise<void>((r) => variantServer.close(() => r()));
+  brotliServer.closeAllConnections();
+  await new Promise<void>((r) => brotliServer.close(() => r()));
   await new Promise<void>((r) => soft404Server.close(() => r()));
 });
 
@@ -733,6 +762,44 @@ describe("resumeCrawl", () => {
       leased: 0,
       done: 6,
     });
+  });
+});
+
+/**
+ * `unsupported_encoding` is an ANSWER, not a failed attempt.
+ *
+ * It was originally classified `network_error`, which is in loop's TRANSIENT
+ * set — so every page of a CDN that ignores `accept-encoding` was fetched three
+ * times for three identical undecodable replies. Triple the load on someone
+ * else's origin for no information, which is exactly what rule 9 forbids and
+ * what TRANSIENT's own docblock says the set is for.
+ */
+describe("unsupported_encoding is not retried", () => {
+  it("fetches an undecodable page once and records why", async () => {
+    brotliHits = [];
+    const summary = await crawl(config({ siteUrl: brotli, probeHosts: false }));
+
+    const rows = await db
+      .select()
+      .from(pages)
+      .where(and(eq(pages.crawlId, summary.crawlId), eq(pages.url, `${brotli}/`)));
+    const row = rows[0];
+    expect(row?.fetchClass).toBe("unsupported_encoding");
+    // Persisted, so the row is actionable rather than an unexplained failure.
+    expect(row?.fetchReason).toBe("unsupported content-encoding (br)");
+
+    // ONE fetch of the page, not MAX_ATTEMPTS. This is the whole point of the
+    // class. (The other hit is the known-404 probe on the way out, which asks
+    // for a URL that does not exist and is not a retry of anything.)
+    expect(brotliHits.filter((path) => path === "/")).toEqual(["/"]);
+    const state = await db
+      .select({ state: frontier.state, attempts: frontier.attempts })
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, summary.crawlId), eq(frontier.url, `${brotli}/`)));
+    expect(state[0]?.attempts).toBe(1);
+    // And it is `done`: we have our answer, poor as it is. A `failed` row would
+    // invite a resume to ask again.
+    expect(state[0]?.state).toBe("done");
   });
 });
 

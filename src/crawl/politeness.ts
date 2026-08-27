@@ -27,10 +27,12 @@ export interface BatchOutcome {
 
 /**
  * Classes that mean "the server is pushing back". `client_error`, `non_html`,
- * `too_large`, `redirect` and `disallowed` are the site's own business — a
- * wall of 404s is not a throttling signal and must not collapse the window.
- * `network_error` is deliberately excluded too: it is usually one bad host or
- * a DNS hiccup, not us being too fast (a real block arrives as `blocked`).
+ * `too_large`, `redirect`, `unsupported_encoding` and `disallowed` are the
+ * site's own business — a wall of 404s is not a throttling signal and must not
+ * collapse the window, and neither is a CDN that answers `br` to every request
+ * however slowly we make them. `network_error` is deliberately excluded too:
+ * it is usually one bad host or a DNS hiccup, not us being too fast (a real
+ * block arrives as `blocked`).
  */
 const BACKPRESSURE: ReadonlySet<FetchClass> = new Set<FetchClass>([
   "blocked",

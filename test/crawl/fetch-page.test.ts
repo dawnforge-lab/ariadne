@@ -47,6 +47,21 @@ beforeAll(async () => {
       res.setHeader("content-type", "text/html");
       res.setHeader("content-encoding", "br");
       res.end(Buffer.from([0x1b, 0x00, 0x00, 0x00]));
+    } else if (req.url === "/gzip-dies-midstream") {
+      // Headers, then a partial gzip member, then the socket is destroyed —
+      // the shape a reset connection, a dropped CDN edge or an origin crash
+      // takes when the response was compressed. The inflater has been fed
+      // valid bytes and is waiting for more that will never come.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.write(gzipSync(Buffer.from(htmlOfSize(4096), "utf-8")).subarray(0, 30));
+      setTimeout(() => res.socket?.destroy(), 20);
+    } else if (req.url === "/gzip-dies-clean") {
+      // The other half: a partial gzip member and then a CLEAN end of body.
+      // zlib sees a truncated member (Z_BUF_ERROR) rather than a dead socket.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from(htmlOfSize(4096), "utf-8")).subarray(0, 30));
     } else if (req.url === "/gzip-identity") {
       res.setHeader("content-type", "text/html");
       res.setHeader("content-encoding", "identity");
@@ -274,13 +289,54 @@ describe("fetchPage", () => {
 
     it("classifies a content-encoding we never advertised, and names it", async () => {
       const r = await fetchPage(`${base}/brotli`, OPTS);
-      expect(r.fetchClass).toBe("network_error");
+      // Its own class, NOT network_error: the failure is deterministic, and
+      // network_error is the retry bucket. Asking a CDN that ignores
+      // accept-encoding three times gets three identical non-answers.
+      expect(r.fetchClass).toBe("unsupported_encoding");
       expect(r.body).toBeNull();
       expect(r.disallowedReason).toBe("unsupported content-encoding (br)");
     });
 
     it("classifies a body that claims gzip and is not", async () => {
       const r = await fetchPage(`${base}/gzip-lying`, OPTS);
+      expect(r.fetchClass).toBe("network_error");
+      expect(r.body).toBeNull();
+    });
+
+    /**
+     * Regression, and the reason the inflater is wired with `stream.pipeline`
+     * rather than `body.pipe(gunzip)`.
+     *
+     * `Readable.pipe` does not forward SOURCE errors to the destination, so a
+     * body that died mid-stream left the inflater neither ended nor errored
+     * and the capped read never settled: `fetchPage` hung past its own
+     * deadline, the URL got NO classified row at all (hard rule 7), and the
+     * worker's byte reservation was never released. Measured at >8s against
+     * 77ms for the identical response without `content-encoding`.
+     *
+     * The assertion is on the wall clock as much as on the class: the bug was
+     * not a wrong verdict, it was no verdict ever.
+     */
+    it("classifies a gzipped body that dies mid-stream, and does not hang", async () => {
+      const started = Date.now();
+      const r = await fetchPage(`${base}/gzip-dies-midstream`, {
+        ...OPTS,
+        timeoutMs: 2_000,
+      });
+      const elapsed = Date.now() - started;
+
+      expect(r.fetchClass).toBe("network_error");
+      expect(r.body).toBeNull();
+      // Well inside the deadline: the socket death is what ends the read, not
+      // a timer, and certainly not never.
+      expect(elapsed).toBeLessThan(1_000);
+    });
+
+    it("classifies a truncated gzip member that ends cleanly", async () => {
+      const r = await fetchPage(`${base}/gzip-dies-clean`, { ...OPTS, timeoutMs: 2_000 });
+      // zlib's Z_BUF_ERROR. Stays `network_error` — a body that stopped early
+      // is a transport failure and worth another attempt, unlike a coding we
+      // were never able to read (see `unsupported_encoding`).
       expect(r.fetchClass).toBe("network_error");
       expect(r.body).toBeNull();
     });

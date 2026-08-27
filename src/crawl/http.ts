@@ -11,6 +11,7 @@
  * the callers.
  */
 import { lookup as systemLookup, type LookupOptions } from "node:dns";
+import { pipeline, type Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 import { Agent } from "undici";
 import { blockedAddressReason } from "./url-policy.js";
@@ -271,12 +272,6 @@ export async function readCapped(
  */
 export const ACCEPT_ENCODING = "gzip";
 
-/** A response body: async-iterable, destroyable, and pipeable into zlib. */
-export type BodyStream = AsyncIterable<Buffer> & {
-  destroy: (error?: Error) => void;
-  pipe: <T extends NodeJS.WritableStream>(destination: T) => T;
-};
-
 export interface DecodedBody extends CappedBody {
   /**
    * The `content-encoding` value when it names a coding we do not implement,
@@ -311,7 +306,7 @@ export interface DecodedBody extends CappedBody {
  * the caller turns that into a classified `too_large` row, not a short page.
  */
 export async function readCappedDecoded(
-  body: BodyStream,
+  body: Readable,
   contentEncoding: string | null,
   maxBytes: number,
   keep: boolean,
@@ -346,14 +341,32 @@ export async function readCappedDecoded(
   }
 
   const gunzip = createGunzip();
-  body.pipe(gunzip);
+  // `pipeline`, emphatically NOT `body.pipe(gunzip)`.
+  //
+  // `Readable.pipe` does not forward SOURCE errors to the destination. Every
+  // way a body can die mid-stream — the socket resetting, undici's bodyTimeout
+  // firing, fetch-page's own deadline calling `deadline.abort()` — destroys
+  // `body` with an error and leaves `gunzip` neither ended nor errored. The
+  // `for await` in readCapped would then never settle: fetchPage would hang
+  // past its own deadline, the URL would get no classified row (hard rule 7),
+  // and the worker's byte reservation would never be released — a wedged
+  // window, which is the failure loop.ts's admit() warns about.
+  //
+  // `pipeline` propagates destruction in both directions, so a source error
+  // destroys the inflater with that same error and it surfaces on the read
+  // below. That is the ONLY path this error takes; the callback is required by
+  // the API and would only see the duplicate.
+  pipeline(body, gunzip, () => {
+    // Deliberately empty. See above: the error is raised by the read, and a
+    // second throw from here would be an unhandled rejection, not a report.
+  });
   let read: CappedBody;
   try {
-    read = await readCapped(gunzip as unknown as BodyStream, maxBytes, true);
+    read = await readCapped(gunzip, maxBytes, true);
   } catch (error) {
-    // A corrupt or truthless gzip body (Z_DATA_ERROR, Z_BUF_ERROR). Not ours
-    // to fix and not ours to swallow: close the socket and let the caller
-    // classify the failure it is.
+    // Either end of the pipe: a corrupt or truthless gzip body (Z_DATA_ERROR,
+    // Z_BUF_ERROR), or a source that died mid-stream. Not ours to fix and not
+    // ours to swallow — close the socket and let the caller classify it.
     body.destroy();
     throw error;
   }
