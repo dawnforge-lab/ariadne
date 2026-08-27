@@ -16,7 +16,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { gunzipSync } from "node:zlib";
-import { readFileSync, rmSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,6 +46,10 @@ const serverLog: string[] = [];
 let crawlA = "";
 /** A second crawl holding rows for the same rules — the isolation control. */
 let crawlB = "";
+/** A crawl holding rows for ids this ruleset no longer defines. */
+let crawlC = "";
+/** A crawl the export is run over twice, to prove the file is replaced. */
+let crawlD = "";
 
 interface Res {
   status: number;
@@ -157,8 +161,9 @@ beforeAll(async () => {
   const stamp = Date.now();
   crawlA = `crawl_query_a_${stamp}`;
   crawlB = `crawl_query_b_${stamp}`;
-  await seedCrawl(crawlA);
-  await seedCrawl(crawlB);
+  crawlC = `crawl_query_c_${stamp}`;
+  crawlD = `crawl_query_d_${stamp}`;
+  for (const id of [crawlA, crawlB, crawlC, crawlD]) await seedCrawl(id);
 
   const product1 = await seedPage(crawlA, {
     slug: "p1", pageType: "product", statusCode: 200, isIndexable: true,
@@ -220,12 +225,27 @@ beforeAll(async () => {
     pageUrl: `${SITE}/other`, dedupeKey: `${SITE}/other`,
   });
 
+  // A crawl judged by a ruleset this one is not: ids nothing here defines.
+  // Their copy cannot be joined, and the surface says so rather than answering
+  // with blank titles.
+  await seedIssue(crawlC, {
+    ruleId: "retired.rule", severity: "warning", pageId: null,
+    pageUrl: `${SITE}/retired`, dedupeKey: `${SITE}/retired`,
+  });
+
+  // The export-churn crawl: one finding now, a second one added mid-test.
+  await seedIssue(crawlD, {
+    ruleId: "title.missing", severity: "warning", pageId: null,
+    pageUrl: `${SITE}/d1`, dedupeKey: `${SITE}/d1`,
+  });
+
   await db.insert(metrics).values([
     { crawlId: crawlA, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: crawlA, metricId: "inlinks.distribution", scope: "site", scopeValue: "", value: { median: 4 } },
     { crawlId: crawlA, metricId: "content.metrics-by-type", scope: "page_type", scopeValue: "product", value: { words: 800 } },
     { crawlId: crawlA, metricId: "content.metrics-by-type", scope: "page_type", scopeValue: "blog", value: { words: 300 } },
     { crawlId: crawlB, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 99 } },
+    { crawlId: crawlC, metricId: "retired.metric", scope: "site", scopeValue: "", value: { n: 1 } },
   ]);
 
   api = createApiServer({
@@ -245,7 +265,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await api.close();
-  for (const id of [crawlA, crawlB]) {
+  for (const id of [crawlA, crawlB, crawlC, crawlD]) {
     await db.delete(crawls).where(eq(crawls.id, id));
   }
   await closeDb(db);
@@ -332,6 +352,39 @@ describe("GET /crawls/:id/issues", () => {
       expect(res.status, `${query} should be a 400`).toBe(400);
       expect(String(res.body["error"])).toContain(field);
     }
+  });
+
+  it("400s a check or rule that only the metric side claims, pointing at /metrics", async () => {
+    // CHECK-08 is claimed by exactly one rule in this ruleset, and it is a
+    // METRIC rule (`sitemap.structure`). Findings never carry a metric id, so
+    // this filter's answer is structurally empty — and an empty page would read
+    // as "the sitemap is fine", which is a verdict nobody reached.
+    const check = await call(`/crawls/${crawlA}/issues?checkId=CHECK-08`);
+    expect(check.status).toBe(400);
+    expect(String(check.body["error"])).toContain("CHECK-08");
+    expect(String(check.body["error"])).toContain("/metrics");
+
+    const rule = await call(`/crawls/${crawlA}/issues?ruleId=sitemap.structure`);
+    expect(rule.status).toBe(400);
+    expect(String(rule.body["error"])).toContain("metric rule");
+
+    const slice = await call(`/crawls/${crawlA}/issues/sitemap.structure/urls`);
+    expect(slice.status).toBe(400);
+    expect(String(slice.body["error"])).toContain("metric rule");
+  });
+
+  it("409s a crawl whose rows name a rule this ruleset does not define", async () => {
+    // Copy is joined at read time, so a crawl judged by another ruleset cannot
+    // be rendered — and it is refused with the fix rather than answered with
+    // blank titles.
+    const stale = await call(`/crawls/${crawlC}/issues`);
+    expect(stale.status).toBe(409);
+    expect(String(stale.body["error"])).toContain("retired.rule");
+    expect(String(stale.body["error"])).toContain("re-run the rules");
+
+    const staleMetrics = await call(`/crawls/${crawlC}/metrics`);
+    expect(staleMetrics.status).toBe(409);
+    expect(String(staleMetrics.body["error"])).toContain("retired.metric");
   });
 
   it("400s a filter combination that can select no rule rather than answering with nothing", async () => {
@@ -560,9 +613,11 @@ describe("GET /crawls/:id/export", () => {
     expect(res.body["rows"]).toBe(12);
     expect(Object.keys(res.body).sort()).toEqual(["bytes", "dataset", "path", "rows"]);
 
+    // One file per (crawl, dataset), named for the pair rather than for the
+    // moment: a caller can find yesterday's export without a listing, and an
+    // agent looping over /export does not fill a disk.
     const path = String(res.body["path"]);
-    expect(path.startsWith(exportDir)).toBe(true);
-    expect(path.endsWith(".jsonl.gz")).toBe(true);
+    expect(path).toBe(join(exportDir, `${crawlA}-issues.jsonl.gz`));
 
     const rows = lines(path);
     expect(rows).toHaveLength(12);
@@ -595,6 +650,111 @@ describe("GET /crawls/:id/export", () => {
     expect(bad.status).toBe(400);
     expect(String(bad.body["error"])).toContain("dataset");
     expect((await call("/crawls/crawl_missing/export")).status).toBe(404);
+  });
+
+  it("replaces the file on a re-export instead of accumulating copies", async () => {
+    const first = await call(`/crawls/${crawlD}/export`);
+    expect(first.status).toBe(200);
+    expect(first.body["rows"]).toBe(1);
+
+    await seedIssue(crawlD, {
+      ruleId: "title.missing", severity: "warning", pageId: null,
+      pageUrl: `${SITE}/d2`, dedupeKey: `${SITE}/d2`,
+    });
+
+    const second = await call(`/crawls/${crawlD}/export`);
+    expect(second.body["path"]).toBe(first.body["path"]);
+    expect(second.body["rows"]).toBe(2);
+
+    // One file for this crawl, and it holds the SECOND export's rows — not the
+    // first's, and not a concatenation of both.
+    const mine = readdirSync(exportDir).filter((name) => name.startsWith(crawlD));
+    expect(mine).toEqual([`${crawlD}-issues.jsonl.gz`]);
+    expect(lines(String(second.body["path"])).map((r) => r["url"])).toEqual([
+      `${SITE}/d1`, `${SITE}/d2`,
+    ]);
+  });
+
+  it("survives a write that fails, leaves no temp file, and keeps serving", async () => {
+    // The write side fails on its own schedule while this method is parked in a
+    // database await. Before the fix, `pipeline()`'s rejection had no handler at
+    // the moment it rejected — an unhandled rejection, which ends the process in
+    // Node 22. A full disk would have taken the API server down with it.
+    //
+    // Root ignores the permission bits, so a root run would prove nothing. It is
+    // an error rather than a skip: a test that passes without testing anything
+    // is the silent fallback this repo does not allow.
+    const uid = process.getuid?.();
+    if (uid === 0) throw new Error("this test cannot run as root: chmod would not deny the write");
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    chmodSync(exportDir, 0o500); // read and traverse, but nothing may be created
+    try {
+      const res = await call(`/crawls/${crawlA}/export?dataset=pages`);
+      expect(res.status).toBe(500);
+      expect(res.body["error"]).toBe("internal error");
+      expect(typeof res.body["correlationId"]).toBe("string");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(unhandled, "the export left a rejection for nobody to handle").toEqual([]);
+    } finally {
+      chmodSync(exportDir, 0o700);
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    // The server is still there, and the export still works — with no temp
+    // file left behind by the failed attempt.
+    const after = await call(`/crawls/${crawlA}/export?dataset=pages`);
+    expect(after.status).toBe(200);
+    expect(after.body["rows"]).toBe(4);
+    expect(readdirSync(exportDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+});
+
+describe("unknown query parameters", () => {
+  it("refuses a typo'd filter instead of answering the question nobody asked", async () => {
+    // Both of these used to come back 200 with the WHOLE listing — a caller
+    // reading `?serverity=critical` as "these are the critical findings" and
+    // `?indexible=true` as "these are the indexable pages". A filter the server
+    // silently drops is a wrong answer with a success code on it.
+    const severity = await call(`/crawls/${crawlA}/issues?serverity=critical`);
+    expect(severity.status).toBe(400);
+    expect(String(severity.body["error"])).toContain("serverity");
+    expect(String(severity.body["error"])).toContain("severity");
+
+    const indexable = await call(`/crawls/${crawlA}/pages?indexible=true`);
+    expect(indexable.status).toBe(400);
+    expect(String(indexable.body["error"])).toContain("indexible");
+    expect(String(indexable.body["error"])).toContain("indexable");
+  });
+
+  it("holds on every listing, including the ones with no filters at all", async () => {
+    for (const path of [
+      `/crawls/${crawlA}/issues?nope=1`,
+      `/crawls/${crawlA}/issues/links.orphan/urls?severity=warning`,
+      `/crawls/${crawlA}/metrics?pageType=product`,
+      `/crawls/${crawlA}/pages?checkId=CHECK-35`,
+      `/crawls/${crawlA}/export?limit=5`,
+      `/crawls/${crawlA}?limit=5`,
+    ]) {
+      const res = await call(path);
+      expect(res.status, `${path} should be a 400`).toBe(400);
+      expect(String(res.body["error"])).toContain("unknown query parameter");
+    }
+  });
+
+  it("still accepts every parameter each listing does document", async () => {
+    const issues = await call(
+      `/crawls/${crawlA}/issues?severity=warning&category=links&checkId=CHECK-32&ruleId=links.orphan&limit=5`,
+    );
+    expect(issues.status).toBe(200);
+    const pages = await call(
+      `/crawls/${crawlA}/pages?pageType=product&statusCode=200&indexable=true&rendered=true&limit=5`,
+    );
+    expect(pages.status).toBe(200);
   });
 });
 

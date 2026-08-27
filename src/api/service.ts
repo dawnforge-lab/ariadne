@@ -49,7 +49,7 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createWriteStream } from "node:fs";
-import { mkdir, stat, unlink } from "node:fs/promises";
+import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
@@ -382,7 +382,10 @@ export const EXPORT_DATASETS: readonly ExportDataset[] = ["issues", "pages", "me
 /** What an export answers with: where the file is, not what is in it. */
 export interface ExportResult {
   dataset: ExportDataset;
-  /** Absolute path, under the server's export directory. */
+  /**
+   * Absolute path, under the server's export directory. One file per (crawl,
+   * dataset): a re-export replaces it rather than adding a second copy.
+   */
   path: string;
   rows: number;
   /** Size of the gzipped file on disk. */
@@ -1118,29 +1121,58 @@ export class ApiService {
    * so the memory cost is O(`EXPORT_BATCH`) rather than O(rows) (hard rule 6).
    * There is no array of findings in this method and there must never be one.
    *
-   * A write that fails takes its half-written file with it: a truncated
-   * `.jsonl.gz` on disk is a file a pipeline would read as a short crawl. The
-   * error surfaces either way.
+   * ## The name is deterministic, and the write is atomic
+   *
+   * One file per (crawl, dataset): `<crawl>-<dataset>.jsonl.gz`, overwritten by
+   * the next export of the same pair. A timestamped name never collides and
+   * never stops accumulating either — an agent that loops over `/export` fills
+   * a disk, and nothing in the surface would say so.
+   *
+   * A deterministic name makes two callers meeting on one path ROUTINE rather
+   * than a same-millisecond accident, so the bytes go to a temp file and are
+   * `rename`d into place, which is atomic within a directory: a reader either
+   * sees the previous complete export or the new complete one, never the half
+   * of one that a crashed writer left behind. The temp name carries the pid AND
+   * a random suffix, because two concurrent requests in THIS process share a
+   * pid and would otherwise write over each other's temp file.
+   *
+   * A write that fails takes its temp file with it and leaves any existing
+   * export standing: a truncated `.jsonl.gz` is a file a pipeline would read as
+   * a short crawl. The error surfaces either way.
    */
   async exportCrawl(crawlId: string, opts: { dataset?: string } = {}): Promise<ExportResult> {
     await this.assertCrawl(crawlId);
     const dataset = parseDataset(opts.dataset);
 
     await mkdir(this.exportDir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     // The crawl id reaches this from the request path, so it is slugged before
     // it becomes a filename and the result is checked to be inside the export
     // directory. A caller names a crawl, never a path.
-    const file = joinPath(this.exportDir, `${slug(crawlId)}-${dataset}-${stamp}.jsonl.gz`);
+    const file = joinPath(this.exportDir, `${slug(crawlId)}-${dataset}.jsonl.gz`);
     if (!resolvePath(file).startsWith(this.exportDir + pathSep)) {
       throw new Error(`export: refusing to write outside the export directory (${file})`);
     }
+    const temp = `${file}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
 
     const gzip = createGzip();
-    const written = pipeline(gzip, createWriteStream(file));
+    // THE HANDLER IS ATTACHED AT CREATION, and that placement is the whole
+    // point. The write side fails on its own schedule — ENOSPC, a directory
+    // removed underneath us, EACCES on open — and control spends most of this
+    // method parked in `exportRows`' database awaits. A `pipeline()` promise
+    // whose rejection has no handler AT THE MOMENT IT REJECTS is an unhandled
+    // rejection, and an unhandled rejection ends the process in Node 22: a full
+    // disk would take the API server down with it. Catching here turns that
+    // into a value, which the loop below checks and re-throws as its own error
+    // (the same reasoning as the queue runner's catch in `pump`).
+    let writeError: unknown = null;
+    const written = pipeline(gzip, createWriteStream(temp)).catch((error: unknown) => {
+      writeError = error;
+    });
+
     let rows = 0;
     try {
       for await (const row of this.exportRows(crawlId, dataset)) {
+        if (writeError !== null) throw writeError;
         // Backpressure honoured: gzip's buffer says when to wait, so a slow
         // disk slows the reader rather than filling memory with pending writes.
         if (!gzip.write(`${JSON.stringify(row)}\n`)) await once(gzip, "drain");
@@ -1148,10 +1180,14 @@ export class ApiService {
       }
       gzip.end();
       await written;
+      if (writeError !== null) throw writeError;
+      // The rename is the publish step: everything above wrote a temp file
+      // nobody was reading.
+      await rename(temp, file);
     } catch (error) {
       gzip.destroy();
-      await written.catch(() => undefined);
-      await unlink(file).catch(() => undefined);
+      await written;
+      await unlink(temp).catch(() => undefined);
       throw error;
     }
 
@@ -1505,6 +1541,14 @@ export class ApiService {
       if (ids === undefined) {
         throw new ServiceError(
           "VALIDATION",
+          // THE `allCategories` ARM IS DEFENSIVE AND CURRENTLY UNREACHABLE:
+          // every category a metric rule uses is also used by a finding rule in
+          // this ruleset, so the set of metric-only categories is empty and no
+          // test can reach it. It is kept because a future metric-only category
+          // (a `performance` group, say) would otherwise be refused as "not a
+          // category" — true of the finding rules, and misleading about the
+          // ruleset. The checkId arm above IS reachable (CHECK-08 is claimed
+          // only by `sitemap.structure`) and is tested.
           this.allCategories.has(opts.category)
             ? `category '${clip(opts.category)}' holds only metric rules in ruleset ` +
               `${RULESET_VERSION} — ask /crawls/:id/metrics`

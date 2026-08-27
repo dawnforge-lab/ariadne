@@ -107,8 +107,23 @@ interface Reply {
 interface Route {
   method: string;
   pattern: Segment[];
+  /**
+   * Every query parameter this route accepts — a CLOSED list, checked before
+   * the handler runs.
+   *
+   * `parseStartCrawlInput`'s discipline, applied to the other half of the
+   * request. A filter the server does not know is not a harmless extra: a
+   * caller who writes `?serverity=critical` gets an unfiltered listing and
+   * reads it as "these are the critical findings", which is a wrong answer
+   * delivered as a 200. The unknown name is refused instead, and the refusal
+   * names the accepted set so the typo is one round trip from fixed.
+   */
+  query: readonly string[];
   handler: (service: ApiService, ctx: RequestCtx) => Promise<Reply>;
 }
+
+/** Every listing takes these; each route names its own filters alongside. */
+const PAGINATION_PARAMS = ["limit", "cursor"] as const;
 
 export function createApiServer({ db, config }: CreateApiServerOpts): ApiServer {
   const service = new ApiService(db, config);
@@ -165,6 +180,7 @@ function buildRoutes(): Route[] {
     {
       method: "POST",
       pattern: ["crawls"],
+      query: [],
       handler: async (service, ctx) => ({
         status: 202,
         body: await service.startCrawl(parseStartCrawlInput(ctx.body)),
@@ -173,6 +189,7 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls"],
+      query: PAGINATION_PARAMS,
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listCrawls({
@@ -184,6 +201,7 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id],
+      query: [],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.getCrawl(param(ctx, "id")),
@@ -192,6 +210,7 @@ function buildRoutes(): Route[] {
     {
       method: "POST",
       pattern: ["crawls", id, "fail"],
+      query: [],
       handler: async (service, ctx) => {
         noBody(ctx);
         return { status: 200, body: await service.markCrawlFailed(param(ctx, "id")) };
@@ -200,6 +219,7 @@ function buildRoutes(): Route[] {
     {
       method: "POST",
       pattern: ["crawls", id, "render"],
+      query: [],
       handler: async (service, ctx) => {
         noBody(ctx);
         return { status: 200, body: await service.renderCrawl(param(ctx, "id")) };
@@ -208,6 +228,7 @@ function buildRoutes(): Route[] {
     {
       method: "POST",
       pattern: ["crawls", id, "rules"],
+      query: [],
       handler: async (service, ctx) => {
         noBody(ctx);
         return { status: 200, body: await service.runRulesForCrawl(param(ctx, "id")) };
@@ -222,6 +243,7 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "issues"],
+      query: ["severity", "checkId", "ruleId", "category", "pageType", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listIssues(param(ctx, "id"), {
@@ -238,6 +260,7 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "issues", { param: "ruleId" }, "urls"],
+      query: PAGINATION_PARAMS,
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listIssueUrls(param(ctx, "id"), param(ctx, "ruleId"), {
@@ -249,6 +272,7 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "metrics"],
+      query: ["metricId", "scope", "scopeValue", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listMetrics(param(ctx, "id"), {
@@ -263,6 +287,7 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "pages"],
+      query: ["pageType", "statusCode", "indexable", "rendered", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listPages(param(ctx, "id"), {
@@ -278,6 +303,7 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "export"],
+      query: ["dataset"],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.exportCrawl(param(ctx, "id"), {
@@ -374,6 +400,7 @@ async function handle(
   }
 
   try {
+    checkQuery(url.searchParams, chosen.route.query);
     const reply = await chosen.route.handler(service, {
       params: chosen.params,
       query: url.searchParams,
@@ -420,6 +447,27 @@ function param(ctx: RequestCtx, name: string): string {
     throw new Error(`api: route parameter '${name}' is missing from a matched route`);
   }
   return value;
+}
+
+/**
+ * A query string this route understands, or a 400 naming the parameter.
+ *
+ * The same argument as `noBody` and as `parseStartCrawlInput`'s unknown-field
+ * refusal, made about the third place a request can carry an instruction. An
+ * ignored `?serverity=critical` is worse than an ignored body: the caller gets
+ * a 200 full of rows and believes they are the critical ones.
+ */
+function checkQuery(query: URLSearchParams, allowed: readonly string[]): void {
+  for (const name of query.keys()) {
+    if (!allowed.includes(name)) {
+      throw new ServiceError(
+        "VALIDATION",
+        allowed.length === 0
+          ? `unknown query parameter '${clip(name)}': this route takes none`
+          : `unknown query parameter '${clip(name)}' (accepted: ${allowed.join(", ")})`,
+      );
+    }
+  }
 }
 
 /**
