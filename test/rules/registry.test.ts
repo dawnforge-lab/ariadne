@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_CHECKS,
   CRAWL_CHECK_IDS,
-  RENDER_CHECKS,
   defineRule,
   Registry,
   RULESET_VERSION,
@@ -121,7 +120,11 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
-    expect(RULESET_VERSION).toBe("0.3.0");
+    // 0.4.0: the render pass's four finding rules and its coverage metric
+    // changed what the ruleset says about a site, so a finding read back later
+    // can be traced to the ruleset that produced it rather than to a version
+    // that predates the render diff.
+    expect(RULESET_VERSION).toBe("0.4.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -133,37 +136,20 @@ describe("check universe", () => {
 });
 
 /**
- * The one annotation left that says WHY a check has no rule behind it, so the
- * coverage pin's remaining entries are explained rather than merely counted:
- * `RENDER_CHECKS` wait on the render pass. `METRIC_PENDING_CHECKS` was the
- * other, and Phase 4 deleted it — its four ids are claimed by metric rules, and
- * an annotation with nothing to annotate is a reason nobody needs (see the
- * `RENDER_CHECKS` doc comment). Neither list is `AGENT_CHECKS` — those are
- * judgement, and will never have a rule.
+ * The annotations that said WHY a check had no rule behind it, so the coverage
+ * pin's entries were explained rather than merely counted. There are none left:
+ * `METRIC_PENDING_CHECKS` went with Phase 4's metric rules and `RENDER_CHECKS`
+ * with Phase 5's render diff rules, each deleted by the phase that claimed its
+ * ids — an annotation with nothing to annotate is a reason nobody needs.
+ *
+ * What survives is the property those lists were checked FOR, asserted against
+ * the one list still standing. `AGENT_CHECKS` is not an annotation of the same
+ * kind: those three are judgement and will never have a finding rule, so they
+ * are excluded from the pin permanently rather than pending a phase.
  */
 describe("check annotations", () => {
-  it("exports the render-gated list", () => {
-    expect(RENDER_CHECKS).toEqual(["CHECK-01", "CHECK-02", "CHECK-34"]);
-  });
-
-  it("every annotated check is part of the crawl-derived universe", () => {
-    for (const c of RENDER_CHECKS) expect(CRAWL_CHECK_IDS, c).toContain(c);
-  });
-
-  // Disjoint at runtime, not just by inspection: a check that appears on two
-  // lists claims two different reasons for having no rule, and one of them is
-  // a lie the coverage pin would carry forward.
-  it("the annotation lists are pairwise disjoint", () => {
-    const lists: [string, readonly string[]][] = [
-      ["AGENT_CHECKS", AGENT_CHECKS],
-      ["RENDER_CHECKS", RENDER_CHECKS],
-    ];
-    for (const [nameA, a] of lists) {
-      expect(new Set(a).size, `${nameA} repeats an id`).toBe(a.length);
-      for (const [nameB, b] of lists) {
-        if (nameA === nameB) continue;
-        for (const c of a) expect(b, `${c} is on both ${nameA} and ${nameB}`).not.toContain(c);
-      }
-    }
+  it("the agent list is well-formed and inside the crawl-derived universe", () => {
+    expect(new Set(AGENT_CHECKS).size, "AGENT_CHECKS repeats an id").toBe(AGENT_CHECKS.length);
+    for (const c of AGENT_CHECKS) expect(CRAWL_CHECK_IDS, c).toContain(c);
   });
 });

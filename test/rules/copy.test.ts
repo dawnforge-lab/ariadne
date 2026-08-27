@@ -12,6 +12,14 @@ import {
   NEAR_DUPLICATE_HAMMING,
   SOFT_404_WORDS,
 } from "../../src/rules/query/content.js";
+import {
+  CSR_MIN_ADDED_WORDS,
+  CSR_WORD_MULTIPLE,
+  FILTER_RENDERED_MIN,
+  NAV_RAW_MAX,
+  NAV_RENDERED_MIN,
+  NAV_RENDERED_MULTIPLE,
+} from "../../src/rules/query/render-diff.js";
 import { BREADCRUMB_PAGE_FLOOR } from "../../src/rules/query/structured-data.js";
 import {
   EXTREMES_LIST_CAP,
@@ -142,7 +150,29 @@ const PHASE_4_METRIC_IDS = [
   "sitemap.structure",
 ];
 
-const ALL_RULE_IDS = [...PHASE_2_RULE_IDS, ...PHASE_3_RULE_IDS, ...PHASE_4_METRIC_IDS];
+/**
+ * The render pass's rules. Same contract again — copy lands with the rule —
+ * with one addition worth naming: `render.coverage` is a metric and the four
+ * above it are findings, so the metric-only assertions below select it out of
+ * this list rather than taking the whole of it.
+ */
+const PHASE_5_RULE_IDS = [
+  "content.csr-dependent",
+  "nav.js-only",
+  "filters.js-only",
+  "redirect.js",
+  "render.coverage",
+];
+
+/** The metric ids of the list above — what the metric-copy contracts apply to. */
+const PHASE_5_METRIC_IDS = ["render.coverage"];
+
+const ALL_RULE_IDS = [
+  ...PHASE_2_RULE_IDS,
+  ...PHASE_3_RULE_IDS,
+  ...PHASE_4_METRIC_IDS,
+  ...PHASE_5_RULE_IDS,
+];
 
 describe("issue copy", () => {
   it("throws on an unknown rule id", () => {
@@ -546,11 +576,74 @@ describe("issue copy", () => {
     );
   });
 
+  // The render diff rules' thresholds, pinned against the rules' own constants
+  // exactly as the on-page ones are. These matter more than most: all three
+  // fire on a comparison, and copy quoting a threshold the rule does not use
+  // would describe a different, usually more sensitive, rule than the one that
+  // produced the finding a client is reading.
+  it("quotes the render diff thresholds the rules actually use", () => {
+    const csr = ISSUE_COPY["content.csr-dependent"]!.explanation;
+    expect(CSR_WORD_MULTIPLE).toBe(2);
+    expect(csr, "the ratio arm").toMatch(/at least twice as many words/i);
+    expect(csr, "the floor arm").toContain(`${CSR_MIN_ADDED_WORDS} words`);
+
+    const nav = ISSUE_COPY["nav.js-only"]!.explanation;
+    expect(nav, "the raw ceiling").toMatch(new RegExp(`fewer than ${NAV_RAW_MAX} links\\b`));
+    expect(nav, "the rendered floor").toMatch(new RegExp(`at least ${NAV_RENDERED_MIN}\\b`));
+    expect(NAV_RENDERED_MULTIPLE).toBe(2);
+    expect(nav, "the ratio").toMatch(/at least twice as many as the HTML held/i);
+
+    const filters = ISSUE_COPY["filters.js-only"]!.explanation;
+    expect(filters, "the rendered floor").toMatch(
+      new RegExp(`at least ${FILTER_RENDERED_MIN} of them`),
+    );
+    // The predicate is half the finding: a reader who cannot tell what counted
+    // as a filter link cannot check the claim against their own page.
+    expect(filters, "the `?` arm").toMatch(/query string/i);
+    expect(filters, "the regex arm").toMatch(/filter, facet or sort/i);
+  });
+
+  // The standing accuracy constraint on this group, asserted negatively for the
+  // reason the other negative guards are: prose that already says the right
+  // thing can have the overclaim appended to it. Google renders, on a schedule
+  // and a budget nobody outside Google can measure; what these rules establish
+  // is that the content is not in the first response, which is a cost and a
+  // risk rather than an invisibility.
+  it("the render diff copy does not claim search engines cannot see the page", () => {
+    for (const id of ["content.csr-dependent", "nav.js-only", "filters.js-only", "redirect.js"]) {
+      const c = ISSUE_COPY[id]!;
+      const overclaim =
+        /(?:search engines|google|crawlers) (?:cannot|can't|will never|do not|don't) (?:see|index|read|find)|invisible to (?:search engines|google)|never indexed|will not be indexed/i;
+      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
+    }
+  });
+
+  // The metric-copy column contract again, for the Phase 5 metric. Its shape is
+  // two-sided — what the selection decided, and what the page rows now hold —
+  // and the prose has to name both sides plus the reason they can disagree,
+  // because a reader who takes them for one set of numbers will read a
+  // legitimate difference as an error.
+  it("render.coverage names every column of its shape and both of its sides", () => {
+    const text = ISSUE_COPY["render.coverage"]!.explanation;
+    expect(text, "pagesCrawled").toMatch(/how many pages the crawl read in total/i);
+    expect(text, "selectionBudget").toMatch(/how many pages the render pass was allowed to open/i);
+    expect(text, "selectionSuspects").toMatch(/how many candidates were suspects/i);
+    expect(text, "selectionSampled").toMatch(/how many were sampled/i);
+    expect(text, "selectionSelected").toMatch(/how many were selected in the end/i);
+    expect(text, "selectionTruncated").toMatch(/whether the selection was truncated/i);
+    expect(text, "pagesRendered").toMatch(/how many pages are recorded as rendered/i);
+    expect(text, "renderFailures").toMatch(/how many render failures were recorded/i);
+    // The asymmetry the rule deliberately does not assert away.
+    expect(text, "the two sides need not agree").toMatch(
+      /need not add up to the number selected/i,
+    );
+  });
+
   // A metric states what was counted; it does not accuse the site of anything.
   // "Fix" language in a table's copy would turn a distribution into a fault
   // list, and the numbers at the bottom of a distribution are frequently fine.
   it("the metric copy describes a measurement rather than a defect", () => {
-    for (const id of PHASE_4_METRIC_IDS) {
+    for (const id of [...PHASE_4_METRIC_IDS, ...PHASE_5_METRIC_IDS]) {
       const c = ISSUE_COPY[id]!;
       const asFault =
         /this (?:is a|indicates a) (?:problem|fault|error)|must be fixed|you must fix|is broken|penalis|penaliz/i;

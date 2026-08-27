@@ -117,6 +117,34 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   "sitemap.missing",
 ];
 
+/**
+ * TEMPORARY, and discharged by the next task of this phase.
+ *
+ * These four are the render pass's finding rules, and every one of them reads a
+ * `rendered_*` column. This harness runs the CRAWL pass only — `runCrawl` then
+ * `runRules` — so every page it writes has `rendered = false` and null counts,
+ * which is exactly the "not audited" state the rules refuse to judge. They
+ * cannot speak here for want of a render, not for want of a fixture.
+ *
+ * That is a different claim from the one `SKIP_HARNESS_CLAIMS` above makes, and
+ * it is deliberately a different list. An entry there says NO PAGE COULD EVER
+ * provoke the rule on this site; an entry here says the fixture and the pass
+ * that would provoke it are being authored in the next task — P5-T6, which adds
+ * the client-side-rendered pages and runs the render pass over this crawl. The
+ * Phase 4 precedent is the same shape: its Task 4 carried a pending list for one
+ * task and Task 5 emptied it.
+ *
+ * **This list must be empty again at the end of P5-T6.** It is asserted below
+ * exactly as the exemptions are — an id here that DOES fire fails the test —
+ * so it cannot quietly become a second exemption list.
+ */
+const PENDING_RENDER_FIXTURES: string[] = [
+  "content.csr-dependent",
+  "filters.js-only",
+  "nav.js-only",
+  "redirect.js",
+];
+
 let db: Db;
 let app: FixtureApp;
 let summary: CrawlSummary;
@@ -864,12 +892,20 @@ describe("the fixture site end to end", () => {
     // The metric layer's coverage assertion, and the reason the rule sweep
     // below can stop skipping the kind. A metric writes no `issues` row, so
     // "did it fire" is a question only the `metrics` table can answer — and
-    // every one of the ten CAN answer it here: eight always emit a site row,
+    // every one of the eleven CAN answer it here: nine always emit a site row,
     // `inlinks.sources-by-type` emits one per target cohort type and this site
     // has 42 of them, and `content.template-similarity` emits one per type with
     // two fingerprinted pages, which the `/deep/:id`, `/head/:slug`,
     // `/content/:slug`, `/authored/:slug` and `/authored3/:slug` templates give
     // it. There is no exemption paragraph to write.
+    //
+    // `render.coverage` is among the nine, and it is the one metric whose row
+    // is currently ALL SELECTION AND NO EVIDENCE: this harness runs the crawl
+    // pass and not the render pass, so its `pagesRendered` and `renderFailures`
+    // are zero while its selection numbers describe a selection that was
+    // computed and never spent. That is the honest row for such a crawl rather
+    // than a gap — which is why the metric is here and the four render FINDING
+    // rules are in `PENDING_RENDER_FIXTURES` below.
     expect([...metricsById.keys()].sort()).toEqual([
       "content.metrics-by-type",
       "content.template-similarity",
@@ -878,6 +914,7 @@ describe("the fixture site end to end", () => {
       "inlinks.extremes",
       "inlinks.sources-by-type",
       "redirect.volume",
+      "render.coverage",
       "sitemap.structure",
       "structure.depth-distribution",
       "url.param-volumes",
@@ -1043,7 +1080,7 @@ describe("the fixture site end to end", () => {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);
     }
 
-    const exempt = new Set(SKIP_HARNESS_CLAIMS);
+    const exempt = new Set([...SKIP_HARNESS_CLAIMS, ...PENDING_RENDER_FIXTURES]);
     const unfired = registry
       .all()
       .map((rule) => rule.id)
@@ -1062,8 +1099,10 @@ describe("the fixture site end to end", () => {
 
     // The exemption is asserted, not assumed. An id listed as unfireable that
     // then fires is a rule whose condition is not what the list claims, and it
-    // must leave the list rather than sit there as a stale excuse.
-    for (const id of SKIP_HARNESS_CLAIMS) {
+    // must leave the list rather than sit there as a stale excuse. The pending
+    // render four are held to the same standard: the day P5-T6's fixtures make
+    // one of them speak, it must leave `PENDING_RENDER_FIXTURES` in that commit.
+    for (const id of [...SKIP_HARNESS_CLAIMS, ...PENDING_RENDER_FIXTURES]) {
       expect(fired.has(id), `${id} fired — it is not unfireable, drop the exemption`).toBe(
         false,
       );

@@ -23,7 +23,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
-export const RULESET_VERSION = "0.3.0";
+export const RULESET_VERSION = "0.4.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
@@ -40,28 +40,24 @@ export const CRAWL_CHECK_IDS: readonly string[] = [
   "CHECK-42","CHECK-43","CHECK-44","CHECK-45","CHECK-46",
 ];
 
-/** Judgement checks — never rules (build plan §6: no rule that always passes). */
-export const AGENT_CHECKS: readonly string[] = ["CHECK-38", "CHECK-41", "CHECK-42"];
-
 /**
- * Checks that need the render pass before a rule can speak to them: what a
- * page shows after its JavaScript has run is not in the raw HTML the crawler
- * stores today. A rule written against the unrendered body would report the
- * empty shell as the page, which is worse than reporting nothing.
+ * Judgement checks — never rules (build plan §6: no rule that always passes).
  *
- * It is now the ONLY annotation, and therefore the whole of the coverage pin:
- * `unclaimedChecks(…)` equals this list exactly, which is what
- * `test/rules/coverage.test.ts` asserts. `METRIC_PENDING_CHECKS` stood beside
- * it from Phase 3, holding CHECK-08, CHECK-29, CHECK-33 and CHECK-33b — checks
- * whose answer is a site-wide number rather than a per-page fault. Phase 4's
- * metric rules claimed all four (the link-graph metrics took CHECK-33 and
- * CHECK-33b, `sitemap.structure` took CHECK-08, `url.param-volumes` took
- * CHECK-29), and the constant was deleted rather than kept empty: an annotation
- * with nothing to annotate is a reason nobody needs, and a future check waiting
- * on a metric will arrive with the rule that claims it rather than with a list
- * to join.
+ * THE ONLY ANNOTATION LEFT, and the only reason a crawl-derived check has no
+ * finding rule behind it. Two others stood beside it and both are gone, each
+ * deleted by the phase that discharged it: `METRIC_PENDING_CHECKS` (CHECK-08,
+ * CHECK-29, CHECK-33, CHECK-33b — site-wide numbers rather than per-page faults)
+ * left with Phase 4's metric rules, and `RENDER_CHECKS` (CHECK-01, CHECK-02,
+ * CHECK-34 — questions about what a page shows AFTER its JavaScript has run)
+ * with Phase 5's render diff rules, which are the pass that made those three
+ * answerable at all. An annotation with nothing to annotate is a reason nobody
+ * needs; a future check waiting on a future phase arrives with the rule that
+ * claims it rather than with a list to join.
+ *
+ * The coverage pin is now empty in consequence: `unclaimedChecks(…)` returns
+ * `[]`, which is what `test/rules/coverage.test.ts` asserts.
  */
-export const RENDER_CHECKS: readonly string[] = ["CHECK-01", "CHECK-02", "CHECK-34"];
+export const AGENT_CHECKS: readonly string[] = ["CHECK-38", "CHECK-41", "CHECK-42"];
 
 export function defineRule<T extends AnyRule>(rule: T): T {
   const fail = (msg: string): never => {

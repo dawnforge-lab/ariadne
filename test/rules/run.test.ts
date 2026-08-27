@@ -57,7 +57,15 @@ describe("buildRegistry", () => {
     expect(ids).toContain("url.param-volumes");
     expect(ids).toContain("redirect.volume");
     expect(ids).toContain("sitemap.structure");
-    expect(ids.length).toBe(74);
+    // And Phase 5's render rules: the three diffs between the raw HTML and the
+    // rendered DOM, the JavaScript redirect, and the coverage metric that says
+    // how much of the crawl those four could speak for.
+    expect(ids).toContain("content.csr-dependent");
+    expect(ids).toContain("nav.js-only");
+    expect(ids).toContain("filters.js-only");
+    expect(ids).toContain("redirect.js");
+    expect(ids).toContain("render.coverage");
+    expect(ids.length).toBe(79);
   });
 
   it("registers every kind the runner drives", () => {
