@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -312,6 +312,44 @@ describe("runRules against the database", () => {
     expect(await db.select().from(urlParams).where(eq(urlParams.crawlId, crawlId))).toHaveLength(
       rows.length,
     );
+  });
+
+  // Planner statistics, and why this is a test rather than a comment: the
+  // Phase 4 gate disclosed that the rules run had usable statistics only
+  // because autovacuum happened to analyze mid-crawl. Nothing about that is
+  // observable from a run's output — a planner working from "0 rows" produces
+  // the same findings, slowly — so the only way the ANALYZE can be known to
+  // still be there is to watch Postgres record it.
+  //
+  // The exclusion of `metrics` from the list is deliberate (no rule reads it)
+  // but deliberately NOT asserted here: autovacuum may analyze any table at
+  // any moment, so "this table was not analyzed" is not a property a test can
+  // hold without becoming flaky. The runner's own comment carries that half.
+  it("analyzes the tables the rules read before it reads them", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const analyzedAt = async (): Promise<Record<string, number>> => {
+      const { rows } = await db.execute<{ relname: string; last_analyze: string | null }>(
+        sql`select relname, last_analyze from pg_stat_user_tables
+            where relname in ('pages', 'links', 'sitemap_urls', 'url_params', 'hreflang', 'issues')`,
+      );
+      return Object.fromEntries(
+        rows.map((r) => [r.relname, r.last_analyze === null ? 0 : Date.parse(r.last_analyze)]),
+      );
+    };
+
+    const before = await analyzedAt();
+    await runRules(db, crawlId, buildRegistry());
+    const after = await analyzedAt();
+
+    for (const table of ["pages", "links", "sitemap_urls", "url_params", "hreflang", "issues"]) {
+      expect(after[table], `${table} has no pg_stat row`).toBeDefined();
+      expect(
+        after[table]! > (before[table] ?? 0),
+        `${table} was not analyzed by the run`,
+      ).toBe(true);
+    }
   });
 
   // A crawl id nothing knows produces no pages, which is indistinguishable

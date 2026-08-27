@@ -91,6 +91,17 @@
  * derivation, not a DOM read, so `EXTENSION_FIELDS` strips it). It exists
  * because the soft-404 rule (CHECK-16) needs a phrase signal it can read in
  * SQL, and the crawl is the only place the page's text is ever in memory.
+ *
+ * Phase 5 (P5-T2) added the render pass's raw-HTML baseline, again inside the
+ * same pass: `navLinkCount` / `footerLinkCount` (depth counters, built on the
+ * `titleDepth` idiom) and `frameworkMarkers`. Unlike the two text derivations
+ * above, all three ARE DOM reads — `nav a[href]`, `footer a[href]`, and three
+ * attribute/id presences — so they stay ON the parity surface and the oracle
+ * computes them with those very selectors. That is load-bearing rather than
+ * tidy: the render pass runs `document.querySelectorAll('nav a[href]').length`
+ * in a real browser and CHECK-34 compares its answer with this one, so the
+ * tokenizer has to agree with the selector about nesting and about malformed
+ * markup, or the check compares two different questions.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
@@ -172,6 +183,26 @@ export interface PageAnalysis {
    * style, noscript or svg subtree cannot raise it.
    */
   hasSoft404Phrases: boolean;
+  /**
+   * Anchors carrying an `href` attribute inside a `<nav>` — the raw-HTML half
+   * of CHECK-34 (navigation that only exists once JavaScript has run). Counted
+   * on exactly the terms `document.querySelectorAll('nav a[href]').length`
+   * would report, because that is what the render pass reads on the same page
+   * and the two numbers are compared: any `href` value counts (`href=""`
+   * included), any protocol counts (a `mailto:` nav link is still a nav link,
+   * even though it never becomes a `links` row), and an anchor inside nested
+   * containers counts once for each container it is in.
+   */
+  navLinkCount: number;
+  /** The same count for `<footer>`; see `navLinkCount`. */
+  footerLinkCount: number;
+  /**
+   * Which of `FRAMEWORK_MARKERS` the raw HTML carries, in that constant's
+   * order (a set with a stable spelling, not document order). The tell of
+   * which framework shipped the page — NOT a claim that the page needs
+   * JavaScript to be readable, which only the render pass can answer.
+   */
+  frameworkMarkers: string[];
   links: PageLink[];
   /** First `<link rel=next>` href; null when absent or href-less. */
   relNext: string | null;
@@ -310,6 +341,22 @@ const SOFT_404_PATTERN = new RegExp(
   "i",
 );
 
+/**
+ * The client-rendered-framework tells, each one a thing that is in the HTML
+ * because a framework put it there:
+ *  - `__NEXT_DATA__` — Next.js' hydration payload, a `<script>` with that id.
+ *    An id, so matched case-sensitively and verbatim.
+ *  - `data-reactroot` — React's server-rendered root attribute.
+ *  - `ng-app` — the AngularJS bootstrap attribute.
+ * The last two are attributes on any element; htmlparser2 lowercases attribute
+ * names, and both are already lowercase, so the `in attribs` test is exact.
+ *
+ * Exported so the test suite (and any consumer reading `frameworkMarkers`)
+ * pins the list itself rather than a sample of it — the SOFT_404_PHRASES
+ * precedent. The order here is the order the field reports.
+ */
+export const FRAMEWORK_MARKERS = ["__NEXT_DATA__", "data-reactroot", "ng-app"] as const;
+
 interface OpenAnchor {
   href: string;
   rel: string | null;
@@ -412,6 +459,26 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let imagesMissingDimensions = 0;
   const linksByTarget = new Map<string, RawPageLink>();
   let openAnchor: OpenAnchor | null = null;
+
+  // `nav a[href]` / `footer a[href]`, counted with depth counters the way
+  // `titleDepth` is: incremented on the open tag, decremented on the close,
+  // and an anchor counted while a counter is positive. Depths rather than
+  // booleans because the containers nest — a <nav> inside a <nav> that closes
+  // must not take the outer one down with it — and the decrements are guarded
+  // so a stray close tag (a real thing in real HTML) cannot drive a counter
+  // negative and silence every anchor after it. htmlparser2 emits the implied
+  // close of an open <nav> when a `</footer>` pops it, which is what the HTML
+  // parsing spec does too, so malformed nesting lands where a browser puts it.
+  let navDepth = 0;
+  let footerDepth = 0;
+  let navLinkCount = 0;
+  let footerLinkCount = 0;
+
+  // Which of FRAMEWORK_MARKERS the document carried. A set of at most three
+  // short strings, so it costs nothing against the memory contract, and it
+  // keeps the marker's name in one place — the constant — rather than in a
+  // boolean whose mapping back to a name has to be maintained.
+  const markersSeen = new Set<string>();
 
   // Visible text: prefer text inside an explicit <body>; when the document
   // never opens one (fragments), fall back to all non-head text. Both
@@ -583,7 +650,16 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               imagesMissingDimensions += 1;
             }
             break;
+          case "nav":
+            navDepth += 1;
+            break;
+          case "footer":
+            footerDepth += 1;
+            break;
           case "script":
+            // An id is case-sensitive and is not a token list: compared
+            // verbatim, unlike `rel` / `type` / meta names above.
+            if (attribs["id"] === "__NEXT_DATA__") markersSeen.add("__NEXT_DATA__");
             if (
               attribs["type"]?.trim().toLowerCase() === "application/ld+json"
             ) {
@@ -595,6 +671,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             }
             break;
           case "a": {
+            // `a[href]`, before the link extraction below narrows it: the
+            // attribute's presence is the whole test, so an empty value and a
+            // `mailto:` both count here while neither becomes a `links` row.
+            if ("href" in attribs) {
+              if (navDepth > 0) navLinkCount += 1;
+              if (footerDepth > 0) footerLinkCount += 1;
+            }
             // HTML forbids nested <a>; browsers implicitly close the open
             // one, and the tokenizer has no tree correction, so mirror that.
             closeAnchor();
@@ -609,6 +692,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             break;
           }
         }
+        // Framework attributes live on whatever element the framework chose
+        // (<html>, <body>, a wrapper div), so they are read off every open tag
+        // rather than from a case above.
+        if ("data-reactroot" in attribs) markersSeen.add("data-reactroot");
+        if ("ng-app" in attribs) markersSeen.add("ng-app");
         const headingLevel = HEADING_LEVELS[name];
         if (headingLevel !== undefined) {
           headingCounts[headingLevel - 1] =
@@ -660,6 +748,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           titleDepth -= 1;
           if (titleDepth === 0) titleDone = true;
         }
+        if (name === "nav" && navDepth > 0) navDepth -= 1;
+        if (name === "footer" && footerDepth > 0) footerDepth -= 1;
         if (name === "head" && headDepth > 0) headDepth -= 1;
         if (name === "body" && bodyDepth > 0) bodyDepth -= 1;
         if (name === "a") closeAnchor();
@@ -715,6 +805,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     hasViewport,
     hasLoremIpsum: LOREM_IPSUM.test(bodyText),
     hasSoft404Phrases: SOFT_404_PATTERN.test(bodyText),
+    navLinkCount,
+    footerLinkCount,
+    // The constant's order, not document order: the field is a set, and a set
+    // with a stable spelling is one a SQL comparison can be written against.
+    frameworkMarkers: FRAMEWORK_MARKERS.filter((marker) => markersSeen.has(marker)),
     links: Array.from(linksByTarget.values()),
     relNext: relNext ?? null,
     relPrev: relPrev ?? null,
@@ -757,6 +852,9 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     hasViewport: raw.hasViewport,
     hasLoremIpsum: raw.hasLoremIpsum,
     hasSoft404Phrases: raw.hasSoft404Phrases,
+    navLinkCount: raw.navLinkCount,
+    footerLinkCount: raw.footerLinkCount,
+    frameworkMarkers: raw.frameworkMarkers,
     links: raw.links.map(({ href, anchor, rel, nofollow, position }) => ({
       href,
       anchor,

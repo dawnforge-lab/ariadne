@@ -50,6 +50,13 @@
       "when": 1787766855201,
       "tag": "0006_nappy_oracle",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787816206951,
+      "tag": "0007_bent_blindfold",
+      "breakpoints": true
     }
   ]
 }

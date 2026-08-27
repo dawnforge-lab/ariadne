@@ -65,9 +65,20 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     hasSoft404Phrases: false,
     relNext: null,
     relPrev: null,
+    navLinkCount: 12,
+    footerLinkCount: 8,
+    frameworkMarkers: [],
     rendered: false,
     renderedWordCount: null,
     renderedLinkCount: null,
+    // Null is "this page was never rendered" — the clean page is a raw-HTML
+    // crawl's row, so every render-side column is null and no rule may read
+    // that as a rendered page whose counts happened to be zero.
+    renderedNavLinkCount: null,
+    renderedFooterLinkCount: null,
+    renderedFilterLinkCount: null,
+    renderedRedirectUrl: null,
+    renderError: null,
     ...overrides,
   };
 }

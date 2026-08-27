@@ -184,3 +184,147 @@ describe("analyzePage", () => {
     expect(a.links).toHaveLength(0);
   });
 });
+
+// The raw-HTML half of CHECK-34 (navigation that only exists after JavaScript
+// runs). The comparison target is the browser's own
+// `document.querySelectorAll('nav a[href]').length` / `footer a[href]`, which
+// the render pass will read on the same page: an anchor counts when it carries
+// an `href` attribute at all — value irrelevant, protocol irrelevant — and it
+// counts once per container it is inside, so an anchor nested in a `<nav>`
+// inside a `<footer>` is one nav link AND one footer link.
+describe("nav and footer link counts", () => {
+  it("counts anchors with an href inside each container, and nothing else", () => {
+    const a = analyzePage(
+      `<body>
+        <nav><a href="/a">A</a><a href="/b">B</a><a>no href</a></nav>
+        <footer><a href="">empty</a><a href="/c">C</a></footer>
+        <a href="/d">outside both</a>
+      </body>`,
+      "https://x.test/",
+    );
+    // nav a[href]: /a and /b. The href-less anchor is not `a[href]`.
+    expect(a.navLinkCount).toBe(2);
+    // footer a[href]: href="" is present-and-empty, which the selector matches.
+    expect(a.footerLinkCount).toBe(2);
+  });
+
+  it("counts anchors of any protocol, the way a[href] does", () => {
+    const a = analyzePage(
+      `<body><nav><a href="mailto:a@b.test">m</a><a href="#top">t</a><a href="javascript:void(0)">j</a></nav></body>`,
+      "https://x.test/",
+    );
+    // None of the three become `links` rows; all three are `nav a[href]`.
+    expect(a.links).toHaveLength(0);
+    expect(a.navLinkCount).toBe(3);
+  });
+
+  it("counts a nav inside a footer for both containers", () => {
+    const a = analyzePage(
+      `<body><footer><nav><a href="/x">x</a></nav><a href="/y">y</a></footer></body>`,
+      "https://x.test/",
+    );
+    expect(a.navLinkCount).toBe(1);
+    expect(a.footerLinkCount).toBe(2);
+  });
+
+  it("survives an unclosed nav the way an implicit close does", () => {
+    // `</footer>` closes the still-open <nav> first — htmlparser2 emits both
+    // close events, exactly as the HTML parsing spec pops both elements — so
+    // the anchor after the footer is inside neither container.
+    const a = analyzePage(
+      `<body><footer><nav><a href="/x">x</a></footer><a href="/after">after</a></body>`,
+      "https://x.test/",
+    );
+    expect(a.navLinkCount).toBe(1);
+    expect(a.footerLinkCount).toBe(1);
+  });
+
+  it("ignores a stray close tag rather than going negative", () => {
+    const a = analyzePage(
+      `<body></nav><a href="/z">z</a><nav><a href="/w">w</a></nav></body>`,
+      "https://x.test/",
+    );
+    expect(a.navLinkCount).toBe(1);
+  });
+
+  it("counts every anchor of nested navs once each", () => {
+    const a = analyzePage(
+      `<body><nav><a href="/1">1</a><nav><a href="/2">2</a></nav><a href="/3">3</a></nav></body>`,
+      "https://x.test/",
+    );
+    expect(a.navLinkCount).toBe(3);
+    expect(a.footerLinkCount).toBe(0);
+  });
+
+  it("reports zero on a page with no nav or footer", () => {
+    const a = analyzePage(`<body><a href="/a">A</a></body>`, "https://x.test/");
+    expect(a.navLinkCount).toBe(0);
+    expect(a.footerLinkCount).toBe(0);
+  });
+});
+
+// The client-rendered-framework tell, read off the raw HTML. It says which
+// framework shipped the page, not whether the page needs JavaScript — the
+// render pass answers that. Markers are reported in the constant's order, not
+// document order, so the column is a set with a stable spelling.
+describe("framework markers", () => {
+  it("detects the Next.js data script", () => {
+    expect(
+      analyzePage(
+        `<body><script id="__NEXT_DATA__" type="application/json">{"page":"/"}</script></body>`,
+        "https://x.test/",
+      ).frameworkMarkers,
+    ).toEqual(["__NEXT_DATA__"]);
+  });
+
+  it("detects data-reactroot on any element", () => {
+    expect(
+      analyzePage(`<body><div data-reactroot=""><p>x</p></div></body>`, "https://x.test/")
+        .frameworkMarkers,
+    ).toEqual(["data-reactroot"]);
+  });
+
+  it("detects ng-app on any element", () => {
+    expect(
+      analyzePage(`<html ng-app="shopApp"><body></body></html>`, "https://x.test/")
+        .frameworkMarkers,
+    ).toEqual(["ng-app"]);
+  });
+
+  it("reports every marker present, in the constant's order", () => {
+    expect(
+      analyzePage(
+        `<html><body><div ng-app="a"><span data-reactroot></span></div>
+         <script id="__NEXT_DATA__">{}</script></body></html>`,
+        "https://x.test/",
+      ).frameworkMarkers,
+    ).toEqual(["__NEXT_DATA__", "data-reactroot", "ng-app"]);
+  });
+
+  it("reports an empty list when the page carries no marker", () => {
+    expect(
+      analyzePage(
+        `<html><body><script id="app-data">{}</script><div id="root"></div></body></html>`,
+        "https://x.test/",
+      ).frameworkMarkers,
+    ).toEqual([]);
+  });
+
+  it("does not read a marker out of a <noscript> body", () => {
+    // <noscript> content is raw text to a scripting-enabled parser, so the
+    // element inside it is not an element (the port's existing rule).
+    expect(
+      analyzePage(
+        `<html><body><noscript><div data-reactroot></div></noscript></body></html>`,
+        "https://x.test/",
+      ).frameworkMarkers,
+    ).toEqual([]);
+  });
+
+  it("matches the script id case-sensitively, as an id is", () => {
+    expect(
+      analyzePage(`<body><script id="__next_data__">{}</script></body>`, "https://x.test/")
+        .frameworkMarkers,
+    ).toEqual([]);
+  });
+});

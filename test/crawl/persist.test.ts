@@ -48,6 +48,9 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     hasViewport: false,
     hasLoremIpsum: false,
     hasSoft404Phrases: false,
+    navLinkCount: 7,
+    footerLinkCount: 4,
+    frameworkMarkers: ["__NEXT_DATA__"],
     links: [
       { href: `${SITE}/one`, anchor: "one", rel: null, nofollow: false, position: 0 },
       {
@@ -447,6 +450,9 @@ describe("PageWriter", () => {
         imagesMissingDimensions: 3,
         hasLoremIpsum: true,
         hasSoft404Phrases: true,
+        navLinkCount: 21,
+        footerLinkCount: 9,
+        frameworkMarkers: ["__NEXT_DATA__", "data-reactroot"],
       }),
       { complete: true },
     );
@@ -459,6 +465,14 @@ describe("PageWriter", () => {
         imagesMissingDimensions: pages.imagesMissingDimensions,
         hasLoremIpsum: pages.hasLoremIpsum,
         hasSoft404Phrases: pages.hasSoft404Phrases,
+        navLinkCount: pages.navLinkCount,
+        footerLinkCount: pages.footerLinkCount,
+        frameworkMarkers: pages.frameworkMarkers,
+        renderedNavLinkCount: pages.renderedNavLinkCount,
+        renderedFooterLinkCount: pages.renderedFooterLinkCount,
+        renderedFilterLinkCount: pages.renderedFilterLinkCount,
+        renderedRedirectUrl: pages.renderedRedirectUrl,
+        renderError: pages.renderError,
       })
       .from(pages)
       .where(eq(pages.crawlId, crawlId));
@@ -467,6 +481,17 @@ describe("PageWriter", () => {
     expect(row?.imagesMissingDimensions).toBe(3);
     expect(row?.hasLoremIpsum).toBe(true);
     expect(row?.hasSoft404Phrases).toBe(true);
+    expect(row?.navLinkCount).toBe(21);
+    expect(row?.footerLinkCount).toBe(9);
+    expect(row?.frameworkMarkers).toEqual(["__NEXT_DATA__", "data-reactroot"]);
+    // The render-side twins belong to the render pass and to nothing else: the
+    // HTML crawl leaves them null, which is what says this page was never
+    // rendered rather than rendered and found to have no navigation.
+    expect(row?.renderedNavLinkCount).toBeNull();
+    expect(row?.renderedFooterLinkCount).toBeNull();
+    expect(row?.renderedFilterLinkCount).toBeNull();
+    expect(row?.renderedRedirectUrl).toBeNull();
+    expect(row?.renderError).toBeNull();
   });
 
   it("strips a trailing slash from url_normalised", async () => {
@@ -531,6 +556,12 @@ describe("PageWriter", () => {
     expect(row?.imagesMissingDimensions).toBe(0);
     expect(row?.hasLoremIpsum).toBe(false);
     expect(row?.hasSoft404Phrases).toBe(false);
+    // Same reading for the nav captures: no HTML, no navigation. These three
+    // are NOT NULL columns, so 0/0/[] is the value, and it is a fact about the
+    // page rather than a stand-in for a missing one.
+    expect(row?.navLinkCount).toBe(0);
+    expect(row?.footerLinkCount).toBe(0);
+    expect(row?.frameworkMarkers).toEqual([]);
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);

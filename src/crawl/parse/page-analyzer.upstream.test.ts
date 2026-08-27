@@ -37,6 +37,13 @@
  * tokenizer never sees as open-tag events. They are covered directly in
  * test/crawl/analyzer-extensions.test.ts; `expectParity` strips them.
  *
+ * Phase 5 (P5-T2) added `navLinkCount`, `footerLinkCount` and
+ * `frameworkMarkers`, and all three are modelled here rather than stripped:
+ * they are DOM reads whose specification IS the selector (`nav a[href]`,
+ * `footer a[href]`, an attribute or an id presence), and the render pass runs
+ * those selectors in a real browser to produce the numbers CHECK-34 compares
+ * these against.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -44,6 +51,7 @@ import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
 import {
   analyzeHtml,
+  FRAMEWORK_MARKERS,
   INLINE_TEXT_TAGS,
   type RawPageAnalysis,
 } from "./page-analyzer.js";
@@ -216,6 +224,23 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
 
   const hasViewport = byAttr("meta", "name", "viewport").length > 0;
 
+  // The Phase 5 captures, and the reason they belong on the parity surface:
+  // both are literally `document.querySelectorAll('nav a[href]').length` and
+  // its footer twin — the numbers the render pass reads in a real browser and
+  // compares these against — so the selector IS the specification, and the
+  // depth counters in the port have to agree with it on nesting and on
+  // malformed markup or CHECK-34 compares two different questions.
+  const navLinkCount = $("nav a[href]").length;
+  const footerLinkCount = $("footer a[href]").length;
+  const frameworkMarkers = FRAMEWORK_MARKERS.filter((marker) =>
+    marker === "__NEXT_DATA__"
+      ? // An id: matched verbatim, and by attribute rather than by `#id`
+        // selector so no CSS escaping question enters the oracle.
+        $("script[id]").filter((_, el) => $(el).attr("id") === "__NEXT_DATA__")
+          .length > 0
+      : $(`[${marker}]`).length > 0,
+  );
+
   const hasAmp =
     byRel("link", "amphtml").length > 0 ||
     $("html").attr("amp") !== undefined ||
@@ -238,6 +263,9 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     imagesMissingDimensions,
     hasAmp,
     hasViewport,
+    navLinkCount,
+    footerLinkCount,
+    frameworkMarkers,
     links: Array.from(linksByTarget.values()),
     bodyText,
     h1s,
@@ -418,6 +446,46 @@ describe("analyzeHtml parity with the DOM reference", () => {
       <img src="/d.png" alt="neither">
       <img src="/e.png" width="" height="" alt="present but empty">
       </body></html>`);
+  });
+
+  // The Phase 5 (P5-T2) captures. Held to the oracle rather than covered only
+  // by hand-counted cases because the DOM selector is what the render pass
+  // will run in a real browser: if the tokenizer and `querySelectorAll`
+  // disagree about a malformed page, CHECK-34 compares two numbers that were
+  // never answering the same question.
+  it("matches nav and footer link counts, container by container", () => {
+    expectParity(`<html><body>
+      <nav><a href="/a">A</a><a href="/b">B</a><a>no href</a><a href="">empty</a></nav>
+      <footer><a href="/c">C</a><a href="mailto:x@y.test">mail</a></footer>
+      <a href="/outside">outside</a>
+      </body></html>`);
+  });
+
+  it("matches a nav nested inside a footer, which counts for both", () => {
+    expectParity(
+      `<html><body><footer><nav><a href="/x">x</a></nav><a href="/y">y</a></footer></body></html>`,
+    );
+  });
+
+  it("matches when a footer close implicitly closes an open nav", () => {
+    expectParity(
+      `<html><body><footer><nav><a href="/x">x</a></footer><a href="/after">after</a></body></html>`,
+    );
+  });
+
+  it("matches nested navs and a stray close tag", () => {
+    expectParity(
+      `<html><body></nav><nav><a href="/1">1</a><nav><a href="/2">2</a></nav><a href="/3">3</a></nav></body></html>`,
+    );
+  });
+
+  it("matches the framework markers, each one and all of them", () => {
+    expectParity(
+      `<html ng-app="shopApp"><body><div data-reactroot=""><p>x</p></div>
+       <script id="__NEXT_DATA__" type="application/json">{"page":"/"}</script></body></html>`,
+    );
+    expectParity(`<html><body><div id="root"></div><script id="app">{}</script></body></html>`);
+    expectParity(`<html><body><script id="__next_data__">{}</script></body></html>`);
   });
 
   it("matches when every canonical is counted", () => {

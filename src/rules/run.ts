@@ -1,4 +1,4 @@
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, issues, metrics, pages } from "../db/schema.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
@@ -88,6 +88,26 @@ export async function runRules(
     .where(eq(crawls.id, crawlId))
     .limit(1);
   if (crawl.length === 0) throw new Error(`no such crawl '${crawlId}'`);
+
+  // Planner statistics, before any rule reads a table.
+  //
+  // A crawl fills these tables from empty and then the rules query them
+  // immediately. Postgres' autovacuum daemon is what normally keeps
+  // `pg_statistic` current, and it runs on its own schedule: the Phase 4 gate
+  // disclosed that the rules run had usable statistics only because autovacuum
+  // happened to analyze mid-crawl. That is luck, and the failure it hides is
+  // the quiet kind — never an error, just the planner choosing a nested loop
+  // over a 50k-row table it believes holds 0 rows, and a rules run that takes
+  // minutes instead of seconds (the `sd_crawl_page` and simhash-band
+  // precedents in schema.ts: a missing index is a slow query, never an error).
+  //
+  // One statement over the six tables the rules actually read. `metrics` is
+  // deliberately absent: no rule reads it — the metric phase only writes it.
+  // Loud by construction: no catch, so a failed ANALYZE aborts the run rather
+  // than leaving it to judge the site on whatever plan it gets (hard rule 7).
+  await db.execute(
+    sql`ANALYZE pages, links, sitemap_urls, url_params, hreflang, issues`,
+  );
 
   const summary: RunSummary = {
     pagesScanned: 0,

@@ -476,6 +476,14 @@ export class PageWriter {
       hasSoft404Phrases: analysis?.hasSoft404Phrases ?? false,
       relNext: analysis?.relNext ?? null,
       relPrev: analysis?.relPrev ?? null,
+      // A page with no HTML has no navigation and no framework tell, so the
+      // no-analysis case is 0/0/[] rather than a null: the columns are NOT
+      // NULL, and "this page served a PDF" is not "we do not know how many nav
+      // links it had". The render-side twins are the ones that stay null, and
+      // they are written by the render pass, never here.
+      navLinkCount: analysis?.navLinkCount ?? 0,
+      footerLinkCount: analysis?.footerLinkCount ?? 0,
+      frameworkMarkers: analysis?.frameworkMarkers ?? [],
       structuredDataParseErrors: analysis?.structuredDataParseErrors ?? 0,
     };
   }

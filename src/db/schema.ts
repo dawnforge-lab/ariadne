@@ -122,9 +122,45 @@ export const pages = pgTable("pages", {
   hasSoft404Phrases: boolean("has_soft404_phrases").notNull().default(false),
   relNext: text("rel_next"),
   relPrev: text("rel_prev"),
+  // The raw-HTML half of CHECK-34, written by `PageWriter` off the analyzer's
+  // single pass: anchors carrying an href inside a <nav> / a <footer>, counted
+  // exactly as `document.querySelectorAll('nav a[href]').length` counts them
+  // (see the analyzer's parity oracle). NOT NULL with a 0 default because a
+  // page with no HTML has no nav — a 200 that served a PDF, a 404, a timeout —
+  // and 0 is that fact, not a missing value.
+  navLinkCount: integer("nav_link_count").notNull().default(0),
+  footerLinkCount: integer("footer_link_count").notNull().default(0),
+  // Which of the analyzer's `FRAMEWORK_MARKERS` the raw HTML carried, in that
+  // constant's order. A jsonb array rather than a text[] because it is read as
+  // a set (`framework_markers @> '["__NEXT_DATA__"]'`), and NOT NULL with an
+  // empty-array default on the same reasoning as the two counters: no markers
+  // is a fact about the page, never an absence of evidence.
+  frameworkMarkers: jsonb("framework_markers")
+    .$type<string[]>()
+    .notNull()
+    .default(sql`'[]'::jsonb`),
   rendered: boolean("rendered").notNull().default(false),
   renderedWordCount: integer("rendered_word_count"),
   renderedLinkCount: integer("rendered_link_count"),
+  // The render pass's side of the comparison, ALL WRITTEN BY THE RENDER PASS
+  // (src/crawl/render, P5-T4) and by nothing else — the crawl's HTML path
+  // leaves every one of them null. Nullable, and the null is the whole point:
+  // it means this page was NOT rendered, which is what `isAuditable` gates on.
+  // A rendered page with genuinely zero nav links stores 0; a page nobody
+  // rendered stores null, and no rule may read the two as the same thing.
+  renderedNavLinkCount: integer("rendered_nav_link_count"),
+  renderedFooterLinkCount: integer("rendered_footer_link_count"),
+  // Links the rendered DOM exposes that look like faceted-navigation filters —
+  // the crawl-budget signal a raw-HTML crawl cannot see at all.
+  renderedFilterLinkCount: integer("rendered_filter_link_count"),
+  // Where the page navigated itself to while rendering (a JS redirect): a URL
+  // the HTTP layer never saw a Location header for.
+  renderedRedirectUrl: text("rendered_redirect_url"),
+  // Why a render that was ATTEMPTED produced nothing. Non-null here and null
+  // in the four columns above is a rendered-and-failed page, which is a
+  // different fact from a page that was never rendered (hard rule 7: the
+  // failure is a recorded row, not a silently unrendered page).
+  renderError: text("render_error"),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),
