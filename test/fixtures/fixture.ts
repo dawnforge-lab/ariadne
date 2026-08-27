@@ -13,6 +13,7 @@ import { absorbedFixtures } from "./pages/absorbed.js";
 import { authoredFixtures } from "./pages/authored.js";
 import { authoredP3Fixtures } from "./pages/authored-p3.js";
 import { controlFixture } from "./pages/control.js";
+import { renderFixtures } from "./pages/render-p5.js";
 
 export interface Fixture {
   /**
@@ -101,8 +102,21 @@ export interface Fixture {
 /**
  * Every fixture the site serves: the pages absorbed from badseo, the pages
  * authored in Phase 2 for the rules absorb left unclaimed, the Phase 3 pages
- * authored for the query rules, and the control.
+ * authored for the query rules, the Phase 5 pages authored for the render pass,
+ * and the control.
+ *
+ * The render fixtures need a second HTTP origin to exist before the app serves
+ * them — `/render/js-redirect-offsite` reads it on every request — so a caller
+ * that starts this site must call `startOffsiteHost()` first. Nothing here
+ * enforces that; the handler does, by throwing rather than serving a redirect
+ * to nowhere (see test/fixtures/pages/render-p5.ts).
  */
 export function allFixtures(): Fixture[] {
-  return [...absorbedFixtures, ...authoredFixtures, ...authoredP3Fixtures, controlFixture];
+  return [
+    ...absorbedFixtures,
+    ...authoredFixtures,
+    ...authoredP3Fixtures,
+    ...renderFixtures,
+    controlFixture,
+  ];
 }

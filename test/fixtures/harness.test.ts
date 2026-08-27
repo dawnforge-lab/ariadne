@@ -1,20 +1,27 @@
 /**
  * The end-to-end net.
  *
- * One local HTTP site, crawled once by the REAL crawler, judged once by the
- * REAL rule runner, asserted from the `issues` and `metrics` tables. Nothing
- * here stubs a fetch, hand-builds a `pages` row, or calls a rule directly: if
- * the analyzer stops extracting a signal, or the writer stops persisting it, or
- * a rule stops reading it, this file fails, and none of the unit suites would.
+ * One local HTTP site, crawled once by the REAL crawler, RENDERED once by a
+ * real Chromium, judged once by the REAL rule runner, asserted from the
+ * `issues` and `metrics` tables. Nothing here stubs a fetch, hand-builds a
+ * `pages` row, or calls a rule directly: if the analyzer stops extracting a
+ * signal, or the writer stops persisting it, or a rule stops reading it, this
+ * file fails, and none of the unit suites would.
  *
- * The crawl and the rule run happen once, in `beforeAll`. Every assertion below
- * reads the same result, so adding a fixture costs a page fetch, not a crawl.
+ * The crawl, the render pass and the rule run happen once, in `beforeAll`, in
+ * that order — which is the order production runs them, and the only order the
+ * render pass permits: `runRenderPass` refuses a crawl whose row still says
+ * `running`, and the diff rules read columns the render pass writes. Every
+ * assertion below reads the same result, so adding a fixture costs a page fetch
+ * and a render, not a crawl.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
-import { runCrawl, type CrawlSummary } from "../../src/crawl/loop.js";
+import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/loop.js";
+import { runRenderPass, type RenderPassSummary } from "../../src/crawl/render/run-render.js";
+import { RENDER_DEFAULTS } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, hreflang, issues, metrics, pages, sitemapUrls } from "../../src/db/schema.js";
@@ -26,6 +33,7 @@ import type { Registry } from "../../src/rules/registry/registry.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { allFixtures } from "./fixture.js";
 import { startFixtureApp, type FixtureApp } from "./app.js";
+import { startOffsiteHost, type OffsiteHost } from "./pages/render-p5.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -118,36 +126,39 @@ const SKIP_HARNESS_CLAIMS: string[] = [
 ];
 
 /**
- * TEMPORARY, and discharged by the next task of this phase.
+ * The settle this harness renders with.
  *
- * These four are the render pass's finding rules, and every one of them reads a
- * `rendered_*` column. This harness runs the CRAWL pass only — `runCrawl` then
- * `runRules` — so every page it writes has `rendered = false` and null counts,
- * which is exactly the "not audited" state the rules refuse to judge. They
- * cannot speak here for want of a render, not for want of a fixture.
- *
- * That is a different claim from the one `SKIP_HARNESS_CLAIMS` above makes, and
- * it is deliberately a different list. An entry there says NO PAGE COULD EVER
- * provoke the rule on this site; an entry here says the fixture and the pass
- * that would provoke it are being authored in the next task — P5-T6, which adds
- * the client-side-rendered pages and runs the render pass over this crawl. The
- * Phase 4 precedent is the same shape: its Task 4 carried a pending list for one
- * task and Task 5 emptied it.
- *
- * **This list must be empty again at the end of P5-T6.** It is asserted below
- * exactly as the exemptions are — an id here that DOES fire fails the test —
- * so it cannot quietly become a second exemption list.
+ * Production settles for three seconds (`RENDERER_DEFAULTS.settleMs`), which
+ * over sixty-nine pages would be three and a half minutes of waiting for
+ * scripts that finished in five milliseconds. 300ms is an order of magnitude
+ * more than the fixture site's own JavaScript needs — the two redirect pages
+ * fire theirs after 30ms and are the slowest thing here — and the DEFAULT is
+ * pinned by test/crawl/renderer.test.ts rather than exercised again by this
+ * file.
  */
-const PENDING_RENDER_FIXTURES: string[] = [
-  "content.csr-dependent",
-  "filters.js-only",
-  "nav.js-only",
-  "redirect.js",
-];
+const RENDER_SETTLE_MS = 300;
+
+/**
+ * The render budget this harness runs with: 100% of the crawl, both other knobs
+ * at their production defaults.
+ *
+ * Deliberate, and the whole reason `render.coverage`'s row below can be pinned
+ * as arithmetic rather than as an outcome. At 100% the budget is the crawl's
+ * page count (79), which is comfortably more than the 69 pages suspicion and
+ * the per-type sample between them nominate — so nothing is cut, `truncated` is
+ * false, and the selected set is exactly the candidate set. A smaller percentage
+ * would make the assertion a statement about which candidates happened to sort
+ * first, which proves nothing about the fixtures this task added. The BUDGET CUT
+ * itself is covered directly by test/crawl/select.test.ts.
+ */
+const RENDER_BUDGET_PCT = 100;
 
 let db: Db;
 let app: FixtureApp;
+/** The second origin `/render/js-redirect-offsite` sends the browser to. */
+let offsite: OffsiteHost;
 let summary: CrawlSummary;
+let render: RenderPassSummary;
 let registry: Registry;
 
 /**
@@ -263,9 +274,13 @@ async function findingSet(ruleId: string): Promise<unknown[]> {
 beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
+  // Before the app: `/render/js-redirect-offsite` reads this origin on every
+  // request and throws if it is not up, rather than serving a page that
+  // redirects nowhere (see test/fixtures/pages/render-p5.ts).
+  offsite = await startOffsiteHost();
   app = await startFixtureApp(allFixtures());
 
-  summary = await runCrawl(db, {
+  const config: CrawlConfig = {
     siteUrl: app.base,
     maxPages: 500,
     maxDepth: 10,
@@ -279,6 +294,26 @@ beforeAll(async () => {
     legacyHosts: [app.legacyBase],
     // The sanctioned test-only use: the fixture site is on 127.0.0.1.
     allowPrivate: true,
+    // Stored on the `crawls` row by `startCrawl`, and read back out of it by
+    // `render.coverage` — which is why the budget lives in the CRAWL config
+    // rather than being handed to the render pass alone. The metric describes
+    // the selection that actually happened, and it can only do that if the two
+    // read the same object.
+    renderBudgetPct: RENDER_BUDGET_PCT,
+  };
+  summary = await runCrawl(db, config);
+
+  // The crawl is `finished` by the time `runCrawl` returns (`closeCrawl` writes
+  // the status before the summary is built), which is what lets the render pass
+  // run at all: it refuses a crawl whose row still says `running`.
+  //
+  // The same config object, plus the one knob that is not a crawl's business.
+  // A `CrawlConfig` satisfies `RenderPassConfig` structurally on purpose, so
+  // the render cannot end up with a different user agent or a different
+  // per-host delay from the crawl it belongs to (hard rule 9).
+  render = await runRenderPass(db, summary.crawlId, {
+    ...config,
+    settleMs: RENDER_SETTLE_MS,
   });
 
   registry = buildRegistry();
@@ -354,6 +389,7 @@ afterAll(async () => {
   if (db !== undefined) await closeDb(db);
   await closeFetchAgents();
   if (app !== undefined) await app.close();
+  if (offsite !== undefined) await offsite.close();
 });
 
 describe("the fixture site end to end", () => {
@@ -894,18 +930,15 @@ describe("the fixture site end to end", () => {
     // "did it fire" is a question only the `metrics` table can answer — and
     // every one of the eleven CAN answer it here: nine always emit a site row,
     // `inlinks.sources-by-type` emits one per target cohort type and this site
-    // has 42 of them, and `content.template-similarity` emits one per type with
+    // has 49 of them, and `content.template-similarity` emits one per type with
     // two fingerprinted pages, which the `/deep/:id`, `/head/:slug`,
     // `/content/:slug`, `/authored/:slug` and `/authored3/:slug` templates give
     // it. There is no exemption paragraph to write.
     //
-    // `render.coverage` is among the nine, and it is the one metric whose row
-    // is currently ALL SELECTION AND NO EVIDENCE: this harness runs the crawl
-    // pass and not the render pass, so its `pagesRendered` and `renderFailures`
-    // are zero while its selection numbers describe a selection that was
-    // computed and never spent. That is the honest row for such a crawl rather
-    // than a gap — which is why the metric is here and the four render FINDING
-    // rules are in `PENDING_RENDER_FIXTURES` below.
+    // `render.coverage` is among the nine, and since P5-T6 its row is no longer
+    // all selection and no evidence: this harness runs the render pass over the
+    // crawl, so `pagesRendered` and `renderFailures` describe a selection that
+    // was computed AND spent. The whole row is pinned two tests below.
     expect([...metricsById.keys()].sort()).toEqual([
       "content.metrics-by-type",
       "content.template-similarity",
@@ -935,8 +968,8 @@ describe("the fixture site end to end", () => {
     // and the sitemap it publishes — rather than copied from what the SQL
     // produced, which would assert only that the query is deterministic.
     //
-    // THE COHORT, which two of the three are computed over. The crawl writes 72
-    // `pages` rows: the 71 fixtures plus the hub at `/`. Eleven of them are not
+    // THE COHORT, which two of the three are computed over. The crawl writes 79
+    // `pages` rows: the 78 fixtures plus the hub at `/`. Eleven of them are not
     // an indexable 200 and are therefore outside the cohort every metric shares
     // (fetched OK, 200, indexable):
     //
@@ -947,21 +980,26 @@ describe("the fixture site end to end", () => {
     //   redirects(4): /redirect/chain-1, /redirect/chain-2, /redirect/loop,
     //                /redirect/trailing-slash
     //
-    // 72 - 11 = 61 cohort pages. The `schema.breadcrumb-absent` assertion above
-    // counts the same set out of `pageByPath` and is asserted against the same
-    // rows, which is a second reading of this number from a different direction.
-    const COHORT = 61;
+    // 79 - 11 = 68 cohort pages. The seven `/render/*` fixtures P5-T6 added are
+    // all indexable 200s and all inside it, which is why this number moved by
+    // exactly seven. The `schema.breadcrumb-absent` assertion above counts the
+    // same set out of `pageByPath` and is asserted against the same rows, which
+    // is a second reading of this number from a different direction.
+    const COHORT = 68;
 
-    // THE LINK GRAPH. Every anchor the site renders, and there are only four
-    // kinds: the hub at `/` links the 63 fixtures whose `linkedFromHub` is not
+    // THE LINK GRAPH. Every anchor the site renders, and there are only five
+    // kinds: the hub at `/` links the 70 fixtures whose `linkedFromHub` is not
     // false; `/links/broken-internal-link` links `/status/not-found`;
     // `/deep/N` links `/deep/N+1` for N = 1…6 (the seventh rung ends the chain);
-    // and the paginated series links `paged-1 -> paged-2`, `paged-2 -> paged-1`,
-    // `paged-3 -> paged-2` and `paged-3 -> paged-3`. Nothing else on the site
-    // renders an `<a>`.
+    // the paginated series links `paged-1 -> paged-2`, `paged-2 -> paged-1`,
+    // `paged-3 -> paged-2` and `paged-3 -> paged-3`; and `/render/healthy`
+    // links itself. Nothing else on the site renders an `<a>` — the render
+    // fixtures' menus and facets are built by JavaScript, which the crawl pass
+    // never runs, and that is the whole point of them.
     //
     // Inlinks per cohort page — DISTINCT source pages, a page's link to itself
-    // never counted (the `links.orphan` lesson):
+    // never counted (the `links.orphan` lesson, and the reason `/render/healthy`
+    // appears in the "hub alone" row below rather than in one of its own):
     //
     //   0  `/`                       nothing links the hub. `/redirect/chain-2`
     //                                REDIRECTS to it, and a redirect is not a link.
@@ -971,18 +1009,19 @@ describe("the fixture site end to end", () => {
     //   2  /authored3/paged-1        the hub, paged-2
     //   1  /deep/2 … /deep/7         the rung above (6 pages)
     //   1  every other cohort page   the hub alone —
-    //                                61 - 3 - 1 - 1 - 6 = 50 pages
+    //                                68 - 3 - 1 - 1 - 6 = 57 pages
     //
-    // Sorted, that is 0,0,0 then fifty-six 1s (the 50 above plus the 6 deep
-    // rungs) then 2 then 3. Sum = 56 + 2 + 3 = 61, so mean = 61/61 = 1.
+    // Sorted, that is 0,0,0 then sixty-three 1s (the 57 above plus the 6 deep
+    // rungs) then 2 then 3. Sum = 63 + 2 + 3 = 68, so mean = 68/68 = 1.
     //
-    // n = 61, so `percentile_cont` interpolates at pos = q * 60 over v0…v60,
-    // where v0…v2 = 0, v3…v58 = 1, v59 = 2, v60 = 3:
-    //   p25    pos 15 -> v15 = 1
-    //   median pos 30 -> v30 = 1
-    //   p75    pos 45 -> v45 = 1
-    //   p95    pos 57 -> v57 = 1
-    // Every one lands inside the run of 1s, so none of them interpolates.
+    // n = 68, so `percentile_cont` interpolates at pos = q * 67 over v0…v67,
+    // where v0…v2 = 0, v3…v65 = 1, v66 = 2, v67 = 3:
+    //   p25    pos 16.75 -> between v16 and v17, both 1 -> 1
+    //   median pos 33.5  -> between v33 and v34, both 1 -> 1
+    //   p75    pos 50.25 -> between v50 and v51, both 1 -> 1
+    //   p95    pos 63.65 -> between v63 and v64, both 1 -> 1
+    // Every one lands inside the run of 1s, so each interpolates between two
+    // equal values and the interpolation changes nothing.
     expect(siteMetric("inlinks.distribution")).toEqual({
       count: COHORT,
       min: 0,
@@ -1001,11 +1040,11 @@ describe("the fixture site end to end", () => {
     // the page, not the declaration: `/authored3/hreflang-a` names three
     // alternates and is one covered page.
     //
-    // 100 * 6 / 61 = 9.83606… -> 9.8 at the one decimal place the SQL rounds to.
+    // 100 * 6 / 68 = 8.82352… -> 8.8 at the one decimal place the SQL rounds to.
     expect(siteMetric("hreflang.coverage")).toEqual({
       pagesWithHreflang: 6,
       indexablePages: COHORT,
-      coveragePct: 9.8,
+      coveragePct: 8.8,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
@@ -1028,24 +1067,24 @@ describe("the fixture site end to end", () => {
     // `/sitemap.xml` publishes the hub, every fixture whose `inSitemap` is not
     // false, and the one URL robots.txt blocks:
     //   1 (the hub, `/`)
-    // + 55 (fixtures listed, of the 71 — sixteen opt out)
+    // + 62 (fixtures listed, of the 78 — sixteen opt out)
     // + 1 (/private/hidden)
-    // = 57 entries, all distinct, so the walk's first-source-wins dedupe drops
+    // = 64 entries, all distinct, so the walk's first-source-wins dedupe drops
     // none of them.
     //
-    // 57 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
+    // 64 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
     // it; no document was dropped for exceeding the read cap; and the walk
     // stopped at no entry cap — which is what makes every count above exact
     // rather than a floor.
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 1,
-      totalUrls: 57,
+      totalUrls: 64,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
     });
     // The per-document row beneath it, which is where `docs: 1` is spent: the
-    // one document, with the same 57 entries under its own URL. Asserted as the
+    // one document, with the same 64 entries under its own URL. Asserted as the
     // exact key set, so the broken document appearing here — or the good one
     // vanishing — is a failure rather than a number nobody reads.
     expect([...(metricsById.get("sitemap.structure") ?? new Map()).keys()].sort()).toEqual([
@@ -1053,8 +1092,244 @@ describe("the fixture site end to end", () => {
       "site|",
     ]);
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
-      { urls: 57, breaches50k: false },
+      { urls: 64, breaches50k: false },
     );
+  });
+
+  it("the render pass spent the budget the fixture site's own arithmetic predicts", async () => {
+    // `render.coverage`'s site row, hand-derived end to end. Every number below
+    // comes from the fixture collection and the selection rules
+    // (src/crawl/render/select.ts), not from what the SQL produced.
+    //
+    // pagesCrawled = 79. The 78 fixtures plus the hub — the same count the
+    // cohort derivation two tests above starts from.
+    //
+    // selectionBudget = min(ceil(79 × 100/100), renderMaxPages 500) = 79.
+    // The percentage is taken over EVERY crawled URL, not over the renderable
+    // ones, so the denominator is 79 and not the 72-page cohort below.
+    //
+    // THE SELECTION COHORT is `fetch_class = 'ok'` AND `status_code = 200`, and
+    // deliberately NOT `is_indexable` — a noindex page built by JavaScript is
+    // exactly the evidence this pass collects. So it is 79 minus the seven
+    // pages that are neither: /status/not-found, /status/server-error,
+    // /status/blocked, and the four `/redirect/*` hops. 79 - 7 = 72.
+    //
+    // selectionSuspects = 60. Only ONE of the four suspicion triggers can fire
+    // on this site: no fixture is a 50KB document with under 50 words, and no
+    // titleless fixture is over 25KB (/head/missing-title is 1.3KB). The
+    // trigger that does fire is "this page links nowhere", and the cohort pages
+    // that DO link somewhere are exactly twelve:
+    //
+    //   /                            the hub, 70 links
+    //   /links/broken-internal-link  1 link, to /status/not-found
+    //   /deep/1 … /deep/6            1 link each, to the rung below (6 pages)
+    //   /authored3/paged-1, -2, -3   the paginated series (3 pages)
+    //   /render/healthy              1 link, to itself — which is a `links` row
+    //                                and therefore not "links nowhere", while
+    //                                being invisible to every inbound count
+    //
+    // 72 - 12 = 60. `/render/csr-content` carries a `__NEXT_DATA__` marker as
+    // well, which is a second trigger on a page the first had already caught:
+    // `min(tier)` means it is counted once.
+    //
+    // selectionSampled = 9. The sample takes `renderSamplePerType` (3) pages of
+    // every page type in URL order, and a page that is both a suspect and a
+    // sample member counts on the SUSPECT side — so this number counts only the
+    // twelve above. Six of them are the sole member of their page type and are
+    // therefore its first row: `/`, `/links/broken-internal-link`, the three
+    // `paged-*` pages, and `/render/healthy`. The other six share the
+    // `/deep/:id` type with a seventh page, and URL order seats `/deep/1`,
+    // `/deep/2` and `/deep/3`. 6 + 3 = 9, and `/deep/4`, `/deep/5` and
+    // `/deep/6` are the only three cohort pages this selection does not name.
+    //
+    // selectionSelected = min(79, 60 + 9) = 69, selectionTruncated = false:
+    // the budget is ten seats larger than the need, so nothing was cut.
+    //
+    // pagesRendered = 68 and renderFailures = 1, and the two are disjoint and
+    // sum to the 69 selected — the single-pass invariant this crawl happens to
+    // satisfy, because it was selected once. The one failure is
+    // `/render/js-redirect-offsite`, whose row shape the next test pins.
+    expect(siteMetric("render.coverage")).toEqual({
+      pagesCrawled: 79,
+      selectionBudget: 79,
+      selectionSuspects: 60,
+      selectionSampled: 9,
+      selectionSelected: 69,
+      selectionTruncated: false,
+      pagesRendered: 68,
+      renderFailures: 1,
+    });
+
+    // The metric recomputes the selection from SQL; the pass returned it from
+    // the statement that actually promoted the frontier rows. Asserting both
+    // is what proves `renderSelectionStats` describes the selection that
+    // happened rather than one it would make today.
+    expect(render.selection.budget).toBe(79);
+    expect(render.selection.suspects).toBe(60);
+    expect(render.selection.sampled).toBe(9);
+    expect(render.selection.truncated).toBe(false);
+    expect(render.selection.selected).toHaveLength(69);
+    expect(render.rendered).toBe(68);
+    expect(render.failures).toBe(1);
+    // No URL left behind: the pass was not aborted, so every leased render was
+    // recorded and completed.
+    expect(render.unrendered).toBe(0);
+
+    // The three cohort pages the selection deliberately does not name. Asserted
+    // by absence rather than left as arithmetic, because it is the one part of
+    // the derivation above that a change to `renderSamplePerType` would silently
+    // undo — and the sample size is read from the constant, not restated.
+    expect(RENDER_DEFAULTS.renderSamplePerType).toBe(3);
+    const selectedPaths = new Set(render.selection.selected.map((url) => new URL(url).pathname));
+    expect([...selectedPaths].filter((p) => p.startsWith("/deep/")).sort()).toEqual([
+      "/deep/1",
+      "/deep/2",
+      "/deep/3",
+      "/deep/7",
+    ]);
+
+    // And the one column the pass persists, which nothing else writes.
+    const [crawlRow] = await db
+      .select({ count: crawls.renderPassCount })
+      .from(crawls)
+      .where(eq(crawls.id, summary.crawlId));
+    expect(crawlRow?.count).toBe(68);
+  });
+
+  it("each render rule fires on exactly the fixture built for it", () => {
+    // The four rules the render pass exists to feed, each asserted as the exact
+    // SET of paths it fired on. A containment check would be satisfied by a
+    // rule that had grown eager enough to fire on half the site, which for a
+    // diff rule is the likeliest way to be wrong: every one of them compares
+    // two counts, and a threshold that slipped would land on the fifty-nine
+    // other pages this crawl rendered.
+    const firedOn = (ruleId: string): string[] =>
+      [...issuesByPath]
+        .filter(([, ids]) => ids.has(ruleId))
+        .map(([path]) => path)
+        .sort();
+
+    expect(firedOn("content.csr-dependent")).toEqual(["/render/csr-content"]);
+    expect(firedOn("nav.js-only")).toEqual(["/render/js-nav"]);
+    expect(firedOn("filters.js-only")).toEqual(["/render/js-filters"]);
+    // Both redirect pages, and the second of them is the one whose render
+    // FAILED — see the next test.
+    expect(firedOn("redirect.js")).toEqual([
+      "/render/js-redirect",
+      "/render/js-redirect-offsite",
+    ]);
+
+    // /render/healthy is the control for all four: rendered by the same
+    // browser, in the same pass, and silent. Checked against its page row
+    // first, because "fired nothing" proves nothing about a page nobody
+    // rendered (the /control assertion's lesson, one pass further on).
+    const healthy = pageByPath.get("/render/healthy");
+    if (healthy === undefined) throw new Error("/render/healthy has no pages row");
+    expect(healthy.rendered).toBe(true);
+    expect(healthy.renderError).toBeNull();
+    expect([...(issuesByPath.get("/render/healthy") ?? new Set<string>())]).toEqual([]);
+
+    // THE EVIDENCE, page by page, against the markup that produced it.
+    //
+    // CSR: the shell's own 32 words (a heading and one sentence), plus the 250
+    // `lorem` words the script writes into `#app`. 282 ≥ 2 × 32 = 64 clears the
+    // ratio arm, and 250 added words clears `CSR_MIN_ADDED_WORDS` (150) by a
+    // hundred. The injected text sits inside a `<script>` string literal, so it
+    // contributes nothing to the raw side — the analyzer skips script subtrees.
+    expect(detailsByPath.get("/render/csr-content\ncontent.csr-dependent")).toEqual({
+      pageUrl: `${app.base}/render/csr-content`,
+      rawWordCount: 32,
+      renderedWordCount: 282,
+      addedWords: 250,
+    });
+
+    // NAV: the raw document contains no `<nav>`, no `<footer>` and no anchor at
+    // all; the script builds a twelve-link menu and a four-link footer. 0 < 5
+    // and 16 ≥ 10, with six links of margin over the tokenizer's known
+    // one-directional undercount of anchors unclosed across a container.
+    expect(detailsByPath.get("/render/js-nav\nnav.js-only")).toEqual({
+      pageUrl: `${app.base}/render/js-nav`,
+      rawNavLinks: 0,
+      rawFooterLinks: 0,
+      rawLinks: 0,
+      renderedNavLinks: 12,
+      renderedFooterLinks: 4,
+      renderedLinks: 16,
+    });
+
+    // FILTERS: the product grid is `<div>`s, so the page contributes no `links`
+    // row at all and the raw side is categorically zero — which is what the
+    // rule's NOT EXISTS asks, over the deduplicated, protocol-filtered
+    // `target_url` the analyzer stored. The script adds eight `?filter=`
+    // anchors, three over `FILTER_RENDERED_MIN`.
+    expect(detailsByPath.get("/render/js-filters\nfilters.js-only")).toEqual({
+      pageUrl: `${app.base}/render/js-filters`,
+      rawFilterLinks: 0,
+      renderedFilterLinks: 8,
+    });
+
+    // REDIRECT, same origin: the browser followed the page's own `location.href`
+    // to `/render/target`, so the render SUCCEEDED — what it measured is the
+    // destination's DOM, not this page's — and the redirect is recorded beside
+    // it. `rendered: true` with a null `renderError` is the shape that says so.
+    expect(detailsByPath.get("/render/js-redirect\nredirect.js")).toEqual({
+      pageUrl: `${app.base}/render/js-redirect`,
+      fromUrl: `${app.base}/render/js-redirect`,
+      toUrl: `${app.base}/render/target`,
+      statusCode: 200,
+      rendered: true,
+      renderError: null,
+    });
+  });
+
+  it("the off-site redirect is a failed render that still carries its evidence", () => {
+    // THE ROW SHAPE THE RULE'S NO-`rendered`-GATE EXISTS FOR, proved end to end
+    // for the first time here — P5-T5 could only build it by hand.
+    //
+    // The page answers a plain 200 and then asks the browser for an address on
+    // ANOTHER ORIGIN. The render pass aborts that navigation (we record where
+    // the page wanted to go and refuse to follow it), which leaves Chromium on
+    // its own error surface with no DOM of this site's to measure. So the row
+    // is `rendered = false` with all five count columns null and a classified
+    // `render_error` — and `rendered_redirect_url` set anyway, because a page
+    // that sent itself off-site is a fact worth keeping even when the render
+    // that discovered it could not finish.
+    const offsiteTarget = `${offsite.base}/promotions`;
+    const page = pageByPath.get("/render/js-redirect-offsite");
+    if (page === undefined) throw new Error("/render/js-redirect-offsite has no pages row");
+
+    // The fetch layer saw a perfectly healthy page, which is the whole problem.
+    expect(page.fetchClass).toBe("ok");
+    expect(page.statusCode).toBe(200);
+
+    expect(page.rendered).toBe(false);
+    expect(page.renderError).toBe(`off-site navigation: ${offsiteTarget}`);
+    expect(page.renderedRedirectUrl).toBe(offsiteTarget);
+    // All five, not a sample: "rendered and empty" and "never rendered" are
+    // different facts, and a failed render must not leave one count behind that
+    // a diff rule could read as a zero.
+    expect(page.renderedWordCount).toBeNull();
+    expect(page.renderedLinkCount).toBeNull();
+    expect(page.renderedNavLinkCount).toBeNull();
+    expect(page.renderedFooterLinkCount).toBeNull();
+    expect(page.renderedFilterLinkCount).toBeNull();
+
+    // And the finding, which a `rendered = true` gate would have lost outright.
+    // It is the ONLY finding on the page: the three diff rules all open with
+    // `p.rendered = true`, so they correctly say nothing about a page nobody
+    // could measure, and the exact-set assertion is what proves they stayed
+    // silent for that reason rather than by luck.
+    expect([...(issuesByPath.get("/render/js-redirect-offsite") ?? new Set<string>())]).toEqual([
+      "redirect.js",
+    ]);
+    expect(detailsByPath.get("/render/js-redirect-offsite\nredirect.js")).toEqual({
+      pageUrl: `${app.base}/render/js-redirect-offsite`,
+      fromUrl: `${app.base}/render/js-redirect-offsite`,
+      toUrl: offsiteTarget,
+      statusCode: 200,
+      rendered: false,
+      renderError: `off-site navigation: ${offsiteTarget}`,
+    });
   });
 
   it("every registered rule fires on at least one fixture", () => {
@@ -1080,7 +1355,7 @@ describe("the fixture site end to end", () => {
       for (const ruleId of issuesByPath.get(fixture.path) ?? []) fired.add(ruleId);
     }
 
-    const exempt = new Set([...SKIP_HARNESS_CLAIMS, ...PENDING_RENDER_FIXTURES]);
+    const exempt = new Set(SKIP_HARNESS_CLAIMS);
     const unfired = registry
       .all()
       .map((rule) => rule.id)
@@ -1099,10 +1374,12 @@ describe("the fixture site end to end", () => {
 
     // The exemption is asserted, not assumed. An id listed as unfireable that
     // then fires is a rule whose condition is not what the list claims, and it
-    // must leave the list rather than sit there as a stale excuse. The pending
-    // render four are held to the same standard: the day P5-T6's fixtures make
-    // one of them speak, it must leave `PENDING_RENDER_FIXTURES` in that commit.
-    for (const id of [...SKIP_HARNESS_CLAIMS, ...PENDING_RENDER_FIXTURES]) {
+    // must leave the list rather than sit there as a stale excuse. That
+    // discipline is what emptied the pending list P5-T5 left here: the four
+    // render finding rules were exempted only until a fixture and a pass could
+    // provoke them, and this commit's fixtures do, so the list is gone rather
+    // than grown.
+    for (const id of SKIP_HARNESS_CLAIMS) {
       expect(fired.has(id), `${id} fired — it is not unfireable, drop the exemption`).toBe(
         false,
       );
