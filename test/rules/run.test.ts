@@ -71,7 +71,10 @@ describe("buildRegistry", () => {
     expect(ids).toContain("filters.js-only");
     expect(ids).toContain("redirect.js");
     expect(ids).toContain("render.coverage");
-    expect(ids.length).toBe(79);
+    // And Phase 7's skip rule, which reports the page the corrected
+    // thin-content floor cannot judge on a crawl that predates its column.
+    expect(ids).toContain("content.thin-skipped");
+    expect(ids.length).toBe(80);
   });
 
   it("registers every kind the runner drives", () => {

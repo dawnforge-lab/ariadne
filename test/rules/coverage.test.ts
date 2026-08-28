@@ -90,10 +90,19 @@ describe("checklist coverage", () => {
   //                          filters.js-only, redirect.js)
   //   metric  10 + 1 = 11   (render.coverage)
   //   total   74 + 5 = 79
-  it("pins the ruleset split the gate doc reports: 79 rules = 26 page + 42 query + 11 metric", () => {
+  //
+  // Phase 7 Task 1 adds one page rule and no others: `content.thin-skipped`,
+  // which reports the page `content.thin` could not judge because the crawl
+  // that wrote it predates the column the floor now reads. It claims the same
+  // two checks as the rule it stands in for, so the claimed-check arithmetic
+  // below does not move.
+  //
+  //   page    26 + 1 = 27
+  //   total   79 + 1 = 80
+  it("pins the ruleset split the gate doc reports: 80 rules = 27 page + 42 query + 11 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(79);
-    expect(registry.byKind("page")).toHaveLength(26);
+    expect(registry.all()).toHaveLength(80);
+    expect(registry.byKind("page")).toHaveLength(27);
     expect(registry.byKind("query")).toHaveLength(42);
     // The link-graph four, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

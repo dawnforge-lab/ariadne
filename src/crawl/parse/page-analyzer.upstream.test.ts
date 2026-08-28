@@ -48,6 +48,29 @@
  * builder's adoption agency algorithm, so the DOM holds an anchor the token
  * stream never contained. See "the one divergence" test at the end.
  *
+ * Phase 7 (P7-T1) moved the oracle twice, and the first of the two is the
+ * interesting one:
+ *  - `<template>` was ALREADY excluded here and included by the port. cheerio's
+ *    parse5 tree puts template content under a fragment node whose `name` is
+ *    undefined, and `collectVisibleText` returns on exactly that, so the DOM
+ *    side has always agreed with the browser: template text is in no document.
+ *    No fixture in this repo carried a `<template>`, so the two sides never met
+ *    on one and the divergence went unmeasured until the lavishalice.com
+ *    diagnosis found 482 words of it on one product page. The port now excludes
+ *    it too, and this file names `template` in NON_CONTENT_TAGS so the
+ *    exclusion is a stated rule on both sides rather than an accident of how
+ *    parse5 represents a fragment.
+ *  - `renderableWordCount` IS on the parity surface, because it is a DOM read
+ *    rather than a `bodyText` derivation: it asks four questions about
+ *    ATTRIBUTES (`hidden`, an inline `display:none`, `<dialog open>`,
+ *    `<details open>`) and the oracle asks the same four of the same elements.
+ *    THE LIMITATION IS SHARED AND DELIBERATE, and the port's header states it
+ *    in the same words: this is markup-only. Neither side loads a stylesheet,
+ *    so neither sees a class that hides its element, and the number is a floor
+ *    on the correction rather than an emulation of `innerText`. A parity test
+ *    over CSS-hidden markup would agree on the wrong answer, which is why the
+ *    limitation is written down instead of tested around.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -75,12 +98,20 @@ const EXTENSION_FIELDS = [
   // Derivations of bodyText, like the two hashes above them.
   "hasLoremIpsum",
   "hasSoft404Phrases",
+  // A derivation of `h1s[0]`, which IS compared: if the h1 list matches, the
+  // first entry's collapsed and capped form matches too. Modelling it here
+  // would be the oracle re-deriving the port's own arithmetic rather than
+  // holding it to a DOM.
+  "h1Text",
 ] as const;
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
 
-/** Subtrees the DOM implementation removed before reading text. */
-const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
+/**
+ * Subtrees the DOM implementation removed before reading text. `template` is
+ * named rather than left to parse5's fragment representation; see the header.
+ */
+const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg", "template"]);
 
 /**
  * The bits of a domhandler node this walk needs. Declared structurally so the
@@ -90,6 +121,7 @@ interface DomNode {
   type: string;
   name?: string;
   data?: string;
+  attribs?: Record<string, string>;
   children?: DomNode[];
 }
 
@@ -108,6 +140,56 @@ function collectVisibleText(node: DomNode, out: string[]): void {
   const boundary = !INLINE_TEXT_TAGS.has(name);
   if (boundary) out.push(" ");
   for (const child of node.children ?? []) collectVisibleText(child, out);
+  if (boundary) out.push(" ");
+}
+
+/**
+ * The port's `markupHidden`, asked of a DOM element instead of a token's
+ * attributes. Same four questions, same order, same deliberate blindness to
+ * anything a stylesheet says.
+ */
+function markupHidden(name: string, attribs: Record<string, string>): boolean {
+  if ("hidden" in attribs) return true;
+  const style = attribs["style"];
+  if (style !== undefined && /display\s*:\s*none/i.test(style)) return true;
+  return name === "dialog" && !("open" in attribs);
+}
+
+/**
+ * The renderable text, DOM-side: `collectVisibleText` with the hidden-surface
+ * rule applied to text nodes only. Boundaries are pushed for every non-inline
+ * element whether or not it is hidden, exactly as the port emits them into both
+ * of its streams — the two counts must differ in text and never in structure,
+ * or their difference would not be a number of words.
+ */
+function collectRenderableText(
+  node: DomNode,
+  out: string[],
+  hidden: boolean,
+  closedDetails: boolean,
+  summary: boolean,
+): void {
+  if (node.type === "text") {
+    // A closed `<details>` still renders its summary; everything else in it is
+    // hidden. The port answers this with a stack and a counter and reaches the
+    // same verdict, including on a `<summary>` nested deeper than a browser
+    // would render (both count it).
+    if (!hidden && !(closedDetails && !summary)) out.push(node.data ?? "");
+    return;
+  }
+  const name = node.name?.toLowerCase();
+  if (name === undefined) return;
+  if (NON_CONTENT_TAGS.has(name)) return;
+  const attribs = node.attribs ?? {};
+  const boundary = !INLINE_TEXT_TAGS.has(name);
+  if (boundary) out.push(" ");
+  const nextHidden = hidden || markupHidden(name, attribs);
+  const nextClosedDetails =
+    closedDetails || (name === "details" && !("open" in attribs));
+  const nextSummary = summary || name === "summary";
+  for (const child of node.children ?? []) {
+    collectRenderableText(child, out, nextHidden, nextClosedDetails, nextSummary);
+  }
   if (boundary) out.push(" ");
 }
 
@@ -183,6 +265,11 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   if (bodyEl) collectVisibleText(bodyEl, textParts);
   const bodyText = textParts.join("").replace(/\s+/g, " ").trim();
   const wordCount = bodyText ? bodyText.split(/\s+/).length : 0;
+
+  const renderableParts: string[] = [];
+  if (bodyEl) collectRenderableText(bodyEl, renderableParts, false, false, false);
+  const renderableText = renderableParts.join("").replace(/\s+/g, " ").trim();
+  const renderableWordCount = renderableText ? renderableText.split(/\s+/).length : 0;
 
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
@@ -262,6 +349,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     headingCounts,
     headingOrder: headingOrder.slice(0, 500),
     wordCount,
+    renderableWordCount,
     imagesTotal,
     imagesMissingAlt,
     imagesMissingDimensions,
@@ -293,6 +381,7 @@ function expectParity(html: string) {
     simhash: _simhash,
     hasLoremIpsum: _hasLoremIpsum,
     hasSoft404Phrases: _hasSoft404Phrases,
+    h1Text: _h1Text,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
@@ -552,6 +641,73 @@ describe("the one divergence from the DOM: an open <a> crossing a container", ()
     // reconstruct, so nothing is cloned and the two counts meet.
     expect(count(`<html><body><a href="/x">x</a><nav><a href="/y">y</a></nav></body></html>`))
       .toMatchObject({ streamedNav: 1, domNav: 1 });
+  });
+});
+
+/**
+ * The Phase 7 surfaces, held to the DOM like every other DOM read.
+ *
+ * `expectParity` compares the whole shape, so each case below asserts BOTH the
+ * template exclusion and `renderableWordCount` at once — which is the point:
+ * the port and the oracle have to agree about which text is in the document and
+ * which text the markup hides, on the same markup, or the two numbers a render
+ * diff subtracts are answers to different questions.
+ */
+describe("hidden surfaces and template content, against the DOM", () => {
+  it("agrees that template text is in no document", () => {
+    expectParity(
+      `<html><body><p>one two three</p><template><p>four five six</p></template></body></html>`,
+    );
+  });
+
+  it("agrees on a template holding block markup", () => {
+    expectParity(
+      `<html><body><template><article><h2>a b</h2><p>c d</p></article></template><p>e</p></body></html>`,
+    );
+  });
+
+  it("agrees on the hidden attribute", () => {
+    expectParity(`<html><body><p>a b</p><div hidden><p>c d e</p></div></body></html>`);
+  });
+
+  it("agrees on an inline display:none", () => {
+    expectParity(
+      `<html><body><p>a b</p><div style="color:red;display: none"><p>c d</p></div></body></html>`,
+    );
+  });
+
+  it("agrees on a closed dialog and an open one", () => {
+    expectParity(`<html><body><dialog><p>a b</p></dialog><p>c</p></body></html>`);
+    expectParity(`<html><body><dialog open><p>a b</p></dialog><p>c</p></body></html>`);
+  });
+
+  it("agrees on a closed details, summary included", () => {
+    expectParity(
+      `<html><body><details><summary>Size guide</summary><p>a b c</p></details></body></html>`,
+    );
+    expectParity(
+      `<html><body><details open><summary>Size guide</summary><p>a b c</p></details></body></html>`,
+    );
+  });
+
+  it("agrees on nested and malformed hidden markup", () => {
+    expectParity(`<html><body><div hidden><div>a b</div></div><p>c</p></body></html>`);
+    expectParity(`<html><body><div hidden><span hidden>a</span> b</div><p>c</p></body></html>`);
+    expectParity(`<html><body><p>un<span hidden>x</span>believable</p></body></html>`);
+    expectParity(
+      `<html><body><section hidden><details><summary>s</summary><p>a</p></details></section><p>b</p></body></html>`,
+    );
+  });
+
+  it("agrees on a page carrying all four surfaces at once", () => {
+    expectParity(
+      `<html><body><h1>Visible heading here</h1><p>Visible copy.</p>` +
+        `<template><p>template copy</p></template>` +
+        `<nav hidden><a href="/a">drawer link</a></nav>` +
+        `<div style="display:none"><p>picker copy</p></div>` +
+        `<details><summary>Size guide</summary><p>accordion copy</p></details>` +
+        `</body></html>`,
+    );
   });
 });
 

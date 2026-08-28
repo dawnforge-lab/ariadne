@@ -101,11 +101,22 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Adjust the heading levels so they descend one step at a time. Where a level was skipped for the sake of a smaller font, fix the styling instead of the heading level.",
   },
   "content.thin": {
+    // Accuracy: the count this rule reads excludes text the page's own markup
+    // hides, and does NOT exclude text hidden by a stylesheet — the crawler
+    // does not load CSS. The prose says "the markup hides" for that reason;
+    // do not widen it to a claim about everything a visitor cannot see.
     title: "Thin content",
     explanation:
-      "This indexable page has fewer than 150 words of visible text. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees.",
+      "This indexable page carries fewer than 150 words a reader can actually reach. Text the page's own markup hides is left out of that count — a menu drawer, a closed accordion, a block marked as not displayed, or a template a script clones later — because none of it is on the page a visitor is shown. The finding quotes both numbers, so a page that ships plenty of words and shows very few is visible as exactly that. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees.",
     howToFix:
-      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
+      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the two numbers are far apart, the copy exists but is behind something a reader has to open, so bring the substance into the visible page rather than into a drawer. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
+  },
+  "content.thin-skipped": {
+    title: "Thin-content check could not be run on this page",
+    explanation:
+      "The thin-content check counts the words a reader can reach, which means it has to know which parts of the page the markup hides. This page was crawled before the engine recorded that, so the number the check needs does not exist for it — only the older count of every word in the HTML, which includes hidden menus, accordions and templates and is often several times larger. The page was therefore left unjudged rather than judged on the wrong number, which on a site with heavy hidden chrome would have called a thin page healthy.",
+    howToFix:
+      "Re-crawl the site. The count is taken while the page is being read, so it cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
   },
   "content.placeholder": {
     // Accuracy: the analyzer matches the literal phrase "lorem ipsum" in
@@ -669,9 +680,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "content.metrics-by-type": {
     title: "Word count and text density by template",
     explanation:
-      "How much text this site's indexable pages carry, as two distributions: the word count of the page's visible text, and the text ratio — the share of the page's HTML that is that text rather than markup. Each is summarised the same way: how many pages were measured, the shortest and longest, the mean, the quartiles, and the 95th percentile — the level only the largest one page in twenty reaches. The two counts are the pages that actually carry each measure, so a page the parser recorded no word count for is absent from the word-count column and still present in the text-ratio one. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+      "How much text this site's indexable pages carry, as three distributions: the word count of the page's text, the renderable word count — the same text minus the parts the page's own markup hides, such as a menu drawer, a closed accordion or a template a script clones later — and the text ratio, the share of the page's HTML that is text rather than markup. Each is summarised the same way: how many pages were measured, the shortest and longest, the mean, the quartiles, and the 95th percentile — the level only the largest one page in twenty reaches. The three counts are the pages that actually carry each measure, so a page the parser recorded no word count for is absent from the word-count column and still present in the text-ratio one. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
     howToFix:
-      "Compare each template's row with the site row and with what the template is for: a product listing legitimately carries less text than an article, so the number to read is the spread inside one template rather than the difference between two. A template whose lower quartile sits far below its median has a tail of pages carrying much less than the rest — those are the pages to look at first. A low text ratio says the page is mostly markup, which is a rendering and template question rather than an editorial one.",
+      "Compare each template's row with the site row and with what the template is for: a product listing legitimately carries less text than an article, so the number to read is the spread inside one template rather than the difference between two. The gap between the word count and the renderable word count is the template's furniture — a template shipping 900 words and showing 200 carries 700 words of hidden chrome on every one of its pages, which inflates every other length measure taken of it. A template whose lower quartile sits far below its median has a tail of pages carrying much less than the rest — those are the pages to look at first. A low text ratio says the page is mostly markup, which is a rendering and template question rather than an editorial one.",
   },
   "content.template-similarity": {
     // The plan's naming ruling: this table is about TEMPLATE SIMILARITY. The

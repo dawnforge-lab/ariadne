@@ -50,7 +50,17 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     h5Count: 0,
     h6Count: 0,
     headingOrder: [1, 2, 3],
+    h1Text: "A perfectly reasonable page heading",
     wordCount: 400,
+    // The clean page has some hidden chrome, like every real page, and plenty
+    // of visible words all the same: 380 clears THIN_WORDS, so `content.thin`
+    // is silent for the reason it is meant to be. A test about the floor
+    // overrides THIS column — the raw count is not what the rule reads.
+    renderableWordCount: 380,
+    // Not null: a null here is "this row predates Phase 7", which is a
+    // different page from a clean one and is what `content.thin-skipped`
+    // reports. The clean page is a page a current crawl wrote.
+    clickDepth: 2,
     textRatio: 0.4,
     contentHash: "0".repeat(64),
     simhash: 1234567890123456789n,

@@ -110,10 +110,19 @@ export const FILTER_RENDERED_MIN = 5;
  * `columns` is what THIS rule reads, not every render column: the crawl-evidence
  * discipline (each rule validates its own inputs, so a blob or a column it never
  * looks at cannot make it throw). `content.csr-dependent` also passes the RAW
- * `word_count` through here, because its comparison has two sides and a null on
- * either one loses the page the same way: an ok/200 HTML page always carries an
- * analyzer word count (`PageWriter`), so a null there is the same class of
- * writer defect.
+ * `renderable_word_count` through here, because its comparison has two sides and
+ * a null on either one loses the page the same way: an ok/200 HTML page crawled
+ * by this version of the engine always carries one (`PageWriter` writes it with
+ * `word_count`, off the same pass).
+ *
+ * ONE OF THE TWO NULLS IS NOT A WRITER DEFECT, and the message says so. A crawl
+ * that predates Phase 7 has `renderable_word_count` null on EVERY row, because
+ * the analyzer that wrote them did not compute it. That crawl cannot be re-judged
+ * — the count is taken while the HTML is being read and the HTML is not stored —
+ * so the rule refuses the whole crawl loudly rather than comparing a rendered
+ * count against a raw one that measures a different thing (hard rule 7). The
+ * page-rule side of the same problem is `content.thin-skipped`, which can skip
+ * page by page because it judges one row at a time.
  */
 async function assertRenderedColumns(
   db: Db,
@@ -143,7 +152,10 @@ async function assertRenderedColumns(
       `${row.missing.join(", ")} — the render pass writes every count column together ` +
       "with `rendered`, so this row is a writer defect rather than a page with nothing " +
       "on it. The comparison this rule makes has no side to make it from, and a row " +
-      "dropped for a null would be a page no rule audited and every reader took for clean",
+      "dropped for a null would be a page no rule audited and every reader took for clean" +
+      " (a missing `renderable_word_count` on every row means something else: a crawl " +
+      "from before that column existed, which cannot be re-judged and has to be crawled " +
+      "again)",
   );
 }
 
@@ -152,22 +164,38 @@ async function assertRenderedColumns(
  *
  * Fires when BOTH hold, on a page the render pass actually measured:
  *
- *   rendered_word_count >= CSR_WORD_MULTIPLE * greatest(word_count, 1)
- *   rendered_word_count - word_count >= CSR_MIN_ADDED_WORDS
+ *   rendered_word_count >= CSR_WORD_MULTIPLE * greatest(renderable_word_count, 1)
+ *   rendered_word_count - renderable_word_count >= CSR_MIN_ADDED_WORDS
  *
- * `greatest(word_count, 1)` is the divide-by-nothing guard, and Postgres'
- * `greatest` is the right function for it precisely because it IGNORES nulls —
- * but no null reaches it: `assertRenderedColumns` has already refused a rendered
- * page with no raw count, so the 1 stands in only for a genuine zero. A shell
- * that served no words at all and rendered 150 is the archetype of this finding,
- * and without the guard its ratio arm would be `150 >= 0`, true for every page
- * including the ones that render nothing.
+ * **THE RAW SIDE IS `renderable_word_count`, NOT `word_count` (Phase 7).** The
+ * two sides of a subtraction have to be answers to the same question, and they
+ * were not: the rendered side is `innerText`, which is what a reader sees, while
+ * `word_count` includes every word the markup hides. On the site that provoked
+ * the change that gap was ~740 words of drawer, picker and accordion on every
+ * page, which made the raw side larger than the rendered one everywhere and
+ * could mask a genuinely client-rendered page — a FALSE NEGATIVE, silent by
+ * construction. `renderable_word_count` removes what the markup itself hides, so
+ * what remains between the two sides is CSS-hidden text and JavaScript-injected
+ * text, which is what this rule is about.
+ *
+ * The thresholds are unchanged. They were derived against a raw side that was
+ * inflated, so on a chrome-heavy site the corrected column can only make this
+ * rule MORE willing to fire — which is the direction the diagnosis says it was
+ * wrong in.
+ *
+ * `greatest(renderable_word_count, 1)` is the divide-by-nothing guard, and
+ * Postgres' `greatest` is the right function for it precisely because it IGNORES
+ * nulls — but no null reaches it: `assertRenderedColumns` has already refused a
+ * rendered page with no raw count, so the 1 stands in only for a genuine zero. A
+ * shell that served no words at all and rendered 150 is the archetype of this
+ * finding, and without the guard its ratio arm would be `150 >= 0`, true for
+ * every page including the ones that render nothing.
  *
  * Hand-derived boundaries (the test pins each of these):
- *   raw 100, rendered 250 → 250 ≥ 200 and 150 ≥ 150 — FIRES, both arms exactly at
- *   raw 100, rendered 249 → 249 ≥ 200 but 149 < 150 — silent on the floor
- *   raw 200, rendered 399 → 199 ≥ 150 but 399 < 400 — silent on the ratio
- *   raw 0,   rendered 150 → 150 ≥ 2·1 and 150 ≥ 150 — FIRES (the empty shell)
+ *   renderable 100, rendered 250 → 250 ≥ 200 and 150 ≥ 150 — FIRES, both arms exactly at
+ *   renderable 100, rendered 249 → 249 ≥ 200 but 149 < 150 — silent on the floor
+ *   renderable 200, rendered 399 → 199 ≥ 150 but 399 < 400 — silent on the ratio
+ *   renderable 0,   rendered 150 → 150 ≥ 2·1 and 150 ≥ 150 — FIRES (the empty shell)
  *
  * The evidence carries both counts and the difference rather than a ratio: an
  * action plan quotes "this page's HTML holds 12 of its 840 words", and a
@@ -178,22 +206,26 @@ async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]>
   // A crawl id nothing knows scans no pages, which reads exactly like a site
   // with no CSR problem (`runRules`' precedent, hard rule 7).
   await assertCrawl(db, crawlId, CSR.id);
-  await assertRenderedColumns(db, crawlId, CSR.id, ["word_count", "rendered_word_count"]);
+  await assertRenderedColumns(db, crawlId, CSR.id, [
+    "renderable_word_count",
+    "rendered_word_count",
+  ]);
 
   const res = await db.execute<{
     id: string;
     url: string;
-    word_count: number;
+    word_count: number | null;
+    renderable_word_count: number;
     rendered_word_count: number;
     total_matches: number;
   }>(sql`
-    select p.id, p.url, p.word_count, p.rendered_word_count,
+    select p.id, p.url, p.word_count, p.renderable_word_count, p.rendered_word_count,
            count(*) over ()::int as total_matches
     from pages p
     where p.crawl_id = ${crawlId}
       and p.rendered = true
-      and p.rendered_word_count >= ${CSR_WORD_MULTIPLE} * greatest(p.word_count, 1)
-      and p.rendered_word_count - p.word_count >= ${CSR_MIN_ADDED_WORDS}
+      and p.rendered_word_count >= ${CSR_WORD_MULTIPLE} * greatest(p.renderable_word_count, 1)
+      and p.rendered_word_count - p.renderable_word_count >= ${CSR_MIN_ADDED_WORDS}
     order by p.url
     limit ${URL_FINDING_CAP}`);
 
@@ -202,9 +234,15 @@ async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]>
       pageId: row.id,
       pageUrl: row.url,
       evidence: {
+        // Both raw numbers travel: `rawWordCount` is every word the HTML
+        // carried and `renderableWordCount` is the subset the markup does not
+        // hide, which is the one the arithmetic below is done in. A reader who
+        // saw only the second could not tell a shell from a page whose copy is
+        // merely folded away.
         rawWordCount: row.word_count,
+        renderableWordCount: row.renderable_word_count,
         renderedWordCount: row.rendered_word_count,
-        addedWords: row.rendered_word_count - row.word_count,
+        addedWords: row.rendered_word_count - row.renderable_word_count,
       },
       dedupeKey: row.url,
     }),

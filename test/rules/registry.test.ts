@@ -120,11 +120,13 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
-    // 0.4.0: the render pass's four finding rules and its coverage metric
-    // changed what the ruleset says about a site, so a finding read back later
-    // can be traced to the ruleset that produced it rather than to a version
-    // that predates the render diff.
-    expect(RULESET_VERSION).toBe("0.4.0");
+    // 0.5.0: Phase 7's measurement correction. `content.thin` now judges a
+    // page on the words its markup does not hide rather than on every word in
+    // the HTML, `content.csr-dependent` subtracts the same corrected column,
+    // and `content.thin-skipped` is a new verdict a page can receive. All
+    // three change what the ruleset says about a site, which is exactly what
+    // this version exists to let a stored finding be traced to.
+    expect(RULESET_VERSION).toBe("0.5.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

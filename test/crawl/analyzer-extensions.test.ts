@@ -4,6 +4,11 @@ import {
   SOFT_404_PHRASES,
 } from "../../src/crawl/parse/page-analyzer.js";
 import { simhash64, hammingDistance } from "../../src/crawl/parse/simhash.js";
+import {
+  P7_HIDDEN_CHROME_BODY,
+  P7_RENDERABLE_WORD_COUNT,
+  P7_WORD_COUNT,
+} from "../fixtures/pages/authored-p7.js";
 
 const HTML = `<!doctype html><html><head>
 <title>P2</title>
@@ -427,5 +432,231 @@ describe("soft-404 phrases", () => {
       "https://ex.com/x",
     );
     expect(a.hasSoft404Phrases).toBe(false);
+  });
+});
+
+/**
+ * The Phase 7 measurement correction (P7-T1), whose evidence is
+ * `audits/lavishalice.com/render-diagnosis.md`.
+ *
+ * Two claims, tested apart because they are separate defects that happened to
+ * be found together: `<template>` text was never content and `word_count`
+ * itself now excludes it, and `renderableWordCount` is a second count over the
+ * same stream that also drops what the markup says is not displayed.
+ *
+ * Every expected number here is derived in the assertion beside it, and the two
+ * counts are stated together wherever both are in play — a case that moved one
+ * and not the other is exactly the drift this file exists to catch.
+ */
+const body = (inner: string) =>
+  analyzePage(`<html><body>${inner}</body></html>`, "https://ex.com/x");
+
+describe("template content is counted by nothing", () => {
+  it("excludes template text from wordCount and renderableWordCount alike", () => {
+    // "one two three" = 3. The template's four words are in no document.
+    const a = body(`<p>one two three</p><template><p>four five six seven</p></template>`);
+    expect(a.wordCount).toBe(3);
+    expect(a.renderableWordCount).toBe(3);
+  });
+
+  it("excludes a template that carries the whole page", () => {
+    const a = body(`<template><h2>a b</h2><p>c d e</p></template>`);
+    expect(a.wordCount).toBe(0);
+    expect(a.renderableWordCount).toBe(0);
+  });
+
+  it("excludes nested templates, and the nesting cannot re-open the stream", () => {
+    // The inner </template> must not take the outer one's suppression down
+    // with it — the depth counter is what makes that true, as for <script>.
+    const a = body(
+      `<template><p>a b</p><template><p>c d</p></template><p>e f</p></template><p>g h</p>`,
+    );
+    expect(a.wordCount).toBe(2);
+    expect(a.renderableWordCount).toBe(2);
+  });
+
+  it("keeps the text derivations off template text, like script text", () => {
+    const a = body(`<template><p>lorem ipsum dolor</p></template><p>real copy here</p>`);
+    expect(a.hasLoremIpsum).toBe(false);
+    expect(a.wordCount).toBe(3);
+  });
+});
+
+describe("renderableWordCount drops what the markup says is hidden", () => {
+  it("drops a subtree carrying the hidden attribute", () => {
+    // raw: 3 visible + 3 in the drawer = 6; renderable: the 3 visible.
+    const a = body(`<p>visible words here</p><div hidden><p>secret hidden words</p></div>`);
+    expect(a.wordCount).toBe(6);
+    expect(a.renderableWordCount).toBe(3);
+  });
+
+  it("reads every spelling of the hidden attribute as hidden", () => {
+    for (const attr of ["hidden", 'hidden=""', 'hidden="hidden"', 'hidden="until-found"']) {
+      const a = body(`<p>one two</p><div ${attr}><p>three four five</p></div>`);
+      expect(a.wordCount, attr).toBe(5);
+      expect(a.renderableWordCount, attr).toBe(2);
+    }
+  });
+
+  it("drops an inline display:none, however it is spelled", () => {
+    for (const style of [
+      "display:none",
+      "display: none",
+      "DISPLAY : NONE",
+      "color:red;display:none;",
+      "display:none !important",
+    ]) {
+      const a = body(`<p>one two</p><div style="${style}"><p>three four five</p></div>`);
+      expect(a.wordCount, style).toBe(5);
+      expect(a.renderableWordCount, style).toBe(2);
+    }
+  });
+
+  it("leaves an inline style that hides nothing alone", () => {
+    for (const style of ["display:block", "color:none", "display:inline-block"]) {
+      const a = body(`<p>one two</p><div style="${style}"><p>three four five</p></div>`);
+      expect(a.renderableWordCount, style).toBe(5);
+    }
+  });
+
+  it("counts a display:none later overridden in the same attribute as hidden", () => {
+    // The documented false positive: matching the attribute string IS the
+    // rule, and anything finer is a CSS parser (module header).
+    const a = body(`<p>one two</p><div style="display:none;display:block"><p>x y z</p></div>`);
+    expect(a.wordCount).toBe(5);
+    expect(a.renderableWordCount).toBe(2);
+  });
+
+  it("drops a dialog that is not open, and keeps one that is", () => {
+    const closed = body(`<dialog><p>modal copy</p></dialog><p>page copy</p>`);
+    expect(closed.wordCount).toBe(4);
+    expect(closed.renderableWordCount).toBe(2);
+
+    const open = body(`<dialog open><p>modal copy</p></dialog><p>page copy</p>`);
+    expect(open.renderableWordCount).toBe(4);
+  });
+
+  it("keeps a closed details' summary and drops the rest of it", () => {
+    // "Size guide" is what a browser renders on a closed accordion; the three
+    // words behind it are what it does not.
+    const closed = body(
+      `<details><summary>Size guide</summary><p>hidden details body</p></details>`,
+    );
+    expect(closed.wordCount).toBe(5);
+    expect(closed.renderableWordCount).toBe(2);
+
+    const open = body(
+      `<details open><summary>Size guide</summary><p>hidden details body</p></details>`,
+    );
+    expect(open.renderableWordCount).toBe(5);
+  });
+
+  it("hides even the summary when the details itself is hidden", () => {
+    const a = body(`<details hidden><summary>Size guide</summary><p>a b</p></details><p>c d</p>`);
+    expect(a.wordCount).toBe(6);
+    expect(a.renderableWordCount).toBe(2);
+  });
+
+  it("does not split a word around an inline hidden element", () => {
+    // The two streams share every element boundary, so dropping text can merge
+    // two words and can never split one. `<span>` is inline: no boundary.
+    const a = body(`<p>un<span hidden>x</span>believable</p>`);
+    expect(a.wordCount).toBe(1);
+    expect(a.renderableWordCount).toBe(1);
+  });
+
+  it("composes with the template exclusion", () => {
+    const a = body(
+      `<p>one two three</p><template><p>t t t t</p></template><div hidden><p>h h</p></div>`,
+    );
+    expect(a.wordCount).toBe(5);
+    expect(a.renderableWordCount).toBe(3);
+  });
+});
+
+describe("the hidden-surface counters survive real markup", () => {
+  it("does not un-hide when an inner element of the same name closes", () => {
+    const a = body(`<div hidden><div>a b</div></div><p>c d</p>`);
+    expect(a.wordCount).toBe(4);
+    expect(a.renderableWordCount).toBe(2);
+  });
+
+  it("stays hidden to the end of the document when the hidden element never closes", () => {
+    const a = body(`<p>x</p><div hidden><p>y z`);
+    expect(a.wordCount).toBe(3);
+    expect(a.renderableWordCount).toBe(1);
+  });
+
+  it("is not confused by a stray close tag", () => {
+    const a = body(`<div hidden>a</div></div><p>b c</p>`);
+    expect(a.wordCount).toBe(3);
+    expect(a.renderableWordCount).toBe(2);
+  });
+
+  it("handles a hidden element inside a hidden element", () => {
+    const a = body(`<div hidden><span hidden>a</span> b</div><p>c</p>`);
+    expect(a.wordCount).toBe(3);
+    expect(a.renderableWordCount).toBe(1);
+  });
+
+  it("handles implicitly closed paragraphs", () => {
+    // htmlparser2 closes the first <p> when the second opens, which is what a
+    // browser does; the counter has to see that close, or the hidden paragraph
+    // would swallow the rest of the page.
+    const a = body(`<p hidden>a b<p>c d`);
+    expect(a.wordCount).toBe(4);
+    expect(a.renderableWordCount).toBe(2);
+  });
+
+  it("never counts more renderable words than raw words", () => {
+    const pages = [
+      `<p>plain copy with nothing hidden at all</p>`,
+      `<div hidden>a</div><p>b</p>`,
+      `<template>a b c</template><p>d</p>`,
+      `<details><summary>s</summary>a b</details>`,
+      `<dialog>a</dialog><p>b</p>`,
+      `<div style="display:none"><p>a</p><div hidden>b</div></div><p>c</p>`,
+      `<p>un<span hidden>x</span>believable</p>`,
+      `<div hidden><p>a</p>`,
+    ];
+    for (const html of pages) {
+      const a = body(html);
+      expect(a.renderableWordCount, html).toBeLessThanOrEqual(a.wordCount);
+    }
+  });
+});
+
+describe("h1Text captures the first heading's words", () => {
+  it("takes the first h1, whitespace collapsed", () => {
+    const a = body(`<h1>  The   first\nheading </h1><h1>the second</h1>`);
+    expect(a.h1Text).toBe("The first heading");
+  });
+
+  it("is null when there is no h1, and empty when the h1 is", () => {
+    expect(body(`<p>no heading</p>`).h1Text).toBeNull();
+    expect(body(`<h1></h1><p>x</p>`).h1Text).toBe("");
+  });
+
+  it("reads through inline markup, as the heading text does", () => {
+    const a = body(`<h1>Buy <em>this</em> today</h1>`);
+    expect(a.h1Text).toBe("Buy this today");
+  });
+
+  it("caps at 300 characters", () => {
+    expect(body(`<h1>${"w".repeat(400)}</h1>`).h1Text).toHaveLength(300);
+  });
+});
+
+describe("the Phase 7 fixture page measures what its own arithmetic says", () => {
+  it("reproduces the fixture's derived counts", () => {
+    const a = analyzePage(
+      `<html><head><title>t</title></head><body><main>${P7_HIDDEN_CHROME_BODY}</main></body></html>`,
+      "https://ex.com/authored7/hidden-chrome",
+    );
+    expect(a.wordCount).toBe(P7_WORD_COUNT);
+    expect(a.renderableWordCount).toBe(P7_RENDERABLE_WORD_COUNT);
+    // The gap is the three hidden blocks named in the fixture (34 + 20 + 28),
+    // and it is a third of the page.
+    expect(a.wordCount - a.renderableWordCount).toBe(82);
   });
 });

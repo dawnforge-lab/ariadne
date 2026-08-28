@@ -103,6 +103,49 @@
  * tokenizer has to agree with the selector about nesting and about every
  * malformed case tried, or the check compares two different questions.
  *
+ * Phase 7 (P7-T1) corrected what the text accumulator counts, and added a
+ * second accumulator beside it. Both come from the lavishalice.com render
+ * diagnosis (`audits/lavishalice.com/render-diagnosis.md`), which measured a
+ * product page at 1,413 raw words against 335 rendered ones and attributed
+ * every missing word:
+ *  - **`<template>` joins `NON_CONTENT_TAGS`, which CHANGES `word_count`.**
+ *    This is the one semantic change this file has ever made to a number
+ *    already in the database, and it is a bug fix rather than a redefinition:
+ *    a real parser puts template content in an inert `DocumentFragment` that
+ *    is in no document, is rendered under no CSS and is indexed by nothing,
+ *    so text inside a `<template>` was never content and counting it was
+ *    never right. On the diagnosed product page it was 482 of 1,413 words —
+ *    34% of a PDP's "content", which is exactly the page type a thin-content
+ *    or duplicate-content rule cares about most. The parity oracle was
+ *    already right here and nobody noticed: cheerio's parse5 tree puts
+ *    template children under a fragment node the oracle's walk skips, so the
+ *    two sides silently disagreed on any page carrying a template. They now
+ *    agree by both excluding it.
+ *  - **`renderableWordCount`** is a SECOND count over the same visible-text
+ *    stream, additionally dropping text inside markup that says the element is
+ *    not displayed: a `hidden` attribute, an inline `style` containing
+ *    `display:none`, a `<dialog>` without `open`, and the non-`<summary>`
+ *    content of a `<details>` without `open`. `word_count` keeps its old
+ *    meaning (every word the HTML carries, template excepted) and the new
+ *    column is what the render diff and the thin-content floor read, because
+ *    those two ask "how much can a reader see" and the raw number answers
+ *    "how much did the server send".
+ *
+ * WHAT `renderableWordCount` IS NOT, stated here and in the parity oracle
+ * because a number this easy to over-trust needs its limits written down: it
+ * is MARKUP-ONLY, and it is not an emulation of `innerText`. A class that
+ * hides its element through a stylesheet is invisible to a tokenizer that
+ * never fetches, let alone cascades, CSS — by design (hard rules 2 and 4) —
+ * so the ~740 words of per-page chrome the diagnosis attributed to theme CSS
+ * on that site are still counted here. This is the honest markup-only FLOOR of
+ * the correction: `renderableWordCount <= wordCount` always, and the gap that
+ * remains against a rendered `innerText` count is CSS-hidden text, which is
+ * evidence rather than error. The one false positive the rule can produce is a
+ * `style` attribute whose `display:none` is overridden later in the same
+ * string (`style="display:none;display:block"`), which this counts as hidden;
+ * matching the attribute string is deliberate, since anything better is a CSS
+ * parser.
+ *
  * ONE KNOWN, PERMANENT DIVERGENCE, and it is a property of the port rather
  * than a defect in it. An `<a href>` left open across a container boundary —
  * `<a href="/x"><nav><a href="/y">y</a></nav></a>` — makes the DOM report 2
@@ -170,7 +213,33 @@ export interface PageAnalysis {
   headingCounts: [number, number, number, number, number, number];
   /** Heading levels in document order, capped at MAX_HEADING_ORDER. */
   headingOrder: number[];
+  /**
+   * The first `<h1>`'s text, whitespace-collapsed and capped at
+   * MAX_H1_TEXT_CHARS. Null means the page has no `<h1>` at all; `""` means it
+   * has one and it is empty — the same present-but-blank distinction `title`
+   * and `metaDescription` carry, and for the same reason.
+   *
+   * A derivation of `h1s[0]`, which the parity oracle already holds this file
+   * to; the heading COUNT is what the existing rules read, and this is the
+   * heading's WORDS, for the rule that compares an h1 with the title.
+   */
+  h1Text: string | null;
   wordCount: number;
+  /**
+   * `wordCount` minus the words no visitor can read WITHOUT CSS: everything
+   * inside an element carrying `hidden`, an inline `display:none`, a `<dialog>`
+   * that is not `open`, or the non-`<summary>` body of a `<details>` that is
+   * not `open`. Always `<= wordCount` — the two streams share every element
+   * boundary and differ only in which text nodes reach them, so dropping text
+   * can merge two words but never split one.
+   *
+   * MARKUP-ONLY, and the module header says what that costs: class-based and
+   * stylesheet-driven hiding is invisible here by design, so this is a floor on
+   * the correction rather than an `innerText` equivalent. The render pass's
+   * `rendered_word_count` is the number that sees CSS; the difference between
+   * the two is the site's CSS-hidden chrome, which is evidence.
+   */
+  renderableWordCount: number;
   imagesTotal: number;
   imagesMissingAlt: number;
   /**
@@ -265,8 +334,28 @@ export interface RawPageLink extends PageLink {
 }
 
 const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
-/** Subtrees whose text is not visible content. */
-const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
+/**
+ * Subtrees whose text is not visible content.
+ *
+ * `template` is in the family for the reason the other four are: its text is
+ * in no rendered document. htmlparser2 sees an ordinary element, but a real
+ * parser moves template content into an inert `DocumentFragment` outside the
+ * tree, where no CSS applies to it and no indexer reads it. See the module
+ * header — this membership changes `wordCount` itself, and it is the only
+ * change to that number this file has made.
+ */
+const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg", "template"]);
+/**
+ * An inline `display:none`, matched against the `style` ATTRIBUTE STRING.
+ *
+ * Not a CSS parser and not a cascade: the whole hidden-surface rule this file
+ * implements is markup-only (module header), and a robust match on the one
+ * declaration that removes an element from the flow is as far as a tokenizer
+ * can honestly go. `display : none !important` matches; `display:none` later
+ * overridden inside the same attribute matches too, which is the rule's one
+ * false-positive shape and is documented rather than guessed around.
+ */
+const DISPLAY_NONE = /display\s*:\s*none/i;
 /**
  * Elements that do not break a word. Everything else — blocks, `<br>`, `<img>`,
  * list items, table cells — puts whitespace between the text on either side of
@@ -289,6 +378,13 @@ const HEADING_LEVELS: Record<string, number> = {
   h6: 6,
 };
 const MAX_ANCHOR_CHARS = 200;
+/**
+ * Cap on `h1Text`. An `<h1>` holding a page's whole first paragraph is a real
+ * (if unfortunate) shape, and the column exists to be compared with a title —
+ * 300 characters is five times the longest title any rule tolerates, so the cap
+ * can only ever truncate text that was already past every question asked of it.
+ */
+const MAX_H1_TEXT_CHARS = 300;
 /**
  * Per-page caps on the extracted collections. Crawler-trap and mega-menu pages
  * can carry thousands of links per page, and pages sit in memory in persist
@@ -504,6 +600,61 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const bodyParts: string[] = [];
   const fallbackParts: string[] = [];
 
+  // The renderable stream: the same two accumulators, minus the text inside
+  // markup-hidden elements. Element boundaries are emitted into BOTH streams
+  // identically — the two differ in which text nodes reach them and in nothing
+  // else — which is what makes `renderableWordCount <= wordCount` a property
+  // rather than a hope: dropping text can merge two words, never split one.
+  //
+  // MEMORY. These arrays hold references to the very same strings the body
+  // accumulators hold, not copies of them, so the cost of the second stream is
+  // one pointer per text node and one transient join at the end. O(page), like
+  // the first stream, so the memory contract is untouched.
+  const renderableBodyParts: string[] = [];
+  const renderableFallbackParts: string[] = [];
+  // Markup-hidden tracking, on the `titleDepth` / `navDepth` idiom and for the
+  // same reasons — containers nest, and malformed markup must not be able to
+  // silence the rest of the document. Two of the three are STACKS OF ELEMENT
+  // DEPTHS rather than plain counters, because unlike `<nav>` the condition is
+  // not readable from the closing tag: `onclosetag` is handed a name and no
+  // attributes, so "was the element that is closing the one that was hidden?"
+  // has to be answered by the depth it opened at.
+  //
+  // `elementDepth` counts every open tag and every close tag htmlparser2 emits,
+  // including the implied closes it synthesises (a `<p>` closed by the next
+  // `<p>`, everything still open at EOF) and the immediate close of a void
+  // element. A stray `</div>` with no open `<div>` produces no event at all, so
+  // the counter stays balanced; the guard below is belt and braces.
+  let elementDepth = 0;
+  const hiddenOpenedAt: number[] = [];
+  const closedDetailsOpenedAt: number[] = [];
+  // A `<summary>` is the ONE thing a closed `<details>` still renders, so it is
+  // un-hidden inside one. A name counter is enough here (the tag identifies
+  // itself on the way out) and it deliberately does not check that the summary
+  // is the details' own first child, which is the only shape a browser
+  // actually renders: a `<summary>` buried deeper inside a closed `<details>`
+  // is counted here and hidden there. That direction over-counts renderable
+  // text, which is the safe direction for a floor.
+  let summaryDepth = 0;
+  /** Is text arriving now inside markup that says it is not displayed? */
+  const renderableHidden = (): boolean =>
+    hiddenOpenedAt.length > 0 ||
+    (closedDetailsOpenedAt.length > 0 && summaryDepth === 0);
+  /**
+   * Does this element's own markup say it is not displayed? Attributes only —
+   * `hidden` in any form (including `hidden="until-found"`, which a browser
+   * does reveal on find; treating it as hidden keeps the rule to one question
+   * about one attribute), an inline `display:none`, and a `<dialog>` that is
+   * not `open`. `<details>` is handled separately: it hides all of itself
+   * except its summary, which is not a thing this predicate can express.
+   */
+  const markupHidden = (name: string, attribs: Record<string, string>): boolean => {
+    if ("hidden" in attribs) return true;
+    const style = attribs["style"];
+    if (style !== undefined && DISPLAY_NONE.test(style)) return true;
+    return name === "dialog" && !("open" in attribs);
+  };
+
   const handleMetaTag = (attribs: Record<string, string>) => {
     const content = attribs["content"];
     const name = attribs["name"]?.trim().toLowerCase();
@@ -585,13 +736,19 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
    * same scoping rules as `ontext`, and collapses runs so a tag-dense page does
    * not grow the accumulator with separators.
    */
-  const emitTextBoundary = () => {
-    if (suppressDepth > 0 || titleDepth > 0) return;
-    const parts =
-      bodyDepth > 0 ? bodyParts : headDepth === 0 ? fallbackParts : null;
-    if (parts === null) return;
+  const pushBoundary = (parts: string[]) => {
     if (parts.length === 0 || parts[parts.length - 1] === " ") return;
     parts.push(" ");
+  };
+  const emitTextBoundary = () => {
+    if (suppressDepth > 0 || titleDepth > 0) return;
+    const inBody = bodyDepth > 0;
+    if (!inBody && headDepth > 0) return;
+    pushBoundary(inBody ? bodyParts : fallbackParts);
+    // Not gated on `renderableHidden`: a hidden element's boundaries are still
+    // boundaries. See the accumulators' comment — identical structure, less
+    // text, is what keeps the two counts comparable.
+    pushBoundary(inBody ? renderableBodyParts : renderableFallbackParts);
   };
 
   const isTextBoundary = (name: string) =>
@@ -623,6 +780,19 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     {
       onopentag(name, attribs) {
         domSize += 1;
+        // Hidden-surface bookkeeping first, and unconditionally: the
+        // `noscript` early return below skips the rest of this handler, and
+        // `onclosetag` has the mirror of it, so anything that must stay
+        // balanced has to happen above both.
+        elementDepth += 1;
+        if (markupHidden(name, attribs)) {
+          hiddenOpenedAt.push(elementDepth);
+        } else if (name === "details" && !("open" in attribs)) {
+          // A hidden `<details>` is already on the stack above; it hides its
+          // summary too, and the harder rule must not also claim it.
+          closedDetailsOpenedAt.push(elementDepth);
+        }
+        if (name === "summary") summaryDepth += 1;
         if (NON_CONTENT_TAGS.has(name)) {
           suppressDepth += 1;
         }
@@ -741,13 +911,29 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         }
         if (openH1) openH1.push(text);
         if (openAnchor) openAnchor.text.push(text);
+        const hidden = renderableHidden();
         if (bodyDepth > 0) {
           bodyParts.push(text);
+          if (!hidden) renderableBodyParts.push(text);
         } else if (headDepth === 0) {
           fallbackParts.push(text);
+          if (!hidden) renderableFallbackParts.push(text);
         }
       },
       onclosetag(name) {
+        // The mirror of `onopentag`'s first block, in the same position and
+        // for the same reason. An element is popped by the DEPTH it opened at,
+        // never by its name: `<div hidden><div>…</div></div>` closes an inner
+        // element of the same name first, and a name match would un-hide the
+        // rest of the outer one.
+        if (hiddenOpenedAt[hiddenOpenedAt.length - 1] === elementDepth) {
+          hiddenOpenedAt.pop();
+        }
+        if (closedDetailsOpenedAt[closedDetailsOpenedAt.length - 1] === elementDepth) {
+          closedDetailsOpenedAt.pop();
+        }
+        if (name === "summary" && summaryDepth > 0) summaryDepth -= 1;
+        if (elementDepth > 0) elementDepth -= 1;
         if (NON_CONTENT_TAGS.has(name) && suppressDepth > 0) {
           suppressDepth -= 1;
         }
@@ -784,7 +970,17 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const rawText = (sawBody ? bodyParts : fallbackParts).join("");
   const bodyText = rawText.replace(/\s+/g, " ").trim();
   const wordCount = bodyText ? bodyText.split(/\s+/).length : 0;
+  // The same three lines over the renderable stream, and the same body-vs-
+  // fallback choice, so a fragment is measured on both sides or on neither.
+  const renderableRaw = (sawBody ? renderableBodyParts : renderableFallbackParts).join("");
+  const renderableText = renderableRaw.replace(/\s+/g, " ").trim();
+  const renderableWordCount = renderableText ? renderableText.split(/\s+/).length : 0;
   const title: string | null = sawTitle ? titleParts.join("").trim() : null;
+  const firstH1 = h1s[0];
+  const h1Text =
+    firstH1 === undefined
+      ? null
+      : firstH1.replace(/\s+/g, " ").trim().slice(0, MAX_H1_TEXT_CHARS);
 
   // Bytes, not characters, on both sides: the ratio is about wire weight.
   // Clamped because a text-only fragment is legitimately all text, and
@@ -811,7 +1007,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       headingCounts[5] ?? 0,
     ],
     headingOrder,
+    h1Text,
     wordCount,
+    renderableWordCount,
     imagesTotal,
     imagesMissingAlt,
     imagesMissingDimensions,
@@ -858,7 +1056,9 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     ogImage: raw.ogImage,
     headingCounts: raw.headingCounts,
     headingOrder: raw.headingOrder,
+    h1Text: raw.h1Text,
     wordCount: raw.wordCount,
+    renderableWordCount: raw.renderableWordCount,
     imagesTotal: raw.imagesTotal,
     imagesMissingAlt: raw.imagesMissingAlt,
     imagesMissingDimensions: raw.imagesMissingDimensions,

@@ -40,7 +40,11 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     ogImage: `${SITE}/og.png`,
     headingCounts: [1, 2, 0, 0, 0, 0],
     headingOrder: [1, 2, 2],
+    h1Text: "A heading",
     wordCount: 420,
+    // Below the raw count, as it always is: the analyzer's two streams share
+    // every element boundary and the renderable one carries less text.
+    renderableWordCount: 380,
     imagesTotal: 3,
     imagesMissingAlt: 1,
     imagesMissingDimensions: 0,

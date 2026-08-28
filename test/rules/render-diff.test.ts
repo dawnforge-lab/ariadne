@@ -113,6 +113,15 @@ describe("the render diff rules against the database", () => {
     rendered?: boolean;
     renderError?: string | null;
     wordCount?: number | null;
+    /**
+     * Defaults to `wordCount`: a page with no markup-hidden chrome, where the
+     * two raw counts are the same number. That default is what keeps every
+     * boundary case below reading as it always did — the arithmetic is now
+     * done in this column, and on a page with nothing hidden the column holds
+     * the same value it used to. `/csr-hidden-chrome` is the case where they
+     * differ, and it is the one that proves which column the rule reads.
+     */
+    renderableWordCount?: number | null;
     renderedWordCount?: number | null;
     navLinkCount?: number;
     footerLinkCount?: number;
@@ -155,6 +164,12 @@ describe("the render diff rules against the database", () => {
         title: "A perfectly reasonable page title here",
         htmlBytes: 40_000,
         wordCount: s.wordCount === undefined ? 400 : s.wordCount,
+        renderableWordCount:
+          s.renderableWordCount === undefined
+            ? s.wordCount === undefined
+              ? 400
+              : s.wordCount
+            : s.renderableWordCount,
         navLinkCount: s.navLinkCount ?? 12,
         footerLinkCount: s.footerLinkCount ?? 8,
         rendered,
@@ -217,8 +232,10 @@ describe("the render diff rules against the database", () => {
     await closeDb(db);
   });
 
-  // CONTENT.CSR-DEPENDENT. Both arms must hold:
-  //   rendered >= 2 * greatest(raw, 1)   and   rendered - raw >= 150
+  // CONTENT.CSR-DEPENDENT. Both arms must hold, and RAW HERE IS THE RENDERABLE
+  // COUNT since Phase 7 — the words the page's markup does not hide, which is
+  // the only raw number comparable with an `innerText` measurement:
+  //   rendered >= 2 * greatest(renderable, 1)   and   rendered - renderable >= 150
   //
   //   /csr-both-exact   raw 100, rendered 250: 250 >= 200 ✓, 150 >= 150 ✓  FIRES
   //   /csr-under-floor  raw 100, rendered 249: 249 >= 200 ✓, 149 >= 150 ✗  silent
@@ -226,9 +243,13 @@ describe("the render diff rules against the database", () => {
   //   /csr-empty-shell  raw   0, rendered 150: 150 >= 2·1 ✓, 150 >= 150 ✓  FIRES
   //   /csr-shell-under  raw   0, rendered 149: 149 >= 2·1 ✓, 149 >= 150 ✗  silent
   //
-  // The last two are what `greatest(word_count, 1)` is for: without it the ratio
-  // arm of a zero-word page would read `rendered >= 0`, true of every page ever
-  // rendered, and the floor would be doing all the work alone.
+  // None of these five pages hides anything, so their renderable count IS their
+  // word count and every boundary above is the same arithmetic it always was —
+  // re-derived rather than assumed: the column moved, the numbers did not.
+  //
+  // The last two are what `greatest(renderable_word_count, 1)` is for: without
+  // it the ratio arm of a zero-word page would read `rendered >= 0`, true of
+  // every page ever rendered, and the floor would be doing all the work alone.
   it("content.csr-dependent fires on both arms and stops one word short of either", async () => {
     const crawlId = await newCrawl();
     await addPages(crawlId, [
@@ -250,7 +271,7 @@ describe("the render diff rules against the database", () => {
     expect(await firedPaths("filters.js-only", crawlId)).toEqual([]);
   });
 
-  it("content.csr-dependent quotes both counts and the difference between them", async () => {
+  it("content.csr-dependent quotes every count and the difference between them", async () => {
     const crawlId = await newCrawl();
     const ids = await addPages(crawlId, [
       { path: "/csr-evidence", wordCount: 12, renderedWordCount: 840 },
@@ -262,8 +283,38 @@ describe("the render diff rules against the database", () => {
     expect(findings[0]!.dedupeKey).toBe(url("/csr-evidence"));
     expect(findings[0]!.evidence).toEqual({
       rawWordCount: 12,
+      renderableWordCount: 12,
       renderedWordCount: 840,
       addedWords: 828,
+    });
+  });
+
+  it("content.csr-dependent compares the renderable count, not the raw one", async () => {
+    // The lavishalice shape: 1,000 words in the HTML of which 740 are hidden
+    // chrome, and a browser that shows 900.
+    //
+    //   against the RAW count:        900 >= 2·1000 ✗ — silent (the false
+    //                                 negative the diagnosis predicted)
+    //   against the RENDERABLE count: 900 >= 2·260  ✓ and 900 − 260 = 640 >= 150
+    //                                 ✓ — FIRES
+    //
+    // And the reverse shape proves the change is not a licence to fire: a page
+    // whose renderable count is high is silent even though most of its HTML is
+    // chrome, because a reader can already see what the browser shows.
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/csr-hidden-chrome", wordCount: 1000, renderableWordCount: 260, renderedWordCount: 900 },
+      { path: "/csr-visible-copy", wordCount: 1000, renderableWordCount: 900, renderedWordCount: 900 },
+    ]);
+
+    expect(await firedPaths("content.csr-dependent", crawlId)).toEqual(["/csr-hidden-chrome"]);
+
+    const findings = await rule("content.csr-dependent").run(db, crawlId);
+    expect(findings[0]!.evidence).toEqual({
+      rawWordCount: 1000,
+      renderableWordCount: 260,
+      renderedWordCount: 900,
+      addedWords: 640,
     });
   });
 
@@ -512,12 +563,14 @@ describe("the render diff rules against the database", () => {
         { path: "/bad-rendered-words", renderedWordCount: null },
       ],
       [
-        // The raw side of the same comparison. An ok/200 HTML page always
-        // carries an analyzer word count, so a null here is the same class of
-        // defect and loses the page the same way.
+        // The raw side of the same comparison, which since Phase 7 is the
+        // RENDERABLE count. An ok/200 HTML page crawled by this engine always
+        // carries one, so a null here loses the page the same way — and on an
+        // older crawl it means the whole crawl cannot be judged, which the
+        // message says and this refusal is what makes visible.
         "content.csr-dependent",
-        "word_count",
-        { path: "/bad-raw-words", wordCount: null },
+        "renderable_word_count",
+        { path: "/bad-raw-words", renderableWordCount: null },
       ],
       [
         "nav.js-only",

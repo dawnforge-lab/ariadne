@@ -167,11 +167,21 @@ const PHASE_5_RULE_IDS = [
 /** The metric ids of the list above — what the metric-copy contracts apply to. */
 const PHASE_5_METRIC_IDS = ["render.coverage"];
 
+/**
+ * Phase 7's rule. Same contract as every list above: the copy lands with the
+ * rule, and a rule that shipped without it fails here as well as at registry
+ * build time. One id, because P7-T1 corrected what existing rules measure
+ * rather than adding new verdicts — apart from the skip, which is a verdict
+ * about the CRAWL and needs a title of its own for exactly that reason.
+ */
+const PHASE_7_RULE_IDS = ["content.thin-skipped"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
   ...PHASE_4_METRIC_IDS,
   ...PHASE_5_RULE_IDS,
+  ...PHASE_7_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -441,10 +451,16 @@ describe("issue copy", () => {
   // assertion above, because their shapes are their own. Every column of every
   // value shape has to be findable in the prose: a table's numbers are quoted
   // to a client, and a column nobody named is a number nobody can explain.
-  it("content.metrics-by-type names both measures and every column of each", () => {
+  it("content.metrics-by-type names all three measures and every column of each", () => {
     const text = ISSUE_COPY["content.metrics-by-type"]!.explanation;
-    expect(text, "the two measures").toMatch(/word count/i);
-    expect(text, "the two measures").toMatch(/text ratio/i);
+    expect(text, "the three measures").toMatch(/word count/i);
+    expect(text, "the three measures").toMatch(/renderable word count/i);
+    expect(text, "the three measures").toMatch(/text ratio/i);
+    // A column called "renderable" is meaningless without the sentence that
+    // says what it leaves out, and that sentence is the whole reason the
+    // measure is quotable to a client.
+    expect(text, "what renderable excludes").toMatch(/the page's own markup hides/i);
+    expect(text, "the count is per measure, over three now").toMatch(/three counts/i);
     expect(text, "the count").toMatch(/how many pages were measured/i);
     // And that the count is per measure rather than the size of the cohort —
     // the one place this shape differs from the link metrics' distribution.
