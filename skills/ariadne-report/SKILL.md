@@ -147,6 +147,15 @@ Sweep them: `metrics_get` with `crawlId` and no other filter, following
   `crawl_status` — is what distinguishes them, with `crawl.rulesRun` as the per-rule
   breakdown beside it. If the sweep is empty and those say the crawl was judged, stop:
   the findings file and the crawl do not describe the same run.
+- **`crawl.rulesRun` may be null, and null is not a defective findings file.** It
+  carries the `crawl_rules` summary's scalars only when the audit ran that pass
+  itself; an audit of a crawl somebody else judged writes null rather than re-judging
+  shared state to fill a field, and says so in `crawl.caveats`. **`crawl.rulesRunAt`
+  is the gate, not `rulesRun`** — a timestamp with a null breakdown is a judged crawl
+  and every PASS in the file stands on it. What you lose is `pagesScanned`, so where
+  the report would have written "over 4,821 pages scanned" use `crawl.pagesCrawled`
+  and call it what it is: the pages the crawl fetched. A null `rulesRunAt` is the
+  refusal case, and it stays one.
 
 ## Step 3 — severity in context
 
@@ -194,7 +203,12 @@ The priority ladder, defined by what it means rather than by which severity fed 
 ## Step 4 — the document
 
 Markdown, one file, written beside the findings file:
-`{client-or-domain}-audit-report.md`. This is the shape; the words are yours.
+`{client-or-domain}-audit-report.md`. **That prefixed name is the canonical one** —
+the findings file is `ariadne-findings.json` on every audit, so the two deliverables
+carry the client instead, and a folder holding two quarters' work stays readable. A
+bare `audit-report.md` is the same document under a name that collides with the next
+one; if the person who asked for the report named the file, follow them and say which
+name you used. This is the shape; the words are yours.
 
 ```markdown
 # SEO & GEO audit — {client} · {site}

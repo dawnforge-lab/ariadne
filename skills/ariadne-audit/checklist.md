@@ -156,12 +156,20 @@ rule, not a finding about the client.
 
 The inverse is equally binding. An empty listing from a crawl nobody judged is
 NOT a clean site: `issues_list` and `metrics_get` answer `{"items": []}` both when
-a rule found nothing and when `crawl_rules` never ran. Nothing on `crawl_status`
-says which — `rulesetVersion` is stamped when the crawl is accepted, not when it
-is judged — so the only proof is the `crawl_rules` summary. Run it yourself (it
-is idempotent: a second run re-judges the same crawl with the current ruleset)
-and keep its `{pagesScanned, findings, byRule, byMetric}` as the audit's evidence
-that every empty answer afterwards means "nothing found".
+a rule found nothing and when `crawl_rules` never ran. **`crawl_status` settles
+which, and one poll is the whole proof**: `rulesRunAt` is the timestamp of the last
+COMPLETED rules pass (null means no complete pass is on record) and `findingsCount`
+is how many findings that crawl holds. Read them as a pair — a timestamp with
+`findingsCount: 0` is "looked, found nothing"; a null with any count is a pass that
+died part-way; null with zero is "nobody has looked". Note that `rulesetVersion` is
+NOT that proof: it is stamped when the crawl is accepted, not when it is judged.
+
+So a crawl somebody else judged is as auditable as one you judged yourself, and you
+do not re-run `crawl_rules` to prove a marker that is already on the row. Run it when
+`rulesRunAt` is null, or deliberately to re-judge with a newer ruleset; its
+`{pagesScanned, findings, byRule, byMetric}` summary is then the per-rule breakdown
+of what that pass wrote, and it is worth keeping — but it is a breakdown, not the
+evidence that a pass happened.
 
 ## Analytics Tools (MCP Servers)
 
@@ -677,16 +685,26 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        3xx, found by the render pass (so it needs `renderPassCount` ≥ 1 to be measured)
      `issue_urls` per rule for the hops and the URLs.
   2. `metrics_get` with `metricId: "redirect.volume"` — the site row carries
-     `{redirectPages, totalPages, ratioPct, chains, loops}`: how much of what the
-     crawl fetched was a redirect, plus the exact chain and loop counts.
+     `{redirectPages, redirectInlinks, totalPages, ratioPct, chains, loops}`: how
+     much of what the crawl fetched was a redirect, how often the site links at
+     those redirects, plus the exact chain and loop counts.
      `redirectPages` counts one row per redirecting URL, so a template link that
      redirects on every page of the site is ONE redirect page here.
-  3. **What the engine does NOT measure: total redirect INLINKS.** The
-     crawl-budget number the Analysis below asks for is a link-graph question and
-     no rule claims it today. Report it as NOT MEASURED in the findings notes —
-     never substitute `ratioPct` for it, which is a different ratio (redirecting
-     URLs ÷ URLs fetched) and will understate a repeated template redirect by
-     exactly the factor that makes it worth reporting.
+  3. **`redirectInlinks` IS the total-redirect-inlink number the Analysis asks
+     for.** It counts internal `links` rows whose target is one of those
+     redirecting URLs — the same template link is one redirect page and one
+     inlink per page of the site, so on a site with three redirecting nav items
+     and ten thousand pages the pair reads `redirectPages: 3, redirectInlinks:
+     30,000`. Quote it; it is the crawl-budget half of this check and the number
+     the Evaluate line's 10% threshold is written against.
+     **Still never substitute `ratioPct` for it**, which is a different ratio
+     (redirecting URLs ÷ URLs fetched) and will understate a repeated template
+     redirect by exactly the factor that makes it worth reporting. The Phase 7
+     gate site is the worked example: `ratioPct: 1.8` beside `redirectInlinks:
+     898` on 551 URLs crawled — 1.8% of the crawl was a redirect, and the site
+     pointed at those ten URLs 898 times, **163% of the URLs crawled**. One of
+     those numbers passes the check and the other fails it critically; the
+     Evaluate line means the second.
 - **Important — Total Redirect Volume Analysis**: Do NOT just count unique redirect URLs.
   A site can have only 31 unique redirect URLs but 550K+ total redirect inlinks if the same
   redirecting link is repeated across thousands of pages (e.g., a template element like a
@@ -695,9 +713,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Analysis**:
   1. Unique redirect URLs: `redirect.volume`'s `redirectPages`, with `ratioPct` as
      its share of the crawl
-  2. **Total redirect inlinks**: NOT MEASURED by the engine (see the Engine note
-     above). Record the gap; if the client needs the number, it is a link-graph
-     export, not something to estimate from what is here
+  2. **Total redirect inlinks**: `redirect.volume`'s `redirectInlinks`, measured.
+     State it beside `redirectPages` ("10 redirecting URLs, linked at 898 times")
+     and against `totalPages` as the crawl-budget percentage the Evaluate line
+     grades — the arithmetic is `redirectInlinks ÷ totalPages`, written out, not
+     `ratioPct`
   3. If a redirect appears as an inlink from most page types, a template-level
      redirect exists — the redirect findings' URLs, grouped by `pageType`, are the
      evidence available for that claim today
@@ -707,8 +727,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      lives in the template. Common culprits: returns/refund widgets, footer links, promo
      banners, policy links. (The engine names the link; naming the *template element* is
      browser work.)
-  6. Crawl budget waste: state it as redirecting URLs ÷ URLs crawled (`ratioPct`) and
-     label it as such. Flag if >10%. The inlink-weighted version stays unmeasured.
+  6. Crawl budget waste: state BOTH ratios and label each. Redirecting URLs ÷
+     URLs crawled is `ratioPct`. The inlink-weighted one — `redirectInlinks` ÷
+     `totalPages` — is the one the Evaluate line's 10% threshold grades, and it
+     is the one that moves when a template link is repointed.
 - **Evaluate**:
   - FAIL if redirect chains > 0
   - CRITICAL if redirect loops found
@@ -1313,6 +1335,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   with a pointer to the metric.
   - `{sources: {}}` on the product cohort is the finding: **nothing on the site links
     to products at all**.
+  - **The self-referential case is not a pass, and it is the common one.** A product
+    cohort whose sources map is `{"/products/:slug": 82}` — products linking only to
+    products — is an ISLAND: the links exist, and nothing outside the cohort reaches
+    them. Read the map for what links IN from other templates; a map with only the
+    cohort's own type in it answers "nothing links to products" just as `{}` does.
+    `clickDepth` is what proves it (the Phase 7 gate site: 148 of 148 products at
+    `clickDepth: null` with 82 product-to-product inlinks), so cross-read the two
+    rather than reading the map alone.
   - A cohort landing in `(untyped)` means the crawl could not type those pages — say
     so rather than reading the typed cohorts as the whole site.
 - **CRITICAL — three populations, do not confuse them**:
@@ -1822,9 +1852,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   fields. `issue_urls` names the missing fields PER PAGE in the evidence, across
   every product page the crawl reached — which is the field checklist below, answered
   at site scale instead of on the one product page a person opened.
-  A product page with NO Product markup at all is the other half: compare the product
-  cohort's size (`pages_query` with `pageType: "product"`) against how many pages the
-  rule considered.
+  A product page with NO Product markup at all is the other half, **and the surface
+  cannot answer it today.** A rule that found nothing is simply absent from
+  `issues_list`; there is no pages-considered count beside it, so "every product's
+  markup is complete" and "no product page carries Product markup at all" are
+  indistinguishable from a silent `schema.product-incomplete`. Do not try to close
+  the gap by comparing the product cohort's size against a number the surface does
+  not publish. Where the site-scoped `schema.none-on-site` is also silent you know
+  the crawl stored JSON-LD SOMEWHERE, which is weaker than it sounds and is not
+  per-cohort. So: a silent rule here is `SKIP` with the ambiguity written out, and
+  a browser reading of one product page settles it for that page — the missing
+  count is on the engine backlog, not something to estimate around.
 - **DevTools** (only for the structure the rule does not judge — the `offers` shape and
   the price format):
   1. Navigate to a product page the engine flagged
@@ -2228,6 +2266,12 @@ through an empty listing rests on that timestamp.
   `scopeValue`.
 - `pages_query` takes `pageType`, `statusCode`, `indexable`, `rendered`, `fetchClass`
   and `discoveredVia`. There is no URL filter: match paths yourself over the listing.
+  Several checks are written as path matches — CHECK-57, CHECK-65, CHECK-66 and
+  CHECK-67 among them — so each of those wants the WHOLE census, which is 3 calls at
+  `limit: 200` on a 551-page crawl and 250 on a 50,000-page one. **Past a few
+  thousand pages, take the census once with `export_crawl` (`dataset: "pages"`),
+  index it locally, and answer every path-matching check off that one file** rather
+  than paging the listing per check.
   Each row carries `depth` AND `clickDepth`, `wordCount` AND `renderableWordCount`,
   and `fetchReason` where the crawl has one to give — the pairs are two different
   measurements each, never one with a fallback.

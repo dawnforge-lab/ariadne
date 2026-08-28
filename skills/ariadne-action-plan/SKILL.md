@@ -44,6 +44,13 @@ remediation prose over a rule you have not read.
    `checks` is complete, and that `crawl.rulesRunAt` carries a timestamp — a file
    whose crawl was never judged holds passes that assert nothing and a work plan
    built on them is a work plan built on silence.
+
+   **`crawl.rulesRunAt` is the whole of that test.** `crawl.rulesRun` — the
+   `crawl_rules` summary's scalars — is null whenever the audit read a crawl
+   somebody else judged, with the reason in `crawl.caveats`, and that is a correct
+   file rather than a broken one. Do not stop on it, and do not run `crawl_rules`
+   yourself to fill it: re-judging the crawl underneath a finished audit is how the
+   spreadsheet stops matching the report it ships with.
 2. **A reachable server holding the same crawl.** MCP preferred
    (`npm run mcp:serve`), HTTP as the fallback (the `ariadne-crawl` skill has the
    equivalence table). `crawl_status` on the findings file's `crawl.crawlId` must
@@ -74,18 +81,40 @@ five stages over one findings file build the same workbook.
 ### 1a — Intake, keyed by check
 
 Walk the findings file's `checks`. A check enters the pipeline when its `verdict`
-is `FAIL` or `AGENT`. Two kinds of candidate come out:
+is `FAIL` or `AGENT`. Three kinds of candidate come out:
 
 - **Rule-backed candidates.** The check's `evidence` carries `finding` entries with
   a `count` above zero. Each named rule is a candidate, and its tab body is an
   `issue_urls` feed.
-- **Check-level candidates.** An `AGENT` check whose evidence is `observation`
-  entries and nothing else. There is no rule, so there is no `issue_urls` feed: the
-  tab body is the observations — their `urls`, their `summary`, their `detail` —
-  one row per URL observed, and the fix is the check's `recommendation` exactly as
-  a rule-backed tab's is. CHECK-41 and CHECK-42 are the standing examples. A check
-  nobody wrote a rule for is still work somebody does, and it does not get to
-  disappear because the engine had nothing to say about it.
+- **Check-level candidates: the judgement kind.** An `AGENT` check whose evidence is
+  `observation` entries and nothing else. There is no rule, so there is no
+  `issue_urls` feed: the tab body is the observations — their `urls`, their
+  `summary`, their `detail` — one row per URL observed, and the fix is the check's
+  `recommendation` exactly as a rule-backed tab's is. CHECK-41 and CHECK-42 are the
+  standing examples. A check nobody wrote a rule for is still work somebody does, and
+  it does not get to disappear because the engine had nothing to say about it.
+- **Check-level candidates: the rule-less FAIL.** A `FAIL` whose evidence carries no
+  `finding` entry with a count above zero — the engine answered it with a metric, a
+  `pages_query` census or the stored robots.txt instead. **These are candidates on
+  exactly the same terms as the other two**, and the reason this branch is written
+  out is that they are not marginal: on the Phase 7 gate site SEVEN of sixteen
+  failures were this shape — CHECK-03, CHECK-10, CHECK-22, CHECK-31, CHECK-33,
+  CHECK-33b and CHECK-67 — including the two worst problems the audit found. A
+  pipeline that only knows how to open a tab from `issue_urls` would have dropped
+  them, and the ledger sentence below forbids that.
+
+  **Where the tab body comes from.** The check's `evidence` records the calls that
+  answered it — each entry's `tool` and `args` — so re-run them and use their rows:
+  a `pages_query` census filtered the way the evidence says (the URLs the check is
+  about), a `metrics_get` row whose value carries the buckets, the `robots_get`
+  body's matching lines. Where the answer is genuinely one fact about the site and
+  not a list of URLs, the tab is one row reading `(site-wide)` in column 1 with the
+  metric's value beside it — the same shape a site-scoped finding takes in Step 4.
+  **Say on the tab which it is**, in the description row: name the tool and the
+  arguments, so a developer who wants to see the list for themselves can. A tab
+  built from a census is as real as one built from `issue_urls`; it just has to
+  admit where its rows came from, because nobody can re-run a query nobody wrote
+  down.
 
 **The intake is keyed by check, and so is the ledger.** Every check that enters
 here leaves through exactly one door: a tab of its own, a block inside a family
@@ -99,6 +128,13 @@ A candidate leaves here, and its reason is what the ledger records:
 
 - **E1 — `verdict` is `SKIP`.** Nothing was measured, so there is nothing to
   action: the fix is a re-crawl or a connected data source, and the report says so.
+  **A `SKIP` never entered 1a in the first place** — the intake takes `FAIL` and
+  `AGENT` — so E1 is the belt-and-braces case, for a check whose verdict changed
+  under you or one an earlier stage mis-sorted, not a door 42 skipped checks walk
+  through. The Summary's ledger sentence is over the checks that ENTERED 1a; say
+  once, in the *Considered, not included* preamble, how many checks were SKIP and
+  that the report is where they are named, so a reader who counts 82 checks and 16
+  candidates is not left doing that arithmetic themselves.
 - **E2 — no `recommendation`.** This is a stop rather than an exclusion. A `FAIL`
   or `AGENT` that needs a fix and carries no fix text is a hole in the audit: go
   back and get one. Do not write it yourself, and do not quietly drop the check.
@@ -148,6 +184,23 @@ Over what survived 1b. **A candidate needs one gate:**
   exclude anything on the same silence.
 - **G5 — the audit asked for it.** The check's `priority` is Critical or High in
   the findings file and the recommendation is a concrete change.
+
+- **G0 — the catch. A `FAIL` with rows that G1 to G5 all decline is still a
+  candidate**, carried to 1d and 1e marked *ungated*, ranked last among its
+  priority peers, and cut only by 1e's ordering with the reason code below. The
+  gates are a way of finding the work that obviously belongs in the plan; they are
+  not a filter the audit's own FAIL has to survive.
+
+  **This exists because the five gates have a hole with a real shape.** A check
+  whose engine `severity` is `warning`, whose row count is under the volume floor,
+  whose category is not one of G2's, and whose checklist `priority` is Medium is
+  admitted by nothing — and G4 is dead whenever Phase 0 is missing, so a fifth of
+  the doorway is boarded up on any audit without analytics. CHECK-40 on the Phase 7
+  gate site is the worked case: live lorem ipsum on 3 URLs, whose own Evaluate line
+  reads *"FAIL if lorem ipsum > 0 (immediate fix needed)"*, declined by all five.
+  It is not the gates' job to overrule the checklist there. Note also that
+  `priority` is the checklist's grading of the check CLASS, not this instance — G5
+  reads it, and that is the only gate that reads intent at all.
 
 The gates generate candidates; they do not size the plan. G2 admits a category at
 any count above zero, so on a tidy site it will hand you nine one-row candidates.
@@ -212,7 +265,10 @@ re-run then adds a second small rule to it without renaming the tab, which is wh
 
 Rank every tab by Step 5's ordering and keep the top ten. Everything below the cut
 goes to *Considered, not included* with its rank, its count and the reason "below
-the cut at rank N".
+the cut at rank N" — or, for a candidate that arrived through G0, **"admitted by no
+gate (G0) — below the cut at rank N"**, which says both why it was never a strong
+candidate and where the cut found it. A G0 candidate that lands in the top ten is a
+tab like any other; the code follows it only into the ledger.
 
 Four protections. A candidate whose findings-file `priority` is `Critical` is
 never cut. **Neither is one at or above the volume floor**: the target exists to
@@ -455,7 +511,9 @@ Summary's tab index where there is room for it.
   id(s), check ids, row count;
 - **Considered, not included**: every check and every rule that entered 1a and got
   no tab and no family block, with its count and its one-line reason — an
-  exclusion code from 1b, or "below the cut at rank N" from 1e;
+  exclusion code from 1b, "admitted by no gate (G0)" from 1c, or "below the cut at
+  rank N" from 1e. Those are the whole vocabulary: a reason that fits none of them
+  means the pipeline grew a door nobody wrote down;
 - anything from `crawl.caveats` that bounds the row counts (a page cap reached, a
   partial render pass), because a developer reading a tab of 200 URLs deserves to
   know the crawl stopped at 500 pages;
@@ -520,8 +578,13 @@ small enough to be worked by hand.
 
 ## Step 6 — hand it over
 
-Save as `{client-or-domain}-action-plan.xlsx` beside the findings file, then say
-in the conversation:
+Save as `{client-or-domain}-action-plan.xlsx` beside the findings file — **the
+prefixed name is canonical**, for the reason the report skill gives: the findings
+file is `ariadne-findings.json` on every audit, so the deliverables carry the client
+and a folder of two quarters' work stays readable. A bare `action-plan.xlsx` is the
+same workbook under a name that collides with the next one; if the person who asked
+for it named the file, follow them and say which name you used. Then say in the
+conversation:
 
 - where the file is;
 - the tabs, grouped by lane, with row counts — so the client can see at a glance
