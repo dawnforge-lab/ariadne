@@ -186,9 +186,11 @@ async function eachCanonicalTarget(
     // anything is handed on. The target lookup above has no ORDER BY, so its
     // row order is whatever the plan emits, and the callers stop listing at
     // `URL_FINDING_CAP`: an unordered visit would let a re-run of the same
-    // crawl report a different two hundred, and the `issues` table (appended
-    // under `onConflictDoNothing`) would grow past the cap run over run.
-    // O(batch), like everything else in this loop.
+    // crawl report a different two hundred. (While `issues` was append-only
+    // that also grew the table past the cap run over run; a rules run now
+    // recomputes it — see the delete at the top of `runRules` — so what a
+    // defined order buys today is a rule that answers the same question the
+    // same way twice.) O(batch), like everything else in this loop.
     visits.sort((a, b) => a.page.url.localeCompare(b.page.url));
     for (const t of visits) visit(t);
   }

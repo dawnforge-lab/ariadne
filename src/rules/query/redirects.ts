@@ -103,10 +103,16 @@ interface WalkRow extends Record<string, unknown> {
  * Ordered by head, and that is load-bearing rather than tidiness. Both callers
  * stop listing at `URL_FINDING_CAP`, so the row order decides WHICH cases are
  * reported; an unordered CTE projection is whatever the plan happens to emit,
- * so a re-run of the same crawl could report a different two hundred and the
- * `issues` table — appended under `onConflictDoNothing` — would grow past the
- * cap run over run. A defined order makes the capped listing the same listing
- * every time.
+ * so a re-run of the same crawl could report a different two hundred. A defined
+ * order makes the capped listing the same listing every time.
+ *
+ * That mattered even more than it reads now. While `issues` was append-only the
+ * consequence of an undefined order was a table that GREW past the cap run over
+ * run — which is exactly what `content.near-duplicate`, whose cap cannot afford
+ * an order, went on to do (see the delete at the top of `runRules`). A rules run
+ * now recomputes the table, so an unordered cap would no longer inflate it; it
+ * would still make this rule report a different two hundred cases each time it
+ * ran, which is reason enough on its own.
  */
 async function walkFrom(db: Db, crawlId: string, seedUrls: SQL): Promise<WalkRow[]> {
   const result = await db.execute<WalkRow>(sql`
