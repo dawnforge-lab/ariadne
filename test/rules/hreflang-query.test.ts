@@ -222,6 +222,65 @@ describe("hreflangRules against the database", () => {
       expect(found[0]!.dedupeKey).toBe(`${SITE}/padded-bad#english-uk`);
     });
 
+    // The `hreflang` table has no unique constraint, and nothing upstream
+    // enforces one: a template that emits its alternates block twice, or a code
+    // declared both in the HTML and in the sitemap, puts two rows on one page
+    // for one code. Ungrouped, each row became a finding, both findings carried
+    // the same `dedupeKey`, and the run died on the `issues_dedupe` unique
+    // index — one page's malformed template taking the whole judgement down.
+    it("reports one finding per (page, code) when a code is declared twice on one page", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/twice"]);
+      await addHreflang(crawlId, ids.get("/twice")!, [
+        ["english-uk", `${SITE}/uk`],
+        ["english-uk ", `${SITE}/uk-alt`],
+      ]);
+
+      const found = await findings("hreflang.invalid-code", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.dedupeKey).toBe(`${SITE}/twice#english-uk`);
+      expect(found[0]!.evidence).toMatchObject({
+        code: "english-uk",
+        occurrences: 2,
+        targetUrls: [`${SITE}/uk`, `${SITE}/uk-alt`],
+      });
+    });
+
+    it("names both sources when one code arrives from the HTML and the sitemap", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/two-sources"]);
+      const pageId = ids.get("/two-sources")!;
+      await db.insert(hreflang).values([
+        {
+          crawlId,
+          pageId,
+          hreflangCode: "en_GB",
+          targetUrl: `${SITE}/en-gb`,
+          targetPageId: null,
+          source: "html",
+        },
+        {
+          crawlId,
+          pageId,
+          hreflangCode: "en_GB",
+          targetUrl: `${SITE}/en-gb`,
+          targetPageId: null,
+          source: "sitemap",
+        },
+      ]);
+
+      const found = await findings("hreflang.invalid-code", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        code: "en_GB",
+        occurrences: 2,
+        sources: ["html", "sitemap"],
+      });
+      // One target, declared twice: no `targetUrls` list, because there is no
+      // second URL for it to hold.
+      expect(found[0]!.evidence["targetUrls"]).toBeUndefined();
+    });
+
     it("reads only its own crawl", async () => {
       const other = await newCrawl();
       const otherIds = await addPages(other, ["/foreign"]);

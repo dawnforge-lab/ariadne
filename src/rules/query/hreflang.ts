@@ -389,27 +389,86 @@ export const hreflangRules: QueryRule[] = [
         page_id: string;
         hreflang_code: string;
         target_url: string;
+        source: string;
         page_url: string;
       }>(sql`
-        select h.page_id, h.hreflang_code, h.target_url, p.url as page_url
+        select h.page_id, h.hreflang_code, h.target_url, h.source, p.url as page_url
         from hreflang h join pages p on p.id = h.page_id
         where h.crawl_id = ${crawlId}`);
+
+      // ONE FINDING PER DISTINCT (page, trimmed code) — not per declaration
+      // row, which is what this used to be.
+      //
+      // A page can carry several broken codes and each is a separate thing to
+      // fix, so the finding is still finer-grained than the page. But it cannot
+      // be per ROW: `hreflang` has no unique constraint and nothing upstream
+      // enforces one, so the same code lands twice on one page whenever a
+      // template emits its alternates block twice, or a code is declared in
+      // both the HTML and the sitemap. Per-row findings then shared a
+      // `dedupeKey`, and since the run stopped absorbing collisions the second
+      // insert aborted the ENTIRE judgement on `issues_dedupe` — one page's
+      // malformed template taking down the crawl's whole audit. The duplicate
+      // is a fact about the site, not a rule defect, so it is grouped here
+      // rather than left to collide.
+      //
       // The analyzer stores the attribute verbatim, so `hreflang="en-GB "` — a
       // formatting artefact, not a mistake — arrives with its whitespace. Trim
-      // before judging it; surrounding space is not what makes a code invalid.
-      return res.rows
-        .map((r) => ({ ...r, code: String(r.hreflang_code).trim() }))
-        .filter(({ code }) => !isXDefault(code) && !HREFLANG_CODE.test(code))
-        .map((r) =>
-          queryFinding(INVALID_CODE, {
-            pageId: String(r.page_id),
-            pageUrl: String(r.page_url),
-            evidence: { code: r.code, targetUrl: r.target_url },
-            // One finding per declaration, not per page: a page can carry
-            // several broken codes and each is a separate thing to fix.
-            dedupeKey: `${String(r.page_url)}#${r.code}`,
-          }),
-        );
+      // before judging it, and group on the trimmed form: `"en_GB"` and
+      // `"en_GB "` are one mistake declared twice.
+      interface Group {
+        pageId: string;
+        pageUrl: string;
+        code: string;
+        occurrences: number;
+        targets: Set<string>;
+        sources: Set<string>;
+      }
+      const groups = new Map<string, Group>();
+      for (const row of res.rows) {
+        const code = String(row.hreflang_code).trim();
+        if (isXDefault(code) || HREFLANG_CODE.test(code)) continue;
+        const pageUrl = String(row.page_url);
+        const dedupeKey = `${pageUrl}#${code}`;
+        let group = groups.get(dedupeKey);
+        if (group === undefined) {
+          group = {
+            pageId: String(row.page_id),
+            pageUrl,
+            code,
+            occurrences: 0,
+            targets: new Set(),
+            sources: new Set(),
+          };
+          groups.set(dedupeKey, group);
+        }
+        group.occurrences += 1;
+        group.targets.add(String(row.target_url));
+        group.sources.add(String(row.source));
+      }
+
+      return [...groups].map(([dedupeKey, group]) => {
+        // Sorted, so the evidence a repeat run writes is the same evidence:
+        // the query has no ORDER BY, and which row of a duplicated pair
+        // arrives first is Postgres' business.
+        const targets = [...group.targets].sort();
+        const sources = [...group.sources].sort();
+        return queryFinding(INVALID_CODE, {
+          pageId: group.pageId,
+          pageUrl: group.pageUrl,
+          evidence: {
+            code: group.code,
+            targetUrl: targets[0]!,
+            // The multiplicity, carried rather than dropped: a code declared
+            // three times is three lines of template to fix, and the report
+            // would otherwise say "one". The extra lists appear only when they
+            // hold something the single fields do not.
+            occurrences: group.occurrences,
+            ...(targets.length > 1 ? { targetUrls: targets } : {}),
+            ...(sources.length > 1 ? { sources } : {}),
+          },
+          dedupeKey,
+        });
+      });
     },
   }),
 

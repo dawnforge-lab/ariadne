@@ -230,6 +230,50 @@ describe("runRules against the database", () => {
     expect(rows.every((r) => r.pageId !== clean.id)).toBe(true);
   });
 
+  /**
+   * Since the run stopped absorbing collisions with `onConflictDoNothing`, a
+   * rule that emits one `dedupeKey` twice aborts the WHOLE judgement with a raw
+   * unique-violation on `issues_dedupe`. That is the intended posture for a
+   * rule defect — but `hreflang.invalid-code` reached it on ordinary site data:
+   * the `hreflang` table has no unique constraint, so one page declaring one
+   * malformed code twice (a template emitting its alternates block twice, or a
+   * code arriving from both the HTML and the sitemap) produced two findings
+   * claiming to be one. One page's broken template took down the run.
+   */
+  it("completes over a page that declares one invalid hreflang code twice", async () => {
+    const crawlId = await newCrawl();
+    const page = mkRow(crawlId, "/dupe-hreflang", { depth: 0, discoveredVia: "seed" });
+    await db.insert(pages).values([page]);
+    await db.insert(hreflang).values([
+      {
+        crawlId,
+        pageId: page.id,
+        hreflangCode: "en_GB",
+        targetUrl: `${SITE}/en-gb`,
+        targetPageId: null,
+        source: "html",
+      },
+      {
+        crawlId,
+        pageId: page.id,
+        hreflangCode: "en_GB",
+        targetUrl: `${SITE}/en-gb`,
+        targetPageId: null,
+        source: "sitemap",
+      },
+    ]);
+
+    const summary = await runRules(db, crawlId, buildRegistry());
+    expect(summary.byRule["hreflang.invalid-code"]).toBe(1);
+    const written = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.crawlId, crawlId));
+    expect(written.filter((r) => r.ruleId === "hreflang.invalid-code")).toHaveLength(1);
+    // And the run's own invariant survives: the summary describes the table.
+    expect(summary.findings).toBe(written.length);
+  });
+
   it("streams past the page batch: every page of a PAGE_BATCH + 1 crawl is scanned once", async () => {
     const crawlId = await newCrawl();
     const total = PAGE_BATCH + 1; // forces the id cursor to iterate a second time
