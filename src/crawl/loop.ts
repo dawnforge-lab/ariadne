@@ -779,11 +779,16 @@ async function runToCompletion(
         timeoutMs: FETCH_TIMEOUT_MS,
       });
 
-      // The gate hears about it FIRST, and per fetch rather than per batch: a
-      // sibling handler may already be inside `acquire` for this host, and the
-      // whole point of the escalation is that the next request is the one that
-      // waits. This is the spacing half of the back-pressure; the window's
-      // concurrency half is applied to the batch below (see politeness).
+      // The gate hears about it FIRST, and per fetch rather than per batch, so
+      // the escalation is in force for the next ACQUISITION rather than only
+      // for the next batch. Not "the next request", which is what this used to
+      // say and is stronger than the gate can deliver: `acquire` claims a host's
+      // slot and returns, so a sibling handler that already got through it has
+      // its start time fixed, and `pushSlot` only ever moves the slot AFTER it
+      // forward. What the immediacy buys is that no further slot is claimed at
+      // the old spacing. This is the spacing half of the back-pressure; the
+      // window's concurrency half is applied to the batch below (see
+      // politeness).
       gate.report(host, {
         fetchClass: result.fetchClass,
         statusCode: result.statusCode,

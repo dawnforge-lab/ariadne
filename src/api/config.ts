@@ -12,6 +12,8 @@
  * trigger while leaving queries readable — both are stated positions, not
  * defaults that happen to be permissive.
  */
+import { domainToASCII } from "node:url";
+
 import type { CrawlConfig } from "../crawl/loop.js";
 
 /**
@@ -207,17 +209,31 @@ export function parseAllowedDomains(raw: string | undefined): string[] {
   if (raw === undefined) return [];
   const out: string[] = [];
   for (const part of raw.split(",")) {
-    const entry = part.trim().toLowerCase();
-    if (entry === "") continue;
-    assertAllowlistEntry(entry);
+    const spelling = part.trim().toLowerCase();
+    // An empty segment is a trailing comma or a double one — punctuation, not
+    // an entry. A segment holding only dots is NOT empty and is not skipped
+    // here; it reaches `assertAllowlistEntry` and is refused by name.
+    if (spelling === "") continue;
+    // The trailing root dot is stripped for the same reason `normaliseHost`
+    // strips it from the needle: `example.com.` and `example.com` are one host.
+    // This side used to keep it, and the asymmetry was silent — an entry
+    // written with the root dot could never equal a needle written without it,
+    // so the operator's domain matched nothing while looking permitted.
+    const entry = normaliseHost(spelling);
+    assertAllowlistEntry(entry, spelling);
     if (!out.includes(entry)) out.push(entry);
   }
   return out;
 }
 
-function assertAllowlistEntry(entry: string): void {
+/**
+ * `spelling` is what the operator actually typed, and it is what the messages
+ * quote: an entry normalised to `''` needs to be reported as the `'.'` it was
+ * written as, or the error names nothing.
+ */
+function assertAllowlistEntry(entry: string, spelling: string = entry): void {
   const bad = (why: string): never => {
-    throw new Error(`ARIADNE_ALLOWED_DOMAINS entry '${entry}' ${why}`);
+    throw new Error(`ARIADNE_ALLOWED_DOMAINS entry '${spelling}' ${why}`);
   };
   if (entry.includes("://") || entry.includes("/")) {
     bad("must be a bare host, not a URL");
@@ -228,6 +244,29 @@ function assertAllowlistEntry(entry: string): void {
   const host = entry.startsWith("*.") ? entry.slice(2) : entry;
   if (host === "") bad("names no host");
   if (host.includes("*")) bad("may only use '*' as a leading '*.' label");
+
+  // NON-ASCII IS REFUSED, and this is the quiet-failure class the whole
+  // function exists for. Every needle this list is matched against comes out of
+  // `new URL(...).hostname`, which is IDNA-encoded: `münchen.de` reaches
+  // `isHostAllowed` as `xn--mnchen-3ya.de`. A Unicode entry can therefore never
+  // equal any needle and never suffix-match one — it permits exactly nothing,
+  // while an operator reading their own domain back out of the config believes
+  // it is allowed and cannot see why every crawl of it is refused.
+  //
+  // The punycode spelling is named rather than described, because the fix is
+  // then a copy-paste. `domainToASCII` returns '' on a label it cannot convert;
+  // the entry is refused either way, and the message says which case it is.
+  if ([...host].some((ch) => (ch.codePointAt(0) ?? 0) > 0x7f)) {
+    const ascii = domainToASCII(host);
+    if (ascii === "") {
+      bad("is not an ASCII hostname and cannot be converted to one: hosts are matched " +
+        "in their IDNA (punycode) form, so this entry would permit nothing");
+    }
+    bad(
+      "is not ASCII: hosts are matched in their IDNA (punycode) form, so this entry " +
+        `would permit nothing. Write it as '${entry.startsWith("*.") ? `*.${ascii}` : ascii}'`,
+    );
+  }
 }
 
 /**
@@ -261,7 +300,14 @@ function assertAllowlistEntry(entry: string): void {
  *
  * Case is folded and a trailing root dot is stripped, because `Example.COM.`
  * and `example.com` are one host and a policy that could be stepped around by
- * spelling would not be a policy.
+ * spelling would not be a policy. BOTH SIDES are normalised the same way — the
+ * needle here, the entries in `parseAllowedDomains` — which was the point of
+ * the fix that made it true: normalising only the needle meant an entry written
+ * `example.com.` matched nothing at all.
+ *
+ * The needle also arrives IDNA-encoded, because it comes from
+ * `new URL(...).hostname`. Entries are refused unless they are ASCII, so the
+ * two sides are always in the same alphabet (see `assertAllowlistEntry`).
  */
 export function isHostAllowed(host: string, allowed: readonly string[]): boolean {
   const needle = normaliseHost(host);

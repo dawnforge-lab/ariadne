@@ -176,8 +176,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "not help; ask the operator.\n\n" +
         "Politeness is not optional and not a tuning knob for speed: robots.txt " +
         "and its crawl-delay are honoured, the user agent is branded, and " +
-        "perHostDelayMs has a floor. Leave the pacing fields alone unless the " +
-        "site's owner has asked for something specific.",
+        "perHostDelayMs has a floor of 250ms — below it the crawl is refused, " +
+        "not slowed. Leave the pacing fields alone unless the site's owner has " +
+        "asked for something specific.",
       inputSchema: z.strictObject(crawlStartShape()),
     },
     async (args) => run("crawl_start", () => service.startCrawl(parseStartCrawlInput(args))),
@@ -586,8 +587,9 @@ function crawlStartShape() {
     perHostDelayMs: z
       .number()
       .describe(
-        "Politeness delay between requests to one host. There is a floor, and " +
-          "robots.txt's own crawl-delay wins when it is longer.",
+        "Politeness delay between requests to one host. The floor is 250ms — a " +
+          "smaller value is refused rather than quietly raised — and robots.txt's " +
+          "own crawl-delay wins when it is longer.",
       )
       .optional(),
     maxConcurrency: z

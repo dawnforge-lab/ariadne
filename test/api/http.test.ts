@@ -26,6 +26,7 @@ import { crawls, frontier, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
+import { MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -414,6 +415,34 @@ describe("crawl-start validation", () => {
     expect(String(res.body["error"])).toContain("siteUrl is required");
   });
 
+  // The floor the MCP tool descriptions promise, enforced on the field as it
+  // arrives over the wire. Refused rather than clamped: raising it silently
+  // would answer a request nobody made. The server's own
+  // `crawlDefaults.perHostDelayMs: 0` is untouched by this — that is the
+  // construction-trust path, and it is how the fixture crawls above run at all.
+  it("refuses a perHostDelayMs under the politeness floor rather than raising it", async () => {
+    for (const value of [0, 10, MIN_PER_HOST_DELAY_MS - 1]) {
+      const res = await call("POST", "/crawls", {
+        body: { siteUrl: `${site}/`, perHostDelayMs: value },
+      });
+      expect(res.status, `perHostDelayMs ${value}`).toBe(400);
+      expect(String(res.body["error"])).toContain(`${MIN_PER_HOST_DELAY_MS}ms`);
+    }
+  });
+
+  // The floor stops exactly where it says it does. Asked of the read-only
+  // server so the assertion costs no crawl: validation runs before the
+  // allowlist, so a 403 naming the allowlist is proof the value got past the
+  // floor, and the case above proves a smaller one does not.
+  it("lets a perHostDelayMs at the floor through validation", async () => {
+    const res = await call("POST", "/crawls", {
+      base: closedBase,
+      body: { siteUrl: `${site}/`, perHostDelayMs: MIN_PER_HOST_DELAY_MS },
+    });
+    expect(res.status).toBe(403);
+    expect(String(res.body["error"])).toContain("allowlist");
+  });
+
   it("refuses a siteUrl that is not http(s)", async () => {
     const res = await call("POST", "/crawls", { body: { siteUrl: "ftp://example.com/x" } });
     expect(res.status).toBe(400);
@@ -450,6 +479,38 @@ describe("domain allowlist", () => {
     expect(() => parseAllowedDomains("https://example.com")).toThrow(/bare host/);
     expect(() => parseAllowedDomains("*")).toThrow(/every host/);
     expect(() => parseAllowedDomains("a.*.com")).toThrow(/leading/);
+  });
+
+  // Both halves of this were silent: the entry looked accepted and matched
+  // nothing, which is the one failure mode the whole parse exists to prevent.
+  it("strips the trailing root dot so a dotted entry matches, rather than matching nothing", () => {
+    // The needle is normalised, so the entry has to be too, or the two never
+    // meet. Deduped against the dotless spelling, because they are one entry.
+    expect(parseAllowedDomains("example.com., *.example.org., example.com")).toEqual([
+      "example.com",
+      "*.example.org",
+    ]);
+    const list = parseAllowedDomains("example.com.");
+    expect(isHostAllowed("example.com", list)).toBe(true);
+    expect(isHostAllowed("example.com.", list)).toBe(true);
+    // A segment of nothing but dots is not punctuation to skip over: it is an
+    // entry that names no host, and it is refused as the operator wrote it.
+    expect(() => parseAllowedDomains(".")).toThrow(/'\.' names no host/);
+  });
+
+  it("refuses a non-ASCII entry and names its punycode spelling", () => {
+    // The needle comes out of `new URL().hostname`, which is punycode, so a
+    // Unicode entry permits exactly nothing while looking permissive.
+    expect(new URL("https://münchen.de/").hostname).toBe("xn--mnchen-3ya.de");
+    expect(() => parseAllowedDomains("münchen.de")).toThrow(/xn--mnchen-3ya\.de/);
+    expect(() => parseAllowedDomains("münchen.de")).toThrow(/not ASCII/);
+    // The wildcard keeps its label in the suggested spelling.
+    expect(() => parseAllowedDomains("*.münchen.de")).toThrow(/\*\.xn--mnchen-3ya\.de/);
+    // And the punycode spelling the message hands back is one that works.
+    expect(isHostAllowed("münchen.de", parseAllowedDomains("xn--mnchen-3ya.de"))).toBe(false);
+    expect(
+      isHostAllowed(new URL("https://münchen.de/").hostname, parseAllowedDomains("xn--mnchen-3ya.de")),
+    ).toBe(true);
   });
 
   it("403s a host that is not on the list, naming it", async () => {

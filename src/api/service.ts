@@ -122,6 +122,47 @@ export class ServiceError extends Error {
  */
 export const API_CRAWL_DEFAULTS = { maxPages: 500 } as const;
 
+/**
+ * The politeness floor under `perHostDelayMs` for a crawl a CLIENT asked for.
+ *
+ * The MCP tool descriptions have said "perHostDelayMs has a floor" since the
+ * agent surface was written, and until now there was none: an agent that sent
+ * `perHostDelayMs: 0` got a crawl that hit one host as fast as the concurrency
+ * window allowed. A claim the engine does not keep is worse than no claim, and
+ * the yellow.com.mt incident (docs/talos-integration.md) is what being wrong
+ * about this costs.
+ *
+ * 250ms — four requests a second to one host — is not a tuned number and is not
+ * meant to be a comfortable one. It is the point below which a crawler is no
+ * longer plausibly reading a site and is measurably load-testing it. The
+ * genuinely polite delays are ten times this (`CRAWL_DEFAULTS` is 1000ms, the
+ * crawl skill recommends 2000ms on anything Cloudflare-fronted); a caller who
+ * hits this floor has already ignored all of that.
+ *
+ * REFUSED, NOT CLAMPED. Silently raising the value to 250 would answer a
+ * request nobody made and leave the caller believing their number took effect
+ * (hard rule 7). The refusal names the floor, so the fix is one edit.
+ *
+ * ## The boundary this does NOT cross, stated because it is load-bearing
+ *
+ * The floor binds `parseStartCrawlInput`, which is the request-field seam and
+ * the ONLY seam both transports pass through (`POST /crawls` parses a body with
+ * it, `crawl_start` parses its arguments with it). It deliberately does NOT
+ * bind `effectiveConfig` or `validateCrawlConfig`, which is where a
+ * `crawlDefaults.perHostDelayMs` supplied by the process that CONSTRUCTS the
+ * server would be caught.
+ *
+ * That is the same process-trust seam `allowPrivate` rests on: the constructor
+ * holds the database handle and the auth token, and it is how the test suite
+ * crawls its own 127.0.0.1 fixture site at `perHostDelayMs: 0` without waiting
+ * a second per page. A floor there would not make anything more polite — a
+ * loopback fixture server has nobody to be rude to — and it would make the
+ * suite unrunnable. The distinction is: a delay that arrived over the wire is
+ * subject to the floor; a delay the operator compiled into the process is that
+ * operator's decision.
+ */
+export const MIN_PER_HOST_DELAY_MS = 250;
+
 /** Rows per page when the caller does not say, and the ceiling when they do. */
 export const PAGE_SIZE_DEFAULT = 50;
 export const PAGE_SIZE_MAX = 200;
@@ -219,6 +260,20 @@ export function parseStartCrawlInput(raw: unknown): StartCrawlInput {
 
   if (typeof input["siteUrl"] !== "string" || input["siteUrl"].trim() === "") {
     throw new ServiceError("VALIDATION", "siteUrl is required and must be a non-empty string");
+  }
+
+  // The politeness floor the tool descriptions promise. Here rather than in
+  // `validateCrawlConfig` because this is the seam BOTH transports pass through
+  // and the construction-trust path does not — see `MIN_PER_HOST_DELAY_MS`.
+  const delay = input["perHostDelayMs"];
+  if (typeof delay === "number" && delay < MIN_PER_HOST_DELAY_MS) {
+    throw new ServiceError(
+      "VALIDATION",
+      `perHostDelayMs ${delay} is below this server's politeness floor of ` +
+        `${MIN_PER_HOST_DELAY_MS}ms: the per-host delay is not a throughput knob, and a ` +
+        `crawl faster than four requests a second to one host is load-testing it. ` +
+        `robots.txt's own crawl-delay still wins when it is longer`,
+    );
   }
   return input as unknown as StartCrawlInput;
 }
@@ -1901,9 +1956,17 @@ export class ApiService {
   /**
    * Pages this crawl recorded as `blocked`.
    *
-   * A count, not a sample: the URLs are on the pages query with
-   * `fetchClass=blocked` for anyone who wants them, and what the polling shape
-   * needs is one number that can be compared with the previous poll.
+   * A count, not a sample: what the polling shape needs is one number that can
+   * be compared with the previous poll.
+   *
+   * THE URLS THEMSELVES ARE NOT ONE QUERY AWAY, and this used to claim they
+   * were — "the pages query with `fetchClass=blocked`". There is no
+   * `fetchClass` filter: `PageQuery` accepts `pageType`, `statusCode`,
+   * `indexable` and `rendered`, and nothing else. What the pages listing does
+   * carry is `fetchClass` and `fetchReason` on every row, so the blocked URLs
+   * are readable — by paging the listing, or by taking the `pages` export — and
+   * selected by the caller rather than by the server. A `fetchClass` filter
+   * would be the honest fix and is a change to the surface, not to a comment.
    */
   private async blockedPageCount(crawlId: string): Promise<number> {
     const rows = await this.db

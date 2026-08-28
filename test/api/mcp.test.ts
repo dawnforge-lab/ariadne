@@ -40,7 +40,7 @@ import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { loadMcpConfig } from "../../src/api/config.js";
-import { START_CRAWL_FIELDS } from "../../src/api/service.js";
+import { MIN_PER_HOST_DELAY_MS, START_CRAWL_FIELDS } from "../../src/api/service.js";
 
 const SEEDED_SITE = "http://mcp-query.example";
 
@@ -457,6 +457,16 @@ describe("crawl_start", () => {
     });
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("victim.example");
+  });
+
+  // The floor `crawl_start`'s description promises, on the transport it
+  // promises it to. Both transports share `parseStartCrawlInput`, so this is
+  // the same guard the HTTP suite asserts — checked here because a claim in a
+  // tool description is a claim to the agent reading it.
+  it("refuses a perHostDelayMs under the politeness floor, naming the floor", async () => {
+    const answer = await call("crawl_start", { siteUrl: `${site}/`, perHostDelayMs: 0 });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain(`${MIN_PER_HOST_DELAY_MS}ms`);
   });
 
   it("refuses allowPrivate as an argument at any value", async () => {

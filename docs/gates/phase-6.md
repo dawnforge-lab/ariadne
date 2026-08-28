@@ -634,8 +634,22 @@ The obligation this project takes most seriously, on its first real site.
    wording is amended for a pipeline that spawns a browser. **This phase did not
    decide it.** A 28-page render pass is not the measurement that argument needs;
    it stays open, and it stays owed to a phase that renders at scale.
-7. **The `renderer.test.ts` spacing warm-up flake** (Task 1 concern 1), still
-   pre-existing and still not from any change in this phase.
+7. ~~**The `renderer.test.ts` spacing warm-up flake**~~ (Task 1 concern 1) —
+   **CLOSED, fixed in this phase**, and this list said otherwise until now
+   ("still pre-existing and still not from any change in this phase"), which
+   was true of the *cause* and wrong about the *state*. The flake was real —
+   `spaces same-host navigations by the configured per-host delay` failed 3 of
+   ~9 full-suite runs at 931/944/948 against a 950ms floor — and Task 1's
+   controller fold repaired it in `5c6fc96` without touching the 50ms tolerance
+   the Phase 5 ruling protects. The mechanism was measured, not guessed: a
+   browser's first navigation pays for Chromium's renderer-process spin-up, so
+   arrival[0] slipped late and the first gap came out short. A warm-up pass on a
+   separate crawl was tried first and **measured as insufficient** (960/974 —
+   `runRenderPass` launches its own browser, so the timed pass's first
+   navigation was still that browser's first). The fix that holds is a fourth
+   page **in the same pass** with `arrivals[0]` discarded: three consecutive
+   full-suite runs, worst asserted gap 989ms, 39ms of headroom. Nothing is owed
+   to a later phase.
 
 ### Added by this gate
 

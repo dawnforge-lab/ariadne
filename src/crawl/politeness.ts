@@ -368,8 +368,12 @@ export class HostGate {
    * is a header a hostile or misconfigured origin can send and a year-long
    * sleep is not a crawl.
    *
-   * The gate is told immediately, per fetch, not per batch: the next acquirer
-   * of this host may be a sibling already inside `acquire`.
+   * The gate is told immediately, per fetch, not per batch, because the next
+   * acquirer of this host may be a sibling already running. What that reaches
+   * is the next ACQUISITION, not the next request: a sibling that has already
+   * come through `acquire` holds a slot computed at the old spacing, and
+   * `pushSlot` never pulls a slot in. The escalation binds every slot claimed
+   * from here on.
    */
   report(host: string, outcome: HostOutcome): void {
     const state = this.stateFor(host);
