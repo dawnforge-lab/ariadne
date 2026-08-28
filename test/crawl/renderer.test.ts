@@ -48,7 +48,11 @@ import {
   writeRenderResult,
   type RenderResult,
 } from "../../src/crawl/render/renderer.js";
-import { RENDER_PASS_DEFAULTS, runRenderPass } from "../../src/crawl/render/run-render.js";
+import {
+  RENDER_PASS_DEFAULTS,
+  renderPaceMs,
+  runRenderPass,
+} from "../../src/crawl/render/run-render.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -617,7 +621,31 @@ describe("runRenderPass", () => {
   });
 
   it("spaces same-host navigations by the configured per-host delay", async () => {
-    const paths = ["/static/1", "/static/2", "/static/3"];
+    // WARM-UP, and it is load-bearing.
+    //
+    // The measured gaps are between server-side ARRIVALS, so anything sitting
+    // between acquiring the host gate and the request reaching the socket lands
+    // inside a gap: gap = delay + (latency of the later navigation - latency of
+    // the earlier one). That latency is not symmetric. A browser's FIRST
+    // navigation pays to spin up its first renderer process and page in
+    // Chromium's libraries; the ones after it do not. So the first arrival
+    // slipped late, the second was on time, the gap between them came out
+    // ~950ms, and under load this flaked about one run in three.
+    //
+    // The Phase 5 ruling stands and the tolerance below must NOT be widened: it
+    // guards a ~57ms bug and a wider margin would hide it. The asymmetry is the
+    // thing to remove, so FOUR pages are rendered and the first arrival is
+    // discarded as the warm-up. It has to be a page in THIS pass, not a
+    // separate one: `runRenderPass` launches its own browser, so a warm-up in
+    // another pass leaves this browser's first navigation still cold (measured:
+    // it bought ~15ms of the ~50ms needed).
+    //
+    // Which of the four is the warm-up is not fixed — three workers race for
+    // the gate — and it does not need to be: they are the same page, so
+    // dropping arrival[0] drops the cold one whichever URL it was. The two gaps
+    // that remain are between warm navigations, and both still see the ~57ms
+    // bug, which was paid on every render rather than only the first.
+    const paths = ["/static/1", "/static/2", "/static/3", "/static/4"];
     const crawlId = await newCrawl(paths);
     const before = site.hits.length;
     // A SECOND OF DELAY AGAINST 50ms OF TOLERANCE, deliberately. The bug this
@@ -636,9 +664,50 @@ describe("runRenderPass", () => {
       .slice(before)
       .filter((h) => h.path.startsWith("/static/"))
       .map((h) => h.at);
-    expect(arrivals.length).toBe(3);
-    expect(arrivals[1]! - arrivals[0]!).toBeGreaterThanOrEqual(delayMs - epsilonMs);
+    expect(arrivals.length).toBe(4);
+    // arrivals[0] is the warm-up. Every gap asserted is warm-to-warm.
     expect(arrivals[2]! - arrivals[1]!).toBeGreaterThanOrEqual(delayMs - epsilonMs);
+    expect(arrivals[3]! - arrivals[2]!).toBeGreaterThanOrEqual(delayMs - epsilonMs);
+  });
+
+  it("paces from the spacing the crawl earned, not the one it was configured with", async () => {
+    // The gate crawl's exact situation: configured at 1000 ms, ratcheted to
+    // 2000 ms by the site's own pushback, and the render pass that followed
+    // went straight back to 1000 ms. `crawls.host_spacing_ms` is a finding, not
+    // a setting, and a later pass over the same host does not get to forget it.
+    const crawlId = await newCrawl(["/static/5", "/static/6", "/static/7"]);
+    await db.update(crawls).set({ hostSpacingMs: 2_000 }).where(eq(crawls.id, crawlId));
+
+    const before = site.hits.length;
+    const configuredMs = 1_000;
+    const earnedMs = 2_000;
+    const epsilonMs = 50;
+
+    await runRenderPass(
+      db,
+      crawlId,
+      passConfig({ perHostDelayMs: configuredMs, renderConcurrency: 3 }),
+    );
+
+    // Measured at the SERVER, and with the same warm-up discipline the
+    // configured-delay test above explains: the browser's first navigation is
+    // cold, so arrivals[0] is dropped and the one remaining gap is warm-to-warm.
+    const arrivals = site.hits
+      .slice(before)
+      .filter((h) => h.path.startsWith("/static/"))
+      .map((h) => h.at);
+    expect(arrivals.length).toBe(3);
+    expect(arrivals[2]! - arrivals[1]!).toBeGreaterThanOrEqual(earnedMs - epsilonMs);
+  });
+
+  it("resolves the pace as the wider of configured and earned", () => {
+    // The rule itself, in the four cases that exist. `max`, not "replace": a
+    // caller who asks for wider spacing than the crawl earned keeps it, and a
+    // crawl that never escalated changes nothing.
+    expect(renderPaceMs(1_000, 2_000)).toBe(2_000); // the gate crawl
+    expect(renderPaceMs(2_000, 1_000)).toBe(2_000); // caller asked for wider
+    expect(renderPaceMs(1_000, null)).toBe(1_000); // never escalated
+    expect(renderPaceMs(0, null)).toBe(0); // the fixture-test case
   });
 
   it("leaves its selection alone when the pass is aborted before it starts", async () => {

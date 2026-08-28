@@ -1,0 +1,1 @@
+ALTER TABLE "pages" ADD COLUMN "fetch_reason" text;

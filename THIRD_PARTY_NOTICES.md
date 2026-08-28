@@ -50,8 +50,14 @@ licence body is identical for both and reproduced once here.
 ## npm dependencies
 
 undici, htmlparser2, robots-parser, fast-xml-parser, pg, drizzle-orm,
-playwright — each under its own licence as published on npm; see
-node_modules/<pkg>/LICENSE.
+playwright, @modelcontextprotocol/sdk, zod — each under its own licence as
+published on npm; see node_modules/<pkg>/LICENSE.
+
+@modelcontextprotocol/sdk (MIT, verified at install: `npm info
+@modelcontextprotocol/sdk license`) and zod (MIT) are runtime dependencies of
+the MCP transport (src/api/mcp.ts): the SDK supplies the protocol and the
+stdio/in-memory transports, zod the tool input schemas the server advertises
+and validates against. No source from either is lifted into this repository.
 
 Playwright (Apache-2.0) is a runtime dependency of the render pass
 (src/crawl/render). It downloads a Chromium build on `npx playwright install

@@ -46,6 +46,18 @@ crawler inside Talos. The intended shape:
    fixed per-host delay honoured alongside adaptive concurrency, branded UA
    (Talos crawls as TalosBot; Ariadne default `AriadneBot`, configurable so a
    Talos-driven crawl can present Talos's identity), back-off on 403/429.
+   Met as of Phase 6 Task 6b: a `blocked` answer halves the concurrency window,
+   and a refusal that NAMES A RATE (a 429, or anything carrying `Retry-After`)
+   also DOUBLES that host's spacing — ratcheted for the life of the crawl,
+   capped at 30s. A refusal that names no rate (401/403/challenge/bare 503)
+   escalates only once the host has refused three times running across at least
+   two different URLs, so one permanently forbidden path cannot tax a whole
+   crawl. `Retry-After` is honoured as a floor on the host's next slot (capped
+   the same way — a hostile header cannot park a crawl), and a blocked URL is
+   retried up to three times under the widened spacing before it settles as a
+   classified row whose `fetch_reason` names the spacing reached. Both halves
+   are on `crawl_status` — `blockedPages` and `hostSpacingMs` — so a driving
+   agent can read what the site did and what the engine did about it.
 5. **SSRF policy equivalence.** Talos pins DNS resolution on every hop
    (`api/urlguard.py: pin_outbound_url/pinned_get`). Ariadne's absorbed
    `url-policy` must maintain the same properties: every hop revalidated,
@@ -71,5 +83,7 @@ crawler inside Talos. The intended shape:
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos
   repo (`.serena/memories/`).
-- The audit checklist both systems serve: `~/.claude/skills/sf-audit/checklist.md`
-  (82 checks; the 47 crawl-derived ones are Ariadne's scope).
+- The audit checklist both systems serve: `skills/ariadne-audit/checklist.md`
+  (82 checks; the 47 crawl-derived ones are Ariadne's scope). It moved in-repo in
+  Phase 6 and is the living authority; the sf-audit original it was imported from is
+  frozen source, recorded in the file's provenance header.

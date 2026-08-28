@@ -1,0 +1,5 @@
+# Where `GET /crawls/:id/export` writes its gzipped JSONL files. The directory
+# is tracked so a fresh clone has somewhere to write; its contents are crawl
+# data and never belong in git.
+*
+!.gitignore

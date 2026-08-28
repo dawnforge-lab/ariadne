@@ -11,6 +11,8 @@
  * the callers.
  */
 import { lookup as systemLookup, type LookupOptions } from "node:dns";
+import { pipeline, type Readable } from "node:stream";
+import { createGunzip } from "node:zlib";
 import { Agent } from "undici";
 import { blockedAddressReason } from "./url-policy.js";
 
@@ -110,10 +112,40 @@ export function guardedLookup(base: DnsLookupFn, allowPrivate: boolean): DnsLook
   };
 }
 
+/**
+ * Concurrent sockets we will open to any one origin. undici's `Agent` keeps a
+ * `Pool` per origin and applies `connections` to each, so this is a per-origin
+ * cap, not a global one — a crawl that touches three hosts may hold up to
+ * three times this many sockets, which is the number that should scale with
+ * hosts.
+ *
+ * Six, because that is what every mainstream browser opens per origin over
+ * HTTP/1.1, and it is the number RFC 7230 §6.4's "be conservative" guidance
+ * settled into. Two things follow from it, and both are the point (rule 9):
+ *
+ *  - It is *not* the same lever as the host gate. The gate in `politeness`
+ *    paces navigations — one request per `perHostDelayMs` per host — and is
+ *    the politeness control. This bounds the *sockets*, which the gate says
+ *    nothing about: a slow origin serving 20s responses would otherwise let
+ *    `maxConcurrency` (default 16) requests sit on 16 open connections while
+ *    the gate happily considers itself satisfied.
+ *  - It is deliberately below `maxConcurrency`, so the excess queues in the
+ *    pool rather than opening a socket. With the default 1000ms host gate a
+ *    single-origin crawl never has more than a couple of requests in flight
+ *    anyway; the cap only bites when an origin is slow, which is exactly when
+ *    we want fewer connections to it, not more.
+ *
+ * Queue time is covered by the caller's own deadline (fetch-page aborts the
+ * whole operation, queue included), so a saturated pool surfaces as a
+ * classified `timeout` row and never as a stuck worker.
+ */
+export const MAX_CONNECTIONS_PER_ORIGIN = 6;
+
 export function newAgent(allowPrivate: boolean, base: DnsLookupFn): Agent {
   // undici forwards its `connect` options to net.connect / tls.connect, which
   // is how the guarded resolver reaches the socket.
   return new Agent({
+    connections: MAX_CONNECTIONS_PER_ORIGIN,
     connect: {
       timeout: CONNECT_TIMEOUT_MS,
       lookup: guardedLookup(base, allowPrivate),
@@ -230,6 +262,118 @@ export async function readCapped(
     buffer: keep ? Buffer.concat(chunks) : null,
     truncated,
   };
+}
+
+/**
+ * The one transport encoding page fetches ask for. Kept next to the reader
+ * that undoes it so the two can never drift: advertising `br` here without
+ * teaching `readCappedDecoded` to inflate it would turn every compressed page
+ * into an unreadable body.
+ */
+export const ACCEPT_ENCODING = "gzip";
+
+export interface DecodedBody extends CappedBody {
+  /**
+   * The `content-encoding` value when it names a coding we do not implement,
+   * else null. A response we cannot decode is a fact the caller must classify
+   * and record — never an empty body that reads like a blank page.
+   */
+  unsupportedEncoding: string | null;
+}
+
+/**
+ * `readCapped` plus transport decoding, with the cap applied to the
+ * **decompressed** bytes.
+ *
+ * The cap has to move to the far side of the inflater or it stops meaning
+ * anything: a 40KB response that expands to 4GB satisfies any wire-byte cap
+ * on its way to exhausting the heap. Discovery already draws the line there
+ * for sitemaps (`SITEMAP_MAX_BYTES` is spent on `gunzip`'s output, not on the
+ * socket's input); this is the same discipline for page bodies, and the same
+ * one constant governs both sides.
+ *
+ * Streaming, not `gunzip(wholeBuffer)`: the inflated bytes are consumed and
+ * counted a chunk at a time, so the peak cost of a gzip bomb is one zlib
+ * chunk and the read is cut off at the cap. The memory contract (RAM
+ * O(concurrency), never O(URLs)) covers decompression buffers too, and a
+ * one-shot inflate would hold the whole decompressed body before anyone could
+ * measure it. Note that zlib's own `maxOutputLength` is NOT a second guard
+ * here: it is documented for the one-shot convenience methods and was
+ * measured not to fire on the streaming classes, so the cap enforced is the
+ * reader's.
+ *
+ * Over the cap the result is `truncated`, exactly as for an uncompressed body —
+ * the caller turns that into a classified `too_large` row, not a short page.
+ */
+export async function readCappedDecoded(
+  body: Readable,
+  contentEncoding: string | null,
+  maxBytes: number,
+  keep: boolean,
+): Promise<DecodedBody> {
+  const encoding = (contentEncoding ?? "").trim().toLowerCase();
+  const isGzip = encoding === "gzip" || encoding === "x-gzip";
+  const isIdentity = encoding === "" || encoding === "identity";
+
+  // Nothing to keep: the bytes are going in the bin either way, so inflating
+  // them would be CPU spent on a body no one will read. Drained and counted as
+  // wire bytes — which is what they cost us.
+  if (!keep) {
+    return { ...(await readCapped(body, maxBytes, false)), unsupportedEncoding: null };
+  }
+
+  if (isIdentity) {
+    return { ...(await readCapped(body, maxBytes, true)), unsupportedEncoding: null };
+  }
+
+  if (!isGzip) {
+    // We advertise gzip and nothing else, so a `br`/`zstd`/`deflate` body is a
+    // server sending a coding it was never offered (RFC 9110 §8.4.1). Drain
+    // the socket and report the coding; guessing at the bytes is not on the
+    // table and neither is handing the parser a body it would read as empty.
+    await readCapped(body, maxBytes, false);
+    return {
+      bytes: 0,
+      buffer: null,
+      truncated: false,
+      unsupportedEncoding: contentEncoding ?? encoding,
+    };
+  }
+
+  const gunzip = createGunzip();
+  // `pipeline`, emphatically NOT `body.pipe(gunzip)`.
+  //
+  // `Readable.pipe` does not forward SOURCE errors to the destination. Every
+  // way a body can die mid-stream — the socket resetting, undici's bodyTimeout
+  // firing, fetch-page's own deadline calling `deadline.abort()` — destroys
+  // `body` with an error and leaves `gunzip` neither ended nor errored. The
+  // `for await` in readCapped would then never settle: fetchPage would hang
+  // past its own deadline, the URL would get no classified row (hard rule 7),
+  // and the worker's byte reservation would never be released — a wedged
+  // window, which is the failure loop.ts's admit() warns about.
+  //
+  // `pipeline` propagates destruction in both directions, so a source error
+  // destroys the inflater with that same error and it surfaces on the read
+  // below. That is the ONLY path this error takes; the callback is required by
+  // the API and would only see the duplicate.
+  pipeline(body, gunzip, () => {
+    // Deliberately empty. See above: the error is raised by the read, and a
+    // second throw from here would be an unhandled rejection, not a report.
+  });
+  let read: CappedBody;
+  try {
+    read = await readCapped(gunzip, maxBytes, true);
+  } catch (error) {
+    // Either end of the pipe: a corrupt or truthless gzip body (Z_DATA_ERROR,
+    // Z_BUF_ERROR), or a source that died mid-stream. Not ours to fix and not
+    // ours to swallow — close the socket and let the caller classify it.
+    body.destroy();
+    throw error;
+  }
+  // Destroying the inflater does not by itself close the socket the compressed
+  // bytes are still arriving on, and we will not pay for the rest of a bomb.
+  if (read.truncated) body.destroy();
+  return { ...read, unsupportedEncoding: null };
 }
 
 function errorChain(error: unknown): unknown[] {

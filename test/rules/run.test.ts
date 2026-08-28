@@ -16,7 +16,13 @@ import { metricRow } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { PAGE_BATCH, runRules } from "../../src/rules/run.js";
 import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
-import type { Metric, MetricRule, PageRecord, PageRule } from "../../src/rules/registry/types.js";
+import type {
+  Metric,
+  MetricRule,
+  PageRecord,
+  PageRule,
+  QueryRule,
+} from "../../src/rules/registry/types.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
 import { mkPage } from "./mk-page.js";
 
@@ -209,13 +215,63 @@ describe("runRules against the database", () => {
     // finding read back months later can be traced to the rules of its day.
     for (const r of rows) expect(r.rulesetVersion, r.ruleId).toBe(RULESET_VERSION);
 
-    // Idempotence: a second run adds no rows — the dedupe index absorbs it.
-    await runRules(db, crawlId, registry);
+    // Idempotence: a second run leaves the table where the first did — because
+    // it CLEARS this crawl's rows and writes its own, not because a dedupe
+    // index absorbs a repeat. The distinction is invisible for deterministic
+    // rules like these three and is what the capped-rule test below is for.
+    const second = await runRules(db, crawlId, registry);
     const again = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
     expect(again.length).toBe(rows.length);
+    // And the summary still describes the table, which is the invariant the
+    // whole recompute exists to keep.
+    expect(second.findings).toBe(again.length);
 
     // A clean page contributes nothing.
     expect(rows.every((r) => r.pageId !== clean.id)).toBe(true);
+  });
+
+  /**
+   * Since the run stopped absorbing collisions with `onConflictDoNothing`, a
+   * rule that emits one `dedupeKey` twice aborts the WHOLE judgement with a raw
+   * unique-violation on `issues_dedupe`. That is the intended posture for a
+   * rule defect — but `hreflang.invalid-code` reached it on ordinary site data:
+   * the `hreflang` table has no unique constraint, so one page declaring one
+   * malformed code twice (a template emitting its alternates block twice, or a
+   * code arriving from both the HTML and the sitemap) produced two findings
+   * claiming to be one. One page's broken template took down the run.
+   */
+  it("completes over a page that declares one invalid hreflang code twice", async () => {
+    const crawlId = await newCrawl();
+    const page = mkRow(crawlId, "/dupe-hreflang", { depth: 0, discoveredVia: "seed" });
+    await db.insert(pages).values([page]);
+    await db.insert(hreflang).values([
+      {
+        crawlId,
+        pageId: page.id,
+        hreflangCode: "en_GB",
+        targetUrl: `${SITE}/en-gb`,
+        targetPageId: null,
+        source: "html",
+      },
+      {
+        crawlId,
+        pageId: page.id,
+        hreflangCode: "en_GB",
+        targetUrl: `${SITE}/en-gb`,
+        targetPageId: null,
+        source: "sitemap",
+      },
+    ]);
+
+    const summary = await runRules(db, crawlId, buildRegistry());
+    expect(summary.byRule["hreflang.invalid-code"]).toBe(1);
+    const written = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.crawlId, crawlId));
+    expect(written.filter((r) => r.ruleId === "hreflang.invalid-code")).toHaveLength(1);
+    // And the run's own invariant survives: the summary describes the table.
+    expect(summary.findings).toBe(written.length);
   });
 
   it("streams past the page batch: every page of a PAGE_BATCH + 1 crawl is scanned once", async () => {
@@ -331,7 +387,9 @@ describe("runRules against the database", () => {
   //
   // Both statements are pinned here, by count rather than by timestamp: the
   // top-of-run one over every table a rule reads, and the second one over the
-  // two tables the derivation phase rewrites in between.
+  // two tables the derivation phase rewrites in between. The measurement is
+  // taken against database-wide counters, so it is retried until a window is
+  // clean — see the comment on the loop.
   it("analyzes every table the rules read, and the derivation-fed pair twice", async () => {
     const crawlId = await newCrawl();
     const listing = mkRow(crawlId, "/list?colour=red", { depth: 0, discoveredVia: "seed" });
@@ -358,37 +416,68 @@ describe("runRules against the database", () => {
       return Object.fromEntries(rows.map((r) => [r.relname, Number(r.analyze_count)]));
     };
 
-    const before = await analyzeCounts();
-    await runRules(db, crawlId, buildRegistry());
-    const after = await analyzeCounts();
-    const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
+    // WHY THIS IS MEASURED REPEATEDLY RATHER THAN ONCE. The counters are
+    // database-wide, vitest runs test files in parallel against one database,
+    // and `runRules` is called from three of them (this one, the fixture
+    // harness, and the API's rules endpoint). Ratios against `pages` were the
+    // first attempt at absorbing that and they are NOT sufficient, because the
+    // run issues TWO statements: `ANALYZE pages, links, …` at the top and
+    // `ANALYZE url_params, structured_data` across the derivation seam. A
+    // concurrent run whose first statement landed before this window and whose
+    // second lands inside it moves the pair by 1 and `pages` by 0 — no ratio
+    // survives that, and the observed failure was exactly it (3 where 2 was
+    // expected, with `runs` = 1).
+    //
+    // So a window is either CLEAN — every invariant below holds together, which
+    // a sliced window cannot fake — or it is discarded and measured again.
+    // `runRules` is idempotent over the same crawl (the issue rows are deleted
+    // and rewritten, the derivations rebuild), so re-measuring is free of side
+    // effects — it leaves the same table, not a bigger one. A real
+    // regression fails every attempt and the last set of problems is reported.
+    const ATTEMPTS = 4;
+    let problems: string[] = [];
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+      const before = await analyzeCounts();
+      await runRules(db, crawlId, buildRegistry());
+      const after = await analyzeCounts();
+      const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
 
-    // The counters are database-wide and vitest runs test files in parallel
-    // against one database, so another file's `runRules` can land inside this
-    // window. The assertions are therefore RATIOS against `pages`, which every
-    // run analyzes exactly once: N concurrent runs move `pages` by N and the
-    // derivation-fed pair by 2N, so the relationship holds however many there
-    // were. `runRules` is the only thing in the repo that issues an ANALYZE,
-    // which is what makes `pages` a usable clock here.
-    const runs = delta("pages");
-    expect(runs, "the run did not analyze pages at all").toBeGreaterThanOrEqual(1);
-    // Once per run, at the top, before the first rule reads them.
-    for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
-      expect(delta(table), `${table} was not analyzed once per run`).toBe(runs);
+      const runs = delta("pages");
+      problems = [];
+      if (runs < 1) problems.push("the run did not analyze pages at all");
+      // Once per run, at the top, before the first rule reads them.
+      for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+        if (delta(table) !== runs) {
+          problems.push(`${table} moved ${delta(table)}, expected ${runs} (once per run)`);
+        }
+      }
+      // And twice per run for the two tables the derivation phase rewrites
+      // mid-run: once at the top (where, on a crawl's first run, `url_params` is
+      // still EMPTY and the planner is taught exactly that) and once across the
+      // derivation seam, before the query rules that join them.
+      for (const table of ["url_params", "structured_data"]) {
+        if (delta(table) !== 2 * runs) {
+          problems.push(`${table} moved ${delta(table)}, expected ${2 * runs} (twice per run)`);
+        }
+      }
+      // `metrics` is deliberately absent from both statements: no rule reads it,
+      // the metric phase only writes it. That exclusion IS assertable here —
+      // unlike a claim about `last_analyze`, which autovacuum could move at any
+      // moment — because `analyze_count` only ever counts a manual ANALYZE.
+      if (delta("metrics") !== 0) {
+        problems.push(`metrics moved ${delta("metrics")}, expected 0 (no rule reads it)`);
+      }
+      if (problems.length === 0) break;
     }
-    // And twice per run for the two tables the derivation phase rewrites
-    // mid-run: once at the top (where, on a crawl's first run, `url_params` is
-    // still EMPTY and the planner is taught exactly that) and once across the
-    // derivation seam, before the query rules that join them.
-    for (const table of ["url_params", "structured_data"]) {
-      expect(delta(table), `${table} was not analyzed twice per run`).toBe(2 * runs);
-    }
-    // `metrics` is deliberately absent from both statements: no rule reads it,
-    // the metric phase only writes it. That exclusion IS assertable here —
-    // unlike a claim about `last_analyze`, which autovacuum could move at any
-    // moment — because `analyze_count` only ever counts a manual ANALYZE.
-    expect(delta("metrics")).toBe(0);
-  });
+    expect(
+      problems.join("; "),
+      `no clean ANALYZE measurement in ${ATTEMPTS} attempts — if this persists, the ` +
+        `run's ANALYZE statements have changed, not the concurrency`,
+    ).toBe("");
+    // Four full runs of the rule set, so the default 30s test timeout is not
+    // the thing that reports a regression: without this, a genuinely missing
+    // ANALYZE fails as "timed out" instead of naming the counter that moved.
+  }, 180_000);
 
   // A crawl id nothing knows produces no pages, which is indistinguishable
   // from a crawl that found nothing: the run would "succeed" over an empty
@@ -396,6 +485,103 @@ describe("runRules against the database", () => {
   it("refuses an unknown crawl id, naming it", async () => {
     const missing = `crawl_${randomUUID()}`;
     await expect(runRules(db, missing, buildRegistry())).rejects.toThrow(missing);
+  });
+
+  /**
+   * THE REGRESSION THIS FILE EXISTS TO HOLD, after the P6 gate found it.
+   *
+   * `content.near-duplicate` lists at most `NEAR_DUPLICATE_PAIR_CAP` pairs and
+   * its query has no `ORDER BY` — deliberately, since ordering would force the
+   * quadratic join the cap avoids — so it reports a FIXED NUMBER of pairs whose
+   * IDENTITY is undefined. Under the old append-only `issues` table with
+   * `onConflictDoNothing`, a second run's different arbitrary 500 collided with
+   * nothing and was simply added: the gate crawl ended two runs with 751
+   * near-duplicate rows behind a summary that said 500, and 1565 issue rows
+   * behind a run reporting 1314 findings. The agent surface reads the table.
+   *
+   * Reproduced synthetically rather than by seeding half a million real pairs:
+   * a query rule with a stable cap of three and a run-varying listing is the
+   * same shape, and it is the SHAPE — not simhash — that broke the invariant.
+   */
+  it("recomputes a capped rule's findings instead of accumulating them", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    const CAP = 3;
+    let run = 0;
+    const capped: QueryRule = {
+      kind: "query",
+      id: "test.capped-nondeterministic",
+      checkIds: ["CHECK-01"],
+      category: "technical",
+      severity: "info",
+      title: "A capped rule whose listing is not deterministic",
+      explanation:
+        "Reports a fixed number of real cases, but not the same ones twice — " +
+        "the shape content.near-duplicate has, without its quadratic join.",
+      howToFix: "Nothing: the rule is a stand-in for one whose cap cannot afford an order.",
+      rulesetVersion: RULESET_VERSION,
+      // Every run reports CAP findings and every dedupe key is new, so nothing
+      // an append-only table could collide on ever repeats.
+      run: async () => {
+        run += 1;
+        return Array.from({ length: CAP }, (_, i) => ({
+          ruleId: "test.capped-nondeterministic",
+          pageId: null,
+          pageUrl: null,
+          severity: "info" as const,
+          evidence: { pair: `run${run}-pair${i}` },
+          dedupeKey: `run${run}-pair${i}`,
+        }));
+      },
+    };
+    const registry = new Registry();
+    registry.register(capped);
+
+    const first = await runRules(db, crawlId, registry);
+    expect(first.findings).toBe(CAP);
+    const afterFirst = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
+    expect(afterFirst).toHaveLength(CAP);
+
+    const second = await runRules(db, crawlId, registry);
+    const afterSecond = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
+
+    // The claim, in the two halves that were both false before the fix.
+    //
+    // 1. The table did not grow. Under the old design this was CAP * 2 = 6.
+    expect(afterSecond).toHaveLength(CAP);
+    // 2. The summary describes the table, so a reader who quotes either number
+    //    quotes the same fact.
+    expect(second.findings).toBe(afterSecond.length);
+    // And what survived is the SECOND run's judgement, not the first's — a
+    // recompute, not a deduplicated repeat.
+    expect(afterSecond.map((r) => r.dedupeKey).sort()).toEqual([
+      "run2-pair0",
+      "run2-pair1",
+      "run2-pair2",
+    ]);
+    expect(run).toBe(2);
+  });
+
+  /**
+   * The other half of the same invariant, on the REAL rule set: whatever the
+   * registry does over a crawl, the run's summary and the table agree, twice
+   * running. Cheap, and it is the assertion an agent surface depends on.
+   */
+  it("keeps the summary and the issues table equal across repeated runs", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([
+      mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" }),
+      mkRow(crawlId, "/untitled", { title: null }),
+      mkRow(crawlId, "/broken", { fetchClass: "server_error", statusCode: 503 }),
+    ]);
+
+    const registry = buildRegistry();
+    for (const pass of [1, 2]) {
+      const summary = await runRules(db, crawlId, registry);
+      const rows = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
+      expect(rows.length, `pass ${pass}`).toBe(summary.findings);
+    }
   });
 
   it("aborts loudly, naming the rule, when a rule throws", async () => {
@@ -452,13 +638,13 @@ describe("runRules against the database", () => {
     );
   }
 
-  // The metrics-vs-issues asymmetry, which is the whole reason the metric phase
-  // deletes before it inserts. An issue is evidence: it happened, and a re-run
-  // adds nothing (the dedupe index absorbs it). A metric is recomputed state:
-  // the crawl's current answer, and last run's answer is not evidence of
+  // Why the metric phase deletes before it inserts. A metric is recomputed
+  // state: the crawl's current answer, and last run's answer is not evidence of
   // anything once this run has produced its own. A cohort that stopped existing
   // must therefore stop having a row — an upsert alone could refresh the
-  // survivors but never remove the departed.
+  // survivors but never remove the departed. (Issues are recomputed too now, by
+  // one delete at the top of the run; what remains different is the
+  // granularity, per rule here against per phase there.)
   it("writes a metric rule's rows, refreshes them, and drops a cohort that stopped being emitted", async () => {
     const crawlId = await newCrawl();
     await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);

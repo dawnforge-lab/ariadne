@@ -14,8 +14,9 @@
  * Fetch semantics are OpenSEO's decisions (site-audit-workflow-helpers.ts
  * @ c469a48ae90ab58413b198fe3d1ac1aa90a9b070), read as reference and
  * re-implemented over undici rather than lifted: manual redirects so every hop
- * is its own row, a 1MiB body cap, and the bot-challenge classification table.
- * Divergences from that table are marked "CHANGED" at their line.
+ * is its own row, a 1MiB body cap (spent on decompressed bytes — see
+ * readCappedDecoded), and the bot-challenge classification table. Divergences
+ * from that table are marked "CHANGED" at their line.
  *
  * The plumbing under all of that — connection pools, the connect-time address
  * guard, the capped reader, charset decoding, error classification — lives in
@@ -26,6 +27,7 @@
 import { request } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
 import {
+  ACCEPT_ENCODING,
   blockedAddressMessage,
   decodeBody,
   headerValue,
@@ -33,12 +35,18 @@ import {
   isTimeout,
   mimeType,
   newAgent,
-  readCapped,
+  readCappedDecoded,
   sharedAgent,
   type DnsLookupFn,
   type HeaderBag,
 } from "./http.js";
 
+/**
+ * The body cap, spent on **decompressed** bytes (see readCappedDecoded). It
+ * bounds the wire read too, because the reader stops inflating and destroys
+ * the socket the moment the cap is reached — a compressed body can therefore
+ * never cost more than ~1MiB of transfer either.
+ */
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
@@ -71,6 +79,17 @@ const CHALLENGE_BODY_MARKERS = [
 
 const HTML_MIME_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 
+/**
+ * How a fetch ended. Stored verbatim in `pages.fetch_class`.
+ *
+ * Adding a member here is not a local change. `loop`'s TRANSIENT set decides
+ * whether the URL is fetched again, `politeness`'s BACKPRESSURE set decides
+ * whether the window collapses, and a dozen rules name classes in SQL. A new
+ * member that nobody placed in those two sets silently gets both defaults —
+ * not retried, not throttling — which may be right, but only if someone said
+ * so. Audit all three when you add one; the sets carry a note naming the
+ * member most likely to be misfiled.
+ */
 export type FetchClass =
   | "ok"
   | "redirect"
@@ -81,6 +100,15 @@ export type FetchClass =
   | "network_error"
   | "non_html"
   | "too_large"
+  /**
+   * The response carried a `content-encoding` we do not implement, so its
+   * bytes are unreadable to us. Distinct from `network_error` because it is
+   * DETERMINISTIC: the same request gets the same undecodable answer, so it
+   * must stay out of the retry bucket (see loop's TRANSIENT). Some CDNs ignore
+   * `accept-encoding` and answer `br` regardless; three fetches of that is
+   * three times the rudeness for the same non-answer (rule 9).
+   */
+  | "unsupported_encoding"
   | "disallowed";
 
 export interface FetchResult {
@@ -96,17 +124,54 @@ export interface FetchResult {
   redirectUrl: string | null;
   /** Decoded html text, ≤ 1MiB; null for every class except `ok`. */
   body: string | null;
-  /** Body bytes actually received, capped at MAX_BODY. */
+  /**
+   * How many bytes of body we hold, capped at MAX_BODY. For the classes that
+   * keep a body this is the html's own size — the **decompressed** length when
+   * the response was gzipped, so it means the same thing whether or not the
+   * origin compresses, and matches what the analyzer measures. For the classes
+   * whose body is drained unread (redirects, non-HTML, 4xx) it is the wire
+   * bytes, which is what those cost us.
+   */
   htmlBytes: number;
   /** Time to response headers, not to the last body byte. */
   responseTimeMs: number;
+  /**
+   * `Retry-After`, in milliseconds from the moment the response arrived, on the
+   * classes where it is a throttle: `blocked` (401/403/429/challenge) and a 503
+   * `server_error`. Null everywhere else — a 404 carrying the header is not
+   * asking us to slow the site down, and honouring it there would let one
+   * misconfigured error page pace the whole crawl.
+   *
+   * Null also when the header WAS there and could not be read; the reason is
+   * then written into `disallowedReason` so the row says so (hard rule 7). It
+   * is never NaN and never a guess.
+   *
+   * NOT persisted: it is a fact about a moment, consumed by `HostGate.report`,
+   * which caps it at `maxDelayMs` before honouring it. This object carries what
+   * the server said; the gate decides what to do about it.
+   */
+  retryAfterMs: number | null;
   /** From `Link: <...>; rel="canonical"`, verbatim (not normalised). */
   canonicalHeader: string | null;
   xRobotsTag: string | null;
   /**
-   * Why something was refused, in plain words. Set on `disallowed` (the URL
-   * or the address it resolved to), and on `redirect` when the Location was
-   * dropped rather than passed on. Null otherwise.
+   * Why this row has no usable body or target, in plain words. Set on
+   * `disallowed` (the URL or the address it resolved to), on `redirect` when
+   * the Location was dropped rather than passed on, on `unsupported_encoding`
+   * (naming the coding we could not read), and on a throttle whose
+   * `Retry-After` we had to ignore (naming the value we refused). Null
+   * otherwise.
+   *
+   * **This is persisted**, as `pages.fetch_reason` — the class alone is not an
+   * explanation, and a reason that lived only in this object would be an
+   * argument about transparency that was false the moment the row was written
+   * (hard rule 7). Anything put here reaches an operator's report, so it is
+   * built from the response and the URL policy only: never a stack trace,
+   * never a local path.
+   *
+   * The name is now narrower than the job — it predates the other three uses —
+   * but renaming it ripples through `persist`, the column and the rule layer
+   * for no behavioural gain.
    */
   disallowedReason: string | null;
 }
@@ -144,6 +209,74 @@ export function parseCanonicalLinkHeader(value: string | null): string | null {
     }
   }
   return null;
+}
+
+/**
+ * `Retry-After` (RFC 9110 §10.2.3), in milliseconds from `nowMs`.
+ *
+ * Two legal spellings — delta-seconds (`120`) and an HTTP-date (`Wed, 21 Oct
+ * 2015 07:28:00 GMT`) — and a long tail of things servers send instead. The
+ * contract for that tail is the point of this function: an unreadable value
+ * yields `ms: null` and a `note` saying what was refused. Never NaN, never a
+ * silent 0, never a throw. A crawl must not stop because a WAF sent `soon`,
+ * and it must not pretend the header was absent either (hard rule 7).
+ *
+ * What it deliberately does NOT do is cap: `31536000` (a year) is read as a
+ * year, and `HostGate` is where that meets `maxDelayMs`. One policy, in the one
+ * module that owns spacing.
+ *
+ * The date branch requires a letter in the value before `Date.parse` sees it.
+ * `Date.parse` is lenient in ways no HTTP-date is — `"2026"` parses as a year,
+ * `"-5"` as who-knows-what — and an IMF-fixdate always carries a month name.
+ * Without the guard a hostile `"3000"` would become a millennium of back-off.
+ */
+export function parseRetryAfter(
+  value: string | null,
+  nowMs: number = Date.now(),
+): { ms: number | null; note: string | null } {
+  if (value === null) return { ms: null, note: null };
+
+  const raw = value.trim();
+  const unreadable = {
+    ms: null,
+    note: `unreadable Retry-After header (${clipHeader(value)}); ignored`,
+  };
+  if (raw === "") return unreadable;
+
+  if (/^\d+$/.test(raw)) {
+    const seconds = Number(raw);
+    // A 300-digit header parses to Infinity. It is not a number we can use.
+    if (!Number.isFinite(seconds)) return unreadable;
+    return { ms: seconds * 1000, note: null };
+  }
+
+  if (!/[a-zA-Z]/.test(raw)) return unreadable;
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return unreadable;
+
+  const deltaMs = at - nowMs;
+  if (deltaMs > 0) return { ms: deltaMs, note: null };
+  return {
+    ms: 0,
+    note: `Retry-After named a time in the past (${clipHeader(value)}); ignored`,
+  };
+}
+
+/** A header value fit to put in a row an operator will read. */
+function clipHeader(value: string): string {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat;
+}
+
+/**
+ * The classes on which a `Retry-After` is a throttle rather than noise: a
+ * block, and the 503 that did not turn out to be a challenge. A 404 or a
+ * redirect carrying the header is answering about itself, not asking the
+ * crawler to slow down, and pacing a whole host off one is how a single broken
+ * error page halves a crawl.
+ */
+function isThrottle(fetchClass: FetchClass, statusCode: number): boolean {
+  return fetchClass === "blocked" || (fetchClass === "server_error" && statusCode === 503);
 }
 
 /**
@@ -238,6 +371,9 @@ function emptyResult(
     body: null,
     htmlBytes: 0,
     responseTimeMs,
+    // Nothing was read, so nothing was asked of us. A timeout is not a throttle
+    // with an unstated interval.
+    retryAfterMs: null,
     canonicalHeader: null,
     xRobotsTag: null,
     disallowedReason,
@@ -250,10 +386,13 @@ function emptyResult(
  * Classification precedence, in order, so the reason a row carries is the
  * most specific true thing about it:
  *   disallowed -> redirect (3xx) -> status (blocked / 4xx / 5xx) ->
- *   non_html -> too_large -> ok
+ *   non_html -> too_large -> unsupported_encoding -> ok
  * A 500 with a 5MB html body is `server_error`, not `too_large`: the status
  * is why the page is unusable. A 200 pdf is `non_html` whatever its size,
- * because we never wanted its bytes.
+ * because we never wanted its bytes. A 503 we could not decode stays a 503.
+ *
+ * `timeout` and `network_error` are outside that order: they are what happens
+ * when there is no response to classify at all.
  *
  * `body` is populated only for `ok`. Every other class has a body that is
  * either absent, unusable, or not worth carrying into the rule engine.
@@ -291,6 +430,12 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       headers: {
         "user-agent": opts.userAgent,
         accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        // undici's `request` does not decode transport encodings (unlike
+        // `fetch`), so asking for gzip means we own the inflating — see
+        // readCappedDecoded, which is also why only gzip is offered. Worth
+        // owning: HTML compresses 4-6x, and a crawl that refuses compression
+        // is four times the bandwidth on someone else's origin (rule 9).
+        "accept-encoding": ACCEPT_ENCODING,
       },
       // Manual redirects: a 3xx is its own row and the crawl loop enqueues the
       // target (which re-enters url-policy on the way in), so chains and loops
@@ -320,7 +465,12 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     // challenge page and a 404's html are drained and dropped, not buffered.
     const keepBody =
       !isRedirect && (statusCode === 503 || (isHtml && statusClass === "ok"));
-    const read = await readCapped(response.body, MAX_BODY, keepBody);
+    const read = await readCappedDecoded(
+      response.body,
+      headerValue(headers, "content-encoding"),
+      MAX_BODY,
+      keepBody,
+    );
 
     if (isRedirect) {
       const target = await resolveRedirectTarget(
@@ -337,6 +487,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
         body: null,
         htmlBytes: read.bytes,
         responseTimeMs,
+        retryAfterMs: null, // a 3xx is an answer, not a throttle
         canonicalHeader,
         xRobotsTag,
         disallowedReason: target.droppedReason,
@@ -352,7 +503,27 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       fetchClass = classifyStatus(statusCode, headers, snippet);
     }
     if (fetchClass === "ok" && !isHtml) fetchClass = "non_html";
+    // Decompressed, not wire: a 40KB body that inflates past MAX_BODY is a
+    // `too_large` row with no body, never a page row holding the first MiB of
+    // it. Precedence is unchanged — the status still wins, so a 500 with a
+    // 5MB body is `server_error`.
     if (fetchClass === "ok" && read.truncated) fetchClass = "too_large";
+    // A 200 whose bytes we cannot decode is a page we did not get. Its own
+    // class, not `network_error`: the failure is deterministic, so it must not
+    // land in loop's retry bucket. Say which coding defeated us rather than
+    // recording an empty page (rule 7). A non-`ok` class keeps its own, more
+    // specific verdict: a 503 we could not decode is still a 503, we simply
+    // could not check it for challenge markers.
+    if (fetchClass === "ok" && read.unsupportedEncoding !== null) {
+      fetchClass = "unsupported_encoding";
+    }
+
+    // The throttle's own answer to "when may we come back". Read only once the
+    // class is settled, because the class is what decides whether the header is
+    // an instruction or noise (see isThrottle).
+    const retryAfter = isThrottle(fetchClass, statusCode)
+      ? parseRetryAfter(headerValue(headers, "retry-after"))
+      : { ms: null, note: null };
 
     return {
       url,
@@ -366,9 +537,17 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
           : null,
       htmlBytes: read.bytes,
       responseTimeMs,
+      retryAfterMs: retryAfter.ms,
       canonicalHeader,
       xRobotsTag,
-      disallowedReason: null,
+      // Two reasons can want this field, and they never co-occur: an
+      // unsupported coding is an `ok`-turned-`unsupported_encoding`, a refused
+      // Retry-After is a throttle. The coding wins if that ever changes,
+      // because it is why the row has no body at all.
+      disallowedReason:
+        read.unsupportedEncoding !== null
+          ? `unsupported content-encoding (${read.unsupportedEncoding})`
+          : retryAfter.note,
     };
   } catch (error) {
     // Our bug, not theirs — surface it loudly instead of burying it in a
@@ -383,6 +562,9 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     if (deadlineHit || isTimeout(error)) {
       return emptyResult(url, "timeout", responseTimeMs);
     }
+    // Also where a body that claimed `content-encoding: gzip` and was not gzip
+    // lands (zlib Z_DATA_ERROR / Z_BUF_ERROR out of readCappedDecoded): the
+    // response was unreadable, which is a failed fetch and not an empty page.
     return emptyResult(url, "network_error", responseTimeMs);
   } finally {
     clearTimeout(timer);

@@ -25,6 +25,25 @@
  *    crawled URL, not over the renderable ones, because the bound it enforces
  *    is "we will not render more than 5% of this site".
  *
+ * WHICH CANDIDATES GET THE SEATS WHEN THERE ARE NOT ENOUGH OF THEM. Suspects
+ * first — those are the pages there is already a reason to doubt — and then, by
+ * the size of the page type each candidate belongs to, largest first:
+ * `order by tier asc, type_size desc, url asc`. **A template's size is how much
+ * of the site its render answers for.** Three renders of a 211-page product
+ * template say something about 211 pages; three renders of a collection page
+ * that exists once say something about one.
+ *
+ * That is written down because the first real-site crawl proved the alternative
+ * wrong. 551 pages produced 196 page types — the big families collapsed
+ * correctly (`/products/:slug` 211, `/collections/:slug` 115) but ~170 URLs
+ * stayed singleton types — and the sampler offered 176 candidates for 28 seats
+ * with no suspect among them. The cut was taken in URL order, so all 28 seats
+ * went to `/apps/*` and `/collections/a-b*` and **not one of the 211 product
+ * pages was rendered**: the four JavaScript rules came back empty for the
+ * template that mattered most, which reads as "clean" and means "unasked".
+ * Alphabetical order is not a priority. Template size is. `url asc` remains the
+ * final tiebreak, so the selection is as deterministic as it ever was.
+ *
  * Everything here is one statement's worth of SQL over `pages` and `links`.
  * Nothing loads a page list into memory except the selection itself, which the
  * budget bounds by construction (hard rules 3 and 6).
@@ -99,9 +118,10 @@ export type ResolvedRenderConfig = Required<RenderSelectionConfig>;
 
 export interface RenderSelection {
   /**
-   * The URLs now sitting in the frontier as `render_pending`, suspects first
-   * and each half in URL order. Bounded by `budget`, so this array is the one
-   * page list this module is allowed to hold.
+   * The URLs now sitting in the frontier as `render_pending`, in the order the
+   * seats were handed out: suspects first, then largest page type first, then
+   * URL. Bounded by `budget`, so this array is the one page list this module is
+   * allowed to hold.
    */
   selected: string[];
   /** `min(ceil(pages × pct/100), renderMaxPages)` — the seats available. */
@@ -188,8 +208,16 @@ export async function selectRenderSet(
         renderSamplePerType,
       })},
       picked as (
-        select c.url, c.tier from candidates c
-        order by c.tier asc, c.url asc
+        -- THE CUT. Suspects before samples, then the biggest templates before
+        -- the smallest, then URL as the tiebreak that keeps this deterministic.
+        -- See the module header for why type_size desc is the middle key: a
+        -- seat spent on a 211-page template answers for 211 pages, and a cut
+        -- taken in URL order spends every seat on the front of the alphabet.
+        -- "nulls last" is not defensive — Postgres orders DESC NULLS FIRST —
+        -- but type_size is non-null for every candidate by construction (each
+        -- one joins its own cohort row).
+        select c.url, c.tier, c.type_size from candidates c
+        order by c.tier asc, c.type_size desc nulls last, c.url asc
         limit (select n from budget)
       ),
       moved as (
@@ -247,7 +275,9 @@ export async function selectRenderSet(
       -- its zeroes: an empty result set would leave the caller unable to tell
       -- "nothing to render" from "the query did not run" (hard rule 7).
       left join picked p on true
-      order by p.tier asc nulls last, p.url asc`);
+      -- The same three keys the cut used, so the selected list comes back in
+      -- the order the seats were given out rather than in an order of its own.
+      order by p.tier asc nulls last, p.type_size desc nulls last, p.url asc`);
 
   const head = res.rows[0];
   if (head === undefined) {
@@ -366,6 +396,16 @@ function candidateCte(crawlId: string, cfg: ResolvedRenderConfig): SQL {
                * ${renderBudgetPct} / 100)::int,
           ${renderMaxPages}::int) as n
       ),
+      type_sizes as (
+        -- How many renderable pages each page type has. This is the middle key
+        -- of the budget cut (see the picked CTE and the module header): a
+        -- candidate inherits the size of the template it stands for, and the
+        -- biggest templates are seated first. Computed here, in the SHARED
+        -- fragment, so renderSelectionStats cannot drift from the decision it
+        -- reports.
+        select c.cohort_type, count(*)::int as n
+        from cohort c group by c.cohort_type
+      ),
       suspects as (
         select c.url from cohort c
         where
@@ -394,12 +434,18 @@ function candidateCte(crawlId: string, cfg: ResolvedRenderConfig): SQL {
       ),
       candidates as (
         -- min(tier) is what makes a page that is BOTH a suspect and a sample
-        -- member count once, on the suspect side.
-        select url, min(tier) as tier from (
+        -- member count once, on the suspect side. type_size rides along from
+        -- the candidate's own cohort row — one page type per URL, so the join
+        -- multiplies nothing and the group-by key is redundant but honest.
+        select t.url, min(t.tier) as tier, ts.n as type_size
+        from (
           select url, 0 as tier from suspects
           union all
           select url, 1 as tier from sample
-        ) t group by url
+        ) t
+        join cohort c on c.url = t.url
+        join type_sizes ts on ts.cohort_type = c.cohort_type
+        group by t.url, ts.n
       ),
       stats as (
         select count(*) filter (where tier = 0)::int as suspects,

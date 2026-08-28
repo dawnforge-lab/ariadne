@@ -25,6 +25,8 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     pageType: "content",
     statusCode: 200,
     fetchClass: "ok",
+    // A page that worked has nothing to explain. See pages.fetch_reason.
+    fetchReason: null,
     contentType: "text/html; charset=utf-8",
     redirectUrl: null,
     redirectUrlNormalised: null,

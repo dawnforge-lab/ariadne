@@ -23,7 +23,10 @@
  *  3. **Render.** `renderConcurrency` workers, each leasing ONE URL at a time
  *     and rendering it in its own browser context. One browser, at most
  *     `renderConcurrency` contexts, no page list in memory beyond the
- *     selection the budget already bounds (rule 6).
+ *     selection the budget already bounds (rule 6). Paced at
+ *     `renderPaceMs(cfg.perHostDelayMs, crawls.host_spacing_ms)` — the crawl's
+ *     configured delay OR the wider one its ratchet earned, whichever is
+ *     larger; see that function.
  *  4. **Record.** Every render — successful or failed — is written to its page
  *     row and its frontier row is completed in the SAME transaction, then the
  *     pass writes its count to `crawls.render_pass_count`.
@@ -71,6 +74,38 @@ import {
   type RenderSelectionConfig,
 } from "./select.js";
 
+/**
+ * A render pass REFUSED, as opposed to a render pass that broke.
+ *
+ * The four guards below are decisions: the crawl is live, another pass holds
+ * it, it has not started, it does not exist. They are all recoverable by the
+ * caller — wait, resume, mark failed, use a different id — and a transport over
+ * this module needs to say so with a 409 or a 404 rather than with a 500.
+ *
+ * A DEFECT IS NOT ONE OF THESE and must never be typed as one. The
+ * `renderConcurrency` `RangeError` below, a failed write, a browser that would
+ * not launch: those stay plain errors, and a transport that turns them into a
+ * client-facing refusal is telling the caller to retry something that is our
+ * bug. That distinction used to be made by matching on the message prefix, and
+ * the `RangeError` — whose message also starts `runRenderPass: ` — walked
+ * straight through it. This type exists so the distinction is carried by the
+ * throw itself.
+ */
+export class RenderPassRefusal extends Error {
+  constructor(
+    message: string,
+    /**
+     * `live` — the crawl exists and may not be rendered right now.
+     * `missing` — there is no such crawl. Separated because they are different
+     * answers (409 vs 404), not different wordings of one.
+     */
+    readonly reason: "live" | "missing",
+  ) {
+    super(message);
+    this.name = "RenderPassRefusal";
+  }
+}
+
 export const RENDER_PASS_DEFAULTS = {
   /**
    * Browser contexts alive at once. Four is the crawl's initial window, and a
@@ -107,6 +142,28 @@ export interface RenderPassConfig extends RenderSelectionConfig {
   allowPrivate?: boolean;
 }
 
+/**
+ * The spacing the render pass paces at: the wider of what the caller
+ * CONFIGURED and what the crawl EARNED.
+ *
+ * `crawls.host_spacing_ms` is the base delay the crawl's adaptive back-off
+ * ratcheted to before it finished (src/crawl/loop.ts) — it is not a setting,
+ * it is a finding, written because the site pushed back and the engine listened.
+ * The render pass hits the same host minutes later, and taking its pace from
+ * `cfg.perHostDelayMs` alone would throw that finding away: the first real-site
+ * gate crawl escalated 1000 → 2000 ms and the render pass that followed went
+ * straight back to 1000 ms with the answer sitting in the database. **A later
+ * pass has no right to forget spacing the site's own responses taught us**
+ * (rule 9).
+ *
+ * `max`, not "replace": a caller who deliberately asks for a wider delay than
+ * the crawl earned keeps it, and a crawl that never escalated (`null`, or a
+ * spacing at or below the configured one) changes nothing.
+ */
+export function renderPaceMs(configuredMs: number, earnedMs: number | null): number {
+  return Math.max(configuredMs, earnedMs ?? 0);
+}
+
 export interface RenderPassOptions {
   /** Graceful shutdown: leasing stops and held leases are released. */
   signal?: AbortSignal;
@@ -135,9 +192,13 @@ export interface RenderPassSummary {
 /**
  * Run the render pass for `crawlId`.
  *
- * Throws — loudly, before touching the frontier — if the crawl is still live.
- * Throws if a render result cannot be written. Everything a *site* does comes
- * back as a classified `render_error` instead.
+ * Throws — loudly, before touching the frontier — if the crawl is still live,
+ * held by another pass, not started, or absent. Those four are
+ * `RenderPassRefusal`s and are the caller's to act on. Everything else it
+ * throws is a defect of ours (the `RangeError` below, a failed write, a browser
+ * that would not launch) and stays a plain error, so a transport can tell them
+ * apart without reading messages. Everything a *site* does comes back as a
+ * classified `render_error` rather than as a throw at all.
  */
 export async function runRenderPass(
   db: Db,
@@ -148,6 +209,9 @@ export async function runRenderPass(
   const started = Date.now();
   const concurrency = cfg.renderConcurrency ?? RENDER_PASS_DEFAULTS.renderConcurrency;
   if (!Number.isInteger(concurrency) || concurrency < 1) {
+    // DELIBERATELY NOT A `RenderPassRefusal`. A caller that asked for zero
+    // browser contexts has a bug, and telling them "wait and try again" — which
+    // is what a refusal means — would be the wrong advice. See the class.
     throw new RangeError(
       `runRenderPass: renderConcurrency must be an integer ≥ 1, got ${concurrency}`,
     );
@@ -161,10 +225,11 @@ export async function runRenderPass(
   // URLs" is. Nothing is written before all three pass.
   const before = await frontierCounts(db, crawlId);
   if (before.leased > 0) {
-    throw new Error(
+    throw new RenderPassRefusal(
       `runRenderPass: crawl ${crawlId} has ${before.leased} leased URL(s) — the render ` +
         `pass may not run over a live crawl (it would steal the crawler's rows). ` +
         `Wait for the crawl to finish, or release its leases if its workers are known dead.`,
+      "live",
     );
   }
   // A render lease leaves the row's state at `render_pending`, so it is
@@ -174,11 +239,12 @@ export async function runRenderPass(
   // completing them.
   const heldRenders = await heldRenderLeases(db, crawlId);
   if (heldRenders > 0) {
-    throw new Error(
+    throw new RenderPassRefusal(
       `runRenderPass: crawl ${crawlId} has ${heldRenders} render URL(s) leased by another ` +
         `render pass — two passes may not share a crawl (this one's selection would ` +
         `demote rows that one is rendering). Wait for it, or call releaseRenderLeases ` +
         `if its worker is known dead.`,
+      "live",
     );
   }
   // And the crawl must have STOPPED. Not "must have drained": a crawl that hit
@@ -189,13 +255,28 @@ export async function runRenderPass(
   // (its next `leaseBatch` is coming for rows we would have promoted) or one
   // that died mid-run and was never resumed or marked failed. Both leave a
   // frontier in flight; `finished`, `cancelled` and `failed` do not.
-  const status = await crawlStatus(db, crawlId);
+  const { status, hostSpacingMs } = await crawlRow(db, crawlId);
+  // A crawl that has not started yet is unsafe for the same reason a live one
+  // is, one step earlier: `queued` is the API queue's accepted-but-not-yet-run
+  // state (src/api/service.ts), and the worker that picks it up will seed a
+  // frontier straight over the rows this pass promoted. It is also empty, so
+  // there is nothing to render — but "nothing selected" is the wrong answer to
+  // give for it, because it reads like a crawl with no suspects.
+  if (status === "queued") {
+    throw new RenderPassRefusal(
+      `runRenderPass: crawl ${crawlId} is 'queued' — it has not run yet, so there is ` +
+        `nothing to render, and the worker that dequeues it would seed a frontier over ` +
+        `this pass's selection. Wait for it to finish.`,
+      "live",
+    );
+  }
   if (status === "running") {
-    throw new Error(
+    throw new RenderPassRefusal(
       `runRenderPass: crawl ${crawlId} is still marked 'running' — the render pass may ` +
         `not run over a crawl that has not stopped (a live worker's next lease would ` +
         `take rows this pass promoted, and a crashed crawl's frontier is mid-flight). ` +
         `Resume it to completion, or mark it failed or cancelled first.`,
+      "live",
     );
   }
 
@@ -205,7 +286,10 @@ export async function runRenderPass(
   const renderer = await PageRenderer.launch({
     origin: new URL(cfg.siteUrl).origin,
     userAgent: cfg.userAgent,
-    perHostDelayMs: cfg.perHostDelayMs,
+    // NOT `cfg.perHostDelayMs`. The crawl's ratchet may have earned a wider
+    // spacing than the config asked for, and that lesson is the site's, not
+    // ours to discard between passes — see `renderPaceMs`.
+    perHostDelayMs: renderPaceMs(cfg.perHostDelayMs, hostSpacingMs),
     robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
     ...(cfg.navigationTimeoutMs === undefined
       ? {}
@@ -261,23 +345,30 @@ export async function runRenderPass(
 }
 
 /**
- * The crawl's own verdict on whether it is still going.
+ * The two things this pass needs from the crawl row: its own verdict on whether
+ * it is still going, and the spacing its back-off ended up at.
+ *
+ * One read for both, because both are decisions taken before the browser
+ * launches and a second round trip would only invite them to disagree.
  *
  * A missing row throws here rather than being read as "not running": a render
  * pass over a crawl that does not exist is a caller bug, and `selectRenderSet`
  * would only discover it one statement later (rule 7).
  */
-async function crawlStatus(db: Db, crawlId: string): Promise<string> {
+async function crawlRow(
+  db: Db,
+  crawlId: string,
+): Promise<{ status: string; hostSpacingMs: number | null }> {
   const rows = await db
-    .select({ status: crawls.status })
+    .select({ status: crawls.status, hostSpacingMs: crawls.hostSpacingMs })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
   const row = rows[0];
   if (row === undefined) {
-    throw new Error(`runRenderPass: no such crawl '${crawlId}'`);
+    throw new RenderPassRefusal(`runRenderPass: no such crawl '${crawlId}'`, "missing");
   }
-  return row.status;
+  return row;
 }
 
 /**

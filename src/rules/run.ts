@@ -65,9 +65,16 @@ const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence];
  * rows.
  *
  * Pages are streamed by id cursor and findings are buffered, so RAM is
- * O(batch), never O(URLs). Issue inserts are `onConflictDoNothing`: the
- * `issues_dedupe` unique index absorbs a re-run over the same crawl, which
- * makes the runner safe to repeat.
+ * O(batch), never O(URLs).
+ *
+ * A RULES RUN RECOMPUTES THE CRAWL'S JUDGEMENT — both tables, not just one.
+ * This crawl's rows are cleared before the rules that own them write: `issues`
+ * in a single statement at the top of the run, `metrics` per rule inside the
+ * transaction that inserts it. The granularity differs because the write paths
+ * do; the principle does not. Both deletes carry their argument where they
+ * stand, and the run's summary is therefore a description of the two tables
+ * rather than of one run's contribution to them:
+ * `count(issues where crawl_id) == summary.findings`, every time.
  *
  * A rule that throws aborts the run loudly, naming the rule — what is already
  * buffered is flushed first so the partial evidence is on disk, but the error
@@ -112,6 +119,50 @@ export async function runRules(
     sql`ANALYZE pages, links, sitemap_urls, url_params, hreflang, issues, structured_data`,
   );
 
+  // THIS CRAWL'S JUDGEMENT IS RECOMPUTED, NOT ACCUMULATED. Every issue row the
+  // crawl has is deleted here, before the first rule writes one.
+  //
+  // Phase 4 built this table append-only and said why: an issue is EVIDENCE, it
+  // happened, and `onConflictDoNothing` over the `issues_dedupe` index absorbs
+  // a re-run. That argument holds only while every rule is DETERMINISTIC, and
+  // one of them is not. `content.near-duplicate` stops listing at
+  // `NEAR_DUPLICATE_PAIR_CAP` pairs with NO `ORDER BY` — deliberately, because
+  // ordering would force the whole quadratic join the cap exists to avoid — so
+  // *which* 500 real pairs it reports is undefined. A second run therefore laid
+  // a different arbitrary 500 on top of the first, and nothing collided.
+  // Measured on the P6 gate crawl: two runs, each reporting 500 near-duplicate
+  // findings, left 751 rows in the table — 1565 issue rows against a summary
+  // saying 1314. The agent surface (`GET /crawls/:id/issues`) reads the TABLE,
+  // so an audit run twice would have quoted a site defect count that grew
+  // because we asked twice. A number that changes when you repeat the question
+  // is not evidence of anything (hard rule 7).
+  //
+  // So an issue is recomputed state, exactly as a metric is: the crawl's
+  // judgement under the ruleset that just ran, not a log of every judgement
+  // ever passed on it. What survives a run is what that run found.
+  //
+  // ONE STATEMENT, PHASE-LEVEL, rather than the metric phase's per-rule delete
+  // inside the transaction that replaces the rows. There is no per-rule seam to
+  // put a transaction around here: the findings buffer batches ACROSS rules —
+  // page rules interleave per page and flush together whenever the buffer
+  // fills — so a per-rule delete would have to rewrite the buffer, and half a
+  // seam is worse than none.
+  //
+  // WHAT THAT COSTS, STATED RATHER THAN HIDDEN: a run that dies part-way leaves
+  // the table holding a PREFIX of its own findings and none of the previous
+  // run's. That is a coherent state rather than a silently mixed one —
+  // everything in the table came from the run that died — and the run threw, so
+  // nothing anywhere reports it as complete. The rejected alternative is worse
+  // in exactly the way that matters: deleting per rule as each finishes would
+  // leave the previous run's rows for rules that had not run yet sitting beside
+  // this run's rows for the ones that had, two answers in one table with
+  // nothing to tell them apart.
+  //
+  // AFTER the ANALYZE above, not before: the planner's statistics then describe
+  // a table roughly the size this run is about to rewrite it to, rather than
+  // the empty one it would see for the rest of the run.
+  await db.delete(issues).where(eq(issues.crawlId, crawlId));
+
   const summary: RunSummary = {
     pagesScanned: 0,
     findings: 0,
@@ -141,8 +192,17 @@ export async function runRules(
             dedupeKey: f.dedupeKey,
             details: { pageUrl: f.pageUrl, ...f.evidence },
           })),
-        )
-        .onConflictDoNothing();
+        );
+      // NO CONFLICT CLAUSE, and that is the metric phase's argument arriving
+      // here: the delete at the top of the run owns idempotence now, so this
+      // crawl's rows were cleared before any rule wrote. The only way left to
+      // collide is ONE RULE EMITTING THE SAME `dedupeKey` TWICE IN ONE RUN —
+      // two findings claiming to be the same finding, which is a rule defect
+      // and must surface rather than have one of them quietly dropped. It is
+      // also what makes `count(issues) == summary.findings` an invariant a
+      // reader can check instead of a coincidence: with a conflict clause the
+      // table could sit silently BELOW the summary, the same class of drift in
+      // the other direction.
     }
   };
 
@@ -234,12 +294,7 @@ export async function runRules(
   // metric that ran before the query rules could count a crawl's issues as they
   // stood halfway through.
   //
-  // The metrics-vs-issues asymmetry, and the reason this phase deletes before
-  // it inserts:
-  //
-  //   An issue is EVIDENCE. It happened, it is stamped with the ruleset that
-  //   found it, and a re-run adds nothing — `onConflictDoNothing` over the
-  //   `issues_dedupe` index absorbs the repeat.
+  // Why this phase deletes before it inserts:
   //
   //   A metric is RECOMPUTED STATE. It is the crawl's current answer, and last
   //   run's answer is not evidence of anything once this run has produced its
@@ -249,13 +304,23 @@ export async function runRules(
   //   of pages nothing counted (hard rule 7 — a stale number is a fallback
   //   wearing a number's clothes).
   //
-  // So each metric rule's rows for this crawl are deleted and its fresh set
+  // THIS USED TO BE STATED AS AN ASYMMETRY — metrics recomputed, issues
+  // appended as evidence — and it is not one any more. Issues are recomputed
+  // too, by the single delete at the top of the run; see the argument there for
+  // what broke the append-only reading (a rule whose capped listing is
+  // deterministic in count but not in content). What genuinely differs between
+  // the two phases is only the GRANULARITY of the delete, and that difference
+  // is a consequence of the write paths rather than of the tables:
+  //
+  // Each metric rule's rows for this crawl are deleted and its fresh set
   // inserted, inside ONE transaction: the two statements share it because the
   // table is otherwise briefly missing a metric a reader might be asking for.
   // Per rule rather than per phase, so a rule that throws does not take a
   // finished rule's rows with it — those rows are this crawl's true answer for
   // that metric, and rolling them back because a different rule is broken would
-  // replace a true number with a missing one.
+  // replace a true number with a missing one. The findings phases cannot do
+  // this: their buffer batches across rules, so they get one phase-level delete
+  // and pay for it with the crash window documented up there.
   for (const rule of registry.byKind("metric")) {
     let returned: unknown;
     try {

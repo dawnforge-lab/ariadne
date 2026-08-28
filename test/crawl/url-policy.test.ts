@@ -113,6 +113,111 @@ describe("isUrlAllowed", () => {
     expect((await isUrlAllowed("http://[2606:4700::1111]/")).allowed).toBe(true);
   });
 
+  /**
+   * Build-plan §7 "before the first real-site crawl", item 5.
+   *
+   * 6to4 and Teredo addresses live inside 2000::/3, so the global-unicast
+   * allowlist admitted them — while the address they actually reach is an IPv4
+   * one written in their own bits. `2002:7f00:1::1` IS 127.0.0.1.
+   *
+   * Every literal below is derived by hand and its embedded IPv4 is shown, so
+   * the test states the arithmetic rather than trusting the implementation to
+   * agree with itself.
+   */
+  describe("6to4 and Teredo embeddings", () => {
+    // 6to4 (RFC 3056 §2): 2002:<V4ADDR>::/48, the IPv4 in the clear at bits
+    // 16-47. Read the two groups after 2002 as four bytes.
+    const SIX_TO_FOUR = [
+      ["http://[2002:7f00:1::1]/", "7f 00 00 01 = 127.0.0.1", "127.0.0.0/8"],
+      ["http://[2002:c0a8:101::1]/", "c0 a8 01 01 = 192.168.1.1", "192.168.0.0/16"],
+      ["http://[2002:a00:1::1]/", "0a 00 00 01 = 10.0.0.1", "10.0.0.0/8"],
+      ["http://[2002:ac10:1::1]/", "ac 10 00 01 = 172.16.0.1", "172.16.0.0/12"],
+      ["http://[2002:6440:1::1]/", "64 40 00 01 = 100.64.0.1", "100.64.0.0/10"],
+      ["http://[2002:a9fe:a9fe::]/", "a9 fe a9 fe = 169.254.169.254", "169.254.0.0/16"],
+    ] as const;
+
+    // Teredo (RFC 4380 §4): 2001:0000 | server(clear) | flags | port^ffff |
+    // client^ffffffff. Server 65.54.227.120 = 41 36 e3 78; flags 8000; port
+    // 40000 = 9c40 ^ ffff = 63bf. Only the last two groups change below.
+    const TEREDO_HEAD = "2001:0:4136:e378:8000:63bf";
+    const TEREDO_CLIENTS = [
+      // c0 a8 01 01 ^ ff = 3f 57 fe fe
+      ["3f57:fefe", "192.168.1.1", "192.168.0.0/16"],
+      // 7f 00 00 01 ^ ff = 80 ff ff fe
+      ["80ff:fffe", "127.0.0.1", "127.0.0.0/8"],
+      // 0a 00 00 01 ^ ff = f5 ff ff fe
+      ["f5ff:fffe", "10.0.0.1", "10.0.0.0/8"],
+      // ac 10 00 01 ^ ff = 53 ef ff fe
+      ["53ef:fffe", "172.16.0.1", "172.16.0.0/12"],
+      // a9 fe a9 fe ^ ff = 56 01 56 01
+      ["5601:5601", "169.254.169.254", "169.254.0.0/16"],
+    ] as const;
+
+    // 08 08 08 08 ^ ff = f7 f7 f7 f7 — a public client, on a public server.
+    const TEREDO_PUBLIC = `http://[${TEREDO_HEAD}:f7f7:f7f7]/`;
+
+    it("refuses a 6to4 address whose embedded IPv4 is refused", async () => {
+      for (const [url, embedded, range] of SIX_TO_FOUR) {
+        const v = await isUrlAllowed(url);
+        expect(v.allowed, `${url} embeds ${embedded}`).toBe(false);
+        // The refusal names the embedding, so a reader is not left wondering
+        // why a 2000::/3 address was turned away.
+        expect(v.reason, url).toContain("6to4");
+        expect(v.reason, url).toContain(range);
+      }
+    });
+
+    it("refuses a Teredo address whose de-obfuscated client IPv4 is refused", async () => {
+      for (const [group, client, range] of TEREDO_CLIENTS) {
+        const url = `http://[${TEREDO_HEAD}:${group}]/`;
+        const v = await isUrlAllowed(url);
+        expect(v.allowed, `${url} embeds client ${client}`).toBe(false);
+        expect(v.reason, url).toContain("Teredo");
+        expect(v.reason, url).toContain("client");
+        expect(v.reason, url).toContain(range);
+      }
+    });
+
+    it("refuses a Teredo address whose server IPv4 is refused", async () => {
+      // Server 10.0.0.1 = 0a 00 00 01 -> groups a00:1; client stays 8.8.8.8.
+      const url = `http://[2001:0:a00:1:8000:63bf:f7f7:f7f7]/`;
+      const v = await isUrlAllowed(url);
+      expect(v.allowed).toBe(false);
+      expect(v.reason).toContain("Teredo");
+      // Named as the server, not mistaken for the client — the two fields are
+      // different things and the reason has to say which one failed.
+      expect(v.reason).toContain("server");
+      expect(v.reason).toContain("10.0.0.0/8");
+    });
+
+    it("still allows 6to4 and Teredo addresses embedding public IPv4", async () => {
+      // 08 08 08 08 = 8.8.8.8, and 5d b8 d8 22 = 93.184.216.34.
+      expect((await isUrlAllowed("http://[2002:808:808::1]/")).allowed).toBe(true);
+      expect((await isUrlAllowed("http://[2002:5db8:d822::1]/")).allowed).toBe(true);
+      expect((await isUrlAllowed(TEREDO_PUBLIC)).allowed).toBe(true);
+    });
+
+    it("leaves ordinary 2001::/16 global unicast alone", async () => {
+      // Only 2001:0000::/32 is Teredo. Google's resolver is not, and neither
+      // is any other 2001: allocation — a /16-wide match would have refused
+      // a large slice of the real IPv6 internet.
+      expect((await isUrlAllowed("http://[2001:4860:4860::8888]/")).allowed).toBe(true);
+      expect((await isUrlAllowed("http://[2001:500:200::b]/")).allowed).toBe(true);
+    });
+
+    it("catches the embeddings in every spelling of the literal", async () => {
+      // Uncompressed, and with the compression in a different place: the byte
+      // parser is the authority, so no spelling escapes.
+      for (const u of [
+        "http://[2002:7f00:0001:0000:0000:0000:0000:0001]/",
+        "http://[2002:7f00:1:0:0:0:0:1]/",
+        "http://[2001:0000:4136:e378:8000:63bf:3f57:fefe]/",
+      ]) {
+        expect((await isUrlAllowed(u)).allowed, u).toBe(false);
+      }
+    });
+  });
+
   it("refuses the private ranges upstream enumerated", async () => {
     for (const u of [
       "http://0.0.0.0/",
@@ -192,6 +297,37 @@ describe("blockedAddressReason", () => {
     ).not.toBeNull();
     expect(
       blockedAddressReason("::ffff:169.254.169.254", { allowPrivate: true }),
+    ).not.toBeNull();
+  });
+
+  it("re-checks a resolved 6to4 / Teredo address on its embedded IPv4", () => {
+    // The connect-time counterpart: an AAAA answer can be a 6to4 or Teredo
+    // address just as easily as a URL can, and this is the check that sees the
+    // address DNS actually returned.
+    expect(blockedAddressReason("2002:7f00:1::1")).not.toBeNull(); // 127.0.0.1
+    expect(blockedAddressReason("2002:c0a8:101::1")).not.toBeNull(); // 192.168.1.1
+    expect(
+      blockedAddressReason("2001:0:4136:e378:8000:63bf:3f57:fefe"),
+    ).not.toBeNull(); // client 192.168.1.1
+    // Public embeddings still resolve to a crawlable address.
+    expect(blockedAddressReason("2002:808:808::1")).toBeNull(); // 8.8.8.8
+    expect(blockedAddressReason("2001:0:4136:e378:8000:63bf:f7f7:f7f7")).toBeNull();
+  });
+
+  it("keeps the metadata floor closed against a tunnelled 169.254.169.254", () => {
+    // allowPrivate is allowed to admit 6to4-wrapped loopback, exactly as it
+    // admits plain 127.0.0.1 — the fixture server is the whole point of it.
+    expect(blockedAddressReason("2002:7f00:1::1", { allowPrivate: true })).toBeNull();
+    // But the floor is not a policy the hatch can relax, and a spelling the
+    // floor could not read would be a hole in it. a9 fe a9 fe = 169.254.169.254,
+    // and 56 01 56 01 is the same address XOR ff.
+    expect(
+      blockedAddressReason("2002:a9fe:a9fe::", { allowPrivate: true }),
+    ).not.toBeNull();
+    expect(
+      blockedAddressReason("2001:0:4136:e378:8000:63bf:5601:5601", {
+        allowPrivate: true,
+      }),
     ).not.toBeNull();
   });
 

@@ -95,6 +95,10 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * TEST ONLY. Threaded through to url-policy, fetch-page and discovery so the
    * suite can crawl a 127.0.0.1 fixture server. Never wire this to an API
    * field, a CLI flag or an env var.
+   *
+   * It is also the one field that is NOT persisted on the `crawls` row: a
+   * resume must re-assert it in `ResumeOpts.config` rather than inherit it.
+   * See storableConfig.
    */
   allowPrivate?: boolean;
   /**
@@ -249,17 +253,38 @@ function leaseSecondsFor(delayMs: number, batchSize: number): number {
   return Math.max(LEASE_FLOOR_SECONDS, Math.ceil(worstCaseMs / 1000));
 }
 
-/** Attempts a transient failure gets before the URL is marked failed. */
+/** Attempts a retryable failure gets before the URL is marked failed. */
 const MAX_ATTEMPTS = 3;
 
 /**
- * Fetch classes worth trying again: the site did not answer, so we learned
- * nothing about the URL. Everything else *is* an answer — a 404, a block, a
+ * Fetch classes worth trying again. Two different reasons sit in this set, and
+ * both have to hold for a member to belong here.
+ *
+ * `timeout` and `network_error` are the original pair: the site did not answer,
+ * so we learned nothing about the URL. Most classes *are* an answer — a 404, a
  * redirect, a PDF — and asking twice would only be rude.
+ *
+ * `blocked` is the member added in Task 6b, and it is here for the *other*
+ * reason: it is an answer about the CRAWLER, not about the URL. A 429 from a
+ * token bucket says "not at this rate", and the page behind it is usually
+ * served the moment the rate drops — which is exactly what the retry now lands
+ * in, because `HostGate.report` has doubled that host's spacing before the
+ * requeued URL is leased again. Retrying a block at the SAME pace would be the
+ * rudeness this set's rule forbids; retrying it slower is the polite reading of
+ * what the server asked for (rule 9). A deterministic 403 settles in three
+ * paced attempts and one classified row.
+ *
+ * `unsupported_encoding` is deliberately NOT here, and it is the member most
+ * likely to be added by mistake because it reads like a failure. It is an
+ * answer: the server replied, in a coding we cannot read, and it will reply
+ * the same way every time (some CDNs return `br` whatever `accept-encoding`
+ * says). Retrying a deterministic non-answer is three times the load for the
+ * same result, and no amount of backing off changes it.
  */
-const TRANSIENT: ReadonlySet<FetchClass> = new Set<FetchClass>([
+const RETRYABLE: ReadonlySet<FetchClass> = new Set<FetchClass>([
   "timeout",
   "network_error",
+  "blocked",
 ]);
 
 /**
@@ -295,6 +320,10 @@ export interface ResumeOpts {
    * Overrides the config stored on the `crawls` row. Use it to change pacing
    * or raise `maxPages` for the continuation; omit it to resume exactly as the
    * crawl was configured.
+   *
+   * It is also the ONLY way to resume with `allowPrivate` on: the flag is
+   * never persisted, so a resume that needs it (fixture-server tests and gate
+   * scripts) must re-state it here. See storableConfig.
    */
   config?: CrawlConfig;
   signal?: AbortSignal;
@@ -321,13 +350,13 @@ export async function runCrawl(
   config: CrawlConfig,
   signal?: AbortSignal,
 ): Promise<CrawlSummary> {
-  validateConfig(config);
+  validateCrawlConfig(config);
 
   const crawlId = `crawl_${randomUUID()}`;
   await db.insert(crawls).values({
     id: crawlId,
     siteUrl: config.siteUrl,
-    config,
+    config: storableConfig(config),
     rulesetVersion: RULESET_VERSION,
     status: "running",
   });
@@ -366,7 +395,7 @@ export async function resumeCrawl(
   }
 
   const config = opts.config ?? parseStoredConfig(row.config, crawlId);
-  validateConfig(config);
+  validateCrawlConfig(config);
 
   if (opts.reclaimLeases === true) {
     await releaseLeases(db, crawlId, null);
@@ -381,14 +410,55 @@ export async function resumeCrawl(
 }
 
 /**
+ * The config as `crawls.config_jsonb` should hold it: everything except
+ * `allowPrivate` (build-plan §7, "before the first real-site crawl").
+ *
+ * `allowPrivate` is a test-only escape hatch that admits loopback and RFC1918
+ * targets. Persisting it would make it *durable* — every resume of that crawl
+ * would silently re-enable it, months later, in a process nobody was thinking
+ * about, from a row nobody reads. That is exactly the silent fallback this
+ * project forbids (hard rule 7): the dangerous setting would carry itself
+ * forward without anyone re-stating the intent.
+ *
+ * So the row does not carry it, and `parseStoredConfig` does not restore it. A
+ * resume that genuinely needs it — the fixture-server gate scripts, and only
+ * those — re-asserts it in `ResumeOpts.config`, at the call site, in the open.
+ *
+ * The running crawl is unaffected: `execute` gets the caller's config object,
+ * not this copy. Only what outlives the process is trimmed.
+ *
+ * Exported because `runCrawl` is no longer the only writer of a `crawls` row:
+ * the API's queue creates the row when a crawl is ACCEPTED and runs it later
+ * (src/api/service.ts), and it must strip the flag by the same authority rather
+ * than by a second copy of the rule that could drift from this one.
+ */
+export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
+  const { allowPrivate: _allowPrivate, ...rest } = config;
+  return rest;
+}
+
+/**
  * A stored config is data we wrote, but it has been through a jsonb column and
  * possibly a schema change, so it is validated rather than trusted. A resume
  * on a config we cannot read must stop, not guess: guessing here would silently
  * re-crawl a site at the wrong pace.
+ *
+ * `allowPrivate` is deliberately not among the fields read back. `runCrawl`
+ * strips it on the way in (see storableConfig), and a row that has one anyway —
+ * written before this rule, or edited by hand — must not be the thing that
+ * turns it on. Off is the value the escape hatch has unless a caller says
+ * otherwise in this call, which is the whole point of the strip; leaving it
+ * off is the documented behaviour, not a guess covering a failure.
+ *
+ * Exported for the second reader of that column: the API's render endpoint
+ * builds its `RenderPassConfig` from the crawl's own stored config, so the
+ * render pass cannot end up with a different user agent or a different per-host
+ * delay than the crawl it belongs to (rule 9). Its messages name the crawl
+ * rather than a function, because two callers now raise them.
  */
-function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
+export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   if (typeof value !== "object" || value === null) {
-    throw new Error(`resumeCrawl: crawl ${crawlId} has no readable config`);
+    throw new Error(`crawl ${crawlId}: stored config is not readable`);
   }
   const raw = value as Record<string, unknown>;
   const config = {
@@ -398,7 +468,6 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
     userAgent: raw["userAgent"],
     perHostDelayMs: raw["perHostDelayMs"],
     maxConcurrency: raw["maxConcurrency"],
-    allowPrivate: raw["allowPrivate"],
     probeHosts: raw["probeHosts"],
     legacyHosts: raw["legacyHosts"],
     renderBudgetPct: raw["renderBudgetPct"],
@@ -415,16 +484,16 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   ] as const) {
     if (typeof config[field] !== expected) {
       throw new Error(
-        `resumeCrawl: crawl ${crawlId} config.${field} is ${typeof config[field]}, expected ${expected}`,
+        `crawl ${crawlId}: stored config.${field} is ${typeof config[field]}, expected ${expected}`,
       );
     }
   }
   // The optional fields: absent is fine, present-and-wrong is not. A stored
   // `probeHosts: "false"` must not resume as "probe on" (it is truthy) or as
   // "probe off" (a guess) — it must stop.
-  for (const field of ["allowPrivate", "probeHosts"] as const) {
+  for (const field of ["probeHosts"] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
-      throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a boolean`);
+      throw new Error(`crawl ${crawlId}: stored config.${field} is not a boolean`);
     }
   }
   // Same ruling for the render budget: a stored `renderMaxPages: "500"` must
@@ -436,7 +505,7 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
     "renderSamplePerType",
   ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "number") {
-      throw new Error(`resumeCrawl: crawl ${crawlId} config.${field} is not a number`);
+      throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
     }
   }
   if (
@@ -445,13 +514,22 @@ function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
       !config.legacyHosts.every((host) => typeof host === "string"))
   ) {
     throw new Error(
-      `resumeCrawl: crawl ${crawlId} config.legacyHosts is not an array of strings`,
+      `crawl ${crawlId}: stored config.legacyHosts is not an array of strings`,
     );
   }
   return config as CrawlConfig;
 }
 
-function validateConfig(config: CrawlConfig): void {
+/**
+ * Range-check a crawl configuration, throwing on anything a crawl must not be
+ * started with.
+ *
+ * Exported because the API validates a request body BEFORE the crawl row
+ * exists: a `maxPages: 0` supplied over the wire is a 400 with this function's
+ * own message, not a crawl row that is created, queued, and only then found to
+ * be unrunnable.
+ */
+export function validateCrawlConfig(config: CrawlConfig): void {
   const positiveInts = [
     ["maxPages", config.maxPages],
     ["maxDepth", config.maxDepth],
@@ -581,6 +659,27 @@ async function runToCompletion(
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
   });
 
+  /**
+   * The spacing, on the crawl row, for whoever is polling.
+   *
+   * The gate lives in this process and the poller reads the database, so a
+   * number nobody wrote down is a number the operator cannot act on — and
+   * acting on it is the whole point: a crawl that has quietly escalated to 8s
+   * per page looks identical, from `crawl_status`, to one that is merely large.
+   * Written once up front (so the column means "the base, so far" rather than
+   * "unknown" from the first poll) and then only when it MOVES, which is at
+   * most a handful of times per host per crawl.
+   *
+   * At the batch boundary rather than inside `handleOne`: concurrent handlers
+   * would race to write the same value, and one write per batch is enough for a
+   * caller polling every 15-30 seconds.
+   */
+  let reportedSpacingMs = gate.maxSpacingMs();
+  const recordSpacing = async (): Promise<void> => {
+    await db.update(crawls).set({ hostSpacingMs: reportedSpacingMs }).where(eq(crawls.id, crawlId));
+  };
+  await recordSpacing();
+
   // The frontier is the crawl's memory: on a resume these numbers come back
   // non-zero and the run continues against the same budget rather than
   // starting a second crawl inside the first one's row.
@@ -668,10 +767,11 @@ async function runToCompletion(
     item: LeasedUrl,
   ): Promise<{ outcome: BatchOutcome | null; persisted: boolean }> => {
     if (!(await admit())) return { outcome: null, persisted: false };
+    const host = new URL(item.url).host;
     try {
       // Claimed immediately before a fetch we are certainly going to issue —
       // acquiring earlier would burn the host's slot on work we then skip.
-      await gate.acquire(new URL(item.url).host);
+      await gate.acquire(host);
 
       const result = await fetchPage(item.url, {
         userAgent: config.userAgent,
@@ -679,10 +779,28 @@ async function runToCompletion(
         timeoutMs: FETCH_TIMEOUT_MS,
       });
 
-      // A transient failure with attempts left is not written yet: the row for
-      // this URL records its *final* outcome, and writing a timeout now would
-      // win the (crawl_id, url) conflict against the retry that succeeds.
-      if (TRANSIENT.has(result.fetchClass) && item.attempts < MAX_ATTEMPTS) {
+      // The gate hears about it FIRST, and per fetch rather than per batch, so
+      // the escalation is in force for the next ACQUISITION rather than only
+      // for the next batch. Not "the next request", which is what this used to
+      // say and is stronger than the gate can deliver: `acquire` claims a host's
+      // slot and returns, so a sibling handler that already got through it has
+      // its start time fixed, and `pushSlot` only ever moves the slot AFTER it
+      // forward. What the immediacy buys is that no further slot is claimed at
+      // the old spacing. This is the spacing half of the back-pressure; the
+      // window's concurrency half is applied to the batch below (see
+      // politeness).
+      gate.report(host, {
+        fetchClass: result.fetchClass,
+        statusCode: result.statusCode,
+        retryAfterMs: result.retryAfterMs,
+        url: item.url,
+      });
+
+      // A retryable failure with attempts left is not written yet: the row for
+      // this URL records its *final* outcome, and writing a timeout — or a
+      // block — now would win the (crawl_id, url) conflict against the retry
+      // that succeeds.
+      if (RETRYABLE.has(result.fetchClass) && item.attempts < MAX_ATTEMPTS) {
         await failUrl(db, crawlId, item.url, { requeue: true, maxAttempts: MAX_ATTEMPTS });
         return { outcome: toOutcome(result), persisted: false };
       }
@@ -696,8 +814,8 @@ async function runToCompletion(
       // commits this page row — never here, where the row is only buffered.
       // A page whose retries are spent is the loop's to settle instead: it
       // becomes `failed` below, and a completion would overwrite that.
-      await writer.addPage(item, result, analysis, {
-        complete: !TRANSIENT.has(result.fetchClass),
+      await writer.addPage(item, settledResult(result, item, gate.spacingMs(host)), analysis, {
+        complete: !RETRYABLE.has(result.fetchClass),
       });
 
       if (analysis !== null && item.depth < config.maxDepth) {
@@ -714,7 +832,7 @@ async function runToCompletion(
         await enqueue([result.redirectUrl], item.depth, "redirect");
       }
 
-      if (TRANSIENT.has(result.fetchClass)) {
+      if (RETRYABLE.has(result.fetchClass)) {
         // Retries spent. The row is written, and the frontier says so.
         await failUrl(db, crawlId, item.url, { requeue: false, maxAttempts: MAX_ATTEMPTS });
       }
@@ -769,7 +887,11 @@ async function runToCompletion(
         crawlId,
         workerId,
         size,
-        leaseSecondsFor(gate.effectiveDelayMs(), size),
+        // The WIDEST spacing in force, not the configured one: once a host has
+        // been escalated the batch behind it takes proportionally longer, and
+        // a lease sized on the base delay would expire mid-batch and invite a
+        // second worker onto URLs still in flight (see leaseSecondsFor).
+        leaseSecondsFor(gate.maxSpacingMs(), size),
       );
 
       if (batch.length === 0) {
@@ -798,6 +920,10 @@ async function runToCompletion(
         if (result.value.outcome !== null) outcomes.push(result.value.outcome);
       }
       window.onBatchSettled(outcomes);
+      if (gate.maxSpacingMs() !== reportedSpacingMs) {
+        reportedSpacingMs = gate.maxSpacingMs();
+        await recordSpacing();
+      }
       if (errors.length === 1) throw errors[0];
       if (errors.length > 1) {
         throw new AggregateError(errors, `crawl loop: ${errors.length} URLs threw`);
@@ -999,6 +1125,36 @@ async function probeKnownMissing(
     wordCount: analysis?.wordCount ?? null,
     simhash: analysis === null ? null : String(BigInt.asIntN(64, analysis.simhash)),
   });
+}
+
+/**
+ * The result as it should be RECORDED, which is not always the result as it was
+ * fetched.
+ *
+ * One case today: a block whose retries are spent. `fetch_class: 'blocked'`
+ * says a WAF answered; it does not say whether we tried once or three times, or
+ * how far the engine had already backed off when it gave up. Both belong in the
+ * row, because the operator's next decision turns on them — a block at 8s of
+ * spacing after three attempts is a site saying no, not a crawl that went in
+ * too fast, and the answer to it is a conversation with the site's owner rather
+ * than another crawl (rule 9, and the yellow.com.mt lesson).
+ *
+ * Anything `fetchPage` already had to say is kept and appended to, never
+ * overwritten: an ignored `Retry-After` is exactly the kind of thing a reader
+ * of this row needs alongside the block.
+ */
+function settledResult(
+  result: FetchResult,
+  item: LeasedUrl,
+  spacingMs: number,
+): FetchResult {
+  if (result.fetchClass !== "blocked") return result;
+  const status = result.statusCode === null ? "no status" : String(result.statusCode);
+  const attempts = `${item.attempts} attempt${item.attempts === 1 ? "" : "s"}`;
+  const reason =
+    `blocked (${status}) after ${attempts}, spacing reached ${spacingMs}ms` +
+    (result.disallowedReason === null ? "" : `; ${result.disallowedReason}`);
+  return { ...result, disallowedReason: reason };
 }
 
 function toOutcome(result: FetchResult): BatchOutcome {

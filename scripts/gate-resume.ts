@@ -193,7 +193,13 @@ async function main(): Promise<number> {
 
     // ---- Run 2: resume the same crawl id and drain the frontier. --------
     const resumedAt = Date.now();
-    const summary2 = await resumeCrawl(db, crawlId, { reclaimLeases: true });
+    // `config` is re-stated rather than inherited: `allowPrivate` is never
+    // persisted on the crawls row (build-plan §7 / storableConfig), so the
+    // one caller that legitimately needs it says so again, here, in the open.
+    const summary2 = await resumeCrawl(db, crawlId, {
+      config,
+      reclaimLeases: true,
+    });
     const elapsed2 = Date.now() - resumedAt;
 
     const pageRows = await countRows(db, "pages", crawlId);

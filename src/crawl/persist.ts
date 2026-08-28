@@ -430,6 +430,13 @@ export class PageWriter {
       pageType: derivePageType(item.url, this.pageTypePatterns),
       statusCode: fetch.statusCode,
       fetchClass: fetch.fetchClass,
+      // The one field that says WHY, in the fetch layer's own words: the URL
+      // or address the policy refused, the `Location` that was dropped and
+      // what was wrong with it, the `content-encoding` we could not read. A
+      // classified failure with no reason on disk is a row nobody can act on
+      // (hard rule 7), and until this column existed that is what every one of
+      // them was.
+      fetchReason: fetch.disallowedReason,
       contentType: fetch.contentType,
       redirectUrl: fetch.redirectUrl,
       // The join key for the redirect graph. `fetch.redirectUrl` is already

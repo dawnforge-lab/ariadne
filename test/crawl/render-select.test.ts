@@ -317,16 +317,20 @@ describe("selectRenderSet", () => {
    * THE SAMPLE SITE. Twelve healthy pages — no suspect among them — in three
    * cohorts, one of which is assembled from two spellings of "no page type":
    *
-   *   page_type   pages                 sampled (3 lowest by url)
-   *   product     /p/1 /p/2 /p/3 /p/4 /p/5   /p/1 /p/2 /p/3
-   *   blog        /b/1 /b/2 /b/3 /b/4        /b/1 /b/2 /b/3
-   *   (untyped)   /u/1 /u/2 (null), /u/3 ('')  /u/1 /u/2 /u/3
+   *   page_type   pages                        size  sampled (3 lowest by url)
+   *   product     /p/1 /p/2 /p/3 /p/4 /p/5     5     /p/1 /p/2 /p/3
+   *   blog        /b/1 /b/2 /b/3 /b/4          4     /b/1 /b/2 /b/3
+   *   (untyped)   /u/1 /u/2 (null), /u/3 ('')  3     /u/1 /u/2 /u/3
    *
    * The empty string joins the nulls rather than forming a cohort of its own:
    * `coalesce(nullif(page_type, ''), '(untyped)')`, the metric layer's UNTYPED
    * convention (src/rules/metric/cohort.ts).
    *
    * Budget 100% of 12 = 12, above the 9 sampled, so nothing is capped here.
+   * What the three DIFFERENT cohort sizes pin is the order the seats come back
+   * in: largest template first (product 5, then blog 4, then untyped 3), URL
+   * within a template. Nine seats for nine candidates, so no cut happens — this
+   * is the ordering on its own, with the budget held out of the way.
    */
   const SAMPLE_SITE: PageSpec[] = [
     ...[1, 2, 3, 4, 5].map((i) => ({ path: `/p/${i}`, pageType: "product" })),
@@ -347,8 +351,11 @@ describe("selectRenderSet", () => {
 
     expect(result).toEqual<RenderSelection>({
       selected: [
-        url("/b/1"), url("/b/2"), url("/b/3"),
+        // product (5 pages) — the largest template, so it is seated first.
         url("/p/1"), url("/p/2"), url("/p/3"),
+        // blog (4).
+        url("/b/1"), url("/b/2"), url("/b/3"),
+        // (untyped) (3).
         url("/u/1"), url("/u/2"), url("/u/3"),
       ],
       budget: 12,
@@ -356,6 +363,68 @@ describe("selectRenderSet", () => {
       sampled: 9,
       truncated: false,
     });
+  });
+
+  /**
+   * THE GATE SITE — the shape the first real-site crawl actually had, shrunk.
+   *
+   * lavishalice.com produced 196 page types over 551 pages: two or three real
+   * templates plus ~170 collection URLs that `derivePageType` left as singleton
+   * types of their own. 176 candidates competed for 28 seats, and because the
+   * cut was taken in URL order every seat went to `/apps/*` and
+   * `/collections/a-b*` — **zero of the 211 `/products/:slug` pages rendered**,
+   * so the four JavaScript rules came back empty for the biggest template on an
+   * e-commerce site and looked like a pass.
+   *
+   * Here: twenty singleton `/collections/*` types and one twelve-page
+   * `/products/:slug` type, and the paths are chosen so that alphabetical order
+   * puts every singleton ahead of every product. Five seats.
+   *
+   *   old ordering (tier, url)             → c00 c01 c02 c03 c04, 0 products
+   *   new ordering (tier, type_size, url)  → p01 p02 p03, then c00 c01
+   */
+  const GATE_SITE: PageSpec[] = [
+    ...Array.from({ length: 20 }, (_, i) => {
+      const n = String(i).padStart(2, "0");
+      return { path: `/collections/c${n}`, pageType: `collection:c${n}` };
+    }),
+    ...Array.from({ length: 12 }, (_, i) => ({
+      path: `/products/p${String(i + 1).padStart(2, "0")}`,
+      pageType: "/products/:slug",
+    })),
+  ];
+
+  it("spends its seats on the biggest template, not on the front of the alphabet", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, GATE_SITE);
+
+    // 32 pages, budget capped to 5. Candidates: 3 from the product type + 1
+    // from each of the 20 singletons = 23, none of them a suspect — exactly the
+    // gate's predicament (176 candidates, 28 seats, `suspects: 0`).
+    const result = await selectRenderSet(db, crawlId, {
+      renderBudgetPct: 100,
+      renderMaxPages: 5,
+      renderSamplePerType: 3,
+    });
+
+    expect(result).toEqual<RenderSelection>({
+      selected: [
+        // The 12-page template first, all three of its sampled pages — this is
+        // the whole point: three renders that answer for twelve pages.
+        url("/products/p01"), url("/products/p02"), url("/products/p03"),
+        // Then the size-1 types, which tie on size and fall back to URL.
+        url("/collections/c00"), url("/collections/c01"),
+      ],
+      budget: 5,
+      suspects: 0,
+      sampled: 23,
+      truncated: true,
+    });
+
+    // The regression this pins, stated as the claim it is: the largest template
+    // is represented at all. Under the alphabetical cut this count was 0.
+    const products = result.selected.filter((u) => u.includes("/products/"));
+    expect(products).toHaveLength(3);
   });
 
   it("returns the identical selection and stats on a re-run", async () => {
@@ -383,6 +452,11 @@ describe("selectRenderSet", () => {
    * twelve — `/h/1 /h/2 /h/3` ('h' sorts before 's'). Candidates are therefore
    * 5 suspects + 3 sample-only = 8, and the budget is what decides how many of
    * those eight are actually rendered.
+   *
+   * One cohort also means every candidate carries the same `type_size`, so the
+   * cut's middle key ties and the order is tier then URL throughout. That is
+   * deliberate: this site is about the BUDGET, and the template-size ordering
+   * is pinned separately by the gate site above.
    */
   const BUDGET_SITE: PageSpec[] = [
     ...[1, 2, 3, 4, 5, 6, 7].map((i) => ({ path: `/h/${i}` })),

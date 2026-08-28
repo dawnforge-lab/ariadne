@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import { fetchPage } from "../../src/crawl/fetch-page.js";
+import { gzipSync } from "node:zlib";
+import { fetchPage, parseRetryAfter } from "../../src/crawl/fetch-page.js";
 import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
 
 let server: Server;
@@ -8,9 +9,73 @@ let base: string;
 let port: number;
 const OPTS = { userAgent: "AriadneBot-test", allowPrivate: true };
 
+/** The `accept-encoding` the last request to /echo-accept-encoding carried. */
+let lastAcceptEncoding: string | undefined;
+
+/** `<html>…</html>` padded to exactly `bytes`, so a length assertion is exact. */
+function htmlOfSize(bytes: number): string {
+  const shell = "<html><title>z</title></html>";
+  return shell.slice(0, -7) + "x".repeat(bytes - shell.length) + "</html>";
+}
+
 beforeAll(async () => {
   server = createServer((req, res) => {
-    if (req.url === "/ok") {
+    if (req.url === "/gzip-ok") {
+      // 200 html, gzipped on the wire. The decompressed length is what
+      // htmlBytes must report — not the ~60 bytes that actually crossed it.
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from(htmlOfSize(4096), "utf-8")));
+    } else if (req.url === "/gzip-exactly-1mib") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from(htmlOfSize(1024 * 1024), "utf-8")));
+    } else if (req.url === "/gzip-bomb") {
+      // ~5KB on the wire, 8MiB decompressed: under any wire-byte cap, far over
+      // the body cap. The whole point of capping the inflated side.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.alloc(8 * 1024 * 1024, 0x61)));
+    } else if (req.url === "/gzip-lying") {
+      // Claims gzip, sends plain text. zlib refuses it (Z_DATA_ERROR).
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end("<html><title>not actually gzip</title></html>");
+    } else if (req.url === "/brotli") {
+      // A coding we never advertised. The bytes are irrelevant — we cannot
+      // decode the label, so we never look at them.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "br");
+      res.end(Buffer.from([0x1b, 0x00, 0x00, 0x00]));
+    } else if (req.url === "/gzip-dies-midstream") {
+      // Headers, then a partial gzip member, then the socket is destroyed —
+      // the shape a reset connection, a dropped CDN edge or an origin crash
+      // takes when the response was compressed. The inflater has been fed
+      // valid bytes and is waiting for more that will never come.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.write(gzipSync(Buffer.from(htmlOfSize(4096), "utf-8")).subarray(0, 30));
+      setTimeout(() => res.socket?.destroy(), 20);
+    } else if (req.url === "/gzip-dies-clean") {
+      // The other half: a partial gzip member and then a CLEAN end of body.
+      // zlib sees a truncated member (Z_BUF_ERROR) rather than a dead socket.
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from(htmlOfSize(4096), "utf-8")).subarray(0, 30));
+    } else if (req.url === "/gzip-identity") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("content-encoding", "identity");
+      res.end("<html><title>identity</title></html>");
+    } else if (req.url === "/gzip-pdf") {
+      // Gzipped non-HTML: drained unread, so no CPU is spent inflating it.
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-encoding", "gzip");
+      res.end(gzipSync(Buffer.from("%PDF-")));
+    } else if (req.url === "/echo-accept-encoding") {
+      lastAcceptEncoding = req.headers["accept-encoding"] as string | undefined;
+      res.setHeader("content-type", "text/html");
+      res.end("<html></html>");
+    } else if (req.url === "/ok") {
       res.setHeader("content-type", "text/html; charset=utf-8");
       res.setHeader("link", '<https://ex.com/canon>; rel="canonical"');
       res.setHeader("x-robots-tag", "noindex");
@@ -59,6 +124,34 @@ beforeAll(async () => {
       res.statusCode = 503;
       res.setHeader("content-type", "text/html");
       res.end("<html><title>Just a moment...</title></html>");
+    } else if (req.url === "/throttled") {
+      res.statusCode = 429;
+      res.setHeader("retry-after", "2");
+      res.setHeader("content-type", "text/html");
+      res.end("<html>slow down</html>");
+    } else if (req.url === "/throttled-dated") {
+      res.statusCode = 429;
+      res.setHeader("retry-after", new Date(Date.now() + 90_000).toUTCString());
+      res.end("slow down");
+    } else if (req.url === "/throttled-garbage") {
+      res.statusCode = 429;
+      res.setHeader("retry-after", "soon-ish");
+      res.end("slow down");
+    } else if (req.url === "/throttled-past") {
+      res.statusCode = 403;
+      res.setHeader("retry-after", "Wed, 21 Oct 2015 07:28:00 GMT");
+      res.end("no");
+    } else if (req.url === "/unavailable-retry-after") {
+      res.statusCode = 503;
+      res.setHeader("retry-after", "30");
+      res.setHeader("content-type", "text/html");
+      res.end("<html>backend down</html>");
+    } else if (req.url === "/not-found-retry-after") {
+      // A 404 that carries the header anyway. It is not a throttle, and
+      // nothing must slow down because of it.
+      res.statusCode = 404;
+      res.setHeader("retry-after", "600");
+      res.end("nope");
     } else if (req.url === "/latin1") {
       res.setHeader("content-type", "text/html; charset=iso-8859-1");
       res.end(Buffer.from([0x3c, 0x70, 0x3e, 0xe9, 0x3c, 0x2f, 0x70, 0x3e])); // <p>é</p>
@@ -117,6 +210,58 @@ function fixedLookup(address: string): DnsLookupFn {
     else callback(null, address, family);
   };
 }
+
+describe("parseRetryAfter", () => {
+  const NOW = Date.parse("2026-08-28T12:00:00.000Z");
+
+  it("reads delta-seconds", () => {
+    expect(parseRetryAfter("120", NOW)).toEqual({ ms: 120_000, note: null });
+    expect(parseRetryAfter("0", NOW)).toEqual({ ms: 0, note: null });
+    expect(parseRetryAfter("  5  ", NOW)).toEqual({ ms: 5000, note: null });
+  });
+
+  it("reads an HTTP-date", () => {
+    expect(parseRetryAfter("Fri, 28 Aug 2026 12:01:00 GMT", NOW)).toEqual({
+      ms: 60_000,
+      note: null,
+    });
+  });
+
+  it("keeps a hostile delta-seconds readable rather than refusing it", () => {
+    // A year. It is a number, so it is read as one — the CAP is the gate's
+    // job, and this function's job is not to invent a policy of its own.
+    const parsed = parseRetryAfter("31536000", NOW);
+    expect(parsed.ms).toBe(31_536_000_000);
+    expect(parsed.note).toBeNull();
+  });
+
+  it("ignores a date in the past, loudly", () => {
+    const parsed = parseRetryAfter("Wed, 21 Oct 2015 07:28:00 GMT", NOW);
+    expect(parsed.ms).toBe(0);
+    expect(parsed.note).toContain("past");
+  });
+
+  it("ignores what it cannot read, loudly and never as a number", () => {
+    for (const bad of ["soon", "-5", "1.5", "", "   ", "n/a", "Tue, 99 Xxx"]) {
+      const parsed = parseRetryAfter(bad, NOW);
+      expect(parsed.ms, `Retry-After: ${JSON.stringify(bad)}`).toBeNull();
+      expect(parsed.note, `Retry-After: ${JSON.stringify(bad)}`).toContain(
+        "Retry-After",
+      );
+    }
+  });
+
+  it("reads a bare number as seconds, never as a year", () => {
+    // `Date.parse("2026")` is midnight on New Year's Day 2026. RFC 9110 says
+    // this is 2026 seconds, and a lenient date parser reaching it would be a
+    // back-off measured in months.
+    expect(parseRetryAfter("2026", NOW)).toEqual({ ms: 2_026_000, note: null });
+  });
+
+  it("says nothing at all when there was no header", () => {
+    expect(parseRetryAfter(null, NOW)).toEqual({ ms: null, note: null });
+  });
+});
 
 describe("fetchPage", () => {
   it("classifies a 200 html page and parses headers", async () => {
@@ -185,6 +330,110 @@ describe("fetchPage", () => {
     expect((await fetchPage(`${base}/pdf`, OPTS)).fetchClass).toBe("non_html");
   });
 
+  // Build-plan §7 "before the first real-site crawl", item 1. Every one of
+  // these bites on the open internet and none of them on a fixture server that
+  // does not compress.
+  describe("gzip transport encoding", () => {
+    it("asks for gzip", async () => {
+      lastAcceptEncoding = undefined;
+      const r = await fetchPage(`${base}/echo-accept-encoding`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(lastAcceptEncoding).toBe("gzip");
+    });
+
+    it("inflates a gzipped page and reports the decompressed size", async () => {
+      const r = await fetchPage(`${base}/gzip-ok`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(r.body).toContain("<title>z</title>");
+      expect(r.body?.length).toBe(4096);
+      // Not the wire bytes: gzip of 4KB of 'x' is a couple of dozen bytes.
+      expect(r.htmlBytes).toBe(4096);
+    });
+
+    it("accepts a gzipped body of exactly 1MiB decompressed", async () => {
+      const r = await fetchPage(`${base}/gzip-exactly-1mib`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(r.htmlBytes).toBe(1024 * 1024);
+      expect(r.body?.length).toBe(1024 * 1024);
+    });
+
+    it("refuses a body that expands past the cap — classified, not truncated", async () => {
+      const r = await fetchPage(`${base}/gzip-bomb`, OPTS);
+      // The failure is classified. A page row holding the first MiB of a bomb
+      // would read to every rule as a real 8MiB-of-nothing page.
+      expect(r.fetchClass).toBe("too_large");
+      expect(r.body).toBeNull();
+      expect(r.htmlBytes).toBe(1024 * 1024);
+      expect(r.statusCode).toBe(200);
+    });
+
+    it("classifies a content-encoding we never advertised, and names it", async () => {
+      const r = await fetchPage(`${base}/brotli`, OPTS);
+      // Its own class, NOT network_error: the failure is deterministic, and
+      // network_error is the retry bucket. Asking a CDN that ignores
+      // accept-encoding three times gets three identical non-answers.
+      expect(r.fetchClass).toBe("unsupported_encoding");
+      expect(r.body).toBeNull();
+      expect(r.disallowedReason).toBe("unsupported content-encoding (br)");
+    });
+
+    it("classifies a body that claims gzip and is not", async () => {
+      const r = await fetchPage(`${base}/gzip-lying`, OPTS);
+      expect(r.fetchClass).toBe("network_error");
+      expect(r.body).toBeNull();
+    });
+
+    /**
+     * Regression, and the reason the inflater is wired with `stream.pipeline`
+     * rather than `body.pipe(gunzip)`.
+     *
+     * `Readable.pipe` does not forward SOURCE errors to the destination, so a
+     * body that died mid-stream left the inflater neither ended nor errored
+     * and the capped read never settled: `fetchPage` hung past its own
+     * deadline, the URL got NO classified row at all (hard rule 7), and the
+     * worker's byte reservation was never released. Measured at >8s against
+     * 77ms for the identical response without `content-encoding`.
+     *
+     * The assertion is on the wall clock as much as on the class: the bug was
+     * not a wrong verdict, it was no verdict ever.
+     */
+    it("classifies a gzipped body that dies mid-stream, and does not hang", async () => {
+      const started = Date.now();
+      const r = await fetchPage(`${base}/gzip-dies-midstream`, {
+        ...OPTS,
+        timeoutMs: 2_000,
+      });
+      const elapsed = Date.now() - started;
+
+      expect(r.fetchClass).toBe("network_error");
+      expect(r.body).toBeNull();
+      // Well inside the deadline: the socket death is what ends the read, not
+      // a timer, and certainly not never.
+      expect(elapsed).toBeLessThan(1_000);
+    });
+
+    it("classifies a truncated gzip member that ends cleanly", async () => {
+      const r = await fetchPage(`${base}/gzip-dies-clean`, { ...OPTS, timeoutMs: 2_000 });
+      // zlib's Z_BUF_ERROR. Stays `network_error` — a body that stopped early
+      // is a transport failure and worth another attempt, unlike a coding we
+      // were never able to read (see `unsupported_encoding`).
+      expect(r.fetchClass).toBe("network_error");
+      expect(r.body).toBeNull();
+    });
+
+    it("reads content-encoding: identity as no encoding", async () => {
+      const r = await fetchPage(`${base}/gzip-identity`, OPTS);
+      expect(r.fetchClass).toBe("ok");
+      expect(r.body).toContain("identity");
+    });
+
+    it("still classifies a gzipped non-html body as non_html", async () => {
+      const r = await fetchPage(`${base}/gzip-pdf`, OPTS);
+      expect(r.fetchClass).toBe("non_html");
+      expect(r.body).toBeNull();
+    });
+  });
+
   it("treats application/xhtml+xml as html", async () => {
     const r = await fetchPage(`${base}/xhtml`, OPTS);
     expect(r.fetchClass).toBe("ok");
@@ -212,6 +461,53 @@ describe("fetchPage", () => {
     expect(
       (await fetchPage(`${base}/unavailable-challenge`, OPTS)).fetchClass,
     ).toBe("blocked");
+  });
+
+  it("reads Retry-After off a throttle, in both header formats", async () => {
+    const seconds = await fetchPage(`${base}/throttled`, OPTS);
+    expect(seconds.fetchClass).toBe("blocked");
+    expect(seconds.retryAfterMs).toBe(2000);
+    expect(seconds.disallowedReason).toBeNull();
+
+    const dated = await fetchPage(`${base}/throttled-dated`, OPTS);
+    expect(dated.fetchClass).toBe("blocked");
+    // ~90s, less whatever the round trip and the header's second-resolution
+    // truncation cost. Bounded on both sides, loosely — this is a clock.
+    expect(dated.retryAfterMs).toBeGreaterThan(80_000);
+    expect(dated.retryAfterMs).toBeLessThanOrEqual(90_000);
+  });
+
+  it("reads Retry-After off a 503 too", async () => {
+    const r = await fetchPage(`${base}/unavailable-retry-after`, OPTS);
+    expect(r.fetchClass).toBe("server_error");
+    expect(r.retryAfterMs).toBe(30_000);
+  });
+
+  it("ignores an unreadable Retry-After loudly, and never as a number", async () => {
+    const r = await fetchPage(`${base}/throttled-garbage`, OPTS);
+    expect(r.fetchClass).toBe("blocked");
+    expect(r.retryAfterMs).toBeNull(); // not NaN, not 0
+    expect(r.disallowedReason).toContain("Retry-After");
+    expect(r.disallowedReason).toContain("soon-ish");
+  });
+
+  it("ignores a Retry-After naming a time in the past, and says so", async () => {
+    const r = await fetchPage(`${base}/throttled-past`, OPTS);
+    expect(r.fetchClass).toBe("blocked");
+    expect(r.retryAfterMs).toBe(0);
+    expect(r.disallowedReason).toContain("Retry-After");
+  });
+
+  it("does not read Retry-After off a class that is not a throttle", async () => {
+    const r = await fetchPage(`${base}/not-found-retry-after`, OPTS);
+    expect(r.fetchClass).toBe("client_error");
+    expect(r.retryAfterMs).toBeNull();
+    expect(r.disallowedReason).toBeNull();
+  });
+
+  it("carries no Retry-After when the response carried none", async () => {
+    expect((await fetchPage(`${base}/challenge`, OPTS)).retryAfterMs).toBeNull();
+    expect((await fetchPage(`${base}/ok`, OPTS)).retryAfterMs).toBeNull();
   });
 
   it("classifies 4xx/5xx", async () => {

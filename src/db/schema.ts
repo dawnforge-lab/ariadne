@@ -9,12 +9,35 @@ export const crawls = pgTable("crawls", {
   siteUrl: text("site_url").notNull(),
   config: jsonb("config_jsonb").notNull(),
   rulesetVersion: text("ruleset_version").notNull(),
-  status: text("status").notNull().default("running"), // running|finished|failed|cancelled
+  // queued|running|finished|failed|cancelled. `running` and the three terminal
+  // values are written by the crawl loop (src/crawl/loop.ts, `CrawlSummary
+  // .status`); `queued` is written by the API's crawl queue, which creates the
+  // row when a crawl is ACCEPTED and runs it when its turn comes
+  // (src/api/service.ts) — so a queued row is durable work that no process has
+  // started, and it is never a summary outcome.
+  //
+  // Free text, no enum constraint, so adding a value is a code change and not a
+  // migration — which means every consumer must be audited by hand when one is
+  // added. Today there are exactly two readers: `runRenderPass`'s liveness
+  // guard (src/crawl/render/run-render.ts), which refuses `running` and
+  // `queued`, and the API's crawl serialisation. No rule reads this column.
+  status: text("status").notNull().default("running"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   pagesCrawled: integer("pages_crawled").notNull().default(0),
   pagesTotal: integer("pages_total"),
   renderPassCount: integer("render_pass_count").notNull().default(0),
+  // The widest per-host spacing the crawl's politeness gate has escalated to,
+  // in milliseconds — `HostGate.maxSpacingMs()`, written by the crawl loop when
+  // it changes so a poller can watch it move (src/crawl/loop.ts).
+  //
+  // Nullable, and the null is load-bearing: it means "no crawl loop ever
+  // reported one" — a row that predates this column, or a crawl that failed
+  // before its gate existed. It is NOT zero, which would be a real spacing (a
+  // crawl configured with perHostDelayMs 0 and never throttled). A reader that
+  // conflates the two would report an unpaced crawl as un-instrumented, or the
+  // reverse (hard rule 7).
+  hostSpacingMs: integer("host_spacing_ms"),
   // Three crawl-level evidence blobs the query rules read instead of fetching
   // (hard rule 3: rules read the database). All three are nullable, and a null
   // does NOT mean the same thing in each — what a rule may conclude from one
@@ -51,7 +74,22 @@ export const pages = pgTable("pages", {
   urlNormalised: text("url_normalised").notNull(),
   pageType: text("page_type"),
   statusCode: integer("status_code"),
-  fetchClass: text("fetch_class").notNull(),   // ok|redirect|client_error|server_error|blocked|timeout|network_error|non_html|too_large
+  // ok|redirect|client_error|server_error|blocked|timeout|network_error|
+  // non_html|too_large|unsupported_encoding|disallowed — the `FetchClass`
+  // union in src/crawl/fetch-page.ts is the authority; this comment tracks it.
+  fetchClass: text("fetch_class").notNull(),
+  // Why this row has no usable body or redirect target, in the words the fetch
+  // layer produced (`FetchResult.disallowedReason`). Null for a page that
+  // simply worked, and null for a failure whose class already says everything
+  // — a 404 needs no sentence.
+  //
+  // It exists because a class alone is not an explanation, and hard rule 7
+  // asks for the error to be *visible*, not merely counted: `unsupported_
+  // encoding` without "(br)" and `redirect` with a silently dropped Location
+  // are both rows a reader can only guess at. Tenant-safe by construction —
+  // the fetch layer builds these from the response and the URL policy, never
+  // from a stack trace or a local path.
+  fetchReason: text("fetch_reason"),
   contentType: text("content_type"),
   redirectUrl: text("redirect_url"),
   // The same target as `redirect_url`, put through `normalizeUrl` — the

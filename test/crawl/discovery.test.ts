@@ -34,6 +34,25 @@ let flakyRobotsHits = 0;
 let paceServer: Server;
 let pace: string;
 
+/**
+ * Two sites for the origin-variant matrix (build-plan §7, item 4), addressed
+ * by NAME rather than by 127.0.0.1 so `www.` spellings are real hostnames.
+ *
+ *  - `apexRules`: serves its rules at the apex. Rules origin = the apex.
+ *  - `wwwRules`:  301s /robots.txt to its own `www.` host, which is where the
+ *    rules are actually served. Rules origin = the `www.` host. This is the
+ *    commonest real shape (apex redirects to www) and the only way to get the
+ *    www -> apex direction out of a socket we can bind.
+ */
+let apexRulesServer: Server;
+let apexRules: string;
+let apexRulesWww: string;
+let apexRulesPort = 0;
+
+let wwwRulesServer: Server;
+let wwwRules: string;
+let wwwRulesWww: string;
+
 function xml(res: ServerResponse, body: string): void {
   res.setHeader("content-type", "application/xml");
   res.end(body);
@@ -61,6 +80,18 @@ async function listen(server: Server): Promise<string> {
   const addr = server.address();
   const port = typeof addr === "object" && addr !== null ? addr.port : 0;
   return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * Listen on every interface and address the site by name, so `localhost` and
+ * `www.localhost` both reach it (`www.localhost` resolves to ::1 here). An IP
+ * literal has no `www.` spelling, so the variant matrix needs a name.
+ */
+async function listenByName(server: Server): Promise<{ url: string; port: number }> {
+  await new Promise<void>((r) => server.listen(0, r));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  return { url: `http://localhost:${port}`, port };
 }
 
 beforeAll(async () => {
@@ -214,11 +245,53 @@ beforeAll(async () => {
     }
   });
   pace = await listen(paceServer);
+
+  apexRulesServer = createServer((req, res) => {
+    if (req.url === "/robots.txt") {
+      res.setHeader("content-type", "text/plain");
+      res.end("User-agent: *\nDisallow: /admin\n");
+    } else {
+      res.statusCode = 404;
+      res.end("nope");
+    }
+  });
+  const apexListen = await listenByName(apexRulesServer);
+  apexRules = apexListen.url;
+  apexRulesPort = apexListen.port;
+  apexRulesWww = apexRules.replace("http://", "http://www.");
+
+  wwwRulesServer = createServer((req, res) => {
+    if (req.url !== "/robots.txt") {
+      res.statusCode = 404;
+      res.end("nope");
+      return;
+    }
+    if (req.headers.host?.startsWith("www.") === true) {
+      res.setHeader("content-type", "text/plain");
+      res.end("User-agent: *\nDisallow: /admin\n");
+      return;
+    }
+    // Apex -> www, the shape most real sites have. Discovery follows redirects
+    // on robots.txt, and the rules origin becomes wherever the bytes came from.
+    res.statusCode = 301;
+    res.setHeader("location", `${wwwRulesWww}/robots.txt`);
+    res.end();
+  });
+  const wwwListen = await listenByName(wwwRulesServer);
+  wwwRules = wwwListen.url;
+  wwwRulesWww = wwwRules.replace("http://", "http://www.");
 });
 
 afterAll(async () => {
   await closeFetchAgents();
-  for (const server of [siteServer, bareServer, flakyServer, paceServer]) {
+  for (const server of [
+    siteServer,
+    bareServer,
+    flakyServer,
+    paceServer,
+    apexRulesServer,
+    wwwRulesServer,
+  ]) {
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
   }
@@ -308,6 +381,95 @@ describe("discover: robots.txt", () => {
     expect(d.robots.attempts).toBe(1);
     expect(d.robots.note).toContain("169.254.169.254");
     expect(d.sitemapEntries).toEqual([]);
+  });
+});
+
+/**
+ * Build-plan §7 "before the first real-site crawl", item 4: the www/apex
+ * rewrite in `RobotsInfo.isAllowed` (`onRulesOrigin`).
+ *
+ * What the rewrite claims: a URL `isSameOrigin` admits into the crawl is
+ * judged by the rules as if it were written on the origin robots.txt was read
+ * from. Without it robots-parser answers `undefined` for the second spelling
+ * of the same site — and `undefined` means "no rule forbids this", so
+ * `Disallow: /admin` would silently stop applying to exactly the URLs the
+ * crawler will go on to fetch (hard rule 9, and the worst kind of failure: a
+ * false all-clear).
+ *
+ * There is one fixture test of this already (loop.test.ts, end to end through
+ * a crawl). This is the matrix: both directions of the rewrite, and — as much
+ * as it matters — the spellings it must NOT rewrite, because a rewrite that
+ * caught too much would apply our site's rules to somebody else's URLs.
+ *
+ * Both halves run against real bytes off a real socket; the rules origin is
+ * whatever the redirect chain settled on, exactly as in a crawl.
+ *
+ * NOT covered here, and deliberately: verification against a real www/apex
+ * site on the open internet. That is the other half of build-plan §7 item 4
+ * and it is recorded at the Phase 6 Task 7 gate, against the gate's real
+ * target — a loopback fixture cannot prove that the shape we model is the
+ * shape sites actually serve. The http -> https upgrade leg is in the same
+ * position for a narrower reason: it is only ever taken on the default ports
+ * (80 -> 443), which a test server cannot bind.
+ */
+describe("discover: robots origin-variant matrix", () => {
+  it("applies apex rules to the www spelling, and only to it", async () => {
+    const d = await discover(apexRules, OPTS);
+    expect(d.robots.outcome).toBe("read");
+
+    // The rules origin itself: the baseline the rest is measured against.
+    expect(d.robots.isAllowed(`${apexRules}/admin/x`)).toBe(false);
+    expect(d.robots.isAllowed(`${apexRules}/public`)).toBe(true);
+
+    // apex -> www. The crawl admits this spelling (isSameOrigin), so it must
+    // not escape the rules.
+    expect(d.robots.isAllowed(`${apexRulesWww}/admin/x`)).toBe(false);
+    // …and the rewrite judges, it does not blanket-refuse: an allowed path on
+    // the variant is still allowed.
+    expect(d.robots.isAllowed(`${apexRulesWww}/public`)).toBe(true);
+
+    // A subdomain is a different site. `www.` is the one label the crawl
+    // boundary treats as noise; `shop.` is not, so our rules do not travel
+    // there and robots-parser's "no rule of mine applies" stands.
+    expect(d.robots.isAllowed(`http://shop.localhost:${apexRulesPort}/admin/x`)).toBe(
+      true,
+    );
+    expect(
+      d.robots.isAllowed(`http://www.shop.localhost:${apexRulesPort}/admin/x`),
+    ).toBe(true);
+
+    // Another port is another origin — and one the crawl would not follow
+    // either, so judging it under these rules would be a claim about a site we
+    // never looked at.
+    expect(d.robots.isAllowed(`http://localhost:${apexRulesPort + 1}/admin/x`)).toBe(
+      true,
+    );
+    expect(d.robots.isAllowed(`http://www.localhost:${apexRulesPort + 1}/admin/x`)).toBe(
+      true,
+    );
+
+    // Same host, same port, different scheme. This is NOT the http -> https
+    // upgrade (that is defined on 80 -> 443 only), so it is a different origin
+    // and stays unjudged — consistent with the crawl boundary, which will not
+    // admit it either.
+    expect(d.robots.isAllowed(`https://www.localhost:${apexRulesPort}/admin/x`)).toBe(
+      true,
+    );
+  });
+
+  it("applies www rules to the apex spelling when robots.txt redirected there", async () => {
+    // /robots.txt 301s apex -> www, so the rules origin is the www host even
+    // though the crawl was seeded at the apex. The rewrite has to run in this
+    // direction too, and this is the direction real sites are in.
+    const d = await discover(wwwRules, OPTS);
+    expect(d.robots.outcome).toBe("read");
+
+    expect(d.robots.isAllowed(`${wwwRulesWww}/admin/x`)).toBe(false);
+    // www -> apex: the seed spelling, judged by the rules its own redirect
+    // pointed at.
+    expect(d.robots.isAllowed(`${wwwRules}/admin/x`)).toBe(false);
+    expect(d.robots.isAllowed(`${wwwRules}/public`)).toBe(true);
+    expect(d.robots.isAllowed(`${wwwRulesWww}/public`)).toBe(true);
   });
 });
 

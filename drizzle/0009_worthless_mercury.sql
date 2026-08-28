@@ -1,0 +1,1 @@
+ALTER TABLE "crawls" ADD COLUMN "host_spacing_ms" integer;

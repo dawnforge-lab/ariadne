@@ -404,7 +404,12 @@ describe("the fixture site end to end", () => {
   it("crawls cleanly and reaches every fixture", () => {
     expect(summary.status).toBe("finished");
     expect(summary.frontier.pending).toBe(0);
-    expect(summary.frontier.failed).toBe(0);
+    // Exactly one: `/status/blocked`, the fixture that answers 403 to every
+    // crawler. A block is retried three times under widening per-host spacing
+    // (Task 6b) and then settles as a classified `blocked` page row and a
+    // FAILED frontier row — the same disposition a spent timeout gets, because
+    // in both cases the URL's own outbound links were never read.
+    expect(summary.frontier.failed).toBe(1);
 
     // Asserted from the `pages` rows, not from the findings: a fixture that
     // fires nothing (the control) still has to have been fetched, and a fixture
@@ -703,8 +708,11 @@ describe("the fixture site end to end", () => {
         pageUrl: `${app.base}${path}`,
         inSitemap: true,
         discoveredVia: "sitemap",
-        // No `caveat`: the crawl failed no URL, so no page's outbound links went
-        // unread and nothing qualifies the finding.
+        // The caveat, qualifying the finding: one URL (`/status/blocked`, the
+        // 403 fixture) was never read, so its outbound links are unknown and
+        // "nothing links to this page" is a verdict with one page missing from
+        // the evidence. That is the caveat doing its job, not a defect.
+        caveat: { failedPages: 1 },
       });
     }
   });

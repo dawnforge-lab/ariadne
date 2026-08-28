@@ -69,12 +69,37 @@ let flappyHits = 0;
 let alwaysBrokenHits = 0;
 
 /**
+ * A site that throttles:
+ *   /always-429 -> 429 for ever (the retries are spent, one blocked row)
+ *   /flaky-403  -> 403 twice, then a real page (the third attempt lands)
+ * Both are linked from `/`, and robots.txt 404s (absent -> allow all). This is
+ * the Shopify/Cloudflare shape: a token bucket that refuses a burst and serves
+ * the same URL happily once the crawler has slowed down.
+ */
+let throttleServer: Server;
+let throttle: string;
+let always429Hits = 0;
+let flaky403Hits = 0;
+
+/**
  * A site whose catch-all answers 200 with the same "not found" template for
  * every unknown URL — the soft-404 site the known-404 probe exists to catch.
  * robots.txt 404s (absent -> allow all) so the crawl itself is ordinary.
  */
 let soft404Server: Server;
 let soft404: string;
+
+/**
+ * A site whose pages answer with a `content-encoding` we never advertised.
+ * The commonest real shape is a CDN that ignores `accept-encoding` and serves
+ * brotli regardless — a deterministic non-answer, and the reason
+ * `unsupported_encoding` must stay out of the retry bucket. robots.txt 404s
+ * (absent -> allow all) so the crawl itself is ordinary.
+ */
+let brotliServer: Server;
+let brotli: string;
+/** Every non-robots path the brotli site was asked for, in order. */
+let brotliHits: string[] = [];
 
 /**
  * Set by the poison test: the next `/` request deletes the running crawl row
@@ -250,6 +275,35 @@ beforeAll(async () => {
   });
   broken = await listen(brokenServer);
 
+  throttleServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/always-429") {
+      always429Hits += 1;
+      res.writeHead(429, { "content-type": "text/html", "retry-after": "0" });
+      res.end("<html>slow down</html>");
+      return;
+    }
+    if (path === "/flaky-403") {
+      flaky403Hits += 1;
+      if (flaky403Hits <= 2) {
+        res.writeHead(403, { "content-type": "text/html" });
+        res.end("<html>nope</html>");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html("<p>served once we slowed down</p>"));
+      return;
+    }
+    if (path === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html(`<a href="/always-429">a</a><a href="/flaky-403">f</a>`));
+      return;
+    }
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("no");
+  });
+  throttle = await listen(throttleServer);
+
   soft404Server = createServer((req, res) => {
     const path = req.url ?? "";
     if (path === "/robots.txt") {
@@ -268,6 +322,21 @@ beforeAll(async () => {
   });
   soft404 = await listen(soft404Server);
 
+  brotliServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/robots.txt") {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no robots here");
+      return;
+    }
+    brotliHits.push(path);
+    // A coding we never asked for. The bytes are irrelevant: we cannot decode
+    // the label, so we never look at them.
+    res.writeHead(200, { "content-type": "text/html", "content-encoding": "br" });
+    res.end(Buffer.from([0x1b, 0x00, 0x00, 0x00]));
+  });
+  brotli = await listen(brotliServer);
+
   db = createDb(databaseUrl());
   await runMigrations(db);
 });
@@ -282,7 +351,11 @@ afterAll(async () => {
   await new Promise<void>((r) => flakyServer.close(() => r()));
   await new Promise<void>((r) => closedServer.close(() => r()));
   await new Promise<void>((r) => brokenServer.close(() => r()));
+  throttleServer.closeAllConnections();
+  await new Promise<void>((r) => throttleServer.close(() => r()));
   await new Promise<void>((r) => variantServer.close(() => r()));
+  brotliServer.closeAllConnections();
+  await new Promise<void>((r) => brotliServer.close(() => r()));
   await new Promise<void>((r) => soft404Server.close(() => r()));
 });
 
@@ -448,6 +521,48 @@ describe("runCrawl", () => {
     expect(summary.frontier.failed).toBe(1); // /always-broken
     expect(summary.frontier.pending).toBe(0);
     expect(rows).toHaveLength(3);
+  });
+
+  it("retries a block under widening spacing instead of ending the page", async () => {
+    always429Hits = 0;
+    flaky403Hits = 0;
+    // A real per-host delay, so the escalation has something to double. Kept
+    // tiny: what is under test is the ratchet, not the wall clock.
+    const started = Date.now();
+    const summary = await crawl(config({ siteUrl: throttle, perHostDelayMs: 5 }));
+    const elapsed = Date.now() - started;
+
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    const byUrl = new Map(rows.map((r) => [r.url, r]));
+
+    // Throttled twice, then served: a 429 is no longer a permanent verdict on
+    // the URL, and only the settling attempt is written.
+    expect(flaky403Hits).toBe(3);
+    expect(byUrl.get(`${throttle}/flaky-403`)?.fetchClass).toBe("ok");
+
+    // Throttled for ever: three paced attempts, then ONE classified row.
+    expect(always429Hits).toBe(3);
+    const blockedRow = byUrl.get(`${throttle}/always-429`);
+    expect(blockedRow?.fetchClass).toBe("blocked");
+    expect(blockedRow?.statusCode).toBe(429);
+    // The row says what happened AND how hard the engine had backed off by the
+    // time it gave up — the number an operator needs to decide whether to
+    // re-crawl slower or stop and call the site's owner.
+    const reason = blockedRow?.fetchReason ?? "";
+    expect(reason).toContain("blocked (429)");
+    expect(reason).toContain("3 attempts");
+    expect(reason).toMatch(/spacing reached \d+ms/);
+
+    // The frontier agrees: the retried URL is done, the exhausted one failed.
+    expect(summary.frontier.done).toBe(2); // / and /flaky-403
+    expect(summary.frontier.failed).toBe(1); // /always-429
+    expect(summary.frontier.pending).toBe(0);
+    expect(rows).toHaveLength(3);
+
+    // Five blocks on one host at a 5ms base is 10+20+40+80+160ms of ratchet —
+    // real spacing, and nowhere near a stalled crawl. The upper bound is what
+    // says the escalation is capped and does not compound per request.
+    expect(elapsed).toBeLessThan(30_000);
   });
 
   it("applies robots rules to same-site origin variants", async () => {
@@ -693,6 +808,7 @@ describe("resumeCrawl", () => {
         body: null,
         htmlBytes: 32,
         responseTimeMs: 1,
+        retryAfterMs: null,
         canonicalHeader: null,
         xRobotsTag: null,
         disallowedReason: null,
@@ -733,5 +849,117 @@ describe("resumeCrawl", () => {
       leased: 0,
       done: 6,
     });
+  });
+});
+
+/**
+ * `unsupported_encoding` is an ANSWER, not a failed attempt.
+ *
+ * It was originally classified `network_error`, which is in loop's TRANSIENT
+ * set — so every page of a CDN that ignores `accept-encoding` was fetched three
+ * times for three identical undecodable replies. Triple the load on someone
+ * else's origin for no information, which is exactly what rule 9 forbids and
+ * what TRANSIENT's own docblock says the set is for.
+ */
+describe("unsupported_encoding is not retried", () => {
+  it("fetches an undecodable page once and records why", async () => {
+    brotliHits = [];
+    const summary = await crawl(config({ siteUrl: brotli, probeHosts: false }));
+
+    const rows = await db
+      .select()
+      .from(pages)
+      .where(and(eq(pages.crawlId, summary.crawlId), eq(pages.url, `${brotli}/`)));
+    const row = rows[0];
+    expect(row?.fetchClass).toBe("unsupported_encoding");
+    // Persisted, so the row is actionable rather than an unexplained failure.
+    expect(row?.fetchReason).toBe("unsupported content-encoding (br)");
+
+    // ONE fetch of the page, not MAX_ATTEMPTS. This is the whole point of the
+    // class. (The other hit is the known-404 probe on the way out, which asks
+    // for a URL that does not exist and is not a retry of anything.)
+    expect(brotliHits.filter((path) => path === "/")).toEqual(["/"]);
+    const state = await db
+      .select({ state: frontier.state, attempts: frontier.attempts })
+      .from(frontier)
+      .where(and(eq(frontier.crawlId, summary.crawlId), eq(frontier.url, `${brotli}/`)));
+    expect(state[0]?.attempts).toBe(1);
+    // And it is `done`: we have our answer, poor as it is. A `failed` row would
+    // invite a resume to ask again.
+    expect(state[0]?.state).toBe("done");
+  });
+});
+
+/**
+ * Build-plan §7 "before the first real-site crawl", item 3.
+ *
+ * `allowPrivate` is a test-only escape hatch. The defect these pin is that it
+ * used to be written into `crawls.config_jsonb` with everything else, so every
+ * resume of that crawl — days later, from a row nobody reads — silently
+ * switched it back on. A dangerous setting that carries itself forward without
+ * anyone re-stating the intent is the silent fallback hard rule 7 forbids.
+ */
+describe("allowPrivate is not persisted", () => {
+  it("is stripped from the config the crawls row stores", async () => {
+    const summary = await crawl(config());
+    const rows = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
+    const stored = rows[0]?.config as Record<string, unknown>;
+
+    // Gone entirely, not stored as false: the row should not carry the field
+    // at all, so nobody reading it can mistake it for a decision.
+    expect(stored).not.toHaveProperty("allowPrivate");
+    // …and nothing else was lost on the way out.
+    expect(stored).toMatchObject({
+      siteUrl: base,
+      maxPages: 100,
+      maxDepth: 10,
+      userAgent: "AriadneBot-test",
+      perHostDelayMs: 0,
+      maxConcurrency: 4,
+    });
+  });
+
+  it("does not come back on a resume that does not re-assert it", async () => {
+    const first = await crawl(config());
+    expect(first.pagesCrawled).toBeGreaterThan(0);
+
+    // No `config` — so the resume runs on what the row holds, and the row does
+    // not hold the escape hatch. The fixture server is on 127.0.0.1, so
+    // url-policy now refuses its robots.txt, which is complete disallow
+    // (RFC 9309 §2.3.1.4) and a `failed` crawl rather than a quiet no-op.
+    const resumed = await resumeCrawl(db, first.crawlId, { reclaimLeases: true });
+    expect(resumed.status).toBe("failed");
+    expect(resumed.note).toMatch(/robots\.txt unreachable/);
+    expect(resumed.note).toMatch(/refused by URL policy/);
+  });
+
+  it("comes back when the caller re-asserts it in the resume config", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    expect(first.status).toBe("cancelled");
+
+    // The same resume, with the hatch re-stated at the call site — explicit,
+    // in the open, and scoped to this call. That is the whole contract.
+    const resumed = await resumeCrawl(db, first.crawlId, {
+      config: config({ perHostDelayMs: 0 }),
+      reclaimLeases: true,
+    });
+    expect(resumed.status).toBe("finished");
+  });
+
+  it("ignores an allowPrivate left in a stored config by an older writer", async () => {
+    const summary = await crawl(config());
+    // A row as the pre-strip code would have written it — or as a hand edit
+    // would. Reading it back must not be the thing that turns the hatch on.
+    const stored = { ...(config() as unknown as Record<string, unknown>), allowPrivate: true };
+    await db
+      .update(crawls)
+      .set({ config: stored })
+      .where(eq(crawls.id, summary.crawlId));
+
+    const resumed = await resumeCrawl(db, summary.crawlId, { reclaimLeases: true });
+    expect(resumed.status).toBe("failed");
+    expect(resumed.note).toMatch(/robots\.txt unreachable/);
   });
 });

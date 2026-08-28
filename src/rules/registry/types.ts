@@ -74,7 +74,7 @@ export type RuleCategory =
 
 interface RuleMeta {
   id: string;               // 'canonical.non-200-target'
-  checkIds: string[];       // ['CHECK-19'] — traces to the sf-audit checklist
+  checkIds: string[];       // ['CHECK-19'] — traces to skills/ariadne-audit/checklist.md
   category: RuleCategory;
   severity: Severity;
   title: string;
