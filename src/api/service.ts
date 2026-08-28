@@ -579,6 +579,13 @@ export class ApiService {
   private readonly allCategories: Set<string>;
   private readonly exportDir: string;
 
+  /**
+   * Crawls this process is currently judging — one rules run at a time, per
+   * crawl. See `runRulesForCrawl` for why the serialisation lives here rather
+   * than in the database.
+   */
+  private readonly judging = new Set<string>();
+
   /** Crawls accepted by this process and not yet started, in FIFO order. */
   private readonly waiting: QueueEntry[] = [];
   private running: RunningCrawl | null = null;
@@ -902,6 +909,51 @@ export class ApiService {
    * an orphan because the page linking to it has not been fetched yet, a
    * sitemap entry "uncrawled" because its turn has not come. Evidence has to be
    * about a crawl that has stopped moving.
+   *
+   * ## And refused while ANOTHER RUN IS JUDGING THE SAME CRAWL
+   *
+   * The status guard above is not enough, because it says nothing about a
+   * second *rules run*. Two overlapping runs on one finished crawl used to be
+   * merely wasteful; since a run deletes the crawl's `issues` rows at the top
+   * and writes its own (see `runRules`), they are destructive. Interleaved,
+   * the second run's delete lands in the middle of the first run's inserts, so
+   * the table ends up holding a SUFFIX of run A beside all of run B — two
+   * judgements in one table with nothing to tell them apart, and a summary
+   * from each describing a table neither of them produced. That is the exact
+   * silently-mixed state the single delete was designed to make impossible,
+   * and the argument for it ("what survives a run is what that run found")
+   * holds only for a single writer. The friendlier outcome — both runs abort
+   * on `issues_dedupe` — is luck, not a guard.
+   *
+   * ## Why the lock is in this process and not in Postgres
+   *
+   * A `pg_advisory_xact_lock` was the obvious answer and it does not work
+   * here: it is released when its transaction ends, and a rules run is not one
+   * transaction. `runRules` issues its `ANALYZE`s, its delete, its page-cursor
+   * selects and its finding inserts as separate autocommitted statements, and
+   * wraps only each metric rule's delete+insert pair. A lock taken inside any
+   * one of those covers that statement and nothing else.
+   *
+   * A SESSION-level `pg_advisory_lock` does span statements — but only for the
+   * connection that took it, and `Db` is a pool that hands out a connection
+   * per statement. Holding one across the run would mean pinning a client for
+   * the run's whole duration and threading it through `runRules`, changing the
+   * rules runner's contract to buy a guard for a case a single-process server
+   * does not have. So the hold lives here, in memory, keyed by crawl id.
+   *
+   * WHAT THAT IS HONEST ABOUT: this serialises runs **within this process
+   * only**. Two Ariadne servers pointed at one database can still interleave
+   * two runs over one crawl, and nothing here would notice. That is the same
+   * boundary the queue already stands on — `markCrawlFailed` refuses work
+   * "held by this server" from process truth and explicitly never claims to
+   * know another process's queue — so this adds no assumption the surface did
+   * not already make. A multi-process deployment needs a database-level lock,
+   * and the place for it is a pinned client inside `runRules`, not here.
+   *
+   * The refusal is a 409 rather than a wait, matching the render path: the
+   * caller asked for a run that would produce a judgement, and the answer
+   * "another run is producing it, ask again" is one an agent can act on, where
+   * a silent block is a request that appears to hang.
    */
   async runRulesForCrawl(crawlId: string): Promise<RunSummary> {
     const row = await this.crawlRow(crawlId);
@@ -912,6 +964,18 @@ export class ApiService {
           `has stopped, or they would judge a site that is still being fetched`,
       );
     }
+    // Check and claim in ONE synchronous step — no `await` between them — so
+    // two callers that both got past the status read cannot both see an
+    // unheld crawl.
+    if (this.judging.has(crawlId)) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} is already being judged by this server: a rules run rewrites ` +
+          `the crawl's issues, so two runs would leave the table holding half of each. ` +
+          `Wait for the run in flight and read its summary, or ask again when it ends`,
+      );
+    }
+    this.judging.add(crawlId);
     try {
       return await runRules(this.db, crawlId, this.registry);
     } catch (error) {
@@ -922,6 +986,11 @@ export class ApiService {
         throw new ServiceError("NOT_FOUND", `no such crawl '${crawlId}'`);
       }
       throw error;
+    } finally {
+      // Released on the failure path too: a run that threw is a run that is no
+      // longer writing, and a crawl no one could ever judge again because one
+      // run died would be a worse failure than the one being guarded against.
+      this.judging.delete(crawlId);
     }
   }
 

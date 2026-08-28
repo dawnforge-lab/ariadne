@@ -776,6 +776,27 @@ describe("POST /crawls/:id/rules", () => {
     expect(typeof res.body["byRule"]).toBe("object");
     expect(typeof res.body["byMetric"]).toBe("object");
   }, 60_000);
+
+  // A rules run REWRITES the crawl's issues — it deletes them at the top and
+  // writes its own. Two runs over one crawl at once therefore interleave a
+  // delete into the middle of the other's inserts, and the table is left
+  // holding part of each: two judgements with nothing to tell them apart. The
+  // second caller is refused rather than served.
+  it("409s a second rules run while one is already judging the same crawl", async () => {
+    const [a, b] = await Promise.all([
+      call("POST", `/crawls/${fixtureCrawlId}/rules`),
+      call("POST", `/crawls/${fixtureCrawlId}/rules`),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 409]);
+    const refused = a.status === 409 ? a : b;
+    expect(String(refused.body["error"])).toContain("already being judged");
+
+    // And the refusal is not sticky: the hold is released when the run ends,
+    // so the crawl can be judged again straight afterwards.
+    const after = await call("POST", `/crawls/${fixtureCrawlId}/rules`);
+    expect(after.status).toBe(200);
+  }, 120_000);
 });
 
 describe("GET /crawls", () => {
