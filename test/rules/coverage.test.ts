@@ -99,11 +99,26 @@ describe("checklist coverage", () => {
   //
   //   page    26 + 1 = 27
   //   total   79 + 1 = 80
-  it("pins the ruleset split the gate doc reports: 80 rules = 27 page + 42 query + 11 metric", () => {
+  //
+  // Phase 7 Task 2 adds four QUERY rules — the three field-level duplicates and
+  // the heading skip beside them. Query-kind because a duplicate is a fact about
+  // two pages and a page rule is handed one; there is no page-rule spelling of
+  // the question. The claimed-check arithmetic does not move here either, and
+  // the reason is worth stating rather than looking like an oversight:
+  // CHECK-35, CHECK-36 and CHECK-37 were ALREADY claimed, by `title.missing`,
+  // `meta-description.missing` and `headings.h1-missing`. Claims are a set
+  // union, so a check answered more completely does not appear as a new claim —
+  // which is exactly how the duplicate gap survived to production with a
+  // coverage pin that said nothing was unclaimed.
+  //
+  //   query   42 + 4 = 46   (title.duplicate, meta-description.duplicate,
+  //                          h1.duplicate-text, h1.duplicate-skipped)
+  //   total   80 + 4 = 84
+  it("pins the ruleset split the gate doc reports: 84 rules = 27 page + 46 query + 11 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(80);
+    expect(registry.all()).toHaveLength(84);
     expect(registry.byKind("page")).toHaveLength(27);
-    expect(registry.byKind("query")).toHaveLength(42);
+    expect(registry.byKind("query")).toHaveLength(46);
     // The link-graph four, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage.

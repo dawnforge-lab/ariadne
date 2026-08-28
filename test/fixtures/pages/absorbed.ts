@@ -345,16 +345,31 @@ const imagesMissingAlt: Fixture = {
 /**
  * The duplicate family — same page at two URLs, two pages sharing a title, two
  * pages sharing a meta description. Ariadne answers all three with cross-page
- * SQL (`contentHash` / `simhash` / grouped titles). The first of the three now
- * has its rule (`content.exact-duplicate`, CHECK-39) and its expectation below;
- * duplicate titles and meta descriptions are still a later phase's metric
- * rules, so those two pairs carry no expectations yet.
+ * SQL (`contentHash` / `simhash` / grouped field values), and as of Phase 7 all
+ * three have their rule: `content.exact-duplicate` (CHECK-39) landed in Phase 3,
+ * and `title.duplicate` (CHECK-35) and `meta-description.duplicate` (CHECK-36)
+ * in P7-T2 — the numbers the first real audit had to report as unmeasured.
+ *
+ * These pages were written for those rules and waited three phases for them, so
+ * what changes here is the expectations and nothing else. The identical pair
+ * below carries all four findings, because two byte-identical pages share their
+ * title and their description as well as their body.
  */
-const DUP_TITLE = "Pumpkin Spice Latte Recipe";
-const DUP_META =
+/**
+ * The five values the duplicate rules group on, exported so the harness asserts
+ * the strings this site actually serves rather than restating them.
+ *
+ * A copy of a value in two files is a copy that can drift: an edit here would
+ * leave the harness pinning a title no page carries any more, and the assertion
+ * would fail for the wrong reason — or, worse, keep passing against a group it
+ * no longer describes.
+ */
+export const DUP_TITLE = "Pumpkin Spice Latte Recipe";
+export const DUP_H1 = "The same latte recipe, twice";
+export const DUP_META =
   "The same latte recipe, published word for word at two different URLs, so a search engine has to pick one and drop the other.";
 const DUP_BODY = article({
-  h1: "The same latte recipe, twice",
+  h1: DUP_H1,
   lede: "This page is identical, byte for byte, to another URL on this site.",
   sections: [
     {
@@ -373,11 +388,14 @@ function duplicateBody(path: string, expectedIssues: string[] = []): Fixture {
     path,
     category: CONTENT,
     name: "Duplicate content (same page, two URLs)",
-    // `content.exact-duplicate` reports the GROUP once, on its lexically first
-    // member, so the expectation belongs to `/content/duplicate-a` alone — the
-    // `-b` copy is named in that finding's evidence rather than carrying one of
-    // its own. Duplicate titles and duplicate meta descriptions are still a
-    // later phase (metric rules).
+    // Every duplicate rule reports the GROUP once, on its lexically first
+    // member, so all four expectations belong to `/content/duplicate-a` alone —
+    // the `-b` copy is named in each finding's evidence rather than carrying one
+    // of its own. The four are `content.exact-duplicate` (the body),
+    // `title.duplicate`, `meta-description.duplicate` and `h1.duplicate-text`:
+    // two identical pages are identical in every one of those columns, which is
+    // exactly why the h1 rule needed a pair of its own that is NOT identical
+    // (test/fixtures/pages/authored-p7.ts).
     expectedIssues,
     handler: (req, res) =>
       serve(req, res, () => ({
@@ -388,14 +406,17 @@ function duplicateBody(path: string, expectedIssues: string[] = []): Fixture {
   };
 }
 
-const SHARED_TITLE = "Blue Running Shoes | Sole Mates";
+export const SHARED_TITLE = "Blue Running Shoes | Sole Mates";
 
 const dupTitleA: Fixture = {
   path: "/content/duplicate-title-a",
   category: CONTENT,
   name: "Duplicate title (product A)",
-  // Later phase: duplicate-title is a cross-page query rule.
-  expectedIssues: [],
+  // The group is reported on its lexically first member, which is this page;
+  // `-b` is named in the evidence. The two descriptions differ, deliberately —
+  // this pair is the title rule's fixture and must not also be the description
+  // rule's, or neither finding would prove which column was grouped.
+  expectedIssues: ["title.duplicate"],
   handler: (req, res) =>
     serve(req, res, () => ({
       title: SHARED_TITLE,
@@ -445,15 +466,17 @@ const dupTitleB: Fixture = {
     })),
 };
 
-const SHARED_META =
+export const SHARED_META =
   "Fresh, seasonal, and made locally every morning, then delivered to your door. Order today.";
 
 const dupMetaA: Fixture = {
   path: "/content/duplicate-meta-a",
   category: CONTENT,
   name: "Duplicate meta description (bakery)",
-  // Later phase: duplicate-meta-description is a cross-page query rule.
-  expectedIssues: [],
+  // Reported on the group's first member, like the title pair above, and with
+  // the same discipline in the other direction: the two titles differ, so this
+  // pair proves the description column and only that one.
+  expectedIssues: ["meta-description.duplicate"],
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Early Riser Bakery, sourdough and pastries",
@@ -1143,7 +1166,12 @@ export const absorbedFixtures: Fixture[] = [
   headingSkip,
   thinContent,
   imagesMissingAlt,
-  duplicateBody("/content/duplicate-a", ["content.exact-duplicate"]),
+  duplicateBody("/content/duplicate-a", [
+    "content.exact-duplicate",
+    "title.duplicate",
+    "meta-description.duplicate",
+    "h1.duplicate-text",
+  ]),
   duplicateBody("/content/duplicate-b"),
   dupTitleA,
   dupTitleB,

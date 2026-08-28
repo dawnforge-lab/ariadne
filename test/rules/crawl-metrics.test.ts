@@ -13,11 +13,11 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { issues, pages, sitemapUrls } from "../../src/db/schema.js";
+import { issues, links, pages, sitemapUrls } from "../../src/db/schema.js";
 import {
   crawlMetrics,
   SITEMAP_DOC_ROWS_CAP,
@@ -79,6 +79,39 @@ describe("the crawl metrics against the database", () => {
         depth: 1,
         discoveredVia: "link",
       })),
+    );
+  }
+
+  /**
+   * `links` rows exactly as `PageWriter` writes them: the target in the
+   * spelling `pages.url` is keyed by, and `target_page_id` null — the crawler
+   * never fills that column, which is why every rule joins on the URL.
+   */
+  async function addLinks(
+    crawlId: string,
+    rows: { from: string; to: string; internal?: boolean }[],
+  ): Promise<void> {
+    const ids = await db
+      .select({ id: pages.id, url: pages.url })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    const byUrl = new Map(ids.map((p) => [p.url, p.id]));
+    await db.insert(links).values(
+      rows.map((r, i) => {
+        const sourcePageId = byUrl.get(url(r.from));
+        if (sourcePageId === undefined) throw new Error(`no pages row for ${r.from}`);
+        return {
+          crawlId,
+          sourcePageId,
+          targetUrl: url(r.to),
+          targetPageId: null,
+          anchor: `link ${i}`,
+          rel: null,
+          isInternal: r.internal ?? true,
+          isNofollow: false,
+          position: i,
+        };
+      }),
     );
   }
 
@@ -146,6 +179,24 @@ describe("the crawl metrics against the database", () => {
     it("counts redirect pages, the whole crawl, the share and the graph faults", async () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, SPECS);
+      // THE LINK GRAPH, and it is deliberately not shaped like the page table:
+      //
+      //   /ok1 -> /r1      a redirect inlink
+      //   /ok2 -> /r1      a second one, into the SAME redirecting URL
+      //   /ok3 -> /r2      a third
+      //   /ok1 -> /ok2     a link to a page, which is not one
+      //   /ok2 -> /r3      marked external, so outside the site's own budget
+      //
+      // Three internal links into a redirect, against three redirect pages —
+      // two numbers that happen to be equal and are counted from different
+      // tables, which is why /r1 carries two of them and /r3 none.
+      await addLinks(crawlId, [
+        { from: "/ok1", to: "/r1" },
+        { from: "/ok2", to: "/r1" },
+        { from: "/ok3", to: "/r2" },
+        { from: "/ok1", to: "/ok2" },
+        { from: "/ok2", to: "/r3", internal: false },
+      ]);
       await addIssues(crawlId, [
         { ruleId: "redirect.chain", key: "chain-a" },
         { ruleId: "redirect.chain", key: "chain-b" },
@@ -158,6 +209,9 @@ describe("the crawl metrics against the database", () => {
 
       expect(await site(ID, crawlId)).toEqual({
         redirectPages: 3,
+        // The three internal links into /r1 (twice) and /r2. The link to /ok2
+        // is a link to a page, and the external one is not this site's budget.
+        redirectInlinks: 3,
         // Every page row, whatever it answered — the 404 included.
         totalPages: 7,
         // 100 * 3 / 7 = 42.857142… -> 42.9, rounded to one decimal place in SQL.
@@ -165,6 +219,61 @@ describe("the crawl metrics against the database", () => {
         chains: 2,
         loops: 1,
       });
+    });
+
+    it("counts links into a redirect, not redirecting URLs, and says so on a template", async () => {
+      // The distinction the column exists for. ONE redirecting URL, linked from
+      // every page of the site — the footer link that survived a migration — is
+      // 1 redirect page and 5 redirect inlinks, and only the second number says
+      // how much crawl budget it is costing.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/old-terms", statusCode: 301, fetchClass: "redirect" },
+        { path: "/a" },
+        { path: "/b" },
+        { path: "/c" },
+        { path: "/d" },
+        { path: "/e" },
+      ]);
+      await addLinks(
+        crawlId,
+        ["/a", "/b", "/c", "/d", "/e"].map((from) => ({ from, to: "/old-terms" })),
+      );
+
+      const value = await site(ID, crawlId);
+      expect(value["redirectPages"]).toBe(1);
+      expect(value["redirectInlinks"]).toBe(5);
+    });
+
+    it("does not count a link whose target this crawl never fetched", async () => {
+      // The join is `pages.url = links.target_url`, so a link into a URL with no
+      // page row contributes nothing — the crawl knows nothing about whether it
+      // redirects, and guessing would put an unmeasured number in a column.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/r1", statusCode: 301, fetchClass: "redirect" },
+        { path: "/a" },
+      ]);
+      await addLinks(crawlId, [
+        { from: "/a", to: "/never-fetched" },
+        { from: "/a", to: "/r1" },
+      ]);
+      expect((await site(ID, crawlId))["redirectInlinks"]).toBe(1);
+    });
+
+    it("does not count another crawl's links into the same URL", async () => {
+      const mine = await newCrawl();
+      const theirs = await newCrawl();
+      for (const crawlId of [mine, theirs]) {
+        await addPages(crawlId, [
+          { path: "/r1", statusCode: 301, fetchClass: "redirect" },
+          { path: "/a" },
+        ]);
+        await addLinks(crawlId, [{ from: "/a", to: "/r1" }]);
+      }
+      // Both crawls hold the same two URLs, so a join that forgot either
+      // `crawl_id` would double this.
+      expect((await site(ID, mine))["redirectInlinks"]).toBe(1);
     });
 
     it("reports the exact chain count where the findings listing was capped", async () => {
@@ -248,6 +357,10 @@ describe("the crawl metrics against the database", () => {
       // crawl was redirects" is a claim about a crawl that fetched nothing.
       expect(await site(ID, crawlId)).toEqual({
         redirectPages: 0,
+        // Zero rather than null, and the difference is honest: no links were
+        // counted because there are none, which is a measurement. The share
+        // above is null because 0 of 0 is not a percentage.
+        redirectInlinks: 0,
         totalPages: 0,
         ratioPct: null,
         chains: 0,
@@ -267,6 +380,7 @@ describe("the crawl metrics against the database", () => {
 
       expect(await site(ID, mine)).toEqual({
         redirectPages: 1,
+        redirectInlinks: 0,
         totalPages: 1,
         ratioPct: 100,
         chains: 0,

@@ -86,7 +86,15 @@ export const NEAR_DUPLICATE_HAMMING = 3;
  */
 export const NEAR_DUPLICATE_PAIR_CAP = 500;
 
-/** URLs quoted on an exact-duplicate finding. The count beside them is exact. */
+/**
+ * URLs quoted on a duplicate-GROUP finding. The count beside them is exact.
+ *
+ * Shared with the field-level duplicate rules (src/rules/query/field-duplicates.ts),
+ * which report the same shape over titles, meta descriptions and H1 text: a
+ * group finding quotes the same number of URLs whichever field produced it, so
+ * a reader meets one list length rather than two, and the number moves in one
+ * place.
+ */
 export const DUPLICATE_SAMPLE_URLS = 20;
 
 /** The three content rules' idea of a page worth judging, in SQL. */

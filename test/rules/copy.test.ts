@@ -9,6 +9,7 @@ import {
 } from "../../src/rules/page/on-page.js";
 import { DEEP_DEPTH, SLOW_MS } from "../../src/rules/page/technical.js";
 import {
+  DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_HAMMING,
   SOFT_404_WORDS,
 } from "../../src/rules/query/content.js";
@@ -168,13 +169,23 @@ const PHASE_5_RULE_IDS = [
 const PHASE_5_METRIC_IDS = ["render.coverage"];
 
 /**
- * Phase 7's rule. Same contract as every list above: the copy lands with the
+ * Phase 7's rules. Same contract as every list above: the copy lands with the
  * rule, and a rule that shipped without it fails here as well as at registry
- * build time. One id, because P7-T1 corrected what existing rules measure
- * rather than adding new verdicts — apart from the skip, which is a verdict
- * about the CRAWL and needs a title of its own for exactly that reason.
+ * build time.
+ *
+ * T1 corrected what existing rules measure rather than adding new verdicts —
+ * apart from `content.thin-skipped`, which is a verdict about the CRAWL and
+ * needs a title of its own for exactly that reason. T2 adds the three
+ * field-level duplicate rules the checklist has always asked for, plus the
+ * heading skip, which is the same crawl-not-site verdict one column over.
  */
-const PHASE_7_RULE_IDS = ["content.thin-skipped"];
+const PHASE_7_RULE_IDS = [
+  "content.thin-skipped",
+  "title.duplicate",
+  "meta-description.duplicate",
+  "h1.duplicate-text",
+  "h1.duplicate-skipped",
+];
 
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
@@ -570,6 +581,15 @@ describe("issue copy", () => {
   it("redirect.volume names every column and what its counts are capped by", () => {
     const text = ISSUE_COPY["redirect.volume"]!.explanation;
     expect(text, "redirectPages").toMatch(/how many of the URLs this crawl requested/i);
+    // `redirectInlinks` is a second count of the same fact and reads as a
+    // restatement of the first unless the copy says how they differ — one
+    // redirecting URL in a footer is one page and one link per page of the site.
+    expect(text, "redirectInlinks").toMatch(
+      /number of internal links pointing at one of those redirecting URLs/i,
+    );
+    expect(text, "the two counts are not the same number").toMatch(
+      /the same fact counted the other way round/i,
+    );
     expect(text, "totalPages").toMatch(/out of how many pages were fetched in total/i);
     expect(text, "ratioPct").toMatch(/percentage rounded to one decimal place/i);
     expect(text, "chains and loops").toMatch(/how many redirect chains and how many redirect loops/i);
@@ -580,6 +600,72 @@ describe("issue copy", () => {
       new RegExp(`counted in full even where that list was capped at the first ${URL_FINDING_CAP}`, "i"),
     );
     expect(text, "the null share").toMatch(/no percentage rather than zero/i);
+  });
+
+  // The three duplicate-group rules share one evidence shape — the duplicated
+  // value, the exact size of the group, and a capped sample of its URLs — and a
+  // reader who cannot tell the count from the list will read a twenty-URL
+  // sample as the whole problem. Asserted for all three at once, because they
+  // share a rule body and a copy that stopped naming a column would be the same
+  // omission three times.
+  it("the field-duplicate copy names the value, the exact count and the capped URL list", () => {
+    const fields: Record<string, RegExp> = {
+      "title.duplicate": /shared title/i,
+      "meta-description.duplicate": /shared description/i,
+      "h1.duplicate-text": /shared heading/i,
+    };
+    for (const [id, value] of Object.entries(fields)) {
+      const text = ISSUE_COPY[id]!.explanation;
+      expect(text, `${id}: the duplicated value`).toMatch(value);
+      expect(text, `${id}: count`).toMatch(/how many indexable pages were found carrying it/i);
+      expect(text, `${id}: pages`).toMatch(/up to twenty of those URLs in alphabetical order/i);
+      // The distinction between the two, which is what makes the number
+      // quotable: the count is the group, the list is a sample of it.
+      expect(text, `${id}: the count is not the list`).toMatch(
+        /the count is the whole group, the list is a sample of it/i,
+      );
+      // And the cohort, because a client checking the finding against their own
+      // site will otherwise count noindexed and redirecting URLs too.
+      expect(text, `${id}: the cohort`).toMatch(/returned 200 and are indexable/i);
+    }
+    // The list cap in the copy is the rule's own constant (the on-page-threshold
+    // contract): a cap that moves fails here until the prose moves with it.
+    expect(DUPLICATE_SAMPLE_URLS).toBe(20);
+  });
+
+  // Exact equality after trimming is the whole claim. Copy implying the engine
+  // spotted SIMILAR titles would describe a measurement it did not make, and
+  // duplicate titles carry no penalty of their own — the cost is that the pages
+  // stop distinguishing themselves.
+  it("the field-duplicate copy claims exact repetition, not similarity or a penalty", () => {
+    for (const id of ["title.duplicate", "meta-description.duplicate", "h1.duplicate-text"]) {
+      const c = ISSUE_COPY[id]!;
+      expect(c.explanation, id).toMatch(/word for word/i);
+      const overclaim =
+        /similar|near-identical|almost the same|penalis|penaliz|will be penal|duplicate content penalt/i;
+      expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
+    }
+    // And the heading rule says which heading it read: the column holds the
+    // FIRST h1 only, so copy speaking of "the headings on these pages" would be
+    // describing data the rule never sees.
+    expect(ISSUE_COPY["h1.duplicate-text"]!.explanation).toMatch(/only each page's first H1/i);
+  });
+
+  // The skip's copy is about the CRAWL. It must not read as a fault on the
+  // site, and it must name each of the three numbers its evidence carries,
+  // because the last of them is the reason the check did not run.
+  it("h1.duplicate-skipped explains the crawl, its three numbers and the remedy", () => {
+    const c = ISSUE_COPY["h1.duplicate-skipped"]!;
+    expect(c.title.toLowerCase()).toContain("could not be run");
+    expect(c.explanation, "indexablePages").toMatch(/how many indexable pages the crawl held/i);
+    expect(c.explanation, "pagesWithH1").toMatch(/how many of them carry an H1 element/i);
+    expect(c.explanation, "pagesWithH1Text").toMatch(/how many have heading text stored/i);
+    // Why a silence had to be reported at all — the unknown-is-not-evidence
+    // argument, in the words a client reads.
+    expect(c.explanation, "the two facts that share one silence").toMatch(
+      /a site with no duplicate headings and a crawl that never read any heading/i,
+    );
+    expect(c.howToFix).toMatch(/re-crawl/i);
   });
 
   it("sitemap.structure names every column of both its shapes", () => {

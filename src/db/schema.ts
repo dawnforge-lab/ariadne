@@ -143,11 +143,23 @@ export const pages = pgTable("pages", {
   // `meta_description` already make, and rules read it through `present()`.
   //
   // WRITTEN BY THE CRAWL (`PageWriter`, off the analyzer's single pass) FROM
-  // PHASE 7 ONWARD; null on every row a pre-P7 crawl wrote. Its consumer is
-  // Task 2's heading rule, which compares a page's h1 with its title — the
-  // CAPTURE landed here with the analyzer work in P7-T1 because the analyzer is
-  // the only place the page's text is ever in memory (hard rule 2: rules do not
-  // fetch), and a rule cannot read a column no crawl ever wrote.
+  // PHASE 7 ONWARD; null on every row a pre-P7 crawl wrote. The CAPTURE landed
+  // here with the analyzer work in P7-T1 because the analyzer is the only place
+  // the page's text is ever in memory (hard rule 2: rules do not fetch), and a
+  // rule cannot read a column no crawl ever wrote.
+  //
+  // Its consumer is `h1.duplicate-text` (P7-T2, src/rules/query/field-duplicates.ts),
+  // which groups indexable pages by this exact value. The null is a GATE for
+  // that rule the same way `renderable_word_count`'s is for the thin one: a
+  // pre-P7 crawl has null here on every row, the grouping finds nothing, and
+  // "no duplicate headings" and "no headings were ever read" are the same
+  // silence. `h1.duplicate-skipped` is what tells them apart, on the condition
+  // that no indexable page has text here while some carry an h1 at all.
+  //
+  // The stored value collapses the h1's descendant text with NO separator
+  // (cheerio's `.text()` semantics, which the parity oracle holds the port to),
+  // so `<h1>Big<br>Sale</h1>` is stored as `BigSale` — a ledgered limitation
+  // the grouping rule inherits and states.
   h1Text: text("h1_text"),
   // Every word of visible text the HTML carries.
   //

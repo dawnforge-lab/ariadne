@@ -120,12 +120,19 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
-    // 0.5.0: Phase 7's measurement correction. `content.thin` now judges a
-    // page on the words its markup does not hide rather than on every word in
-    // the HTML, `content.csr-dependent` subtracts the same corrected column,
-    // and `content.thin-skipped` is a new verdict a page can receive. All
-    // three change what the ruleset says about a site, which is exactly what
-    // this version exists to let a stored finding be traced to.
+    // 0.5.0: Phase 7. `content.thin` now judges a page on the words its markup
+    // does not hide rather than on every word in the HTML,
+    // `content.csr-dependent` subtracts the same corrected column, and
+    // `content.thin-skipped` is a new verdict a page can receive (T1) — and
+    // four more verdicts arrive with the field-level duplicates (T2:
+    // `title.duplicate`, `meta-description.duplicate`, `h1.duplicate-text` and
+    // its skip). All of them change what the ruleset says about a site, which is
+    // exactly what this version exists to let a stored finding be traced to.
+    //
+    // ONE BUMP PER PHASE, not one per task: a version identifies the ruleset a
+    // stored finding was produced by, and two numbers inside one phase would
+    // claim a difference between rules that shipped together. T1 bumped; this
+    // task verifies rather than bumping again.
     expect(RULESET_VERSION).toBe("0.5.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {

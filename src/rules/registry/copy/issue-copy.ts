@@ -55,6 +55,17 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Shorten the title to 60 characters or fewer, front-loading the words that matter most and moving boilerplate such as the site name to the end (or dropping it).",
   },
+  "title.duplicate": {
+    // Accuracy: this is exact equality between two stored titles after
+    // trimming, over indexable 200 pages only. It is not a similarity measure —
+    // two titles differing by one word are not grouped — and duplicate titles
+    // carry no ranking penalty. Do not let this copy imply either.
+    title: "The same title on more than one page",
+    explanation:
+      "These pages all carry the same title, word for word. The finding names the shared title, how many indexable pages were found carrying it, and up to twenty of those URLs in alphabetical order — the count is the whole group, the list is a sample of it. Only pages that returned 200 and are indexable are compared, since a page kept out of the index competes with nothing. A repeated title is almost always a template writing the same string for every item in a section: the pages then look identical in a search result, none of them says what makes it different, and the search engine has to choose between them on other signals.",
+    howToFix:
+      "Fix the template rather than the pages. Build the title from the fields that actually differ between them — the product or article name, the variant, the location, the page number — and keep the shared part short and at the end. Where the pages really are the same page at several URLs, that is a duplicate-content problem instead: canonicalise or redirect them, and the titles stop repeating on their own.",
+  },
   "meta-description.missing": {
     title: "Missing meta description",
     explanation:
@@ -75,6 +86,15 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "The meta description is over 160 characters, so search engines will truncate the snippet and the closing sentence will not be read.",
     howToFix:
       "Trim the description to 160 characters or fewer, keeping the core message and the call to action in the first sentence.",
+  },
+  "meta-description.duplicate": {
+    // Same accuracy constraint as `title.duplicate` above: exact equality after
+    // trimming, indexable 200s only, and no penalty claim.
+    title: "The same meta description on more than one page",
+    explanation:
+      "These pages all carry the same meta description, word for word. The finding names the shared description, how many indexable pages were found carrying it, and up to twenty of those URLs in alphabetical order — the count is the whole group, the list is a sample of it. Only pages that returned 200 and are indexable are compared. A description is the sales line under the title in a result, so a shared one means several of your results say exactly the same thing about pages that are not the same, and the search engine is more likely to discard it and write a snippet from the page text instead.",
+    howToFix:
+      "Write the description from the page's own content, in the template: what this item is, what makes it different, and a reason to click. A generic site-wide sentence is worse than none at all, because it fills the one line you control with words that describe nothing. If a section genuinely has nothing distinct to say per page, it is usually better to leave the description off those pages and let the search engine build a snippet than to repeat one.",
   },
   "headings.h1-missing": {
     title: "Missing H1 heading",
@@ -99,6 +119,24 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "The heading hierarchy jumps a level, for example an H4 directly under an H2. The outline is how assistive technology and content parsers understand the structure of a page, and a skipped level breaks that outline.",
     howToFix:
       "Adjust the heading levels so they descend one step at a time. Where a level was skipped for the sake of a smaller font, fix the styling instead of the heading level.",
+  },
+  "h1.duplicate-text": {
+    // Accuracy, twice over. Exact equality after trimming, like the two rules
+    // above — and the compared value is the FIRST H1 only, as the analyzer
+    // stored it. Copy claiming anything about a page's other headings would be
+    // describing data this rule never sees.
+    title: "The same H1 heading on more than one page",
+    explanation:
+      "These pages all open with the same H1 heading, word for word. The finding names the shared heading, how many indexable pages were found carrying it, and up to twenty of those URLs in alphabetical order — the count is the whole group, the list is a sample of it. Only pages that returned 200 and are indexable are compared, and only each page's first H1 is read. The H1 is the headline a reader sees and the strongest statement a page makes about its own subject, so a set of pages sharing one is a set of pages claiming to be about the same thing.",
+    howToFix:
+      "Give each page a headline that names what is actually on it, generated from the same fields that make the pages different in the first place. A shared H1 usually comes from a layout that puts the section or brand name in the heading slot and the real headline in a styled div below it: if that is what happened, swap the two so the element and the words agree.",
+  },
+  "h1.duplicate-skipped": {
+    title: "Duplicate-heading check could not be run on this crawl",
+    explanation:
+      "Comparing headings across a site needs the text of each page's first H1, and this crawl did not record it: the pages here carry H1 elements, and not one of them has any heading text stored against it. That is what a crawl performed before the engine started reading heading text looks like. The check was therefore left unrun rather than reported as clean, because a site with no duplicate headings and a crawl that never read any heading produce exactly the same empty result, and only one of them is good news. The finding says how many indexable pages the crawl held, how many of them carry an H1 element, and how many have heading text stored — the last of which is zero, which is the reason this is here.",
+    howToFix:
+      "Re-crawl the site. The heading text is captured while each page is being read and cannot be recovered afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
   },
   "content.thin": {
     // Accuracy: the count this rule reads excludes text the page's own markup
@@ -712,9 +750,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "redirect.volume": {
     title: "How much of the crawl was redirects",
     explanation:
-      "How many of the URLs this crawl requested answered with a redirect, out of how many pages were fetched in total, and that as a percentage rounded to one decimal place. Every page the crawl read counts in the total, whatever it answered, because a redirect is a share of what was fetched rather than of what was indexable. Each redirecting URL counts once, so a link that redirects and appears in the footer of every page is one redirecting URL here, not one per page. Beside them are how many redirect chains and how many redirect loops the audit found on this crawl — the same chains and loops the redirect findings list, counted in full even where that list was capped at the first 200. A crawl with no pages shows no percentage rather than zero.",
+      "How many of the URLs this crawl requested answered with a redirect, out of how many pages were fetched in total, and that as a percentage rounded to one decimal place. Every page the crawl read counts in the total, whatever it answered, because a redirect is a share of what was fetched rather than of what was indexable. Each redirecting URL counts once, so a link that redirects and appears in the footer of every page is one redirecting URL here, not one per page. Beside it is the number of internal links pointing at one of those redirecting URLs, which is the same fact counted the other way round: that one footer link is a single redirecting URL and one redirect inlink from every page of the site. Beside them are how many redirect chains and how many redirect loops the audit found on this crawl — the same chains and loops the redirect findings list, counted in full even where that list was capped at the first 200. A crawl with no pages shows no percentage rather than zero.",
     howToFix:
-      "The percentage is the crawl-budget number: every redirect is a request that returns no content, so a site spending a tenth of its crawl on them is a site whose pages are being fetched less often than they could be. Read it beside the chains and loops, which are faults rather than overhead — a loop returns nothing at all, and a chain multiplies the cost of every link into it. Where the share is high and the chains are few, the fix is usually in the links themselves rather than in the redirect rules: point internal links, sitemap entries and navigation at the destination URL, so the redirect stays available for outside traffic and stops being walked on every crawl.",
+      "The percentage is the crawl-budget number: every redirect is a request that returns no content, so a site spending a tenth of its crawl on them is a site whose pages are being fetched less often than they could be. The inlink count is what tells you how much of that is worth chasing: a handful of redirecting URLs with thousands of links into them is a template change, while the same URLs with one link each are a tidy-up. Read them beside the chains and loops, which are faults rather than overhead — a loop returns nothing at all, and a chain multiplies the cost of every link into it. Where the share is high and the chains are few, the fix is usually in the links themselves rather than in the redirect rules: point internal links, sitemap entries and navigation at the destination URL, so the redirect stays available for outside traffic and stops being walked on every crawl.",
   },
   "sitemap.structure": {
     title: "What the site's sitemap is made of",

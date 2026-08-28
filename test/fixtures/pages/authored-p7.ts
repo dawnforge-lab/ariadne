@@ -1,5 +1,7 @@
 /**
- * The Phase 7 fixture: one page shaped like the defect that provoked the phase.
+ * The Phase 7 fixtures: the page shaped like the defect that provoked the phase
+ * (T1), and the pair at the bottom of this file that share an H1 and nothing
+ * else (T2).
  *
  * `audits/lavishalice.com/render-diagnosis.md` measured a real product page at
  * 1,413 raw words against 335 rendered ones and attributed every missing word
@@ -20,7 +22,7 @@
  * the three fails against a number that was derived rather than observed.
  */
 import type { Fixture } from "../fixture.js";
-import { serve } from "../render.js";
+import { article, serve } from "../render.js";
 
 /** Exactly 44 characters — inside TITLE_MIN..TITLE_MAX. */
 const TITLE = "A page that hides most of the words it ships";
@@ -122,5 +124,100 @@ const hiddenChrome: Fixture = {
     })),
 };
 
-/** The Phase 7 fixtures. One page, and it is the phase's whole shape. */
-export const authoredP7Fixtures: Fixture[] = [hiddenChrome];
+// ---------------------------------------------------------------------------
+// T2: the duplicate H1, on two pages that share nothing else
+// ---------------------------------------------------------------------------
+
+/**
+ * The heading both pages below open with, and the ONLY thing they have in
+ * common.
+ *
+ * The fixture site already carried duplicate titles and duplicate meta
+ * descriptions, authored in Phase 2 and left with `expectedIssues: []` and a
+ * comment saying a later phase would claim them — this is that phase, and those
+ * pages need no change beyond their expectations. Duplicate H1 TEXT had no such
+ * pair: the only pages on the site sharing a heading were `/content/duplicate-a`
+ * and `-b`, which are byte-identical copies and therefore share their title,
+ * their description and their content hash as well.
+ *
+ * That is why these two exist. A rule that had quietly grouped by content hash,
+ * or by title, would fire on the identical pair and look correct; it fires on
+ * NOTHING here, because these two pages differ in every column but the heading.
+ * The pair is what makes the harness's h1 assertion an assertion about h1s.
+ */
+export const P7_SHARED_H1 = "How the returns process works";
+
+/** The pair's paths, exported so the harness names the same two pages. */
+export const P7_SHARED_H1_PATHS = ["/authored7/shared-h1-a", "/authored7/shared-h1-b"] as const;
+
+/** The two pages' word counts clear THIN_WORDS (150) with room to spare. */
+function guideBody(opts: { lede: string; sections: Array<{ h2: string; body: string }> }): string {
+  return article({ h1: P7_SHARED_H1, lede: opts.lede, sections: opts.sections });
+}
+
+const sharedH1A: Fixture = {
+  path: P7_SHARED_H1_PATHS[0],
+  category: "content",
+  name: "Duplicate H1 (the first of the pair)",
+  // `h1.duplicate-text` reports the GROUP once, on its lexically first member,
+  // so the expectation belongs to this page alone and `-b` is named in the
+  // evidence. Nothing else fires: the title, the description and the prose are
+  // this page's own, which is the arrangement the pair exists to provide.
+  expectedIssues: ["h1.duplicate-text"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "Returns, refunds and the timings",
+      metaDescription:
+        "How long a refund takes, what condition we can accept an item back in, and who pays for the postage when something arrives damaged.",
+      bodyHtml: guideBody({
+        lede: "This page is about money going back to a card, and it shares its headline with a page about something else entirely.",
+        sections: [
+          {
+            h2: "What happens after the parcel reaches us",
+            body: "A returned parcel is booked in on the day it arrives, checked against the order it belongs to, and then refunded to the card that paid for it. The bank takes a few working days of its own after that, which is the part nobody controls and the part every customer asks about, so it is written here rather than left to a support ticket. Nothing about this section is true of the other page carrying the same heading, and that is the point of the pair.",
+          },
+          {
+            h2: "Why a heading has to say what the page is",
+            body: "A headline that could sit on any page in a section is a headline that names none of them. Two pages built from the same template with the same words at the top are two pages making the same claim about themselves, and a search engine choosing between them has nothing in the strongest signal on either page to tell them apart. The fix is a template change rather than a rewrite: build the heading from the field that already differs.",
+          },
+        ],
+      }),
+    })),
+};
+
+const sharedH1B: Fixture = {
+  path: P7_SHARED_H1_PATHS[1],
+  category: "content",
+  name: "Duplicate H1 (the second of the pair)",
+  // The group is reported on `-a` above. This page carries no finding of its
+  // own, which is what an exact set is for: a rule reporting per PAGE rather
+  // than per group would fail here rather than pass quietly.
+  expectedIssues: [],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "Exchanges and how to arrange one",
+      metaDescription:
+        "Swapping an item for another size or colour, why we treat it as a return plus a fresh order, and what that means for how quickly it ships.",
+      bodyHtml: guideBody({
+        lede: "This page is about swapping one item for another, and it shares its headline with a page about refunds.",
+        sections: [
+          {
+            h2: "An exchange is two transactions",
+            body: "The replacement is placed as a new order the moment the request comes in, so it ships from stock immediately instead of waiting for the original to travel back across the country. The original then follows the ordinary returns route and is refunded when it lands. Handling it as one transaction would mean holding the customer's replacement hostage to a courier, which is a worse experience for the sake of a tidier ledger.",
+          },
+          {
+            h2: "Where the sizes are listed",
+            body: "Every product page carries the measurements for its own range, taken the same way across the catalogue so two ranges can be compared without converting anything. If the size chart and the product description ever disagree, the chart is the one that was measured and the description is the one that was written, so trust the chart and tell us about the description.",
+          },
+        ],
+      }),
+    })),
+};
+
+/**
+ * The Phase 7 fixtures: the page whose markup hides most of its own words
+ * (T1), and the pair that share a heading and nothing else (T2).
+ */
+export const authoredP7Fixtures: Fixture[] = [hiddenChrome, sharedH1A, sharedH1B];

@@ -24,7 +24,7 @@ import type {
   QueryRule,
 } from "../../src/rules/registry/types.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
-import { mkPage } from "./mk-page.js";
+import { CLEAN_META, mkPage } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -74,7 +74,13 @@ describe("buildRegistry", () => {
     // And Phase 7's skip rule, which reports the page the corrected
     // thin-content floor cannot judge on a crawl that predates its column.
     expect(ids).toContain("content.thin-skipped");
-    expect(ids.length).toBe(80);
+    // And Phase 7 Task 2's four: the three field-level duplicate rules and the
+    // heading skip beside them.
+    expect(ids).toContain("title.duplicate");
+    expect(ids).toContain("meta-description.duplicate");
+    expect(ids).toContain("h1.duplicate-text");
+    expect(ids).toContain("h1.duplicate-skipped");
+    expect(ids.length).toBe(84);
   });
 
   it("registers every kind the runner drives", () => {
@@ -133,10 +139,24 @@ describe("runRules against the database", () => {
    * contributes nothing" would stop being true for a reason that has nothing to
    * do with the page. Derived from the URL, so they stay deterministic, and
    * from a hash, so no two of them land within the near-duplicate band.
+   *
+   * THE HEAD FIELDS ARE PER-URL FOR THE SAME REASON, since P7-T2. `title`,
+   * `meta_description` and `h1_text` are now grouped across pages as well
+   * (`title.duplicate` and its two siblings), so two rows built from one set of
+   * clean defaults are a duplicate group — reported, correctly, on the
+   * lexically first of them, which on this crawl is `/clean`. Each is derived
+   * from the same digest and kept inside the length rules the on-page rules
+   * enforce (title 10-60, description 70-160), so the page stays clean in every
+   * other respect.
    */
   function mkRow(crawlId: string, path: string, overrides: Partial<PageRecord> = {}): PageRecord {
     const url = `${SITE}${path}`;
     const digest = createHash("sha256").update(url).digest("hex");
+    // Eight hex characters of the URL's own digest, so the head fields differ
+    // between rows without the length of the path leaking into the length of
+    // the title (`/list?colour=red&utm_source=news` appended to the clean title
+    // would be a `title.too-long` finding on a page nothing is wrong with).
+    const tag = digest.slice(0, 8);
     return mkPage({
       id: `page_${randomUUID()}`,
       crawlId,
@@ -145,6 +165,12 @@ describe("runRules against the database", () => {
       canonicalHtml: url,
       contentHash: digest,
       simhash: BigInt.asIntN(64, BigInt(`0x${digest.slice(0, 16)}`)),
+      // 21 characters, inside TITLE_MIN..TITLE_MAX.
+      title: `A page about ${tag}`,
+      // The clean description plus a sentence naming the page: 100 + 20 = 120
+      // characters, inside META_MIN..META_MAX.
+      metaDescription: `${CLEAN_META} About ${tag}.`,
+      h1Text: `A heading about ${tag}`,
       ...overrides,
     });
   }

@@ -11,6 +11,7 @@ import { canonicalRules } from "./page/canonical.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { technicalRules } from "./page/technical.js";
 import { contentRules } from "./query/content.js";
+import { fieldDuplicateRules } from "./query/field-duplicates.js";
 import { hostRules } from "./query/host.js";
 import { hreflangRules } from "./query/hreflang.js";
 import { linkGraphRules } from "./query/link-graph.js";
@@ -49,6 +50,11 @@ export function buildRegistry(): Registry {
     ...urlHygieneRules,
     ...hostRules,
     ...contentRules,
+    // The field-level duplicates: one title, one meta description or one H1
+    // shared across pages. Query-kind like the content duplicates beside them,
+    // and for the same reason — "is this value unique on this site" is a
+    // question about the crawl, which no page rule is handed.
+    ...fieldDuplicateRules,
     ...structuredDataRules,
     // The render pass's query rules: the three diffs between the raw HTML and
     // the rendered DOM, and the JavaScript redirect. Registered here with the

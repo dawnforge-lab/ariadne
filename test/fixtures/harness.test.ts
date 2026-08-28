@@ -34,8 +34,17 @@ import type { PageRecord } from "../../src/rules/registry/types.js";
 import { allFixtures } from "./fixture.js";
 import { startFixtureApp, type FixtureApp } from "./app.js";
 import {
+  DUP_H1,
+  DUP_META,
+  DUP_TITLE,
+  SHARED_META,
+  SHARED_TITLE,
+} from "./pages/absorbed.js";
+import {
   P7_HIDDEN_CHROME_PATH,
   P7_RENDERABLE_WORD_COUNT,
+  P7_SHARED_H1,
+  P7_SHARED_H1_PATHS,
   P7_WORD_COUNT,
 } from "./pages/authored-p7.js";
 import { startOffsiteHost, type OffsiteHost } from "./pages/render-p5.js";
@@ -120,6 +129,18 @@ function databaseUrl(): string {
  * pair's partition over it. The MEASUREMENT the skip protects is asserted here
  * all the same, from the row `/authored7/hidden-chrome` produced.
  *
+ * `h1.duplicate-skipped` is the same shape as the thin skip, one column over.
+ * It fires when a crawl stored H1 counts and no H1 TEXT — a row written before
+ * `pages.h1_text` existed — and the real crawler writes both off one parse for
+ * every page it reads, so no fixture can produce that crawl. Its condition is a
+ * property of a pre-Phase-7 crawl rather than of a page, and building one here
+ * would mean hand-writing `pages` rows, which is the one thing this file exists
+ * not to do. Covered directly by test/rules/field-duplicates.test.ts, which
+ * builds the pre-P7 shape and asserts the pair's partition over it — including
+ * the case that must NOT skip, a site whose indexable pages genuinely carry no
+ * h1 at all. The rule it stands in for, `h1.duplicate-text`, DOES fire here,
+ * on a pair of pages authored to share a heading and nothing else.
+ *
  * `schema.none-on-site` is the same trade in the structured-data family. Its
  * condition is "this crawl stored no JSON-LD of any type", and
  * `/authored3/product-incomplete` and `/authored3/reviews` had to publish some
@@ -132,6 +153,7 @@ function databaseUrl(): string {
  */
 const SKIP_HARNESS_CLAIMS: string[] = [
   "content.thin-skipped",
+  "h1.duplicate-skipped",
   "host.duplicate-host-200",
   "host.probe-skipped",
   "links.orphan-skipped",
@@ -157,7 +179,7 @@ const SKIP_HARNESS_CLAIMS: string[] = [
  * against 300ms — 10×, ledgered as such — and a 7.5× margin of exactly that
  * shape is what a loaded machine broke in test/crawl/renderer.test.ts during
  * the phase-5 review. A settle only ever ends by expiring, so widening it costs
- * wall and nothing else: 69 renders at concurrency 4 pay about 3.4 extra
+ * wall and nothing else: 71 renders at concurrency 4 pay about 3.5 extra
  * seconds for it.
  */
 const RENDER_SETTLE_MS = 500;
@@ -168,7 +190,7 @@ const RENDER_SETTLE_MS = 500;
  *
  * Deliberate, and the whole reason `render.coverage`'s row below can be pinned
  * as arithmetic rather than as an outcome. At 100% the budget is the crawl's
- * page count (80), which is comfortably more than the 70 pages suspicion and
+ * page count (82), which is comfortably more than the 72 pages suspicion and
  * the per-type sample between them nominate — so nothing is cut, `truncated` is
  * false, and the selected set is exactly the candidate set. A smaller percentage
  * would make the assertion a statement about which candidates happened to sort
@@ -989,16 +1011,151 @@ describe("the fixture site end to end", () => {
     expect(duplicated).toEqual(["/content/duplicate-a", "/deep/2"]);
   });
 
+  it("the field-level duplicates find the site's repeated titles, descriptions and headings", async () => {
+    // P7-T2, end to end: three rules, each grouping ONE column of `pages` over
+    // the indexable 200s, on a site that carries a deliberately different pair
+    // for each of them. Every group below is hand-derived from the fixture
+    // collection — the values come from the fixture modules themselves rather
+    // than being restated here, so a page that changed its title fails as a
+    // mismatch instead of quietly leaving the assertion describing nothing.
+    //
+    // THE SITE'S GROUPS, in full:
+    //
+    //   title          `/content/duplicate-a` + `-b`        (identical pages)
+    //                  `/content/duplicate-title-a` + `-b`  (one catalogue title)
+    //   description    `/content/duplicate-a` + `-b`
+    //                  `/content/duplicate-meta-a` + `-b`   (one shared sentence)
+    //   h1 text        `/content/duplicate-a` + `-b`
+    //                  `/authored7/shared-h1-a` + `-b`      (heading and nothing else)
+    //
+    // Nothing else on this site repeats any of the three, which is what makes
+    // these exact sets rather than containment checks: a rule grouping on
+    // whitespace, on nulls, or on the wrong column would show up here as an
+    // extra group rather than as a silence nobody notices.
+    const at = (path: string): string => `${app.base}${path}`;
+    const group = (value: Record<string, unknown>, paths: string[]): Record<string, unknown> => ({
+      pageUrl: at(paths[0]!),
+      ...value,
+      count: paths.length,
+      pages: paths.map(at),
+    });
+
+    expect(await findingSet("title.duplicate")).toEqual([
+      group({ title: DUP_TITLE }, ["/content/duplicate-a", "/content/duplicate-b"]),
+      group({ title: SHARED_TITLE }, [
+        "/content/duplicate-title-a",
+        "/content/duplicate-title-b",
+      ]),
+    ]);
+
+    // `findingSet` sorts by the SERIALISED evidence with its keys in
+    // alphabetical order, so the first field that differs decides the order —
+    // `pageUrl` for the titles above, and the description itself here, which is
+    // why the bakery's sentence sorts before the latte recipe's.
+    expect(await findingSet("meta-description.duplicate")).toEqual([
+      group({ metaDescription: SHARED_META }, [
+        "/content/duplicate-meta-a",
+        "/content/duplicate-meta-b",
+      ]),
+      group({ metaDescription: DUP_META }, ["/content/duplicate-a", "/content/duplicate-b"]),
+    ]);
+
+    // The heading rule's second group is the one that proves the column: those
+    // two pages have different titles, different descriptions and different
+    // prose, so a rule that had grouped on any other column would report one
+    // group here instead of two.
+    expect(await findingSet("h1.duplicate-text")).toEqual([
+      group({ h1Text: P7_SHARED_H1 }, [...P7_SHARED_H1_PATHS]),
+      group({ h1Text: DUP_H1 }, ["/content/duplicate-a", "/content/duplicate-b"]),
+    ]);
+
+    // The h1 text reached the column from the real crawler, on both pages of
+    // the authored pair. Read from the `pages` rows rather than inferred from
+    // the finding: "the rule grouped them" and "the analyzer captured the same
+    // string twice" are different claims, and the second is what the first
+    // rests on.
+    for (const path of P7_SHARED_H1_PATHS) {
+      expect(pageByPath.get(path)?.h1Text, path).toBe(P7_SHARED_H1);
+    }
+    // And the two pages differ in every other column the duplicate rules read,
+    // which is the arrangement the pair exists to provide.
+    const [a, b] = P7_SHARED_H1_PATHS.map((path) => pageByPath.get(path));
+    expect(a?.title).not.toBe(b?.title);
+    expect(a?.metaDescription).not.toBe(b?.metaDescription);
+    expect(a?.contentHash).not.toBe(b?.contentHash);
+
+    // Every finding lands on its group's first member and nowhere else: three
+    // rules over six groups, and only three pages carry any of them.
+    const carriers = [...issuesByPath]
+      .filter(([, ids]) =>
+        ["title.duplicate", "meta-description.duplicate", "h1.duplicate-text"].some((id) =>
+          ids.has(id),
+        ),
+      )
+      .map(([path]) => path)
+      .sort();
+    expect(carriers).toEqual([
+      P7_SHARED_H1_PATHS[0],
+      "/content/duplicate-a",
+      "/content/duplicate-meta-a",
+      "/content/duplicate-title-a",
+    ].sort());
+  });
+
+  it("the redirect volume counts the URLs and the links into them", () => {
+    // `redirect.volume`'s site row, hand-derived like the three metrics above.
+    //
+    // redirectPages = 4. Every `/redirect/*` fixture that answers a 3xx:
+    // `/redirect/chain-1`, `/redirect/chain-2`, `/redirect/loop` and
+    // `/redirect/trailing-slash`. The slash form `/redirect/trailing-slash/` is
+    // the 200 at the end of that hop and is not one of them.
+    //
+    // totalPages = 82, the whole crawl — the same count `render.coverage` above
+    // starts from, and deliberately not the 71-page cohort: a redirect is a
+    // share of what was fetched.
+    //
+    // ratioPct = 100 × 4 / 82 = 4.878… -> 4.9 at one decimal place.
+    //
+    // redirectInlinks = 4, and the number being equal to `redirectPages` here is
+    // a property of this site rather than of the metric: the hub links each of
+    // the four exactly once, and nothing else on the site links a redirect at
+    // all (`/links/broken-internal-link` links a 404, the deep chain links the
+    // rung below, the paginated series links itself, `/render/healthy` links
+    // itself). On a real site the second number is the larger one — see the
+    // unit test in test/rules/crawl-metrics.test.ts, where one redirecting URL
+    // in a footer is 1 page and 5 inlinks.
+    //
+    // chains = 1 and loops = 1: `/redirect/chain-1` heads the one chain and
+    // `/redirect/loop` is the one cycle, which is what those two fixtures are
+    // for and what the `expectedIssues` on them already assert from the other
+    // side.
+    expect(siteMetric("redirect.volume")).toEqual({
+      redirectPages: 4,
+      redirectInlinks: 4,
+      totalPages: 82,
+      ratioPct: 4.9,
+      chains: 1,
+      loops: 1,
+    });
+  });
+
   it("every metric rule wrote its table for this crawl", () => {
     // The metric layer's coverage assertion, and the reason the rule sweep
     // below can stop skipping the kind. A metric writes no `issues` row, so
     // "did it fire" is a question only the `metrics` table can answer — and
     // every one of the eleven CAN answer it here: nine always emit a site row,
     // `inlinks.sources-by-type` emits one per target cohort type and this site
-    // has 49 of them, and `content.template-similarity` emits one per type with
+    // has 50 of them, and `content.template-similarity` emits one per type with
     // two fingerprinted pages, which the `/deep/:id`, `/head/:slug`,
-    // `/content/:slug`, `/authored/:slug` and `/authored3/:slug` templates give
-    // it. There is no exemption paragraph to write.
+    // `/content/:slug`, `/authored/:slug`, `/authored3/:slug` and now
+    // `/authored7/:slug` templates give it. There is no exemption paragraph to
+    // write.
+    //
+    // The type count moved by ONE for P7-T2's two pages rather than by two, and
+    // the reason is `detectUrlTemplate`'s slug rule: a segment carrying a digit
+    // is a slug, so `/authored7/shared-h1-a` and `-b` collapse to
+    // `/authored7/:slug` together, while `/authored7/hidden-chrome` (no digit,
+    // so a literal segment) stays a type of its own.
     //
     // `render.coverage` is among the nine, and since P5-T6 its row is no longer
     // all selection and no evidence: this harness runs the render pass over the
@@ -1033,8 +1190,8 @@ describe("the fixture site end to end", () => {
     // and the sitemap it publishes — rather than copied from what the SQL
     // produced, which would assert only that the query is deterministic.
     //
-    // THE COHORT, which two of the three are computed over. The crawl writes 80
-    // `pages` rows: the 79 fixtures plus the hub at `/`. Eleven of them are not
+    // THE COHORT, which two of the three are computed over. The crawl writes 82
+    // `pages` rows: the 81 fixtures plus the hub at `/`. Eleven of them are not
     // an indexable 200 and are therefore outside the cohort every metric shares
     // (fetched OK, 200, indexable):
     //
@@ -1045,17 +1202,18 @@ describe("the fixture site end to end", () => {
     //   redirects(4): /redirect/chain-1, /redirect/chain-2, /redirect/loop,
     //                /redirect/trailing-slash
     //
-    // 80 - 11 = 69 cohort pages. The seven `/render/*` fixtures P5-T6 added are
+    // 82 - 11 = 71 cohort pages. The seven `/render/*` fixtures P5-T6 added are
     // all indexable 200s and all inside it, which is why this number moved by
     // exactly seven; P7-T1's `/authored7/hidden-chrome` is an indexable 200 too
-    // and is why it has since moved by one more. The `schema.breadcrumb-absent`
-    // assertion above counts the same set out of `pageByPath` and is asserted
-    // against the same rows, which is a second reading of this number from a
-    // different direction.
-    const COHORT = 69;
+    // and is why it moved by one more; and P7-T2's `/authored7/shared-h1-a` and
+    // `-b` are two more of the same, which is this commit's +2. The
+    // `schema.breadcrumb-absent` assertion above counts the same set out of
+    // `pageByPath` and is asserted against the same rows, which is a second
+    // reading of this number from a different direction.
+    const COHORT = 71;
 
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
-    // kinds: the hub at `/` links the 71 fixtures whose `linkedFromHub` is not
+    // kinds: the hub at `/` links the 73 fixtures whose `linkedFromHub` is not
     // false; `/links/broken-internal-link` links `/status/not-found`;
     // `/deep/N` links `/deep/N+1` for N = 1…6 (the seventh rung ends the chain);
     // the paginated series links `paged-1 -> paged-2`, `paged-2 -> paged-1`,
@@ -1076,17 +1234,17 @@ describe("the fixture site end to end", () => {
     //   2  /authored3/paged-1        the hub, paged-2
     //   1  /deep/2 … /deep/7         the rung above (6 pages)
     //   1  every other cohort page   the hub alone —
-    //                                69 - 3 - 1 - 1 - 6 = 58 pages
+    //                                71 - 3 - 1 - 1 - 6 = 60 pages
     //
-    // Sorted, that is 0,0,0 then sixty-four 1s (the 58 above plus the 6 deep
-    // rungs) then 2 then 3. Sum = 64 + 2 + 3 = 69, so mean = 69/69 = 1.
+    // Sorted, that is 0,0,0 then sixty-six 1s (the 60 above plus the 6 deep
+    // rungs) then 2 then 3. Sum = 66 + 2 + 3 = 71, so mean = 71/71 = 1.
     //
-    // n = 69, so `percentile_cont` interpolates at pos = q * 68 over v0…v68,
-    // where v0…v2 = 0, v3…v66 = 1, v67 = 2, v68 = 3:
-    //   p25    pos 17    -> v17, which is 1
-    //   median pos 34    -> v34, which is 1
-    //   p75    pos 51    -> v51, which is 1
-    //   p95    pos 64.6  -> between v64 and v65, both 1 -> 1
+    // n = 71, so `percentile_cont` interpolates at pos = q * 70 over v0…v70,
+    // where v0…v2 = 0, v3…v68 = 1, v69 = 2, v70 = 3:
+    //   p25    pos 17.5  -> between v17 and v18, both 1 -> 1
+    //   median pos 35    -> v35, which is 1
+    //   p75    pos 52.5  -> between v52 and v53, both 1 -> 1
+    //   p95    pos 66.5  -> between v66 and v67, both 1 -> 1
     // Every one lands inside the run of 1s, so each interpolates between two
     // equal values and the interpolation changes nothing.
     expect(siteMetric("inlinks.distribution")).toEqual({
@@ -1107,11 +1265,11 @@ describe("the fixture site end to end", () => {
     // the page, not the declaration: `/authored3/hreflang-a` names three
     // alternates and is one covered page.
     //
-    // 100 * 6 / 69 = 8.69565… -> 8.7 at the one decimal place the SQL rounds to.
+    // 100 * 6 / 71 = 8.45070… -> 8.5 at the one decimal place the SQL rounds to.
     expect(siteMetric("hreflang.coverage")).toEqual({
       pagesWithHreflang: 6,
       indexablePages: COHORT,
-      coveragePct: 8.7,
+      coveragePct: 8.5,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
@@ -1134,24 +1292,24 @@ describe("the fixture site end to end", () => {
     // `/sitemap.xml` publishes the hub, every fixture whose `inSitemap` is not
     // false, and the one URL robots.txt blocks:
     //   1 (the hub, `/`)
-    // + 63 (fixtures listed, of the 79 — sixteen opt out)
+    // + 65 (fixtures listed, of the 81 — the same sixteen opt out)
     // + 1 (/private/hidden)
-    // = 65 entries, all distinct, so the walk's first-source-wins dedupe drops
+    // = 67 entries, all distinct, so the walk's first-source-wins dedupe drops
     // none of them.
     //
-    // 65 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
+    // 67 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
     // it; no document was dropped for exceeding the read cap; and the walk
     // stopped at no entry cap — which is what makes every count above exact
     // rather than a floor.
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 1,
-      totalUrls: 65,
+      totalUrls: 67,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
     });
     // The per-document row beneath it, which is where `docs: 1` is spent: the
-    // one document, with the same 65 entries under its own URL. Asserted as the
+    // one document, with the same 67 entries under its own URL. Asserted as the
     // exact key set, so the broken document appearing here — or the good one
     // vanishing — is a failure rather than a number nobody reads.
     expect([...(metricsById.get("sitemap.structure") ?? new Map()).keys()].sort()).toEqual([
@@ -1159,7 +1317,7 @@ describe("the fixture site end to end", () => {
       "site|",
     ]);
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
-      { urls: 65, breaches50k: false },
+      { urls: 67, breaches50k: false },
     );
   });
 
@@ -1168,20 +1326,20 @@ describe("the fixture site end to end", () => {
     // comes from the fixture collection and the selection rules
     // (src/crawl/render/select.ts), not from what the SQL produced.
     //
-    // pagesCrawled = 80. The 79 fixtures plus the hub — the same count the
+    // pagesCrawled = 82. The 81 fixtures plus the hub — the same count the
     // cohort derivation two tests above starts from.
     //
-    // selectionBudget = min(ceil(80 × 100/100), renderMaxPages 500) = 80.
+    // selectionBudget = min(ceil(82 × 100/100), renderMaxPages 500) = 82.
     // The percentage is taken over EVERY crawled URL, not over the renderable
-    // ones, so the denominator is 80 and not the 73-page cohort below.
+    // ones, so the denominator is 82 and not the 75-page cohort below.
     //
     // THE SELECTION COHORT is `fetch_class = 'ok'` AND `status_code = 200`, and
     // deliberately NOT `is_indexable` — a noindex page built by JavaScript is
-    // exactly the evidence this pass collects. So it is 80 minus the seven
+    // exactly the evidence this pass collects. So it is 82 minus the seven
     // pages that are neither: /status/not-found, /status/server-error,
-    // /status/blocked, and the four `/redirect/*` hops. 80 - 7 = 73.
+    // /status/blocked, and the four `/redirect/*` hops. 82 - 7 = 75.
     //
-    // selectionSuspects = 61. Only ONE of the four suspicion triggers can fire
+    // selectionSuspects = 63. Only ONE of the four suspicion triggers can fire
     // on this site: no fixture is a 50KB document with under 50 words, and no
     // titleless fixture is over 25KB (/head/missing-title is 1.3KB). The thin
     // trigger reads `renderable_word_count` since Phase 7 and STILL fires on
@@ -1192,7 +1350,7 @@ describe("the fixture site end to end", () => {
     // word one. The trigger that does fire is "this page links nowhere", and
     // the cohort pages that DO link somewhere are exactly twelve:
     //
-    //   /                            the hub, 71 links
+    //   /                            the hub, 73 links
     //   /links/broken-internal-link  1 link, to /status/not-found
     //   /deep/1 … /deep/6            1 link each, to the rung below (6 pages)
     //   /authored3/paged-1, -2, -3   the paginated series (3 pages)
@@ -1200,12 +1358,14 @@ describe("the fixture site end to end", () => {
     //                                and therefore not "links nowhere", while
     //                                being invisible to every inbound count
     //
-    // 73 - 12 = 61. `/render/csr-content` carries a `__NEXT_DATA__` marker as
+    // 75 - 12 = 63. `/render/csr-content` carries a `__NEXT_DATA__` marker as
     // well, which is a second trigger on a page the first had already caught:
     // `min(tier)` means it is counted once. P7-T1's `/authored7/hidden-chrome`
     // renders no anchor of its own — its one hidden drawer holds none — so it
-    // joins the suspects rather than the twelve, which is why this number moved
-    // by one and `selectionSampled` did not move at all.
+    // joins the suspects rather than the twelve, and P7-T2's two shared-heading
+    // pages render none either (the `article` helper emits an image and no
+    // anchor), so all three are suspects. That is why this number has moved by
+    // three across the phase while `selectionSampled` has not moved at all.
     //
     // selectionSampled = 9. The sample takes `renderSamplePerType` (3) pages of
     // every page type in URL order, and a page that is both a suspect and a
@@ -1217,21 +1377,21 @@ describe("the fixture site end to end", () => {
     // `/deep/2` and `/deep/3`. 6 + 3 = 9, and `/deep/4`, `/deep/5` and
     // `/deep/6` are the only three cohort pages this selection does not name.
     //
-    // selectionSelected = min(80, 61 + 9) = 70, selectionTruncated = false:
+    // selectionSelected = min(82, 63 + 9) = 72, selectionTruncated = false:
     // the budget is ten seats larger than the need, so nothing was cut.
     //
-    // pagesRendered = 69 and renderFailures = 1, and the two are disjoint and
-    // sum to the 70 selected — the single-pass invariant this crawl happens to
+    // pagesRendered = 71 and renderFailures = 1, and the two are disjoint and
+    // sum to the 72 selected — the single-pass invariant this crawl happens to
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
-      pagesCrawled: 80,
-      selectionBudget: 80,
-      selectionSuspects: 61,
+      pagesCrawled: 82,
+      selectionBudget: 82,
+      selectionSuspects: 63,
       selectionSampled: 9,
-      selectionSelected: 70,
+      selectionSelected: 72,
       selectionTruncated: false,
-      pagesRendered: 69,
+      pagesRendered: 71,
       renderFailures: 1,
     });
 
@@ -1239,12 +1399,12 @@ describe("the fixture site end to end", () => {
     // the statement that actually promoted the frontier rows. Asserting both
     // is what proves `renderSelectionStats` describes the selection that
     // happened rather than one it would make today.
-    expect(render.selection.budget).toBe(80);
-    expect(render.selection.suspects).toBe(61);
+    expect(render.selection.budget).toBe(82);
+    expect(render.selection.suspects).toBe(63);
     expect(render.selection.sampled).toBe(9);
     expect(render.selection.truncated).toBe(false);
-    expect(render.selection.selected).toHaveLength(70);
-    expect(render.rendered).toBe(69);
+    expect(render.selection.selected).toHaveLength(72);
+    expect(render.rendered).toBe(71);
     expect(render.failures).toBe(1);
     // No URL left behind: the pass was not aborted, so every leased render was
     // recorded and completed.
@@ -1268,7 +1428,7 @@ describe("the fixture site end to end", () => {
       .select({ count: crawls.renderPassCount })
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
-    expect(crawlRow?.count).toBe(69);
+    expect(crawlRow?.count).toBe(71);
   });
 
   it("each render rule fires on exactly the fixture built for it", () => {
@@ -1445,7 +1605,7 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the seven `SKIP_HARNESS_CLAIMS` name and explain. A
+    // this one crawl, save the nine `SKIP_HARNESS_CLAIMS` name and explain. A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     expect(

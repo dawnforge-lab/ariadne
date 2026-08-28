@@ -57,6 +57,10 @@ type RedirectRow = {
   ratio_pct: number | null;
 };
 
+type RedirectInlinkRow = {
+  redirect_inlinks: number;
+};
+
 type FindingCountRow = {
   rule_id: string;
   listed: number;
@@ -146,9 +150,25 @@ function exactFindingCount(row: FindingCountRow, self: MetricIdentity): number {
  *  - `redirectPages` — page rows whose `fetch_class` is `redirect`: URLs this
  *    crawl requested and was sent away from. One row per URL, so a template
  *    link that redirects on every page of the site is ONE redirect page here.
- *    (The checklist's crawl-budget number is redirect INLINKS, which is a
- *    question for the link graph rather than for this table; it is not claimed
- *    here and this column does not stand in for it.)
+ *  - `redirectInlinks` — internal LINKS pointing at one of those URLs. This is
+ *    the crawl-budget half of CHECK-10, and it is a different number from the
+ *    one above rather than a restatement of it: the template link that redirects
+ *    is one redirect page and one inlink per page of the site, so a site with
+ *    three redirecting nav items and ten thousand pages has 3 redirect pages and
+ *    30,000 redirect inlinks. The first says how many URLs are wrong; the second
+ *    says how often the site walks into them, which is what the budget is
+ *    actually spent on and what the fix (repointing links) actually changes.
+ *
+ *    THE JOIN, spelled exactly as every other link-to-page join in this engine:
+ *    `pages.url = links.target_url`. Both sides are `normalizeUrl` output — the
+ *    analyzer resolves every href through it before storing a `links` row, and
+ *    the frontier keys `pages` by it — so the two are directly comparable and no
+ *    normalisation happens here (see `links.orphan` and `links.broken-internal`,
+ *    which spell it the same way; `links.target_page_id` is written null by the
+ *    crawler and is not the join). `is_internal` is required because the figure
+ *    is about this site's own crawl budget; in practice it excludes nothing,
+ *    since only a URL this crawl fetched has a `pages` row at all, and saying so
+ *    is cheaper than leaving a reader to work it out.
  *  - `totalPages` — every page row of the crawl, whatever its status. Redirects
  *    are a share of what was fetched, not of what was indexable, so this is
  *    deliberately not the metric cohort.
@@ -199,6 +219,25 @@ async function redirectVolume(db: Db, crawlId: string, self: MetricIdentity): Pr
     throw new Error(`${self.id}: crawl '${crawlId}' redirect query returned no row`);
   }
 
+  // The link side of the same question. A separate statement rather than a
+  // fourth aggregate above, because it counts `links` rows and the query above
+  // counts `pages` rows: folding them into one join would multiply every page
+  // count by that page's inlink count, which is the classic way to make two
+  // correct numbers into two wrong ones.
+  //
+  // The `links` table is never loaded into memory (hard rule 3) — this is a
+  // count over the `links_crawl_target_url` index, and a redirect-heavy site is
+  // exactly where an in-memory version would fall over.
+  const inlinks = await db.execute<RedirectInlinkRow>(sql`
+    select count(*)::int as redirect_inlinks
+    from links l
+    join pages p on p.crawl_id = ${crawlId} and p.url = l.target_url
+    where l.crawl_id = ${crawlId} and l.is_internal and p.fetch_class = 'redirect'`);
+  const inlinkRow = inlinks.rows[0];
+  if (inlinkRow === undefined) {
+    throw new Error(`${self.id}: crawl '${crawlId}' redirect inlink query returned no row`);
+  }
+
   // The findings the two redirect rules wrote, and any truncation notes among
   // them. Grouped in SQL and judged in JavaScript, because "how many chains are
   // there" is not one aggregate: a note that cannot be read as an exact total
@@ -226,6 +265,7 @@ async function redirectVolume(db: Db, crawlId: string, self: MetricIdentity): Pr
       scope: "site",
       value: {
         redirectPages: num(row.redirect_pages, "redirect_pages", self.id),
+        redirectInlinks: num(inlinkRow.redirect_inlinks, "redirect_inlinks", self.id),
         totalPages: num(row.total_pages, "total_pages", self.id),
         ratioPct: nullableNum(row.ratio_pct, "ratio_pct", self.id),
         chains: found(CHAIN.id),
