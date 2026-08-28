@@ -156,6 +156,29 @@ type GroupRow = {
  * rather than arbitrary. Like every other URL ordering in the rule layer it is
  * the database's collation, so a database created with a different one may cut
  * a different last group; the COUNT behind the cap is exact either way.
+ *
+ * **THE CAP COMES BEFORE THE LATERAL, and that is a measured requirement rather
+ * than a tidiness.** A `cross join lateral` under an `order by`/`limit` at the
+ * same query level is evaluated for EVERY row the FROM produces, because the
+ * limit cannot be applied until the rows exist — so ordering on a value the
+ * lateral computes runs one twenty-row indexed lookup per GROUP, not per
+ * reported group. On a templated 50,000-page site with 5,000 duplicate groups
+ * that measured **2m41s for one rule**, against 69s for all 42 query rules in
+ * the Phase 5 gate. The three CTEs below exist to stop that:
+ *
+ *  1. `dupes` groups and carries `min(p.url) as first_url` out of the SAME
+ *     aggregate — the group's lexically first member, which is exactly what the
+ *     lateral's `order by p2.url limit N` puts at `urls[0]`, so the ordering
+ *     key and the finding's carrier are computed once and for free;
+ *  2. `capped` takes the `count(*) over ()` exact total (a window is evaluated
+ *     over the whole CTE before its own `order by`/`limit`, so the total is
+ *     every group) and cuts to `URL_FINDING_CAP`;
+ *  3. the lateral then runs against at most two hundred surviving rows.
+ *
+ * Every semantic above is preserved — same group order, same carrier, same
+ * exact totals, same truncation note — and the 20,000-page case measured 3.3s
+ * instead of 28.9s. `content.exact-duplicate` was restructured the same way in
+ * the same commit; it is the shape's origin and had the same cost curve.
  */
 async function groupFindings(
   db: Db,
@@ -178,30 +201,36 @@ async function groupFindings(
 
   const result = await db.execute<GroupRow>(sql`
     with dupes as (
-      select btrim(${column}) as value, count(*)::int as page_count
+      select btrim(${column}) as value,
+             count(*)::int as page_count,
+             min(p.url) as first_url
       from pages p
       where p.crawl_id = ${crawlId} and ${INDEXABLE("p")}
         and ${column} is not null and btrim(${column}) <> ''
       group by btrim(${column})
       having count(*) > 1
+    ),
+    capped as (
+      select d.value, d.page_count, d.first_url,
+             count(*) over ()::int as total_matches
+      from dupes d
+      order by d.first_url
+      limit ${URL_FINDING_CAP}
     )
-    select d.value, d.page_count,
-           count(*) over ()::int as total_matches,
-           s.urls, s.first_id
-    from dupes d
+    select c.value, c.page_count, c.total_matches, s.urls, s.first_id
+    from capped c
     cross join lateral (
       select array_agg(sample.url) as urls, (array_agg(sample.id))[1] as first_id
       from (
         select p2.id, p2.url
         from pages p2
         where p2.crawl_id = ${crawlId} and ${INDEXABLE("p2")}
-          and btrim(${columnB}) = d.value
+          and btrim(${columnB}) = c.value
         order by p2.url
         limit ${DUPLICATE_SAMPLE_URLS}
       ) sample
     ) s
-    order by s.urls[1]
-    limit ${URL_FINDING_CAP}`);
+    order by c.first_url`);
 
   const findings = result.rows.map((row) =>
     queryFinding(self, {
@@ -260,6 +289,16 @@ async function h1Coverage(db: Db, crawlId: string, ruleId: string): Promise<H1Co
  * H1s produces. Two crawls, two opposite facts, one silence: precisely the
  * always-passes hole hard rule 1 forbids, arriving through a schema version
  * rather than through a bad predicate.
+ *
+ * **The analyzer invariant this rests on**, which is what makes the condition
+ * DECIDE the question rather than merely suggest an answer: from P7 onward,
+ * `h1_count > 0` implies `h1_text IS NOT NULL`. The two come off one parse —
+ * the count from each `<h1>` open tag and the text from the first one's close
+ * (`headingCounts[0]` and `h1s`/`h1Text` in src/crawl/parse/page-analyzer.ts),
+ * written together by `PageWriter` — and an `<h1>` holding only an image stores
+ * `''`, which is present-but-blank rather than null. So a row with a count and
+ * no text is not a row a P7-or-later analyzer produced, and an entire cohort in
+ * that state can only be a pre-P7 crawl.
  *
  * The condition names that crawl and nothing else: NO indexable page has H1
  * text, while some indexable page HAS an h1 (`h1_count > 0`). The second half

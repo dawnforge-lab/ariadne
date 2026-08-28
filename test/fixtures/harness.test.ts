@@ -1152,10 +1152,12 @@ describe("the fixture site end to end", () => {
     // write.
     //
     // The type count moved by ONE for P7-T2's two pages rather than by two, and
-    // the reason is `detectUrlTemplate`'s slug rule: a segment carrying a digit
-    // is a slug, so `/authored7/shared-h1-a` and `-b` collapse to
-    // `/authored7/:slug` together, while `/authored7/hidden-chrome` (no digit,
-    // so a literal segment) stays a type of its own.
+    // the reason is `detectUrlTemplate`'s slug rule (src/crawl/parse/url-utils.ts):
+    // a segment is a `:slug` only when it has THREE OR MORE hyphen-separated
+    // parts, since two-part segments ("my-account") are more often fixed routes
+    // than content slugs. `shared-h1-a` and `shared-h1-b` are three parts each,
+    // so both collapse to `/authored7/:slug` and share one type; `hidden-chrome`
+    // is two parts, stays literal, and remains a type of its own.
     //
     // `render.coverage` is among the nine, and since P5-T6 its row is no longer
     // all selection and no evidence: this harness runs the render pass over the

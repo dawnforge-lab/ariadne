@@ -272,6 +272,18 @@ async function soft404Findings(db: Db, crawlId: string): Promise<Finding[]> {
  * quoted sample: duplicates spanning two templates (a product page and its
  * print version) are a different problem from duplicates inside one, and that
  * distinction must not depend on which twenty URLs happened to be quoted.
+ *
+ * **THE CAP COMES BEFORE THE LATERAL.** A `cross join lateral` under an
+ * `order by`/`limit` at the same query level is evaluated for every row the FROM
+ * produces — the limit cannot apply until the rows exist — so the twenty-URL
+ * lookup ran once per GROUP rather than once per reported group, and a
+ * templated site with thousands of duplicate groups paid minutes for it. The
+ * `capped` CTE takes the exact `count(*) over ()` total (a window is evaluated
+ * over the whole CTE before its own `order by`/`limit`, so it counts every
+ * group) and cuts to `URL_FINDING_CAP` first; the lateral then runs against at
+ * most two hundred rows. Semantics are untouched — same group order, same
+ * carrier, same totals — and the same restructure is in
+ * src/rules/query/field-duplicates.ts, which took this shape from here.
  */
 async function exactDuplicateFindings(db: Db, crawlId: string): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, EXACT.id);
@@ -292,24 +304,29 @@ async function exactDuplicateFindings(db: Db, crawlId: string): Promise<Finding[
       where p.crawl_id = ${crawlId} and ${AUDITABLE("p")} and p.content_hash is not null
       group by p.content_hash
       having count(*) > 1
+    ),
+    capped as (
+      select d.content_hash, d.page_count, d.page_types,
+             count(*) over ()::int as total_matches
+      from dupes d
+      order by d.content_hash
+      limit ${URL_FINDING_CAP}
     )
-    select d.content_hash, d.page_count, d.page_types,
-           count(*) over ()::int as total_matches,
+    select c.content_hash, c.page_count, c.page_types, c.total_matches,
            s.urls, s.first_id
-    from dupes d
+    from capped c
     cross join lateral (
       select array_agg(sample.url) as urls, (array_agg(sample.id))[1] as first_id
       from (
         select p2.id, p2.url
         from pages p2
         where p2.crawl_id = ${crawlId} and ${AUDITABLE("p2")}
-          and p2.content_hash = d.content_hash
+          and p2.content_hash = c.content_hash
         order by p2.url
         limit ${DUPLICATE_SAMPLE_URLS}
       ) sample
     ) s
-    order by d.content_hash
-    limit ${URL_FINDING_CAP}`);
+    order by c.content_hash`);
 
   const findings = result.rows.map((row) =>
     queryFinding(EXACT, {
