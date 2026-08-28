@@ -56,7 +56,7 @@ import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, gt, isNotNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
-import { crawls, frontier, pages } from "../db/schema.js";
+import { crawls, frontier, issues, pages } from "../db/schema.js";
 import {
   CRAWL_DEFAULTS,
   parseStoredConfig,
@@ -65,7 +65,8 @@ import {
   validateCrawlConfig,
   type CrawlConfig,
 } from "../crawl/loop.js";
-import { frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
+import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
+import { FETCH_CLASSES } from "../crawl/fetch-page.js";
 import {
   RenderPassRefusal,
   runRenderPass,
@@ -372,6 +373,96 @@ export interface CrawlDetail extends CrawlListItem {
    * operator has to decide rather than wait.
    */
   hostSpacingMs: number | null;
+  /**
+   * The extra hosts this crawl was told the site used to live on, echoed from
+   * its stored config. Empty when none were named.
+   *
+   * It is on the detail because it is the only place the host rules' evidence
+   * can be checked against what was asked for. `host.legacy-redirect`
+   * (CHECK-15) reports what the probe found; without this a reader cannot tell
+   * "the legacy domain does not redirect" from "no legacy domain was ever
+   * given to the crawl", and the second is a crawl-configuration mistake
+   * dressed up as a site defect.
+   *
+   * Empty is a real answer, not a fallback: `legacyHosts` is optional, so an
+   * absent key means nobody named one. A stored value of the wrong SHAPE is a
+   * refusal instead (see `legacyHostsOf`).
+   */
+  legacyHosts: string[];
+  /**
+   * When the rules last COMPLETED a pass over this crawl, or null.
+   *
+   * The judged-state marker (`crawls.rules_run_at`), and the field to check
+   * before reading anything into an empty findings list. Null means no
+   * complete pass is on record — never judged, being judged right now, or
+   * judged by a run that died part-way — so `findingsCount: 0` beside a null
+   * here is "nobody has looked", and beside a timestamp it is "looked, found
+   * nothing". Those are different reports.
+   */
+  rulesRunAt: string | null;
+  /**
+   * Rows in the `issues` table for this crawl, counted live.
+   *
+   * The same number the issues listing's groups sum to, so a reader can tell
+   * at a glance whether the judgement produced anything at all without paging
+   * a listing. Read with `rulesRunAt`, never alone.
+   */
+  findingsCount: number;
+}
+
+/**
+ * The site's own robots.txt as this crawl read it — `GET /crawls/:id/robots`.
+ *
+ * EVERY FIELD IS STORED EVIDENCE, none of it re-fetched: the crawl wrote the
+ * text and the outcome into `crawls.discovery_jsonb` before it seeded the
+ * frontier (hard rule 3 — the surface reads the database), so this is what the
+ * crawl actually obeyed rather than what the file says today. A file that has
+ * changed since is a fact about the site, and reading the live one here would
+ * hide it.
+ *
+ * The body itself is the site's own public document, so there is nothing
+ * tenant-private in it — and the WRAPPER is still a closed shape, because the
+ * blob it is read out of is `jsonb` and everything else in that blob (the
+ * sitemap walk's failures, its counters) belongs to other endpoints.
+ */
+export interface RobotsEvidence {
+  crawlId: string;
+  /**
+   * The URL the crawl asked for: `/robots.txt` on the seed's origin. NOT
+   * necessarily where the answer came from — a redirect to another host is
+   * followed and its rules are the ones that applied — which the crawl does
+   * not record separately; `note` says when something like that happened.
+   */
+  robotsUrl: string;
+  /**
+   * `read` — 2xx and parsed, the site's rules applied.
+   * `absent` — 4xx, the site says there are no rules: crawled allow-all.
+   * `unreachable` — 5xx, timeout, network error or a refused URL. The site
+   * could not tell us its rules, which RFC 9309 §2.3.1.4 does NOT treat as
+   * "there are none".
+   */
+  outcome: string;
+  /** The text as served, or null when nothing was read (`absent`/`unreachable`). */
+  raw: string | null;
+  /**
+   * True when `raw` is a 500KB PREFIX rather than the whole file. Anything
+   * concluded from the stored text about a rule past that point is unsound —
+   * a missing `Disallow` may simply be past the cap.
+   */
+  truncated: boolean;
+  /** The `Crawl-delay` the crawl honoured, in seconds, or null if none. */
+  crawlDelaySec: number | null;
+  /** Why the rules are what they are, when that needed saying. Null when read. */
+  note: string | null;
+  /** The `Sitemap:` lines the walk was pointed at, in the order declared. */
+  sitemapSources: string[];
+  /**
+   * The user agent the crawl identified as — the groups in this file that
+   * governed it. Null when the stored config does not carry one, which is a
+   * row no crawl loop wrote: the matching is then unreproducible rather than
+   * assumed to be `*`.
+   */
+  userAgent: string | null;
 }
 
 /** A page of results, in the surface's one pagination shape. */
@@ -524,7 +615,14 @@ export interface PageRow {
   /** `is_indexable`; null when the crawl never got a verdict for this URL. */
   indexable: boolean | null;
   depth: number;
+  /** How the crawler found this URL: seed, link, sitemap or redirect. */
+  discoveredVia: string;
   wordCount: number | null;
+  /**
+   * The same count minus the words the page's own markup says are not
+   * displayed. Null on a page no Phase-7-or-later analyzer ran on.
+   */
+  renderableWordCount: number | null;
   rendered: boolean;
   renderedWordCount: number | null;
   /** Why an ATTEMPTED render produced nothing. Null is not "it worked". */
@@ -598,6 +696,8 @@ export interface PageQuery {
   statusCode?: number;
   indexable?: boolean;
   rendered?: boolean;
+  fetchClass?: string;
+  discoveredVia?: string;
   limit?: number;
   cursor?: string;
 }
@@ -810,10 +910,11 @@ export class ApiService {
 
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
     const row = await this.crawlRow(crawlId);
-    const [counts, liveLeases, blockedPages] = await Promise.all([
+    const [counts, liveLeases, blockedPages, findingsCount] = await Promise.all([
       frontierCounts(this.db, crawlId),
       this.liveLeaseCount(crawlId),
       this.blockedPageCount(crawlId),
+      this.findingsCount(crawlId),
     ]);
     return {
       crawlId: row.id,
@@ -830,6 +931,59 @@ export class ApiService {
       liveLeases,
       blockedPages,
       hostSpacingMs: row.hostSpacingMs,
+      legacyHosts: legacyHostsOf(row.config, crawlId),
+      rulesRunAt: row.rulesRunAt === null ? null : row.rulesRunAt.toISOString(),
+      findingsCount,
+    };
+  }
+
+  /**
+   * The site's robots.txt as this crawl read it, out of the stored discovery
+   * evidence — `GET /crawls/:id/robots` and `robots_get`.
+   *
+   * A READ OF EVIDENCE, never a fetch (hard rule 2 and 3): this is the file the
+   * crawl obeyed. It is also the only way to see it — nothing else on the
+   * surface carries the text, so a robots.txt question was previously
+   * answerable only by asking the site again, which answers a different
+   * question (what it says now) and costs the site a request.
+   *
+   * A crawl with no discovery blob is a 409 rather than an empty answer, by the
+   * same argument the render path makes: `discovery_jsonb` is written before
+   * the frontier is seeded, so its absence means the crawl never got that far —
+   * and "we have no record" must not be served as "the site has no robots.txt",
+   * which is a fact with the opposite meaning.
+   */
+  async getRobots(crawlId: string): Promise<RobotsEvidence> {
+    const row = await this.crawlRow(crawlId);
+    const robots = this.parseRobots(row.discovery, crawlId);
+
+    let robotsUrl: string;
+    try {
+      robotsUrl = new URL("/robots.txt", row.siteUrl).href;
+    } catch {
+      // `site_url` is `normalizeUrl` output on every row this engine writes, so
+      // this is a row we did not write. Loud rather than an omitted field.
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} has a site URL that is not a URL, so the robots.txt it ` +
+          `would have asked for cannot be named`,
+      );
+    }
+
+    const config = row.config;
+    const userAgent =
+      isRecord(config) && typeof config["userAgent"] === "string" ? config["userAgent"] : null;
+
+    return {
+      crawlId,
+      robotsUrl,
+      outcome: robots.outcome,
+      raw: robots.raw,
+      truncated: robots.truncated,
+      crawlDelaySec: robots.crawlDelaySec,
+      note: robots.note,
+      sitemapSources: robots.sitemapSources,
+      userAgent,
     };
   }
 
@@ -1348,6 +1502,31 @@ export class ApiService {
     // reads them off the listing, where they come back as null.
     if (opts.indexable !== undefined) where.push(eq(pages.isIndexable, opts.indexable));
     if (opts.rendered !== undefined) where.push(eq(pages.rendered, opts.rendered));
+    // Both of these are CLOSED vocabularies owned by the crawl layer, and both
+    // are validated against the real one rather than passed through: a value
+    // the crawler cannot write selects no rows, and an empty page would read as
+    // "no page of this crawl was blocked" — which is the opposite of what a
+    // caller who typo'd `blocked` needs to hear.
+    if (opts.fetchClass !== undefined) {
+      if (!(FETCH_CLASSES as readonly string[]).includes(opts.fetchClass)) {
+        throw new ServiceError(
+          "VALIDATION",
+          `fetchClass '${clip(opts.fetchClass)}' is not a fetch class ` +
+            `(one of: ${FETCH_CLASSES.join(", ")})`,
+        );
+      }
+      where.push(eq(pages.fetchClass, opts.fetchClass));
+    }
+    if (opts.discoveredVia !== undefined) {
+      if (!(DISCOVERED_VIA as readonly string[]).includes(opts.discoveredVia)) {
+        throw new ServiceError(
+          "VALIDATION",
+          `discoveredVia '${clip(opts.discoveredVia)}' is not a discovery kind ` +
+            `(one of: ${DISCOVERED_VIA.join(", ")})`,
+        );
+      }
+      where.push(eq(pages.discoveredVia, opts.discoveredVia));
+    }
     if (cursor !== null) where.push(gt(pages.url, cursor[0]));
 
     const rows = await this.db
@@ -1959,14 +2138,12 @@ export class ApiService {
    * A count, not a sample: what the polling shape needs is one number that can
    * be compared with the previous poll.
    *
-   * THE URLS THEMSELVES ARE NOT ONE QUERY AWAY, and this used to claim they
-   * were — "the pages query with `fetchClass=blocked`". There is no
-   * `fetchClass` filter: `PageQuery` accepts `pageType`, `statusCode`,
-   * `indexable` and `rendered`, and nothing else. What the pages listing does
-   * carry is `fetchClass` and `fetchReason` on every row, so the blocked URLs
-   * are readable — by paging the listing, or by taking the `pages` export — and
-   * selected by the caller rather than by the server. A `fetchClass` filter
-   * would be the honest fix and is a change to the surface, not to a comment.
+   * THE URLS THEMSELVES ARE ONE QUERY AWAY, and now they really are: the pages
+   * listing takes `fetchClass=blocked` (`listPages`), which is the filter this
+   * comment used to say did not exist and ought to. Every blocked row carries
+   * its `fetchReason` too — the status, the attempts and the spacing the engine
+   * had escalated to — so "crawl slower" and "this site refuses us" are
+   * distinguishable from the listing rather than only from a re-crawl.
    */
   private async blockedPageCount(crawlId: string): Promise<number> {
     const rows = await this.db
@@ -1981,17 +2158,58 @@ export class ApiService {
   }
 
   /**
-   * The robots `Crawl-delay` this crawl honoured, read back off its own
-   * discovery evidence so the render pass honours it too.
+   * Findings this crawl holds right now — `count(*)` over `issues`.
    *
-   * A crawl with no discovery blob is refused rather than rendered at the
-   * config delay alone: `discovery_jsonb` is written before the frontier is
-   * seeded, so a row without one belongs to a crawl that never got that far,
-   * and rendering it would mean visiting a site at a pace we have no evidence
-   * it permits (rule 9 — and the "no silent fallback" rule, since the missing
-   * evidence would otherwise be read as "no delay").
+   * Live rather than remembered, and off the same table the issues listing
+   * reads, so the detail and the listing cannot disagree: a rules run rewrites
+   * that table wholesale, and a stored count would go stale the moment one did.
+   * It is the invariant `runRules`' summary states about itself
+   * (`count(issues where crawl_id) == summary.findings`), asked of the database.
    */
-  private robotsCrawlDelay(discovery: unknown, crawlId: string): number | null {
+  private async findingsCount(crawlId: string): Promise<number> {
+    const rows = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(issues)
+      .where(eq(issues.crawlId, crawlId));
+    const n = rows[0]?.n;
+    if (typeof n !== "number") {
+      throw new Error(`findingsCount: count came back as ${typeof n}, not a number`);
+    }
+    return n;
+  }
+
+  /**
+   * The robots half of a crawl's stored discovery evidence, VALIDATED FIELD BY
+   * FIELD rather than cast.
+   *
+   * Two callers, and both of them act on what it says: the render pass paces
+   * itself by `crawlDelaySec` (rule 9 — a pass that ignored it would be a
+   * second, ruder visit), and `getRobots` publishes the text an auditor will
+   * quote to a site owner. `discovery_jsonb` is a jsonb column, so by read time
+   * it is whatever is in the row; a `truncated` that is not a boolean reads as
+   * falsy and turns "this text is a 500KB prefix" into silence, which is the
+   * exact untruth the flag exists to prevent. This is the discipline
+   * `parseDiscovery` applies for the rules (src/rules/query/crawl-evidence.ts),
+   * raising the API's own refusal instead of a bare Error.
+   *
+   * A crawl with no discovery blob is a CONFLICT rather than an empty answer:
+   * `discovery_jsonb` is written by `runCrawl` before the frontier is seeded,
+   * so a row without one belongs to a crawl that never got that far. Rendering
+   * it would mean visiting a site at a pace we have no evidence it permits, and
+   * publishing it would mean reporting "no robots.txt" about a file nobody
+   * asked for (hard rule 7).
+   */
+  private parseRobots(
+    discovery: unknown,
+    crawlId: string,
+  ): {
+    outcome: string;
+    raw: string | null;
+    truncated: boolean;
+    crawlDelaySec: number | null;
+    note: string | null;
+    sitemapSources: string[];
+  } {
     if (discovery === null || discovery === undefined) {
       throw new ServiceError(
         "CONFLICT",
@@ -1999,23 +2217,97 @@ export class ApiService {
           `there is nothing to render and no robots crawl-delay to honour`,
       );
     }
-    const robots = (discovery as Record<string, unknown>)["robots"];
+    if (!isRecord(discovery)) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} discovery evidence is not an object`,
+      );
+    }
+    const robots = discovery["robots"];
     if (robots === null || typeof robots !== "object") {
       throw new ServiceError(
         "CONFLICT",
         `crawl ${crawlId} discovery evidence has no robots object`,
       );
     }
-    const delay = (robots as Record<string, unknown>)["crawlDelaySec"];
-    if (delay === null || delay === undefined) return null;
-    if (typeof delay !== "number") {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} discovery evidence has a non-numeric robots.crawlDelaySec`,
-      );
+    const bad = (why: string): never => {
+      throw new ServiceError("CONFLICT", `crawl ${crawlId} discovery evidence has ${why}`);
+    };
+    const record = robots as Record<string, unknown>;
+
+    const outcome = record["outcome"];
+    if (!ROBOTS_OUTCOMES.includes(outcome as string)) {
+      bad(`an unknown robots.outcome (one of: ${ROBOTS_OUTCOMES.join(", ")})`);
     }
-    return delay;
+    const raw = record["raw"];
+    if (raw !== null && raw !== undefined && typeof raw !== "string") {
+      bad("a non-string robots.raw");
+    }
+    const truncated = record["truncated"];
+    if (typeof truncated !== "boolean") bad("a non-boolean robots.truncated");
+    const note = record["note"];
+    if (note !== null && note !== undefined && typeof note !== "string") {
+      bad("a non-string robots.note");
+    }
+    const delay = record["crawlDelaySec"];
+    if (delay !== null && delay !== undefined && typeof delay !== "number") {
+      bad("a non-numeric robots.crawlDelaySec");
+    }
+    // The declared sitemaps live one level up, on the discovery blob itself —
+    // they are what the WALK was pointed at, and every one of them came off a
+    // `Sitemap:` line in this file (`discoveryEvidence`, src/crawl/loop.ts).
+    const sources = discovery["sitemapSources"];
+    if (!Array.isArray(sources) || sources.some((s) => typeof s !== "string")) {
+      bad("no sitemapSources array of strings");
+    }
+
+    return {
+      outcome: outcome as string,
+      raw: (raw as string | null | undefined) ?? null,
+      truncated: truncated as boolean,
+      crawlDelaySec: (delay as number | null | undefined) ?? null,
+      note: (note as string | null | undefined) ?? null,
+      sitemapSources: sources as string[],
+    };
   }
+
+  /** The crawl-delay the render pass has to honour, off the same evidence. */
+  private robotsCrawlDelay(discovery: unknown, crawlId: string): number | null {
+    return this.parseRobots(discovery, crawlId).crawlDelaySec;
+  }
+}
+
+/** The three outcomes `RobotsInfo` can record. See `RobotsEvidence.outcome`. */
+const ROBOTS_OUTCOMES: readonly string[] = ["read", "absent", "unreachable"];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `legacyHosts` off a stored config, checked rather than cast.
+ *
+ * Absent is `[]` and that is the honest reading: the field is optional, and a
+ * crawl started without one was told about no legacy domain. A value of the
+ * wrong SHAPE is a different matter — it is a config this engine did not write,
+ * and echoing `[]` for it would report "no legacy hosts were configured" about
+ * a row that says otherwise (hard rule 7). `parseStoredConfig` refuses the same
+ * shape for the same reason; this is the read-only half of it, which does not
+ * demand the rest of the config be readable in order to answer a status poll.
+ */
+function legacyHostsOf(config: unknown, crawlId: string): string[] {
+  if (!isRecord(config)) {
+    throw new ServiceError("CONFLICT", `crawl ${crawlId} has a stored config that is not an object`);
+  }
+  const hosts = config["legacyHosts"];
+  if (hosts === undefined || hosts === null) return [];
+  if (!Array.isArray(hosts) || hosts.some((host) => typeof host !== "string")) {
+    throw new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} has a stored config.legacyHosts that is not an array of strings`,
+    );
+  }
+  return hosts as string[];
 }
 
 /**
@@ -2070,7 +2362,41 @@ const PAGE_FIELDS = {
   pageType: pages.pageType,
   indexable: pages.isIndexable,
   depth: pages.depth,
+  /**
+   * How the crawler reached this URL — seed, link, sitemap or redirect.
+   *
+   * Named here because it is half of the orphan cross-check: a page whose only
+   * discovery was `sitemap` was never linked to from anywhere the crawl walked,
+   * and `links.orphan`'s finding is checkable against the page list only if the
+   * list says so. It is a fact about our own walk, not about the visitor's site,
+   * and it is written by the crawl loop's four `enqueue` call sites.
+   */
+  discoveredVia: pages.discoveredVia,
+  /**
+   * Every word of visible text the HTML carried.
+   *
+   * SEMANTICS: template content is NOT counted (Phase 7); rows written before
+   * that change counted it, and carry the old meaning. See `pages.word_count`.
+   */
   wordCount: pages.wordCount,
+  /**
+   * The same count minus the words the page's own MARKUP says are not shown —
+   * `hidden`, inline `display:none`, a closed `<dialog>`, a closed `<details>`'
+   * body. Always <= `wordCount`, and it is the number a thin-content judgement
+   * is actually made on (`content.thin`).
+   *
+   * BOTH COLUMNS, SIDE BY SIDE, deliberately. The surface used to publish only
+   * `wordCount`, which on a page that hides half its markup is a number nobody
+   * can see on the page — an agent reading the page list was quoting the
+   * inflated figure. It is still here because it is what the HTML carries, and
+   * the gap between the two is evidence about the page rather than an error in
+   * either.
+   *
+   * NULL IS A GATE, not a zero: it means no Phase-7-or-later analyzer wrote the
+   * row, so the correction was never computed. A page the analyzer never ran on
+   * at all — a PDF, a 404 — is null in both columns, which is a different fact.
+   */
+  renderableWordCount: pages.renderableWordCount,
   rendered: pages.rendered,
   renderedWordCount: pages.renderedWordCount,
   renderError: pages.renderError,

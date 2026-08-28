@@ -161,7 +161,25 @@ export async function runRules(
   // AFTER the ANALYZE above, not before: the planner's statistics then describe
   // a table roughly the size this run is about to rewrite it to, rather than
   // the empty one it would see for the rest of the run.
-  await db.delete(issues).where(eq(issues.crawlId, crawlId));
+  //
+  // IN ONE TRANSACTION WITH `crawls.rules_run_at = null`, which is the crawl's
+  // judged-state marker (schema.ts). The pair is the whole point: the moment
+  // the previous run's findings stop being in the table, the timestamp that
+  // said when they were produced stops being true, and the two facts must not
+  // be observable apart. A reader that saw an old `rulesRunAt` over a
+  // half-rewritten `issues` table would take a coherent prefix of THIS run for
+  // a complete judgement made at a time that has passed.
+  //
+  // So the null window — from here to the stamp at the end of the run — is the
+  // honest state and is meant to be read as one: "this crawl is being judged,
+  // or a judgement of it died part-way". It is also what a crashed run leaves
+  // behind, deliberately: the table then holds a coherent prefix of a run that
+  // threw, and `rulesRunAt: null` is the surface saying that no complete pass
+  // is on record rather than pointing at the run before it (hard rule 7).
+  await db.transaction(async (tx) => {
+    await tx.delete(issues).where(eq(issues.crawlId, crawlId));
+    await tx.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlId));
+  });
 
   const summary: RunSummary = {
     pagesScanned: 0,
@@ -408,6 +426,23 @@ export async function runRules(
     summary.metrics += rows.length;
     summary.byMetric[rule.id] = rows.length;
   }
+
+  // THE JUDGED-STATE MARKER, stamped last and only here.
+  //
+  // Every finding and every metric this run produces is on disk by the time
+  // this statement runs, so a non-null `rules_run_at` means exactly one thing:
+  // a full pass over this crawl completed, and the `issues` and `metrics` rows
+  // beside it are that pass's. The agent surface reports it as `rulesRunAt`
+  // (`GET /crawls/:id`, `crawl_status`), which is how a reader tells "this
+  // crawl was judged and found clean" from "this crawl was never judged" —
+  // two facts an empty issues table cannot distinguish on its own.
+  //
+  // Deliberately NOT inside a transaction with anything: there is nothing left
+  // to be atomic with. The run's writes are already committed, and a failure
+  // here is a failure to record a judgement that happened — which throws, and
+  // leaves the marker null, which is the same "no complete pass on record"
+  // the delete above established. Never the other way round.
+  await db.update(crawls).set({ rulesRunAt: new Date() }).where(eq(crawls.id, crawlId));
 
   return summary;
 }

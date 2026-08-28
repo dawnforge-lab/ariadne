@@ -613,6 +613,77 @@ describe("runRules against the database", () => {
     }
   });
 
+  /** `crawls.rules_run_at` as the runner left it. */
+  async function rulesRunAt(crawlId: string): Promise<Date | null> {
+    const rows = await db
+      .select({ at: crawls.rulesRunAt })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId));
+    const row = rows[0];
+    if (row === undefined) throw new Error(`no crawl row for ${crawlId}`);
+    return row.at;
+  }
+
+  // THE JUDGED-STATE MARKER. An empty `issues` table means two different things
+  // — never judged, or judged and clean — and this column is the only thing
+  // that tells them apart. It is stamped at the END of a completed run and
+  // cleared with the delete that removes the previous run's rows, so it never
+  // describes a table that is being rewritten.
+  it("clears rules_run_at with the delete and stamps it when the run completes", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    // A crawl that carries a previous run's stamp, as a re-judge does.
+    const before = new Date("2020-01-01T00:00:00.000Z");
+    await db.update(crawls).set({ rulesRunAt: before }).where(eq(crawls.id, crawlId));
+
+    const started = Date.now();
+    await runRules(db, crawlId, buildRegistry());
+
+    const after = await rulesRunAt(crawlId);
+    expect(after).not.toBeNull();
+    // The previous run's stamp did not survive: this timestamp is THIS run's.
+    expect(after?.getTime()).toBeGreaterThan(before.getTime());
+    expect(after?.getTime()).toBeGreaterThanOrEqual(started - 1000);
+  });
+
+  // The crashed run, simulated by a rule that throws part-way. What the table
+  // then holds is a coherent PREFIX of the run that died — and the marker must
+  // not point at the run before it, whose findings are gone. Null is the honest
+  // state: "no complete pass is on record".
+  it("leaves rules_run_at null when a run dies part-way, rather than pointing at the run before", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    // A previous, complete judgement of this crawl.
+    await runRules(db, crawlId, buildRegistry());
+    expect(await rulesRunAt(crawlId)).not.toBeNull();
+
+    const exploding: PageRule = {
+      kind: "page",
+      id: "test.exploding-marker",
+      checkIds: ["CHECK-01"],
+      category: "technical",
+      severity: "info",
+      title: "Exploding test rule",
+      explanation: "A rule that throws, so the marker's failure path can be observed.",
+      howToFix: "Do not ship it.",
+      rulesetVersion: RULESET_VERSION,
+      run: () => {
+        throw new Error("boom");
+      },
+    };
+    const registry = new Registry();
+    registry.register(exploding);
+
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.exploding-marker/);
+    expect(await rulesRunAt(crawlId)).toBeNull();
+    // And the previous run's findings really are gone, which is why the old
+    // stamp would have been a lie about the rows beside it.
+    const rows = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
+    expect(rows).toHaveLength(0);
+  });
+
   it("aborts loudly, naming the rule, when a rule throws", async () => {
     const crawlId = await newCrawl();
     await db.insert(pages).values([mkRow(crawlId, "/clean")]);

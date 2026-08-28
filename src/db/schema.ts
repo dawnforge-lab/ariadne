@@ -67,14 +67,18 @@ export const crawls = pgTable("crawls", {
   notfoundProbe: jsonb("notfound_probe_jsonb"),
   // When the rule runner last finished a full pass over this crawl.
   //
-  // WRITTEN BY PHASE 7 TASK 3, and by nothing today: the column ships with
-  // migration 0010 (the phase's one migration) and stays null until that task
-  // wires `runRules` to stamp it. Its null therefore means "no rule pass has
-  // ever been recorded for this crawl", which is what a reader asking whether
-  // the `issues` table is current needs — an empty `issues` table on a crawl
-  // that was never judged and one on a crawl that was judged and found clean
-  // are different facts, and until this column is written nothing can tell
-  // them apart (hard rule 7).
+  // WRITTEN BY `runRules` (src/rules/run.ts) AND BY NOTHING ELSE, at both ends
+  // of a run: cleared to null in the same transaction as the delete that
+  // removes the previous run's `issues` rows, and stamped once every rule and
+  // every metric has been written. A null therefore means "no complete rule
+  // pass is on record for this crawl" — never judged, being judged right now,
+  // or judged by a run that died part-way — and a timestamp means the `issues`
+  // and `metrics` rows beside it are one completed pass's.
+  //
+  // That distinction is the whole reason for the column: an empty `issues`
+  // table on a crawl that was never judged and one on a crawl that was judged
+  // and found clean are different facts, and nothing else can tell them apart
+  // (hard rule 7). The agent surface exposes it as `rulesRunAt`.
   rulesRunAt: timestamp("rules_run_at", { withTimezone: true }),
 });
 

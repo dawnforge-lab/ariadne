@@ -30,6 +30,7 @@
  *   GET  /crawls/:id/issues/:rule/urls one rule's findings, URL by URL
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
+ *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
  *   GET  /crawls/:id/export            write a dataset to disk, answer with the path
  *
  * ## What a caller can never be told
@@ -292,7 +293,15 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "pages"],
-      query: ["pageType", "statusCode", "indexable", "rendered", ...PAGINATION_PARAMS],
+      query: [
+        "pageType",
+        "statusCode",
+        "indexable",
+        "rendered",
+        "fetchClass",
+        "discoveredVia",
+        ...PAGINATION_PARAMS,
+      ],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listPages(param(ctx, "id"), {
@@ -300,9 +309,20 @@ function buildRoutes(): Route[] {
           ...optionalNumber(ctx.query, "statusCode"),
           ...optionalBoolean(ctx.query, "indexable"),
           ...optionalBoolean(ctx.query, "rendered"),
+          ...optionalString(ctx.query, "fetchClass"),
+          ...optionalString(ctx.query, "discoveredVia"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["crawls", id, "robots"],
+      query: [],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.getRobots(param(ctx, "id")),
       }),
     },
     {

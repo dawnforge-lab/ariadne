@@ -53,6 +53,15 @@ let crawlB = "";
 let crawlC = "";
 /** A crawl the export is run over twice, to prove the file is replaced. */
 let crawlD = "";
+/**
+ * The surface-exposure crawl: a stored `legacyHosts`, a discovery blob with a
+ * real robots.txt in it, and pages spanning the fetch-class and discovery
+ * vocabularies. Its own crawl so the listings above keep their exact rows.
+ */
+let crawlE = "";
+
+/** The robots.txt `crawlE` read, as the discovery evidence stores it. */
+const ROBOTS_TEXT = "User-agent: *\nDisallow: /admin\nCrawl-delay: 2\nSitemap: http://query.example/sitemap.xml\n";
 
 interface Res {
   status: number;
@@ -91,13 +100,17 @@ async function walk(path: string, limit = 1): Promise<Record<string, unknown>[]>
   throw new Error("walk: listing did not end");
 }
 
-async function seedCrawl(id: string): Promise<void> {
+async function seedCrawl(
+  id: string,
+  opts: { config?: Record<string, unknown>; discovery?: unknown } = {},
+): Promise<void> {
   await db.insert(crawls).values({
     id,
     siteUrl: `${SITE}/`,
-    config: { siteUrl: `${SITE}/` },
+    config: opts.config ?? { siteUrl: `${SITE}/` },
     rulesetVersion: "0.0.0-test",
     status: "finished",
+    ...(opts.discovery === undefined ? {} : { discovery: opts.discovery }),
   });
 }
 
@@ -110,6 +123,11 @@ interface SeedPage {
   depth: number;
   wordCount: number | null;
   contentHash?: string;
+  /** Defaults to the status code's class, as a real crawl's row would carry. */
+  fetchClass?: string;
+  /** Defaults to the depth's usual origin: the seed at 0, a link below it. */
+  discoveredVia?: string;
+  renderableWordCount?: number | null;
 }
 
 async function seedPage(crawlId: string, p: SeedPage): Promise<string> {
@@ -121,11 +139,14 @@ async function seedPage(crawlId: string, p: SeedPage): Promise<string> {
     urlNormalised: `${SITE}/${p.slug}`,
     pageType: p.pageType,
     statusCode: p.statusCode,
-    fetchClass: p.statusCode >= 500 ? "server_error" : "ok",
+    fetchClass: p.fetchClass ?? (p.statusCode >= 500 ? "server_error" : "ok"),
     depth: p.depth,
-    discoveredVia: p.depth === 0 ? "seed" : "link",
+    discoveredVia: p.discoveredVia ?? (p.depth === 0 ? "seed" : "link"),
     isIndexable: p.isIndexable,
     wordCount: p.wordCount,
+    ...(p.renderableWordCount === undefined
+      ? {}
+      : { renderableWordCount: p.renderableWordCount }),
     rendered: p.rendered,
     title: `title of ${p.slug}`,
     metaDescription: `description of ${p.slug}`,
@@ -166,7 +187,54 @@ beforeAll(async () => {
   crawlB = `crawl_query_b_${stamp}`;
   crawlC = `crawl_query_c_${stamp}`;
   crawlD = `crawl_query_d_${stamp}`;
+  crawlE = `crawl_query_e_${stamp}`;
   for (const id of [crawlA, crawlB, crawlC, crawlD]) await seedCrawl(id);
+
+  // The surface-exposure crawl. Its config carries the two legacy domains the
+  // crawl was told about (CHECK-15's evidence is unreadable without them), and
+  // its discovery blob carries the robots.txt the crawl obeyed.
+  await seedCrawl(crawlE, {
+    config: {
+      siteUrl: `${SITE}/`,
+      userAgent: "AriadneBot/0.1 (query-test)",
+      legacyHosts: ["old.query.example", "legacy.query.example"],
+    },
+    discovery: {
+      robots: {
+        outcome: "read",
+        crawlDelaySec: 2,
+        note: null,
+        raw: ROBOTS_TEXT,
+        truncated: false,
+      },
+      sitemapSources: [`${SITE}/sitemap.xml`],
+      truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 1 },
+      docsFetched: 1,
+    },
+  });
+  // The fetch-class and discovery cohorts, one page each: what a blocked-page
+  // question and an orphan cross-check actually select on.
+  await seedPage(crawlE, {
+    slug: "home", pageType: "home", statusCode: 200, isIndexable: true, rendered: false,
+    depth: 0, wordCount: 900, renderableWordCount: 640, discoveredVia: "seed",
+  });
+  await seedPage(crawlE, {
+    slug: "blocked", pageType: null, statusCode: 429, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchClass: "blocked", discoveredVia: "link",
+  });
+  await seedPage(crawlE, {
+    slug: "only-in-sitemap", pageType: "product", statusCode: 200, isIndexable: true,
+    rendered: false, depth: 1, wordCount: 300, renderableWordCount: 300,
+    discoveredVia: "sitemap",
+  });
+  await seedPage(crawlE, {
+    slug: "moved", pageType: null, statusCode: 301, isIndexable: false, rendered: false,
+    depth: 1, wordCount: null, fetchClass: "redirect", discoveredVia: "link",
+  });
+  await seedPage(crawlE, {
+    slug: "target", pageType: "product", statusCode: 200, isIndexable: true, rendered: false,
+    depth: 2, wordCount: 120, renderableWordCount: 90, discoveredVia: "redirect",
+  });
 
   const product1 = await seedPage(crawlA, {
     slug: "p1", pageType: "product", statusCode: 200, isIndexable: true,
@@ -290,7 +358,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await api.close();
-  for (const id of [crawlA, crawlB, crawlC, crawlD]) {
+  for (const id of [crawlA, crawlB, crawlC, crawlD, crawlE]) {
     await db.delete(crawls).where(eq(crawls.id, id));
   }
   await closeDb(db);
@@ -627,8 +695,9 @@ describe("GET /crawls/:id/pages", () => {
       `${SITE}/b1`, `${SITE}/p1`, `${SITE}/p2`, `${SITE}/x`,
     ]);
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
-      "depth", "fetchClass", "fetchReason", "indexable", "pageType", "rendered",
-      "renderError", "renderedWordCount", "statusCode", "url", "wordCount",
+      "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable", "pageType",
+      "rendered", "renderError", "renderableWordCount", "renderedWordCount",
+      "statusCode", "url", "wordCount",
     ].sort());
     // The column nobody selected stays where it is.
     expect(JSON.stringify(res.body)).not.toContain("LEAK-CONTENT-HASH-MARKER");
@@ -659,6 +728,58 @@ describe("GET /crawls/:id/pages", () => {
     expect(items(rendered).map((r) => r["url"])).toEqual([`${SITE}/p1`]);
   });
 
+  // The two filters the audit could not ask for until now. Blocked pages were
+  // a number on the crawl detail with no way to list the URLs behind it, and
+  // "which pages did only the sitemap know about" — the orphan cross-check —
+  // had no filter at all. Both are closed vocabularies owned by the crawl
+  // layer, so both are validated against it rather than passed to SQL.
+  it("filters by fetchClass and discoveredVia, and by both at once", async () => {
+    const blocked = await call(`/crawls/${crawlE}/pages?fetchClass=blocked`);
+    expect(items(blocked).map((r) => r["url"])).toEqual([`${SITE}/blocked`]);
+
+    const ok = await call(`/crawls/${crawlE}/pages?fetchClass=ok`);
+    expect(items(ok).map((r) => r["url"])).toEqual([
+      `${SITE}/home`, `${SITE}/only-in-sitemap`, `${SITE}/target`,
+    ]);
+
+    const sitemapOnly = await call(`/crawls/${crawlE}/pages?discoveredVia=sitemap`);
+    expect(items(sitemapOnly).map((r) => r["url"])).toEqual([`${SITE}/only-in-sitemap`]);
+
+    const viaLink = await call(`/crawls/${crawlE}/pages?discoveredVia=link`);
+    expect(items(viaLink).map((r) => r["url"])).toEqual([`${SITE}/blocked`, `${SITE}/moved`]);
+
+    // The filters intersect, as every other pair on this listing does.
+    const both = await call(`/crawls/${crawlE}/pages?fetchClass=redirect&discoveredVia=link`);
+    expect(items(both).map((r) => r["url"])).toEqual([`${SITE}/moved`]);
+
+    // And a cohort that exists in one vocabulary but not in this crawl is an
+    // empty page rather than a refusal: the value is real, the crawl has none.
+    const timeouts = await call(`/crawls/${crawlE}/pages?fetchClass=timeout`);
+    expect(timeouts.status).toBe(200);
+    expect(items(timeouts)).toEqual([]);
+  });
+
+  it("carries both word counts, so the number a reader quotes is the one they can see", async () => {
+    const res = await call(`/crawls/${crawlE}/pages?pageType=home`);
+    const row = items(res)[0];
+    expect(row?.["url"]).toBe(`${SITE}/home`);
+    // The HTML's whole count, and the count minus the markup-hidden words. The
+    // surface used to publish only the first, which on a page like this is 260
+    // words nobody sees.
+    expect(row?.["wordCount"]).toBe(900);
+    expect(row?.["renderableWordCount"]).toBe(640);
+    expect(row?.["discoveredVia"]).toBe("seed");
+
+    // Null is "never measured" — a crawl that predates the column — and it is
+    // carried as null rather than collapsed onto wordCount, which counts
+    // something else.
+    const blocked = await call(`/crawls/${crawlE}/pages?fetchClass=blocked`);
+    expect(items(blocked)[0]?.["renderableWordCount"]).toBeNull();
+
+    // The projection is still the allowlist: nothing else came with them.
+    expect(JSON.stringify(res.body)).not.toContain("description of home");
+  });
+
   it("400s a filter value it does not know rather than answering with an empty page", async () => {
     for (const [query, field] of [
       ["pageType=nosuchtype", "pageType"],
@@ -666,6 +787,9 @@ describe("GET /crawls/:id/pages", () => {
       ["statusCode=abc", "statusCode"],
       ["indexable=yes", "indexable"],
       ["rendered=1", "rendered"],
+      ["fetchClass=blocke", "fetchClass"],
+      ["fetchClass=200", "fetchClass"],
+      ["discoveredVia=crawl", "discoveredVia"],
     ] as const) {
       const res = await call(`/crawls/${crawlA}/pages?${query}`);
       expect(res.status, `${query} should be a 400`).toBe(400);
@@ -679,6 +803,91 @@ describe("GET /crawls/:id/pages", () => {
       `${SITE}/b1`, `${SITE}/p1`, `${SITE}/p2`, `${SITE}/x`,
     ]);
     expect((await call("/crawls/crawl_missing/pages")).status).toBe(404);
+  });
+});
+
+describe("GET /crawls/:id/robots", () => {
+  it("answers with the robots.txt the crawl read, and the metadata that makes it readable", async () => {
+    const res = await call(`/crawls/${crawlE}/robots`);
+    expect(res.status).toBe(200);
+    expect(res.body["crawlId"]).toBe(crawlE);
+    // Derived from the crawl's own seed: the URL the crawler asked for.
+    expect(res.body["robotsUrl"]).toBe(`${SITE}/robots.txt`);
+    expect(res.body["outcome"]).toBe("read");
+    // The body, verbatim — this is the file the findings were judged against,
+    // not whatever the site serves today.
+    expect(res.body["raw"]).toBe(ROBOTS_TEXT);
+    expect(res.body["truncated"]).toBe(false);
+    expect(res.body["crawlDelaySec"]).toBe(2);
+    expect(res.body["note"]).toBeNull();
+    expect(res.body["sitemapSources"]).toEqual([`${SITE}/sitemap.xml`]);
+    // The groups in the file that governed this crawl.
+    expect(res.body["userAgent"]).toBe("AriadneBot/0.1 (query-test)");
+
+    // The wrapper is a closed shape, even though the body inside it is the
+    // site's own public document: the blob it comes out of holds the sitemap
+    // walk's counters too, and none of them are here.
+    expect(Object.keys(res.body).sort()).toEqual([
+      "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
+      "sitemapSources", "truncated", "userAgent",
+    ]);
+  });
+
+  it("409s a crawl with no discovery evidence rather than reporting 'no robots.txt'", async () => {
+    // crawlA never completed discovery. "We have no record" and "the site has
+    // no robots.txt" are different facts, and only one of them is true here.
+    const res = await call(`/crawls/${crawlA}/robots`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("discovery evidence");
+  });
+
+  it("404s an unknown crawl and takes no query parameters", async () => {
+    expect((await call("/crawls/crawl_missing/robots")).status).toBe(404);
+    const extra = await call(`/crawls/${crawlE}/robots?limit=5`);
+    expect(extra.status).toBe(400);
+    expect(String(extra.body["error"])).toContain("unknown query parameter");
+  });
+});
+
+describe("GET /crawls/:id — the fields an audit checks itself against", () => {
+  it("echoes the legacy hosts the crawl was configured with, and an empty list when there were none", async () => {
+    const withHosts = await call(`/crawls/${crawlE}`);
+    expect(withHosts.status).toBe(200);
+    expect(withHosts.body["legacyHosts"]).toEqual([
+      "old.query.example",
+      "legacy.query.example",
+    ]);
+
+    // Present and empty, not absent: "no legacy domain was named" is an answer,
+    // and a missing field would leave a reader unable to tell it from a
+    // surface that does not report the setting at all.
+    const without = await call(`/crawls/${crawlA}`);
+    expect(without.body["legacyHosts"]).toEqual([]);
+  });
+
+  it("reports rulesRunAt null and the live findings count on an unjudged crawl", async () => {
+    const res = await call(`/crawls/${crawlA}`);
+    // These rows were seeded, not judged: no rules run has ever completed over
+    // this crawl, and the marker says so even though the issues table is full.
+    expect(res.body["rulesRunAt"]).toBeNull();
+
+    const rows = await db.select().from(issues).where(eq(issues.crawlId, crawlA));
+    expect(res.body["findingsCount"]).toBe(rows.length);
+    expect(Number(res.body["findingsCount"])).toBeGreaterThan(0);
+
+    // A crawl with no findings at all: zero, beside a null marker, is "nobody
+    // has looked" rather than "this site is clean".
+    const clean = await call(`/crawls/${crawlE}`);
+    expect(clean.body["findingsCount"]).toBe(0);
+    expect(clean.body["rulesRunAt"]).toBeNull();
+  });
+
+  it("reports the stamp a completed rules run leaves, as an ISO timestamp", async () => {
+    const stamped = new Date("2026-08-28T10:11:12.000Z");
+    await db.update(crawls).set({ rulesRunAt: stamped }).where(eq(crawls.id, crawlE));
+    const res = await call(`/crawls/${crawlE}`);
+    expect(res.body["rulesRunAt"]).toBe(stamped.toISOString());
+    await db.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlE));
   });
 });
 
@@ -837,7 +1046,8 @@ describe("unknown query parameters", () => {
     );
     expect(issues.status).toBe(200);
     const pages = await call(
-      `/crawls/${crawlA}/pages?pageType=product&statusCode=200&indexable=true&rendered=true&limit=5`,
+      `/crawls/${crawlA}/pages?pageType=product&statusCode=200&indexable=true&rendered=true` +
+        `&fetchClass=ok&discoveredVia=seed&limit=5`,
     );
     expect(pages.status).toBe(200);
   });
@@ -850,6 +1060,7 @@ describe("the query surface is behind the same token as the rest", () => {
       `/crawls/${crawlA}/issues/links.orphan/urls`,
       `/crawls/${crawlA}/metrics`,
       `/crawls/${crawlA}/pages`,
+      `/crawls/${crawlE}/robots`,
       `/crawls/${crawlA}/export`,
     ]) {
       expect((await call(path, { token: null })).status).toBe(401);

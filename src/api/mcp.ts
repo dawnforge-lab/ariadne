@@ -1,5 +1,5 @@
 /**
- * The MCP transport: eleven tools over the same service layer the HTTP routes
+ * The MCP transport: twelve tools over the same service layer the HTTP routes
  * use.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
@@ -62,6 +62,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import type { Db } from "../db/client.js";
+import { FETCH_CLASSES } from "../crawl/fetch-page.js";
+import { DISCOVERED_VIA } from "../crawl/frontier.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
 import {
@@ -75,6 +77,9 @@ import {
 
 /** The metric scopes, as a tool description says them. */
 const METRIC_SCOPES_HINT = METRIC_SCOPES.join(" | ");
+/** The two closed page vocabularies, from the crawl layer that writes them. */
+const FETCH_CLASS_HINT = FETCH_CLASSES.join(" | ");
+const DISCOVERED_VIA_HINT = DISCOVERED_VIA.join(" | ");
 
 export interface CreateMcpServerOpts {
   db: Db;
@@ -116,6 +121,11 @@ The order of operations is fixed by what the evidence means:
   4. crawl_rules   runs every rule over the finished crawl and writes the
                    findings. Refused while the crawl is still moving.
   5. issues_list / issue_urls / metrics_get / pages_query read the results.
+                   robots_get reads the robots.txt the crawl obeyed.
+
+An empty findings or metrics answer is only 'nothing found' on a crawl that was
+judged. crawl_status's rulesRunAt is the check: a timestamp means a rules pass
+completed, null means none is on record.
 
 Every listing answers {items, nextCursor}. Pass nextCursor back as 'cursor',
 with the SAME filters, to get the next page; nextCursor null means the listing
@@ -191,7 +201,20 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
-        "with, queuePosition, liveLeases, blockedPages and hostSpacingMs.\n\n" +
+        "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
+        "legacyHosts, rulesRunAt and findingsCount.\n\n" +
+        "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
+        "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
+        "complete pass is on record — never judged, being judged right now, or " +
+        "judged by a run that died part-way. Check it before you read anything " +
+        "into an empty findings or metrics answer: findingsCount 0 with rulesRunAt " +
+        "null is 'nobody has looked', and findingsCount 0 with a timestamp is " +
+        "'looked, found nothing'. findingsCount is the live number of issue rows, " +
+        "which is what issues_list's groups sum to.\n\n" +
+        "legacyHosts echoes the domains this crawl was told the site used to live " +
+        "on (empty when none were named) — the host-probe findings about legacy " +
+        "redirects mean nothing without it: no finding on an empty list is 'the " +
+        "crawl was never given a legacy domain', not 'the redirects are fine'.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
@@ -375,7 +398,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "It reads findings crawl_rules wrote. On a crawl that has not been judged " +
         "every rule answers {items: []}, and so does a rule that simply found " +
         "nothing — the two are indistinguishable here, so an empty answer means NOT " +
-        "MEASURED YET until you have confirmed the rules ran. Reach this tool " +
+        "MEASURED YET until you have confirmed the rules ran. Confirm it with " +
+        "crawl_status: rulesRunAt is the timestamp of the last completed rules " +
+        "pass, and null means no complete pass is on record. Reach this tool " +
         "through issues_list, which only names rules that actually found something.\n\n" +
         "url is null for a site-wide finding (a fact about the crawl, not about a " +
         "page). evidence is the rule's own testimony, verbatim: its shape is the " +
@@ -410,8 +435,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "A crawl nobody has judged has no metrics AT ALL: crawl_rules is what " +
         "writes them, and until it has run this tool answers {items: []}. That " +
         "empty answer means NOT MEASURED YET — never 'this site has nothing worth " +
-        "measuring'. Check crawl_status/crawl_rules before you quote a number that " +
-        "is not there.\n\n" +
+        "measuring'. The check is one field: crawl_status's rulesRunAt is the " +
+        "timestamp of the last COMPLETED rules pass, and null means none is on " +
+        "record (never judged, being judged now, or a run that died part-way). " +
+        "Read it before you quote a number that is not there.\n\n" +
         "Filters, each refused by name if it names nothing this crawl measured:\n" +
         `  metricId   — a single metric, e.g. redirect.volume\n` +
         `  scope      — the cohort kind: ${METRIC_SCOPES_HINT}\n` +
@@ -449,10 +476,20 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "The crawled pages",
       description:
         "The crawl's pages, slim and filtered: {url, statusCode, fetchClass, " +
-        "fetchReason, pageType, indexable, depth, wordCount, rendered, " +
-        "renderedWordCount, renderError}. Use it to answer questions about the site " +
-        "itself — how deep the blog is, which product pages are non-indexable, what " +
-        "a render actually added — rather than about its faults.\n\n" +
+        "fetchReason, pageType, indexable, depth, discoveredVia, wordCount, " +
+        "renderableWordCount, rendered, renderedWordCount, renderError}. Use it to " +
+        "answer questions about the site itself — how deep the blog is, which " +
+        "product pages are non-indexable, which URLs only the sitemap knows about, " +
+        "what a render actually added — rather than about its faults.\n\n" +
+        "TWO WORD COUNTS, AND THEY MEAN DIFFERENT THINGS. wordCount is every word " +
+        "of visible text in the HTML. renderableWordCount is that count minus the " +
+        "words the page's own markup says are not displayed (hidden attributes, " +
+        "inline display:none, closed dialogs and details) — always the smaller of " +
+        "the two, and the number a thin-content judgement is made on. Quote " +
+        "renderableWordCount when you are asking whether a page has enough content; " +
+        "the gap between them is markup that ships but does not show. It is null on " +
+        "a page crawled before this measurement existed, which is 'never measured', " +
+        "not zero — do not fall back to wordCount there, it counts something else.\n\n" +
         "fetchReason is why a row has no usable body, in plain words, and is null " +
         "for a page that fetched normally. On fetchClass 'blocked' it names the " +
         "status, how many attempts the URL got, and the per-host spacing the engine " +
@@ -460,8 +497,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "blocked page means 'crawl slower' or 'this site refuses us'.\n\n" +
         "WHICH PASS WROTE WHAT, because a filter can outrun the evidence. The rows " +
         "themselves — url, statusCode, fetchClass, pageType, indexable, depth, " +
-        "wordCount — are written by the CRAWL, so they are complete as soon as it " +
-        "finishes and crawl_rules is not needed for them. rendered, " +
+        "discoveredVia, wordCount, renderableWordCount — are written by the CRAWL, " +
+        "so they are complete as soon as it finishes and crawl_rules is not needed " +
+        "for them (crawl_status's rulesRunAt is what says whether the rules have " +
+        "run; it says nothing about these). rendered, " +
         "renderedWordCount and renderError are written by crawl_render: before that " +
         "pass has run, rendered is false on every page and 'rendered: true' answers " +
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
@@ -476,7 +515,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "those off an unfiltered listing.\n" +
         "  rendered   — true or false: whether the render pass re-fetched it. " +
         "renderError is why an ATTEMPTED render produced nothing; null there is " +
-        "not the same as 'it worked'.\n\n" +
+        "not the same as 'it worked'.\n" +
+        `  fetchClass — how the fetch ended: ${FETCH_CLASS_HINT}. ` +
+        "'blocked' is the WAF/rate-limiter cohort crawl_status counts, listed URL " +
+        "by URL.\n" +
+        `  discoveredVia — how the crawler first reached the URL: ${DISCOVERED_VIA_HINT}. ` +
+        "'sitemap' with no link ever found to the page is the orphan cross-check.\n\n" +
         "Ordered by URL. Paginated: {items, nextCursor}; limit defaults to " +
         `${PAGE_SIZE_DEFAULT}, maximum ${PAGE_SIZE_MAX}. This is not an export — a ` +
         "whole 50k-page crawl belongs in a file, not in your context; see " +
@@ -499,11 +543,53 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           .boolean()
           .describe("Only pages the render pass re-fetched (true) or did not (false).")
           .optional(),
+        fetchClass: z
+          .string()
+          .describe(`Only pages whose fetch ended this way: ${FETCH_CLASS_HINT}.`)
+          .optional(),
+        discoveredVia: z
+          .string()
+          .describe(
+            `Only pages the crawler first reached this way: ${DISCOVERED_VIA_HINT}.`,
+          )
+          .optional(),
         limit: limitField(),
         cursor: cursorField(),
       }),
     },
     async ({ crawlId, ...rest }) => run("pages_query", () => service.listPages(crawlId, defined(rest))),
+  );
+
+  server.registerTool(
+    "robots_get",
+    {
+      title: "The site's robots.txt, as this crawl read it",
+      description:
+        "The robots.txt this crawl actually obeyed, out of its stored evidence: " +
+        "{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, " +
+        "sitemapSources, userAgent}. Nothing is re-fetched — this is the text the " +
+        "crawler read at crawl time, which is what its findings were judged " +
+        "against. A file that has changed since is a fact about the site, and " +
+        "fetching the current one here would hide it.\n\n" +
+        "outcome is the fact to read first, because the three are not degrees of " +
+        "the same thing: 'read' means the site's rules applied; 'absent' means the " +
+        "site answered 4xx and there are no rules, so the crawl was allow-all — a " +
+        "normal, reportable state; 'unreachable' means the site COULD NOT TELL US " +
+        "its rules (5xx, timeout, refused), which is not the same as having none, " +
+        "and note says what was done about it.\n\n" +
+        "raw is the file's text, or null when there was nothing to read. truncated " +
+        "true means raw is a 500KB PREFIX: a rule you cannot find in it may simply " +
+        "be past the cap, so do not report 'robots.txt does not disallow X' from a " +
+        "truncated copy. crawlDelaySec is the delay the crawl honoured. " +
+        "sitemapSources are the Sitemap: lines the walk was pointed at. userAgent " +
+        "is the string the crawl identified as — the groups in the file that " +
+        "governed it, which matters when the file has per-agent sections.\n\n" +
+        "Refused for a crawl that never completed discovery: there is no stored " +
+        "copy, and 'we have no record' must not be served as 'the site has no " +
+        "robots.txt'.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("robots_get", () => service.getRobots(crawlId)),
   );
 
   server.registerTool(
