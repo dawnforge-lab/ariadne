@@ -129,14 +129,26 @@ CHECK-41 and CHECK-42 — and belong to Phase 3 whatever evidence exists for the
 
 ### 2.1 Sweep first, then walk
 
-Two unfiltered, paginated sweeps cost far fewer calls than 44 filtered ones, and they
-give you the whole picture before you commit to a check:
+Two unfiltered, paginated sweeps give you the whole picture before you commit to a
+check, and the issues sweep is usually one call:
 
 1. `issues_list` with no filter but `crawlId` — every rule that found something, with
    its `checkIds`, `severity`, `count` and five `sampleUrls`. Follow `nextCursor` to
    the end. Index the rows by check id.
 2. `metrics_get` with no filter — every measured number, each with its own
    `checkIds`, `title` and `explanation`. Follow the cursors. Index by check id too.
+
+**Every listing takes `limit`** — 50 by default, 200 maximum — and using it is the
+difference between 3 calls and 12 on a 551-page census. Take the maximum on any sweep
+you intend to read in full.
+
+The metrics sweep is the one that does not stay cheap: metric rows are per page type,
+and page types are per URL path (see §2.2), so a mid-sized site can produce hundreds
+of rows. When the unfiltered sweep runs past two or three pages, index by
+`metricId` instead — one call per metric id, plus `scope: "site"` for the site-wide
+rows — which is both fewer calls and easier to quote. `metrics_get` has no `checkId`
+filter, by design: a metric answers whatever checks name it, and it is the rows'
+`checkIds` you index on.
 
 Now walk the checklist in order. For each check, the sweep has already answered one
 of three ways:
@@ -158,8 +170,23 @@ of three ways:
 - **Quote, don't paraphrase.** The `count`, the `sampleUrls`, the metric's `value` —
   these go into the findings file as they came back. A number you retyped is a number
   nobody can trace.
-- **`count` is the total; `sampleUrls` is five.** Never report the sample as the
-  extent of a problem.
+- **`count` is the rows the rule listed; `sampleUrls` is five of them.** Never report
+  the sample as the extent of a problem — and do not assume the count is the extent
+  either. Some rules stop listing at a cap, and a capped group says so:
+  - `truncated: true` with **`total`** — the rule counted every case and listed some.
+    `total` is the magnitude. Quote it: "243 orphaned pages, 200 listed".
+  - `truncated: true` with **`atLeast`** — the rule stopped *looking*, so the number
+    is what it SAW and the real one is unknown. Say "at least 501"; never round it
+    into a total, and never quote it as one.
+  - **no `truncated` field** — `count` is the whole number, and that absence is the
+    only thing that licenses reporting it as one.
+
+  On the Phase 6 gate site `links.orphan` answered `{count: 200, truncated: true,
+  total: 243}` and `content.near-duplicate` `{count: 500, truncated: true, atLeast:
+  501}`. Quoting the counts would have understated the first by 43 pages and stated
+  the second as a fact nothing had counted. (Where a `pageType` filter is on, `count`
+  is that cohort's rows while `total`/`atLeast` stay the whole rule's magnitude — the
+  two are not two ends of one fraction.)
 - **Evidence shapes belong to their rules.** `issue_urls` returns `{url, evidence}`
   and the evidence's fields are whatever that rule wrote — read what it gives you
   rather than expecting a fixed set. `url` is null on a site-scoped finding (a fact
@@ -172,6 +199,23 @@ of three ways:
   `pages_query` both take `pageType`, and metrics carry it as `scopeValue`. Prefer
   those cohorts to path guesses. `(untyped)` is the pages the crawl could not type:
   report it as its own bucket rather than folding it into a template.
+
+  **Know what the detection actually produces before you filter on it.** A page type
+  is derived from the URL path, and today it only collapses into a template
+  (`/products/:slug`) where the path has a repeated shape. A path that occurs once
+  becomes its own type. The gate site produced **196 types over 551 pages**: four
+  real templates and about 170 singletons — and `(untyped)` occurred **zero** times,
+  so the bucket this file and the checklist both tell you to report may simply not
+  exist on a given crawl. Say that it was empty rather than inventing one.
+
+  Practical consequence: the cohort ids are not guessable, so discover them first —
+  one `metrics_get` scoped pass or a `pages_query` census — and filter on the ids you
+  saw. Where the per-template breakdown the checklist asks for (CHECK-35 / 36 / 37:
+  products, collections, blog, info pages, separately) cannot be produced from those
+  ids, group by first path segment and SAY SO in `notes`. Both halves of this —
+  singleton types, and the missing `(untyped)` bucket — are recorded on the backlog
+  as the `derivePageType` heuristics item; they are engine behaviour to work around
+  today, not something to fix inside an audit.
 - **A refusal names its field.** An unrecognised `severity`, `checkId`, `ruleId`,
   `category` or `pageType` is refused rather than answered with an unfiltered listing.
   Read the message; do not retry with a guess.
@@ -210,6 +254,23 @@ Record those as NOT MEASURED in `notes` — never substitute a nearby number:
 - Core Web Vitals (CHECK-47) — the engine measures response time and nothing else;
 - GSC-only orphans (CHECK-32, CHECK-33b) — by definition outside a crawl.
 
+**And one number that is measured, but does not measure what its name suggests.**
+`depth` — the `structure.depth-distribution` metric, `pages_query`'s `depth`, and
+CHECK-31 — is **discovery depth: hops from a seed**. Every sitemap URL is a seed, so
+on a site whose sitemap covers the estate, pages with no HTML link path whatsoever sit
+at depth 0 beside the home page. The gate site read 437 of 443 indexable pages at
+depth 0 while the median page had **zero** inbound internal links: read literally,
+CHECK-31 passes on a site where half the estate is unreachable by clicking.
+
+So: when depth-0 is dominated by sitemap discovery — compare `discoveredVia` in a
+`pages_query` census against the depth histogram — do not report site depth from that
+metric. Rebuild reachability instead, from `links.orphan` (pages with no inbound
+internal link) and `inlinks.sources-by-type` (which templates link to which), and
+record CHECK-31 as passing on its stated criteria while NOT MEASURED on its intent,
+with both halves in `notes`. CHECK-33b's "sitemap only (no depth)" tier is empty by
+the same construction and needs the same rebuild. Click-depth as a field of its own is
+on the backlog.
+
 ---
 
 ## Phase 3 — the agent checks
@@ -234,7 +295,44 @@ Their verdict in the findings file is `AGENT`, with `notes` carrying what you fo
 `AGENT` means the work was done and the judgement is recorded — it is not a polite
 SKIP, and a bare `AGENT` with empty notes is a check nobody did.
 
-### 3.2 The browser and platform sections
+**With no browser, CHECK-41 and CHECK-42 are `SKIP`, not `AGENT`.** Both are entirely
+browser work: no rule claims them, `issues_list` refuses their check ids, and without
+a browser there is nothing to have looked at. `AGENT` would assert that the work was
+done. Record `verdict: "SKIP"` with `notes` naming the missing browser MCP server and
+what it blocked — the same disposition as §3.3's browser sections, and the one the
+Phase 6 gate's auditor arrived at by following this file's own honesty rule against
+this paragraph's earlier wording.
+
+### 3.2 Hybrid checks: the engine half and the deciding half
+
+Eleven of the in-scope checks are `Engine + DevTools` (03, 05, 22, 29, 30, 37, 39, 43,
+44, 45, 46): the engine answers part of the question and a browser, GSC or Ahrefs
+answers another part. Route them the same way every time, because a verdict that
+depends on who ran the audit is not a verdict.
+
+1. **Do the engine half and quote it.** Always. It is cheap and it is the part that
+   scales past one page.
+2. **Does the engine evidence resolve the check's own Evaluate criteria?** If yes,
+   the verdict is the engine's — `PASS` or `FAIL` — and `notes` names every sub-step
+   you did not perform, so the reader knows what the verdict does not cover.
+3. **If the deciding criterion is one only the missing tool can answer**, the engine
+   half cannot carry the verdict, and it downgrades by what is missing:
+   - missing **judgement** (the evidence is in hand; nobody has weighed it) → `AGENT`,
+     with the engine work quoted in `notes`;
+   - missing **evidence** (the tool that would produce it was never available, so
+     there was no work to do) → `SKIP`, naming the tool.
+
+The distinction between the last two is the same one that separates MANUAL from SKIP
+in the checklist: `AGENT` says a person looked, `SKIP` says nobody could. Never let a
+half-answered hybrid check land on `PASS` — an engine half that passes is not the
+check passing, and recording it as one is how a site gets a clean bill of health for a
+question nothing asked.
+
+This policy came out of the Phase 6 gate, where the auditor had to invent it mid-walk
+because the skill routed only the pure cases. It is written down so the next audit
+lands where that one did.
+
+### 3.3 The browser and platform sections
 
 Sections 12 (Performance & CWV), 13 (GEO / AI Visibility) and 14 (Shopify-specific)
 are agent work with engine support where the checklist names it — CHECK-49, CHECK-50
@@ -247,7 +345,7 @@ HTTP fetch for a check that needs a rendered page — a fetch has no JavaScript,
 console and no layout, and a check answered from one is answered wrongly. If the user
 says to continue without a browser, those checks are SKIP with the tool named.
 
-### 3.3 Cross-reading
+### 3.4 Cross-reading
 
 Several findings only mean something together, and this is where the audit stops being
 a list:
@@ -290,7 +388,7 @@ broken there.
     "renderPassCount": 1,
     "rulesetVersion": "0.4.0",
     "frontier": { "pending": 0, "leased": 0, "done": 4821, "failed": 3, "renderPending": 0 },
-    "rulesRun": { "pagesScanned": 4821, "findings": 1902, "elapsedMs": 41233 },
+    "rulesRun": { "pagesScanned": 4821, "findings": 1902, "metrics": 855 },
     "render": { "rendered": 240, "failures": 2, "unrendered": 4581, "budget": 241, "truncated": false },
     "caveats": [
       "3 URLs failed to fetch; their checks are reported on 4818 pages, not 4821."
@@ -409,6 +507,9 @@ broken there.
   `count: 0` and the `args` that were asked, so the reader can re-run the query.
 - **`args` reproduces the call.** The point is that anybody can repeat it and get the
   same answer.
+- **`crawl.rulesRun`** copies the `crawl_rules` summary's scalars — `pagesScanned`,
+  `findings`, `metrics`. The surface returns no `elapsedMs`; do not invent one, and do
+  not leave a null in its place.
 - **`crawl.caveats`** is where the evidence's limits go: a page cap reached, a render
   pass that covered a fraction, URLs that failed to fetch, a crawl that ended
   `cancelled`. Empty array when there are none — never absent.

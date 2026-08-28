@@ -1096,6 +1096,22 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      `export_crawl` with `dataset: "pages"` gives the whole set when the crawl is
      large. `count` minus the pages that have a depth is the same number from the
      other side; state which way you got it.
+  4. **CAVEAT — `depth` is DISCOVERY depth, not click depth.** It counts hops from a
+     seed, and **every sitemap URL is a seed**, so a page with no HTML link path at
+     all is recorded at depth 0 rather than at no depth. On a site whose sitemap
+     covers the estate the no-depth bucket is empty by construction and this check
+     passes on its criteria while measuring nothing it intends to (Phase 6 gate:
+     437 of 443 indexable pages at depth 0, median inbound links **zero**).
+
+     Detect it before trusting the histogram: `pages_query` reports `discoveredVia`,
+     and depth 0 dominated by `sitemap` rather than `seed`/`link` is the tell. When
+     it holds, rebuild reachability from the link graph instead — `links.orphan`
+     (pages with no inbound internal link, and note its `truncated`/`total`) plus
+     `inlinks.sources-by-type` (which templates link to which) plus
+     `inlinks.distribution` (the median page's inbound count) — and report CHECK-31
+     as passing on its stated criteria and NOT MEASURED on its intent, with both
+     halves in the notes. The same construction empties CHECK-33b's "sitemap only
+     (no depth)" tier; rebuild that one the same way.
 - **Analysis**: the distribution is per indexable page — non-indexable pages
   (noindexed, canonicalised, blocked) are excluded, because their crawl depth is
   irrelevant. Present the buckets the table below asks for, with the percentiles from

@@ -121,12 +121,19 @@ requests, it is counting how bunched they are. Defaults are for an ordinary orig
 
 | The site is… | How to tell | Start with |
 |---|---|---|
-| Shopify, or anything Cloudflare-fronted | `cdn.shopify.com` assets, `x-shopid`, `myshopify.com` redirects; `cf-ray` / `server: cloudflare` on any response | `maxConcurrency: 2`, `perHostDelayMs: 1000` |
+| Shopify, or anything Cloudflare-fronted | `cdn.shopify.com` assets, `x-shopid`, `myshopify.com` redirects; `cf-ray` / `server: cloudflare` on any response | `maxConcurrency: 2`, `perHostDelayMs: 2000` |
 | Same, and `blockedPages` is climbing mid-crawl | see Step 2 | stop, re-crawl at `maxConcurrency: 1`, `perHostDelayMs: 2000` |
 | Anything else, no evidence of a WAF | — | leave the defaults |
 
-These are the settings a Screaming Frog crawl of a Shopify store is run at (2 threads,
-1 URL/second), for the same reason.
+Screaming Frog crawls a Shopify store at 2 threads and 1 URL/second for the same
+reason, and 1000 ms was this table's first Shopify row. **The Phase 6 gate moved it.**
+On a Shopify/Cloudflare store started at 1000 ms the engine's own ratchet doubled the
+spacing to 2000 ms within about a hundred pages and held it there for the remaining
+85% of the crawl — a clean run, zero blocked pages, but 2000 ms was the site's answer
+and the first hundred pages were the question. The engine will earn the right number
+on its own; starting at it is simply politer, and it makes the ETA you quote the ETA
+you get. One real data point, not a law: record what the next Shopify crawl settles
+at.
 
 **Do the arithmetic before you promise anyone a time, and do it on
 `perHostDelayMs` alone.** The per-host gate serialises every request to one host at
@@ -170,6 +177,10 @@ What the fields mean when you are waiting:
 - **`frontier.pending` + `frontier.leased`** — URLs still to fetch and URLs in
   flight. This is the progress bar: `pending` falling while `done` rises is a healthy
   crawl, however slow.
+- **`pagesCrawled` — it stays at 0 until the crawl ends.** The column is written when
+  the crawl closes, so it reads 0 through the whole run and jumps to the final count
+  at the end. It is not a progress counter and a crawl showing 0 after sixteen minutes
+  is not stuck. **`frontier.done` is the live number**; watch that one.
 - **`liveLeases`** — unexpired worker leases. A live crawl BETWEEN BATCHES
   momentarily holds none, which is exactly the window an impatient caller looks in.
 - **`queuePosition`** — a number only while THIS server holds the crawl, null
@@ -178,6 +189,10 @@ What the fields mean when you are waiting:
   it, or retire it with `crawl_mark_failed`.
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
+- **`renderPassCount`** — despite the name, it is **how many pages the last render
+  pass rendered**, not how many passes ran. Read it as a boolean gate ("≥ 1 means a
+  render pass happened") and take the real coverage from the `render.coverage` metric
+  or from `crawl_render`'s own `selection` block. The name is on the backlog.
 - **`blockedPages`** — pages a WAF or rate limiter answered instead of the site
   (401, 403, 429, or a challenge page). Watch it across polls: the number matters far
   less than whether it is still rising. See the reaction loop below.
@@ -207,12 +222,22 @@ other is what the engine did about it. That pair is the whole diagnosis:
 
 | `blockedPages` | `hostSpacingMs` | What it means | What to do |
 |---|---|---|---|
+| **Still 0** | Above `perHostDelayMs` | The site pushed back and the engine absorbed it completely — the normal healthy case, not a contradiction | **Leave it alone**, and recompute the ETA at the new spacing. Nothing was lost. |
 | Rose, now flat | Above `perHostDelayMs`, not at the cap | The back-off found the site's rate and settled | **Leave it alone.** The crawl is slow *because* it worked. Recompute your ETA at the new spacing. |
 | Still rising | Still rising | The escalation has not found an acceptable rate yet | Keep polling. Decide when it stops moving. |
 | Still rising | Pinned at 30000 | The engine is out of room to back off | Let this crawl finish — its rows are still evidence — then re-crawl at `maxConcurrency: 1`, `perHostDelayMs: 2000`. |
 | Rising on that slower re-crawl | — | The site is refusing us, not throttling us | **Stop.** Talk to whoever owns the site about allowlisting our user agent. |
 
-Note the ETA consequence in row one: at `hostSpacingMs: 8000` a 2,000-page crawl needs
+**Row one is the one to internalise: the two fields answer different questions.**
+`hostSpacingMs` is the honest signal that the site pushed back; `blockedPages` is the
+signal that the engine could not absorb it. A blocked URL that succeeds within its
+three retries is never written as a blocked row, so the engine working perfectly reads
+as `blockedPages: 0` — the Phase 6 gate crawl doubled its spacing at about page 100
+and finished 551 pages with `blockedPages` at 0 throughout. Do not wait for
+`blockedPages` to move before believing a site pushed back, and do not read a rising
+`hostSpacingMs` as a problem.
+
+Note the ETA consequence in row two: at `hostSpacingMs: 8000` a 2,000-page crawl needs
 about four and a half hours, not thirty-three minutes. Re-quote it rather than letting
 someone discover it.
 
@@ -264,13 +289,27 @@ empty on evidence that exists.
 
 It is refused on a crawl that is still queued or running, on one another worker is
 already rendering, and on one with no discovery evidence (there would be no robots
-`crawl-delay` to honour). It paces itself with the crawl's own delay and user agent —
-it is a second visit, not a ruder one.
+`crawl-delay` to honour). It paces itself with the crawl's user agent and the
+WIDER of the crawl's configured delay and the spacing the crawl earned
+(`hostSpacingMs`) — a site that pushed back during the crawl is not asked to say so
+twice. Expect the pass to take that long: 28 pages at 2000 ms is about a minute.
 
 Read the `selection` block rather than the `rendered` count alone: `budget` is what
 the crawl's render fields allowed, `suspects` and `sampled` are how the pages were
 chosen, and `truncated: true` means the budget cut the selection. A render pass that
 covered 20 of 4,000 pages is evidence about 20 pages.
+
+**`truncated: true` also means the sample was decided by page type, so know what the
+types are.** Candidates are sampled per page type and the budget cut takes the largest
+templates first, which is what makes a handful of renders stand for a whole template.
+But a page type is derived from the URL path, and a path that occurs once becomes its
+own type: the Phase 6 gate site produced 196 types over 551 pages, four of them real
+templates and about 170 singletons, so roughly half the seats went to pages that exist
+once. Nothing is wrong when that happens — the templates are covered first — but the
+coverage you can claim is per template, not per page. Check which types were rendered
+(`pages_query` with `rendered: true`) before telling an audit that a template was
+measured, and raise `renderMaxPages` / `renderBudgetPct` if the tail crowded out
+something you needed. The typing heuristics are on the backlog.
 
 ## Step 4 — run the rules
 
@@ -278,8 +317,14 @@ covered 20 of 4,000 pages is evidence about 20 pages.
 and metrics written. It answers the run summary:
 
 ```
-{pagesScanned, findings, byRule, byMetric, elapsedMs}
+{pagesScanned, findings, byRule, derived, metrics, byMetric}
 ```
+
+`findings` is the issue rows this run wrote and `byRule` breaks them down; `metrics`
+is the metric rows and `byMetric` breaks those down, naming **every** metric rule that
+ran, so a zero there means "this rule removed the crawl's previous answer" and an
+absent key means it never ran. `derived` counts what the derivations wrote. There is
+**no `elapsedMs`** — time the call yourself if you want to report the duration.
 
 **Keep that summary.** It is the only proof the rules ran: `issues_list` and
 `metrics_get` answer `{"items": []}` both for a rule that found nothing and for a
