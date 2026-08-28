@@ -199,3 +199,141 @@ describe("HostGate", () => {
     ).toThrow(RangeError);
   });
 });
+
+/**
+ * The adaptive half of the gate (Task 6b). The fixed base is what we ASKED to
+ * crawl at; this is what the site's answers make us crawl at.
+ */
+describe("HostGate escalation", () => {
+  const blocked = { fetchClass: "blocked", retryAfterMs: null } as const;
+  const fine = { fetchClass: "ok", retryAfterMs: null } as const;
+
+  it("doubles a host's spacing per block, and leaves the base alone", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    expect(g.spacingMs("a.example")).toBe(1000);
+
+    g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(2000);
+    g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(4000);
+    g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(8000);
+
+    // The configured/robots base is a fact about the crawl's configuration and
+    // never moves — only the live spacing does.
+    expect(g.effectiveDelayMs()).toBe(1000);
+    // And it is per host: nobody else pays for one host's WAF.
+    expect(g.spacingMs("b.example")).toBe(1000);
+  });
+
+  it("ratchets: a success never buys the spacing back", () => {
+    const g = new HostGate({ perHostDelayMs: 500, robotsCrawlDelaySec: null });
+    g.report("a.example", blocked);
+    g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(2000);
+
+    g.report("a.example", fine);
+    g.report("a.example", fine);
+    expect(g.spacingMs("a.example")).toBe(2000);
+
+    // And the next block escalates from where the ratchet stands, not from the
+    // base: a bucket that tripped three times is not a bucket to probe gently.
+    g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(4000);
+  });
+
+  it("caps the escalation at maxDelayMs", () => {
+    const g = new HostGate({
+      perHostDelayMs: 1000,
+      robotsCrawlDelaySec: null,
+      maxDelayMs: 5000,
+    });
+    for (let i = 0; i < 20; i += 1) g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(5000);
+  });
+
+  it("escalates a zero-delay crawl from a seed rather than doubling nothing", () => {
+    // perHostDelayMs 0 is the configuration in which a 429 matters most, and
+    // 0 * 2 is 0 — the ratchet would be a silent no-op.
+    const g = new HostGate({ perHostDelayMs: 0, robotsCrawlDelaySec: null });
+    expect(g.spacingMs("a.example")).toBe(0);
+    g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(1000);
+    g.report("a.example", blocked);
+    expect(g.spacingMs("a.example")).toBe(2000);
+  });
+
+  it("reports the widest spacing in force, for lease sizing", () => {
+    const g = new HostGate({ perHostDelayMs: 100, robotsCrawlDelaySec: null });
+    expect(g.maxSpacingMs()).toBe(100);
+    g.report("a.example", blocked);
+    g.report("a.example", blocked);
+    g.report("b.example", blocked);
+    expect(g.maxSpacingMs()).toBe(400);
+  });
+
+  it("spaces the next acquisition by the escalated delay, not the base", async () => {
+    const g = new HostGate({ perHostDelayMs: 20, robotsCrawlDelaySec: null });
+    await g.acquire("a.example"); // cold host: admitted at once
+    g.report("a.example", blocked); // -> 40ms
+    g.report("a.example", blocked); // -> 80ms
+    const t0 = Date.now();
+    await g.acquire("a.example");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(70);
+  });
+
+  it("honours Retry-After as a floor under the escalated spacing", async () => {
+    const g = new HostGate({ perHostDelayMs: 5, robotsCrawlDelaySec: null });
+    await g.acquire("a.example");
+    g.report("a.example", { fetchClass: "blocked", retryAfterMs: 120 });
+    const t0 = Date.now();
+    await g.acquire("a.example");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(110);
+  });
+
+  it("takes the escalated spacing when it is the longer of the two", async () => {
+    const g = new HostGate({ perHostDelayMs: 60, robotsCrawlDelaySec: null });
+    await g.acquire("a.example");
+    // 60 -> 120 escalated, against a 1ms Retry-After: the floor loses.
+    g.report("a.example", { fetchClass: "blocked", retryAfterMs: 1 });
+    const t0 = Date.now();
+    await g.acquire("a.example");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(110);
+  });
+
+  it("caps a hostile Retry-After at maxDelayMs instead of parking the crawl", async () => {
+    // "Retry-After: 31536000" — a year. Honoured literally it ends the crawl.
+    const g = new HostGate({
+      perHostDelayMs: 1,
+      robotsCrawlDelaySec: null,
+      maxDelayMs: 60,
+    });
+    await g.acquire("a.example");
+    g.report("a.example", {
+      fetchClass: "server_error",
+      retryAfterMs: 365 * 24 * 3600 * 1000,
+    });
+    const t0 = Date.now();
+    await g.acquire("a.example");
+    const waited = Date.now() - t0;
+    expect(waited).toBeGreaterThanOrEqual(40);
+    expect(waited).toBeLessThan(2000);
+  });
+
+  it("honours a Retry-After on a class that is not blocked (a 503 asking us to wait)", () => {
+    const g = new HostGate({ perHostDelayMs: 10, robotsCrawlDelaySec: null });
+    g.report("a.example", { fetchClass: "server_error", retryAfterMs: 500 });
+    // The floor is a slot, not an escalation: the spacing itself is untouched.
+    expect(g.spacingMs("a.example")).toBe(10);
+  });
+
+  it("refuses a nonsense Retry-After from our own parser loudly", () => {
+    const g = new HostGate({ perHostDelayMs: 10, robotsCrawlDelaySec: null });
+    expect(() =>
+      g.report("a.example", { fetchClass: "blocked", retryAfterMs: -1 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      g.report("a.example", { fetchClass: "blocked", retryAfterMs: Number.NaN }),
+    ).toThrow(RangeError);
+  });
+});

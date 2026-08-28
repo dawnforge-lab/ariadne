@@ -473,6 +473,36 @@ describe("crawl_status / crawl_list", () => {
     expect(detail["queuePosition"]).toBeNull();
     expect(detail["liveLeases"]).toBe(0);
     expect(typeof detail["frontier"]).toBe("object");
+    // A fixture site nobody blocks: the field is present and zero, not absent.
+    expect(detail["blockedPages"]).toBe(0);
+  });
+
+  it("counts the crawl's blocked pages", async () => {
+    const crawlId = await seedCrawl({
+      id: `crawl_mcp_blocked_${Date.now()}`,
+      status: "finished",
+    });
+    for (const [slug, fetchClass] of [
+      ["blocked-1", "blocked"],
+      ["blocked-2", "blocked"],
+      ["fine", "ok"],
+      ["gone", "client_error"],
+    ] as const) {
+      await db.insert(pages).values({
+        id: `${crawlId}_${slug}`,
+        crawlId,
+        url: `${SEEDED_SITE}/${slug}`,
+        urlNormalised: `${SEEDED_SITE}/${slug}`,
+        statusCode: fetchClass === "blocked" ? 429 : 200,
+        fetchClass,
+        depth: 1,
+        discoveredVia: "link",
+        rendered: false,
+      });
+    }
+
+    const detail = await ok("crawl_status", { crawlId });
+    expect(detail["blockedPages"]).toBe(2);
   });
 
   it("refuses a crawl id nothing knows", async () => {
@@ -639,8 +669,8 @@ describe("pages_query", () => {
     const rows = items(body);
     expect(rows.map((r) => r["url"])).toEqual([`${SEEDED_SITE}/b1`, `${SEEDED_SITE}/p1`]);
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
-      "depth", "fetchClass", "indexable", "pageType", "renderError", "rendered",
-      "renderedWordCount", "statusCode", "url", "wordCount",
+      "depth", "fetchClass", "fetchReason", "indexable", "pageType", "renderError",
+      "rendered", "renderedWordCount", "statusCode", "url", "wordCount",
     ]);
   });
 

@@ -8,12 +8,26 @@
  *   us — throttling, 5xx, timeouts shrink it; a clean, full, fast batch grows
  *   it by one. It also carries the in-flight byte budget, which is the OOM
  *   guard behind the memory contract (RAM O(concurrency), never O(URLs)).
- * - `HostGate` is *fixed spacing*. Adaptive concurrency alone does not give a
+ * - `HostGate` is *spacing*. Adaptive concurrency alone does not give a
  *   WAF's token bucket what it wants: yellow.com.mt blocked us at a modest
  *   concurrency because the requests arrived in bursts. A per-host minimum
- *   interval, honouring robots `crawl-delay`, is the fix.
+ *   interval, honouring robots `crawl-delay`, is the fix. The interval has a
+ *   FIXED base — max(config, robots), capped — and an ADAPTIVE layer over it:
+ *   a `blocked` answer doubles that host's spacing, and a `Retry-After` header
+ *   is honoured as a floor under the host's next slot (see `report`).
+ *
+ * Both halves see every settled fetch, and they compose rather than duplicate:
+ * a 429 shrinks the window (fewer requests at once) AND widens that host's
+ * spacing (more time between them). A token bucket wants the second; a busy
+ * origin wants the first; a Shopify site behind Cloudflare hands out both
+ * complaints at once.
  *
  * Pure logic — no I/O, no fetching, no database. The crawl loop wires it.
+ *
+ * Memory: the gate holds two small maps keyed by host — O(hosts touched), not
+ * O(URLs). A site crawl touches one host, or a handful with its variants; the
+ * memory contract (rule 6) is about the frontier and the page bodies, and
+ * nothing here grows with either.
  */
 
 import type { FetchClass } from "./fetch-page.js";
@@ -23,6 +37,24 @@ export interface BatchOutcome {
   fetchClass: FetchClass;
   responseTimeMs: number;
   htmlBytes: number;
+}
+
+/**
+ * What one settled fetch tells the *gate*. Deliberately not `BatchOutcome`:
+ * the window judges a batch by how fast and how clean it was, the gate judges
+ * one host by whether it pushed back and what it asked for. Merging them would
+ * make every caller of one carry the other's fields.
+ */
+export interface HostOutcome {
+  fetchClass: FetchClass;
+  /**
+   * `Retry-After`, in milliseconds from now. Null when the response carried
+   * none, or carried one we could not read — an unreadable header is recorded
+   * in the page row by `fetch-page`'s `parseRetryAfter` and NEVER guessed at
+   * here (hard rule 7). A value that arrives negative or non-finite is our own
+   * parser's bug and is thrown, not clamped.
+   */
+  retryAfterMs: number | null;
 }
 
 /**
@@ -44,6 +76,17 @@ const DEFAULT_INITIAL_WINDOW = 4;
 const DEFAULT_SLOW_MS = 1500;
 const DEFAULT_BYTE_BUDGET = 64 * 1024 * 1024;
 const DEFAULT_MAX_DELAY_MS = 30_000;
+
+/**
+ * The spacing a block escalates FROM when the crawl was configured with no
+ * per-host delay at all and robots.txt asked for none either.
+ *
+ * Doubling zero is zero, so a base of 0 would make the ratchet a silent no-op —
+ * in exactly the configuration where a 429 matters most. 500ms seeds it, so the
+ * first block spaces that host at 1s, the second at 2s, and so on. Any positive
+ * base doubles itself and never sees this number.
+ */
+const ZERO_BASE_SEED_MS = 500;
 
 export interface CrawlWindowOptions {
   /** Starting concurrency. Default 4. Must be ≥ 1 and ≤ max. */
@@ -173,8 +216,16 @@ export interface HostGateOptions {
 
 export class HostGate {
   private readonly delayMs: number;
+  private readonly maxDelayMs: number;
   /** host → the earliest wall-clock ms at which the next hit may start. */
   private readonly nextAllowedAt = new Map<string, number>();
+  /**
+   * host → how many times it has blocked us. Only ever incremented: see
+   * `report` for why a success does not give the spacing back.
+   */
+  private readonly blocks = new Map<string, number>();
+  /** The widest spacing any host has reached. Read by the loop's lease sizing. */
+  private highWaterMs: number;
 
   constructor(opts: HostGateOptions) {
     const maxDelayMs = opts.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
@@ -201,27 +252,107 @@ export class HostGate {
       maxDelayMs,
       Math.max(opts.perHostDelayMs, (opts.robotsCrawlDelaySec ?? 0) * 1000),
     );
+    this.maxDelayMs = maxDelayMs;
+    this.highWaterMs = this.delayMs;
   }
 
-  /** The spacing actually honoured: max(config, robots), capped. */
+  /**
+   * The CONFIGURED spacing: max(config, robots), capped. A fact about how the
+   * crawl was set up, not about how it is going — it never moves. For what a
+   * host is actually being crawled at right now, see `spacingMs`.
+   */
   effectiveDelayMs(): number {
     return this.delayMs;
+  }
+
+  /** The spacing in force for `host` right now: the base, times the ratchet. */
+  spacingMs(host: string): number {
+    const blocks = this.blocks.get(host) ?? 0;
+    if (blocks === 0) return this.delayMs;
+    const seed = this.delayMs > 0 ? this.delayMs : ZERO_BASE_SEED_MS;
+    return Math.min(this.maxDelayMs, seed * 2 ** blocks);
+  }
+
+  /**
+   * The widest spacing any host has reached — the number a lease has to be
+   * sized against, because a batch is leased before anyone knows which host's
+   * escalated queue its members will sit in (see the loop's `leaseSecondsFor`).
+   */
+  maxSpacingMs(): number {
+    return this.highWaterMs;
+  }
+
+  /**
+   * Tell the gate how one fetch of `host` ended.
+   *
+   * Two independent effects, both of which only ever make us slower:
+   *
+   *  - **A `blocked` answer doubles that host's spacing** (base ×2, ×4, ×8 …,
+   *    capped at `maxDelayMs`) and pushes its next slot out by the new figure,
+   *    so the escalation takes effect on the very next request rather than one
+   *    request later.
+   *
+   *    It is a RATCHET: a success afterwards does not wind it back. A token
+   *    bucket that emptied once will empty again, and "we got one 200, let's
+   *    speed up" is precisely how a crawl oscillates in and out of a WAF's bad
+   *    books for an hour. Within one crawl the spacing only ever goes up. The
+   *    escalation is also per block rather than per *consecutive* block, so a
+   *    site alternating 200 and 429 keeps backing off instead of stalling at
+   *    ×2 forever — the more polite of the two readings, which is the one this
+   *    project takes (rule 9).
+   *
+   *  - **A `Retry-After` is honoured as a floor** under the next slot, on any
+   *    class that carries one (a 429's, and a 503's). It competes with the
+   *    escalated spacing and the longer wins; it is capped at `maxDelayMs`,
+   *    because `Retry-After: 31536000` is a header a hostile or misconfigured
+   *    origin can send and a year-long sleep is not a crawl.
+   *
+   * The gate is told immediately, per fetch, not per batch: the next acquirer
+   * of this host may be a sibling already inside `acquire`.
+   */
+  report(host: string, outcome: HostOutcome): void {
+    if (outcome.fetchClass === "blocked") {
+      this.blocks.set(host, (this.blocks.get(host) ?? 0) + 1);
+      const spacing = this.spacingMs(host);
+      this.highWaterMs = Math.max(this.highWaterMs, spacing);
+      this.pushSlot(host, spacing);
+    }
+    if (outcome.retryAfterMs !== null) {
+      if (!Number.isFinite(outcome.retryAfterMs) || outcome.retryAfterMs < 0) {
+        // Not a site problem: fetch-page hands over null for anything it could
+        // not read, so a bad number here is our parser's defect (rule 7).
+        throw new RangeError(
+          `HostGate.report: retryAfterMs must be ≥ 0 or null, got ${outcome.retryAfterMs}`,
+        );
+      }
+      this.pushSlot(host, Math.min(this.maxDelayMs, outcome.retryAfterMs));
+    }
   }
 
   /**
    * Resolve when `host` may be hit again.
    *
    * The slot is claimed *before* sleeping, so N concurrent acquirers of one
-   * host chain at `delayMs` apart rather than all waking on the same
+   * host chain at the host's spacing apart rather than all waking on the same
    * timestamp. A host untouched for longer than the delay is admitted with no
    * wait at all (elapsed-time credit).
    */
   async acquire(host: string): Promise<void> {
     const now = Date.now();
     const startAt = Math.max(now, this.nextAllowedAt.get(host) ?? 0);
-    this.nextAllowedAt.set(host, startAt + this.delayMs);
+    this.nextAllowedAt.set(host, startAt + this.spacingMs(host));
 
     const waitMs = startAt - now;
     if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  /**
+   * Push a host's next slot out by `delayMs` from now, never pulling it in: an
+   * escalation or a `Retry-After` may arrive while siblings hold slots further
+   * out already, and the later of the two is the polite one.
+   */
+  private pushSlot(host: string, delayMs: number): void {
+    const at = Date.now() + delayMs;
+    this.nextAllowedAt.set(host, Math.max(this.nextAllowedAt.get(host) ?? 0, at));
   }
 }

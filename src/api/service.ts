@@ -287,6 +287,22 @@ export interface CrawlDetail extends CrawlListItem {
    * the worker is gone (the condition `markCrawlFailed` requires).
    */
   liveLeases: number;
+  /**
+   * Pages that ended as `fetch_class = 'blocked'`: a WAF or a rate limiter
+   * answered instead of the site (401/403/429, a `cf-mitigated` header, or a
+   * challenge page behind a 503).
+   *
+   * It is on the polling shape rather than left to a `pages` query because it
+   * is the number an operator has to WATCH RISE, not discover afterwards. The
+   * engine protects itself when it climbs — the host's spacing doubles per
+   * block and each blocked URL is retried up to three times under the widened
+   * spacing — but a count that keeps climbing anyway means the site does not
+   * want to be crawled at this pace, or at all, and the answer is a slower
+   * re-crawl or a conversation with its owner. Never a harder push (rule 9).
+   *
+   * Counted live off the `pages` rows, so it is meaningful mid-crawl.
+   */
+  blockedPages: number;
 }
 
 /** A page of results, in the surface's one pagination shape. */
@@ -653,9 +669,10 @@ export class ApiService {
 
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
     const row = await this.crawlRow(crawlId);
-    const [counts, liveLeases] = await Promise.all([
+    const [counts, liveLeases, blockedPages] = await Promise.all([
       frontierCounts(this.db, crawlId),
       this.liveLeaseCount(crawlId),
+      this.blockedPageCount(crawlId),
     ]);
     return {
       crawlId: row.id,
@@ -670,6 +687,7 @@ export class ApiService {
       frontier: counts,
       queuePosition: row.status === "queued" ? this.queuePosition(crawlId) : null,
       liveLeases,
+      blockedPages,
     };
   }
 
@@ -1702,6 +1720,25 @@ export class ApiService {
   }
 
   /**
+   * Pages this crawl recorded as `blocked`.
+   *
+   * A count, not a sample: the URLs are on the pages query with
+   * `fetchClass=blocked` for anyone who wants them, and what the polling shape
+   * needs is one number that can be compared with the previous poll.
+   */
+  private async blockedPageCount(crawlId: string): Promise<number> {
+    const rows = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(pages)
+      .where(and(eq(pages.crawlId, crawlId), eq(pages.fetchClass, "blocked")));
+    const n = rows[0]?.n;
+    if (typeof n !== "number") {
+      throw new Error(`blockedPageCount: count came back as ${typeof n}, not a number`);
+    }
+    return n;
+  }
+
+  /**
    * The robots `Crawl-delay` this crawl honoured, read back off its own
    * discovery evidence so the render pass honours it too.
    *
@@ -1774,6 +1811,20 @@ const PAGE_FIELDS = {
   url: pages.url,
   statusCode: pages.statusCode,
   fetchClass: pages.fetchClass,
+  /**
+   * Why the row has no usable body or target, when that needed saying: a URL
+   * the policy refused, a dropped redirect target, a coding we could not read,
+   * and — since Task 6b — a block, with the attempts it took and the per-host
+   * spacing the engine had escalated to before giving up.
+   *
+   * Named here deliberately. `fetchClass: "blocked"` on its own cannot tell an
+   * agent whether the crawl went in too fast or the site refuses us outright,
+   * and that is the difference between re-crawling slower and calling the site's
+   * owner. It is safe to expose by the same discipline that builds it: the
+   * reason is composed from the response and the URL policy only, never from a
+   * stack trace or a local path (see FetchResult.disallowedReason).
+   */
+  fetchReason: pages.fetchReason,
   pageType: pages.pageType,
   indexable: pages.isIndexable,
   depth: pages.depth,

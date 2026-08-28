@@ -22,7 +22,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier } from "../../src/db/schema.js";
+import { crawls, frontier, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
@@ -556,6 +556,37 @@ describe("crawl lifecycle", () => {
     expect(fixtureFinal["liveLeases"]).toBe(0);
     const counts = fixtureFinal["frontier"] as Record<string, number>;
     expect(counts["done"]).toBeGreaterThanOrEqual(3);
+    // A fixture site nobody blocks: present and zero, not absent.
+    expect(fixtureFinal["blockedPages"]).toBe(0);
+  });
+
+  it("counts the crawl's blocked pages on the status body", async () => {
+    const crawlId = await seedCrawl({ status: "finished" });
+    for (const [slug, fetchClass] of [
+      ["blocked-1", "blocked"],
+      ["blocked-2", "blocked"],
+      ["fine", "ok"],
+      ["gone", "client_error"],
+    ] as const) {
+      await db.insert(pages).values({
+        id: `${crawlId}_${slug}`,
+        crawlId,
+        url: `http://seeded.example/${slug}`,
+        urlNormalised: `http://seeded.example/${slug}`,
+        statusCode: fetchClass === "blocked" ? 429 : 200,
+        fetchClass,
+        depth: 1,
+        discoveredVia: "link",
+        rendered: false,
+      });
+    }
+
+    const res = await fetch(`${base}/crawls/${crawlId}`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body["blockedPages"]).toBe(2);
   });
 
   it("never lets allowPrivate reach the crawl row, even though the crawl used it", async () => {

@@ -94,6 +94,7 @@ function makeFetch(url: string, overrides: Partial<FetchResult> = {}): FetchResu
     body: "<html></html>",
     htmlBytes: 4096,
     responseTimeMs: 87,
+    retryAfterMs: null,
     canonicalHeader: null,
     xRobotsTag: null,
     disallowedReason: null,

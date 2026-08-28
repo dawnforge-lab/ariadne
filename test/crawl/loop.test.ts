@@ -69,6 +69,19 @@ let flappyHits = 0;
 let alwaysBrokenHits = 0;
 
 /**
+ * A site that throttles:
+ *   /always-429 -> 429 for ever (the retries are spent, one blocked row)
+ *   /flaky-403  -> 403 twice, then a real page (the third attempt lands)
+ * Both are linked from `/`, and robots.txt 404s (absent -> allow all). This is
+ * the Shopify/Cloudflare shape: a token bucket that refuses a burst and serves
+ * the same URL happily once the crawler has slowed down.
+ */
+let throttleServer: Server;
+let throttle: string;
+let always429Hits = 0;
+let flaky403Hits = 0;
+
+/**
  * A site whose catch-all answers 200 with the same "not found" template for
  * every unknown URL — the soft-404 site the known-404 probe exists to catch.
  * robots.txt 404s (absent -> allow all) so the crawl itself is ordinary.
@@ -262,6 +275,35 @@ beforeAll(async () => {
   });
   broken = await listen(brokenServer);
 
+  throttleServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/always-429") {
+      always429Hits += 1;
+      res.writeHead(429, { "content-type": "text/html", "retry-after": "0" });
+      res.end("<html>slow down</html>");
+      return;
+    }
+    if (path === "/flaky-403") {
+      flaky403Hits += 1;
+      if (flaky403Hits <= 2) {
+        res.writeHead(403, { "content-type": "text/html" });
+        res.end("<html>nope</html>");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html("<p>served once we slowed down</p>"));
+      return;
+    }
+    if (path === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html(`<a href="/always-429">a</a><a href="/flaky-403">f</a>`));
+      return;
+    }
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("no");
+  });
+  throttle = await listen(throttleServer);
+
   soft404Server = createServer((req, res) => {
     const path = req.url ?? "";
     if (path === "/robots.txt") {
@@ -309,6 +351,8 @@ afterAll(async () => {
   await new Promise<void>((r) => flakyServer.close(() => r()));
   await new Promise<void>((r) => closedServer.close(() => r()));
   await new Promise<void>((r) => brokenServer.close(() => r()));
+  throttleServer.closeAllConnections();
+  await new Promise<void>((r) => throttleServer.close(() => r()));
   await new Promise<void>((r) => variantServer.close(() => r()));
   brotliServer.closeAllConnections();
   await new Promise<void>((r) => brotliServer.close(() => r()));
@@ -477,6 +521,48 @@ describe("runCrawl", () => {
     expect(summary.frontier.failed).toBe(1); // /always-broken
     expect(summary.frontier.pending).toBe(0);
     expect(rows).toHaveLength(3);
+  });
+
+  it("retries a block under widening spacing instead of ending the page", async () => {
+    always429Hits = 0;
+    flaky403Hits = 0;
+    // A real per-host delay, so the escalation has something to double. Kept
+    // tiny: what is under test is the ratchet, not the wall clock.
+    const started = Date.now();
+    const summary = await crawl(config({ siteUrl: throttle, perHostDelayMs: 5 }));
+    const elapsed = Date.now() - started;
+
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    const byUrl = new Map(rows.map((r) => [r.url, r]));
+
+    // Throttled twice, then served: a 429 is no longer a permanent verdict on
+    // the URL, and only the settling attempt is written.
+    expect(flaky403Hits).toBe(3);
+    expect(byUrl.get(`${throttle}/flaky-403`)?.fetchClass).toBe("ok");
+
+    // Throttled for ever: three paced attempts, then ONE classified row.
+    expect(always429Hits).toBe(3);
+    const blockedRow = byUrl.get(`${throttle}/always-429`);
+    expect(blockedRow?.fetchClass).toBe("blocked");
+    expect(blockedRow?.statusCode).toBe(429);
+    // The row says what happened AND how hard the engine had backed off by the
+    // time it gave up — the number an operator needs to decide whether to
+    // re-crawl slower or stop and call the site's owner.
+    const reason = blockedRow?.fetchReason ?? "";
+    expect(reason).toContain("blocked (429)");
+    expect(reason).toContain("3 attempts");
+    expect(reason).toMatch(/spacing reached \d+ms/);
+
+    // The frontier agrees: the retried URL is done, the exhausted one failed.
+    expect(summary.frontier.done).toBe(2); // / and /flaky-403
+    expect(summary.frontier.failed).toBe(1); // /always-429
+    expect(summary.frontier.pending).toBe(0);
+    expect(rows).toHaveLength(3);
+
+    // Five blocks on one host at a 5ms base is 10+20+40+80+160ms of ratchet —
+    // real spacing, and nowhere near a stalled crawl. The upper bound is what
+    // says the escalation is capped and does not compound per request.
+    expect(elapsed).toBeLessThan(30_000);
   });
 
   it("applies robots rules to same-site origin variants", async () => {
@@ -722,6 +808,7 @@ describe("resumeCrawl", () => {
         body: null,
         htmlBytes: 32,
         responseTimeMs: 1,
+        retryAfterMs: null,
         canonicalHeader: null,
         xRobotsTag: null,
         disallowedReason: null,

@@ -190,14 +190,21 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
-        "with, queuePosition and liveLeases.\n\n" +
+        "with, queuePosition, liveLeases and blockedPages.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
         "number only while THIS server holds the crawl (null otherwise), and " +
         "liveLeases counts unexpired worker leases. A 'queued' crawl with " +
         "queuePosition null was accepted by a server process that is now gone — " +
-        "nobody will run it; re-submit it, or retire it with crawl_mark_failed.",
+        "nobody will run it; re-submit it, or retire it with crawl_mark_failed.\n\n" +
+        "blockedPages counts pages a WAF or rate limiter answered instead of the " +
+        "site (401/403/429/challenge). The engine already reacts on its own — it " +
+        "doubles that host's spacing per block and retries each blocked URL up to " +
+        "three times under the widened spacing — so a few early blocks that stop " +
+        "climbing are the safety net working. A blockedPages that keeps climbing " +
+        "is the site refusing this crawl: re-crawl slower (maxConcurrency 1, " +
+        "perHostDelayMs 2000) or stop and talk to the site's owner. Never faster.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_status", () => service.getCrawl(crawlId)),
@@ -425,10 +432,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "The crawled pages",
       description:
         "The crawl's pages, slim and filtered: {url, statusCode, fetchClass, " +
-        "pageType, indexable, depth, wordCount, rendered, renderedWordCount, " +
-        "renderError}. Use it to answer questions about the site itself — how deep " +
-        "the blog is, which product pages are non-indexable, what a render " +
-        "actually added — rather than about its faults.\n\n" +
+        "fetchReason, pageType, indexable, depth, wordCount, rendered, " +
+        "renderedWordCount, renderError}. Use it to answer questions about the site " +
+        "itself — how deep the blog is, which product pages are non-indexable, what " +
+        "a render actually added — rather than about its faults.\n\n" +
+        "fetchReason is why a row has no usable body, in plain words, and is null " +
+        "for a page that fetched normally. On fetchClass 'blocked' it names the " +
+        "status, how many attempts the URL got, and the per-host spacing the engine " +
+        "had backed off to before giving up — read it before deciding whether a " +
+        "blocked page means 'crawl slower' or 'this site refuses us'.\n\n" +
         "WHICH PASS WROTE WHAT, because a filter can outrun the evidence. The rows " +
         "themselves — url, statusCode, fetchClass, pageType, indexable, depth, " +
         "wordCount — are written by the CRAWL, so they are complete as soon as it " +

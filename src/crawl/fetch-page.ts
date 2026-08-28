@@ -135,14 +135,31 @@ export interface FetchResult {
   htmlBytes: number;
   /** Time to response headers, not to the last body byte. */
   responseTimeMs: number;
+  /**
+   * `Retry-After`, in milliseconds from the moment the response arrived, on the
+   * classes where it is a throttle: `blocked` (401/403/429/challenge) and a 503
+   * `server_error`. Null everywhere else — a 404 carrying the header is not
+   * asking us to slow the site down, and honouring it there would let one
+   * misconfigured error page pace the whole crawl.
+   *
+   * Null also when the header WAS there and could not be read; the reason is
+   * then written into `disallowedReason` so the row says so (hard rule 7). It
+   * is never NaN and never a guess.
+   *
+   * NOT persisted: it is a fact about a moment, consumed by `HostGate.report`,
+   * which caps it at `maxDelayMs` before honouring it. This object carries what
+   * the server said; the gate decides what to do about it.
+   */
+  retryAfterMs: number | null;
   /** From `Link: <...>; rel="canonical"`, verbatim (not normalised). */
   canonicalHeader: string | null;
   xRobotsTag: string | null;
   /**
    * Why this row has no usable body or target, in plain words. Set on
    * `disallowed` (the URL or the address it resolved to), on `redirect` when
-   * the Location was dropped rather than passed on, and on
-   * `unsupported_encoding` (naming the coding we could not read). Null
+   * the Location was dropped rather than passed on, on `unsupported_encoding`
+   * (naming the coding we could not read), and on a throttle whose
+   * `Retry-After` we had to ignore (naming the value we refused). Null
    * otherwise.
    *
    * **This is persisted**, as `pages.fetch_reason` — the class alone is not an
@@ -152,7 +169,7 @@ export interface FetchResult {
    * built from the response and the URL policy only: never a stack trace,
    * never a local path.
    *
-   * The name is now narrower than the job — it predates the other two uses —
+   * The name is now narrower than the job — it predates the other three uses —
    * but renaming it ripples through `persist`, the column and the rule layer
    * for no behavioural gain.
    */
@@ -192,6 +209,74 @@ export function parseCanonicalLinkHeader(value: string | null): string | null {
     }
   }
   return null;
+}
+
+/**
+ * `Retry-After` (RFC 9110 §10.2.3), in milliseconds from `nowMs`.
+ *
+ * Two legal spellings — delta-seconds (`120`) and an HTTP-date (`Wed, 21 Oct
+ * 2015 07:28:00 GMT`) — and a long tail of things servers send instead. The
+ * contract for that tail is the point of this function: an unreadable value
+ * yields `ms: null` and a `note` saying what was refused. Never NaN, never a
+ * silent 0, never a throw. A crawl must not stop because a WAF sent `soon`,
+ * and it must not pretend the header was absent either (hard rule 7).
+ *
+ * What it deliberately does NOT do is cap: `31536000` (a year) is read as a
+ * year, and `HostGate` is where that meets `maxDelayMs`. One policy, in the one
+ * module that owns spacing.
+ *
+ * The date branch requires a letter in the value before `Date.parse` sees it.
+ * `Date.parse` is lenient in ways no HTTP-date is — `"2026"` parses as a year,
+ * `"-5"` as who-knows-what — and an IMF-fixdate always carries a month name.
+ * Without the guard a hostile `"3000"` would become a millennium of back-off.
+ */
+export function parseRetryAfter(
+  value: string | null,
+  nowMs: number = Date.now(),
+): { ms: number | null; note: string | null } {
+  if (value === null) return { ms: null, note: null };
+
+  const raw = value.trim();
+  const unreadable = {
+    ms: null,
+    note: `unreadable Retry-After header (${clipHeader(value)}); ignored`,
+  };
+  if (raw === "") return unreadable;
+
+  if (/^\d+$/.test(raw)) {
+    const seconds = Number(raw);
+    // A 300-digit header parses to Infinity. It is not a number we can use.
+    if (!Number.isFinite(seconds)) return unreadable;
+    return { ms: seconds * 1000, note: null };
+  }
+
+  if (!/[a-zA-Z]/.test(raw)) return unreadable;
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return unreadable;
+
+  const deltaMs = at - nowMs;
+  if (deltaMs > 0) return { ms: deltaMs, note: null };
+  return {
+    ms: 0,
+    note: `Retry-After named a time in the past (${clipHeader(value)}); ignored`,
+  };
+}
+
+/** A header value fit to put in a row an operator will read. */
+function clipHeader(value: string): string {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat;
+}
+
+/**
+ * The classes on which a `Retry-After` is a throttle rather than noise: a
+ * block, and the 503 that did not turn out to be a challenge. A 404 or a
+ * redirect carrying the header is answering about itself, not asking the
+ * crawler to slow down, and pacing a whole host off one is how a single broken
+ * error page halves a crawl.
+ */
+function isThrottle(fetchClass: FetchClass, statusCode: number): boolean {
+  return fetchClass === "blocked" || (fetchClass === "server_error" && statusCode === 503);
 }
 
 /**
@@ -286,6 +371,9 @@ function emptyResult(
     body: null,
     htmlBytes: 0,
     responseTimeMs,
+    // Nothing was read, so nothing was asked of us. A timeout is not a throttle
+    // with an unstated interval.
+    retryAfterMs: null,
     canonicalHeader: null,
     xRobotsTag: null,
     disallowedReason,
@@ -399,6 +487,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
         body: null,
         htmlBytes: read.bytes,
         responseTimeMs,
+        retryAfterMs: null, // a 3xx is an answer, not a throttle
         canonicalHeader,
         xRobotsTag,
         disallowedReason: target.droppedReason,
@@ -429,6 +518,13 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       fetchClass = "unsupported_encoding";
     }
 
+    // The throttle's own answer to "when may we come back". Read only once the
+    // class is settled, because the class is what decides whether the header is
+    // an instruction or noise (see isThrottle).
+    const retryAfter = isThrottle(fetchClass, statusCode)
+      ? parseRetryAfter(headerValue(headers, "retry-after"))
+      : { ms: null, note: null };
+
     return {
       url,
       statusCode,
@@ -441,12 +537,17 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
           : null,
       htmlBytes: read.bytes,
       responseTimeMs,
+      retryAfterMs: retryAfter.ms,
       canonicalHeader,
       xRobotsTag,
+      // Two reasons can want this field, and they never co-occur: an
+      // unsupported coding is an `ok`-turned-`unsupported_encoding`, a refused
+      // Retry-After is a throttle. The coding wins if that ever changes,
+      // because it is why the row has no body at all.
       disallowedReason:
-        read.unsupportedEncoding === null
-          ? null
-          : `unsupported content-encoding (${read.unsupportedEncoding})`,
+        read.unsupportedEncoding !== null
+          ? `unsupported content-encoding (${read.unsupportedEncoding})`
+          : retryAfter.note,
     };
   } catch (error) {
     // Our bug, not theirs — surface it loudly instead of burying it in a

@@ -542,8 +542,8 @@ describe("GET /crawls/:id/pages", () => {
       `${SITE}/b1`, `${SITE}/p1`, `${SITE}/p2`, `${SITE}/x`,
     ]);
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
-      "depth", "fetchClass", "indexable", "pageType", "rendered", "renderError",
-      "renderedWordCount", "statusCode", "url", "wordCount",
+      "depth", "fetchClass", "fetchReason", "indexable", "pageType", "rendered",
+      "renderError", "renderedWordCount", "statusCode", "url", "wordCount",
     ].sort());
     // The column nobody selected stays where it is.
     expect(JSON.stringify(res.body)).not.toContain("LEAK-CONTENT-HASH-MARKER");

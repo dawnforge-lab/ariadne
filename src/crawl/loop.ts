@@ -253,24 +253,38 @@ function leaseSecondsFor(delayMs: number, batchSize: number): number {
   return Math.max(LEASE_FLOOR_SECONDS, Math.ceil(worstCaseMs / 1000));
 }
 
-/** Attempts a transient failure gets before the URL is marked failed. */
+/** Attempts a retryable failure gets before the URL is marked failed. */
 const MAX_ATTEMPTS = 3;
 
 /**
- * Fetch classes worth trying again: the site did not answer, so we learned
- * nothing about the URL. Everything else *is* an answer — a 404, a block, a
+ * Fetch classes worth trying again. Two different reasons sit in this set, and
+ * both have to hold for a member to belong here.
+ *
+ * `timeout` and `network_error` are the original pair: the site did not answer,
+ * so we learned nothing about the URL. Most classes *are* an answer — a 404, a
  * redirect, a PDF — and asking twice would only be rude.
+ *
+ * `blocked` is the member added in Task 6b, and it is here for the *other*
+ * reason: it is an answer about the CRAWLER, not about the URL. A 429 from a
+ * token bucket says "not at this rate", and the page behind it is usually
+ * served the moment the rate drops — which is exactly what the retry now lands
+ * in, because `HostGate.report` has doubled that host's spacing before the
+ * requeued URL is leased again. Retrying a block at the SAME pace would be the
+ * rudeness this set's rule forbids; retrying it slower is the polite reading of
+ * what the server asked for (rule 9). A deterministic 403 settles in three
+ * paced attempts and one classified row.
  *
  * `unsupported_encoding` is deliberately NOT here, and it is the member most
  * likely to be added by mistake because it reads like a failure. It is an
  * answer: the server replied, in a coding we cannot read, and it will reply
  * the same way every time (some CDNs return `br` whatever `accept-encoding`
  * says). Retrying a deterministic non-answer is three times the load for the
- * same result — the exact rudeness this set's own rule forbids.
+ * same result, and no amount of backing off changes it.
  */
-const TRANSIENT: ReadonlySet<FetchClass> = new Set<FetchClass>([
+const RETRYABLE: ReadonlySet<FetchClass> = new Set<FetchClass>([
   "timeout",
   "network_error",
+  "blocked",
 ]);
 
 /**
@@ -732,10 +746,11 @@ async function runToCompletion(
     item: LeasedUrl,
   ): Promise<{ outcome: BatchOutcome | null; persisted: boolean }> => {
     if (!(await admit())) return { outcome: null, persisted: false };
+    const host = new URL(item.url).host;
     try {
       // Claimed immediately before a fetch we are certainly going to issue —
       // acquiring earlier would burn the host's slot on work we then skip.
-      await gate.acquire(new URL(item.url).host);
+      await gate.acquire(host);
 
       const result = await fetchPage(item.url, {
         userAgent: config.userAgent,
@@ -743,10 +758,21 @@ async function runToCompletion(
         timeoutMs: FETCH_TIMEOUT_MS,
       });
 
-      // A transient failure with attempts left is not written yet: the row for
-      // this URL records its *final* outcome, and writing a timeout now would
-      // win the (crawl_id, url) conflict against the retry that succeeds.
-      if (TRANSIENT.has(result.fetchClass) && item.attempts < MAX_ATTEMPTS) {
+      // The gate hears about it FIRST, and per fetch rather than per batch: a
+      // sibling handler may already be inside `acquire` for this host, and the
+      // whole point of the escalation is that the next request is the one that
+      // waits. This is the spacing half of the back-pressure; the window's
+      // concurrency half is applied to the batch below (see politeness).
+      gate.report(host, {
+        fetchClass: result.fetchClass,
+        retryAfterMs: result.retryAfterMs,
+      });
+
+      // A retryable failure with attempts left is not written yet: the row for
+      // this URL records its *final* outcome, and writing a timeout — or a
+      // block — now would win the (crawl_id, url) conflict against the retry
+      // that succeeds.
+      if (RETRYABLE.has(result.fetchClass) && item.attempts < MAX_ATTEMPTS) {
         await failUrl(db, crawlId, item.url, { requeue: true, maxAttempts: MAX_ATTEMPTS });
         return { outcome: toOutcome(result), persisted: false };
       }
@@ -760,8 +786,8 @@ async function runToCompletion(
       // commits this page row — never here, where the row is only buffered.
       // A page whose retries are spent is the loop's to settle instead: it
       // becomes `failed` below, and a completion would overwrite that.
-      await writer.addPage(item, result, analysis, {
-        complete: !TRANSIENT.has(result.fetchClass),
+      await writer.addPage(item, settledResult(result, item, gate.spacingMs(host)), analysis, {
+        complete: !RETRYABLE.has(result.fetchClass),
       });
 
       if (analysis !== null && item.depth < config.maxDepth) {
@@ -778,7 +804,7 @@ async function runToCompletion(
         await enqueue([result.redirectUrl], item.depth, "redirect");
       }
 
-      if (TRANSIENT.has(result.fetchClass)) {
+      if (RETRYABLE.has(result.fetchClass)) {
         // Retries spent. The row is written, and the frontier says so.
         await failUrl(db, crawlId, item.url, { requeue: false, maxAttempts: MAX_ATTEMPTS });
       }
@@ -833,7 +859,11 @@ async function runToCompletion(
         crawlId,
         workerId,
         size,
-        leaseSecondsFor(gate.effectiveDelayMs(), size),
+        // The WIDEST spacing in force, not the configured one: once a host has
+        // been escalated the batch behind it takes proportionally longer, and
+        // a lease sized on the base delay would expire mid-batch and invite a
+        // second worker onto URLs still in flight (see leaseSecondsFor).
+        leaseSecondsFor(gate.maxSpacingMs(), size),
       );
 
       if (batch.length === 0) {
@@ -1063,6 +1093,36 @@ async function probeKnownMissing(
     wordCount: analysis?.wordCount ?? null,
     simhash: analysis === null ? null : String(BigInt.asIntN(64, analysis.simhash)),
   });
+}
+
+/**
+ * The result as it should be RECORDED, which is not always the result as it was
+ * fetched.
+ *
+ * One case today: a block whose retries are spent. `fetch_class: 'blocked'`
+ * says a WAF answered; it does not say whether we tried once or three times, or
+ * how far the engine had already backed off when it gave up. Both belong in the
+ * row, because the operator's next decision turns on them — a block at 8s of
+ * spacing after three attempts is a site saying no, not a crawl that went in
+ * too fast, and the answer to it is a conversation with the site's owner rather
+ * than another crawl (rule 9, and the yellow.com.mt lesson).
+ *
+ * Anything `fetchPage` already had to say is kept and appended to, never
+ * overwritten: an ignored `Retry-After` is exactly the kind of thing a reader
+ * of this row needs alongside the block.
+ */
+function settledResult(
+  result: FetchResult,
+  item: LeasedUrl,
+  spacingMs: number,
+): FetchResult {
+  if (result.fetchClass !== "blocked") return result;
+  const status = result.statusCode === null ? "no status" : String(result.statusCode);
+  const attempts = `${item.attempts} attempt${item.attempts === 1 ? "" : "s"}`;
+  const reason =
+    `blocked (${status}) after ${attempts}, spacing reached ${spacingMs}ms` +
+    (result.disallowedReason === null ? "" : `; ${result.disallowedReason}`);
+  return { ...result, disallowedReason: reason };
 }
 
 function toOutcome(result: FetchResult): BatchOutcome {

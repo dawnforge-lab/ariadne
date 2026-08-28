@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { gzipSync } from "node:zlib";
-import { fetchPage } from "../../src/crawl/fetch-page.js";
+import { fetchPage, parseRetryAfter } from "../../src/crawl/fetch-page.js";
 import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
 
 let server: Server;
@@ -124,6 +124,34 @@ beforeAll(async () => {
       res.statusCode = 503;
       res.setHeader("content-type", "text/html");
       res.end("<html><title>Just a moment...</title></html>");
+    } else if (req.url === "/throttled") {
+      res.statusCode = 429;
+      res.setHeader("retry-after", "2");
+      res.setHeader("content-type", "text/html");
+      res.end("<html>slow down</html>");
+    } else if (req.url === "/throttled-dated") {
+      res.statusCode = 429;
+      res.setHeader("retry-after", new Date(Date.now() + 90_000).toUTCString());
+      res.end("slow down");
+    } else if (req.url === "/throttled-garbage") {
+      res.statusCode = 429;
+      res.setHeader("retry-after", "soon-ish");
+      res.end("slow down");
+    } else if (req.url === "/throttled-past") {
+      res.statusCode = 403;
+      res.setHeader("retry-after", "Wed, 21 Oct 2015 07:28:00 GMT");
+      res.end("no");
+    } else if (req.url === "/unavailable-retry-after") {
+      res.statusCode = 503;
+      res.setHeader("retry-after", "30");
+      res.setHeader("content-type", "text/html");
+      res.end("<html>backend down</html>");
+    } else if (req.url === "/not-found-retry-after") {
+      // A 404 that carries the header anyway. It is not a throttle, and
+      // nothing must slow down because of it.
+      res.statusCode = 404;
+      res.setHeader("retry-after", "600");
+      res.end("nope");
     } else if (req.url === "/latin1") {
       res.setHeader("content-type", "text/html; charset=iso-8859-1");
       res.end(Buffer.from([0x3c, 0x70, 0x3e, 0xe9, 0x3c, 0x2f, 0x70, 0x3e])); // <p>é</p>
@@ -182,6 +210,58 @@ function fixedLookup(address: string): DnsLookupFn {
     else callback(null, address, family);
   };
 }
+
+describe("parseRetryAfter", () => {
+  const NOW = Date.parse("2026-08-28T12:00:00.000Z");
+
+  it("reads delta-seconds", () => {
+    expect(parseRetryAfter("120", NOW)).toEqual({ ms: 120_000, note: null });
+    expect(parseRetryAfter("0", NOW)).toEqual({ ms: 0, note: null });
+    expect(parseRetryAfter("  5  ", NOW)).toEqual({ ms: 5000, note: null });
+  });
+
+  it("reads an HTTP-date", () => {
+    expect(parseRetryAfter("Fri, 28 Aug 2026 12:01:00 GMT", NOW)).toEqual({
+      ms: 60_000,
+      note: null,
+    });
+  });
+
+  it("keeps a hostile delta-seconds readable rather than refusing it", () => {
+    // A year. It is a number, so it is read as one — the CAP is the gate's
+    // job, and this function's job is not to invent a policy of its own.
+    const parsed = parseRetryAfter("31536000", NOW);
+    expect(parsed.ms).toBe(31_536_000_000);
+    expect(parsed.note).toBeNull();
+  });
+
+  it("ignores a date in the past, loudly", () => {
+    const parsed = parseRetryAfter("Wed, 21 Oct 2015 07:28:00 GMT", NOW);
+    expect(parsed.ms).toBe(0);
+    expect(parsed.note).toContain("past");
+  });
+
+  it("ignores what it cannot read, loudly and never as a number", () => {
+    for (const bad of ["soon", "-5", "1.5", "", "   ", "n/a", "Tue, 99 Xxx"]) {
+      const parsed = parseRetryAfter(bad, NOW);
+      expect(parsed.ms, `Retry-After: ${JSON.stringify(bad)}`).toBeNull();
+      expect(parsed.note, `Retry-After: ${JSON.stringify(bad)}`).toContain(
+        "Retry-After",
+      );
+    }
+  });
+
+  it("reads a bare number as seconds, never as a year", () => {
+    // `Date.parse("2026")` is midnight on New Year's Day 2026. RFC 9110 says
+    // this is 2026 seconds, and a lenient date parser reaching it would be a
+    // back-off measured in months.
+    expect(parseRetryAfter("2026", NOW)).toEqual({ ms: 2_026_000, note: null });
+  });
+
+  it("says nothing at all when there was no header", () => {
+    expect(parseRetryAfter(null, NOW)).toEqual({ ms: null, note: null });
+  });
+});
 
 describe("fetchPage", () => {
   it("classifies a 200 html page and parses headers", async () => {
@@ -381,6 +461,53 @@ describe("fetchPage", () => {
     expect(
       (await fetchPage(`${base}/unavailable-challenge`, OPTS)).fetchClass,
     ).toBe("blocked");
+  });
+
+  it("reads Retry-After off a throttle, in both header formats", async () => {
+    const seconds = await fetchPage(`${base}/throttled`, OPTS);
+    expect(seconds.fetchClass).toBe("blocked");
+    expect(seconds.retryAfterMs).toBe(2000);
+    expect(seconds.disallowedReason).toBeNull();
+
+    const dated = await fetchPage(`${base}/throttled-dated`, OPTS);
+    expect(dated.fetchClass).toBe("blocked");
+    // ~90s, less whatever the round trip and the header's second-resolution
+    // truncation cost. Bounded on both sides, loosely — this is a clock.
+    expect(dated.retryAfterMs).toBeGreaterThan(80_000);
+    expect(dated.retryAfterMs).toBeLessThanOrEqual(90_000);
+  });
+
+  it("reads Retry-After off a 503 too", async () => {
+    const r = await fetchPage(`${base}/unavailable-retry-after`, OPTS);
+    expect(r.fetchClass).toBe("server_error");
+    expect(r.retryAfterMs).toBe(30_000);
+  });
+
+  it("ignores an unreadable Retry-After loudly, and never as a number", async () => {
+    const r = await fetchPage(`${base}/throttled-garbage`, OPTS);
+    expect(r.fetchClass).toBe("blocked");
+    expect(r.retryAfterMs).toBeNull(); // not NaN, not 0
+    expect(r.disallowedReason).toContain("Retry-After");
+    expect(r.disallowedReason).toContain("soon-ish");
+  });
+
+  it("ignores a Retry-After naming a time in the past, and says so", async () => {
+    const r = await fetchPage(`${base}/throttled-past`, OPTS);
+    expect(r.fetchClass).toBe("blocked");
+    expect(r.retryAfterMs).toBe(0);
+    expect(r.disallowedReason).toContain("Retry-After");
+  });
+
+  it("does not read Retry-After off a class that is not a throttle", async () => {
+    const r = await fetchPage(`${base}/not-found-retry-after`, OPTS);
+    expect(r.fetchClass).toBe("client_error");
+    expect(r.retryAfterMs).toBeNull();
+    expect(r.disallowedReason).toBeNull();
+  });
+
+  it("carries no Retry-After when the response carried none", async () => {
+    expect((await fetchPage(`${base}/challenge`, OPTS)).retryAfterMs).toBeNull();
+    expect((await fetchPage(`${base}/ok`, OPTS)).retryAfterMs).toBeNull();
   });
 
   it("classifies 4xx/5xx", async () => {

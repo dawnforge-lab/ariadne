@@ -108,10 +108,29 @@ Fields worth setting deliberately:
   pass's sample, stored on the crawl row now and read by the render pass later. Set
   them here if the default sample would not cover the page types you care about.
 
-Fields to leave alone: **`userAgent`**, **`perHostDelayMs`**, **`maxConcurrency`**.
-They are the politeness settings, not tuning knobs for speed. The user agent must
-stay identifiable; the delay has a floor and robots.txt's own `crawl-delay` wins when
-it is longer.
+**`userAgent`**, **`perHostDelayMs`** and **`maxConcurrency`** are the politeness
+settings, not tuning knobs for speed. The user agent must stay identifiable, and
+robots.txt's own `crawl-delay` wins over `perHostDelayMs` when it is longer. The only
+direction you may ever move the other two is **slower**, and the platform table below
+is when to do it.
+
+### Pacing by platform
+
+Most e-commerce sites sit behind a WAF running a token bucket: it is not counting your
+requests, it is counting how bunched they are. Defaults are for an ordinary origin.
+
+| The site is… | How to tell | Start with |
+|---|---|---|
+| Shopify, or anything Cloudflare-fronted | `cdn.shopify.com` assets, `x-shopid`, `myshopify.com` redirects; `cf-ray` / `server: cloudflare` on any response | `maxConcurrency: 2`, `perHostDelayMs: 1000` |
+| Same, and `blockedPages` is climbing mid-crawl | see Step 2 | stop, re-crawl at `maxConcurrency: 1`, `perHostDelayMs: 2000` |
+| Anything else, no evidence of a WAF | — | leave the defaults |
+
+These are the settings a Screaming Frog crawl of a Shopify store is run at (2 threads,
+1 URL/second), for the same reason. A 2,000-page site at `2 / 1000` takes around
+twenty minutes. That is the correct amount of time.
+
+Do not raise them to make a crawl finish sooner. If it is too slow to be practical,
+crawl fewer pages (`maxPages`), not faster.
 
 There is no `allowPrivate` on this surface at any value. The schema refuses it as an
 unrecognised field and the service refuses it again by name. A loopback or RFC1918
@@ -125,7 +144,7 @@ target is not something this skill can crawl.
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
  renderPassCount, rulesetVersion,
  frontier: {pending, leased, done, failed, renderPending},
- queuePosition, liveLeases}
+ queuePosition, liveLeases, blockedPages}
 ```
 
 What the fields mean when you are waiting:
@@ -143,10 +162,45 @@ What the fields mean when you are waiting:
   it, or retire it with `crawl_mark_failed`.
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
+- **`blockedPages`** — pages a WAF or rate limiter answered instead of the site
+  (401, 403, 429, or a challenge page). Watch it across polls: the number matters far
+  less than whether it is still rising. See the reaction loop below.
 
 Poll every 15-30 seconds early and back off to a minute on a long crawl; there is
 nothing to gain from tighter polling, since the crawl's pace is set by politeness
 rather than by anything you can ask for.
+
+### When `blockedPages` climbs
+
+The engine protects itself before you get a chance to. A blocked answer **doubles
+that host's spacing** (1s → 2s → 4s → 8s, up to 30s) and the ratchet never winds back
+inside a crawl; a `Retry-After` header is honoured as a floor under the next request;
+and each blocked URL is **retried up to three times** under the widened spacing, so a
+page that was refused during a burst is usually served once the crawl has slowed down.
+A crawl visibly getting slower after some early blocks is that working, not a fault.
+
+So read the trend, not the total:
+
+- **A handful of blocks that stops rising** — the back-off found the site's rate.
+  Leave it alone. A slow crawl is the engine being polite.
+- **Still climbing after several polls** — the escalation has not found a rate the
+  site will accept. Let this crawl finish (its rows are still evidence), then re-crawl
+  at `maxConcurrency: 1`, `perHostDelayMs: 2000`.
+- **Climbing again on that slower re-crawl** — stop. The site is refusing us, not
+  merely throttling us, and the next step is a conversation with whoever owns it about
+  allowlisting our user agent. **Do not push harder, do not change the user agent to
+  look like a browser, and do not crawl from somewhere else.** Being throttled by a
+  WAF is our problem to solve honestly; working around one is not something this skill
+  does.
+
+A page that is still blocked after its three attempts also counts in
+`frontier.failed`, for the same reason a spent timeout does: its own outbound links
+were never read, and findings that depend on the link graph are qualified accordingly.
+
+Blocked pages are recorded, not lost: `pages_query` returns each one with
+`fetchClass: "blocked"`, its status code, and a `fetchReason` saying how many attempts
+it took and what the spacing had reached when the engine gave up. That reason is what
+to quote when you report a crawl as incomplete.
 
 **A slow crawl is the engine being polite. Do not restart it.** The pacing is a
 per-host delay plus whatever `crawl-delay` the site's robots.txt asks for, and a
@@ -240,7 +294,9 @@ in the server's log under that correlation id, and that is where to look.
 
 **A fetch failure inside the crawl is not a crawl failure.** Individual URLs that
 404, time out or get blocked are recorded as classified rows and become findings —
-that is the engine reporting, not the engine breaking.
+that is the engine reporting, not the engine breaking. A timeout or a block is
+retried up to three times (a block under widening spacing) before it settles as a
+row, so one appearing in the results is a URL that failed three times, not once.
 
 ## What to hand over
 
@@ -248,7 +304,7 @@ An audit needs three things from this skill, and they should be stated together:
 
 1. the **`crawlId`**;
 2. the **`crawl_status`** of the finished crawl — `pagesCrawled`, the frontier
-   counts, `renderPassCount`, and whether it stopped at a cap;
+   counts, `renderPassCount`, `blockedPages`, and whether it stopped at a cap;
 3. the **`crawl_rules`** summary.
 
 Together they say what the evidence covers. The audit's job is to judge that
