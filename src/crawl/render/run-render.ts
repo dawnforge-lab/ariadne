@@ -23,7 +23,10 @@
  *  3. **Render.** `renderConcurrency` workers, each leasing ONE URL at a time
  *     and rendering it in its own browser context. One browser, at most
  *     `renderConcurrency` contexts, no page list in memory beyond the
- *     selection the budget already bounds (rule 6).
+ *     selection the budget already bounds (rule 6). Paced at
+ *     `renderPaceMs(cfg.perHostDelayMs, crawls.host_spacing_ms)` — the crawl's
+ *     configured delay OR the wider one its ratchet earned, whichever is
+ *     larger; see that function.
  *  4. **Record.** Every render — successful or failed — is written to its page
  *     row and its frontier row is completed in the SAME transaction, then the
  *     pass writes its count to `crawls.render_pass_count`.
@@ -139,6 +142,28 @@ export interface RenderPassConfig extends RenderSelectionConfig {
   allowPrivate?: boolean;
 }
 
+/**
+ * The spacing the render pass paces at: the wider of what the caller
+ * CONFIGURED and what the crawl EARNED.
+ *
+ * `crawls.host_spacing_ms` is the base delay the crawl's adaptive back-off
+ * ratcheted to before it finished (src/crawl/loop.ts) — it is not a setting,
+ * it is a finding, written because the site pushed back and the engine listened.
+ * The render pass hits the same host minutes later, and taking its pace from
+ * `cfg.perHostDelayMs` alone would throw that finding away: the first real-site
+ * gate crawl escalated 1000 → 2000 ms and the render pass that followed went
+ * straight back to 1000 ms with the answer sitting in the database. **A later
+ * pass has no right to forget spacing the site's own responses taught us**
+ * (rule 9).
+ *
+ * `max`, not "replace": a caller who deliberately asks for a wider delay than
+ * the crawl earned keeps it, and a crawl that never escalated (`null`, or a
+ * spacing at or below the configured one) changes nothing.
+ */
+export function renderPaceMs(configuredMs: number, earnedMs: number | null): number {
+  return Math.max(configuredMs, earnedMs ?? 0);
+}
+
 export interface RenderPassOptions {
   /** Graceful shutdown: leasing stops and held leases are released. */
   signal?: AbortSignal;
@@ -230,7 +255,7 @@ export async function runRenderPass(
   // (its next `leaseBatch` is coming for rows we would have promoted) or one
   // that died mid-run and was never resumed or marked failed. Both leave a
   // frontier in flight; `finished`, `cancelled` and `failed` do not.
-  const status = await crawlStatus(db, crawlId);
+  const { status, hostSpacingMs } = await crawlRow(db, crawlId);
   // A crawl that has not started yet is unsafe for the same reason a live one
   // is, one step earlier: `queued` is the API queue's accepted-but-not-yet-run
   // state (src/api/service.ts), and the worker that picks it up will seed a
@@ -261,7 +286,10 @@ export async function runRenderPass(
   const renderer = await PageRenderer.launch({
     origin: new URL(cfg.siteUrl).origin,
     userAgent: cfg.userAgent,
-    perHostDelayMs: cfg.perHostDelayMs,
+    // NOT `cfg.perHostDelayMs`. The crawl's ratchet may have earned a wider
+    // spacing than the config asked for, and that lesson is the site's, not
+    // ours to discard between passes — see `renderPaceMs`.
+    perHostDelayMs: renderPaceMs(cfg.perHostDelayMs, hostSpacingMs),
     robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
     ...(cfg.navigationTimeoutMs === undefined
       ? {}
@@ -317,15 +345,22 @@ export async function runRenderPass(
 }
 
 /**
- * The crawl's own verdict on whether it is still going.
+ * The two things this pass needs from the crawl row: its own verdict on whether
+ * it is still going, and the spacing its back-off ended up at.
+ *
+ * One read for both, because both are decisions taken before the browser
+ * launches and a second round trip would only invite them to disagree.
  *
  * A missing row throws here rather than being read as "not running": a render
  * pass over a crawl that does not exist is a caller bug, and `selectRenderSet`
  * would only discover it one statement later (rule 7).
  */
-async function crawlStatus(db: Db, crawlId: string): Promise<string> {
+async function crawlRow(
+  db: Db,
+  crawlId: string,
+): Promise<{ status: string; hostSpacingMs: number | null }> {
   const rows = await db
-    .select({ status: crawls.status })
+    .select({ status: crawls.status, hostSpacingMs: crawls.hostSpacingMs })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
@@ -333,7 +368,7 @@ async function crawlStatus(db: Db, crawlId: string): Promise<string> {
   if (row === undefined) {
     throw new RenderPassRefusal(`runRenderPass: no such crawl '${crawlId}'`, "missing");
   }
-  return row.status;
+  return row;
 }
 
 /**
