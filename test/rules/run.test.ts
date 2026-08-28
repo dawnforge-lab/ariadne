@@ -80,7 +80,12 @@ describe("buildRegistry", () => {
     expect(ids).toContain("meta-description.duplicate");
     expect(ids).toContain("h1.duplicate-text");
     expect(ids).toContain("h1.duplicate-skipped");
-    expect(ids.length).toBe(84);
+    // And Phase 7 Task 4's metric: click depth from the home page, which is what
+    // CHECK-31 has always asked for. The metric beside it keeps its data and
+    // measures the crawl's own discovery depth.
+    expect(ids).toContain("structure.click-depth-distribution");
+    expect(ids).toContain("structure.depth-distribution");
+    expect(ids.length).toBe(85);
   });
 
   it("registers every kind the runner drives", () => {
@@ -376,9 +381,34 @@ describe("runRules against the database", () => {
     ]);
 
     const summary = await runRules(db, crawlId, buildRegistry());
+    // Every derivation reports, and each one reports in its own units: rows for
+    // the inventory table, blocks for the presence column, and the search's own
+    // account of the link graph. The two pages here are the home page and one
+    // listing that nothing links to — so the search reaches the root and stops,
+    // and the listing is `unreachable`, which is the honest word for a page that
+    // is in the crawl because the sitemap named it.
     expect(summary.derived).toEqual({
       "deriveUrlParams.params": 2,
       "deriveFieldPresence.blocks": 1,
+      "deriveClickDepth.root": 1,
+      "deriveClickDepth.rootRedirects": 0,
+      "deriveClickDepth.reachable": 1,
+      "deriveClickDepth.unreachable": 1,
+      "deriveClickDepth.maxDepth": 0,
+      "deriveClickDepth.capped": 0,
+    });
+    // And the column is written, not merely counted: the home page is the one
+    // page at depth 0 and the listing has no depth at all.
+    expect(
+      Object.fromEntries(
+        (await db.select().from(pages).where(eq(pages.crawlId, crawlId))).map((p) => [
+          p.url,
+          p.clickDepth,
+        ]),
+      ),
+    ).toEqual({
+      [`${SITE}/`]: 0,
+      [`${SITE}/list?colour=red&utm_source=news`]: null,
     });
 
     const rows = await db.select().from(urlParams).where(eq(urlParams.crawlId, crawlId));
@@ -471,20 +501,27 @@ describe("runRules against the database", () => {
       const after = await analyzeCounts();
       const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
 
-      const runs = delta("pages");
+      // COUNTED OFF `links` RATHER THAN `pages`, since P7-T4: `pages` is now in
+      // both statements (the click-depth derivation rewrites a column of it), so
+      // it is no longer the table that moves once per run. `links` is — every
+      // rule reads it and no derivation writes it.
+      const runs = delta("links");
       problems = [];
-      if (runs < 1) problems.push("the run did not analyze pages at all");
+      if (runs < 1) problems.push("the run did not analyze links at all");
       // Once per run, at the top, before the first rule reads them.
-      for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+      for (const table of ["sitemap_urls", "hreflang", "issues"]) {
         if (delta(table) !== runs) {
           problems.push(`${table} moved ${delta(table)}, expected ${runs} (once per run)`);
         }
       }
-      // And twice per run for the two tables the derivation phase rewrites
+      // And twice per run for the three tables the derivation phase rewrites
       // mid-run: once at the top (where, on a crawl's first run, `url_params` is
       // still EMPTY and the planner is taught exactly that) and once across the
-      // derivation seam, before the query rules that join them.
-      for (const table of ["url_params", "structured_data"]) {
+      // derivation seam, before the query rules and the metrics that read them.
+      // `pages` is in this list for the same reason one level down — its
+      // `click_depth` column is entirely null when the top-of-run statement
+      // samples it, and `structure.click-depth-distribution` groups by it.
+      for (const table of ["pages", "url_params", "structured_data"]) {
         if (delta(table) !== 2 * runs) {
           problems.push(`${table} moved ${delta(table)}, expected ${2 * runs} (twice per run)`);
         }

@@ -619,6 +619,14 @@ export interface PageRow {
   /** `is_indexable`; null when the crawl never got a verdict for this URL. */
   indexable: boolean | null;
   depth: number;
+  /**
+   * Clicks from the home page: the shortest chain of internal links that
+   * reaches this URL. NULL means no chain does — the page is unreachable, which
+   * is a finding and never a zero (see `pages.click_depth`). Null on every row
+   * of a crawl the rules have not been run over since Phase 7, because the
+   * derivation that computes it runs there.
+   */
+  clickDepth: number | null;
   /** How the crawler found this URL: seed, link, sitemap or redirect. */
   discoveredVia: string;
   wordCount: number | null;
@@ -2403,6 +2411,22 @@ const PAGE_FIELDS = {
   pageType: pages.pageType,
   indexable: pages.isIndexable,
   depth: pages.depth,
+  /**
+   * CLICKS FROM THE HOME PAGE, beside the discovery depth above and never
+   * instead of it.
+   *
+   * The two answer different questions and an agent needs both: `depth` is where
+   * the crawler's frontier found the URL — and since every sitemap entry is
+   * enqueued as a seed, a page nothing links to is recorded there at 0 —
+   * while this is the shortest path a visitor could walk to it. Null is the
+   * finding: no internal link path reaches the page at all.
+   *
+   * Named here because CHECK-31 asks for a per-bucket table (depth 0, 1, 2 …,
+   * plus the unreachable pages) and the click-depth METRIC gives percentiles
+   * rather than buckets. Without this column an agent could see the shape of the
+   * distribution and could not name a single page in it.
+   */
+  clickDepth: pages.clickDepth,
   /**
    * How the crawler reached this URL — seed, link, sitemap or redirect.
    *

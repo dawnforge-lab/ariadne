@@ -696,8 +696,12 @@ describe("GET /crawls/:id/pages", () => {
       `${SITE}/b1`, `${SITE}/p1`, `${SITE}/p2`, `${SITE}/x`,
     ]);
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
-      "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable", "pageType",
-      "rendered", "renderError", "renderableWordCount", "renderedWordCount",
+      // Both depths: `depth` is where the crawler's frontier found the URL,
+      // `clickDepth` is how many internal links from the home page it takes to
+      // get there (null when nothing reaches it). CHECK-31 asks for the second
+      // per page, so the projection carries it.
+      "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
+      "pageType", "rendered", "renderError", "renderableWordCount", "renderedWordCount",
       "statusCode", "url", "wordCount",
     ].sort());
     // The column nobody selected stays where it is.

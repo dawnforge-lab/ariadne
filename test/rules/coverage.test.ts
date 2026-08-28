@@ -114,15 +114,45 @@ describe("checklist coverage", () => {
   //   query   42 + 4 = 46   (title.duplicate, meta-description.duplicate,
   //                          h1.duplicate-text, h1.duplicate-skipped)
   //   total   80 + 4 = 84
-  it("pins the ruleset split the gate doc reports: 84 rules = 27 page + 46 query + 11 metric", () => {
+  //
+  // Phase 7 Task 4 adds one METRIC — `structure.click-depth-distribution`, the
+  // shortest link path from the home page, computed by the `click_depth`
+  // derivation — and MOVES a claim rather than making one:
+  //
+  //   metric  11 + 1 = 12
+  //   total   84 + 1 = 85
+  //
+  // THE MOVED CLAIM, stated as set arithmetic because the pin below cannot show
+  // it: CHECK-31 leaves `structure.depth-distribution` (which measures DISCOVERY
+  // depth, where every sitemap entry is a starting point, and therefore cannot
+  // answer "how many clicks from the home page") and is claimed by the new
+  // metric instead. The claimed-check set does not move in either direction:
+  // CHECK-31 keeps a claimant throughout (`structure.deep-page` claims it too,
+  // and now the new metric), and the metric that gave it up takes CHECK-32,
+  // which `links.orphan` already claims. Claims are a set union, so both edges
+  // are invisible in the totals — which is exactly why they are written here.
+  it("pins the ruleset split the gate doc reports: 85 rules = 27 page + 46 query + 12 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(84);
+    expect(registry.all()).toHaveLength(85);
     expect(registry.byKind("page")).toHaveLength(27);
     expect(registry.byKind("query")).toHaveLength(46);
-    // The link-graph four, the two content metrics and hreflang coverage, plus
+    // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage.
-    expect(registry.byKind("metric")).toHaveLength(11);
+    expect(registry.byKind("metric")).toHaveLength(12);
+  });
+
+  // The moved claim, asserted rather than only argued. Both directions: the
+  // discovery-depth metric must NOT claim CHECK-31 (a metric measuring the crawl
+  // under the checklist id for the site's structure is the defect this task
+  // removed), and the click-depth metric must.
+  it("CHECK-31 is claimed by the metric that measures click depth, not by the crawl's own depth", () => {
+    const byId = new Map(buildRegistry().all().map((r) => [r.id, r.checkIds]));
+    expect(byId.get("structure.click-depth-distribution")).toEqual(["CHECK-31"]);
+    expect(byId.get("structure.depth-distribution")).not.toContain("CHECK-31");
+    // And CHECK-31 never went unclaimed on the way: the page rule that names
+    // individual deep pages has claimed it since Phase 3.
+    expect(byId.get("structure.deep-page")).toContain("CHECK-31");
   });
 
   it("accounts for all 47 crawl-derived checks: 44 claimed, 3 agent, 0 unclaimed", () => {

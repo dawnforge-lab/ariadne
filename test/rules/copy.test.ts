@@ -177,7 +177,11 @@ const PHASE_5_METRIC_IDS = ["render.coverage"];
  * apart from `content.thin-skipped`, which is a verdict about the CRAWL and
  * needs a title of its own for exactly that reason. T2 adds the three
  * field-level duplicate rules the checklist has always asked for, plus the
- * heading skip, which is the same crawl-not-site verdict one column over.
+ * heading skip, which is the same crawl-not-site verdict one column over. T4
+ * adds the click-depth metric, whose copy has to do something no other metric's
+ * does: say what the table it stands NEXT TO measures, because
+ * `structure.depth-distribution` keeps its data under a corrected title and the
+ * two are one letter apart in a list.
  */
 const PHASE_7_RULE_IDS = [
   "content.thin-skipped",
@@ -185,6 +189,7 @@ const PHASE_7_RULE_IDS = [
   "meta-description.duplicate",
   "h1.duplicate-text",
   "h1.duplicate-skipped",
+  "structure.click-depth-distribution",
 ];
 
 const ALL_RULE_IDS = [
@@ -453,7 +458,11 @@ describe("issue copy", () => {
   // share the shape, so the same omission cannot recur in the metrics Tasks 5
   // and 6 copy from this pattern.
   it("the distribution copy names every column of the shape, p95 included", () => {
-    for (const id of ["inlinks.distribution", "structure.depth-distribution"]) {
+    for (const id of [
+      "inlinks.distribution",
+      "structure.depth-distribution",
+      "structure.click-depth-distribution",
+    ]) {
       const text = ISSUE_COPY[id]!.explanation;
       expect(text, `${id}: the count`).toMatch(/how many pages were measured/i);
       expect(text, `${id}: min and max`).toMatch(/smallest and largest|shallowest and deepest/i);
@@ -461,6 +470,44 @@ describe("issue copy", () => {
       expect(text, `${id}: p25/median/p75`).toContain("quartiles");
       expect(text, `${id}: p95`).toContain("95th percentile");
     }
+  });
+
+  // The ninth column, and the reason the metric exists in the shape it does. A
+  // `nullCount` a reader meets without prose behind it is a number they will
+  // read as "no data" — which is the exact misreading that let a site with 437
+  // unreachable pages pass CHECK-31. The copy has to say what it counts, that
+  // those pages are NOT depth 0, and that they are the worst bucket.
+  it("the click-depth copy explains the unreachable bucket rather than just having one", () => {
+    const c = ISSUE_COPY["structure.click-depth-distribution"]!;
+    expect(c.explanation).toMatch(/unreachable/i);
+    expect(c.explanation, "says they are not depth zero").toMatch(
+      /rather than being given a depth of zero/i,
+    );
+    expect(c.explanation, "names the sitemap-only case").toMatch(/sitemap/i);
+    expect(c.explanation, "ranks the bucket").toMatch(/worst case/i);
+    expect(c.howToFix, "the fix starts with them").toMatch(/unreachable/i);
+    // And the count's population, which differs from every other distribution's
+    // in this table: `count` includes the pages the statistics exclude.
+    expect(c.explanation).toMatch(/count covers every page in the cohort/i);
+  });
+
+  // The other half of the same move: the metric that KEPT its data had to lose
+  // the words "click depth" from its copy, because the number it holds is a
+  // property of the crawl. A title still saying "click depth" over a column
+  // that counts sitemap entries as zero hops is the defect this task removed.
+  it("the discovery-depth copy claims the crawl, never a click path", () => {
+    const c = ISSUE_COPY["structure.depth-distribution"]!;
+    expect(c.title, "the title names discovery depth").toMatch(/discovery depth/i);
+    expect(c.title, "and never click depth").not.toMatch(/click/i);
+    expect(c.explanation, "it says whose property the number is").toMatch(
+      /measurement of the crawl, not of the site/i,
+    );
+    // It has to say WHY it is flat on a sitemapped site, because that flatness
+    // is what a reader would otherwise quote as good news.
+    expect(c.explanation).toMatch(/sitemap/i);
+    expect(c.explanation, "points at the metric that answers the click question").toMatch(
+      /click depth table/i,
+    );
   });
 
   // The same contract, for the Task 5 metrics — which do NOT inherit the

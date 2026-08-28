@@ -42,11 +42,12 @@ const url = (path: string): string => `${SITE}${path}`;
 const rule = metricLookup(linkMetrics, "linkMetrics");
 
 describe("linkMetrics metadata", () => {
-  it("defines the four metrics of the phase-4 table", () => {
+  it("defines the phase-4 four plus the click-depth metric", () => {
     expect(linkMetrics.map((r) => r.id).sort()).toEqual([
       "inlinks.distribution",
       "inlinks.extremes",
       "inlinks.sources-by-type",
+      "structure.click-depth-distribution",
       "structure.depth-distribution",
     ]);
   });
@@ -59,7 +60,14 @@ describe("linkMetrics metadata", () => {
       "inlinks.distribution": [["CHECK-33"], "info", "links"],
       "inlinks.extremes": [["CHECK-33"], "info", "links"],
       "inlinks.sources-by-type": [["CHECK-33b"], "info", "links"],
-      "structure.depth-distribution": [["CHECK-31"], "info", "technical"],
+      // CHECK-31 asks how many clicks from the home page a page is, so it is
+      // claimed by the metric that measures clicks. The one below keeps its
+      // data — discovery depth is real evidence about how the crawl found the
+      // site — and stands beside `links.orphan` under CHECK-32, because a crawl
+      // that found its pages from the sitemap rather than from links is the
+      // site-wide shadow of that per-page finding.
+      "structure.click-depth-distribution": [["CHECK-31"], "info", "technical"],
+      "structure.depth-distribution": [["CHECK-32"], "info", "technical"],
     });
   });
 
@@ -87,6 +95,21 @@ describe("the link-graph metrics against the database", () => {
     path: string;
     pageType: string | null;
     depth: number;
+    /**
+     * `pages.click_depth`, set DIRECTLY rather than derived.
+     *
+     * The column is written by `deriveClickDepth`, whose breadth-first search
+     * has its own test file (test/rules/derive-click-depth.test.ts) with its own
+     * hand-solved graph. What is under test HERE is the metric's arithmetic over
+     * a column that can be null, so the column is stated: a test that ran the
+     * derivation would be asserting two things at once and would fail for
+     * whichever of them broke.
+     *
+     * The values used below are nonetheless the honest solution of this file's
+     * own link graph rooted at `/u1` — see the site plan — so the two tables a
+     * reader puts side by side are still describing one site.
+     */
+    clickDepth?: number | null;
   }
 
   const newCrawl = async (): Promise<string> =>
@@ -105,6 +128,7 @@ describe("the link-graph metrics against the database", () => {
       isIndexable: writerIndexable(s),
       robotsMeta: s.robotsMeta ?? null,
       depth: s.depth,
+      clickDepth: s.clickDepth ?? null,
       discoveredVia: s.depth === 0 ? "seed" : "link",
     }));
     await db.insert(pages).values(rows);
@@ -165,36 +189,55 @@ describe("the link-graph metrics against the database", () => {
    * page and a 404 — so an assertion below can prove the cohort excludes them
    * while their outbound links are still counted.
    *
-   *   path      page_type    depth   inlinks (distinct sources, self excluded)
-   *   /u1       null (!)     0       5
-   *   /u2       null (!)     5       1
-   *   /p1       product      1       4
-   *   /p2       product      2       2
-   *   /p3       product      2       1
-   *   /p4       product      3       0   <- nothing links to it but itself
-   *   /b1       blog         1       3
-   *   /b2       blog         2       2
-   *   /b3       blog         3       2
-   *   /b4       blog         4       1
-   *   /noindex  blog         2       -   excluded from the cohort; LINKS to /p1
-   *   /gone     retired      3       -   excluded (404); links to nothing
+   *   path      page_type    depth  click  inlinks (distinct sources, self excluded)
+   *   /u1       null (!)     0      0      5
+   *   /u2       null (!)     5      1      1
+   *   /p1       product      1      1      4
+   *   /p2       product      2      1      2
+   *   /p3       product      2      2      1
+   *   /p4       product      3      -      0   <- nothing links to it but itself
+   *   /b1       blog         1      1      3
+   *   /b2       blog         2      1      2
+   *   /b3       blog         3      2      2
+   *   /b4       blog         4      3      1
+   *   /noindex  blog         2      1      -   excluded from the cohort; LINKS to /p1
+   *   /gone     retired      3      1      -   excluded (404); links to nothing
+   *
+   * THE `click` COLUMN IS THE BREADTH-FIRST SOLUTION of the edge list below,
+   * rooted at `/u1` — the hub every other page hangs off. `/u1` links /p1, /p2,
+   * /b1, /b2, /u2, /noindex and /gone, so all seven are one click away; /p1
+   * links /p3, and /b2 links /b3, so those are two; /b3 links /b4, which is
+   * three. `/p4` is reached by NOTHING but itself, so it has no click depth at
+   * all — null, never 0, which is the whole point of the column and the reason
+   * the same page is the one with zero inlinks two columns to the right.
+   *
+   * The two depth columns disagree on nine of the twelve rows, which is the
+   * fidelity gap this phase closed: `depth` is where the frontier found the URL,
+   * `click` is how far a visitor has to walk.
    */
   const SPECS: PageSpec[] = [
-    { path: "/u1", pageType: null, depth: 0 },
-    { path: "/u2", pageType: null, depth: 5 },
-    { path: "/p1", pageType: "product", depth: 1 },
-    { path: "/p2", pageType: "product", depth: 2 },
-    { path: "/p3", pageType: "product", depth: 2 },
-    { path: "/p4", pageType: "product", depth: 3 },
-    { path: "/b1", pageType: "blog", depth: 1 },
-    { path: "/b2", pageType: "blog", depth: 2 },
-    { path: "/b3", pageType: "blog", depth: 3 },
-    { path: "/b4", pageType: "blog", depth: 4 },
-    { path: "/noindex", pageType: "blog", depth: 2, robotsMeta: "noindex, follow" },
+    { path: "/u1", pageType: null, depth: 0, clickDepth: 0 },
+    { path: "/u2", pageType: null, depth: 5, clickDepth: 1 },
+    { path: "/p1", pageType: "product", depth: 1, clickDepth: 1 },
+    { path: "/p2", pageType: "product", depth: 2, clickDepth: 1 },
+    { path: "/p3", pageType: "product", depth: 2, clickDepth: 2 },
+    { path: "/p4", pageType: "product", depth: 3, clickDepth: null },
+    { path: "/b1", pageType: "blog", depth: 1, clickDepth: 1 },
+    { path: "/b2", pageType: "blog", depth: 2, clickDepth: 1 },
+    { path: "/b3", pageType: "blog", depth: 3, clickDepth: 2 },
+    { path: "/b4", pageType: "blog", depth: 4, clickDepth: 3 },
+    {
+      path: "/noindex",
+      pageType: "blog",
+      depth: 2,
+      clickDepth: 1,
+      robotsMeta: "noindex, follow",
+    },
     {
       path: "/gone",
       pageType: "retired",
       depth: 3,
+      clickDepth: 1,
       statusCode: 404,
       fetchClass: "client_error",
     },
@@ -411,7 +454,132 @@ describe("the link-graph metrics against the database", () => {
     ]);
   });
 
-  it("structure.depth-distribution measures click depth over the same cohort", async () => {
+  it("structure.click-depth-distribution counts the unreachable page instead of burying it", async () => {
+    const rows = await run("structure.click-depth-distribution", crawlId);
+
+    // SITE. Ten cohort pages, and only NINE of them have a click depth: /p4 is
+    // reached by nothing but itself. `count` is the cohort, `nullCount` is the
+    // page the statistics could not describe, and the two together are what
+    // stops a reader dividing by the wrong denominator — the exact error the
+    // checklist's block capitals have been warning about since before any rule
+    // could compute this.
+    //
+    // The nine: 0,1,1,1,1,1,2,2,3 — n=9, so pos = q*8 over v0…v8.
+    //   mean  = 12/9 = 1.3333… -> 1.33
+    //   p25   pos 2   -> v2 = 1
+    //   median pos 4  -> v4 = 1
+    //   p75   pos 6   -> v6 = 2
+    //   p95   pos 7.6 -> v7=2, v8=3 -> 2 + 0.6*1 = 2.6
+    expect(rows["site|"]).toEqual({
+      count: 10,
+      nullCount: 1,
+      min: 0,
+      p25: 1,
+      median: 1,
+      p75: 2,
+      p95: 2.6,
+      max: 3,
+      mean: 1.33,
+    });
+
+    // product: 1,1,2 with /p4 unreachable — n=3, pos = q*2.
+    //   mean 4/3 = 1.3333… -> 1.33
+    //   p25   pos 0.5 -> v0=1, v1=1 -> 1
+    //   median pos 1  -> v1 = 1
+    //   p75   pos 1.5 -> v1=1, v2=2 -> 1 + 0.5*1 = 1.5
+    //   p95   pos 1.9 -> 1 + 0.9*1 = 1.9
+    // The count is FOUR, not three: the unreachable page is in the cohort, and a
+    // template's worst page must not leave the table by being its worst.
+    expect(rows["page_type|product"]).toEqual({
+      count: 4,
+      nullCount: 1,
+      min: 1,
+      p25: 1,
+      median: 1,
+      p75: 1.5,
+      p95: 1.9,
+      max: 2,
+      mean: 1.33,
+    });
+
+    // blog: 1,1,2,3 — n=4, nothing missing.
+    //   mean 7/4 = 1.75
+    //   p25   pos 0.75 -> v0=1, v1=1 -> 1
+    //   median pos 1.5 -> v1=1, v2=2 -> 1.5
+    //   p75   pos 2.25 -> v2=2, v3=3 -> 2.25
+    //   p95   pos 2.85 -> 2 + 0.85*1 = 2.85
+    // `nullCount: 0` is a stated zero rather than an absent key: "every page of
+    // this template is reachable" is an answer.
+    expect(rows["page_type|blog"]).toEqual({
+      count: 4,
+      nullCount: 0,
+      min: 1,
+      p25: 1,
+      median: 1.5,
+      p75: 2.25,
+      p95: 2.85,
+      max: 3,
+      mean: 1.75,
+    });
+
+    // (untyped): the hub at 0 and /u2 at 1 — n=2, pos = q*1.
+    expect(rows[`page_type|${UNTYPED}`]).toEqual({
+      count: 2,
+      nullCount: 0,
+      min: 0,
+      p25: 0.25,
+      median: 0.5,
+      p75: 0.75,
+      p95: 0.95,
+      max: 1,
+      mean: 0.5,
+    });
+
+    // The same cohorts as every other metric in this file: the noindex page and
+    // the 404 both carry a click depth of 1 and neither produces a row.
+    expect(Object.keys(rows).sort()).toEqual([
+      "page_type|(untyped)",
+      "page_type|blog",
+      "page_type|product",
+      "site|",
+    ]);
+  });
+
+  // The lavishalice shape, isolated: a cohort NO link path reaches. The crawl
+  // found every page through the sitemap, so `depth` says 0 for all of them and
+  // the discovery metric reports a site whose every page is on the home page.
+  // The click-depth metric reports the truth — nothing measured, everything
+  // unreachable — and the two tables side by side are the finding.
+  it("answers an all-unreachable cohort with nullCount = count, not with zeroes", async () => {
+    const orphanCrawl = await newCrawl();
+    await addPages(orphanCrawl, [
+      { path: "/s1", pageType: "product", depth: 0, clickDepth: null },
+      { path: "/s2", pageType: "product", depth: 0, clickDepth: null },
+    ]);
+
+    expect(await run("structure.click-depth-distribution", orphanCrawl)).toEqual({
+      "site|": {
+        count: 2, nullCount: 2,
+        min: null, p25: null, median: null, p75: null, p95: null, max: null, mean: null,
+      },
+      "page_type|product": {
+        count: 2, nullCount: 2,
+        min: null, p25: null, median: null, p75: null, p95: null, max: null, mean: null,
+      },
+    });
+
+    // And the metric that keeps the discovery number reads the same two pages as
+    // a site with no depth problem at all. Both numbers are true; only one of
+    // them is about the site.
+    expect(await run("structure.depth-distribution", orphanCrawl)).toEqual({
+      "site|": { count: 2, min: 0, p25: 0, median: 0, p75: 0, p95: 0, max: 0, mean: 0 },
+      "page_type|product": {
+        count: 2, min: 0, p25: 0, median: 0, p75: 0, p95: 0, max: 0, mean: 0,
+      },
+    });
+  });
+
+  it("structure.depth-distribution measures discovery depth over the same cohort", async () => {
     const rows = await run("structure.depth-distribution", crawlId);
 
     // SITE. Depths of the ten cohort pages: 0,1,1,2,2,2,3,3,4,5 — n=10.
@@ -644,6 +812,12 @@ describe("the link-graph metrics against the database", () => {
     const empty = { count: 0, min: null, p25: null, median: null, p75: null, p95: null, max: null, mean: null };
     expect(await run("inlinks.distribution", emptyCrawl)).toEqual({ "site|": empty });
     expect(await run("structure.depth-distribution", emptyCrawl)).toEqual({ "site|": empty });
+    // The click-depth shape over an empty cohort is the same plus a stated zero:
+    // no pages were measured AND none of them were unreachable, which is a
+    // different sentence from "nothing was computed".
+    expect(await run("structure.click-depth-distribution", emptyCrawl)).toEqual({
+      "site|": { ...empty, nullCount: 0 },
+    });
     expect(await run("inlinks.extremes", emptyCrawl)).toEqual({ "site|": { bottom: [], top: [] } });
     // No target cohorts at all, so this one legitimately has nothing to say.
     expect(await run("inlinks.sources-by-type", emptyCrawl)).toEqual({});

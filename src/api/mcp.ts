@@ -476,11 +476,22 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       title: "The crawled pages",
       description:
         "The crawl's pages, slim and filtered: {url, statusCode, fetchClass, " +
-        "fetchReason, pageType, indexable, depth, discoveredVia, wordCount, " +
-        "renderableWordCount, rendered, renderedWordCount, renderError}. Use it to " +
-        "answer questions about the site itself — how deep the blog is, which " +
-        "product pages are non-indexable, which URLs only the sitemap knows about, " +
-        "what a render actually added — rather than about its faults.\n\n" +
+        "fetchReason, pageType, indexable, depth, clickDepth, discoveredVia, " +
+        "wordCount, renderableWordCount, rendered, renderedWordCount, renderError}. " +
+        "Use it to answer questions about the site itself — how deep the blog is, " +
+        "which product pages are non-indexable, which URLs only the sitemap knows " +
+        "about, what a render actually added — rather than about its faults.\n\n" +
+        "TWO DEPTHS, AND ONLY ONE OF THEM IS ABOUT THE SITE. depth is DISCOVERY " +
+        "depth: how far into the crawl the frontier found the URL. Every sitemap " +
+        "entry is enqueued as a starting point, so a page no link on the site " +
+        "reaches is recorded at depth 0 — which is why a sitemapped site looks " +
+        "flat here and means nothing by it. clickDepth is the shortest chain of " +
+        "internal links from the home page: 0 is the home page, and NULL means no " +
+        "chain of links reaches the page at all. Null is the finding — the page " +
+        "exists only in the sitemap — and it is never to be read as zero. It is " +
+        "also null on every page of a crawl the rules have not run over, since the " +
+        "search that computes it runs with them; crawl_status's rulesRunAt is what " +
+        "tells the two nulls apart.\n\n" +
         "TWO WORD COUNTS, AND THEY MEAN DIFFERENT THINGS. wordCount is every word " +
         "of visible text in the HTML. renderableWordCount is that count minus the " +
         "words the page's own markup says are not displayed (hidden attributes, " +
@@ -500,7 +511,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "discoveredVia, wordCount, renderableWordCount — are written by the CRAWL, " +
         "so they are complete as soon as it finishes and crawl_rules is not needed " +
         "for them (crawl_status's rulesRunAt is what says whether the rules have " +
-        "run; it says nothing about these). rendered, " +
+        "run; it says nothing about these). clickDepth is the exception among the " +
+        "crawl's own columns: it is computed by crawl_rules, so it is null " +
+        "everywhere until the rules have run over the crawl. rendered, " +
         "renderedWordCount and renderError are written by crawl_render: before that " +
         "pass has run, rendered is false on every page and 'rendered: true' answers " +
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +

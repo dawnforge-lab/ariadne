@@ -524,9 +524,12 @@ describe("the fixture site end to end", () => {
     // And the h1 the analyzer captured for Task 2's rule to read, written by
     // the same pass and stored by the same writer.
     expect(page.h1Text).toBe("A page whose markup hides most of its words");
-    // The two columns Tasks 3 and 4 will write are null on this crawl, which is
-    // what "the column exists and nothing writes it yet" has to look like.
-    expect(page.clickDepth).toBeNull();
+    // And the column Task 4 now writes: this page is linked from the hub and
+    // from nowhere else, so it is one click from the home page. It was pinned as
+    // NULL here while the column existed and nothing filled it — "not written
+    // yet" being a state a test has to be able to state — and the click-depth
+    // assertion further down is where that column is now measured in full.
+    expect(page.clickDepth).toBe(1);
   });
 
   it("the site-scoped findings are the two host names, the sitemap's own faults and the missing breadcrumbs", async () => {
@@ -1143,7 +1146,7 @@ describe("the fixture site end to end", () => {
     // The metric layer's coverage assertion, and the reason the rule sweep
     // below can stop skipping the kind. A metric writes no `issues` row, so
     // "did it fire" is a question only the `metrics` table can answer — and
-    // every one of the eleven CAN answer it here: nine always emit a site row,
+    // every one of the twelve CAN answer it here: ten always emit a site row,
     // `inlinks.sources-by-type` emits one per target cohort type and this site
     // has 50 of them, and `content.template-similarity` emits one per type with
     // two fingerprinted pages, which the `/deep/:id`, `/head/:slug`,
@@ -1163,6 +1166,10 @@ describe("the fixture site end to end", () => {
     // all selection and no evidence: this harness runs the render pass over the
     // crawl, so `pagesRendered` and `renderFailures` describe a selection that
     // was computed AND spent. The whole row is pinned two tests below.
+    //
+    // P7-T4 makes it twelve — ten that always emit a site row, since
+    // `structure.click-depth-distribution` reads a column the derivation phase
+    // fills on every run and answers over the same cohort as the rest.
     expect([...metricsById.keys()].sort()).toEqual([
       "content.metrics-by-type",
       "content.template-similarity",
@@ -1173,6 +1180,7 @@ describe("the fixture site end to end", () => {
       "redirect.volume",
       "render.coverage",
       "sitemap.structure",
+      "structure.click-depth-distribution",
       "structure.depth-distribution",
       "url.param-volumes",
     ]);
@@ -1321,6 +1329,77 @@ describe("the fixture site end to end", () => {
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
       { urls: 67, breaches50k: false },
     );
+  });
+
+  it("click depth is the walk the site publishes, and the sitemap-only pages have none", () => {
+    // THE CLICK-DEPTH DISTRIBUTION, hand-derived from the same link inventory
+    // the inlink assertion above uses — the hub's 73 anchors, the deep chain,
+    // the paginated series, the one broken link and `/render/healthy`'s
+    // self-link. Nothing else on this site renders an `<a>`.
+    //
+    // The cohort is the same 71 indexable 200s. Breadth-first from the hub at
+    // `/`, which is the crawl's seed:
+    //
+    //   0    `/`                     1 page, the entry point
+    //   1    every cohort page the hub links   62 pages —
+    //        the hub links 73 fixtures, ELEVEN of which are the non-cohort
+    //        pages (4 noindex, 3 errors, 4 redirects), so 73 - 11 = 62
+    //   2-7  /deep/2 … /deep/7       6 pages, one per rung: the hub links
+    //        /deep/1 (depth 1) and each rung links only the next
+    //   null /structure/orphan, /authored3/paged-3   2 pages
+    //
+    // 1 + 62 + 6 + 2 = 71, which is the cohort back again.
+    //
+    // The two nulls are EXACTLY the two pages `links.orphan` names, and that is
+    // this metric's whole reason for existing: both reached the crawl through
+    // the sitemap, both are recorded at DISCOVERY depth 0, and neither is one
+    // click from anywhere. `paged-3` is the load-bearing one — it renders its
+    // own URL as a link, so a search that followed a page's self-link would
+    // have reached it and reported one null instead of two.
+    //
+    // The 69 pages that HAVE a depth, sorted: v0 = 0, v1…v62 = 1, then
+    // v63…v68 = 2,3,4,5,6,7. n = 69, so `percentile_cont` interpolates at
+    // pos = q * 68:
+    //   mean   = (0 + 62 + (2+3+4+5+6+7)) / 69 = 89/69 = 1.28985… -> 1.29
+    //   p25    pos 17   -> v17 = 1
+    //   median pos 34   -> v34 = 1
+    //   p75    pos 51   -> v51 = 1
+    //   p95    pos 64.6 -> v64=3, v65=4 -> 3 + 0.6*1 = 3.6
+    expect(siteMetric("structure.click-depth-distribution")).toEqual({
+      count: 71,
+      nullCount: 2,
+      min: 0,
+      p25: 1,
+      median: 1,
+      p75: 1,
+      p95: 3.6,
+      max: 7,
+      mean: 1.29,
+    });
+
+    // The same two facts read off the pages table rather than out of the metric,
+    // so the number above is corroborated by the column it was computed from.
+    const cohort = [...pageByPath].filter(
+      ([, p]) => p.fetchClass === "ok" && p.statusCode === 200 && p.isIndexable,
+    );
+    expect(cohort).toHaveLength(71);
+    expect(
+      cohort.filter(([, p]) => p.clickDepth === null).map(([path]) => path).sort(),
+    ).toEqual(["/authored3/paged-3", "/structure/orphan"]);
+    expect(pageByPath.get("/deep/7")?.clickDepth).toBe(7);
+
+    // AND THE WHOLE POINT, in one comparison. Sixty-three of these pages are at
+    // DISCOVERY depth 0 — the hub, plus every cohort page the sitemap lists,
+    // since a sitemap entry is enqueued as a seed. Exactly ONE of them is a zero
+    // click from the home page, because there is only one home page. An audit
+    // reading the discovery column would have reported this site as almost
+    // entirely one click deep; it is the Phase 6 gate's 437-of-443 in miniature.
+    //
+    // 63 = 71 cohort pages - 8 that the sitemap does not list (`/deep/1`…`/7`
+    // and `/authored3/unlisted`, the set the `pages.not-in-sitemap` assertion
+    // above pins), and those 8 carry the depth the frontier reached them at.
+    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(63);
+    expect(cohort.filter(([, p]) => p.clickDepth === 0).map(([path]) => path)).toEqual(["/"]);
   });
 
   it("the render pass spent the budget the fixture site's own arithmetic predicts", async () => {

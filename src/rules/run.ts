@@ -1,6 +1,7 @@
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, issues, metrics, pages } from "../db/schema.js";
+import { deriveClickDepth } from "./derive/click-depth.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
@@ -50,15 +51,16 @@ type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
  * derivation's table would depend on this order, so the order is a list one can
  * read rather than an emergent property of module loading. Every entry is
  * idempotent over the crawl it is given — `deriveUrlParams` rebuilds its
- * inventory table, `deriveFieldPresence` recomputes the column it fills — so a
+ * inventory table, `deriveFieldPresence` recomputes the column it fills, and
+ * `deriveClickDepth` clears its column for the crawl before it searches — so a
  * re-run over the same crawl leaves exactly what the first run left.
  *
- * The two are independent: one reads `pages`, the other `structured_data`, and
- * neither reads what the other writes. The order between them is therefore
- * arbitrary today, and stated rather than discovered so that it stops being
- * arbitrary the moment one of them starts mattering.
+ * The three are independent: they read `pages`, `structured_data`, and `pages`
+ * and `links`, and none of them reads what another writes. The order between
+ * them is therefore arbitrary today, and stated rather than discovered so that
+ * it stops being arbitrary the moment one of them starts mattering.
  */
-const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence];
+const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence, deriveClickDepth];
 
 /**
  * Run every rule in `registry` over one crawl, writing `issues` and `metrics`
@@ -276,7 +278,7 @@ export async function runRules(
     }
   }
 
-  // Statistics again, for the two tables the derivation phase just rewrote —
+  // Statistics again, for the three tables the derivation phase just rewrote —
   // and this one is not belt-and-braces, it is the case the top-of-run ANALYZE
   // cannot cover.
   //
@@ -289,10 +291,18 @@ export async function runRules(
   // just rewritten for every block on the crawl, which is what
   // `schema.product-incomplete` reads.
   //
+  // `pages` IS ANALYZED TWICE FOR THE SAME REASON, not for a second one. It is
+  // in the statement above because every rule reads it, and it is here because
+  // `deriveClickDepth` has just rewritten a COLUMN of it: on a crawl's first
+  // run `click_depth` is entirely null when the planner is taught the table, so
+  // it believes `click_depth is not null` selects nothing — and then
+  // `structure.click-depth-distribution` groups by it. The same first-run
+  // statistics argument as `url_params`, one level down.
+  //
   // Same idiom as above and for the same reason: no catch, because a plan
-  // built on statistics that describe an empty table is a slow query and never
-  // an error (hard rule 7).
-  await db.execute(sql`ANALYZE url_params, structured_data`);
+  // built on statistics that describe an empty table (or an all-null column) is
+  // a slow query and never an error (hard rule 7).
+  await db.execute(sql`ANALYZE pages, url_params, structured_data`);
 
   // Query rules run after the page rules: they read the crawl's tables whole
   // (in SQL), so they are unaffected by the page cursor.

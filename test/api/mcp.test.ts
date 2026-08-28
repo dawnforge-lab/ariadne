@@ -814,9 +814,13 @@ describe("pages_query", () => {
     const body = await ok("pages_query", { crawlId: seededCrawlId });
     const rows = items(body);
     expect(rows.map((r) => r["url"])).toEqual([`${SEEDED_SITE}/b1`, `${SEEDED_SITE}/p1`]);
+    // `clickDepth` sits beside `depth` and answers the other depth question —
+    // clicks from the home page, null when no link path reaches the page —
+    // which an agent needs per page: the click-depth metric gives percentiles,
+    // and CHECK-31 asks for buckets and for the URLs in them.
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
-      "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable", "pageType",
-      "renderError", "renderableWordCount", "rendered", "renderedWordCount",
+      "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
+      "pageType", "renderError", "renderableWordCount", "rendered", "renderedWordCount",
       "statusCode", "url", "wordCount",
     ].sort());
   });

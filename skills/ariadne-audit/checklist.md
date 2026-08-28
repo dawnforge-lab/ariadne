@@ -1083,35 +1083,39 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-31: Crawl depth to key pages
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `metrics_get` with `metricId: "structure.depth-distribution"` — the shape of the
-     depth distribution over indexable 200 pages: `{count, min, p25, median, p75,
-     p95, max, mean}` for the site and for each page type (`scope: "page_type"`).
-     `count` is every page in the cohort; the percentiles describe only the pages
-     that HAVE a depth.
+  1. `metrics_get` with `metricId: "structure.click-depth-distribution"` — CLICK
+     depth: the shortest chain of internal links from the home page, computed by the
+     engine's own breadth-first search over the `links` table. The shape is
+     `{count, nullCount, min, p25, median, p75, p95, max, mean}` for the site and for
+     each page type (`scope: "page_type"`). The home page is 0.
+     - `count` is every page in the cohort (indexable 200s).
+     - **`nullCount` is the no-depth bucket the check below demands** — the pages no
+       chain of links reaches at all. They are NOT depth 0 and never were: a page
+       listed only in the sitemap has no click depth, and this column is where it is
+       counted. `count - nullCount` is the population the percentiles describe, so
+       percentages over the whole cohort use `count` as the denominator and the
+       unreachable pages appear as their own row.
+     - Links are followed as published: internal links only, and a link that lands on
+       a redirect leads no further — a page reachable only through a redirect is
+       counted unreachable, and the redirect is the thing to fix (CHECK-10).
   2. `issues_list` with `checkId: "CHECK-31"` — `structure.deep-page` (info) names
-     the individual pages past the depth threshold, and `issue_urls` lists them.
-  3. **The no-depth bucket is yours to count**, and the check below insists on it:
-     the metric does not break it out. Count the indexable pages whose `depth` is
-     null — `pages_query` with `indexable: true` shows `depth` per row, and
-     `export_crawl` with `dataset: "pages"` gives the whole set when the crawl is
-     large. `count` minus the pages that have a depth is the same number from the
-     other side; state which way you got it.
-  4. **CAVEAT — `depth` is DISCOVERY depth, not click depth.** It counts hops from a
-     seed, and **every sitemap URL is a seed**, so a page with no HTML link path at
-     all is recorded at depth 0 rather than at no depth. On a site whose sitemap
-     covers the estate the no-depth bucket is empty by construction and this check
-     passes on its criteria while measuring nothing it intends to (Phase 6 gate:
-     437 of 443 indexable pages at depth 0, median inbound links **zero**).
-
-     Detect it before trusting the histogram: `pages_query` reports `discoveredVia`,
-     and depth 0 dominated by `sitemap` rather than `seed`/`link` is the tell. When
-     it holds, rebuild reachability from the link graph instead — `links.orphan`
-     (pages with no inbound internal link, and note its `truncated`/`total`) plus
-     `inlinks.sources-by-type` (which templates link to which) plus
-     `inlinks.distribution` (the median page's inbound count) — and report CHECK-31
-     as passing on its stated criteria and NOT MEASURED on its intent, with both
-     halves in the notes. The same construction empties CHECK-33b's "sitemap only
-     (no depth)" tier; rebuild that one the same way.
+     individual pages past the depth threshold. **It still reads DISCOVERY depth**
+     (it is a page rule, and runs before the click-depth search): treat its list as a
+     lower bound, and take the per-page click depths from `pages_query`, which reports
+     `clickDepth` beside `depth`.
+  3. `metrics_get` with `metricId: "structure.depth-distribution"` — DISCOVERY depth,
+     kept as evidence about the CRAWL rather than about the site. It counts hops from
+     a seed, and **every sitemap URL is a seed**, so a page with no HTML link path is
+     recorded there at 0. Read it against the click-depth table: where discovery depth
+     is far shallower than click depth, the sitemap is doing the work the internal
+     linking should do. On the Phase 6 gate crawl this metric put 437 of 443 indexable
+     pages at "depth 0" beside a median inbound link count of **zero** — which is the
+     reading error this pair of metrics exists to make impossible.
+  4. Cross-read the unreachable pages against `links.orphan` (CHECK-32). The two
+     answer different questions and should broadly agree: an orphan has no inbound
+     internal link at all, while an unreachable page may be linked only from other
+     unreachable pages (an island). A page in `nullCount` but not in `links.orphan` is
+     exactly that island, and it is worth naming as one.
 - **Analysis**: the distribution is per indexable page — non-indexable pages
   (noindexed, canonicalised, blocked) are excluded, because their crawl depth is
   irrelevant. Present the buckets the table below asks for, with the percentiles from
