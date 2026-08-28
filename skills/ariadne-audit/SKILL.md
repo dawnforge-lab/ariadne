@@ -254,22 +254,38 @@ Record those as NOT MEASURED in `notes` — never substitute a nearby number:
 - Core Web Vitals (CHECK-47) — the engine measures response time and nothing else;
 - GSC-only orphans (CHECK-32, CHECK-33b) — by definition outside a crawl.
 
-**And one number that is measured, but does not measure what its name suggests.**
-`depth` — the `structure.depth-distribution` metric, `pages_query`'s `depth`, and
-CHECK-31 — is **discovery depth: hops from a seed**. Every sitemap URL is a seed, so
-on a site whose sitemap covers the estate, pages with no HTML link path whatsoever sit
-at depth 0 beside the home page. The gate site read 437 of 443 indexable pages at
-depth 0 while the median page had **zero** inbound internal links: read literally,
-CHECK-31 passes on a site where half the estate is unreachable by clicking.
+**And two numbers that both measure a depth, one of which is not about the site.**
 
-So: when depth-0 is dominated by sitemap discovery — compare `discoveredVia` in a
-`pages_query` census against the depth histogram — do not report site depth from that
-metric. Rebuild reachability instead, from `links.orphan` (pages with no inbound
-internal link) and `inlinks.sources-by-type` (which templates link to which), and
-record CHECK-31 as passing on its stated criteria while NOT MEASURED on its intent,
-with both halves in `notes`. CHECK-33b's "sitemap only (no depth)" tier is empty by
-the same construction and needs the same rebuild. Click-depth as a field of its own is
-on the backlog.
+`depth` — `pages_query`'s `depth`, and the `structure.depth-distribution` metric — is
+**discovery depth: hops from a seed**. Every sitemap URL is enqueued as a seed, so on
+a site whose sitemap covers the estate, pages with no HTML link path whatsoever sit at
+depth 0 beside the home page. The gate site read 437 of 443 indexable pages at depth 0
+while the median page had **zero** inbound internal links. That number is still worth
+reading, for what it actually says: how the CRAWL found the site. A distribution that
+collapses to zero means the pages were found by reading a file rather than by
+following links, which is site-wide orphan evidence and is where it is now filed
+(CHECK-32). It is not an answer to "how deep is this site".
+
+`clickDepth` — `pages_query`'s `clickDepth`, and the
+`structure.click-depth-distribution` metric — is **the shortest chain of internal
+links from the home page**, computed by the engine's own breadth-first search over the
+link graph. 0 is the home page; **null means no chain of links reaches the page at
+all**, and the metric counts those as `nullCount` beside the distribution. That is
+CHECK-31's number, and the sitemap-only bucket the check has always demanded.
+
+The history, because it explains the shape of the checklist: until Phase 7 the engine
+had only discovery depth, and CHECK-31 had to be answered by rebuilding reachability
+by hand from `links.orphan` and `inlinks.sources-by-type` and then recorded as passing
+on its stated criteria while NOT MEASURED on its intent. **That hand-rebuild is
+finished** — the engine computes the walk now. Use the metric and `clickDepth`, and
+use `links.orphan` for what it is: the per-page verdict, cross-read against the
+unreachable set (a page that is unreachable but not an orphan is an island, linked
+only from other unreachable pages). CHECK-33b's "sitemap only" tier reads `clickDepth`
+for the same reason — counted off `depth` it was empty by construction.
+
+One gate on both: `clickDepth` is written by the RULES run, not by the crawl. Null on
+every page means the rules have not run over this crawl, which `crawl_status`'s
+`rulesRunAt` settles — a missing measurement, never a site with no internal links.
 
 ---
 

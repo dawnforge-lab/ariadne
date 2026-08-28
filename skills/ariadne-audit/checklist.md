@@ -1163,6 +1163,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     unfetched, or a page cap reached), so "nothing links to this page" cannot be
     distinguished from "the page that links to it was never crawled". When this
     fires, CHECK-32 is SKIP with the reason quoted, NOT a clean orphan count.
+
+  And the site-wide evidence beside those two verdicts: `metrics_get` with
+  `metricId: "structure.depth-distribution"` — DISCOVERY depth, how far into the
+  crawl each page was first found. It passes no verdict; it is the shape the orphan
+  findings make in aggregate. Every sitemap URL is enqueued as a starting point, so
+  a distribution that collapses to zero says the crawl found this site's pages by
+  reading a file rather than by following links — the site-wide shadow of the
+  per-page fact `links.orphan` reports, and the number to quote when a client asks
+  how widespread the orphaning is. Read it against
+  `structure.click-depth-distribution` (CHECK-31): where discovery depth is far
+  shallower than click depth, the sitemap is carrying the internal linking.
 - **CRITICAL — two different orphan populations, and the engine sees one of them**:
   - **Crawl orphans** (the engine's): pages this crawl reached, with no inbound
     internal link from any other crawled page. Complete for what was crawled.
@@ -1246,35 +1257,43 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **CRITICAL — three populations, do not confuse them**:
   - **Orphan products** = products with zero internal inlinks from anywhere in the
     crawl (`links.orphan`, filtered to the product cohort). Smallest count, worst case.
-  - **Products with no crawl depth** = products no HTML link path reaches from the
+  - **Products with no click depth** = products no HTML link path reaches from the
     homepage, a strictly larger set that includes products linked only from other
-    sitemap-discovered pages. `pages_query` with `pageType: "product"` shows `depth`
-    per row; the ones with `depth: null` are these.
+    sitemap-discovered pages. `pages_query` with `pageType: "product"` shows
+    `clickDepth` per row; the ones with `clickDepth: null` are these.
+    **Read `clickDepth`, never `depth`.** `depth` is DISCOVERY depth and every
+    sitemap URL is enqueued as a seed, so `depth: null` is a set that is empty by
+    construction — a tier counted that way is always zero and this check passes on
+    a site whose entire catalogue is unreachable. `clickDepth` is null exactly when
+    no chain of internal links reaches the page, and it is written by the rules run
+    (`crawl_rules`): if it is null on EVERY page, the rules have not been run, which
+    `crawl_status`'s `rulesRunAt` confirms — that is a missing measurement, not a
+    site with no internal links.
   - **GSC-only products** = products Google knows and the crawl never reached. Only
     GSC has them.
   The correct number for "products not reachable via HTML" is the second. Reporting
   the orphan count instead under-reports the problem, sometimes by several times.
 - **Analysis**: over the product cohort (`pages_query` with `pageType: "product"`, or
   `export_crawl` with `dataset: "pages"` on a large site):
-  1. **Link-discovered products**: count products WITH a `depth` value
-  2. **Sitemap-only products**: count products with `depth: null`
+  1. **Link-discovered products**: count products WITH a `clickDepth` value
+  2. **Sitemap-only products**: count products with `clickDepth: null`
   3. **GSC-only products**: from GSC — URLs it has impressions for that do not appear
      in the crawl at all
   4. Present as a three-tier breakdown table:
      ```
-     | Discovery Source       | Products | % of Total |
-     |------------------------|----------|------------|
-     | HTML links (with depth)| X        | X%         |
-     | Sitemap only (no depth)| X        | X%         |
-     | GSC only (not in crawl)| X        | X%         |
-     | TOTAL                  | X        | 100%       |
+     | Discovery Source            | Products | % of Total |
+     |-----------------------------|----------|------------|
+     | HTML links (with clickDepth)| X        | X%         |
+     | Sitemap only (no clickDepth)| X        | X%         |
+     | GSC only (not in crawl)     | X        | X%         |
+     | TOTAL                       | X        | 100%       |
      ```
   5. Cross-reference with CHECK-01: if the product grid is JS-dependent, the "sitemap only"
      and "GSC only" tiers will be large — this confirms the JS rendering impact on real crawl data
   6. Cross-reference with `inlinks.sources-by-type`: an empty or tiny `sources` map on
      the product cohort says the same thing from the link graph's side
 - **Evaluate**:
-  - PASS if >80% of products have crawl depth (discovered via HTML links)
+  - PASS if >80% of products have a click depth (reachable via HTML links)
   - WARN if 30-80% are sitemap/GSC-only
   - FAIL if >80% of products have no HTML link path (entirely dependent on sitemap for discovery)
   - Note: A "FAIL" here combined with a JS-dependent product grid (CHECK-01) means the site's
