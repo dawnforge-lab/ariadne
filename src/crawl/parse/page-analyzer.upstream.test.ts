@@ -622,7 +622,7 @@ describe("analyzeHtml parity with the DOM reference", () => {
  * JavaScript-only navigation (see the analyzer's header and the
  * `nav_link_count` comment in src/db/schema.ts).
  */
-describe("the one divergence from the DOM: an open <a> crossing a container", () => {
+describe("a permanent divergence from the DOM: an open <a> crossing a container (the other class: script/style/svg text in captures — see the T1 ledger)", () => {
   const count = (html: string) => {
     const $ = cheerio.load(html);
     const streamed = analyzeHtml(html, PAGE_URL);

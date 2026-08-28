@@ -464,7 +464,7 @@ not an answer to the check.
 
 **The class is named so nobody re-derives it per audit.** On the Phase 7 gate site
 nine checks landed here — CHECK-05, CHECK-43, CHECK-44, CHECK-45, CHECK-46,
-CHECK-50, CHECK-52, CHECK-57 and CHECK-70 — and they are most of the reason that
+CHECK-50, CHECK-52, CHECK-57, CHECK-68 and CHECK-70 — and they are most of the reason that
 audit's SKIP count was 42. That number is the policy working. The alternative
 reading, PASS-with-a-caveat, would have produced nine passes on questions nothing
 asked, on a site whose entire product catalogue turned out to be unreachable.
