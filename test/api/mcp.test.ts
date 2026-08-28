@@ -475,6 +475,9 @@ describe("crawl_status / crawl_list", () => {
     expect(typeof detail["frontier"]).toBe("object");
     // A fixture site nobody blocks: the field is present and zero, not absent.
     expect(detail["blockedPages"]).toBe(0);
+    // Reported by the gate even though nothing escalated it: this crawl ran at
+    // perHostDelayMs 0, and 0 is a real spacing rather than "unknown".
+    expect(detail["hostSpacingMs"]).toBe(0);
   });
 
   it("counts the crawl's blocked pages", async () => {
@@ -503,6 +506,9 @@ describe("crawl_status / crawl_list", () => {
 
     const detail = await ok("crawl_status", { crawlId });
     expect(detail["blockedPages"]).toBe(2);
+    // A seeded row no crawl loop ever ran: null means "never reported", which
+    // is a different fact from a spacing of 0.
+    expect(detail["hostSpacingMs"]).toBeNull();
   });
 
   it("refuses a crawl id nothing knows", async () => {

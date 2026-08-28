@@ -190,7 +190,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
-        "with, queuePosition, liveLeases and blockedPages.\n\n" +
+        "with, queuePosition, liveLeases, blockedPages and hostSpacingMs.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
@@ -199,12 +199,20 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "queuePosition null was accepted by a server process that is now gone — " +
         "nobody will run it; re-submit it, or retire it with crawl_mark_failed.\n\n" +
         "blockedPages counts pages a WAF or rate limiter answered instead of the " +
-        "site (401/403/429/challenge). The engine already reacts on its own — it " +
-        "doubles that host's spacing per block and retries each blocked URL up to " +
-        "three times under the widened spacing — so a few early blocks that stop " +
-        "climbing are the safety net working. A blockedPages that keeps climbing " +
-        "is the site refusing this crawl: re-crawl slower (maxConcurrency 1, " +
-        "perHostDelayMs 2000) or stop and talk to the site's owner. Never faster.",
+        "site (401/403/429/challenge). hostSpacingMs is how far the engine has " +
+        "already backed off in response: the widest per-host gap it is enforcing, " +
+        "in milliseconds, or null on a crawl that never reported one. READ THEM " +
+        "TOGETHER. The engine reacts on its own — a refusal naming a rate (429, or " +
+        "any Retry-After) doubles that host's spacing, a volley of refusals across " +
+        "several URLs eventually does too, and each blocked URL is retried up to " +
+        "three times under the widened spacing.\n\n" +
+        "hostSpacingMs above the configured perHostDelayMs with blockedPages no " +
+        "longer rising is the safety net having found the site's rate: the crawl " +
+        "is slow BECAUSE it is working, and restarting it loses the progress and " +
+        "the lesson. blockedPages still rising, or hostSpacingMs pinned at the " +
+        "30000ms cap, is the engine out of room: re-crawl slower (maxConcurrency " +
+        "1, perHostDelayMs 2000), or stop and talk to the site's owner. Never " +
+        "faster.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_status", () => service.getCrawl(crawlId)),

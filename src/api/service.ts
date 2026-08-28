@@ -303,6 +303,20 @@ export interface CrawlDetail extends CrawlListItem {
    * Counted live off the `pages` rows, so it is meaningful mid-crawl.
    */
   blockedPages: number;
+  /**
+   * The widest per-host spacing the crawl's politeness gate has escalated to,
+   * in milliseconds, or null when no crawl loop ever reported one (a row that
+   * predates the field, or a crawl that failed before it started fetching).
+   *
+   * It is the other half of `blockedPages`, and the pair is what makes "this
+   * crawl is slow" readable instead of alarming. Spacing well above the
+   * configured `perHostDelayMs` with `blockedPages` no longer rising is the
+   * engine having found the site's rate and settled there — the correct outcome,
+   * and the one a caller must not "fix" by restarting. Spacing pinned at the
+   * 30s cap is the engine out of room to back off further, which is where an
+   * operator has to decide rather than wait.
+   */
+  hostSpacingMs: number | null;
 }
 
 /** A page of results, in the surface's one pagination shape. */
@@ -688,6 +702,7 @@ export class ApiService {
       queuePosition: row.status === "queued" ? this.queuePosition(crawlId) : null,
       liveLeases,
       blockedPages,
+      hostSpacingMs: row.hostSpacingMs,
     };
   }
 

@@ -659,6 +659,27 @@ async function runToCompletion(
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
   });
 
+  /**
+   * The spacing, on the crawl row, for whoever is polling.
+   *
+   * The gate lives in this process and the poller reads the database, so a
+   * number nobody wrote down is a number the operator cannot act on — and
+   * acting on it is the whole point: a crawl that has quietly escalated to 8s
+   * per page looks identical, from `crawl_status`, to one that is merely large.
+   * Written once up front (so the column means "the base, so far" rather than
+   * "unknown" from the first poll) and then only when it MOVES, which is at
+   * most a handful of times per host per crawl.
+   *
+   * At the batch boundary rather than inside `handleOne`: concurrent handlers
+   * would race to write the same value, and one write per batch is enough for a
+   * caller polling every 15-30 seconds.
+   */
+  let reportedSpacingMs = gate.maxSpacingMs();
+  const recordSpacing = async (): Promise<void> => {
+    await db.update(crawls).set({ hostSpacingMs: reportedSpacingMs }).where(eq(crawls.id, crawlId));
+  };
+  await recordSpacing();
+
   // The frontier is the crawl's memory: on a resume these numbers come back
   // non-zero and the run continues against the same budget rather than
   // starting a second crawl inside the first one's row.
@@ -765,7 +786,9 @@ async function runToCompletion(
       // concurrency half is applied to the batch below (see politeness).
       gate.report(host, {
         fetchClass: result.fetchClass,
+        statusCode: result.statusCode,
         retryAfterMs: result.retryAfterMs,
+        url: item.url,
       });
 
       // A retryable failure with attempts left is not written yet: the row for
@@ -892,6 +915,10 @@ async function runToCompletion(
         if (result.value.outcome !== null) outcomes.push(result.value.outcome);
       }
       window.onBatchSettled(outcomes);
+      if (gate.maxSpacingMs() !== reportedSpacingMs) {
+        reportedSpacingMs = gate.maxSpacingMs();
+        await recordSpacing();
+      }
       if (errors.length === 1) throw errors[0];
       if (errors.length > 1) {
         throw new AggregateError(errors, `crawl loop: ${errors.length} URLs threw`);

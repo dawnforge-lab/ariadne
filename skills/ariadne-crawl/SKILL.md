@@ -126,11 +126,27 @@ requests, it is counting how bunched they are. Defaults are for an ordinary orig
 | Anything else, no evidence of a WAF | — | leave the defaults |
 
 These are the settings a Screaming Frog crawl of a Shopify store is run at (2 threads,
-1 URL/second), for the same reason. A 2,000-page site at `2 / 1000` takes around
-twenty minutes. That is the correct amount of time.
+1 URL/second), for the same reason.
 
-Do not raise them to make a crawl finish sooner. If it is too slow to be practical,
-crawl fewer pages (`maxPages`), not faster.
+**Do the arithmetic before you promise anyone a time, and do it on
+`perHostDelayMs` alone.** The per-host gate serialises every request to one host at
+that spacing, so a single-site crawl takes about `maxPages × perHostDelayMs`
+regardless of `maxConcurrency`:
+
+| Pages | `perHostDelayMs` | Roughly |
+|---|---|---|
+| 2,000 | 1000 | 33 minutes |
+| 2,000 | 2000 | 67 minutes |
+| 500 | 1000 | 8 minutes |
+
+`maxConcurrency` does **not** buy throughput on a single-host crawl. It bounds how
+much work is in flight — which bounds memory and, more importantly, burstiness — and
+a site behind one hostname is paced by the gate whatever it is set to. Raising it to
+go faster changes nothing except how bunched the requests are, which is the thing WAFs
+actually count.
+
+Do not raise either setting to make a crawl finish sooner. If it is too slow to be
+practical, crawl fewer pages (`maxPages`), not faster.
 
 There is no `allowPrivate` on this surface at any value. The schema refuses it as an
 unrecognised field and the service refuses it again by name. A loopback or RFC1918
@@ -144,7 +160,7 @@ target is not something this skill can crawl.
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
  renderPassCount, rulesetVersion,
  frontier: {pending, leased, done, failed, renderPending},
- queuePosition, liveLeases, blockedPages}
+ queuePosition, liveLeases, blockedPages, hostSpacingMs}
 ```
 
 What the fields mean when you are waiting:
@@ -165,6 +181,11 @@ What the fields mean when you are waiting:
 - **`blockedPages`** — pages a WAF or rate limiter answered instead of the site
   (401, 403, 429, or a challenge page). Watch it across polls: the number matters far
   less than whether it is still rising. See the reaction loop below.
+- **`hostSpacingMs`** — how far the engine has already backed off: the widest gap it
+  is enforcing between two requests to one host, in milliseconds. It starts at the
+  crawl's `perHostDelayMs` and only ever rises. Null means no crawl loop reported one
+  (an old row, or a crawl that failed before it fetched anything) — which is not the
+  same as `0`.
 
 Poll every 15-30 seconds early and back off to a minute on a long crawl; there is
 nothing to gain from tighter polling, since the crawl's pace is set by politeness
@@ -172,26 +193,32 @@ rather than by anything you can ask for.
 
 ### When `blockedPages` climbs
 
-The engine protects itself before you get a chance to. A blocked answer **doubles
-that host's spacing** (1s → 2s → 4s → 8s, up to 30s) and the ratchet never winds back
-inside a crawl; a `Retry-After` header is honoured as a floor under the next request;
-and each blocked URL is **retried up to three times** under the widened spacing, so a
-page that was refused during a burst is usually served once the crawl has slowed down.
-A crawl visibly getting slower after some early blocks is that working, not a fault.
+The engine protects itself before you get a chance to. A refusal that names a rate — a
+429, or anything carrying a `Retry-After` — **doubles that host's spacing** (1s → 2s →
+4s → 8s, up to 30s), and a volley of refusals that named no rate (403s across several
+different URLs) does the same once it is clearly about the host rather than about one
+forbidden page. The ratchet never winds back inside a crawl, a `Retry-After` is
+honoured as a floor under the next request, and each blocked URL is **retried up to
+three times** under the widened spacing — so a page refused during a burst is usually
+served once the crawl has slowed down.
 
-So read the trend, not the total:
+**Read `blockedPages` and `hostSpacingMs` together.** One is what the site did; the
+other is what the engine did about it. That pair is the whole diagnosis:
 
-- **A handful of blocks that stops rising** — the back-off found the site's rate.
-  Leave it alone. A slow crawl is the engine being polite.
-- **Still climbing after several polls** — the escalation has not found a rate the
-  site will accept. Let this crawl finish (its rows are still evidence), then re-crawl
-  at `maxConcurrency: 1`, `perHostDelayMs: 2000`.
-- **Climbing again on that slower re-crawl** — stop. The site is refusing us, not
-  merely throttling us, and the next step is a conversation with whoever owns it about
-  allowlisting our user agent. **Do not push harder, do not change the user agent to
-  look like a browser, and do not crawl from somewhere else.** Being throttled by a
-  WAF is our problem to solve honestly; working around one is not something this skill
-  does.
+| `blockedPages` | `hostSpacingMs` | What it means | What to do |
+|---|---|---|---|
+| Rose, now flat | Above `perHostDelayMs`, not at the cap | The back-off found the site's rate and settled | **Leave it alone.** The crawl is slow *because* it worked. Recompute your ETA at the new spacing. |
+| Still rising | Still rising | The escalation has not found an acceptable rate yet | Keep polling. Decide when it stops moving. |
+| Still rising | Pinned at 30000 | The engine is out of room to back off | Let this crawl finish — its rows are still evidence — then re-crawl at `maxConcurrency: 1`, `perHostDelayMs: 2000`. |
+| Rising on that slower re-crawl | — | The site is refusing us, not throttling us | **Stop.** Talk to whoever owns the site about allowlisting our user agent. |
+
+Note the ETA consequence in row one: at `hostSpacingMs: 8000` a 2,000-page crawl needs
+about four and a half hours, not thirty-three minutes. Re-quote it rather than letting
+someone discover it.
+
+On the last row: **do not push harder, do not change the user agent to look like a
+browser, and do not crawl from somewhere else.** Being throttled by a WAF is our
+problem to solve honestly; working around one is not something this skill does.
 
 A page that is still blocked after its three attempts also counts in
 `frontier.failed`, for the same reason a spent timeout does: its own outbound links
@@ -202,12 +229,18 @@ Blocked pages are recorded, not lost: `pages_query` returns each one with
 it took and what the spacing had reached when the engine gave up. That reason is what
 to quote when you report a crawl as incomplete.
 
-**A slow crawl is the engine being polite. Do not restart it.** The pacing is a
-per-host delay plus whatever `crawl-delay` the site's robots.txt asks for, and a
-restart neither speeds that up nor preserves what was already fetched — it starts a
-second crawl over a site that is already being crawled. If the elapsed time is
-genuinely wrong (nothing moving in the frontier for many minutes, `liveLeases` at
-zero across several polls), that is a stuck worker, and the answer is Step 5.
+**A slow crawl is usually the engine being polite, and `hostSpacingMs` says whether
+it is.** The pacing is a per-host delay, plus whatever `crawl-delay` robots.txt asks
+for, plus whatever the engine has escalated to — and a restart speeds up none of them
+while losing what was already fetched. Before concluding anything about a slow crawl,
+read `hostSpacingMs` against the `perHostDelayMs` it was started with: higher means
+the site pushed back and the engine answered, and the crawl is now correctly slower
+(see the reaction loop below). A crawl that is slow at its configured spacing, with
+`pending` falling, is simply a large site.
+
+The one genuinely wrong shape is nothing moving at all: the frontier unchanged for
+many minutes with `liveLeases` at zero across several polls. That is a stuck worker,
+and the answer is Step 5.
 
 ## Step 3 — render (before the rules, or not at all)
 
@@ -304,7 +337,8 @@ An audit needs three things from this skill, and they should be stated together:
 
 1. the **`crawlId`**;
 2. the **`crawl_status`** of the finished crawl — `pagesCrawled`, the frontier
-   counts, `renderPassCount`, `blockedPages`, and whether it stopped at a cap;
+   counts, `renderPassCount`, `blockedPages`, `hostSpacingMs`, and whether it stopped
+   at a cap;
 3. the **`crawl_rules`** summary.
 
 Together they say what the evidence covers. The audit's job is to judge that

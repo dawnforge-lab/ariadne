@@ -27,6 +27,17 @@ export const crawls = pgTable("crawls", {
   pagesCrawled: integer("pages_crawled").notNull().default(0),
   pagesTotal: integer("pages_total"),
   renderPassCount: integer("render_pass_count").notNull().default(0),
+  // The widest per-host spacing the crawl's politeness gate has escalated to,
+  // in milliseconds — `HostGate.maxSpacingMs()`, written by the crawl loop when
+  // it changes so a poller can watch it move (src/crawl/loop.ts).
+  //
+  // Nullable, and the null is load-bearing: it means "no crawl loop ever
+  // reported one" — a row that predates this column, or a crawl that failed
+  // before its gate existed. It is NOT zero, which would be a real spacing (a
+  // crawl configured with perHostDelayMs 0 and never throttled). A reader that
+  // conflates the two would report an unpaced crawl as un-instrumented, or the
+  // reverse (hard rule 7).
+  hostSpacingMs: integer("host_spacing_ms"),
   // Three crawl-level evidence blobs the query rules read instead of fetching
   // (hard rule 3: rules read the database). All three are nullable, and a null
   // does NOT mean the same thing in each — what a rule may conclude from one

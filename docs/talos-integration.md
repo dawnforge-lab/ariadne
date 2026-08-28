@@ -46,13 +46,18 @@ crawler inside Talos. The intended shape:
    fixed per-host delay honoured alongside adaptive concurrency, branded UA
    (Talos crawls as TalosBot; Ariadne default `AriadneBot`, configurable so a
    Talos-driven crawl can present Talos's identity), back-off on 403/429.
-   Met as of Phase 6 Task 6b: a `blocked` answer both halves the concurrency
-   window and DOUBLES that host's spacing (ratcheted for the life of the crawl,
-   capped at 30s), `Retry-After` is honoured as a floor on the host's next slot
-   (capped the same way — a hostile header cannot park a crawl), and a blocked
-   URL is retried up to three times under the widened spacing before it settles
-   as a classified row whose `fetch_reason` names the spacing reached. The count
-   is on `crawl_status` as `blockedPages` so a driving agent can react too.
+   Met as of Phase 6 Task 6b: a `blocked` answer halves the concurrency window,
+   and a refusal that NAMES A RATE (a 429, or anything carrying `Retry-After`)
+   also DOUBLES that host's spacing — ratcheted for the life of the crawl,
+   capped at 30s. A refusal that names no rate (401/403/challenge/bare 503)
+   escalates only once the host has refused three times running across at least
+   two different URLs, so one permanently forbidden path cannot tax a whole
+   crawl. `Retry-After` is honoured as a floor on the host's next slot (capped
+   the same way — a hostile header cannot park a crawl), and a blocked URL is
+   retried up to three times under the widened spacing before it settles as a
+   classified row whose `fetch_reason` names the spacing reached. Both halves
+   are on `crawl_status` — `blockedPages` and `hostSpacingMs` — so a driving
+   agent can read what the site did and what the engine did about it.
 5. **SSRF policy equivalence.** Talos pins DNS resolution on every hop
    (`api/urlguard.py: pin_outbound_url/pinned_get`). Ariadne's absorbed
    `url-policy` must maintain the same properties: every hop revalidated,
