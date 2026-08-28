@@ -749,19 +749,31 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-13: Soft-404s and thin OK responses
 - **Priority**: Medium | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-13"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-13"` — three rules:
   - `content.soft-404` (warning) — a 200 response whose text reads as a
     not-found page
   - `content.thin` (warning) — a 200 page with too little body text to serve any
     query (the same rule answers CHECK-40)
+  - `content.thin-skipped` (info) — the pages the thin check could not be run on,
+    below
   `issue_urls` per rule; `pages_query` for the word counts beside page type, which
   is how the "% of indexable pages" in the Evaluate line is computed.
 
-  **Both rules judge `renderableWordCount`, not `wordCount`** — the page's words minus
-  the ones its own markup hides (`hidden`, inline `display:none`, a closed `<dialog>`
-  or `<details>`). `pages_query` returns both columns; quote the renderable one, since
-  it is what the verdict was reached on and what a visitor sees. Null in both is a row
-  no Phase-7-or-later analyzer wrote: NOT MEASURED, and a re-crawl answers it.
+  **Both verdict rules judge `renderableWordCount`, not `wordCount`** — the page's
+  words minus the ones its own markup hides (`hidden`, inline `display:none`, a closed
+  `<dialog>` or `<details>`). `pages_query` returns both columns; quote the renderable
+  one, since it is what the verdict was reached on and what a visitor sees.
+
+  **`content.thin-skipped` is the NOT MEASURED marker** (`links.orphan-skipped` /
+  `robots.check-skipped` precedent): it fires per page where `wordCount` is present
+  and `renderableWordCount` is null — a row a pre-Phase-7 analyzer wrote, where the
+  page WAS read and the column the floor needs did not exist yet. The engine will not
+  fall back to `wordCount` there, because that column measures something else; on a
+  chrome-heavy site the fallback would answer four times high, silently, on old crawls
+  only. Where it fires, the thin count is a floor and a re-crawl is the fix. **Null in
+  BOTH columns is a different thing and not a skip**: no text was ever extracted for
+  that URL — a PDF, a 404, anything with no body — which `content.thin` was always
+  silent about and a re-crawl will not change.
 - **Evaluate**:
   - FAIL if soft 404s > 0
   - WARN if low content pages > 10% of indexable pages
@@ -1667,8 +1679,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-40: Thin or placeholder content
 - **Priority**: Medium | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-40"` — `content.thin` (warning, the
-  same rule CHECK-13 reads) and `content.placeholder` (warning: lorem ipsum and
-  friends left in live copy). `issue_urls` for both lists; filter `issues_list` by
+  same rule CHECK-13 reads), `content.thin-skipped` (info, the same marker CHECK-13
+  reads: pages carrying a `wordCount` and no `renderableWordCount`, which a pre-Phase-7
+  crawl wrote and this check cannot be run on — a re-crawl is the fix, and while it
+  fires the thin count is a floor) and `content.placeholder` (warning: lorem ipsum and
+  friends left in live copy). `issue_urls` for all three; filter `issues_list` by
   `pageType` to say which templates the thin pages belong to, and read
   `content.metrics-by-type` for the distributions behind the threshold — it carries
   `wordCount`, `renderableWordCount` and `textRatio` per template. **The pair is the

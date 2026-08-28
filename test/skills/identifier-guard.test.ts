@@ -8,35 +8,41 @@
  * else in this repository reads those files, so a rename in `src/` and a
  * sentence in a SKILL.md drift apart in silence.
  *
- * ## The evidence that this test is not hypothetical
+ * ## Why this exists, and exactly how much of it this test catches
  *
- * Four divergences of the Phase 6 gate (`docs/gates/phase-6.md`, ledger items
- * D-4/5/10/11, restated at that gate's item 14) were exactly this failure:
+ * The Phase 6 gate (`docs/gates/phase-6.md`, item 14) proposed this test over
+ * four of its own divergences. Being precise about which of them would actually
+ * go red here matters more than the count, because the gap is where the next one
+ * will live:
  *
- *  - **D-4** — the audit skill's findings interface asked for an `elapsedMs` on
- *    the `crawl_rules` summary that the surface has never returned, and did not
- *    mention the `derived` and `metrics` scalars it does.
- *  - **D-5** — `renderPassCount` was documented as a count of render passes; it
- *    holds the last pass's rendered-page count.
- *  - **D-10** — the "two unfiltered sweeps" arithmetic was the opposite of what
- *    the surface rewards at real metric cardinality.
- *  - **D-11** — `limit` exists on every listing and neither skill named it.
+ *  - **D-4 — CAUGHT, by the shape tests at the bottom of this file.** The audit
+ *    skill's findings interface asked for an `elapsedMs` on the `crawl_rules`
+ *    summary that the surface has never returned, and did not mention the
+ *    `derived` and `metrics` scalars it does. A documented block compared to
+ *    `RunSummary` as a whole set fails on both halves.
+ *  - **D-5 — PARTLY.** `renderPassCount` is a real field, spelled correctly; what
+ *    was wrong was the SENTENCE around it ("how many passes ran" — it is the last
+ *    pass's rendered-page count). The identifier check cannot read that. The
+ *    shape tests would only have caught it had the field been absent.
+ *  - **D-10 — NOT CAUGHT.** "Two unfiltered sweeps" was advice whose arithmetic
+ *    is wrong at real metric cardinality. Every identifier in it was correct.
+ *  - **D-11 — NOT CAUGHT.** `limit` existing and going unmentioned is an
+ *    OMISSION; nothing in a text says a field was left out.
  *
- * And Phase 7 produced three more of its own, all caught by hand:
+ * Phase 7's own three, on the same honest accounting: the marker claim
+ * ("nothing on `crawl_status` distinguishes the two", false since `rulesRunAt`
+ * and `findingsCount` shipped in P7-T3) is caught only in the half that is a
+ * shape — the `crawl_status` block below now has to list both fields; the false
+ * NOT-MEASURED list (duplicate titles and headings, measured since P7-T2) and
+ * the checklist's hand-rebuilt reachability (measured since P7-T4) are claims
+ * about what exists, and no identifier in either was misspelled.
  *
- *  - the audit skill and the crawl skill both claimed **nothing distinguishes a
- *    crawl nobody judged from a rule that found nothing** — false since
- *    `rulesRunAt` and `findingsCount` went onto `crawl_status` (P7-T3);
- *  - the audit skill's §2.4 listed **duplicate titles, duplicate meta
- *    descriptions and duplicate H1 text as NOT MEASURED** — false since
- *    `title.duplicate`, `meta-description.duplicate` and `h1.duplicate-text`
- *    shipped (P7-T2);
- *  - the checklist told CHECK-31 to rebuild reachability by hand — false since
- *    `structure.click-depth-distribution` and `clickDepth` shipped (P7-T4).
- *
- * A test that reads the skills and asserts every identifier against the live
- * source is what turns each of those from a discovery made mid-audit into a red
- * test on the commit that caused it.
+ * **So: this file catches WRONG NAMES, and the two shape tests catch a wrong or
+ * missing FIELD in the two blocks documented as whole shapes. It cannot read a
+ * false claim, a wrong piece of arithmetic, or an omission in prose.** Those
+ * remain human review, and the fact that most of the divergences above are in
+ * that class is the argument for extending the shape tests rather than for
+ * trusting a green run here as "the skills are correct".
  *
  * ## How a token is checked
  *
@@ -93,6 +99,8 @@ const SKILLS = join(ROOT, "skills");
 const CHECKLIST = join(SKILLS, "ariadne-audit", "checklist.md");
 const AUDIT_SKILL = join(SKILLS, "ariadne-audit", "SKILL.md");
 const CRAWL_SKILL = join(SKILLS, "ariadne-crawl", "SKILL.md");
+const REPORT_SKILL = join(SKILLS, "ariadne-report", "SKILL.md");
+const ACTION_PLAN_SKILL = join(SKILLS, "ariadne-action-plan", "SKILL.md");
 
 // --------------------------------------------------------------- the sources
 
@@ -462,6 +470,46 @@ function unique(names: readonly string[]): string[] {
 }
 
 /**
+ * The `{a, b, c}` shape the checklist's tool table documents for one tool.
+ *
+ * The table is where an auditor learns what a listing answers with, so the row
+ * is a response shape written by hand — the same class of statement as the
+ * fenced blocks above, in a table cell. Absent is a THROW for the same reason.
+ */
+function toolTableShape(tool: string): string[] {
+  const row = new RegExp(`^\\|\\s*\`${tool}\`\\s*\\|.*$`, "m").exec(readFileSync(CHECKLIST, "utf8"));
+  if (row === null) {
+    throw new Error(`identifier-guard: the checklist's tool table has no '${tool}' row`);
+  }
+  const shape = /`\{([^`]*)\}`/.exec(row[0]);
+  if (shape === null) {
+    throw new Error(`identifier-guard: the checklist's '${tool}' row documents no {…} shape`);
+  }
+  return unique([...shape[1]!.matchAll(/[a-z][a-zA-Z0-9]*/g)].map((m) => m[0]));
+}
+
+/**
+ * Every backticked `{…}` shape in one file whose body names `marker`, with the
+ * line each sits on — a shape documented in more than one place has to agree
+ * with the engine in all of them, and this is how both copies are read.
+ */
+function bracedShapes(file: string, marker: string): { line: number; names: string[] }[] {
+  const text = readFileSync(file, "utf8");
+  const out: { line: number; names: string[] }[] = [];
+  for (const match of text.matchAll(/`\{([^`]*)\}`/g)) {
+    if (!match[1]!.includes(marker)) continue;
+    out.push({
+      line: text.slice(0, match.index).split("\n").length,
+      names: unique([...match[1]!.matchAll(/[a-z][a-zA-Z0-9]*/g)].map((m) => m[0])),
+    });
+  }
+  if (out.length === 0) {
+    throw new Error(`identifier-guard: ${relative(ROOT, file)} documents no shape naming ${marker}`);
+  }
+  return out;
+}
+
+/**
  * The findings file's shape, parsed out of the audit skill's own `json` block.
  *
  * INTERNAL CONSISTENCY, like the check ids: the audit skill defines this file
@@ -574,6 +622,37 @@ describe("the skills name only identifiers the engine has", () => {
     expect(fenceTokens(CRAWL_SKILL, "byMetric")).toEqual(
       unique(declaredFields(join(ROOT, "src/rules/run.ts"), ["RunSummary"])),
     );
+  });
+
+  it("documents `robots_get`'s answer as the answer it gives, in both places", () => {
+    const evidence = unique(declaredFields(join(ROOT, "src/api/service.ts"), ["RobotsEvidence"]));
+    // CHECK-03's Engine step and the tool table both write the shape out. Two
+    // copies of one statement is how one of them eventually stops being true.
+    for (const shape of bracedShapes(CHECKLIST, "robotsUrl")) {
+      expect(shape.names, `checklist.md:${shape.line}`).toEqual(evidence);
+    }
+    expect(toolTableShape("robots_get")).toEqual(evidence);
+  });
+
+  it("documents the query tools' rows as the rows they return", () => {
+    const service = join(ROOT, "src/api/service.ts");
+    // `IssueGroup`'s own fields; the truncation note is a separate type,
+    // documented separately in the audit skill because it is sometimes absent.
+    expect(toolTableShape("issues_list")).toEqual(unique(declaredFields(service, ["IssueGroup"])));
+    expect(toolTableShape("issue_urls")).toEqual(unique(declaredFields(service, ["IssueUrl"])));
+    expect(toolTableShape("metrics_get")).toEqual(unique(declaredFields(service, ["MetricRow"])));
+    // The same three shapes are quoted outside the table — the report skill's
+    // metrics sweep, the action plan's intake — and must not drift apart.
+    for (const shape of bracedShapes(REPORT_SKILL, "metricId")) {
+      expect(shape.names, `ariadne-report/SKILL.md:${shape.line}`).toEqual(
+        unique(declaredFields(service, ["MetricRow"])),
+      );
+    }
+    for (const shape of bracedShapes(ACTION_PLAN_SKILL, "sampleUrls")) {
+      expect(shape.names, `ariadne-action-plan/SKILL.md:${shape.line}`).toEqual(
+        unique(declaredFields(service, ["IssueGroup"])),
+      );
+    }
   });
 
   it("reads something: the extraction is not silently empty", () => {

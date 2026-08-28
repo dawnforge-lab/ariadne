@@ -358,16 +358,29 @@ The tab body is the URL plus the rule's own evidence, flattened.
 
 - **Column 1 is `URL`.** For a site-scoped finding (`url: null`) write
   `(site-wide)` and keep the evidence — those rows carry the whole finding.
-- **Some rules report a GROUP, not a page, and their tabs must say so.** The
-  duplicate rules — `title.duplicate`, `meta-description.duplicate`,
-  `h1.duplicate-text`, and the content pair `content.exact-duplicate` /
-  `content.near-duplicate` — write one finding per duplicated VALUE: the evidence
-  carries the value, `count` (how many indexable pages share it) and `pages` (up to 20
-  of them). So a 40-row tab is 40 groups, and the pages involved are the sum of the
-  groups' `count`s. Column 1 is that group's first URL; keep `pages` as its own JSON
-  column and put both numbers in the description row ("40 duplicate titles across 612
-  pages"). A tab that presents groups as pages understates the work by an order of
-  magnitude, and its Fix — one template change per group — reads as forty edits.
+- **Some rules report a GROUP or a PAIR, not a page, and their tabs must say so.**
+  A row that is not a page breaks the arithmetic a reader does by eye, so the
+  description row states what a row IS and how many pages it covers. Three shapes,
+  and they are not interchangeable:
+  - **The field duplicates** — `title.duplicate`, `meta-description.duplicate`,
+    `h1.duplicate-text` — one finding per duplicated VALUE:
+    `{title|metaDescription|h1Text, count, pages}`, where `count` is how many
+    indexable pages share the value (exact) and `pages` is up to 20 of their URLs.
+  - **`content.exact-duplicate`** — one finding per identical-content group:
+    `{contentHash, urls, count, pageTypes}`. Same idea, different key: the URL
+    sample is `urls`, not `pages`, and `pageTypes` names the templates the group
+    spans, which is usually the fix's shape.
+  - **`content.near-duplicate`** — one finding per PAIR of similar pages:
+    `{urlA, urlB, hamming, pageTypeA, pageTypeB}`. **No `count`, no URL list.** A
+    50-row tab is 50 pairs, and the pages involved are however many distinct URLs
+    those pairs mention — count them, do not assume two per row, and do not write
+    "50 duplicate pages".
+
+  For the group shapes, column 1 is the group's first URL, the URL list stays as its
+  own JSON column under its own key, and the description row carries both numbers
+  ("40 duplicate titles across 612 pages"). A tab that presents groups as pages
+  understates the work by an order of magnitude, and its Fix — one template change
+  per group — then reads as forty edits.
 - **Then every evidence key**, one column each. The evidence repeats the page URL
   as `pageUrl`; drop that one key, since column 1 already carries it. Take the
   union of keys across all of the rule's rows, sorted alphabetically, so two runs

@@ -298,7 +298,19 @@ An audit that copies an older findings file forward will under-report all three:
   the number `content.thin` judges on. Quote the renderable figure when you report
   thin content; the gap between the two is the template's furniture, and
   `content.metrics-by-type` carries both distributions per template so you can size
-  it. Null in both columns means no Phase-7-or-later analyzer wrote the row.
+  it.
+
+  **The two null shapes are different facts, and only one of them is a gap.** A
+  `wordCount` with a NULL `renderableWordCount` is a row a pre-Phase-7 analyzer
+  wrote: the page was read, the column the floor now needs did not exist yet, and
+  the engine SAYS SO rather than falling back — `content.thin-skipped` (info) fires
+  per page, on the `links.orphan-skipped` / `robots.check-skipped` precedent. That
+  is NOT MEASURED, and a re-crawl is the fix, because a word count cannot be
+  recomputed from a database that does not store the HTML. **Null in BOTH columns is
+  not a skip at all**: the analyzer never produced text for that URL — a PDF, a 404,
+  anything with no body to read — and `content.thin` was always silent about those.
+  A re-crawl changes nothing there, and reporting it as unmeasured content would
+  invent a gap.
 - **Click depth**, immediately below.
 
 **And two numbers that both measure a depth, one of which is not about the site.**
