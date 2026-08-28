@@ -677,7 +677,8 @@ describe("crawl_rules", () => {
     expect(typeof summary["byMetric"]).toBe("object");
 
     // The marker an agent checks before reading an empty answer as "clean", and
-    // the count the issues listing sums to.
+    // the count the issues listing sums to — read off ONE answer, from one
+    // statement, because the pair is what gets interpreted (see `getCrawl`).
     const after = await ok("crawl_status", { crawlId: liveCrawlId });
     expect(Number.isNaN(Date.parse(String(after["rulesRunAt"])))).toBe(false);
     expect(after["findingsCount"]).toBe(summary["findings"]);

@@ -53,7 +53,7 @@ import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
-import { and, asc, desc, eq, gt, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, isNotNull, sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { crawls, frontier, issues, pages } from "../db/schema.js";
@@ -67,6 +67,10 @@ import {
 } from "../crawl/loop.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES } from "../crawl/fetch-page.js";
+// The robots vocabulary from the module that WRITES it, never a copy: a fourth
+// outcome added there must not turn every new crawl's stored evidence into a
+// validation refusal here. See `ROBOTS_OUTCOMES` in discovery.ts.
+import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 import {
   RenderPassRefusal,
   runRenderPass,
@@ -908,13 +912,39 @@ export class ApiService {
     };
   }
 
+  /**
+   * One crawl, in full.
+   *
+   * `rulesRunAt` AND `findingsCount` COME OUT OF ONE STATEMENT, and that is a
+   * correctness requirement rather than a saved round trip. The two describe
+   * each other: the marker says whether a judgement is on record, the count
+   * says what it produced, and the tool descriptions tell an agent to read
+   * `findingsCount: 0` beside a timestamp as "looked, found nothing".
+   *
+   * Read on two pool connections they would be two SNAPSHOTS, and `runRules`'
+   * opening transaction clears the marker and deletes the crawl's issues
+   * together (src/rules/run.ts). A crawl-row read landing just BEFORE that
+   * commit and a `count(*)` landing just after would compose
+   * `{rulesRunAt: <the previous run's stamp>, findingsCount: 0}` — a sentence
+   * neither of the two states ever said, and precisely the one an agent is
+   * told means the site is clean. The count is therefore a scalar subquery on
+   * the crawl-row select: one statement, one snapshot, no pair that never
+   * existed.
+   *
+   * The genuinely mid-run shape — `{rulesRunAt: null, findingsCount: <partial>}`
+   * — is left exactly as it is. It is honest and documented: no complete pass
+   * is on record, and what is in the table belongs to the run in flight.
+   *
+   * The other three counts stay parallel and independent on purpose: the
+   * frontier counts, the lease count and the blocked-page count are each read
+   * as one number, and none of them is interpreted through another.
+   */
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
-    const row = await this.crawlRow(crawlId);
-    const [counts, liveLeases, blockedPages, findingsCount] = await Promise.all([
+    const { row, findingsCount } = await this.crawlRowWithFindings(crawlId);
+    const [counts, liveLeases, blockedPages] = await Promise.all([
       frontierCounts(this.db, crawlId),
       this.liveLeaseCount(crawlId),
       this.blockedPageCount(crawlId),
-      this.findingsCount(crawlId),
     ]);
     return {
       crawlId: row.id,
@@ -2106,6 +2136,41 @@ export class ApiService {
   }
 
   /**
+   * The crawl row and its findings count, from ONE statement and therefore one
+   * snapshot of the database.
+   *
+   * The subquery is what makes `rulesRunAt` and `findingsCount` describe the
+   * same instant — see `getCrawl` for what a two-snapshot read would compose
+   * out of a rules run's opening transaction. `count(*)` over
+   * `issues (crawl_id)` is an index-only scan; the pairing is what this costs
+   * a round trip for, and it costs nothing else.
+   */
+  private async crawlRowWithFindings(
+    crawlId: string,
+  ): Promise<{ row: typeof crawls.$inferSelect; findingsCount: number }> {
+    const rows = await this.db
+      .select({
+        ...getTableColumns(crawls),
+        // Through the schema objects rather than raw table text, so a rename of
+        // the table or the column is a compile error here rather than a 500 the
+        // first time somebody polls a crawl.
+        findingsCount: sql<number>`(select count(*)::int from ${issues} where ${issues.crawlId} = ${crawls.id})`,
+      })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId))
+      .limit(1);
+    const row = rows[0];
+    if (row === undefined) {
+      throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+    }
+    const { findingsCount, ...rest } = row;
+    if (typeof findingsCount !== "number") {
+      throw new Error(`crawlRowWithFindings: count came back as ${typeof findingsCount}, not a number`);
+    }
+    return { row: rest, findingsCount };
+  }
+
+  /**
    * Leases with a deadline still in the future, of either kind.
    *
    * Deliberately keyed on `lease_id is not null and leased_until > now()`
@@ -2153,27 +2218,6 @@ export class ApiService {
     const n = rows[0]?.n;
     if (typeof n !== "number") {
       throw new Error(`blockedPageCount: count came back as ${typeof n}, not a number`);
-    }
-    return n;
-  }
-
-  /**
-   * Findings this crawl holds right now — `count(*)` over `issues`.
-   *
-   * Live rather than remembered, and off the same table the issues listing
-   * reads, so the detail and the listing cannot disagree: a rules run rewrites
-   * that table wholesale, and a stored count would go stale the moment one did.
-   * It is the invariant `runRules`' summary states about itself
-   * (`count(issues where crawl_id) == summary.findings`), asked of the database.
-   */
-  private async findingsCount(crawlId: string): Promise<number> {
-    const rows = await this.db
-      .select({ n: sql<number>`count(*)::int` })
-      .from(issues)
-      .where(eq(issues.crawlId, crawlId));
-    const n = rows[0]?.n;
-    if (typeof n !== "number") {
-      throw new Error(`findingsCount: count came back as ${typeof n}, not a number`);
     }
     return n;
   }
@@ -2236,7 +2280,7 @@ export class ApiService {
     const record = robots as Record<string, unknown>;
 
     const outcome = record["outcome"];
-    if (!ROBOTS_OUTCOMES.includes(outcome as string)) {
+    if (typeof outcome !== "string" || !(ROBOTS_OUTCOMES as readonly string[]).includes(outcome)) {
       bad(`an unknown robots.outcome (one of: ${ROBOTS_OUTCOMES.join(", ")})`);
     }
     const raw = record["raw"];
@@ -2276,9 +2320,6 @@ export class ApiService {
     return this.parseRobots(discovery, crawlId).crawlDelaySec;
   }
 }
-
-/** The three outcomes `RobotsInfo` can record. See `RobotsEvidence.outcome`. */
-const ROBOTS_OUTCOMES: readonly string[] = ["read", "absent", "unreachable"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

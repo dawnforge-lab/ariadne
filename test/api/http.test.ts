@@ -857,6 +857,11 @@ describe("POST /crawls/:id/rules", () => {
     // the same number the run reported — the invariant `runRules` states about
     // itself (`count(issues where crawl_id) == summary.findings`), asked of the
     // surface instead of of the table.
+    //
+    // BOTH FIELDS OFF ONE RESPONSE, and one statement behind it: the pair is
+    // what an agent interprets ("0 beside a timestamp" is a clean site), so the
+    // two must describe the same snapshot. See `getCrawl`, and the
+    // statement-level assertion in test/api/query.test.ts.
     const after = await call("GET", `/crawls/${fixtureCrawlId}`);
     const stamp = after.body["rulesRunAt"];
     expect(typeof stamp).toBe("string");

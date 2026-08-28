@@ -26,6 +26,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
+import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";
@@ -833,6 +834,65 @@ describe("GET /crawls/:id/robots", () => {
     ]);
   });
 
+  // THE VOCABULARY IS THE CRAWL LAYER'S, NOT A COPY. `parseRobots` validates
+  // the stored outcome, so a fourth outcome added to `ROBOTS_OUTCOMES` and not
+  // mirrored into the API would make every new crawl's evidence unreadable —
+  // robots_get and the render path refusing rows that are perfectly sound. The
+  // list is imported rather than restated, here and in the service.
+  it("accepts every outcome the crawl layer can record", async () => {
+    const ids: string[] = [];
+    try {
+      for (const outcome of ROBOTS_OUTCOMES) {
+        const id = `crawl_query_robots_${outcome}_${Date.now()}`;
+        ids.push(id);
+        await seedCrawl(id, {
+          config: { siteUrl: `${SITE}/` },
+          discovery: {
+            // `read` is the only outcome that stores text; the other two are a
+            // note about why there is none.
+            robots: {
+              outcome,
+              crawlDelaySec: null,
+              note: outcome === "read" ? null : `robots.txt ${outcome}`,
+              raw: outcome === "read" ? ROBOTS_TEXT : null,
+              truncated: false,
+            },
+            sitemapSources: [],
+            truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+            docsFetched: 0,
+          },
+        });
+
+        const res = await call(`/crawls/${id}/robots`);
+        expect(res.status, `outcome '${outcome}' should be readable`).toBe(200);
+        expect(res.body["outcome"]).toBe(outcome);
+        expect(res.body["raw"]).toBe(outcome === "read" ? ROBOTS_TEXT : null);
+      }
+    } finally {
+      for (const id of ids) await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
+
+  it("409s an outcome no crawl of ours writes rather than passing it through", async () => {
+    const id = `crawl_query_robots_bogus_${Date.now()}`;
+    try {
+      await seedCrawl(id, {
+        config: { siteUrl: `${SITE}/` },
+        discovery: {
+          robots: { outcome: "maybe", crawlDelaySec: null, note: null, raw: null, truncated: false },
+          sitemapSources: [],
+          truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+          docsFetched: 0,
+        },
+      });
+      const res = await call(`/crawls/${id}/robots`);
+      expect(res.status).toBe(409);
+      expect(String(res.body["error"])).toContain("robots.outcome");
+    } finally {
+      await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
+
   it("409s a crawl with no discovery evidence rather than reporting 'no robots.txt'", async () => {
     // crawlA never completed discovery. "We have no record" and "the site has
     // no robots.txt" are different facts, and only one of them is true here.
@@ -880,6 +940,43 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     const clean = await call(`/crawls/${crawlE}`);
     expect(clean.body["findingsCount"]).toBe(0);
     expect(clean.body["rulesRunAt"]).toBeNull();
+  });
+
+  // ONE STATEMENT, ONE SNAPSHOT. rulesRunAt and findingsCount describe each
+  // other — an agent is told to read `findingsCount: 0` beside a timestamp as
+  // "looked, found nothing" — and a rules run clears the marker and deletes the
+  // crawl's issues in a single transaction. Read on two pool connections, a
+  // crawl-row read landing just before that commit and a count landing just
+  // after would compose `{rulesRunAt: <the previous run's stamp>,
+  // findingsCount: 0}`: a state that never existed, reported as a clean site.
+  // The race is not deterministically reproducible, so what is asserted is the
+  // property that removes it — the count comes out of the crawl-row statement.
+  it("reads the marker and the findings count from one statement, not two snapshots", async () => {
+    const pool = db.$pool as unknown as { query: (...args: unknown[]) => unknown };
+    const original = pool.query.bind(pool);
+    const statements: string[] = [];
+    pool.query = (...args: unknown[]) => {
+      const first = args[0];
+      statements.push(
+        typeof first === "string" ? first : String((first as { text?: unknown })?.text ?? ""),
+      );
+      return original(...args);
+    };
+
+    let res: Res;
+    try {
+      res = await call(`/crawls/${crawlA}`);
+    } finally {
+      pool.query = original;
+    }
+    expect(res.status).toBe(200);
+
+    // Exactly one statement of the whole request touches `issues`…
+    const touchingIssues = statements.filter((sql) => /\bissues\b/.test(sql));
+    expect(touchingIssues).toHaveLength(1);
+    // …and it is the one that reads the crawl row, marker included.
+    expect(touchingIssues[0]).toMatch(/\bcrawls\b/);
+    expect(touchingIssues[0]).toMatch(/rules_run_at/);
   });
 
   it("reports the stamp a completed rules run leaves, as an ISO timestamp", async () => {
