@@ -21,7 +21,12 @@
  *   POST /crawls/:id/fail              close a crawl nobody is working
  *   POST /crawls/:id/render            run the render pass
  *   POST /crawls/:id/rules             run the rules
- *   GET  /crawls/:id/issues            findings grouped by rule (the triage view)
+ *   GET  /crawls/:id/issues            findings grouped by rule (the triage view).
+ *                                      A group's `count` is the rows the rule
+ *                                      wrote; `truncated` + `total`|`atLeast`
+ *                                      appear when the rule capped its listing,
+ *                                      and their absence means the count is the
+ *                                      whole number (see `listIssues`).
  *   GET  /crawls/:id/issues/:rule/urls one rule's findings, URL by URL
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered

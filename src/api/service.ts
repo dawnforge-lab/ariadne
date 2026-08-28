@@ -342,6 +342,32 @@ export interface RenderSummaryOut {
 }
 
 /**
+ * What a group says when the rule that produced it CAPPED its listing.
+ *
+ * Absent — the empty case — means `count` is the whole truth: the rule listed
+ * every case it found. Present, `count` is only how many rows the rule wrote,
+ * and the magnitude of the problem is the other field: `total` where the rule
+ * counted every case exactly (a `count(*) over ()` beside a capped listing),
+ * `atLeast` where counting the rest would have cost precisely what the cap
+ * exists to save, so the number says how many were SEEN and nothing about how
+ * many exist. The two shapes are the rules' own `TruncationNote` contract
+ * (`src/rules/query/crawl-evidence.ts`), carried to the wire unweakened: a
+ * reader may render "and N more" from `total` and only "and at least N more"
+ * from `atLeast`.
+ *
+ * The distinction is not pedantry. `links.orphan` reports 200 on a site with
+ * 222 orphans and `content.near-duplicate` reports 500 of an unknown number;
+ * without this field both read as exact, and an audit quotes a floor as a fact
+ * (the Phase 6 gate's D-1 — an auditor did exactly that, and had to reconstruct
+ * the real magnitude from a metric).
+ */
+export type IssueTruncation =
+  | { truncated: true; total: number; atLeast?: never }
+  | { truncated: true; atLeast: number; total?: never }
+  /** No note: nothing was capped, and no field is added to the group. */
+  | { truncated?: never; total?: never; atLeast?: never };
+
+/**
  * One rule's findings on one crawl, as the agent's triage view.
  *
  * The count and the severity are FACTS from the `issues` rows; the checkIds,
@@ -349,15 +375,54 @@ export interface RenderSummaryOut {
  * half is stored twice: the API layer holds no rule copy of its own, so a rule
  * whose title changes changes here with it and nowhere else.
  */
-export interface IssueGroup {
+export type IssueGroup = {
   ruleId: string;
   checkIds: string[];
   severity: string;
   category: string;
   title: string;
+  /**
+   * How many rows this group holds — which is the number of cases found only
+   * when no `truncated` field sits beside it.
+   */
   count: number;
   /** At most `ISSUE_SAMPLE_URLS`, ascending — a sample, never the slice. */
   sampleUrls: string[];
+} & IssueTruncation;
+
+/**
+ * Read a rule's truncation note off the `truncated` key of whichever of its
+ * findings carries one (the last, by `noteOnLast`).
+ *
+ * VALIDATED, never cast: the note crosses from a rule's evidence blob — a
+ * `jsonb` column, so anything at all by the time it is read back — into a
+ * number a client will quote to a site owner. The `crawl-evidence` parsers set
+ * the precedent and the reason is the same: a shape that does not match is a
+ * defect to surface, not a value to coerce. Malformed is therefore LOUD (hard
+ * rule 7): the alternative is dropping the note, and a dropped note reads as
+ * "count is the total", which is the exact untruth this field exists to stop.
+ *
+ * The note's own `reported` is deliberately ignored. `count` is measured from
+ * the rows this query actually grouped, and under a `pageType` filter the two
+ * legitimately differ — see `listIssues` for what the pair means then.
+ */
+function truncationOf(raw: unknown, ruleId: string): IssueTruncation {
+  if (raw === null || raw === undefined) return {};
+  const bad = (why: string): never => {
+    throw new Error(
+      `rule '${ruleId}' wrote a truncation note that ${why}: ` +
+        `${JSON.stringify(raw)} matches neither shape of TruncationNote`,
+    );
+  };
+  if (typeof raw !== "object" || Array.isArray(raw)) return bad("is not an object");
+  const note = raw as Record<string, unknown>;
+  const magnitude = (value: unknown): value is number =>
+    typeof value === "number" && Number.isInteger(value) && value >= 0;
+  const total = note["total"];
+  const atLeast = note["atLeast"];
+  if (magnitude(total) && atLeast === undefined) return { truncated: true, total };
+  if (magnitude(atLeast) && total === undefined) return { truncated: true, atLeast };
+  return bad("names neither a whole-number 'total' nor a whole-number 'atLeast'");
 }
 
 /**
@@ -876,6 +941,28 @@ export class ApiService {
    * at read time. A rule id the current ruleset does not define is a 409 naming
    * it: the alternative is a findings table rendered with blank titles, which
    * is a report a client cannot act on and a silence hard rule 7 forbids.
+   *
+   * ## The truncation note
+   *
+   * A capped rule stamps its magnitude onto one of its findings
+   * (`noteTruncation` / `noteAtLeastTruncation`), and that fact is lifted onto
+   * the group as `truncated` + `total` | `atLeast` (`IssueTruncation`). Without
+   * it `count: 200` on a rule that stops listing at 200 reads as "200 cases",
+   * which is what the Phase 6 gate's auditor was told to report.
+   *
+   * The note is read RULE-WIDE — a subquery over this crawl and this rule id,
+   * outside the filters the caller supplied — for one reason: no filter may be
+   * able to HIDE a truncation. The note lives on a single row, so a `pageType`
+   * or `severity` filter that happened to exclude that row would answer a
+   * capped listing with no note at all, and silence here reads as "count is the
+   * total". Over-reporting the magnitude is the survivable direction; hiding it
+   * is not.
+   *
+   * The consequence, stated rather than left to be discovered: under a
+   * `pageType` filter `count` is the cohort's rows while `total`/`atLeast`
+   * remain the RULE's magnitude, so the two are not two ends of one fraction.
+   * The field names a property of the rule's run; the count names the rows in
+   * front of you.
    */
   async listIssues(crawlId: string, opts: IssueQuery = {}): Promise<Page<IssueGroup>> {
     await this.assertCrawl(crawlId);
@@ -912,6 +999,7 @@ export class ApiService {
       severity_rank: number;
       n: number;
       sample_urls: string[] | null;
+      truncation: unknown;
     }>(sql`
       select i.rule_id,
              i.severity,
@@ -920,7 +1008,13 @@ export class ApiService {
              (array_agg(distinct i.details_jsonb->>'pageUrl'
                         order by i.details_jsonb->>'pageUrl')
                 filter (where i.details_jsonb->>'pageUrl' is not null)
-             )[1:${sql.raw(String(ISSUE_SAMPLE_URLS))}] as sample_urls
+             )[1:${sql.raw(String(ISSUE_SAMPLE_URLS))}] as sample_urls,
+             (select i2.details_jsonb->'truncated'
+                from issues i2
+               where i2.crawl_id = ${crawlId}
+                 and i2.rule_id = i.rule_id
+                 and i2.details_jsonb->'truncated' is not null
+               limit 1) as truncation
       from issues i
       where ${sql.join(where, sql` and `)}
       group by i.rule_id, i.severity
@@ -941,6 +1035,7 @@ export class ApiService {
         // pass the filter — a rule whose every finding is site-wide. An empty
         // list is the honest reading and the one a caller can iterate.
         sampleUrls: row.sample_urls ?? [],
+        ...truncationOf(row.truncation, row.rule_id),
       };
     });
     const last = rows.length > limit ? rows[limit - 1] : undefined;

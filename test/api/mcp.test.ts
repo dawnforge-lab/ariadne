@@ -177,7 +177,14 @@ async function seedPage(
 
 async function seedIssue(
   crawlId: string,
-  row: { ruleId: string; severity: string; pageId?: string | null; pageUrl: string | null; dedupeKey: string },
+  row: {
+    ruleId: string;
+    severity: string;
+    pageId?: string | null;
+    pageUrl: string | null;
+    dedupeKey: string;
+    evidence?: Record<string, unknown>;
+  },
 ): Promise<void> {
   await db.insert(issues).values({
     crawlId,
@@ -186,7 +193,7 @@ async function seedIssue(
     severity: row.severity,
     rulesetVersion: "0.0.0-test",
     dedupeKey: row.dedupeKey,
-    details: { pageUrl: row.pageUrl },
+    details: { pageUrl: row.pageUrl, ...(row.evidence ?? {}) },
   });
 }
 
@@ -301,10 +308,14 @@ beforeAll(async () => {
     ruleId: "http.server-error", severity: "critical", pageUrl: `${SEEDED_SITE}/b1`,
     dedupeKey: `${SEEDED_SITE}/b1`,
   });
+  // The third orphan row carries a truncation note, as a capped rule's last
+  // finding does: this crawl's `links.orphan` listed 3 of 222, and the MCP
+  // transport has to carry that difference like the HTTP one does.
   for (let i = 1; i <= 3; i += 1) {
     await seedIssue(seededCrawlId, {
       ruleId: "links.orphan", severity: "warning", pageUrl: `${SEEDED_SITE}/o${i}`,
       dedupeKey: `${SEEDED_SITE}/o${i}`,
+      evidence: i === 3 ? { truncated: { reported: 3, total: 222 } } : {},
     });
   }
   await seedIssue(seededCrawlId, {
@@ -598,6 +609,24 @@ describe("issues_list / issue_urls", () => {
     expect(orphan?.["checkIds"]).toEqual(["CHECK-32"]);
     expect(String(orphan?.["title"] ?? "")).not.toBe("");
     expect(body["nextCursor"]).toBeNull();
+  });
+
+  it("carries a capped rule's real magnitude, and says nothing where nothing capped", async () => {
+    const groups = items(await ok("issues_list", { crawlId: seededCrawlId }));
+    const orphan = groups.find((g) => g["ruleId"] === "links.orphan");
+    expect(orphan?.["count"]).toBe(3);
+    expect(orphan?.["truncated"]).toBe(true);
+    expect(orphan?.["total"]).toBe(222);
+
+    const titles = groups.find((g) => g["ruleId"] === "title.missing");
+    expect(titles).not.toHaveProperty("truncated");
+  });
+
+  it("tells an agent what a capped count means, in the tool's own description", async () => {
+    const listed = await client.listTools();
+    const description = listed.tools.find((t) => t.name === "issues_list")?.description ?? "";
+    expect(description).toContain("truncated");
+    expect(description).toContain("atLeast");
   });
 
   it("filters by checkId, the way a checklist walk asks", async () => {

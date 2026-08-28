@@ -305,6 +305,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "sampleUrls}. Ordered by severity (critical, warning, info) then rule id. " +
         "sampleUrls is at most five URLs and is a SAMPLE, not the list; get the " +
         "full list from issue_urls.\n\n" +
+        "COUNTS AND CAPS. Some rules stop listing at a cap, so 'count' is the " +
+        "number of rows the rule wrote. A capped row carries 'truncated': true " +
+        "and one magnitude field: 'total' — the exact number of cases, of which " +
+        "count were listed — or 'atLeast' — how many were SEEN before the rule " +
+        "stopped looking, with the real number unknown. No 'truncated' field " +
+        "means count IS the total. Quote total or 'at least atLeast' as the size " +
+        "of the problem, never a capped count. (With a pageType filter, count is " +
+        "that cohort's rows while total/atLeast stay the whole rule's magnitude.)\n\n" +
         "Filters, each refused by name if it names nothing this ruleset defines " +
         "(so an empty page always means 'nothing found', never 'you asked wrong'):\n" +
         "  severity  — critical | warning | info\n" +

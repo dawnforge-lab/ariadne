@@ -44,7 +44,10 @@ const serverLog: string[] = [];
 
 /** The crawl every query test reads. */
 let crawlA = "";
-/** A second crawl holding rows for the same rules — the isolation control. */
+/**
+ * A second crawl holding rows for the same rules — the isolation control, and
+ * the crawl whose rules CAPPED their listings (the truncation-note fixture).
+ */
 let crawlB = "";
 /** A crawl holding rows for ids this ruleset no longer defines. */
 let crawlC = "";
@@ -219,11 +222,33 @@ beforeAll(async () => {
     pageUrl: `${SITE}/p2`, dedupeKey: `${SITE}/p2`, evidence: { param: "sort" },
   });
 
-  // The isolation control: the same rule, a different crawl.
+  // The isolation control: the same rule, a different crawl. It doubles as the
+  // UNCAPPED control below — nothing it wrote carries a truncation note, so its
+  // count is the whole truth and the group must say nothing about caps.
   await seedIssue(crawlB, {
     ruleId: "title.missing", severity: "warning", pageId: null,
     pageUrl: `${SITE}/other`, dedupeKey: `${SITE}/other`,
   });
+
+  // Two capped rules, in the two shapes a cap can honestly take. The note sits
+  // on the LAST finding, which is where `noteOnLast` puts it, and the fixture
+  // reproduces the gate site's own numbers: links.orphan listed 200 of 222
+  // orphans (exact), content.near-duplicate listed 500 of a number it never
+  // counted (lower bound), at 1/100 scale.
+  for (let i = 1; i <= 3; i += 1) {
+    await seedIssue(crawlB, {
+      ruleId: "links.orphan", severity: "warning", pageId: null,
+      pageUrl: `${SITE}/capped${i}`, dedupeKey: `${SITE}/capped${i}`,
+      evidence: i === 3 ? { truncated: { reported: 3, total: 222 } } : {},
+    });
+  }
+  for (let i = 1; i <= 2; i += 1) {
+    await seedIssue(crawlB, {
+      ruleId: "content.near-duplicate", severity: "warning", pageId: null,
+      pageUrl: `${SITE}/dupe${i}`, dedupeKey: `${SITE}/dupe${i}`,
+      evidence: i === 2 ? { truncated: { reported: 2, atLeast: 3 } } : {},
+    });
+  }
 
   // A crawl judged by a ruleset this one is not: ids nothing here defines.
   // Their copy cannot be joined, and the surface says so rather than answering
@@ -414,6 +439,66 @@ describe("GET /crawls/:id/issues", () => {
 
   it("404s an unknown crawl", async () => {
     expect((await call("/crawls/crawl_missing/issues")).status).toBe(404);
+  });
+
+  it("says so when a rule's listing was capped, in the shape the cap allows", async () => {
+    const groups = items(await call(`/crawls/${crawlB}/issues`));
+
+    // An EXACT cap: three rows listed, 222 orphans found. Quoting `count` here
+    // is what the Phase 6 gate's auditor was instructed to do, and it
+    // understates the site's problem by two orders of magnitude.
+    const orphan = groups.find((g) => g["ruleId"] === "links.orphan");
+    expect(orphan?.["count"]).toBe(3);
+    expect(orphan?.["truncated"]).toBe(true);
+    expect(orphan?.["total"]).toBe(222);
+    expect(orphan).not.toHaveProperty("atLeast");
+
+    // A LOWER BOUND: the rule stopped looking, so it can say what it saw and
+    // nothing about what exists. `total` must NOT appear — a number in that
+    // field is a promise this rule cannot keep.
+    const dupes = groups.find((g) => g["ruleId"] === "content.near-duplicate");
+    expect(dupes?.["count"]).toBe(2);
+    expect(dupes?.["truncated"]).toBe(true);
+    expect(dupes?.["atLeast"]).toBe(3);
+    expect(dupes).not.toHaveProperty("total");
+
+    // And an UNCAPPED rule says nothing at all: absence is what means "this
+    // count is the whole number", so a stray flag here would be as wrong as a
+    // missing one above.
+    const titles = groups.find((g) => g["ruleId"] === "title.missing");
+    expect(titles?.["count"]).toBe(1);
+    expect(titles).not.toHaveProperty("truncated");
+    expect(titles).not.toHaveProperty("total");
+    expect(titles).not.toHaveProperty("atLeast");
+
+    // The same crawl's rules under a filter: no filter may hide a cap, because
+    // silence reads as "count is the total".
+    const filtered = items(await call(`/crawls/${crawlB}/issues?ruleId=links.orphan`));
+    expect(filtered[0]?.["truncated"]).toBe(true);
+    expect(filtered[0]?.["total"]).toBe(222);
+  });
+
+  it("500s a truncation note it cannot read rather than dropping it", async () => {
+    // A note that names no magnitude is a rule defect. Dropping it would answer
+    // with a bare `count`, which a reader is entitled to take as the total — the
+    // silent fallback hard rule 7 forbids, and the precise untruth this field
+    // was added to prevent. So it is loud, and the detail stays in the log.
+    const broken = `crawl_query_broken_${Date.now()}`;
+    await seedCrawl(broken);
+    try {
+      await seedIssue(broken, {
+        ruleId: "links.orphan", severity: "warning", pageId: null,
+        pageUrl: `${SITE}/b`, dedupeKey: `${SITE}/b`,
+        evidence: { truncated: { reported: 1 } },
+      });
+      const res = await call(`/crawls/${broken}/issues`);
+      expect(res.status).toBe(500);
+      expect(res.body["error"]).toBe("internal error");
+      expect(typeof res.body["correlationId"]).toBe("string");
+      expect(serverLog.some((line) => line.includes("links.orphan"))).toBe(true);
+    } finally {
+      await db.delete(crawls).where(eq(crawls.id, broken));
+    }
   });
 });
 
