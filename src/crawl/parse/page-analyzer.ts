@@ -108,19 +108,30 @@
  * diagnosis (`audits/lavishalice.com/render-diagnosis.md`), which measured a
  * product page at 1,413 raw words against 335 rendered ones and attributed
  * every missing word:
- *  - **`<template>` joins `NON_CONTENT_TAGS`, which CHANGES `word_count`.**
- *    This is the one semantic change this file has ever made to a number
- *    already in the database, and it is a bug fix rather than a redefinition:
- *    a real parser puts template content in an inert `DocumentFragment` that
- *    is in no document, is rendered under no CSS and is indexed by nothing,
- *    so text inside a `<template>` was never content and counting it was
- *    never right. On the diagnosed product page it was 482 of 1,413 words —
- *    34% of a PDP's "content", which is exactly the page type a thin-content
- *    or duplicate-content rule cares about most. The parity oracle was
- *    already right here and nobody noticed: cheerio's parse5 tree puts
- *    template children under a fragment node the oracle's walk skips, so the
- *    two sides silently disagreed on any page carrying a template. They now
- *    agree by both excluding it.
+ *  - **`<template>` text leaves the visible-text accumulators, which CHANGES
+ *    `word_count`.** This is the one semantic change this file has ever made
+ *    to a number already in the database, and it is a bug fix rather than a
+ *    redefinition: a real parser puts template content in an inert
+ *    `DocumentFragment` that is in no document, is rendered under no CSS and
+ *    is indexed by nothing, so text inside a `<template>` was never content
+ *    and counting it was never right. On the diagnosed product page it was
+ *    482 of 1,413 words — 34% of a PDP's "content", which is exactly the page
+ *    type a thin-content or duplicate-content rule cares about most. The
+ *    parity oracle was already right here and nobody noticed: cheerio's
+ *    parse5 tree puts template children under a fragment node the oracle's
+ *    TEXT WALK skips, so the two sides silently disagreed on any page
+ *    carrying a template. They now agree by both excluding it.
+ *
+ *    THE BLAST RADIUS IS EXACTLY THE SIX DERIVATIONS OF THAT ACCUMULATOR —
+ *    `wordCount`, `textRatio`, `contentHash`, `simhash`, `hasLoremIpsum` and
+ *    `hasSoft404Phrases`, every one of them a reading of `bodyText` — plus
+ *    `renderableWordCount`, which is new and template-free by construction.
+ *    Nothing else moves. `<template>` is tracked by its own depth counter
+ *    and NOT by `NON_CONTENT_TAGS` precisely so that stays true: the element
+ *    extractions, and the element TEXT they capture (the first `<h1>`'s
+ *    words, an anchor's words, the document title), are untouched, because
+ *    the oracle's selectors reach template content and this file must agree
+ *    with them about it. See `TEMPLATE_TAG`.
  *  - **`renderableWordCount`** is a SECOND count over the same visible-text
  *    stream, additionally dropping text inside markup that says the element is
  *    not displayed: a `hidden` attribute, an inline `style` containing
@@ -334,17 +345,35 @@ export interface RawPageLink extends PageLink {
 }
 
 const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
+/** Subtrees whose text is not visible content. */
+const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
 /**
- * Subtrees whose text is not visible content.
+ * `<template>` is a fifth subtree whose text is not page text — its content is
+ * in no rendered document — and it is tracked SEPARATELY from the four above
+ * rather than added to them, which is the whole of the distinction this file
+ * draws about it.
  *
- * `template` is in the family for the reason the other four are: its text is
- * in no rendered document. htmlparser2 sees an ordinary element, but a real
- * parser moves template content into an inert `DocumentFragment` outside the
- * tree, where no CSS applies to it and no indexer reads it. See the module
- * header — this membership changes `wordCount` itself, and it is the only
- * change to that number this file has made.
+ * `NON_CONTENT_TAGS` does two jobs: it suppresses text accumulation AND it is
+ * read at element level (the `<title>`-inside-`<svg>` guard). A `<template>`
+ * belongs in the first job and NOT the second. Its text is in no document, so
+ * no word count may include it; but htmlparser2 emits its elements as ordinary
+ * open tags, the DOM oracle's selectors match them (cheerio's parse5 tree puts
+ * template children under a fragment that `$('h1')`, `$('a[href]')` and
+ * `$('title')` all still reach), and every element-level extraction in this
+ * file — heading counts, image counts, link rows, canonical, the document
+ * title — has always counted them. WHETHER IT SHOULD is a real question and an
+ * open one; it is not this task's question, and answering it by accident,
+ * through a set membership, would have silently emptied three text captures:
+ * the first `<h1>`'s text (`h1Text`, and first-h1-wins means a phantom
+ * template heading would SHADOW the real one), every template anchor's text in
+ * the persisted `links` rows, and the document title of a page whose `<title>`
+ * sits inside a template. All three are on the parity surface and all three
+ * would have diverged from the DOM oracle in one direction only.
+ *
+ * So: one counter, one job. Template text reaches the element captures exactly
+ * as it did before Phase 7 and reaches neither word-count accumulator.
  */
-const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg", "template"]);
+const TEMPLATE_TAG = "template";
 /**
  * An inline `display:none`, matched against the `style` ATTRIBUTE STRING.
  *
@@ -592,8 +621,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   // Visible text: prefer text inside an explicit <body>; when the document
   // never opens one (fragments), fall back to all non-head text. Both
-  // exclude NON_CONTENT_TAGS subtrees.
+  // exclude NON_CONTENT_TAGS subtrees, and both exclude `<template>` content —
+  // which is counted by `templateDepth` rather than by `suppressDepth`, so that
+  // it reaches the element captures the way it always has. See TEMPLATE_TAG.
   let suppressDepth = 0;
+  let templateDepth = 0;
   let bodyDepth = 0;
   let headDepth = 0;
   let sawBody = false;
@@ -741,7 +773,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     parts.push(" ");
   };
   const emitTextBoundary = () => {
-    if (suppressDepth > 0 || titleDepth > 0) return;
+    if (suppressDepth > 0 || templateDepth > 0 || titleDepth > 0) return;
     const inBody = bodyDepth > 0;
     if (!inBody && headDepth > 0) return;
     pushBoundary(inBody ? bodyParts : fallbackParts);
@@ -751,8 +783,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     pushBoundary(inBody ? renderableBodyParts : renderableFallbackParts);
   };
 
+  // `<template>` joins the stripped subtrees here as well: the oracle's DOM
+  // walk stops at the element and pushes no separator around it, so neither
+  // does this. The two streams must agree about structure or the whitespace
+  // either side of a template block would differ between them.
   const isTextBoundary = (name: string) =>
-    !INLINE_TEXT_TAGS.has(name) && !NON_CONTENT_TAGS.has(name);
+    !INLINE_TEXT_TAGS.has(name) && !NON_CONTENT_TAGS.has(name) && name !== TEMPLATE_TAG;
 
   const closeAnchor = () => {
     if (!openAnchor) return;
@@ -796,6 +832,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (NON_CONTENT_TAGS.has(name)) {
           suppressDepth += 1;
         }
+        // Counted apart from the four above, and counted BEFORE the noscript
+        // return below so its close (which is handled just as early) can never
+        // be missed. Only the text accumulators read it.
+        if (name === TEMPLATE_TAG) templateDepth += 1;
         if (name === "noscript") noscriptDepth += 1;
         if (noscriptDepth > 0) return;
         switch (name) {
@@ -911,6 +951,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         }
         if (openH1) openH1.push(text);
         if (openAnchor) openAnchor.text.push(text);
+        // THE TEMPLATE GATE, and its position is the point: every capture
+        // above it sees template text (the DOM oracle's selectors do too, so
+        // an `<h1>`, an `<a>` or a `<title>` inside a template reads exactly as
+        // it did before Phase 7), and neither accumulator below it does.
+        if (templateDepth > 0) return;
         const hidden = renderableHidden();
         if (bodyDepth > 0) {
           bodyParts.push(text);
@@ -937,6 +982,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (NON_CONTENT_TAGS.has(name) && suppressDepth > 0) {
           suppressDepth -= 1;
         }
+        if (name === TEMPLATE_TAG && templateDepth > 0) templateDepth -= 1;
         if (name === "noscript" && noscriptDepth > 0) {
           noscriptDepth -= 1;
           return;

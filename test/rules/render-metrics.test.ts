@@ -63,6 +63,13 @@ describe("render.coverage against the database", () => {
     /** A hydration marker in the raw HTML — the framework trigger. */
     frameworkMarkers?: string[];
     wordCount?: number;
+    /**
+     * What the thin suspicion trigger reads (Phase 7). Undefined means "the
+     * same as `wordCount`" — the shape of a page whose markup hides nothing,
+     * which is what these fixtures are — so the selection arithmetic below is
+     * the same arithmetic it was before the trigger changed column.
+     */
+    renderableWordCount?: number | null;
     htmlBytes?: number;
     rendered?: boolean;
     renderError?: string | null;
@@ -87,6 +94,8 @@ describe("render.coverage against the database", () => {
         pageType: s.pageType,
         title: "A perfectly reasonable page title here",
         wordCount: s.wordCount ?? 400,
+        renderableWordCount:
+          s.renderableWordCount === undefined ? (s.wordCount ?? 400) : s.renderableWordCount,
         htmlBytes: s.htmlBytes ?? 40_000,
         frameworkMarkers: s.frameworkMarkers ?? [],
         rendered,
@@ -116,7 +125,10 @@ describe("render.coverage against the database", () => {
    *
    * Page types and suspicion:
    *   /a1  type a  framework marker            SUSPECT
-   *   /a2  type a  10 words in 60,000 bytes    SUSPECT (thin: < 50 words in > 50KB)
+   *   /a2  type a  10 words in 60,000 bytes    SUSPECT (thin: < 50 RENDERABLE
+   *                                          words in > 50KB — this page hides
+   *                                          nothing, so its renderable count
+   *                                          is its word count)
    *   /a3  type a  clean
    *   /a4  type a  clean
    *   /b1  type b  clean

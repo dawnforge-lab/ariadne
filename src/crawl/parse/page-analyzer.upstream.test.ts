@@ -59,7 +59,14 @@
  *    diagnosis found 482 words of it on one product page. The port now excludes
  *    it too, and this file names `template` in NON_CONTENT_TAGS so the
  *    exclusion is a stated rule on both sides rather than an accident of how
- *    parse5 represents a fragment.
+ *    parse5 represents a fragment. **The exclusion is of the TEXT and of
+ *    nothing else**: the fragment is invisible to a tree WALK and perfectly
+ *    visible to a SELECTOR, so `$('h1')`, `$('a[href]')`, `$('title')`,
+ *    `$('img')` and `$('link[rel]')` all reach into a template — and the port
+ *    keeps agreeing with them, which is what the four cases at the bottom of
+ *    this file pin. Whether template elements SHOULD count as page elements
+ *    is a live question and neither side answers it here; both answer it the
+ *    same way, which is all a parity oracle is for.
  *  - `renderableWordCount` IS on the parity surface, because it is a DOM read
  *    rather than a `bodyText` derivation: it asks four questions about
  *    ATTRIBUTES (`hidden`, an inline `display:none`, `<dialog open>`,
@@ -108,8 +115,14 @@ const EXTENSION_FIELDS = [
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
 
 /**
- * Subtrees the DOM implementation removed before reading text. `template` is
- * named rather than left to parse5's fragment representation; see the header.
+ * Subtrees this file's two TEXT WALKS stop at. `template` is named rather than
+ * left to parse5's fragment representation; see the header.
+ *
+ * Deliberately NOT the same set as the port's `NON_CONTENT_TAGS`, which is back
+ * to four names because it is read at element level as well. This one is only
+ * ever consulted by `collectVisibleText` and `collectRenderableText`, so the
+ * fifth name belongs here and the port spends a separate counter to say the
+ * same thing without touching its element extractions.
  */
 const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg", "template"]);
 
@@ -696,6 +709,51 @@ describe("hidden surfaces and template content, against the DOM", () => {
     expectParity(`<html><body><p>un<span hidden>x</span>believable</p></body></html>`);
     expectParity(
       `<html><body><section hidden><details><summary>s</summary><p>a</p></details></section><p>b</p></body></html>`,
+    );
+  });
+
+  // THE FIVE CASES THE TEXT EXCLUSION MUST NOT TOUCH. A `<template>` hides its
+  // content from a tree walk and from nothing else, so every element the DOM
+  // oracle's selectors reach inside one has to read the same on both sides.
+  // Each of these was a live divergence for the length of one review round,
+  // when `template` was suppressed as a whole rather than as text.
+  it("agrees about an h1 inside a template, which must not shadow the real one", () => {
+    // The sharp one. `h1s` is compared here, and `h1Text` is `h1s[0]`, so a
+    // port that captured an empty string for the phantom heading would put ""
+    // in the column Task 2's rule reads — silently, on every templated page.
+    expectParity(
+      `<html><body><template><h1>Phantom heading</h1></template><h1>Real heading</h1></body></html>`,
+    );
+    expectParity(`<html><body><template><h1>Phantom heading</h1></template></body></html>`);
+  });
+
+  it("agrees about an anchor inside a template, text and all", () => {
+    // The anchor becomes a `links` row on both sides; only its ANCHOR TEXT was
+    // at risk, and anchor text is what an internal-link report quotes.
+    expectParity(
+      `<html><body><template><a href="/x">anchor text</a></template><a href="/y">real</a></body></html>`,
+    );
+  });
+
+  it("agrees about a title inside a template", () => {
+    // cheerio's `$('title').first()` reaches into the fragment, so a document
+    // whose only title sits in a template HAS that title as far as the oracle
+    // is concerned — and a port that returned null would report
+    // `title.missing` on a page the DOM says has one.
+    expectParity(
+      `<html><head><template><title>Template title</title></template></head><body><p>x</p></body></html>`,
+    );
+    expectParity(
+      `<html><head><title>Real title</title><template><title>Template title</title></template></head><body><p>x</p></body></html>`,
+    );
+  });
+
+  it("agrees about images, canonicals and metas inside a template", () => {
+    expectParity(
+      `<html><head><template><link rel="canonical" href="/c">` +
+        `<meta name="description" content="template description"></template></head>` +
+        `<body><template><img src="/a.png"><img src="/b.png" alt="b" width="1" height="1">` +
+        `</template><p>real copy</p></body></html>`,
     );
   });
 

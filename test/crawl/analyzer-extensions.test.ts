@@ -480,6 +480,30 @@ describe("template content is counted by nothing", () => {
     expect(a.hasLoremIpsum).toBe(false);
     expect(a.wordCount).toBe(3);
   });
+
+  it("leaves every ELEMENT inside a template exactly where it was", () => {
+    // The exclusion is of text and of nothing else. A template's elements are
+    // still elements to this file, because they are still elements to the DOM
+    // oracle's selectors — see TEMPLATE_TAG in page-analyzer.ts and the four
+    // parity cases in page-analyzer.upstream.test.ts.
+    const a = body(
+      `<template><h1>Phantom heading</h1><a href="/x">anchor text</a><img src="/a.png">` +
+        `</template><h1>Real heading</h1><p>visible copy</p>`,
+    );
+    expect(a.headingCounts[0], "both h1s counted").toBe(2);
+    expect(a.imagesTotal, "the template's image counted").toBe(1);
+    expect(a.links.map((l) => l.anchor), "the template's anchor and its TEXT").toEqual([
+      "anchor text",
+    ]);
+    // AND THE OPEN QUESTION, pinned rather than answered: first-h1-wins, so a
+    // phantom heading a script will clone later is the heading `h1Text`
+    // reports. Whether a template's elements should count as the page's
+    // elements at all is a ruling this task deliberately does not make — but
+    // the shadowing is visible here instead of being discovered downstream.
+    expect(a.h1Text).toBe("Phantom heading");
+    // The words, meanwhile, are the visible ones alone: 2 (real heading) + 2.
+    expect(a.wordCount).toBe(4);
+  });
 });
 
 describe("renderableWordCount drops what the markup says is hidden", () => {

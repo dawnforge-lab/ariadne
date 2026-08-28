@@ -61,6 +61,13 @@ interface PageSpec {
   fetchClass?: string;
   statusCode?: number | null;
   wordCount?: number | null;
+  /**
+   * What the thin trigger actually reads (Phase 7). Undefined means "the same
+   * as `wordCount`" — a page hiding nothing — so every threshold case below
+   * reads as it always did; an explicit null is a pre-P7 row, which the
+   * trigger drops rather than guessing at.
+   */
+  renderableWordCount?: number | null;
   htmlBytes?: number | null;
   title?: string | null;
   frameworkMarkers?: string[];
@@ -99,6 +106,10 @@ describe("selectRenderSet", () => {
       statusCode: s.statusCode === undefined ? 200 : s.statusCode,
       isIndexable: s.isIndexable ?? true,
       wordCount: s.wordCount === undefined ? 400 : s.wordCount,
+      renderableWordCount:
+        s.renderableWordCount === undefined
+          ? (s.wordCount === undefined ? 400 : s.wordCount)
+          : s.renderableWordCount,
       htmlBytes: s.htmlBytes === undefined ? 40_000 : s.htmlBytes,
       title: s.title === undefined ? "A perfectly reasonable page title" : s.title,
       frameworkMarkers: s.frameworkMarkers ?? [],
@@ -163,9 +174,12 @@ describe("selectRenderSet", () => {
    *
    *   path           why it is (or is not) a suspect
    *   /healthy       nothing: 400 words, 40KB, titled, no markers, links out
-   *   /thin          T1: word_count 49 < 50 AND html_bytes 51201 > 51200
-   *   /thin-edge     no: word_count 50 is not < 50 (51201 bytes)
+   *   /thin          T1: renderable 49 < 50 AND html_bytes 51201 > 51200
+   *   /thin-edge     no: renderable 50 is not < 50 (51201 bytes)
    *   /thin-edge2    no: html_bytes 51200 is not > 51200 (49 words)
+   *                  — none of the three hides anything, so their renderable
+   *                    counts ARE their word counts and the boundaries are the
+   *                    same arithmetic they were before the column moved
    *   /dead-end      T2: makes no outgoing link
    *   /titleless     T3: title null AND html_bytes 25601 > 25600
    *   /title-empty   T3: title '' counts as titleless (25601 bytes)
@@ -218,6 +232,34 @@ describe("selectRenderSet", () => {
       sampled: 0,
       truncated: false,
     });
+  });
+
+  it("reads the thin trigger off the renderable count, and drops a pre-P7 null", async () => {
+    // Phase 7's swap, in the three shapes that distinguish the two columns.
+    // All three are 60KB documents, so the byte half of the trigger holds for
+    // each and only the word half decides.
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      // 900 words shipped, 40 a reader can reach: a big document with almost
+      // nothing in it, which is precisely what this trigger is looking for and
+      // precisely what the raw column hid.
+      { path: "/chrome-shell", wordCount: 900, renderableWordCount: 40, htmlBytes: 60_000 },
+      // The same size with the words actually on the page: not a suspect, so
+      // the swap is not a licence to render everything.
+      { path: "/chrome-rich", wordCount: 900, renderableWordCount: 900, htmlBytes: 60_000 },
+      // A pre-P7 row: thin by the old column, no renderable count at all.
+      // `null < 50` is NULL, so it is not a suspect — and that is not a
+      // regression, because the render pass runs on the crawl that just wrote
+      // these rows, so this shape cannot occur in a live pass.
+      { path: "/pre-p7", wordCount: 10, renderableWordCount: null, htmlBytes: 60_000 },
+    ]);
+
+    const result = await selectRenderSet(db, crawlId, {
+      renderBudgetPct: 100,
+      renderSamplePerType: 0,
+    });
+    expect(result.selected).toEqual([url("/chrome-shell")]);
+    expect(result.suspects).toBe(1);
   });
 
   it("puts every selected URL into the frontier as render_pending", async () => {

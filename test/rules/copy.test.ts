@@ -340,6 +340,11 @@ describe("issue copy", () => {
     expect(ISSUE_COPY["content.soft-404"]!.explanation).toMatch(
       new RegExp(`\\b${SOFT_404_WORDS} words\\b`),
     );
+    // And WHICH 300 words: the ceiling is applied to the renderable count, so
+    // a short error message inside a full site shell is still short. Copy that
+    // left this out would describe a rule that fires far less often than it
+    // does on exactly the sites where it matters most.
+    expect(ISSUE_COPY["content.soft-404"]!.explanation).toMatch(/the markup hides/i);
     expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toContain(
       `${NUMBER_WORDS[NEAR_DUPLICATE_HAMMING]} bits out of sixty-four`,
     );
@@ -460,6 +465,14 @@ describe("issue copy", () => {
     // says what it leaves out, and that sentence is the whole reason the
     // measure is quotable to a client.
     expect(text, "what renderable excludes").toMatch(/the page's own markup hides/i);
+    // And the other half of that sentence, which is the one a reader of this
+    // table would otherwise get wrong: `text_ratio` reads the accumulator that
+    // still includes hidden chrome. Two measures over the same page that treat
+    // hidden text differently must both say which they are, or the table
+    // silently invites the comparison it cannot support.
+    expect(text, "the text ratio still counts hidden text").toMatch(
+      /text ratio counts the hidden parts as text/i,
+    );
     expect(text, "the count is per measure, over three now").toMatch(/three counts/i);
     expect(text, "the count").toMatch(/how many pages were measured/i);
     // And that the count is per measure rather than the size of the cohort —

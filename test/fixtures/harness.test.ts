@@ -847,16 +847,24 @@ describe("the fixture site end to end", () => {
     const details = detailsByPath.get("/authored3/soft-404\ncontent.soft-404") as {
       signals: string[];
       wordCount: number;
+      renderableWordCount: number;
     };
     expect(details.signals).toEqual(["phrases"]);
-    expect(details.wordCount).toBeGreaterThanOrEqual(THIN_WORDS);
-    expect(details.wordCount).toBeLessThan(SOFT_404_WORDS);
+    // The bounds are applied to the RENDERABLE count, which is the column the
+    // ceiling reads since Phase 7. This fixture hides nothing, so the two are
+    // the same number and the bounds hold on both — asserted on both, so a
+    // fixture that later grew a hidden block would fail here rather than
+    // quietly changing which number the assertion was about.
+    expect(details.renderableWordCount).toBeGreaterThanOrEqual(THIN_WORDS);
+    expect(details.renderableWordCount).toBeLessThan(SOFT_404_WORDS);
+    expect(details.renderableWordCount).toBe(details.wordCount);
     // `hammingToTemplate` appears only when a distance was computed; there was
-    // no template, so the blob carries the two fields above and nothing else.
+    // no template, so the blob carries the three fields above and nothing else.
     expect(details).toEqual({
       pageUrl: `${app.base}/authored3/soft-404`,
       signals: ["phrases"],
       wordCount: details.wordCount,
+      renderableWordCount: details.renderableWordCount,
     });
   });
 
@@ -1175,9 +1183,14 @@ describe("the fixture site end to end", () => {
     //
     // selectionSuspects = 61. Only ONE of the four suspicion triggers can fire
     // on this site: no fixture is a 50KB document with under 50 words, and no
-    // titleless fixture is over 25KB (/head/missing-title is 1.3KB). The
-    // trigger that does fire is "this page links nowhere", and the cohort pages
-    // that DO link somewhere are exactly twelve:
+    // titleless fixture is over 25KB (/head/missing-title is 1.3KB). The thin
+    // trigger reads `renderable_word_count` since Phase 7 and STILL fires on
+    // nothing here, which is arithmetic rather than luck: its byte half is what
+    // excludes every fixture, and the fixture that hides the most is
+    // `/authored7/hidden-chrome` at 2.3KB with 187 renderable words — two
+    // orders of magnitude inside the byte threshold and three times over the
+    // word one. The trigger that does fire is "this page links nowhere", and
+    // the cohort pages that DO link somewhere are exactly twelve:
     //
     //   /                            the hub, 71 links
     //   /links/broken-internal-link  1 link, to /status/not-found

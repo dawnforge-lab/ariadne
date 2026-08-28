@@ -148,6 +148,14 @@ describe("the content rules against the database", () => {
     /** Overrides the hash derived from `text` — how two pages become exact duplicates. */
     contentHash?: string | null;
     wordCount?: number;
+    /**
+     * The renderable word count — what `content.soft-404`'s length ceiling
+     * reads. Undefined means "the same as `wordCount`", the shape of a page
+     * with nothing hidden; an explicit null is a row a pre-P7 crawl wrote,
+     * which SQL drops from the phrase path rather than judging on the other
+     * column.
+     */
+    renderableWordCount?: number | null;
     hasSoft404Phrases?: boolean;
     pageType?: string;
   }
@@ -202,6 +210,10 @@ describe("the content rules against the database", () => {
         contentHash: s.contentHash === undefined ? (text === null ? null : `h:${text}`) : s.contentHash,
         simhash: text === null ? null : stored(text),
         wordCount: s.wordCount ?? (text === null ? null : text.split(" ").length),
+        renderableWordCount:
+          s.renderableWordCount === undefined
+            ? (s.wordCount ?? (text === null ? null : text.split(" ").length))
+            : s.renderableWordCount,
         hasSoft404Phrases: s.hasSoft404Phrases ?? false,
         depth: 1,
         discoveredVia: "link",
@@ -249,7 +261,11 @@ describe("the content rules against the database", () => {
       });
       // No probe: the template signal was not available, so it is not named and
       // no distance is quoted. The rule still ran.
-      expect(found[0]!.evidence).toEqual({ signals: ["phrases"], wordCount: 80 });
+      expect(found[0]!.evidence).toEqual({
+        signals: ["phrases"],
+        wordCount: 80,
+        renderableWordCount: 80,
+      });
     });
 
     it("is silent when a long page merely contains the phrases", async () => {
@@ -277,6 +293,7 @@ describe("the content rules against the database", () => {
       expect(found[0]!.evidence).toEqual({
         signals: ["template-match"],
         wordCount: 500,
+        renderableWordCount: 500,
         hammingToTemplate: 3,
       });
     });
@@ -292,6 +309,7 @@ describe("the content rules against the database", () => {
       expect(found[0]!.evidence).toEqual({
         signals: ["phrases", "template-match"],
         wordCount: 90,
+        renderableWordCount: 90,
         hammingToTemplate: 3,
       });
     });
@@ -321,7 +339,11 @@ describe("the content rules against the database", () => {
 
       const found = await run(ID, crawlId);
       expect(found.map((f) => f.pageUrl)).toEqual([url("/gone")]);
-      expect(found[0]!.evidence).toEqual({ signals: ["phrases"], wordCount: 80 });
+      expect(found[0]!.evidence).toEqual({
+        signals: ["phrases"],
+        wordCount: 80,
+        renderableWordCount: 80,
+      });
     });
 
     it("still runs the phrase path when the probe was skipped", async () => {
@@ -335,7 +357,11 @@ describe("the content rules against the database", () => {
 
       const found = await run(ID, crawlId);
       expect(found).toHaveLength(1);
-      expect(found[0]!.evidence).toEqual({ signals: ["phrases"], wordCount: 80 });
+      expect(found[0]!.evidence).toEqual({
+        signals: ["phrases"],
+        wordCount: 80,
+        renderableWordCount: 80,
+      });
     });
 
     it("stays silent on a page that is not indexable or did not answer 200", async () => {
@@ -355,6 +381,42 @@ describe("the content rules against the database", () => {
       ]);
       const found = await run(ID, crawlId);
       expect(found.map((f) => f.pageUrl)).toEqual([url("/under")]);
+    });
+
+    it("measures that threshold against the renderable count, not the raw one", async () => {
+      // The soft 404 rendered into the site's own shell: 42 words of "we could
+      // not find that page" inside 780 words of mega-menu, currency picker and
+      // closed accordions. The raw column puts it 480 words above a ceiling
+      // meant to catch exactly this page — a false negative in the phase's own
+      // direction — while the renderable one puts it 258 below.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/shelled-404", text: SIZING, wordCount: 780, renderableWordCount: 42, hasSoft404Phrases: true },
+        // And the converse, so the swap is not a licence to fire: a long
+        // article about broken links stays silent on both counts.
+        { path: "/article", text: RETURNS, wordCount: 900, renderableWordCount: 850, hasSoft404Phrases: true },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/shelled-404")]);
+      expect(found[0]!.evidence).toEqual({
+        signals: ["phrases"],
+        wordCount: 780,
+        renderableWordCount: 42,
+      });
+    });
+
+    it("does not judge a pre-P7 row on the other column — it leaves it to the skip rule", async () => {
+      // A word count under the ceiling, no renderable count, the wording
+      // present. `null < 300` is NULL, so SQL drops the row and this rule says
+      // nothing about it: a coalesce here would be the silent wrong-column
+      // fallback `content.thin` refuses by name one file away. The page is not
+      // passed over in silence either — `content.thin-skipped` reports it.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/pre-p7", text: SIZING, wordCount: 80, renderableWordCount: null, hasSoft404Phrases: true },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
     it("caps the list and still says how many pages there are", async () => {
