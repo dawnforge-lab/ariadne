@@ -485,12 +485,28 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        robots questions below are unanswered on this crawl, not answered clean.
   2. `issues_list` with `checkId: "CHECK-05"` (`crawl.blocked`) for pages the crawl
      was refused — a robots-shaped block that shows up as a fetch outcome.
-- **DevTools** (the parts no crawl answers — the file's *contents*, and the gaps in it):
-  1. Navigate to `{domain}/robots.txt` — extract full content
-  2. Parse: User-agent blocks, Disallow rules, Sitemap lines, Crawl-delay
+  3. **`robots_get` — the file itself, as this crawl read it.** It answers
+     `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
+     sitemapSources, userAgent}`: `raw` is the text the crawl obeyed, `outcome` is
+     `read` / `absent` / `unreachable` (and `unreachable` is NOT `absent` — a site
+     that could not tell us its rules is a finding, not an allow-all), `truncated`
+     means `raw` is only the first 500KB so anything concluded about a rule past that
+     point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
+     (CHECK-06 reads it), and `userAgent` is the UA whose groups actually governed
+     the crawl. **Stored evidence, never re-fetched**: quote it rather than the live
+     file, and if you also read the live file, report the difference as the fact about
+     the site that it is.
+- **The file's contents** (steps 1-4 read `robots_get`'s `raw`; a browser only if the
+  crawl never stored one — `outcome: "unreachable"`):
+  1. Read `raw` in full. Note `truncated` in the finding if it is set.
+  2. Parse: User-agent blocks, Disallow rules, Sitemap lines, Crawl-delay. `robots_get`
+     already extracts the last two as `sitemapSources` and `crawlDelaySec` — quote
+     those rather than re-deriving them, and read the rest against `userAgent`, since
+     a rule in a group the crawler never matched did not apply to it.
   3. Check for AI bot rules: GPTBot, ChatGPT-User, Google-Extended, ClaudeBot, Anthropic-AI, PerplexityBot, CCBot
   4. Flag any Disallow rules blocking important content paths (/collections/, /products/, /blogs/)
-  5. **Pattern gap analysis** (MANDATORY): Don't just read the rules — test specific URL
+- **DevTools** (the part no stored text answers — testing URLs against the rules):
+  1. **Pattern gap analysis** (MANDATORY): Don't just read the rules — test specific URL
      patterns against them to find gaps. Construct these test URLs and check each:
      - Single filter: `/collections/{name}?filter.v.size=UK+10` — blocked?
      - Filter + pagination: `/collections/{name}?filter.v.size=UK+10&page=2` — blocked?
@@ -499,13 +515,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - Tag + pagination: `/blogs/{name}/tagged/{tag}?page=2` — blocked?
      - Sort + pagination: `/collections/{name}?sort_by=price&page=2` — blocked?
      Present results as a table showing each test URL pattern and whether it's blocked or passes through.
-  6. **Shopify-specific**: The default Shopify robots.txt blocks `*/collections/*filter*&*filter*`
+  2. **Shopify-specific**: The default Shopify robots.txt blocks `*/collections/*filter*&*filter*`
      (two+ filters) but NOT single filter URLs. It blocks `*sort_by*` but doesn't block
      `?page=` pagination. Check if these gaps exist and flag the crawl surface they create.
 - **Evaluate**:
-  - FAIL if robots.txt returns non-200
+  - FAIL if robots.txt returns non-200 — and say which kind, because the two do not
+    mean the same thing: `robots_get`'s `outcome` is `absent` for a 4xx (the site says
+    there are no rules, and crawling allow-all was correct) and `unreachable` for a
+    5xx, a timeout or a refused URL (rules nobody could read)
   - FAIL if key content paths are blocked
-  - WARN if no Sitemap: line declared
+  - WARN if no Sitemap: line declared — `sitemapSources` empty
   - WARN if single filter URLs or filter+pagination combinations pass through robots.txt rules
   - Record: blocked paths list, AI bot rules, sitemap declaration, blocked URL count from the engine, **pattern gap analysis table**
 
@@ -550,8 +569,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   reports pages the crawler was refused rather than served (the fetch was classified
   `blocked`; the evidence carries the status code). A branded, politely paced crawler
   being blocked is a bot-blocker finding, and `issue_urls` gives the affected URLs.
-  Report it against the user agent the crawl actually used — the claim is "this UA
-  was blocked on these URLs", never "all bots are blocked".
+  Report it against the user agent the crawl actually used (`robots_get`'s
+  `userAgent`) — the claim is "this UA was blocked on these URLs", never "all bots are
+  blocked".
+
+  **The census beside the finding**: `pages_query` with `fetchClass: "blocked"` lists
+  every blocked page with its `statusCode` and a `fetchReason` naming how many
+  attempts it took and what per-host spacing the engine had escalated to before it
+  gave up. That is what separates "the site rate-limited a crawl that went in too
+  fast" from "the site refuses this crawler", and only the second is a CHECK-05
+  finding. `crawl_status`'s `blockedPages` and `hostSpacingMs` are the same story at
+  crawl level — quote them when you report either.
 - **DevTools** (geo behaviour, which needs a browser and a location):
   1. Navigate to homepage — note any redirect chain (final URL, status codes)
   2. Navigate to a product page — same check
@@ -580,6 +608,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     `failureCount` (the true number).
   The sitemap's shape — index vs flat, how many child documents, how many entries
   each — is CHECK-08's metric; do not re-fetch the file to describe it.
+
+  **The robots.txt half is `robots_get`'s `sitemapSources`**: the `Sitemap:` lines the
+  crawl's walk was pointed at, in declaration order. Empty means the file declared
+  none, which is the WARN below — and it is a different fact from "no sitemap exists",
+  which is `sitemap.missing`. A site with a sitemap at the conventional location and
+  no declaration fails this half and passes the other; say both.
 - **Evaluate**:
   - FAIL if sitemap returns non-200 or robots.txt has no Sitemap: line
   - WARN if flat sitemap with >50k URLs
@@ -722,6 +756,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     query (the same rule answers CHECK-40)
   `issue_urls` per rule; `pages_query` for the word counts beside page type, which
   is how the "% of indexable pages" in the Evaluate line is computed.
+
+  **Both rules judge `renderableWordCount`, not `wordCount`** — the page's words minus
+  the ones its own markup hides (`hidden`, inline `display:none`, a closed `<dialog>`
+  or `<details>`). `pages_query` returns both columns; quote the renderable one, since
+  it is what the verdict was reached on and what a visitor sees. Null in both is a row
+  no Phase-7-or-later analyzer wrote: NOT MEASURED, and a re-crawl answers it.
 - **Evaluate**:
   - FAIL if soft 404s > 0
   - WARN if low content pages > 10% of indexable pages
@@ -1184,10 +1224,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   A total that silently mixes the two is the reporting error this section exists to
   prevent.
 
+- **The cross-check the pages listing answers directly.** `pages_query` takes
+  `discoveredVia` — `seed`, `link`, `sitemap` or `redirect` — which is how the CRAWLER
+  reached each URL. Pages at `discoveredVia: "sitemap"` were never linked from
+  anywhere the crawl walked, so that listing is the orphan finding's population read
+  from the other side: the two should agree, and where they do not, the difference is
+  informative (a page discovered by link whose only linker was later found
+  unreachable is an island, not an orphan). Read it against `clickDepth: null` from
+  CHECK-31 too — a page reachable by no chain of links at all.
 - **Analysis**:
   1. Take the total crawl-orphan count from `issues_list`'s `count` for `links.orphan`
   2. Break down by source: the finding evidence separates sitemap-listed orphans from
-     the rest; the GSC tier comes from GSC
+     the rest, and `pages_query` with `discoveredVia: "sitemap"` counts the same
+     population independently; the GSC tier comes from GSC
   3. **Break down by URL type — but classify carefully**. CDN asset URLs contain
      `/products/` in their path (e.g., `/cdn/shop/products/image.jpg`) and will
      false-positive as product pages if you match on `/products/` alone. Always
@@ -1324,14 +1373,21 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — three rules:
-  `title.missing` (warning), `title.too-short` (info), `title.too-long` (info). Use
-  `pageType` on `issues_list` to get each count per template cohort directly, which
-  is what the per-page-type breakdown below needs; `issue_urls` gives the titles
-  themselves in the evidence, which is where the template patterns and the samples
-  come from. Duplicate titles are not a rule today — see CHECK-39 for the content-level
-  duplicate rules, and record the duplicate-title count as NOT MEASURED rather than
-  inferring it from the samples.
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — four rules:
+  `title.missing` (warning), `title.too-short` (info), `title.too-long` (info) and
+  `title.duplicate` (warning). Use `pageType` on `issues_list` to get each count per
+  template cohort directly, which is what the per-page-type breakdown below needs;
+  `issue_urls` gives the titles themselves in the evidence, which is where the
+  template patterns and the samples come from.
+
+  **`title.duplicate` reports one finding per DUPLICATED TITLE, not per page.** Its
+  evidence is `{title, count, pages}` — the shared title, exactly how many indexable
+  pages carry it, and up to 20 of their URLs. So `issues_list`'s `count` is the number
+  of duplicate groups and the pages involved are the sum of the groups' own `count`s:
+  report both ("48 titles shared by 612 pages"), never the group count as a page
+  count. Capped at 200 groups, with the usual `truncated`/`total` note when the site
+  has more. Equality is exact after trimming — two titles differing by one character
+  are two groups here, and near-duplication is CHECK-39's question, not this one.
 - **Important — Analyse by Page Type, Not Just Global Counts**: Saying "99% of titles are
   over 60 chars" tells the client nothing useful. Different page types have different title
   templates, different keyword needs, and different SERP competition. The analysis must
@@ -1392,11 +1448,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-36: Meta descriptions — unique, compelling, and correct length
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
-  (warning), `meta-description.too-short` (info), `meta-description.too-long` (info).
-  Filter by `pageType` for the per-type breakdown; `issue_urls` carries each
-  description and its length, which is what the quality spot-check reads. As with
-  CHECK-35, duplicate descriptions are NOT MEASURED by a rule — say so rather than
-  estimating.
+  (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
+  and `meta-description.duplicate` (warning). Filter by `pageType` for the per-type
+  breakdown; `issue_urls` carries each description and its length, which is what the
+  quality spot-check reads. The duplicate rule has CHECK-35's group shape exactly —
+  one finding per shared description, evidence `{metaDescription, count, pages}` — so
+  quote the group count and the page total together. A template dumping one
+  description across a whole cohort is a single group with a very large `count`, which
+  is the shape the Analysis below calls a template-generated duplicate.
 - **Analysis** (break down by page type, same as CHECK-35):
   1. **Missing count by page type**: Products, collections, blog, info pages separately.
      Blog and info pages often have the highest missing rate — report this specifically.
@@ -1424,13 +1483,27 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-37: H1 and heading hierarchy
 - **Priority**: High | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-37"` — `headings.h1-missing`
-  (warning), `headings.h1-multiple` (info), `headings.level-skip` (info). Filter by
-  `pageType` for the per-template counts. The evidence carries the H1 COUNT, not the
-  H1 TEXT: the engine can tell you that every product page has two H1s, and cannot
-  tell you what they say.
+  (warning), `headings.h1-multiple` (info), `headings.level-skip` (info),
+  `h1.duplicate-text` (warning) and `h1.duplicate-skipped` (info). Filter by
+  `pageType` for the per-template counts.
+
+  **What the engine knows about heading TEXT, precisely.** It stores each page's
+  FIRST H1 as text (collapsed, trimmed, capped at 300 characters) and compares those
+  strings to each other: `h1.duplicate-text` reports one finding per shared heading,
+  evidence `{h1Text, count, pages}`, group-shaped exactly as CHECK-35's duplicate rule
+  is. Two consequences worth stating in the finding: a page with three H1s contributes
+  only its first, so a duplicate among the others is invisible; and the text is not
+  published per page anywhere else, so the H1 ↔ title alignment work in step 4 below
+  is still a sampled browser reading rather than a query.
+
+  **`h1.duplicate-skipped` is a NOT MEASURED marker, not a pass.** It fires when the
+  crawl stored no heading text at all while its pages do carry H1 elements — a
+  pre-Phase-7 crawl. Then the duplicate-heading question is unanswered on this crawl
+  and the answer is a re-crawl; record it as such rather than as zero duplicates.
 - **Analysis**:
-  1. **Global counts**: missing, multiple, level skips — from `issues_list`. Duplicate
-     H1 text is NOT MEASURED by a rule.
+  1. **Global counts**: missing, multiple, level skips and duplicate headings — all
+     from `issues_list`. For the duplicates, report the group count and the pages they
+     cover separately.
   2. **Break down multiple H1s by page type** with the `pageType` filter. If a whole
      cohort has the same H1 count above one, a template element is coded as an H1
      (e.g., a geo banner, promo bar, store selector). Confirm WHICH element in the
@@ -1456,9 +1529,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        (e.g., `.store-select` → `sections/store-selector.liquid`)
      - **The exact fix**: "Change `<h1 class="store-select__heading">` to `<div class="store-select__heading">`"
   4. **H1 ↔ Title alignment check**: For each page type, does the H1 match the title?
-     The engine holds the titles (CHECK-35's evidence) but not the H1 text, so this is
-     a sampled browser comparison — take 3-5 pages per page type from `pages_query`,
-     read both, and say the sample size in the finding.
+     The engine holds the titles (CHECK-35's evidence) and publishes H1 text only for
+     the headings that DUPLICATE each other, so a page-by-page comparison is still a
+     sampled browser reading — take 3-5 pages per page type from `pages_query`, read
+     both, and say the sample size in the finding.
      They don't need to be identical, but they should reinforce the same topic/keyword.
      **Normalise whitespace before comparing** — collapse multiple spaces, strip newlines,
      and trim. Template whitespace differences (double space vs single space) are a
@@ -1596,7 +1670,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   same rule CHECK-13 reads) and `content.placeholder` (warning: lorem ipsum and
   friends left in live copy). `issue_urls` for both lists; filter `issues_list` by
   `pageType` to say which templates the thin pages belong to, and read
-  `content.metrics-by-type` for the word-count distribution behind the threshold.
+  `content.metrics-by-type` for the distributions behind the threshold — it carries
+  `wordCount`, `renderableWordCount` and `textRatio` per template. **The pair is the
+  finding**: a template whose median word count is 900 and whose median renderable
+  count is 200 ships 700 words of furniture on every page, and the thin verdict was
+  reached on the 200.
 - **Evaluate**:
   - FAIL if lorem ipsum > 0 (immediate fix needed)
   - WARN if low content > 10% of indexable pages
@@ -2106,19 +2184,26 @@ and each check names the call that answers it. What follows is the shape of thos
 calls, so a check's one-line **Engine** entry is enough.
 
 The tools are the MCP surface (`crawl_start`, `crawl_status`, `crawl_list`,
-`crawl_render`, `crawl_rules`, `crawl_mark_failed`, `issues_list`, `issue_urls`,
-`metrics_get`, `pages_query`, `export_crawl`). The HTTP API exposes the same
-service — `GET /crawls/:id/issues`, `/metrics`, `/pages`, `/issues/:ruleId/urls`,
-`/export` — and answers the same JSON, so an operator running `npm run api:serve`
-instead of `npm run mcp:serve` changes the transport and nothing else.
+`crawl_render`, `crawl_rules`, `crawl_mark_failed`, `robots_get`, `issues_list`,
+`issue_urls`, `metrics_get`, `pages_query`, `export_crawl`). The HTTP API exposes the
+same service — `GET /crawls/:id/issues`, `/metrics`, `/pages`, `/robots`,
+`/issues/:ruleId/urls`, `/export` — and answers the same JSON, so an operator running
+`npm run api:serve` instead of `npm run mcp:serve` changes the transport and nothing
+else.
 
-**The three query tools, and what each is for:**
+**Before reading any of it, check the crawl was judged.** `crawl_status` carries
+`rulesRunAt` (when a rules pass last completed; null means none is on record) and
+`findingsCount` (the findings that pass left). Every PASS this checklist reaches
+through an empty listing rests on that timestamp.
+
+**The query tools, and what each is for:**
 
 | Tool | Answers | Use it for |
 |------|---------|-----------|
 | `issues_list` | one row per rule that found something: `{ruleId, checkIds, severity, category, title, count, sampleUrls}` | the verdict on a check, and its size |
 | `issue_urls` | one row per finding: `{url, evidence}` | the URL list a developer gets, and the per-page evidence |
 | `metrics_get` | `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}` | every number a report quotes |
+| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
 
 **Filters that matter for a checklist walk:**
 
@@ -2126,8 +2211,11 @@ instead of `npm run mcp:serve` changes the transport and nothing else.
   `severity`, `ruleId`, `category` and `pageType`, which intersect.
 - `metrics_get` takes `metricId`, `scope` (`site`, `page_type`, `sitemap_doc`) and
   `scopeValue`.
-- `pages_query` takes `pageType`, `statusCode`, `indexable` and `rendered`. There is
-  no URL filter: match paths yourself over the listing.
+- `pages_query` takes `pageType`, `statusCode`, `indexable`, `rendered`, `fetchClass`
+  and `discoveredVia`. There is no URL filter: match paths yourself over the listing.
+  Each row carries `depth` AND `clickDepth`, `wordCount` AND `renderableWordCount`,
+  and `fetchReason` where the crawl has one to give — the pairs are two different
+  measurements each, never one with a fallback.
 
 **Every listing is paginated.** `{items, nextCursor}`; pass `nextCursor` back as
 `cursor` with the SAME filters. `nextCursor: null` is the end. A first page is not

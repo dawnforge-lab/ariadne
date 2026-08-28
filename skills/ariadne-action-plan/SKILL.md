@@ -40,8 +40,10 @@ remediation prose over a rule you have not read.
 ## Prerequisites
 
 1. **The findings file.** `ariadne-findings.json` from the `ariadne-audit` skill
-   (its Phase 4 defines the shape). Check `schema` is `"ariadne-findings/1"` and
-   that `checks` is complete before reading anything out of it.
+   (its Phase 4 defines the shape). Check `schema` is `"ariadne-findings/1"`, that
+   `checks` is complete, and that `crawl.rulesRunAt` carries a timestamp — a file
+   whose crawl was never judged holds passes that assert nothing and a work plan
+   built on them is a work plan built on silence.
 2. **A reachable server holding the same crawl.** MCP preferred
    (`npm run mcp:serve`), HTTP as the fallback (the `ariadne-crawl` skill has the
    equivalence table). `crawl_status` on the findings file's `crawl.crawlId` must
@@ -104,9 +106,24 @@ A candidate leaves here, and its reason is what the ledger records:
   options, this is a *Decide first* tab (Step 2). If it did not, the check stays in
   the report until somebody chooses, and comes back here once they have.
 - **E4 — small.** All three of: engine `severity` is `info`; `count` <
-  `max(10, 1% of crawl.pagesCrawled)`; and the affected pages are not on a page
-  type Phase 0 named as traffic or revenue. **That is what "small" means in this
-  skill** — the same floor G3 uses, so nothing can be both small and voluminous.
+  `max(10, 1% of crawl.pagesCrawled)`; and **Phase 0 answered, and what it named as
+  traffic and revenue does not include these pages' page type**. **That is what
+  "small" means in this skill** — the same floor G3 uses, so nothing can be both
+  small and voluminous.
+
+  **The third condition needs affirmative evidence, and this is why.** It used to
+  read "the affected pages are not on a page type Phase 0 named as traffic or
+  revenue", which is true by default when Phase 0 never ran: no page type was named,
+  so nothing is on the list, so every low-severity finding excludes itself — and G4,
+  which admits exactly those pages, is dead for the same reason. On the Phase 6
+  deliverable run that pair auto-excluded four candidates that nobody had weighed.
+  Absence of analytics is not evidence that a page type earns nothing. **With no
+  Phase 0 — the checks are `SKIP`, or the traffic and revenue page types are not
+  recorded — E4 does not apply and G4 cannot fire**; the candidate goes on to the
+  other gates and, if none admits it, reaches 1e on its rank rather than leaving
+  through a door marked "small". Say in the Summary sheet's *Considered, not
+  included* preamble that the plan was built without commercial context, because the
+  ordering it produces is by volume and severity alone.
 
 ### 1c — Gates
 
@@ -125,7 +142,10 @@ Over what survived 1b. **A candidate needs one gate:**
   from looking clean because it is small.
 - **G4 — it lands where the money is.** Whatever the count, the affected pages are
   a page type Phase 0 named as traffic or revenue. Forty broken product pages
-  outrank four hundred faults on a page type with no entrances.
+  outrank four hundred faults on a page type with no entrances. **This gate needs
+  Phase 0 to have run**: with no analytics context it cannot fire at all, which is
+  the other half of E4's third condition and the reason that condition may not
+  exclude anything on the same silence.
 - **G5 — the audit asked for it.** The check's `priority` is Critical or High in
   the findings file and the recommendation is a concrete change.
 
@@ -194,12 +214,23 @@ Rank every tab by Step 5's ordering and keep the top ten. Everything below the c
 goes to *Considered, not included* with its rank, its count and the reason "below
 the cut at rank N".
 
-Three protections. A candidate whose findings-file `priority` is `Critical` is
+Four protections. A candidate whose findings-file `priority` is `Critical` is
 never cut. **Neither is one at or above the volume floor**: the target exists to
 stop a workbook filling with one-row tabs, so a cut that drops a 23-row work item
 while keeping a one-row family tab has inverted its own purpose — the cut may only
-take below-floor candidates. And every cut candidate is recorded on its own line,
-never "and 14 others".
+take below-floor candidates.
+
+**Nor is one the audit graded `High` priority or `critical` severity, however few
+rows it has.** A site-wide finding is ONE ROW by construction — a robots.txt pattern,
+a missing sitemap declaration, a host that serves 200 on both protocols — and its row
+count is not its size: the row is the whole site. On the Phase 6 deliverable run a
+one-row P1 pagination finding (CHECK-22) was cut at rank 11 while a two-row hygiene
+tab survived, which is the volume floor's logic applied to a number that was never a
+magnitude. So row count alone may not cut a candidate the audit graded that highly.
+If that leaves the workbook over ten tabs, the paragraph below is what happens next,
+not a licence to reopen the cut.
+
+And every cut candidate is recorded on its own line, never "and 14 others".
 
 When those protections leave more than ten tabs, the plan is bigger than the target
 and the Summary sheet says so in a sentence. That is the honest outcome: the cut
@@ -327,6 +358,16 @@ The tab body is the URL plus the rule's own evidence, flattened.
 
 - **Column 1 is `URL`.** For a site-scoped finding (`url: null`) write
   `(site-wide)` and keep the evidence — those rows carry the whole finding.
+- **Some rules report a GROUP, not a page, and their tabs must say so.** The
+  duplicate rules — `title.duplicate`, `meta-description.duplicate`,
+  `h1.duplicate-text`, and the content pair `content.exact-duplicate` /
+  `content.near-duplicate` — write one finding per duplicated VALUE: the evidence
+  carries the value, `count` (how many indexable pages share it) and `pages` (up to 20
+  of them). So a 40-row tab is 40 groups, and the pages involved are the sum of the
+  groups' `count`s. Column 1 is that group's first URL; keep `pages` as its own JSON
+  column and put both numbers in the description row ("40 duplicate titles across 612
+  pages"). A tab that presents groups as pages understates the work by an order of
+  magnitude, and its Fix — one template change per group — reads as forty edits.
 - **Then every evidence key**, one column each. The evidence repeats the page URL
   as `pageUrl`; drop that one key, since column 1 already carries it. Take the
   union of keys across all of the rule's rows, sorted alphabetically, so two runs

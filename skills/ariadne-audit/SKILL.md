@@ -37,7 +37,14 @@ report about the rule — raise it as one — not a finding about the client.
 
 **And the mirror of it: an empty answer is not a clean site.** `issues_list` and
 `metrics_get` answer `{"items": []}` for a rule that found nothing AND for a crawl
-nobody judged. Only the `crawl_rules` summary distinguishes them.
+nobody judged. **`crawl_status` settles which**: `rulesRunAt` is the timestamp of the
+last COMPLETED rules pass — null means no complete pass is on record — and
+`findingsCount` is how many findings that crawl holds. Read them as a pair, never
+apart: a timestamp with `findingsCount: 0` is "looked, found nothing", a null with
+any count at all is a pass that died part-way, and null with zero is "nobody has
+looked". One `crawl_status` poll is the whole check, and it is on the crawl rather
+than in your notes — the `crawl_rules` summary is still worth keeping for its
+per-rule breakdown, and it is no longer the only evidence a pass happened.
 
 ## Prerequisites
 
@@ -110,9 +117,13 @@ A crawl is fit to audit when:
   cap makes CHECK-32 unanswerable (`links.orphan-skipped` fires and says why);
 - `renderPassCount` ≥ 1 if the site needs rendering. Without it, CHECK-01, CHECK-02,
   CHECK-34 and CHECK-10's JS-redirect half are SKIP, not PASS;
-- the rules have run, and **you have the `crawl_rules` summary**. If you did not run
-  them yourself, run them now: it is idempotent, it re-judges with the current
-  ruleset, and its summary is the evidence every empty answer downstream leans on.
+- **the rules have run — `crawl_status`'s `rulesRunAt` carries a timestamp.** That is
+  the crawl's own record of a completed pass, so a crawl somebody else judged is as
+  auditable as one you judged yourself. Null means no complete pass: run `crawl_rules`
+  now. Running it again on a judged crawl is idempotent and re-judges with the current
+  ruleset, which is what you do after upgrading the engine rather than re-crawling —
+  and its summary, kept beside the marker, is the per-rule breakdown of what that pass
+  wrote.
 
 Record the crawl's shape before reading a single finding. It bounds every claim the
 audit makes.
@@ -156,8 +167,8 @@ of three ways:
 - **Rows for this check id** → read them, and pull the URL list with `issue_urls`
   where the check's Record line asks for one.
 - **No rows, and the check is claimed by a finding rule** → candidate PASS. It is a
-  PASS only because the `crawl_rules` summary says the rules ran; cite that summary
-  in the evidence.
+  PASS only because the crawl was judged; cite `crawl_status`'s `rulesRunAt` (and the
+  `crawl_rules` summary, if you ran it) in the evidence.
 - **No rows because the check is measured, not found** → the metrics sweep has it.
   Five checks are metric-only — CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38
   — and `issues_list` with their `checkId` is refused with a pointer to `metrics_get`
@@ -219,6 +230,19 @@ of three ways:
 - **A refusal names its field.** An unrecognised `severity`, `checkId`, `ruleId`,
   `category` or `pageType` is refused rather than answered with an unfiltered listing.
   Read the message; do not retry with a guess.
+- **Two `pages_query` filters answer cross-checks nothing else can.** `fetchClass`
+  separates the pages the site served from the ones it refused (`blocked`), dropped or
+  disallowed — the census behind CHECK-05 and behind every "% of pages" denominator on
+  a crawl that met a WAF. `discoveredVia` says how the crawler reached each URL —
+  `seed`, `link`, `sitemap` or `redirect` — which is the other half of the orphan
+  finding: a page whose only discovery was `sitemap` was linked from nowhere the crawl
+  walked. Both are closed vocabularies and a value outside them is refused by name.
+- **The robots.txt the crawl obeyed is readable.** `robots_get` returns the stored
+  file — `raw` (the text as served, `truncated` when it is only the first 500KB),
+  `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources` and
+  the `userAgent` the crawl matched under. It is EVIDENCE, not a re-fetch: a file that
+  has changed since the crawl is a fact about the site, and reading today's copy over
+  the crawl's would hide it.
 - **Large lists go to a file.** `export_crawl` writes `issues`, `pages` or `metrics`
   as gzipped JSONL and answers `{dataset, path, rows, bytes}`. Use it when you need
   every row; put the path in the findings file, not the rows.
@@ -230,7 +254,7 @@ Follow the checklist's own sections — they group the calls naturally:
 | Section | Checks | Mostly answered by |
 |---------|--------|--------------------|
 | Pre-Crawl | 01, 02 | render diff rules + `render.coverage` |
-| 1. Crawlability & Robots | 03-05 | robots rules; browser for the file's contents |
+| 1. Crawlability & Robots | 03-05 | robots rules + `robots_get`; browser for pattern gaps |
 | 2. Sitemaps | 06-09 | sitemap rules + `sitemap.structure` |
 | 3. Redirects & Errors | 10-13 | redirect rules + `redirect.volume`, status rules |
 | 4. Host & Protocol | 14-15 | host-probe rules |
@@ -248,11 +272,34 @@ Several checks ask for a number no rule produces. The checklist says so at each 
 Record those as NOT MEASURED in `notes` — never substitute a nearby number:
 
 - total redirect **inlinks** (CHECK-10) — `redirect.volume` counts redirecting URLs;
-- duplicate titles and duplicate meta descriptions (CHECK-35, CHECK-36);
-- H1 **text** (CHECK-37) — the rules count H1s, they do not read them;
+- H1 ↔ title **alignment** (CHECK-37) — the engine stores each page's first H1 text
+  and compares headings only to each other, so whether a heading matches its title is
+  still a sampled browser reading;
 - image weight and format (CHECK-49); caching, compression and protocol (CHECK-50);
 - Core Web Vitals (CHECK-47) — the engine measures response time and nothing else;
 - GSC-only orphans (CHECK-32, CHECK-33b) — by definition outside a crawl.
+
+**Three things a previous audit recorded as NOT MEASURED and the engine now measures.**
+An audit that copies an older findings file forward will under-report all three:
+
+- **Duplicate titles, meta descriptions and H1 headings** (CHECK-35, CHECK-36,
+  CHECK-37). `title.duplicate`, `meta-description.duplicate` and `h1.duplicate-text`
+  each report ONE FINDING PER DUPLICATED VALUE, not per page: the evidence carries the
+  value itself, `count` (how many indexable pages share it — exact) and `pages` (up to
+  20 of them). So `issues_list`'s `count` for these rules is the number of duplicate
+  GROUPS, and the pages involved are the sum of the groups' own counts — quote both,
+  and never read the group count as a page count. Capped at 200 groups with the usual
+  `truncated`/`total` note. `h1.duplicate-skipped` (info) is the honest silence: a
+  pre-Phase-7 crawl stored no heading text, so the check is NOT MEASURED on it rather
+  than clean, and a re-crawl is what answers it.
+- **Words a visitor can actually see.** `pages_query` returns `renderableWordCount`
+  beside `wordCount` — the same count minus the words the page's own markup hides
+  (`hidden`, inline `display:none`, a closed `<dialog>` or `<details>`) — and it is
+  the number `content.thin` judges on. Quote the renderable figure when you report
+  thin content; the gap between the two is the template's furniture, and
+  `content.metrics-by-type` carries both distributions per template so you can size
+  it. Null in both columns means no Phase-7-or-later analyzer wrote the row.
+- **Click depth**, immediately below.
 
 **And two numbers that both measure a depth, one of which is not about the site.**
 
@@ -382,6 +429,13 @@ a list:
 
 Write ONE JSON file: `ariadne-findings.json` in the audit's working directory.
 
+**The NAME is part of the interface too.** Both downstream skills open
+`ariadne-findings.json` by that name, and it says whose findings these are in a client
+folder that will also hold a crawl export, a report and a workbook. The Phase 6
+deliverable run wrote `findings.json` and the two skills went looking for the other
+spelling; if you meet a file under the old name, it is this shape and renaming it is
+the fix.
+
 **This shape is an interface, not an example.** The `ariadne-report` and
 `ariadne-action-plan` skills read it verbatim; a field renamed here is a deliverable
 broken there.
@@ -403,6 +457,8 @@ broken there.
     "pagesCrawled": 4821,
     "renderPassCount": 1,
     "rulesetVersion": "0.4.0",
+    "rulesRunAt": "2026-08-27T11:04:19.220Z",
+    "findingsCount": 1902,
     "frontier": { "pending": 0, "leased": 0, "done": 4821, "failed": 3, "renderPending": 0 },
     "rulesRun": { "pagesScanned": 4821, "findings": 1902, "metrics": 855 },
     "render": { "rendered": 240, "failures": 2, "unrendered": 4581, "budget": 241, "truncated": false },
@@ -526,6 +582,11 @@ broken there.
 - **`crawl.rulesRun`** copies the `crawl_rules` summary's scalars — `pagesScanned`,
   `findings`, `metrics`. The surface returns no `elapsedMs`; do not invent one, and do
   not leave a null in its place.
+- **`crawl.rulesRunAt` and `crawl.findingsCount`** are copied from `crawl_status`, and
+  they are what every PASS on an empty listing rests on. A findings file whose
+  `rulesRunAt` is null is a file whose passes assert nothing — the report and the
+  action plan are entitled to refuse it. Copy them even when you ran the rules
+  yourself: a reader six weeks later has the crawl, not your session.
 - **`crawl.caveats`** is where the evidence's limits go: a page cap reached, a render
   pass that covered a fraction, URLs that failed to fetch, a crawl that ended
   `cancelled`. Empty array when there are none — never absent.
@@ -534,7 +595,7 @@ broken there.
 ### Before you hand it over
 
 - Every check present, every `notes` written for the verdicts that need one.
-- No verdict resting on an empty listing without the `crawl_rules` summary behind it.
+- No verdict resting on an empty listing without a `rulesRunAt` timestamp behind it.
 - No engine-claimed check whose verdict came from a browser instead.
 - The counts in `coverage` add up.
 

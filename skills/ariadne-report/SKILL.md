@@ -77,6 +77,9 @@ not something to work around:
 - Every `FAIL`, `SKIP` and `AGENT` has `notes`. A bare verdict is not a finding.
 - Every `FAIL` and `AGENT` that names a fix has a `recommendation`.
 - `crawl.caveats` is present — an empty array is an answer, an absent field is not.
+- `crawl.rulesRunAt` carries a timestamp. Null means the crawl was never judged to
+  completion, so every PASS in the file rests on an empty listing that proves nothing:
+  send it back rather than reporting a clean site.
 
 Name what is wrong and send it back to the audit. A report written over a
 half-filled findings file states things about a site that nobody checked.
@@ -104,6 +107,15 @@ Sweep them: `metrics_get` with `crawlId` and no other filter, following
   `structure.depth-distribution` answers `{count, min, max, mean, median, p25, p75, p95}`,
   `sitemap.structure` answers something else entirely — so the table's columns are
   the value's own keys, not a set you chose in advance.
+- **The two depth metrics are two different claims, and only one is about the site.**
+  `structure.depth-distribution` is DISCOVERY depth: hops from a seed, and every
+  sitemap URL is a seed, so it describes how the CRAWL found the site.
+  `structure.click-depth-distribution` is the shortest chain of internal links from
+  the home page, with `nullCount` for the pages no chain reaches at all. A report that
+  writes "97% of pages are one click from the home page" off the first metric has said
+  something false about the site with a true number. Caption them by what they
+  measure, and when both appear, say what the gap between them means: discovery far
+  shallower than click depth is a sitemap carrying the internal linking.
 - The metric's `title` is the table's caption. The `explanation` is what tells the
   client what the number counted; use it once, under the table, in the metric's own
   words. It is written for a reader, and rewriting it is how a precise statement
@@ -124,9 +136,16 @@ Sweep them: `metrics_get` with `crawlId` and no other filter, following
 - **A number you derived is not a number that was measured.** Percentages, ratios
   and "up from last quarter" are yours; write the arithmetic beside them ("128 of
   4,102 sitemap URLs, 3.1%") so the two source numbers stay visible.
+- **Thin content is reported on the words a visitor can see.** `content.thin` judges
+  `renderableWordCount` — the page's words minus the ones its own markup hides — and
+  `pages_query` publishes that column beside `wordCount`. Quote the renderable figure
+  in the finding; quote both when the gap is the story ("the template ships 900 words,
+  200 of them visible: 700 words of mega-menu on every product page"), which
+  `content.metrics-by-type` sizes per template with a distribution for each.
 - An empty metrics sweep means the rules did not run, not that the site has
-  nothing worth measuring. The findings file's `crawl.rulesRun` summary is what
-  distinguishes them. If the sweep is empty and `rulesRun` says otherwise, stop —
+  nothing worth measuring. The findings file's `crawl.rulesRunAt` — copied there from
+  `crawl_status` — is what distinguishes them, with `crawl.rulesRun` as the per-rule
+  breakdown beside it. If the sweep is empty and those say the crawl was judged, stop:
   the findings file and the crawl do not describe the same run.
 
 ## Step 3 — severity in context

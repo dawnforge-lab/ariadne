@@ -81,6 +81,35 @@ const METRIC_SCOPES_HINT = METRIC_SCOPES.join(" | ");
 const FETCH_CLASS_HINT = FETCH_CLASSES.join(" | ");
 const DISCOVERED_VIA_HINT = DISCOVERED_VIA.join(" | ");
 
+/**
+ * The tools this server advertises, as one list.
+ *
+ * It exists because the names are an INTERFACE the skills quote by hand
+ * (`skills/**` tells an agent to call `crawl_status`, and nothing but a reader's
+ * memory connected that sentence to this file). `test/skills/identifier-guard`
+ * checks the documentation against this list; a tool renamed here fails there.
+ *
+ * Both directions are held: `named` types each registration against this list,
+ * so a tool registered under a name the list does not carry fails to compile,
+ * and `createMcpServer` throws if the list names a tool nobody registered.
+ */
+export const TOOL_NAMES = [
+  "crawl_start",
+  "crawl_status",
+  "crawl_list",
+  "crawl_mark_failed",
+  "crawl_render",
+  "crawl_rules",
+  "robots_get",
+  "issues_list",
+  "issue_urls",
+  "metrics_get",
+  "pages_query",
+  "export_crawl",
+] as const;
+
+export type ToolName = (typeof TOOL_NAMES)[number];
+
 export interface CreateMcpServerOpts {
   db: Db;
   /**
@@ -166,10 +195,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     }
   };
 
+  /** A tool's name, checked against `TOOL_NAMES` and recorded as registered. */
+  const registered = new Set<ToolName>();
+  const named = (name: ToolName): ToolName => {
+    registered.add(name);
+    return name;
+  };
+
   // ------------------------------------------------------------------- crawls
 
   server.registerTool(
-    "crawl_start",
+    named("crawl_start"),
     {
       title: "Start a crawl",
       description:
@@ -195,7 +231,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "crawl_status",
+    named("crawl_status"),
     {
       title: "Crawl status",
       description:
@@ -243,7 +279,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "crawl_list",
+    named("crawl_list"),
     {
       title: "List crawls",
       description:
@@ -259,7 +295,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "crawl_render",
+    named("crawl_render"),
     {
       title: "Run the render pass",
       description:
@@ -281,7 +317,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "crawl_rules",
+    named("crawl_rules"),
     {
       title: "Run the rules",
       description:
@@ -299,7 +335,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "crawl_mark_failed",
+    named("crawl_mark_failed"),
     {
       title: "Retire an abandoned crawl",
       description:
@@ -320,7 +356,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   // -------------------------------------------------------------- the results
 
   server.registerTool(
-    "issues_list",
+    named("issues_list"),
     {
       title: "Findings, grouped by rule",
       description:
@@ -388,7 +424,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "issue_urls",
+    named("issue_urls"),
     {
       title: "One rule's findings, URL by URL",
       description:
@@ -424,7 +460,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "metrics_get",
+    named("metrics_get"),
     {
       title: "Measured numbers",
       description:
@@ -471,7 +507,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "pages_query",
+    named("pages_query"),
     {
       title: "The crawled pages",
       description:
@@ -574,7 +610,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "robots_get",
+    named("robots_get"),
     {
       title: "The site's robots.txt, as this crawl read it",
       description:
@@ -606,7 +642,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
-    "export_crawl",
+    named("export_crawl"),
     {
       title: "Export a dataset to a file",
       description:
@@ -629,6 +665,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     },
     async ({ crawlId, ...rest }) => run("export_crawl", () => service.exportCrawl(crawlId, defined(rest))),
   );
+
+  // The other half of the list's guarantee: `named` cannot admit a name the
+  // list does not carry, and this cannot let the list carry a name no tool was
+  // registered under. A skill quoting such a name would be documenting a tool
+  // that answers nothing (hard rule 7).
+  const unregistered = TOOL_NAMES.filter((name) => !registered.has(name));
+  if (unregistered.length > 0) {
+    throw new Error(
+      `createMcpServer: TOOL_NAMES names tools nobody registered: ${unregistered.join(", ")}`,
+    );
+  }
 
   return {
     service,

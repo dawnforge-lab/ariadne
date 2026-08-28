@@ -2383,14 +2383,18 @@ function mapRenderPassError(error: unknown): unknown {
 }
 
 /**
- * The `pages` field allowlist — ONE definition, two readers.
+ * The `pages` field allowlist — ONE definition, three readers.
  *
  * The listing and the export both project through this object, so a column
  * added to `pages` tomorrow reaches neither until somebody names it here. Two
  * hand-maintained copies of a projection is how one of them eventually gains a
  * column the other refuses (Talos obligation 6).
+ *
+ * Exported for the third reader, which reads only the KEYS:
+ * `test/skills/identifier-guard` checks that every page field the skills tell an
+ * agent to read is a field this projection publishes.
  */
-const PAGE_FIELDS = {
+export const PAGE_FIELDS = {
   url: pages.url,
   statusCode: pages.statusCode,
   fetchClass: pages.fetchClass,
