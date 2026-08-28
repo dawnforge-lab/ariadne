@@ -108,6 +108,20 @@
 
 ---
 
+### Task 6b: Adaptive host back-off + blocked retries + platform guidance (owner-added 2026-08-28)
+
+**Files:** Modify `src/crawl/politeness.ts` (HostGate), `src/crawl/loop.ts` (blocked-retry path, Retry-After plumbing), `src/crawl/fetch-page.ts` (capture Retry-After), `src/api/service.ts` (+`blockedPages` on crawl status), `skills/ariadne-crawl/SKILL.md` (platform table + reaction loop); tests per file.
+
+**Interfaces:**
+- `HostGate` gains adaptive escalation: a `blocked` outcome for a host doubles that host's spacing per consecutive block (ratcheted — no de-escalation within a crawl), capped at the existing `maxDelayMs` (30s); a `Retry-After` header (delta-seconds or HTTP-date) is honoured as a floor for that host's next slot when present. The fixed-base semantics (max(config, robots crawl-delay)) unchanged.
+- `blocked` becomes retryable-under-backoff: up to the same MAX_ATTEMPTS (3), each retry landing under the escalated spacing (the requeue path — attempts accounting unchanged); still blocked after retries → final classified row with `fetch_reason` recording the block + the spacing reached. Deterministic 403s settle in 3 paced attempts.
+- `crawl_status` (service + both transports) gains `blockedPages` (count of `fetch_class='blocked'` rows) so the operator/agent reaction loop is checkable.
+- `skills/ariadne-crawl`: a platform table (Shopify/Cloudflare-fronted: start `maxConcurrency 2, perHostDelayMs 1000`; drop to `1 / 2000` when blockedPages climbs mid-crawl) + the note that the engine now also protects itself (escalation) when the operator guesses wrong.
+
+- [ ] TDD (escalation doubling + ratchet + cap; Retry-After both formats + floor semantics; blocked-retry with eventual classified row + fetch_reason; blockedPages count; a wrong-Retry-After value — non-numeric/past date — ignored loudly not crashed) → full suite green → commit `feat: adaptive host back-off — a 429 slows the crawl down instead of ending the page (P6-T6b)`.
+
+---
+
 ### Task 7: Real-site gate + docs/gates/phase-6.md
 
 **Files:** Create `docs/gates/phase-6.md`; gate artifacts under an exports/ dir (git-ignored).
