@@ -144,8 +144,10 @@ Sweep them: `metrics_get` with `crawlId` and no other filter, following
   `content.metrics-by-type` sizes per template with a distribution for each.
 - An empty metrics sweep means the rules did not run, not that the site has
   nothing worth measuring. The findings file's `crawl.rulesRunAt` — copied there from
-  `crawl_status` — is what distinguishes them, with `crawl.rulesRun` as the per-rule
-  breakdown beside it. If the sweep is empty and those say the crawl was judged, stop:
+  `crawl_status` — is what distinguishes them, with `crawl.rulesRun`'s three scalars
+  (`pagesScanned`, `findings`, `metrics`) sizing the pass beside it. There is no
+  per-rule map in the findings file. If the sweep is empty and those say the crawl
+  was judged, stop:
   the findings file and the crawl do not describe the same run.
 - **`crawl.rulesRun` is filled for any judged crawl**, including one somebody else
   judged: its `pagesScanned` and `findings` come from `crawl_status` and its `metrics`

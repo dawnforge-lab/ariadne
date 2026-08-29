@@ -826,6 +826,26 @@ describe("crawl_rules", () => {
 
     const summary = await ok("crawl_rules", { crawlId: liveCrawlId });
     expect(Number(summary["pagesScanned"])).toBeGreaterThanOrEqual(3);
+
+    // THE DESCRIPTION IS PINNED TO THE ANSWER THIS CALL JUST RETURNED, because
+    // an unpinned description is how a lie survives: this tool's said the
+    // summary carries an `elapsedMs` — Phase 6 divergence D-4, fixed where the
+    // crawl skill's fenced block is compared field for field and missed here,
+    // where nothing compared anything — and it named four of the six fields
+    // that are actually returned. Asserted against `Object.keys` of the real
+    // summary rather than a restated list, so a seventh field cannot be added
+    // to `RunSummary` and left undocumented.
+    const rules = (await client.listTools()).tools.find((t) => t.name === "crawl_rules");
+    const rulesDescription = rules?.description ?? "";
+    expect(Object.keys(summary).sort()).toEqual([
+      "byMetric", "byRule", "derived", "findings", "metrics", "pagesScanned",
+    ]);
+    for (const field of Object.keys(summary)) {
+      expect(rulesDescription, `crawl_rules does not name ${field}`).toContain(field);
+    }
+    // And the field it does NOT return is named nowhere in the description —
+    // not even to deny it, because a denial is a string an agent can misread.
+    expect(rulesDescription).not.toContain("elapsedMs");
     expect(typeof summary["findings"]).toBe("number");
     expect(typeof summary["byRule"]).toBe("object");
     expect(typeof summary["byMetric"]).toBe("object");

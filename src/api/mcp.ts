@@ -368,8 +368,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Judge a finished crawl: run every rule in the registry over it and write " +
         "the findings and metrics. Answers the run summary — {pagesScanned, " +
         "findings, byRule, derived, metrics, byMetric} — not the findings " +
-        "themselves; read those with issues_list and metrics_get. There is no " +
-        "elapsedMs on it: time the call yourself if you want the duration.\n\n" +
+        "themselves; read those with issues_list and metrics_get. Those six are " +
+        "the whole summary; it carries no timing field, so time the call " +
+        "yourself if you want the duration.\n\n" +
         "pagesScanned here is the crawl's page count, and crawl_status answers " +
         "the same number without judging anything — so a crawl somebody else " +
         "judged does not need a second pass to be described.\n\n" +

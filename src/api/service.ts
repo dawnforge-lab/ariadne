@@ -2665,7 +2665,9 @@ export class ApiService {
    *
    * BOTH SUBQUERIES ARE BUILT, NOT WRITTEN, and that is the fix for a live
    * defect rather than a style preference. A column interpolated into a `sql`
-   * template inside a select list renders UNQUALIFIED, so
+   * template inside the select list of a single-table select renders
+   * UNQUALIFIED (a `where` clause and a joined query's projection both qualify
+   * it — this one case does not), so
    * `` sql`… from ${pages} where ${pages.crawlId} = ${crawls.id}` `` came out as
    * `where "crawl_id" = "id"` — and Postgres resolves BOTH names in the inner
    * scope, against `pages.id`, so the correlated subquery correlated with
