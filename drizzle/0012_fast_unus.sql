@@ -12,6 +12,19 @@ CREATE INDEX "pages_dupe_h1_text" ON "pages" USING btree ("crawl_id",btrim("h1_t
 -- `template_inference_jsonb` is deliberately NOT backfilled: the pre-0012
 -- crawls' collapse numbers exist only in a log line, and a guessed backfill
 -- would be a silent fallback (hard rule 7). Their NULL is the truth.
+--
+-- THE `jsonb_typeof` GUARD IS LOAD-BEARING, and it is not the same test as the
+-- `IS NOT NULL` beside it. `->` yields *jsonb* `null` — not SQL NULL — when the
+-- key is present with a JSON null value, and that is what the retired
+-- `jsonb_set` writer wrote on EVERY AUTOMATIC Phase 8 render pass. Without the
+-- guard those rows land in the column as jsonb `'null'`, a second spelling of
+-- the fact the column's comment says SQL NULL means (src/db/schema.ts), and a
+-- SQL reader asking `render_urls_jsonb is null` would get the wrong answer on
+-- every auto-rendered P8-era crawl. `<> 'null'` and deliberately NOT
+-- `= 'array'`: a value that is neither null nor a list of URLs is a config we
+-- cannot read, and it must be COPIED so `render.coverage` refuses the crawl
+-- out loud rather than having the migration quietly drop it (hard rule 7).
 UPDATE crawls SET render_urls_jsonb = config_jsonb->'renderUrls'
-WHERE config_jsonb ? 'renderUrls' AND config_jsonb->'renderUrls' IS NOT NULL;--> statement-breakpoint
+WHERE config_jsonb ? 'renderUrls' AND config_jsonb->'renderUrls' IS NOT NULL
+  AND jsonb_typeof(config_jsonb->'renderUrls') <> 'null';--> statement-breakpoint
 UPDATE crawls SET config_jsonb = config_jsonb - 'renderUrls' WHERE config_jsonb ? 'renderUrls';

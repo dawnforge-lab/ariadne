@@ -99,6 +99,14 @@ export const crawls = pgTable("crawls", {
   // ran — the ambiguity docs/gates/phase-8.md §7.2 warns about, now a column
   // instead of a log line. Never backfilled: the old runs' numbers exist only
   // in logs, and a guessed backfill would be a silent fallback (rule 7).
+  //
+  // LAST-RUN SEMANTICS, like render_urls_jsonb beside it. A resumed crawl runs
+  // the inference again over the larger population and OVERWRITES all four
+  // fields, `at` included — so this describes the most recent pass, not the
+  // first. That is the only reading that stays true: the pass is idempotent by
+  // recomputation, so the counts it reports are the ones the population NOW
+  // implies, and a preserved first-write `at` would date numbers that have
+  // since moved.
   templateInferenceJsonb: jsonb("template_inference_jsonb"),
 });
 

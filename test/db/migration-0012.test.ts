@@ -151,8 +151,18 @@ describe("0012 — crawls.render_urls_jsonb", () => {
    * saying "explicit": every pass overwrites the record, so the column always
    * describes the LAST selection. NULL, not an empty array — an empty list
    * would read as "somebody named no pages", which is not what happened.
+   *
+   * The list it overwrites is set HERE rather than inherited from the test
+   * above: a case that depends on a sibling's write passes for the wrong
+   * reason when that sibling breaks, and this one would then be asserting that
+   * NULL stayed NULL.
    */
   it("an automatic pass writes NULL over the earlier list", async () => {
+    await db
+      .update(crawls)
+      .set({ renderUrlsJsonb: [`${base}/a`] })
+      .where(eq(crawls.id, crawlId));
+
     const summary = await runRenderPass(db, crawlId, {
       ...config,
       renderHtmlDir: renderRoot,
@@ -294,15 +304,20 @@ describe("0012 — the duplicate-group indexes", () => {
     ] as const) {
       const def = defs.get(name);
       expect(def, `missing index ${name}`).toBeDefined();
-      expect(def).toContain(`btrim(${column})`);
-      // The lateral's `order by p2.url limit 20` is read off the index rather
-      // than sorted, which is what makes the sample cheap.
-      expect(def).toContain("url");
-      // The cohort, verbatim from the rules' INDEXABLE.
-      expect(def).toContain("(fetch_class = 'ok'::text)");
-      expect(def).toContain("(status_code = 200)");
-      expect(def).toContain("is_indexable");
-      expect(def).toContain(`(${column} IS NOT NULL)`);
+      // THE WHOLE KEY LIST, IN ORDER, not just its members. `crawl_id` first
+      // for the equality, the grouped expression second so `group by
+      // btrim(<field>)` is answerable from it, and `url` THIRD so the sample
+      // lateral's `order by p2.url limit 20` is read off the index instead of
+      // sorted — which is where the measured 0.338 -> 0.009 ms per group came
+      // from. Any other order still contains all three names and would satisfy
+      // a membership check while losing the sort avoidance silently.
+      expect(def).toContain(`USING btree (crawl_id, btrim(${column}), url)`);
+      // The cohort, verbatim from the rules' INDEXABLE, as Postgres normalises
+      // it (`is_indexable = true` spelled out, `'ok'::text` cast).
+      expect(def).toContain(
+        `WHERE ((fetch_class = 'ok'::text) AND (status_code = 200) AND ` +
+          `(is_indexable = true) AND (${column} IS NOT NULL))`,
+      );
     }
   });
 });
