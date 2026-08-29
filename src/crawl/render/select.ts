@@ -53,6 +53,16 @@
  * Alphabetical order is not a priority. Template size is. `url asc` remains the
  * final tiebreak, so the selection is as deterministic as it ever was.
  *
+ * P8-T5 fixed the other half of that crawl's problem — `inferPageTemplates`
+ * (src/crawl/page-type.ts) collapses those ~170 singletons into
+ * `/collections/:slug` before this module ever reads the column, so a type here
+ * is a template — but it did NOT retire the ordering above, and the ordering is
+ * not to be read as a workaround that has served its purpose. A flat site, a
+ * site with dozens of genuinely small sections, and any crawl whose tail is
+ * long still put many size-1 types in front of a big one; size-ordering is what
+ * keeps the biggest template seated first in all of those, and it is the only
+ * thing that does.
+ *
  * Everything here is one statement's worth of SQL over `pages` and `links`.
  * Nothing loads a page list into memory except the selection itself, which the
  * budget bounds by construction (hard rules 3 and 6).

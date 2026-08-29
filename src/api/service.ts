@@ -1958,8 +1958,20 @@ export class ApiService {
         config: entry.config,
         signal,
       });
+      // The template inference beside the page count, because the pair is the
+      // whole of "what shape is this site" and the alternative is a second
+      // census over `pages` to find out. `pageTemplates` is null only when the
+      // pass did not run (a crawl that failed before it had a population), and
+      // that is said in those words rather than printed as a zero.
+      const templates =
+        summary.pageTemplates === null
+          ? "page types not inferred"
+          : `${summary.pageTemplates.typesBefore} URL shape(s) -> ` +
+            `${summary.pageTemplates.typesAfter} page type(s), ` +
+            `${summary.pageTemplates.pagesRetyped} retyped`;
       this.log(
-        `api: crawl ${entry.crawlId} ${summary.status} — ${summary.pagesCrawled} page(s)`,
+        `api: crawl ${entry.crawlId} ${summary.status} — ` +
+          `${summary.pagesCrawled} page(s), ${templates}`,
       );
     } catch (error) {
       // The crawl's own failure path has already closed the row as `failed`

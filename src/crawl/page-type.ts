@@ -120,6 +120,23 @@ export interface TemplateMember {
  *    into one bucket and call it a template. They stay themselves. This is the
  *    "small honest tail" a real site keeps, and it is why this pass invents no
  *    `(other)` bucket: every page keeps a type that means something.
+ *
+ *    THE RESIDUAL, stated so a gate crawl does not have to rediscover it: on a
+ *    site that publishes everything at the root — `/about-us-today`,
+ *    `/summer-sale-2026`, a flat WordPress or a flat Shopify — this pass
+ *    collapses NOTHING, and the crawl comes out with one page type per page,
+ *    which is the shape of the defect this pass exists to fix. That is
+ *    deliberate: a template is a claim about a route, and a flat site's routes
+ *    are its pages. An auditor meeting one should group by hand and say so, as
+ *    the audit skill's `notes` guidance already asks.
+ *
+ *    A related asymmetry the same rule produces: `/:slug` CAN exist as a
+ *    parse-time type (a root path whose one segment has three or more hyphen
+ *    parts already detected as a slug), while its two-part root siblings stay
+ *    literal beside it — and nothing merges them, because the family that would
+ *    do it is the one this branch refuses to form. So `/:slug` on a real crawl
+ *    means "the root pages whose names happened to be long", not "the root
+ *    pages", and it must not be read as a template.
  */
 function familyOf(pageType: string): string | null {
   if (detectUrlTemplate(pageType) !== pageType) return null;
@@ -259,22 +276,37 @@ export async function inferPageTemplates(
   if (mapping.size === 0) return { typesBefore, typesAfter, pagesRetyped: 0 };
 
   const pairs = [...mapping].map(([from, to]) => sql`(${from}::text, ${to}::text)`);
+  // ALL THE BATCHES OR NONE OF THEM, which is what the three sibling
+  // derivations do (`deriveUrlParams`, `deriveFieldPresence`,
+  // `deriveClickDepth`) and for the same reason. A hard kill between two
+  // batches would leave half the population collapsed and half of it not, under
+  // a `crawls` row still saying `running` — and a reader cannot tell that from a
+  // crawl whose types legitimately had nothing to collapse (hard rule 7). The
+  // batching bounds the SQL text rather than the memory, so nothing is gained by
+  // committing between batches; the transaction costs one line.
+  //
+  // The second line of defence, not the first: because the pass is idempotent
+  // over the population, a resume re-runs it and a half-collapsed crawl would
+  // heal. That is a repair, and it only happens if somebody resumes. The
+  // transaction is what makes the row never wrong in the first place.
   let pagesRetyped = 0;
-  for (let i = 0; i < pairs.length; i += RETYPE_BATCH) {
-    const batch = pairs.slice(i, i + RETYPE_BATCH);
-    const written = await db.execute(sql`
-      update pages p
-      set page_type = v.new_type
-      from (values ${sql.join(batch, sql`, `)}) as v(old_type, new_type)
-      where p.crawl_id = ${crawlId}
-        and p.page_type = v.old_type`);
-    if (written.rowCount === null) {
-      throw new Error(
-        `inferPageTemplates: crawl '${crawlId}' — the update reported no row count, ` +
-          "so how many pages were retyped is unknown",
-      );
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < pairs.length; i += RETYPE_BATCH) {
+      const batch = pairs.slice(i, i + RETYPE_BATCH);
+      const written = await tx.execute(sql`
+        update pages p
+        set page_type = v.new_type
+        from (values ${sql.join(batch, sql`, `)}) as v(old_type, new_type)
+        where p.crawl_id = ${crawlId}
+          and p.page_type = v.old_type`);
+      if (written.rowCount === null) {
+        throw new Error(
+          `inferPageTemplates: crawl '${crawlId}' — the update reported no row count, ` +
+            "so how many pages were retyped is unknown",
+        );
+      }
+      pagesRetyped += written.rowCount;
     }
-    pagesRetyped += written.rowCount;
-  }
+  });
   return { typesBefore, typesAfter, pagesRetyped };
 }
