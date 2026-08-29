@@ -7,7 +7,10 @@ import {
   TITLE_MAX,
   TITLE_MIN,
 } from "../../src/rules/page/on-page.js";
-import { DEEP_DEPTH, SLOW_MS } from "../../src/rules/page/technical.js";
+import { SLOW_MS } from "../../src/rules/page/technical.js";
+// `DEEP_DEPTH` moved with `structure.deep-page` in Phase 9: the rule reads
+// `click_depth` and therefore lives with the link-graph rules.
+import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_HAMMING,

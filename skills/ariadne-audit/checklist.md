@@ -1231,10 +1231,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        a redirect leads no further — a page reachable only through a redirect is
        counted unreachable, and the redirect is the thing to fix (CHECK-10).
   2. `issues_list` with `checkId: "CHECK-31"` — `structure.deep-page` (info) names
-     individual pages past the depth threshold. **It still reads DISCOVERY depth**
-     (it is a page rule, and runs before the click-depth search): treat its list as a
-     lower bound, and take the per-page click depths from `pages_query`, which reports
-     `clickDepth` beside `depth`.
+     individual pages past the depth threshold. **It reads CLICK depth** (since
+     ruleset 0.7.0 it is a query rule, running after the click-depth search), so its
+     evidence is `{clickDepth, threshold}` and its list is the buried indexable pages
+     rather than a lower bound. Pages with no click path at all are NOT in it — they
+     have no depth to be past a threshold and are `links.orphan`'s finding (CHECK-32)
+     — so read the two together. Per-page depths come from `pages_query`, which
+     reports `clickDepth` beside `depth`.
   3. `metrics_get` with `metricId: "structure.depth-distribution"` — DISCOVERY depth,
      kept as evidence about the CRAWL rather than about the site. It counts hops from
      a seed, and **every sitemap URL is a seed**, so a page with no HTML link path is

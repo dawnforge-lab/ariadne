@@ -11,6 +11,7 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import {
+  assertCrawl,
   assertNormalisedSitemap,
   capsOr,
   limitTo,
@@ -19,6 +20,18 @@ import {
 
 const ORPHAN: RuleIdentity = { id: "links.orphan", severity: "warning" };
 const SKIPPED: RuleIdentity = { id: "links.orphan-skipped", severity: "info" };
+const DEEP: RuleIdentity = { id: "structure.deep-page", severity: "info" };
+
+/**
+ * Click depth above which a page is reported as buried — hops along internal
+ * links from the home page, not hops through the crawler's frontier.
+ *
+ * Exported because the client-facing copy quotes the number and a test asserts
+ * the prose against this constant: change it here and the copy test fails until
+ * the sentence is changed with it. It moved from src/rules/page/technical.ts
+ * with the rule (Phase 9).
+ */
+export const DEEP_DEPTH = 5;
 
 /** What the crawl row and the frontier say about whether the crawl finished. */
 interface Completeness {
@@ -204,15 +217,82 @@ async function orphanFindings(
 }
 
 /**
- * The orphan check and the statement that it could not be run: two rule ids,
- * because a finding's copy is looked up by its rule id, and rendering "the
- * check did not run" under "Page has no internal links pointing to it" would be
- * a false statement to a client.
+ * Pages the reader has to click too many times to reach.
  *
+ * click_depth, not discovery depth: discovery depth is "how the crawler
+ * found it" (a sitemap URL is depth 1 however buried it is); click_depth
+ * is the link-graph BFS the reader actually clicks through. Reading
+ * discovery depth kept this rule silent through two real audits on a site
+ * with 356 sitemap-discovered pages (docs/gates/phase-8.md §15 item 1).
+ * NULL click_depth is links.orphan's finding, not ours — excluded, not
+ * treated as infinitely deep.
+ *
+ * A QUERY rule for one reason, and it is the reason the move had to happen at
+ * all: `deriveClickDepth` fills the column in the DERIVATION phase, which runs
+ * after the page cursor and before the query rules (src/rules/run.ts). A page
+ * rule reading `click_depth` would see last run's value, or null on a crawl's
+ * first judgement — a rule that always passes the first time it is asked, which
+ * is hard rule 1.
+ *
+ * Indexable 200s only, the same cohort `links.orphan` reports over: click depth
+ * is about crawl attention and internal link equity, and a page that is not
+ * going in the index is competing for neither. Burying a noindex page is not a
+ * fault, so reporting it would be asking for a fix that should not be made.
+ *
+ * `click_depth > N` excludes null by SQL's own three-valued logic, which is the
+ * behaviour this rule wants and states rather than relies on: a page no link
+ * path reaches has no click depth to be past a threshold, and it is already
+ * reported — once — by `links.orphan`.
+ *
+ * Capped like every other URL-scoped rule, deepest first so the worst page is
+ * the first one an action plan reads. `count(*) over ()` is evaluated across the
+ * full result set before `limit` takes its slice, so the exact total survives
+ * the cap.
+ */
+async function deepPageFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+  const rows = await db.execute<{
+    id: string;
+    url: string;
+    click_depth: number;
+    total_matches: number;
+  }>(sql`
+    select p.id, p.url, p.click_depth, count(*) over ()::int as total_matches
+    from pages p
+    where p.crawl_id = ${crawlId}
+      and p.fetch_class = 'ok'
+      and p.status_code = 200
+      and p.is_indexable
+      and p.click_depth > ${DEEP_DEPTH}
+    order by p.click_depth desc, p.url
+    ${limitTo(caps.listing)}`);
+
+  const findings = rows.rows.map((row) =>
+    queryFinding(DEEP, {
+      pageId: String(row.id),
+      pageUrl: String(row.url),
+      evidence: { clickDepth: Number(row.click_depth), threshold: DEEP_DEPTH },
+      dedupeKey: String(row.url),
+    }),
+  );
+  return noteTruncation(findings, rows.rows[0]?.total_matches ?? 0);
+}
+
+/**
+ * The orphan check, the statement that it could not be run, and the depth of
+ * the pages the same link graph does reach.
+ *
+ * The first two are two rule ids for one check, because a finding's copy is
+ * looked up by its rule id, and rendering "the check did not run" under "Page
+ * has no internal links pointing to it" would be a false statement to a client.
  * Both claim CHECK-32 and both read the same gate, each running it for itself
  * rather than sharing state — a rule that depended on another rule having run
  * first would be a rule that quietly reports nothing when run alone. Exactly
  * one of them can produce a finding on any given crawl.
+ *
+ * The third claims CHECK-31 and lives here rather than beside the page rules
+ * because it reads the link graph too: the orphan rule reports the pages the
+ * graph does not reach, and this one reports the pages it reaches only after
+ * too many clicks. Same column, one derivation apart.
  */
 export const linkGraphRules: QueryRule[] = [
   defineRule<QueryRule>({
@@ -253,6 +333,26 @@ export const linkGraphRules: QueryRule[] = [
           dedupeKey: "site",
         }),
       ];
+    },
+  }),
+
+  // No completeness gate, and the asymmetry with `links.orphan` above is the
+  // point: an unfinished crawl makes "nothing links to this page" unsound, but
+  // it only makes this rule's answer INCOMPLETE — every page it does report is
+  // a page whose click path this crawl walked. The existence check is still
+  // needed, because a crawl id nothing knows selects no rows and would read as
+  // a site with no buried pages.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: DEEP.id,
+    checkIds: ["CHECK-31"],
+    category: "technical",
+    severity: DEEP.severity,
+    ...copyFor(DEEP.id),
+    rulesetVersion: RULESET_VERSION,
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
+      await assertCrawl(db, crawlId, DEEP.id);
+      return deepPageFindings(db, crawlId, capsOr(caps));
     },
   }),
 ];

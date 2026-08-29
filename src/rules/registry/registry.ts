@@ -23,7 +23,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
-export const RULESET_VERSION = "0.6.0";
+// 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
+// sites became reachable, so a re-judged crawl can change verdict.
+export const RULESET_VERSION = "0.7.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
