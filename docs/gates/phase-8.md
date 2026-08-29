@@ -54,7 +54,7 @@ measurement:
 | | The plan asked | Answered |
 |---|---|---|
 | 1 | the cancellation proven on real pages, `renderedRenderable` vs `renderable` quoted | §2 — delta 0 on 10 of 14, the old constant reproduced beside it |
-| 2 | `content.csr-dependent`'s comparison reachable | §3 — ratio 0.32–0.73 → 1.000–1.161; one page 27 words from firing |
+| 2 | `content.csr-dependent`'s comparison reachable | §3 — ratio 0.32–0.73 → 1.000–1.161; one page 27 words from the **floor** arm, with the 2× ratio arm still the binding one |
 | 3 | the agent-directed render flow driven from the skill | §4 — 14 named URLs, 0 failures, `selectionMode: "explicit"` with four nulls |
 | 4 | supplied-sitemap provenance visible | §5 — `sitemapSources` and `suppliedSitemaps` side by side, one document, six fetches |
 | 5 | full listings: every orphan, the complete near-duplicate set, the uncapped cost | §6 — 243 and 16,789, 13.3× the findings for +0.6 s and ~2 MB |
@@ -218,8 +218,11 @@ otherwise.** The rule needs `rendered_renderable ≥ 2 × renderable` **and**
 Phase 7 recorded CHECK-01 as SKIP because the firing condition was
 "arithmetically unreachable on this crawl whatever the site did". **That is no
 longer true.** `/products/harper-square-neck-hourglass-blazer-in-black` came
-within **27 words** of tripping the floor arm; had the theme's script written 150
-words instead of 123, the rule would have fired. The zero is now the honest report
+within **27 words** of tripping the floor arm — but the floor is only half the
+condition, and the ratio arm stayed the binding one: at 150 added words that page
+would have shown 914 against a 2× requirement of 1,528, so it would not have
+fired. Firing on *that* page needed `addedWords ≥ 764` — about **641 more words**,
+not 27. The zero is now the honest report
 of a server-rendered site — the answer CHECK-01 asks for — rather than a
 comparison nothing could answer. **The skills-only session recorded CHECK-01 as a
 PASS on exactly that reasoning, having verified the comparability itself before
@@ -228,10 +231,11 @@ granting it.**
 `nav.js-only` (CHECK-34) and `filters.js-only` (CHECK-02) also fired 0. They stay
 on the browser's counts by the argument written at their own docblocks.
 
-**Twenty-seven words is close enough to be worth saying out loud.** The rule can
-fire and nothing on this site made it. A site that *would* fire it remains
-unmeasured outside the fixture, which is where the firing path is exercised end to
-end.
+**What changed is the sign of the comparison, not a near miss.** The ratio moved
+onto the right side of 1, so the arithmetic can now produce a firing — the floor
+arm came within 27 words of one, and the ratio arm was never close on any page
+here. A site that *would* fire it remains unmeasured outside the fixture, which is
+where the firing path is exercised end to end.
 
 ---
 
@@ -753,7 +757,7 @@ run.
 | Item | Disposition, measured here |
 |---|---|
 | **P8 backlog 1** — CSS-aware suppression, or a per-crawl `chromeWords`, for the 425-word constant | **CLOSED BY BEING MOOTED, not built.** The constant is still 425–489 (mean 436.0) on the innerText pair and is now on neither side of any rule's subtraction: `renderedRenderable − renderable` = **0 on 10 of 14 pages** (§2). No CSS evaluation, no new column, no widening. |
-| **P8 backlog 2** — the comparability answer for `content.csr-dependent` | **CLOSED.** ratio 0.32–0.73 → **1.000–1.161**; the rule is reachable and came within **27 words** of firing on a real product page. CHECK-01's evidence line is sound and its SKIP became a PASS (§3). |
+| **P8 backlog 2** — the comparability answer for `content.csr-dependent` | **CLOSED.** ratio 0.32–0.73 → **1.000–1.161**; the arithmetic can now produce a firing, and a real product page came within **27 words** of the floor arm — the 2× ratio arm stayed the binding one there, so that page itself was ~641 words away. CHECK-01's evidence line is sound and its SKIP became a PASS (§3). |
 | **P8 backlog 3** — `derivePageType`, fourth sighting | **CLOSED.** 196 URL shapes → **13 page types**, 185 retyped, on the site that produced the complaint four phases running (§7.1). |
 | **D-1** — `count` capped, the skill said it was the total | **VERIFIED STABLE in its strongest form**: 21 rules, **zero** truncation notes, because the cap was lifted rather than because the mechanism was removed (§6.1). |
 | **D-2 consequence** — the per-template breakdown unproducible without knowing the four ids | **CLOSED with it.** Four ids, the first four rows of every by-type metric; the product island is one line (§7.2). |
@@ -810,9 +814,10 @@ cannot prove that a claimant answers the check.**
 3. **The thin floor on unrendered pages** (§2.3). Phase 8 fixed the comparison for
    the pages a browser visited. The other 537 still carry the chrome, and the
    caveat travels with every thin number until something measures it site-wide.
-4. **A site that fires `content.csr-dependent`.** The rule is reachable and 27
-   words from firing here; the firing path outside the fixture is still unmeasured
-   (§3).
+4. **A site that fires `content.csr-dependent`.** The rule is reachable here — 27
+   words from the floor arm on the closest page, though the 2× ratio arm remained
+   the binding one and that page was ~641 words from firing. The firing path
+   outside the fixture is still unmeasured (§3).
 5. **A site that declares no sitemap**, to test that supplying one does not hide
    `sitemap.missing` (§5).
 6. **`crawl_status.pagesScanned`**, which would let `crawl.rulesRun` and its three
