@@ -55,6 +55,17 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Shorten the title to 60 characters or fewer, front-loading the words that matter most and moving boilerplate such as the site name to the end (or dropping it).",
   },
+  "title.duplicate": {
+    // Accuracy: this is exact equality between two stored titles after
+    // trimming, over indexable 200 pages only. It is not a similarity measure —
+    // two titles differing by one word are not grouped — and duplicate titles
+    // carry no ranking penalty. Do not let this copy imply either.
+    title: "The same title on more than one page",
+    explanation:
+      "These pages all carry the same title, word for word. The finding names the shared title, how many indexable pages were found carrying it, and up to twenty of those URLs in alphabetical order — the count is the whole group, the list is a sample of it. Only pages that returned 200 and are indexable are compared, since a page kept out of the index competes with nothing. A repeated title is almost always a template writing the same string for every item in a section: the pages then look identical in a search result, none of them says what makes it different, and the search engine has to choose between them on other signals.",
+    howToFix:
+      "Fix the template rather than the pages. Build the title from the fields that actually differ between them — the product or article name, the variant, the location, the page number — and keep the shared part short and at the end. Where the pages really are the same page at several URLs, that is a duplicate-content problem instead: canonicalise or redirect them, and the titles stop repeating on their own.",
+  },
   "meta-description.missing": {
     title: "Missing meta description",
     explanation:
@@ -75,6 +86,15 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "The meta description is over 160 characters, so search engines will truncate the snippet and the closing sentence will not be read.",
     howToFix:
       "Trim the description to 160 characters or fewer, keeping the core message and the call to action in the first sentence.",
+  },
+  "meta-description.duplicate": {
+    // Same accuracy constraint as `title.duplicate` above: exact equality after
+    // trimming, indexable 200s only, and no penalty claim.
+    title: "The same meta description on more than one page",
+    explanation:
+      "These pages all carry the same meta description, word for word. The finding names the shared description, how many indexable pages were found carrying it, and up to twenty of those URLs in alphabetical order — the count is the whole group, the list is a sample of it. Only pages that returned 200 and are indexable are compared. A description is the sales line under the title in a result, so a shared one means several of your results say exactly the same thing about pages that are not the same, and the search engine is more likely to discard it and write a snippet from the page text instead.",
+    howToFix:
+      "Write the description from the page's own content, in the template: what this item is, what makes it different, and a reason to click. A generic site-wide sentence is worse than none at all, because it fills the one line you control with words that describe nothing. If a section genuinely has nothing distinct to say per page, it is usually better to leave the description off those pages and let the search engine build a snippet than to repeat one.",
   },
   "headings.h1-missing": {
     title: "Missing H1 heading",
@@ -100,12 +120,41 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Adjust the heading levels so they descend one step at a time. Where a level was skipped for the sake of a smaller font, fix the styling instead of the heading level.",
   },
+  "h1.duplicate-text": {
+    // Accuracy, twice over. Exact equality after trimming, like the two rules
+    // above — and the compared value is the FIRST H1 only, as the analyzer
+    // stored it. Copy claiming anything about a page's other headings would be
+    // describing data this rule never sees.
+    title: "The same H1 heading on more than one page",
+    explanation:
+      "These pages all open with the same H1 heading, word for word. The finding names the shared heading, how many indexable pages were found carrying it, and up to twenty of those URLs in alphabetical order — the count is the whole group, the list is a sample of it. Only pages that returned 200 and are indexable are compared, and only each page's first H1 is read. The H1 is the headline a reader sees and the strongest statement a page makes about its own subject, so a set of pages sharing one is a set of pages claiming to be about the same thing.",
+    howToFix:
+      "Give each page a headline that names what is actually on it, generated from the same fields that make the pages different in the first place. A shared H1 usually comes from a layout that puts the section or brand name in the heading slot and the real headline in a styled div below it: if that is what happened, swap the two so the element and the words agree.",
+  },
+  "h1.duplicate-skipped": {
+    title: "Duplicate-heading check could not be run on this crawl",
+    explanation:
+      "Comparing headings across a site needs the text of each page's first H1, and this crawl did not record it: the pages here carry H1 elements, and not one of them has any heading text stored against it. That is what a crawl performed before the engine started reading heading text looks like. The check was therefore left unrun rather than reported as clean, because a site with no duplicate headings and a crawl that never read any heading produce exactly the same empty result, and only one of them is good news. The finding says how many indexable pages the crawl held, how many of them carry an H1 element, and how many have heading text stored — the last of which is zero, which is the reason this is here.",
+    howToFix:
+      "Re-crawl the site. The heading text is captured while each page is being read and cannot be recovered afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
+  },
   "content.thin": {
+    // Accuracy: the count this rule reads excludes text the page's own markup
+    // hides, and does NOT exclude text hidden by a stylesheet — the crawler
+    // does not load CSS. The prose says "the markup hides" for that reason;
+    // do not widen it to a claim about everything a visitor cannot see.
     title: "Thin content",
     explanation:
-      "This indexable page has fewer than 150 words of visible text. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees.",
+      "This indexable page carries fewer than 150 words a reader can actually reach. Text the page's own markup hides is left out of that count — a menu drawer, a closed accordion, a block marked as not displayed, or a template a script clones later — because none of it is on the page a visitor is shown. The finding quotes both numbers, so a page that ships plenty of words and shows very few is visible as exactly that. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees.",
     howToFix:
-      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
+      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the two numbers are far apart, the copy exists but is behind something a reader has to open, so bring the substance into the visible page rather than into a drawer. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
+  },
+  "content.thin-skipped": {
+    title: "Thin-content check could not be run on this page",
+    explanation:
+      "The thin-content check counts the words a reader can reach, which means it has to know which parts of the page the markup hides. This page was crawled before the engine recorded that, so the number the check needs does not exist for it — only the older count of every word in the HTML, which includes hidden menus, accordions and templates and is often several times larger. The page was therefore left unjudged rather than judged on the wrong number, which on a site with heavy hidden chrome would have called a thin page healthy.",
+    howToFix:
+      "Re-crawl the site. The count is taken while the page is being read, so it cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
   },
   "content.placeholder": {
     // Accuracy: the analyzer matches the literal phrase "lorem ipsum" in
@@ -511,7 +560,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // the page was proved missing, would misdescribe the rule.
     title: "Soft 404 (a missing page answering 200)",
     explanation:
-      'This page answers with a 200 OK, but it looks like a "page not found" rather than a page. Either signal alone is enough for us to say so: its visible text carries not-found wording and the page is under 300 words, or its content is within a few bits of the body this site served for a URL that cannot exist. Search engines treat these as errors anyway, so the URL is crawled repeatedly, kept out of the index, and the crawl budget spent on it is wasted.',
+      'This page answers with a 200 OK, but it looks like a "page not found" rather than a page. Either signal alone is enough for us to say so: its visible text carries not-found wording and the page shows under 300 words a reader can reach (text the markup hides, such as a menu drawer or a closed accordion, is left out of that count, so a short error message inside a full site shell still reads as short), or its content is within a few bits of the body this site served for a URL that cannot exist. Search engines treat these as errors anyway, so the URL is crawled repeatedly, kept out of the index, and the crawl budget spent on it is wasted.',
     howToFix:
       "Decide what the URL should be. If the content is genuinely gone, return a real 404 or 410 status rather than a 200, or 301-redirect it to the closest live page. If it is a real page that happens to be short or to mention the phrase, expand it so it stops resembling the error template — and check what links to it, because a soft 404 usually means something is generating URLs that were never meant to exist.",
   },
@@ -660,18 +709,25 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Read each row as a sentence about the site's structure — 'product pages are linked to by category pages and by nothing else'. A commercially important type reached from only one other type depends entirely on that template being crawled; a type with no sources at all is reachable only from the sitemap or from outside. Where editorial pages link to nothing commercial, that is an internal linking opportunity rather than a fault to repair.",
   },
   "structure.depth-distribution": {
-    title: "Click depth from the start of the crawl",
+    title: "Discovery depth: how the crawler first reached each page",
     explanation:
-      "How many links from where the crawl started each indexable page sits, summarised as a distribution: how many pages were measured, the shallowest and deepest, the mean, the quartiles, and the 95th percentile — the depth only the deepest one page in twenty is buried past. Depth is measured from the crawl's starting URL, so it is the site's own home page unless the crawl was pointed somewhere else. Only pages that returned 200 and are indexable are measured — a buried noindex page costs nothing. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+      "How far into the crawl each indexable page was first found, summarised as a distribution: how many pages were measured, the shallowest and deepest, the mean, the quartiles, and the 95th percentile — the depth only the deepest one page in twenty was found past. This is a measurement of the CRAWL, not of the site: the crawler starts from the site's URL and from every address the sitemap publishes, so a page listed in the sitemap is recorded at depth 0 whether or not a single link on the site points at it. On a site whose sitemap covers everything this table is therefore mostly zeroes, and that flatness is itself the finding — it says the pages were found by being published in a file, not by being linked to. For how many clicks from the home page a page actually is, read the click depth table beside this one. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
     howToFix:
-      "Read the upper quartiles: pages deep in the structure are crawled less often and receive less internal link equity, so a template whose median depth is high is one whose pages compete from behind. Where that template matters commercially, shorten the path to it — a hub, a category page or a navigation entry — rather than treating each deep page individually.",
+      "Compare this table with the click depth table. Where discovery depth is far shallower than click depth, the sitemap is doing the work the internal linking should do: the pages are being found because they are published in a file, and a search engine that weighs them by how the site links to them will weigh them at nearly nothing. Where the two agree, the crawl found the site the way a visitor would.",
+  },
+  "structure.click-depth-distribution": {
+    title: "Click depth from the home page",
+    explanation:
+      "How many clicks from the home page each indexable page sits — the shortest chain of internal links that reaches it — summarised as a distribution: how many pages were measured, the shallowest and deepest, the mean, the quartiles, and the 95th percentile, the depth only the deepest one page in twenty is buried past. The home page itself is 0. Alongside them is the number that matters most: how many pages NO chain of links reaches at all, counted separately as unreachable rather than being given a depth of zero. Those are the pages that exist only in the sitemap or only in a search engine's memory — the worst case in the table, worse than the deepest page in it, because nothing on the site leads to them. The count covers every page in the cohort, the unreachable ones included, and the statistics beside it describe only the pages that have a depth. Links are followed as the site publishes them: internal links only, and a link that lands on a redirect leads no further, so a page reachable only through a redirect is counted as unreachable and the redirect is the thing to fix. Only pages that returned 200 and are indexable are measured — a buried noindex page costs nothing. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+    howToFix:
+      "Start with the unreachable pages: a page no link path reaches receives no internal link equity, is crawled rarely, and depends entirely on the sitemap being read. Give each one a home — a category, a hub, a related-products block — or, where the page should not exist, remove it from the sitemap. Then read the upper quartiles: pages deep in the structure are crawled less often and compete from behind, so a template whose median depth is high is one to shorten the path to with a hub or a navigation entry, rather than treating each deep page individually.",
   },
   "content.metrics-by-type": {
     title: "Word count and text density by template",
     explanation:
-      "How much text this site's indexable pages carry, as two distributions: the word count of the page's visible text, and the text ratio — the share of the page's HTML that is that text rather than markup. Each is summarised the same way: how many pages were measured, the shortest and longest, the mean, the quartiles, and the 95th percentile — the level only the largest one page in twenty reaches. The two counts are the pages that actually carry each measure, so a page the parser recorded no word count for is absent from the word-count column and still present in the text-ratio one. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+      "How much text this site's indexable pages carry, as three distributions: the word count of the page's text, the renderable word count — the same text minus the parts the page's own markup hides, such as a menu drawer, a closed accordion or a template a script clones later — and the text ratio, the share of the page's HTML that is text rather than markup. The text ratio counts the hidden parts as text, unlike the renderable count beside it, so a template with a lot of hidden chrome reads as denser than it is. Each is summarised the same way: how many pages were measured, the shortest and longest, the mean, the quartiles, and the 95th percentile — the level only the largest one page in twenty reaches. The three counts are the pages that actually carry each measure, so a page the parser recorded no word count for is absent from the word-count column and still present in the text-ratio one. Only pages that returned 200 and are indexable are measured. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
     howToFix:
-      "Compare each template's row with the site row and with what the template is for: a product listing legitimately carries less text than an article, so the number to read is the spread inside one template rather than the difference between two. A template whose lower quartile sits far below its median has a tail of pages carrying much less than the rest — those are the pages to look at first. A low text ratio says the page is mostly markup, which is a rendering and template question rather than an editorial one.",
+      "Compare each template's row with the site row and with what the template is for: a product listing legitimately carries less text than an article, so the number to read is the spread inside one template rather than the difference between two. The gap between the word count and the renderable word count is the template's furniture — a template shipping 900 words and showing 200 carries 700 words of hidden chrome on every one of its pages, which inflates every other length measure taken of it. A template whose lower quartile sits far below its median has a tail of pages carrying much less than the rest — those are the pages to look at first. A low text ratio says the page is mostly markup, which is a rendering and template question rather than an editorial one.",
   },
   "content.template-similarity": {
     // The plan's naming ruling: this table is about TEMPLATE SIMILARITY. The
@@ -701,9 +757,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "redirect.volume": {
     title: "How much of the crawl was redirects",
     explanation:
-      "How many of the URLs this crawl requested answered with a redirect, out of how many pages were fetched in total, and that as a percentage rounded to one decimal place. Every page the crawl read counts in the total, whatever it answered, because a redirect is a share of what was fetched rather than of what was indexable. Each redirecting URL counts once, so a link that redirects and appears in the footer of every page is one redirecting URL here, not one per page. Beside them are how many redirect chains and how many redirect loops the audit found on this crawl — the same chains and loops the redirect findings list, counted in full even where that list was capped at the first 200. A crawl with no pages shows no percentage rather than zero.",
+      "How many of the URLs this crawl requested answered with a redirect, out of how many pages were fetched in total, and that as a percentage rounded to one decimal place. Every page the crawl read counts in the total, whatever it answered, because a redirect is a share of what was fetched rather than of what was indexable. Each redirecting URL counts once, so a link that redirects and appears in the footer of every page is one redirecting URL here, not one per page. Beside it is the number of internal links pointing at one of those redirecting URLs, which is the same fact counted the other way round: that one footer link is a single redirecting URL and one redirect inlink from every page of the site. Beside them are how many redirect chains and how many redirect loops the audit found on this crawl — the same chains and loops the redirect findings list, counted in full even where that list was capped at the first 200. A crawl with no pages shows no percentage rather than zero.",
     howToFix:
-      "The percentage is the crawl-budget number: every redirect is a request that returns no content, so a site spending a tenth of its crawl on them is a site whose pages are being fetched less often than they could be. Read it beside the chains and loops, which are faults rather than overhead — a loop returns nothing at all, and a chain multiplies the cost of every link into it. Where the share is high and the chains are few, the fix is usually in the links themselves rather than in the redirect rules: point internal links, sitemap entries and navigation at the destination URL, so the redirect stays available for outside traffic and stops being walked on every crawl.",
+      "The percentage is the crawl-budget number: every redirect is a request that returns no content, so a site spending a tenth of its crawl on them is a site whose pages are being fetched less often than they could be. The inlink count is what tells you how much of that is worth chasing: a handful of redirecting URLs with thousands of links into them is a template change, while the same URLs with one link each are a tidy-up. Read them beside the chains and loops, which are faults rather than overhead — a loop returns nothing at all, and a chain multiplies the cost of every link into it. Where the share is high and the chains are few, the fix is usually in the links themselves rather than in the redirect rules: point internal links, sitemap entries and navigation at the destination URL, so the redirect stays available for outside traffic and stops being walked on every crawl.",
   },
   "sitemap.structure": {
     title: "What the site's sitemap is made of",

@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 
+import { ROBOTS_OUTCOMES } from "../../crawl/discovery.js";
 import type { DiscoveryTruncation } from "../../crawl/discovery.js";
 import type { FetchClass } from "../../crawl/fetch-page.js";
 import type { HostProbeHop, HostProbeResult, HostProbeVariant } from "../../crawl/host-probe.js";
@@ -39,7 +40,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const OUTCOMES = new Set(["read", "absent", "unreachable"]);
+// Derived from the crawl layer's own list so a fourth outcome cannot desync
+// this parser silently — the same drift class service.ts's copy was fixed for.
+const OUTCOMES = new Set<string>(ROBOTS_OUTCOMES);
 
 /**
  * The stored blob, checked against the shape `runCrawl` writes rather than

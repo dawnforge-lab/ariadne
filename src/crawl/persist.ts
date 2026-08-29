@@ -466,7 +466,17 @@ export class PageWriter {
       h5Count: analysis?.headingCounts[4] ?? 0,
       h6Count: analysis?.headingCounts[5] ?? 0,
       headingOrder: analysis?.headingOrder ?? null,
+      h1Text: analysis?.h1Text ?? null,
       wordCount: analysis?.wordCount ?? null,
+      // Written together with `word_count`, off the same pass, and null in
+      // exactly the same case — no analysis ran. That pairing is what lets a
+      // rule tell "this page has no text evidence at all" (both null) from
+      // "this row predates Phase 7" (a word count and no renderable one), which
+      // is the distinction `content.thin-skipped` is built on.
+      renderableWordCount: analysis?.renderableWordCount ?? null,
+      // `click_depth` is Phase 7 Task 4's column and this writer does not touch
+      // it: the crawl knows the depth of the frontier item that found the URL
+      // (`depth`, above), not the shortest click path to it.
       textRatio: analysis?.textRatio ?? null,
       contentHash: analysis?.contentHash ?? null,
       // Unsigned analyzer value -> signed column; see the module header.

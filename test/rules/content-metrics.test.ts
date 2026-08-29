@@ -89,6 +89,12 @@ describe("the content metrics against the database", () => {
     path: string;
     pageType: string | null;
     words?: number | null;
+    /**
+     * The renderable word count. Undefined means "the same as `words`", the
+     * shape of a page with nothing hidden; an explicit null is a row a pre-P7
+     * crawl wrote, which carries a word count and no renderable one.
+     */
+    renderable?: number | null;
     ratio?: number | null;
     simhash?: bigint | null;
     /** Only the sampling-cap test sets this: the sample is taken BY id. */
@@ -113,6 +119,8 @@ describe("the content metrics against the database", () => {
         depth: 1,
         discoveredVia: "link",
         wordCount: s.words === undefined ? null : s.words,
+        renderableWordCount:
+          s.renderable === undefined ? (s.words === undefined ? null : s.words) : s.renderable,
         textRatio: s.ratio === undefined ? null : s.ratio,
         simhash: s.simhash === undefined ? null : s.simhash,
       })),
@@ -127,27 +135,33 @@ describe("the content metrics against the database", () => {
    * THE SITE UNDER TEST for `content.metrics-by-type`. Eight cohort pages
    * (fetched OK, 200, indexable) and two deliberately outside it.
    *
-   *   path      page_type   words   text_ratio
-   *   /p1       product      100    0.10
-   *   /p2       product      200    0.20
-   *   /p3       product      300    0.30
-   *   /p4       product      500    0.50
-   *   /b1       blog         400    0.20
-   *   /b2       blog         800    0.40
-   *   /u1       null (!)    1000    0.50
-   *   /u2       null (!)    null    null   <- in the cohort, measured by neither
-   *   /noindex  blog        9999    0.99   excluded (noindex)
-   *   /gone     retired        5    0.05   excluded (404)
+   *   path      page_type   words   renderable   text_ratio
+   *   /p1       product      100      80          0.10
+   *   /p2       product      200     150          0.20
+   *   /p3       product      300     200          0.30
+   *   /p4       product      500     400          0.50
+   *   /b1       blog         400     300          0.20
+   *   /b2       blog         800     600          0.40
+   *   /u1       null (!)    1000    null (!)      0.50   <- a pre-P7 row
+   *   /u2       null (!)    null    null          null   <- measured by nothing
+   *   /noindex  blog        9999    9999          0.99   excluded (noindex)
+   *   /gone     retired        5       5          0.05   excluded (404)
+   *
+   * `/u1` is the shape the third distribution exists to be honest about: a
+   * page a crawl from before Phase 7 wrote has a word count and no renderable
+   * one, so it is IN the word-count column and ABSENT from the renderable one.
+   * Reading its 1000 into both would be the metric claiming a measurement that
+   * was never taken.
    */
   const SPECS: PageSpec[] = [
-    { path: "/p1", pageType: "product", words: 100, ratio: 0.1 },
-    { path: "/p2", pageType: "product", words: 200, ratio: 0.2 },
-    { path: "/p3", pageType: "product", words: 300, ratio: 0.3 },
-    { path: "/p4", pageType: "product", words: 500, ratio: 0.5 },
-    { path: "/b1", pageType: "blog", words: 400, ratio: 0.2 },
-    { path: "/b2", pageType: "blog", words: 800, ratio: 0.4 },
-    { path: "/u1", pageType: null, words: 1000, ratio: 0.5 },
-    { path: "/u2", pageType: null, words: null, ratio: null },
+    { path: "/p1", pageType: "product", words: 100, renderable: 80, ratio: 0.1 },
+    { path: "/p2", pageType: "product", words: 200, renderable: 150, ratio: 0.2 },
+    { path: "/p3", pageType: "product", words: 300, renderable: 200, ratio: 0.3 },
+    { path: "/p4", pageType: "product", words: 500, renderable: 400, ratio: 0.5 },
+    { path: "/b1", pageType: "blog", words: 400, renderable: 300, ratio: 0.2 },
+    { path: "/b2", pageType: "blog", words: 800, renderable: 600, ratio: 0.4 },
+    { path: "/u1", pageType: null, words: 1000, renderable: null, ratio: 0.5 },
+    { path: "/u2", pageType: null, words: null, renderable: null, ratio: null },
     { path: "/noindex", pageType: "blog", words: 9999, ratio: 0.99, robotsMeta: "noindex" },
     {
       path: "/gone",
@@ -173,7 +187,7 @@ describe("the content metrics against the database", () => {
     await closeDb(db);
   });
 
-  it("content.metrics-by-type reports both measures for the site and each type", async () => {
+  it("content.metrics-by-type reports all three measures for the site and each type", async () => {
     const rows = await run("content.metrics-by-type", crawlId);
 
     // SITE. Eight cohort pages; /u2 has neither measure, so both distributions
@@ -190,8 +204,15 @@ describe("the content metrics against the database", () => {
     //     median pos 3   -> 0.3
     //     p75    pos 4.5 -> 0.4 + 0.5*(0.5-0.4) = 0.45
     //     p95    pos 5.7 -> 0.5
+    //   renderable sorted: 80,150,200,300,400,600 — n=6 (/u1 has none), pos = q*5
+    //     mean 1730/6 = 288.333… -> 288.33
+    //     p25    pos 1.25 -> 150 + 0.25*(200-150) = 162.5
+    //     median pos 2.5  -> 200 + 0.5*(300-200)  = 250
+    //     p75    pos 3.75 -> 300 + 0.75*(400-300) = 375
+    //     p95    pos 4.75 -> 400 + 0.75*(600-400) = 550
     expect(rows["site|"]).toEqual({
       wordCount: { count: 7, min: 100, p25: 250, median: 400, p75: 650, p95: 940, max: 1000, mean: 471.43 },
+      renderableWordCount: { count: 6, min: 80, p25: 162.5, median: 250, p75: 375, p95: 550, max: 600, mean: 288.33 },
       textRatio: { count: 7, min: 0.1, p25: 0.2, median: 0.3, p75: 0.45, p95: 0.5, max: 0.5, mean: 0.3143 },
     });
 
@@ -207,8 +228,15 @@ describe("the content metrics against the database", () => {
     //   median 0.2 + 0.5*0.1  = 0.25
     //   p75    0.3 + 0.25*0.2 = 0.35
     //   p95    0.3 + 0.85*0.2 = 0.47
+    // product renderable 80,150,200,400 — same positions.
+    //   mean 830/4 = 207.5
+    //   p25    80 + 0.75*(150-80)  = 132.5
+    //   median 150 + 0.5*(200-150) = 175
+    //   p75    200 + 0.25*(400-200) = 250
+    //   p95    200 + 0.85*(400-200) = 370
     expect(rows["page_type|product"]).toEqual({
       wordCount: { count: 4, min: 100, p25: 175, median: 250, p75: 350, p95: 470, max: 500, mean: 275 },
+      renderableWordCount: { count: 4, min: 80, p25: 132.5, median: 175, p75: 250, p95: 370, max: 400, mean: 207.5 },
       textRatio: { count: 4, min: 0.1, p25: 0.175, median: 0.25, p75: 0.35, p95: 0.47, max: 0.5, mean: 0.275 },
     });
 
@@ -216,16 +244,23 @@ describe("the content metrics against the database", () => {
     // median 600; p75 700; p95 400 + 0.95*400 = 780.
     // blog ratios 0.2,0.4. mean 0.3; p25 0.2+0.25*0.2 = 0.25; median 0.3;
     // p75 0.35; p95 0.2 + 0.95*0.2 = 0.39.
+    // blog renderable 300,600. mean 450; p25 300+0.25*300 = 375; median 450;
+    // p75 525; p95 300 + 0.95*300 = 585.
     expect(rows["page_type|blog"]).toEqual({
       wordCount: { count: 2, min: 400, p25: 500, median: 600, p75: 700, p95: 780, max: 800, mean: 600 },
+      renderableWordCount: { count: 2, min: 300, p25: 375, median: 450, p75: 525, p95: 585, max: 600, mean: 450 },
       textRatio: { count: 2, min: 0.2, p25: 0.25, median: 0.3, p75: 0.35, p95: 0.39, max: 0.4, mean: 0.3 },
     });
 
-    // The untyped cohort has TWO pages and ONE measured value: each nested
-    // count is the number of pages that carry that measure, not the size of the
-    // cohort. A single value is its own every percentile.
+    // The untyped cohort has TWO pages and a different count per measure: one
+    // word count, one text ratio, and NO renderable count at all (/u1 is a
+    // pre-P7 row and /u2 was measured by nothing). Each nested count is the
+    // number of pages that carry that measure, not the size of the cohort. A
+    // single value is its own every percentile; no value at all is a count of
+    // zero and eight nulls, never a zero-word cohort.
     expect(rows[`page_type|${UNTYPED}`]).toEqual({
       wordCount: { count: 1, min: 1000, p25: 1000, median: 1000, p75: 1000, p95: 1000, max: 1000, mean: 1000 },
+      renderableWordCount: { count: 0, min: null, p25: null, median: null, p75: null, p95: null, max: null, mean: null },
       textRatio: { count: 1, min: 0.5, p25: 0.5, median: 0.5, p75: 0.5, p95: 0.5, max: 0.5, mean: 0.5 },
     });
 
@@ -353,20 +388,24 @@ describe("the content metrics against the database", () => {
   it("counts a page nothing measured as absent from that measure, not as a zero", async () => {
     const nullCrawl = await newCrawl();
     await addPages(nullCrawl, [
-      { path: "/a", pageType: "product", words: 100, ratio: null },
-      { path: "/b", pageType: "product", words: null, ratio: 0.5 },
+      { path: "/a", pageType: "product", words: 100, renderable: 60, ratio: null },
+      { path: "/b", pageType: "product", words: null, renderable: null, ratio: 0.5 },
     ]);
-    // Two pages, one value each. A null read as 0 would give count 2, a
-    // minimum of 0 and a mean of 50 — the shape of a site with an empty page
-    // on it, which this is not.
+    // Two pages, one value each per measure. A null read as 0 would give count
+    // 2, a minimum of 0 and a mean of 50 — the shape of a site with an empty
+    // page on it, which this is not.
+    const one = (v: number) =>
+      ({ count: 1, min: v, p25: v, median: v, p75: v, p95: v, max: v, mean: v });
     expect(await run("content.metrics-by-type", nullCrawl)).toEqual({
       "site|": {
-        wordCount: { count: 1, min: 100, p25: 100, median: 100, p75: 100, p95: 100, max: 100, mean: 100 },
-        textRatio: { count: 1, min: 0.5, p25: 0.5, median: 0.5, p75: 0.5, p95: 0.5, max: 0.5, mean: 0.5 },
+        wordCount: one(100),
+        renderableWordCount: one(60),
+        textRatio: one(0.5),
       },
       "page_type|product": {
-        wordCount: { count: 1, min: 100, p25: 100, median: 100, p75: 100, p95: 100, max: 100, mean: 100 },
-        textRatio: { count: 1, min: 0.5, p25: 0.5, median: 0.5, p75: 0.5, p95: 0.5, max: 0.5, mean: 0.5 },
+        wordCount: one(100),
+        renderableWordCount: one(60),
+        textRatio: one(0.5),
       },
     });
   });
@@ -379,7 +418,7 @@ describe("the content metrics against the database", () => {
 
     const empty = { count: 0, min: null, p25: null, median: null, p75: null, p95: null, max: null, mean: null };
     expect(await run("content.metrics-by-type", emptyCrawl)).toEqual({
-      "site|": { wordCount: empty, textRatio: empty },
+      "site|": { wordCount: empty, renderableWordCount: empty, textRatio: empty },
     });
     // Similarity has no site row to state, so an empty crawl leaves it silent.
     expect(await run("content.template-similarity", emptyCrawl)).toEqual({});

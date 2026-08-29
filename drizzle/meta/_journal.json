@@ -71,6 +71,13 @@
       "when": 1787911952722,
       "tag": "0009_worthless_mercury",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787932813992,
+      "tag": "0010_unique_gideon",
+      "breakpoints": true
     }
   ]
 }

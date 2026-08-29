@@ -46,6 +46,27 @@ import { eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { frontier } from "../db/schema.js";
 
+/**
+ * How a URL came to be in the frontier — the whole vocabulary, and the value
+ * stored in `frontier.discovered_via` and copied onto `pages.discovered_via`.
+ *
+ * FOUR VALUES, ONE WRITER. The crawl loop's `enqueue` is the only thing that
+ * puts a row in this table, and it is called exactly four times: the seed, the
+ * sitemap entries, a page's links and a redirect target (src/crawl/loop.ts).
+ * The list exists at runtime because the agent surface validates a
+ * `discoveredVia` filter against it (`ApiService.listPages`), and `enqueue`'s
+ * parameter is typed `DiscoveredVia` so a fifth kind of discovery cannot be
+ * introduced without appearing here — a filter that silently refused a value
+ * the crawler really writes would read as "no pages were discovered that way".
+ *
+ * It is NOT applied to rows read back out of the database (`toLeased` keeps its
+ * `string`): what the column holds is a fact about a row that already exists,
+ * and narrowing it on read would be a cast rather than a check.
+ */
+export const DISCOVERED_VIA = ["seed", "link", "sitemap", "redirect"] as const;
+
+export type DiscoveredVia = (typeof DISCOVERED_VIA)[number];
+
 /** A row leased to one worker for one attempt. */
 export interface LeasedUrl {
   url: string;

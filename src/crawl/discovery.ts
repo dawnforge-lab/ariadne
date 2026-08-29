@@ -141,8 +141,20 @@ const GZIP_MAGIC_1 = 0x8b;
  *  - `unreachable` — 5xx, timeout, network error, or a URL the policy refused,
  *    after retries. The site could not tell us its rules, which is *not* the
  *    same as telling us there are none. §2.3.1.4: complete disallow.
+ *
+ * A LIST RATHER THAN A BARE UNION, and the type is derived from it, for the
+ * reason `FETCH_CLASSES` and `DISCOVERED_VIA` are: the value crosses into a
+ * jsonb column and comes back as `unknown`, so the API validates it at read
+ * time (`ApiService.parseRobots`) and therefore needs the vocabulary at
+ * RUNTIME. A hand-kept second copy of these three would drift the moment a
+ * fourth outcome was added here — and it would drift silently in the worst
+ * direction: every new crawl's stored evidence would then fail validation, so
+ * `robots_get` and the render path would refuse crawls that are perfectly
+ * sound. One list, one type, no copy.
  */
-export type RobotsOutcome = "read" | "absent" | "unreachable";
+export const ROBOTS_OUTCOMES = ["read", "absent", "unreachable"] as const;
+
+export type RobotsOutcome = (typeof ROBOTS_OUTCOMES)[number];
 
 export interface RobotsInfo {
   /** True only when a robots.txt was fetched and parsed. */

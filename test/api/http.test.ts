@@ -584,7 +584,11 @@ describe("domain allowlist", () => {
       legacyHosts: ["old.localhost"],
     });
     expect(res.status).toBe(202);
-    await settle(String(res.body["crawlId"]));
+    const detail = await settle(String(res.body["crawlId"]));
+    // And the crawl says which extra hosts it was given. Without this echo the
+    // legacy-redirect check (CHECK-15) is unreadable: no finding could mean the
+    // redirects are fine, or that nobody ever named a legacy domain.
+    expect(detail["legacyHosts"]).toEqual(["old.localhost"]);
   });
 
   it("refuses every crawl when the allowlist is empty, but still answers queries", async () => {
@@ -622,6 +626,14 @@ describe("crawl lifecycle", () => {
     // The gate reported its spacing even though nothing ever escalated it — the
     // crawl ran at perHostDelayMs 0, and 0 is a real answer, not "unknown".
     expect(fixtureFinal["hostSpacingMs"]).toBe(0);
+    // A finished crawl NOBODY HAS JUDGED. The marker is null and the findings
+    // count is zero, and the pair is the honest reading: not "this site is
+    // clean" — nothing has looked at it yet. (The rules describe below runs
+    // over this same crawl and the marker moves.)
+    expect(fixtureFinal["rulesRunAt"]).toBeNull();
+    expect(fixtureFinal["findingsCount"]).toBe(0);
+    // Nobody named a legacy domain for this crawl: present and empty.
+    expect(fixtureFinal["legacyHosts"]).toEqual([]);
   });
 
   it("counts the crawl's blocked pages on the status body", async () => {
@@ -830,12 +842,32 @@ describe("POST /crawls/:id/rules", () => {
   });
 
   it("runs the rules over the finished crawl and returns the summary", async () => {
+    // Before: this crawl has never been judged, and the surface says so.
+    const before = await call("GET", `/crawls/${fixtureCrawlId}`);
+    expect(before.body["rulesRunAt"]).toBeNull();
+
     const res = await call("POST", `/crawls/${fixtureCrawlId}/rules`);
     expect(res.status).toBe(200);
     expect(Number(res.body["pagesScanned"])).toBeGreaterThanOrEqual(3);
     expect(typeof res.body["findings"]).toBe("number");
     expect(typeof res.body["byRule"]).toBe("object");
     expect(typeof res.body["byMetric"]).toBe("object");
+
+    // After: the marker is a timestamp, and the findings count on the detail is
+    // the same number the run reported — the invariant `runRules` states about
+    // itself (`count(issues where crawl_id) == summary.findings`), asked of the
+    // surface instead of of the table.
+    //
+    // BOTH FIELDS OFF ONE RESPONSE, and one statement behind it: the pair is
+    // what an agent interprets ("0 beside a timestamp" is a clean site), so the
+    // two must describe the same snapshot. See `getCrawl`, and the
+    // statement-level assertion in test/api/query.test.ts.
+    const after = await call("GET", `/crawls/${fixtureCrawlId}`);
+    const stamp = after.body["rulesRunAt"];
+    expect(typeof stamp).toBe("string");
+    expect(Number.isNaN(Date.parse(String(stamp)))).toBe(false);
+    expect(Date.parse(String(stamp))).toBeGreaterThan(Date.parse(String(fixtureFinal["startedAt"])));
+    expect(after.body["findingsCount"]).toBe(res.body["findings"]);
   }, 60_000);
 
   // A rules run REWRITES the crawl's issues — it deletes them at the top and
@@ -858,6 +890,76 @@ describe("POST /crawls/:id/rules", () => {
     const after = await call("POST", `/crawls/${fixtureCrawlId}/rules`);
     expect(after.status).toBe(200);
   }, 120_000);
+});
+
+describe("GET /crawls/:id/robots", () => {
+  it("hands back the robots.txt this crawl actually read, out of its stored evidence", async () => {
+    const res = await call("GET", `/crawls/${fixtureCrawlId}/robots`);
+    expect(res.status).toBe(200);
+    expect(res.body["crawlId"]).toBe(fixtureCrawlId);
+    expect(res.body["robotsUrl"]).toBe(`${site}/robots.txt`);
+    expect(res.body["outcome"]).toBe("read");
+    // The fixture server's own file, byte for byte — read at crawl time, not
+    // re-fetched now. Nothing else on the surface carries this text.
+    expect(res.body["raw"]).toBe(`User-agent: *\nAllow: /\nSitemap: ${site}/sitemap.xml\n`);
+    expect(res.body["truncated"]).toBe(false);
+    // The file declares no Crawl-delay, which is null rather than 0.
+    expect(res.body["crawlDelaySec"]).toBeNull();
+    expect(res.body["sitemapSources"]).toEqual([`${site}/sitemap.xml`]);
+    // The agent the crawl identified as: the groups in this file that bound it.
+    expect(String(res.body["userAgent"])).toContain("AriadneBot");
+  });
+
+  it("409s a crawl that never completed discovery, and 404s one nothing knows", async () => {
+    const id = await seedCrawl({ status: "failed" });
+    const missing = await call("GET", `/crawls/${id}/robots`);
+    expect(missing.status).toBe(409);
+    expect(String(missing.body["error"])).toContain("discovery evidence");
+
+    expect((await call("GET", "/crawls/crawl_missing/robots")).status).toBe(404);
+  });
+
+  it("409s discovery evidence it cannot read rather than answering with half of it", async () => {
+    // A row whose robots blob says its text is a prefix — with a non-boolean in
+    // the flag that says so. Read permissively, `truncated` would be falsy and
+    // the answer would present a 500KB prefix as the whole file.
+    const id = await seedCrawl({
+      status: "finished",
+      discovery: {
+        robots: { outcome: "read", crawlDelaySec: null, note: null, raw: "User-agent: *", truncated: "yes" },
+        sitemapSources: [],
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+        docsFetched: 0,
+      },
+    });
+    const res = await call("GET", `/crawls/${id}/robots`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("robots.truncated");
+  });
+});
+
+describe("the judged-state marker across a re-judge", () => {
+  it("clears the previous run's stamp and leaves this run's, rather than keeping the old one", async () => {
+    // A crawl carrying a stamp from a run that happened long ago, with a
+    // finding to match. The re-judge deletes that finding and stamps its own
+    // time; if the delete and the clear were not one step, a reader could see
+    // the old timestamp over the new run's half-written table.
+    const id = await seedCrawl({ status: "finished", discovery: DISCOVERY });
+    const before = new Date("2020-01-01T00:00:00.000Z");
+    await db.update(crawls).set({ rulesRunAt: before }).where(eq(crawls.id, id));
+
+    const stale = await call("GET", `/crawls/${id}`);
+    expect(stale.body["rulesRunAt"]).toBe(before.toISOString());
+
+    const run = await call("POST", `/crawls/${id}/rules`);
+    expect(run.status).toBe(200);
+
+    const after = await call("GET", `/crawls/${id}`);
+    const stamp = Date.parse(String(after.body["rulesRunAt"]));
+    expect(Number.isNaN(stamp)).toBe(false);
+    expect(stamp).toBeGreaterThan(before.getTime());
+    expect(after.body["findingsCount"]).toBe(run.body["findings"]);
+  }, 60_000);
 });
 
 describe("GET /crawls", () => {

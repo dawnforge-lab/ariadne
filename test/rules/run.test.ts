@@ -24,7 +24,7 @@ import type {
   QueryRule,
 } from "../../src/rules/registry/types.js";
 import { mkDiscovery, mkHostProbe } from "./mk-discovery.js";
-import { mkPage } from "./mk-page.js";
+import { CLEAN_META, mkPage } from "./mk-page.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -71,7 +71,21 @@ describe("buildRegistry", () => {
     expect(ids).toContain("filters.js-only");
     expect(ids).toContain("redirect.js");
     expect(ids).toContain("render.coverage");
-    expect(ids.length).toBe(79);
+    // And Phase 7's skip rule, which reports the page the corrected
+    // thin-content floor cannot judge on a crawl that predates its column.
+    expect(ids).toContain("content.thin-skipped");
+    // And Phase 7 Task 2's four: the three field-level duplicate rules and the
+    // heading skip beside them.
+    expect(ids).toContain("title.duplicate");
+    expect(ids).toContain("meta-description.duplicate");
+    expect(ids).toContain("h1.duplicate-text");
+    expect(ids).toContain("h1.duplicate-skipped");
+    // And Phase 7 Task 4's metric: click depth from the home page, which is what
+    // CHECK-31 has always asked for. The metric beside it keeps its data and
+    // measures the crawl's own discovery depth.
+    expect(ids).toContain("structure.click-depth-distribution");
+    expect(ids).toContain("structure.depth-distribution");
+    expect(ids.length).toBe(85);
   });
 
   it("registers every kind the runner drives", () => {
@@ -130,10 +144,24 @@ describe("runRules against the database", () => {
    * contributes nothing" would stop being true for a reason that has nothing to
    * do with the page. Derived from the URL, so they stay deterministic, and
    * from a hash, so no two of them land within the near-duplicate band.
+   *
+   * THE HEAD FIELDS ARE PER-URL FOR THE SAME REASON, since P7-T2. `title`,
+   * `meta_description` and `h1_text` are now grouped across pages as well
+   * (`title.duplicate` and its two siblings), so two rows built from one set of
+   * clean defaults are a duplicate group — reported, correctly, on the
+   * lexically first of them, which on this crawl is `/clean`. Each is derived
+   * from the same digest and kept inside the length rules the on-page rules
+   * enforce (title 10-60, description 70-160), so the page stays clean in every
+   * other respect.
    */
   function mkRow(crawlId: string, path: string, overrides: Partial<PageRecord> = {}): PageRecord {
     const url = `${SITE}${path}`;
     const digest = createHash("sha256").update(url).digest("hex");
+    // Eight hex characters of the URL's own digest, so the head fields differ
+    // between rows without the length of the path leaking into the length of
+    // the title (`/list?colour=red&utm_source=news` appended to the clean title
+    // would be a `title.too-long` finding on a page nothing is wrong with).
+    const tag = digest.slice(0, 8);
     return mkPage({
       id: `page_${randomUUID()}`,
       crawlId,
@@ -142,6 +170,12 @@ describe("runRules against the database", () => {
       canonicalHtml: url,
       contentHash: digest,
       simhash: BigInt.asIntN(64, BigInt(`0x${digest.slice(0, 16)}`)),
+      // 21 characters, inside TITLE_MIN..TITLE_MAX.
+      title: `A page about ${tag}`,
+      // The clean description plus a sentence naming the page: 100 + 20 = 120
+      // characters, inside META_MIN..META_MAX.
+      metaDescription: `${CLEAN_META} About ${tag}.`,
+      h1Text: `A heading about ${tag}`,
       ...overrides,
     });
   }
@@ -347,9 +381,34 @@ describe("runRules against the database", () => {
     ]);
 
     const summary = await runRules(db, crawlId, buildRegistry());
+    // Every derivation reports, and each one reports in its own units: rows for
+    // the inventory table, blocks for the presence column, and the search's own
+    // account of the link graph. The two pages here are the home page and one
+    // listing that nothing links to — so the search reaches the root and stops,
+    // and the listing is `unreachable`, which is the honest word for a page that
+    // is in the crawl because the sitemap named it.
     expect(summary.derived).toEqual({
       "deriveUrlParams.params": 2,
       "deriveFieldPresence.blocks": 1,
+      "deriveClickDepth.root": 1,
+      "deriveClickDepth.rootRedirects": 0,
+      "deriveClickDepth.reachable": 1,
+      "deriveClickDepth.unreachable": 1,
+      "deriveClickDepth.maxDepth": 0,
+      "deriveClickDepth.capped": 0,
+    });
+    // And the column is written, not merely counted: the home page is the one
+    // page at depth 0 and the listing has no depth at all.
+    expect(
+      Object.fromEntries(
+        (await db.select().from(pages).where(eq(pages.crawlId, crawlId))).map((p) => [
+          p.url,
+          p.clickDepth,
+        ]),
+      ),
+    ).toEqual({
+      [`${SITE}/`]: 0,
+      [`${SITE}/list?colour=red&utm_source=news`]: null,
     });
 
     const rows = await db.select().from(urlParams).where(eq(urlParams.crawlId, crawlId));
@@ -442,20 +501,27 @@ describe("runRules against the database", () => {
       const after = await analyzeCounts();
       const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
 
-      const runs = delta("pages");
+      // COUNTED OFF `links` RATHER THAN `pages`, since P7-T4: `pages` is now in
+      // both statements (the click-depth derivation rewrites a column of it), so
+      // it is no longer the table that moves once per run. `links` is — every
+      // rule reads it and no derivation writes it.
+      const runs = delta("links");
       problems = [];
-      if (runs < 1) problems.push("the run did not analyze pages at all");
+      if (runs < 1) problems.push("the run did not analyze links at all");
       // Once per run, at the top, before the first rule reads them.
-      for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+      for (const table of ["sitemap_urls", "hreflang", "issues"]) {
         if (delta(table) !== runs) {
           problems.push(`${table} moved ${delta(table)}, expected ${runs} (once per run)`);
         }
       }
-      // And twice per run for the two tables the derivation phase rewrites
+      // And twice per run for the three tables the derivation phase rewrites
       // mid-run: once at the top (where, on a crawl's first run, `url_params` is
       // still EMPTY and the planner is taught exactly that) and once across the
-      // derivation seam, before the query rules that join them.
-      for (const table of ["url_params", "structured_data"]) {
+      // derivation seam, before the query rules and the metrics that read them.
+      // `pages` is in this list for the same reason one level down — its
+      // `click_depth` column is entirely null when the top-of-run statement
+      // samples it, and `structure.click-depth-distribution` groups by it.
+      for (const table of ["pages", "url_params", "structured_data"]) {
         if (delta(table) !== 2 * runs) {
           problems.push(`${table} moved ${delta(table)}, expected ${2 * runs} (twice per run)`);
         }
@@ -582,6 +648,77 @@ describe("runRules against the database", () => {
       const rows = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
       expect(rows.length, `pass ${pass}`).toBe(summary.findings);
     }
+  });
+
+  /** `crawls.rules_run_at` as the runner left it. */
+  async function rulesRunAt(crawlId: string): Promise<Date | null> {
+    const rows = await db
+      .select({ at: crawls.rulesRunAt })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId));
+    const row = rows[0];
+    if (row === undefined) throw new Error(`no crawl row for ${crawlId}`);
+    return row.at;
+  }
+
+  // THE JUDGED-STATE MARKER. An empty `issues` table means two different things
+  // — never judged, or judged and clean — and this column is the only thing
+  // that tells them apart. It is stamped at the END of a completed run and
+  // cleared with the delete that removes the previous run's rows, so it never
+  // describes a table that is being rewritten.
+  it("clears rules_run_at with the delete and stamps it when the run completes", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    // A crawl that carries a previous run's stamp, as a re-judge does.
+    const before = new Date("2020-01-01T00:00:00.000Z");
+    await db.update(crawls).set({ rulesRunAt: before }).where(eq(crawls.id, crawlId));
+
+    const started = Date.now();
+    await runRules(db, crawlId, buildRegistry());
+
+    const after = await rulesRunAt(crawlId);
+    expect(after).not.toBeNull();
+    // The previous run's stamp did not survive: this timestamp is THIS run's.
+    expect(after?.getTime()).toBeGreaterThan(before.getTime());
+    expect(after?.getTime()).toBeGreaterThanOrEqual(started - 1000);
+  });
+
+  // The crashed run, simulated by a rule that throws part-way. What the table
+  // then holds is a coherent PREFIX of the run that died — and the marker must
+  // not point at the run before it, whose findings are gone. Null is the honest
+  // state: "no complete pass is on record".
+  it("leaves rules_run_at null when a run dies part-way, rather than pointing at the run before", async () => {
+    const crawlId = await newCrawl();
+    await db.insert(pages).values([mkRow(crawlId, "/clean", { depth: 0, discoveredVia: "seed" })]);
+
+    // A previous, complete judgement of this crawl.
+    await runRules(db, crawlId, buildRegistry());
+    expect(await rulesRunAt(crawlId)).not.toBeNull();
+
+    const exploding: PageRule = {
+      kind: "page",
+      id: "test.exploding-marker",
+      checkIds: ["CHECK-01"],
+      category: "technical",
+      severity: "info",
+      title: "Exploding test rule",
+      explanation: "A rule that throws, so the marker's failure path can be observed.",
+      howToFix: "Do not ship it.",
+      rulesetVersion: RULESET_VERSION,
+      run: () => {
+        throw new Error("boom");
+      },
+    };
+    const registry = new Registry();
+    registry.register(exploding);
+
+    await expect(runRules(db, crawlId, registry)).rejects.toThrow(/test\.exploding-marker/);
+    expect(await rulesRunAt(crawlId)).toBeNull();
+    // And the previous run's findings really are gone, which is why the old
+    // stamp would have been a lie about the rows beside it.
+    const rows = await db.select().from(issues).where(eq(issues.crawlId, crawlId));
+    expect(rows).toHaveLength(0);
   });
 
   it("aborts loudly, naming the rule, when a rule throws", async () => {

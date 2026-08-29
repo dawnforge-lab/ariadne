@@ -1,6 +1,7 @@
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, issues, metrics, pages } from "../db/schema.js";
+import { deriveClickDepth } from "./derive/click-depth.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveUrlParams } from "./derive/url-params.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
@@ -50,15 +51,16 @@ type Derivation = (db: Db, crawlId: string) => Promise<Record<string, number>>;
  * derivation's table would depend on this order, so the order is a list one can
  * read rather than an emergent property of module loading. Every entry is
  * idempotent over the crawl it is given — `deriveUrlParams` rebuilds its
- * inventory table, `deriveFieldPresence` recomputes the column it fills — so a
+ * inventory table, `deriveFieldPresence` recomputes the column it fills, and
+ * `deriveClickDepth` clears its column for the crawl before it searches — so a
  * re-run over the same crawl leaves exactly what the first run left.
  *
- * The two are independent: one reads `pages`, the other `structured_data`, and
- * neither reads what the other writes. The order between them is therefore
- * arbitrary today, and stated rather than discovered so that it stops being
- * arbitrary the moment one of them starts mattering.
+ * The three are independent: they read `pages`, `structured_data`, and `pages`
+ * and `links`, and none of them reads what another writes. The order between
+ * them is therefore arbitrary today, and stated rather than discovered so that
+ * it stops being arbitrary the moment one of them starts mattering.
  */
-const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence];
+const derivations: Derivation[] = [deriveUrlParams, deriveFieldPresence, deriveClickDepth];
 
 /**
  * Run every rule in `registry` over one crawl, writing `issues` and `metrics`
@@ -161,7 +163,25 @@ export async function runRules(
   // AFTER the ANALYZE above, not before: the planner's statistics then describe
   // a table roughly the size this run is about to rewrite it to, rather than
   // the empty one it would see for the rest of the run.
-  await db.delete(issues).where(eq(issues.crawlId, crawlId));
+  //
+  // IN ONE TRANSACTION WITH `crawls.rules_run_at = null`, which is the crawl's
+  // judged-state marker (schema.ts). The pair is the whole point: the moment
+  // the previous run's findings stop being in the table, the timestamp that
+  // said when they were produced stops being true, and the two facts must not
+  // be observable apart. A reader that saw an old `rulesRunAt` over a
+  // half-rewritten `issues` table would take a coherent prefix of THIS run for
+  // a complete judgement made at a time that has passed.
+  //
+  // So the null window — from here to the stamp at the end of the run — is the
+  // honest state and is meant to be read as one: "this crawl is being judged,
+  // or a judgement of it died part-way". It is also what a crashed run leaves
+  // behind, deliberately: the table then holds a coherent prefix of a run that
+  // threw, and `rulesRunAt: null` is the surface saying that no complete pass
+  // is on record rather than pointing at the run before it (hard rule 7).
+  await db.transaction(async (tx) => {
+    await tx.delete(issues).where(eq(issues.crawlId, crawlId));
+    await tx.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlId));
+  });
 
   const summary: RunSummary = {
     pagesScanned: 0,
@@ -258,7 +278,7 @@ export async function runRules(
     }
   }
 
-  // Statistics again, for the two tables the derivation phase just rewrote —
+  // Statistics again, for the three tables the derivation phase just rewrote —
   // and this one is not belt-and-braces, it is the case the top-of-run ANALYZE
   // cannot cover.
   //
@@ -271,10 +291,18 @@ export async function runRules(
   // just rewritten for every block on the crawl, which is what
   // `schema.product-incomplete` reads.
   //
+  // `pages` IS ANALYZED TWICE FOR THE SAME REASON, not for a second one. It is
+  // in the statement above because every rule reads it, and it is here because
+  // `deriveClickDepth` has just rewritten a COLUMN of it: on a crawl's first
+  // run `click_depth` is entirely null when the planner is taught the table, so
+  // it believes `click_depth is not null` selects nothing — and then
+  // `structure.click-depth-distribution` groups by it. The same first-run
+  // statistics argument as `url_params`, one level down.
+  //
   // Same idiom as above and for the same reason: no catch, because a plan
-  // built on statistics that describe an empty table is a slow query and never
-  // an error (hard rule 7).
-  await db.execute(sql`ANALYZE url_params, structured_data`);
+  // built on statistics that describe an empty table (or an all-null column) is
+  // a slow query and never an error (hard rule 7).
+  await db.execute(sql`ANALYZE pages, url_params, structured_data`);
 
   // Query rules run after the page rules: they read the crawl's tables whole
   // (in SQL), so they are unaffected by the page cursor.
@@ -408,6 +436,23 @@ export async function runRules(
     summary.metrics += rows.length;
     summary.byMetric[rule.id] = rows.length;
   }
+
+  // THE JUDGED-STATE MARKER, stamped last and only here.
+  //
+  // Every finding and every metric this run produces is on disk by the time
+  // this statement runs, so a non-null `rules_run_at` means exactly one thing:
+  // a full pass over this crawl completed, and the `issues` and `metrics` rows
+  // beside it are that pass's. The agent surface reports it as `rulesRunAt`
+  // (`GET /crawls/:id`, `crawl_status`), which is how a reader tells "this
+  // crawl was judged and found clean" from "this crawl was never judged" —
+  // two facts an empty issues table cannot distinguish on its own.
+  //
+  // Deliberately NOT inside a transaction with anything: there is nothing left
+  // to be atomic with. The run's writes are already committed, and a failure
+  // here is a failure to record a judgement that happened — which throws, and
+  // leaves the marker null, which is the same "no complete pass on record"
+  // the delete above established. Never the other way round.
+  await db.update(crawls).set({ rulesRunAt: new Date() }).where(eq(crawls.id, crawlId));
 
   return summary;
 }

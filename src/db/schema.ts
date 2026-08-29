@@ -65,6 +65,21 @@ export const crawls = pgTable("crawls", {
   discovery: jsonb("discovery_jsonb"),
   hostProbe: jsonb("host_probe_jsonb"),
   notfoundProbe: jsonb("notfound_probe_jsonb"),
+  // When the rule runner last finished a full pass over this crawl.
+  //
+  // WRITTEN BY `runRules` (src/rules/run.ts) AND BY NOTHING ELSE, at both ends
+  // of a run: cleared to null in the same transaction as the delete that
+  // removes the previous run's `issues` rows, and stamped once every rule and
+  // every metric has been written. A null therefore means "no complete rule
+  // pass is on record for this crawl" — never judged, being judged right now,
+  // or judged by a run that died part-way — and a timestamp means the `issues`
+  // and `metrics` rows beside it are one completed pass's.
+  //
+  // That distinction is the whole reason for the column: an empty `issues`
+  // table on a crawl that was never judged and one on a crawl that was judged
+  // and found clean are different facts, and nothing else can tell them apart
+  // (hard rule 7). The agent surface exposes it as `rulesRunAt`.
+  rulesRunAt: timestamp("rules_run_at", { withTimezone: true }),
 });
 
 export const pages = pgTable("pages", {
@@ -126,7 +141,81 @@ export const pages = pgTable("pages", {
   h5Count: integer("h5_count").notNull().default(0),
   h6Count: integer("h6_count").notNull().default(0),
   headingOrder: integer("heading_order").array(),
+  // The first <h1>'s text, whitespace-collapsed and capped at 300 chars by the
+  // analyzer. Null means the page carried no <h1> at all; '' means it carried
+  // an empty one — the present-but-blank distinction `title` and
+  // `meta_description` already make, and rules read it through `present()`.
+  //
+  // WRITTEN BY THE CRAWL (`PageWriter`, off the analyzer's single pass) FROM
+  // PHASE 7 ONWARD; null on every row a pre-P7 crawl wrote. The CAPTURE landed
+  // here with the analyzer work in P7-T1 because the analyzer is the only place
+  // the page's text is ever in memory (hard rule 2: rules do not fetch), and a
+  // rule cannot read a column no crawl ever wrote.
+  //
+  // Its consumer is `h1.duplicate-text` (P7-T2, src/rules/query/field-duplicates.ts),
+  // which groups indexable pages by this exact value. The null is a GATE for
+  // that rule the same way `renderable_word_count`'s is for the thin one: a
+  // pre-P7 crawl has null here on every row, the grouping finds nothing, and
+  // "no duplicate headings" and "no headings were ever read" are the same
+  // silence. `h1.duplicate-skipped` is what tells them apart, on the condition
+  // that no indexable page has text here while some carry an h1 at all.
+  //
+  // The stored value collapses the h1's descendant text with NO separator
+  // (cheerio's `.text()` semantics, which the parity oracle holds the port to),
+  // so `<h1>Big<br>Sale</h1>` is stored as `BigSale` — a ledgered limitation
+  // the grouping rule inherits and states.
+  h1Text: text("h1_text"),
+  // Every word of visible text the HTML carries.
+  //
+  // SEMANTICS CHANGED IN PHASE 7 (migration 0010), and rows written before it
+  // carry the old meaning: text inside a <template> used to be counted, and is
+  // not any more. Template content lives in an inert DocumentFragment that is
+  // in no document, under no CSS and in no index, so counting it was a defect
+  // rather than a definition — on the page that provoked the change it was 482
+  // of 1,413 words. There is NO BACKFILL: a word count cannot be recomputed
+  // without the HTML, which the crawl does not store, and a pre-P7 crawl is not
+  // a supported re-judge target (see `renderable_word_count`, whose null is the
+  // gate that makes that refusal loud instead of silent).
   wordCount: integer("word_count"),
+  // The same count minus the words the page's own MARKUP says are not
+  // displayed: anything inside an element carrying `hidden`, an inline
+  // `display:none`, a <dialog> that is not `open`, or the non-<summary> body of
+  // a <details> that is not `open`. Written by the crawl (`PageWriter`) beside
+  // `word_count`, from the same single pass, and always <= it.
+  //
+  // MARKUP-ONLY, and the limitation is the column's meaning rather than a
+  // caveat on it: the analyzer never fetches or cascades CSS (hard rules 2 and
+  // 4), so a class that hides its element through a stylesheet is invisible
+  // here. This is a FLOOR on the correction — what remains between it and the
+  // render pass's `rendered_word_count` is CSS-hidden text, which is evidence
+  // about the site rather than error in the measurement.
+  //
+  // NULLABLE, AND THE NULL IS A GATE. It means "no P7-or-later analyzer wrote
+  // this row" — a pre-P7 crawl, whose `word_count` also carries the old
+  // template semantics. The rules that read it (`content.thin`'s floor,
+  // `content.csr-dependent`'s comparison) must SKIP such a page loudly rather
+  // than falling back to `word_count`, which measures a different thing: see
+  // `content.thin-skipped` in src/rules/page/on-page.ts. A page the analyzer
+  // never ran on at all — a PDF, a 404 — stores null in BOTH columns, and that
+  // is a different fact from this one.
+  renderableWordCount: integer("renderable_word_count"),
+  // How many links from the crawl's entry point the shortest path to this page
+  // is. Nullable; NOT the same thing as `depth`, which is the depth of the
+  // frontier item that discovered the URL and counts a sitemap entry as 0.
+  //
+  // WRITTEN BY PHASE 7 TASK 4, and by nothing today: this column ships with
+  // migration 0010 (with the three other P7 columns, so the phase adds one
+  // migration and not four) and stays null until that task's writer lands. A
+  // reader before then sees every row null, which is "no click depth was
+  // computed" and must not be read as "depth 0".
+  clickDepth: integer("click_depth"),
+  // Visible-text bytes over HTML bytes. It reads the SAME accumulator
+  // `word_count` does, so Phase 7's template exclusion moved it too (template
+  // text is no longer in the numerator) — but it does NOT read the renderable
+  // stream, so it still counts markup-hidden chrome as text. Correcting that is
+  // a separate decision about what a text ratio is for and is deliberately out
+  // of P7-T1's scope; `content_hash` and `simhash` sit on the same accumulator
+  // and the same reasoning.
   textRatio: real("text_ratio"),
   contentHash: text("content_hash"),
   // The analyzer's simhash is in the UNSIGNED 64-bit range; this column is a

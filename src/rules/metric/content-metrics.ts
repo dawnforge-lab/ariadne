@@ -135,16 +135,31 @@ function readStats(
 type StatsRow = Record<string, unknown> & { scope: string; scope_value: string };
 
 const WORDS = "words";
+const RENDERABLE = "renderable";
 const RATIO = "ratio";
 
 /**
- * Word count and text ratio per template (CHECK-38 evidence).
+ * Word count, renderable word count and text ratio per template (CHECK-38
+ * evidence).
  *
  * The site row and the cohort rows come from ONE statement over one CTE, so the
  * two can never be computed over different sets of pages. The site row has no
  * `GROUP BY`, so an empty cohort still yields a row with `count: 0` and null
  * statistics: an absent metric row means the rule did not run, and "this crawl
  * has no indexable pages" is an answer rather than a silence.
+ *
+ * THREE DISTRIBUTIONS SINCE PHASE 7, and the third is the point of the pair.
+ * `wordCount` is how many words each template ships and `renderableWordCount`
+ * is how many of those its markup does not hide, so the DISTANCE between the
+ * two distributions is a template's furniture — the mega-menu, the picker, the
+ * closed accordion that ship on every page of it. That is a number the agent
+ * can read directly: a template whose median word count is 900 and whose median
+ * renderable count is 200 is a template with 700 words of chrome on every page,
+ * and no single measure says that.
+ *
+ * Each `count` is per measure, as before, and on a crawl from before Phase 7
+ * the renderable count is 0 while the other two are not — which reads correctly
+ * as "this crawl measured no renderable words" rather than as zero words.
  */
 async function contentByType(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
   // An unknown crawl aggregates to that same `count: 0` site row, which is a
@@ -152,11 +167,13 @@ async function contentByType(db: Db, crawlId: string, self: MetricIdentity): Pro
   await assertCrawl(db, crawlId, self.id);
 
   const aggregates = sql`${statsAggregates(sql`words`, WORDS, 2)},
+    ${statsAggregates(sql`renderable`, RENDERABLE, 2)},
     ${statsAggregates(sql`ratio`, RATIO, 4)}`;
   const rows = await db.execute<StatsRow>(sql`
     with cohort as (
       select ${COHORT_PAGE_TYPE} as page_type,
              p.word_count as words,
+             p.renderable_word_count as renderable,
              p.text_ratio as ratio
       from pages p
       where ${cohortFilter(crawlId)}
@@ -171,6 +188,7 @@ async function contentByType(db: Db, crawlId: string, self: MetricIdentity): Pro
   return rows.rows.map((row) => {
     const value = {
       wordCount: readStats(row, WORDS, self.id),
+      renderableWordCount: readStats(row, RENDERABLE, self.id),
       textRatio: readStats(row, RATIO, self.id),
     };
     if (row.scope === "site") return metricRow(self, { scope: "site", value });

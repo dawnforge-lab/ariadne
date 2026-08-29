@@ -40,8 +40,17 @@ remediation prose over a rule you have not read.
 ## Prerequisites
 
 1. **The findings file.** `ariadne-findings.json` from the `ariadne-audit` skill
-   (its Phase 4 defines the shape). Check `schema` is `"ariadne-findings/1"` and
-   that `checks` is complete before reading anything out of it.
+   (its Phase 4 defines the shape). Check `schema` is `"ariadne-findings/1"`, that
+   `checks` is complete, and that `crawl.rulesRunAt` carries a timestamp — a file
+   whose crawl was never judged holds passes that assert nothing and a work plan
+   built on them is a work plan built on silence.
+
+   **`crawl.rulesRunAt` is the whole of that test.** `crawl.rulesRun` — the
+   `crawl_rules` summary's scalars — is null whenever the audit read a crawl
+   somebody else judged, with the reason in `crawl.caveats`, and that is a correct
+   file rather than a broken one. Do not stop on it, and do not run `crawl_rules`
+   yourself to fill it: re-judging the crawl underneath a finished audit is how the
+   spreadsheet stops matching the report it ships with.
 2. **A reachable server holding the same crawl.** MCP preferred
    (`npm run mcp:serve`), HTTP as the fallback (the `ariadne-crawl` skill has the
    equivalence table). `crawl_status` on the findings file's `crawl.crawlId` must
@@ -72,18 +81,40 @@ five stages over one findings file build the same workbook.
 ### 1a — Intake, keyed by check
 
 Walk the findings file's `checks`. A check enters the pipeline when its `verdict`
-is `FAIL` or `AGENT`. Two kinds of candidate come out:
+is `FAIL` or `AGENT`. Three kinds of candidate come out:
 
 - **Rule-backed candidates.** The check's `evidence` carries `finding` entries with
   a `count` above zero. Each named rule is a candidate, and its tab body is an
   `issue_urls` feed.
-- **Check-level candidates.** An `AGENT` check whose evidence is `observation`
-  entries and nothing else. There is no rule, so there is no `issue_urls` feed: the
-  tab body is the observations — their `urls`, their `summary`, their `detail` —
-  one row per URL observed, and the fix is the check's `recommendation` exactly as
-  a rule-backed tab's is. CHECK-41 and CHECK-42 are the standing examples. A check
-  nobody wrote a rule for is still work somebody does, and it does not get to
-  disappear because the engine had nothing to say about it.
+- **Check-level candidates: the judgement kind.** An `AGENT` check whose evidence is
+  `observation` entries and nothing else. There is no rule, so there is no
+  `issue_urls` feed: the tab body is the observations — their `urls`, their
+  `summary`, their `detail` — one row per URL observed, and the fix is the check's
+  `recommendation` exactly as a rule-backed tab's is. CHECK-41 and CHECK-42 are the
+  standing examples. A check nobody wrote a rule for is still work somebody does, and
+  it does not get to disappear because the engine had nothing to say about it.
+- **Check-level candidates: the rule-less FAIL.** A `FAIL` whose evidence carries no
+  `finding` entry with a count above zero — the engine answered it with a metric, a
+  `pages_query` census or the stored robots.txt instead. **These are candidates on
+  exactly the same terms as the other two**, and the reason this branch is written
+  out is that they are not marginal: on the Phase 7 gate site SEVEN of sixteen
+  failures were this shape — CHECK-03, CHECK-10, CHECK-22, CHECK-31, CHECK-33,
+  CHECK-33b and CHECK-67 — including the two worst problems the audit found. A
+  pipeline that only knows how to open a tab from `issue_urls` would have dropped
+  them, and the ledger sentence below forbids that.
+
+  **Where the tab body comes from.** The check's `evidence` records the calls that
+  answered it — each entry's `tool` and `args` — so re-run them and use their rows:
+  a `pages_query` census filtered the way the evidence says (the URLs the check is
+  about), a `metrics_get` row whose value carries the buckets, the `robots_get`
+  body's matching lines. Where the answer is genuinely one fact about the site and
+  not a list of URLs, the tab is one row reading `(site-wide)` in column 1 with the
+  metric's value beside it — the same shape a site-scoped finding takes in Step 4.
+  **Say on the tab which it is**, in the description row: name the tool and the
+  arguments, so a developer who wants to see the list for themselves can. A tab
+  built from a census is as real as one built from `issue_urls`; it just has to
+  admit where its rows came from, because nobody can re-run a query nobody wrote
+  down.
 
 **The intake is keyed by check, and so is the ledger.** Every check that enters
 here leaves through exactly one door: a tab of its own, a block inside a family
@@ -97,6 +128,13 @@ A candidate leaves here, and its reason is what the ledger records:
 
 - **E1 — `verdict` is `SKIP`.** Nothing was measured, so there is nothing to
   action: the fix is a re-crawl or a connected data source, and the report says so.
+  **A `SKIP` never entered 1a in the first place** — the intake takes `FAIL` and
+  `AGENT` — so E1 is the belt-and-braces case, for a check whose verdict changed
+  under you or one an earlier stage mis-sorted, not a door 42 skipped checks walk
+  through. The Summary's ledger sentence is over the checks that ENTERED 1a; say
+  once, in the *Considered, not included* preamble, how many checks were SKIP and
+  that the report is where they are named, so a reader who counts 82 checks and 16
+  candidates is not left doing that arithmetic themselves.
 - **E2 — no `recommendation`.** This is a stop rather than an exclusion. A `FAIL`
   or `AGENT` that needs a fix and carries no fix text is a hole in the audit: go
   back and get one. Do not write it yourself, and do not quietly drop the check.
@@ -104,9 +142,24 @@ A candidate leaves here, and its reason is what the ledger records:
   options, this is a *Decide first* tab (Step 2). If it did not, the check stays in
   the report until somebody chooses, and comes back here once they have.
 - **E4 — small.** All three of: engine `severity` is `info`; `count` <
-  `max(10, 1% of crawl.pagesCrawled)`; and the affected pages are not on a page
-  type Phase 0 named as traffic or revenue. **That is what "small" means in this
-  skill** — the same floor G3 uses, so nothing can be both small and voluminous.
+  `max(10, 1% of crawl.pagesCrawled)`; and **Phase 0 answered, and what it named as
+  traffic and revenue does not include these pages' page type**. **That is what
+  "small" means in this skill** — the same floor G3 uses, so nothing can be both
+  small and voluminous.
+
+  **The third condition needs affirmative evidence, and this is why.** It used to
+  read "the affected pages are not on a page type Phase 0 named as traffic or
+  revenue", which is true by default when Phase 0 never ran: no page type was named,
+  so nothing is on the list, so every low-severity finding excludes itself — and G4,
+  which admits exactly those pages, is dead for the same reason. On the Phase 6
+  deliverable run that pair auto-excluded four candidates that nobody had weighed.
+  Absence of analytics is not evidence that a page type earns nothing. **With no
+  Phase 0 — the checks are `SKIP`, or the traffic and revenue page types are not
+  recorded — E4 does not apply and G4 cannot fire**; the candidate goes on to the
+  other gates and, if none admits it, reaches 1e on its rank rather than leaving
+  through a door marked "small". Say in the Summary sheet's *Considered, not
+  included* preamble that the plan was built without commercial context, because the
+  ordering it produces is by volume and severity alone.
 
 ### 1c — Gates
 
@@ -125,9 +178,29 @@ Over what survived 1b. **A candidate needs one gate:**
   from looking clean because it is small.
 - **G4 — it lands where the money is.** Whatever the count, the affected pages are
   a page type Phase 0 named as traffic or revenue. Forty broken product pages
-  outrank four hundred faults on a page type with no entrances.
+  outrank four hundred faults on a page type with no entrances. **This gate needs
+  Phase 0 to have run**: with no analytics context it cannot fire at all, which is
+  the other half of E4's third condition and the reason that condition may not
+  exclude anything on the same silence.
 - **G5 — the audit asked for it.** The check's `priority` is Critical or High in
   the findings file and the recommendation is a concrete change.
+
+- **G0 — the catch. A `FAIL` with rows that G1 to G5 all decline is still a
+  candidate**, carried to 1d and 1e marked *ungated*, ranked last among its
+  priority peers, and cut only by 1e's ordering with the reason code below. The
+  gates are a way of finding the work that obviously belongs in the plan; they are
+  not a filter the audit's own FAIL has to survive.
+
+  **This exists because the five gates have a hole with a real shape.** A check
+  whose engine `severity` is `warning`, whose row count is under the volume floor,
+  whose category is not one of G2's, and whose checklist `priority` is Medium is
+  admitted by nothing — and G4 is dead whenever Phase 0 is missing, so a fifth of
+  the doorway is boarded up on any audit without analytics. CHECK-40 on the Phase 7
+  gate site is the worked case: live lorem ipsum on 3 URLs, whose own Evaluate line
+  reads *"FAIL if lorem ipsum > 0 (immediate fix needed)"*, declined by all five.
+  It is not the gates' job to overrule the checklist there. Note also that
+  `priority` is the checklist's grading of the check CLASS, not this instance — G5
+  reads it, and that is the only gate that reads intent at all.
 
 The gates generate candidates; they do not size the plan. G2 admits a category at
 any count above zero, so on a tidy site it will hand you nine one-row candidates.
@@ -192,14 +265,28 @@ re-run then adds a second small rule to it without renaming the tab, which is wh
 
 Rank every tab by Step 5's ordering and keep the top ten. Everything below the cut
 goes to *Considered, not included* with its rank, its count and the reason "below
-the cut at rank N".
+the cut at rank N" — or, for a candidate that arrived through G0, **"admitted by no
+gate (G0) — below the cut at rank N"**, which says both why it was never a strong
+candidate and where the cut found it. A G0 candidate that lands in the top ten is a
+tab like any other; the code follows it only into the ledger.
 
-Three protections. A candidate whose findings-file `priority` is `Critical` is
+Four protections. A candidate whose findings-file `priority` is `Critical` is
 never cut. **Neither is one at or above the volume floor**: the target exists to
 stop a workbook filling with one-row tabs, so a cut that drops a 23-row work item
 while keeping a one-row family tab has inverted its own purpose — the cut may only
-take below-floor candidates. And every cut candidate is recorded on its own line,
-never "and 14 others".
+take below-floor candidates.
+
+**Nor is one the audit graded `High` priority or `critical` severity, however few
+rows it has.** A site-wide finding is ONE ROW by construction — a robots.txt pattern,
+a missing sitemap declaration, a host that serves 200 on both protocols — and its row
+count is not its size: the row is the whole site. On the Phase 6 deliverable run a
+one-row P1 pagination finding (CHECK-22) was cut at rank 11 while a two-row hygiene
+tab survived, which is the volume floor's logic applied to a number that was never a
+magnitude. So row count alone may not cut a candidate the audit graded that highly.
+If that leaves the workbook over ten tabs, the paragraph below is what happens next,
+not a licence to reopen the cut.
+
+And every cut candidate is recorded on its own line, never "and 14 others".
 
 When those protections leave more than ten tabs, the plan is bigger than the target
 and the Summary sheet says so in a sentence. That is the honest outcome: the cut
@@ -327,6 +414,29 @@ The tab body is the URL plus the rule's own evidence, flattened.
 
 - **Column 1 is `URL`.** For a site-scoped finding (`url: null`) write
   `(site-wide)` and keep the evidence — those rows carry the whole finding.
+- **Some rules report a GROUP or a PAIR, not a page, and their tabs must say so.**
+  A row that is not a page breaks the arithmetic a reader does by eye, so the
+  description row states what a row IS and how many pages it covers. Three shapes,
+  and they are not interchangeable:
+  - **The field duplicates** — `title.duplicate`, `meta-description.duplicate`,
+    `h1.duplicate-text` — one finding per duplicated VALUE:
+    `{title|metaDescription|h1Text, count, pages}`, where `count` is how many
+    indexable pages share the value (exact) and `pages` is up to 20 of their URLs.
+  - **`content.exact-duplicate`** — one finding per identical-content group:
+    `{contentHash, urls, count, pageTypes}`. Same idea, different key: the URL
+    sample is `urls`, not `pages`, and `pageTypes` names the templates the group
+    spans, which is usually the fix's shape.
+  - **`content.near-duplicate`** — one finding per PAIR of similar pages:
+    `{urlA, urlB, hamming, pageTypeA, pageTypeB}`. **No `count`, no URL list.** A
+    50-row tab is 50 pairs, and the pages involved are however many distinct URLs
+    those pairs mention — count them, do not assume two per row, and do not write
+    "50 duplicate pages".
+
+  For the group shapes, column 1 is the group's first URL, the URL list stays as its
+  own JSON column under its own key, and the description row carries both numbers
+  ("40 duplicate titles across 612 pages"). A tab that presents groups as pages
+  understates the work by an order of magnitude, and its Fix — one template change
+  per group — then reads as forty edits.
 - **Then every evidence key**, one column each. The evidence repeats the page URL
   as `pageUrl`; drop that one key, since column 1 already carries it. Take the
   union of keys across all of the rule's rows, sorted alphabetically, so two runs
@@ -401,7 +511,9 @@ Summary's tab index where there is room for it.
   id(s), check ids, row count;
 - **Considered, not included**: every check and every rule that entered 1a and got
   no tab and no family block, with its count and its one-line reason — an
-  exclusion code from 1b, or "below the cut at rank N" from 1e;
+  exclusion code from 1b, "admitted by no gate (G0)" from 1c, or "below the cut at
+  rank N" from 1e. Those are the whole vocabulary: a reason that fits none of them
+  means the pipeline grew a door nobody wrote down;
 - anything from `crawl.caveats` that bounds the row counts (a page cap reached, a
   partial render pass), because a developer reading a tab of 200 URLs deserves to
   know the crawl stopped at 500 pages;
@@ -466,8 +578,13 @@ small enough to be worked by hand.
 
 ## Step 6 — hand it over
 
-Save as `{client-or-domain}-action-plan.xlsx` beside the findings file, then say
-in the conversation:
+Save as `{client-or-domain}-action-plan.xlsx` beside the findings file — **the
+prefixed name is canonical**, for the reason the report skill gives: the findings
+file is `ariadne-findings.json` on every audit, so the deliverables carry the client
+and a folder of two quarters' work stays readable. A bare `action-plan.xlsx` is the
+same workbook under a name that collides with the next one; if the person who asked
+for it named the file, follow them and say which name you used. Then say in the
+conversation:
 
 - where the file is;
 - the tabs, grouped by lane, with row counts — so the client can see at a glance

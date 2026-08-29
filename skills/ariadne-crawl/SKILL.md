@@ -27,7 +27,7 @@ Check all five before starting. Each failure has a person who can fix it, and no
 of them is worked around.
 
 1. **A server is running.** Either transport, over the same service:
-   - `npm run mcp:serve` — MCP on stdio, the preferred surface. Eleven tools,
+   - `npm run mcp:serve` — MCP on stdio, the preferred surface. Twelve tools,
      no token: an stdio client is the process that started the server.
    - `npm run api:serve` — HTTP on `127.0.0.1:8787` by default, bearer token
      required (`ARIADNE_API_TOKEN`, 16 characters minimum).
@@ -69,6 +69,7 @@ same JSON:
 | `issue_urls` | `GET /crawls/:id/issues/:ruleId/urls` |
 | `metrics_get` | `GET /crawls/:id/metrics` |
 | `pages_query` | `GET /crawls/:id/pages` |
+| `robots_get` | `GET /crawls/:id/robots` |
 | `export_crawl` | `GET /crawls/:id/export` |
 
 Over HTTP every request carries `Authorization: Bearer $ARIADNE_API_TOKEN`. Filters
@@ -97,8 +98,13 @@ Fields worth setting deliberately:
   frontier undrained, and several checks then read "we ran out of budget" as if it
   were a fact about the site. It is real load on someone's server, so size it, don't
   max it.
-- **`maxDepth`** — leave unset unless you mean to truncate. A depth cap truncates the
-  depth distribution the audit reports.
+- **`maxDepth`** — leave unset unless you mean to truncate. The cap is on DISCOVERY
+  depth (hops from a seed), and truncating it truncates two different reports: the
+  `structure.depth-distribution` metric, and — because a page the crawl never fetched
+  has no link graph — the click depth the rules compute afterwards
+  (`structure.click-depth-distribution`, `pages_query`'s `clickDepth`). Pages cut off
+  by the cap read as unreachable, which is a fact about the crawl wearing the shape of
+  a finding about the site.
 - **`probeHosts`** — on by default, and the only evidence behind the host checks
   (apex vs www, http vs https, legacy hosts). Turning it off makes those checks
   unanswerable rather than clean.
@@ -165,9 +171,10 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion,
+ renderPassCount, rulesetVersion, legacyHosts,
  frontier: {pending, leased, done, failed, renderPending},
- queuePosition, liveLeases, blockedPages, hostSpacingMs}
+ queuePosition, liveLeases, blockedPages, hostSpacingMs,
+ rulesRunAt, findingsCount}
 ```
 
 What the fields mean when you are waiting:
@@ -201,6 +208,18 @@ What the fields mean when you are waiting:
   crawl's `perHostDelayMs` and only ever rises. Null means no crawl loop reported one
   (an old row, or a crawl that failed before it fetched anything) — which is not the
   same as `0`.
+- **`rulesRunAt` and `findingsCount`** — the judged marker, and the only pair that
+  tells an empty findings listing from an unjudged crawl. `rulesRunAt` is when a rules
+  pass last COMPLETED (null: none on record — never judged, being judged now, or a run
+  that died part-way); `findingsCount` is the crawl's findings, counted live. A
+  timestamp with zero findings is a clean site; a null with any number is a partial
+  pass to re-run. They are on the crawl, so an auditor who never met your session can
+  read them. Neither moves during the crawl itself — the rules cannot run until it
+  stops.
+- **`legacyHosts`** — the extra hosts this crawl was told the site used to live on,
+  echoed from its stored config. Empty means none were given, which is what separates
+  "the legacy domain does not redirect" from "nobody named a legacy domain" in
+  CHECK-15.
 
 Poll every 15-30 seconds early and back off to a minute on a long crawl; there is
 nothing to gain from tighter polling, since the crawl's pace is set by politeness
@@ -249,10 +268,12 @@ A page that is still blocked after its three attempts also counts in
 `frontier.failed`, for the same reason a spent timeout does: its own outbound links
 were never read, and findings that depend on the link graph are qualified accordingly.
 
-Blocked pages are recorded, not lost: `pages_query` returns each one with
-`fetchClass: "blocked"`, its status code, and a `fetchReason` saying how many attempts
-it took and what the spacing had reached when the engine gave up. That reason is what
-to quote when you report a crawl as incomplete.
+Blocked pages are recorded, not lost: `pages_query` takes `fetchClass` as a filter and
+returns each blocked page with its status code and a `fetchReason` saying how many
+attempts it took and what the spacing had reached when the engine gave up. That reason
+is what to quote when you report a crawl as incomplete. The same listing carries
+`discoveredVia` — `seed`, `link`, `sitemap` or `redirect` — so "which of the pages we
+never got are ones only the sitemap knew about" is one query rather than a guess.
 
 **A slow crawl is usually the engine being polite, and `hostSpacingMs` says whether
 it is.** The pacing is a per-host delay, plus whatever `crawl-delay` robots.txt asks
@@ -326,10 +347,14 @@ ran, so a zero there means "this rule removed the crawl's previous answer" and a
 absent key means it never ran. `derived` counts what the derivations wrote. There is
 **no `elapsedMs`** — time the call yourself if you want to report the duration.
 
-**Keep that summary.** It is the only proof the rules ran: `issues_list` and
-`metrics_get` answer `{"items": []}` both for a rule that found nothing and for a
-crawl nobody judged, and nothing on `crawl_status` distinguishes the two. An audit
-that quotes empty answers without it is quoting the absence of a rule run.
+**Keep that summary** for what it alone carries: the per-rule and per-metric
+breakdown of what this pass wrote. It is no longer the only proof the rules ran —
+`crawl_status`'s `rulesRunAt` is stamped when a pass COMPLETES, and `findingsCount`
+counts what it left behind, so the crawl itself now answers the question every empty
+listing raises. `issues_list` and `metrics_get` still answer `{"items": []}` both for
+a rule that found nothing and for a crawl nobody judged; read the pair before
+concluding either. An audit that quotes empty answers without checking the marker is
+quoting the absence of a rule run.
 
 It is refused while the crawl is `queued` or `running` — findings about a site still
 being fetched change under the reader, and "orphan" is the obvious case: a page is
@@ -382,8 +407,8 @@ An audit needs three things from this skill, and they should be stated together:
 
 1. the **`crawlId`**;
 2. the **`crawl_status`** of the finished crawl — `pagesCrawled`, the frontier
-   counts, `renderPassCount`, `blockedPages`, `hostSpacingMs`, and whether it stopped
-   at a cap;
+   counts, `renderPassCount`, `blockedPages`, `hostSpacingMs`, `rulesRunAt` and
+   `findingsCount`, and whether it stopped at a cap;
 3. the **`crawl_rules`** summary.
 
 Together they say what the evidence covers. The audit's job is to judge that

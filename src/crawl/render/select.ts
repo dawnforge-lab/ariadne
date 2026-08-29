@@ -90,7 +90,18 @@ export const RENDER_DEFAULTS = {
  * decode twice (51200 = 50KB, 25600 = 25KB).
  */
 export const SUSPICION = {
-  /** A page with fewer words than this, in a document of `thinHtmlBytes`. */
+  /**
+   * A page with fewer RENDERABLE words than this, in a document of
+   * `thinHtmlBytes`.
+   *
+   * Renderable since Phase 7, for the reason every other length test moved:
+   * this trigger is looking for "a big document with almost nothing in it",
+   * and a shell whose 50KB is mostly a hidden mega-menu has almost nothing in
+   * it however many words the raw count reports. A pre-P7 crawl stores null
+   * here, `null < 50` is NULL, and the row is simply not a suspect — which is
+   * byte-identical to how such a page was selected before the column existed,
+   * because the render pass runs on the crawl that just wrote the rows.
+   */
   thinWordCount: 50,
   /** …and the document size that makes those missing words suspicious. */
   thinHtmlBytes: 50 * 1024,
@@ -320,11 +331,11 @@ export async function selectRenderSet(
  * carries no render evidence blob — the phase's migration added page columns
  * only, and `config_jsonb` is the crawl's input, not a results column. So the
  * stats are RECOMPUTED rather than persisted, which is sound for exactly one
- * reason worth stating: every column the decision reads (`word_count`,
- * `html_bytes`, `title`, `framework_markers`, and the `links` rows) is written
- * by the CRAWL pass, and the render pass writes only `rendered_*` columns. The
- * inputs cannot move under a render, so this returns the same numbers before
- * the pass, during it, and a week later.
+ * reason worth stating: every column the decision reads
+ * (`renderable_word_count`, `html_bytes`, `title`, `framework_markers`, and the
+ * `links` rows) is written by the CRAWL pass, and the render pass writes only
+ * `rendered_*` columns. The inputs cannot move under a render, so this returns
+ * the same numbers before the pass, during it, and a week later.
  *
  * It shares `candidateCte` with `selectRenderSet` rather than restating the
  * predicate: two spellings of "suspect" would eventually disagree, and the
@@ -382,7 +393,7 @@ function candidateCte(crawlId: string, cfg: ResolvedRenderConfig): SQL {
                -- and a page with none MERGE into one cohort, which is the only
                -- sound answer once the two are indistinguishable.
                coalesce(nullif(p.page_type, ''), '(untyped)') as cohort_type,
-               p.word_count, p.html_bytes, p.title, p.framework_markers
+               p.renderable_word_count, p.html_bytes, p.title, p.framework_markers
         from pages p
         where p.crawl_id = ${crawlId}
           and p.fetch_class = 'ok'
@@ -409,8 +420,8 @@ function candidateCte(crawlId: string, cfg: ResolvedRenderConfig): SQL {
       suspects as (
         select c.url from cohort c
         where
-          -- A long document with almost nothing in it.
-          (c.word_count < ${SUSPICION.thinWordCount}
+          -- A long document with almost nothing a reader can reach in it.
+          (c.renderable_word_count < ${SUSPICION.thinWordCount}
             and c.html_bytes > ${SUSPICION.thinHtmlBytes})
           -- A page with no title at all, big enough that it should have one.
           or ((c.title is null or c.title = '')

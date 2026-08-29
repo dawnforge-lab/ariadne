@@ -37,7 +37,14 @@ report about the rule — raise it as one — not a finding about the client.
 
 **And the mirror of it: an empty answer is not a clean site.** `issues_list` and
 `metrics_get` answer `{"items": []}` for a rule that found nothing AND for a crawl
-nobody judged. Only the `crawl_rules` summary distinguishes them.
+nobody judged. **`crawl_status` settles which**: `rulesRunAt` is the timestamp of the
+last COMPLETED rules pass — null means no complete pass is on record — and
+`findingsCount` is how many findings that crawl holds. Read them as a pair, never
+apart: a timestamp with `findingsCount: 0` is "looked, found nothing", a null with
+any count at all is a pass that died part-way, and null with zero is "nobody has
+looked". One `crawl_status` poll is the whole check, and it is on the crawl rather
+than in your notes — the `crawl_rules` summary is still worth keeping for its
+per-rule breakdown, and it is no longer the only evidence a pass happened.
 
 ## Prerequisites
 
@@ -110,9 +117,13 @@ A crawl is fit to audit when:
   cap makes CHECK-32 unanswerable (`links.orphan-skipped` fires and says why);
 - `renderPassCount` ≥ 1 if the site needs rendering. Without it, CHECK-01, CHECK-02,
   CHECK-34 and CHECK-10's JS-redirect half are SKIP, not PASS;
-- the rules have run, and **you have the `crawl_rules` summary**. If you did not run
-  them yourself, run them now: it is idempotent, it re-judges with the current
-  ruleset, and its summary is the evidence every empty answer downstream leans on.
+- **the rules have run — `crawl_status`'s `rulesRunAt` carries a timestamp.** That is
+  the crawl's own record of a completed pass, so a crawl somebody else judged is as
+  auditable as one you judged yourself. Null means no complete pass: run `crawl_rules`
+  now. Running it again on a judged crawl is idempotent and re-judges with the current
+  ruleset, which is what you do after upgrading the engine rather than re-crawling —
+  and its summary, kept beside the marker, is the per-rule breakdown of what that pass
+  wrote.
 
 Record the crawl's shape before reading a single finding. It bounds every claim the
 audit makes.
@@ -156,8 +167,8 @@ of three ways:
 - **Rows for this check id** → read them, and pull the URL list with `issue_urls`
   where the check's Record line asks for one.
 - **No rows, and the check is claimed by a finding rule** → candidate PASS. It is a
-  PASS only because the `crawl_rules` summary says the rules ran; cite that summary
-  in the evidence.
+  PASS only because the crawl was judged; cite `crawl_status`'s `rulesRunAt` (and the
+  `crawl_rules` summary, if you ran it) in the evidence.
 - **No rows because the check is measured, not found** → the metrics sweep has it.
   Five checks are metric-only — CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38
   — and `issues_list` with their `checkId` is refused with a pointer to `metrics_get`
@@ -219,6 +230,19 @@ of three ways:
 - **A refusal names its field.** An unrecognised `severity`, `checkId`, `ruleId`,
   `category` or `pageType` is refused rather than answered with an unfiltered listing.
   Read the message; do not retry with a guess.
+- **Two `pages_query` filters answer cross-checks nothing else can.** `fetchClass`
+  separates the pages the site served from the ones it refused (`blocked`), dropped or
+  disallowed — the census behind CHECK-05 and behind every "% of pages" denominator on
+  a crawl that met a WAF. `discoveredVia` says how the crawler reached each URL —
+  `seed`, `link`, `sitemap` or `redirect` — which is the other half of the orphan
+  finding: a page whose only discovery was `sitemap` was linked from nowhere the crawl
+  walked. Both are closed vocabularies and a value outside them is refused by name.
+- **The robots.txt the crawl obeyed is readable.** `robots_get` returns the stored
+  file — `raw` (the text as served, `truncated` when it is only the first 500KB),
+  `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources` and
+  the `userAgent` the crawl matched under. It is EVIDENCE, not a re-fetch: a file that
+  has changed since the crawl is a fact about the site, and reading today's copy over
+  the crawl's would hide it.
 - **Large lists go to a file.** `export_crawl` writes `issues`, `pages` or `metrics`
   as gzipped JSONL and answers `{dataset, path, rows, bytes}`. Use it when you need
   every row; put the path in the findings file, not the rows.
@@ -230,7 +254,7 @@ Follow the checklist's own sections — they group the calls naturally:
 | Section | Checks | Mostly answered by |
 |---------|--------|--------------------|
 | Pre-Crawl | 01, 02 | render diff rules + `render.coverage` |
-| 1. Crawlability & Robots | 03-05 | robots rules; browser for the file's contents |
+| 1. Crawlability & Robots | 03-05 | robots rules + `robots_get`; browser for pattern gaps |
 | 2. Sitemaps | 06-09 | sitemap rules + `sitemap.structure` |
 | 3. Redirects & Errors | 10-13 | redirect rules + `redirect.volume`, status rules |
 | 4. Host & Protocol | 14-15 | host-probe rules |
@@ -247,29 +271,113 @@ Follow the checklist's own sections — they group the calls naturally:
 Several checks ask for a number no rule produces. The checklist says so at each one.
 Record those as NOT MEASURED in `notes` — never substitute a nearby number:
 
-- total redirect **inlinks** (CHECK-10) — `redirect.volume` counts redirecting URLs;
-- duplicate titles and duplicate meta descriptions (CHECK-35, CHECK-36);
-- H1 **text** (CHECK-37) — the rules count H1s, they do not read them;
+- H1 ↔ title **alignment** (CHECK-37) — the engine stores each page's first H1 text
+  and compares headings only to each other, so whether a heading matches its title is
+  still a sampled browser reading;
 - image weight and format (CHECK-49); caching, compression and protocol (CHECK-50);
 - Core Web Vitals (CHECK-47) — the engine measures response time and nothing else;
 - GSC-only orphans (CHECK-32, CHECK-33b) — by definition outside a crawl.
 
-**And one number that is measured, but does not measure what its name suggests.**
-`depth` — the `structure.depth-distribution` metric, `pages_query`'s `depth`, and
-CHECK-31 — is **discovery depth: hops from a seed**. Every sitemap URL is a seed, so
-on a site whose sitemap covers the estate, pages with no HTML link path whatsoever sit
-at depth 0 beside the home page. The gate site read 437 of 443 indexable pages at
-depth 0 while the median page had **zero** inbound internal links: read literally,
-CHECK-31 passes on a site where half the estate is unreachable by clicking.
+**Four things a previous audit recorded as NOT MEASURED and the engine now measures.**
+An audit that copies an older findings file forward will under-report all four:
 
-So: when depth-0 is dominated by sitemap discovery — compare `discoveredVia` in a
-`pages_query` census against the depth histogram — do not report site depth from that
-metric. Rebuild reachability instead, from `links.orphan` (pages with no inbound
-internal link) and `inlinks.sources-by-type` (which templates link to which), and
-record CHECK-31 as passing on its stated criteria while NOT MEASURED on its intent,
-with both halves in `notes`. CHECK-33b's "sitemap only (no depth)" tier is empty by
-the same construction and needs the same rebuild. Click-depth as a field of its own is
-on the backlog.
+- **Total redirect inlinks** (CHECK-10). `redirect.volume`'s site row carries
+  `redirectInlinks` beside `redirectPages`: the number of internal LINKS whose target
+  is one of the crawl's redirecting URLs. The two are different questions rather than
+  two spellings of one — `redirectPages` counts the URLs that are wrong,
+  `redirectInlinks` counts how often the site walks into them, and a template link
+  that redirects is one redirect page and one inlink per page of the site. That
+  second number is the crawl-budget figure CHECK-10's Evaluate line grades, and it is
+  now on the wire, so **read the field rather than recording the check as unmeasured**.
+  The old warning still holds: `ratioPct` is redirecting URLs ÷ URLs fetched and is
+  not a substitute — on the Phase 7 gate site the two answered `ratioPct: 1.8` and
+  `redirectInlinks: 898` against 551 URLs crawled, which is **163%**, well past
+  CHECK-10's 10% FAIL threshold. Quoting the ratio would have passed the check on the
+  site's third-largest finding.
+
+- **Duplicate titles, meta descriptions and H1 headings** (CHECK-35, CHECK-36,
+  CHECK-37). `title.duplicate`, `meta-description.duplicate` and `h1.duplicate-text`
+  each report ONE FINDING PER DUPLICATED VALUE, not per page: the evidence carries the
+  value itself, `count` (how many indexable pages share it — exact) and `pages` (up to
+  20 of them). So `issues_list`'s `count` for these rules is the number of duplicate
+  GROUPS, and the pages involved are the sum of the groups' own counts — quote both,
+  and never read the group count as a page count. Capped at 200 groups with the usual
+  `truncated`/`total` note. `h1.duplicate-skipped` (info) is the honest silence: a
+  pre-Phase-7 crawl stored no heading text, so the check is NOT MEASURED on it rather
+  than clean, and a re-crawl is what answers it.
+- **Words a visitor can actually see.** `pages_query` returns `renderableWordCount`
+  beside `wordCount` — the same count minus the words the page's own markup hides
+  (`hidden`, inline `display:none`, a closed `<dialog>` or `<details>`) — and it is
+  the number `content.thin` judges on. Quote the renderable figure when you report
+  thin content; the gap between the two is the template's furniture, and
+  `content.metrics-by-type` carries both distributions per template so you can size
+  it.
+
+  **The two null shapes are different facts, and only one of them is a gap.** A
+  `wordCount` with a NULL `renderableWordCount` is a row a pre-Phase-7 analyzer
+  wrote: the page was read, the column the floor now needs did not exist yet, and
+  the engine SAYS SO rather than falling back — `content.thin-skipped` (info) fires
+  per page, on the `links.orphan-skipped` / `robots.check-skipped` precedent. That
+  is NOT MEASURED, and a re-crawl is the fix, because a word count cannot be
+  recomputed from a database that does not store the HTML. **Null in BOTH columns is
+  not a skip at all**: the analyzer never produced text for that URL — a PDF, a 404,
+  anything with no body to read — and `content.thin` was always silent about those.
+  A re-crawl changes nothing there, and reporting it as unmeasured content would
+  invent a gap.
+- **Click depth**, immediately below.
+
+**And two numbers that both measure a depth, one of which is not about the site.**
+
+`depth` — `pages_query`'s `depth`, and the `structure.depth-distribution` metric — is
+**discovery depth: hops from a seed**. Every sitemap URL is enqueued as a seed, so on
+a site whose sitemap covers the estate, pages with no HTML link path whatsoever sit at
+depth 0 beside the home page. The gate site read 437 of 443 indexable pages at depth 0
+while the median page had **zero** inbound internal links. That number is still worth
+reading, for what it actually says: how the CRAWL found the site. A distribution that
+collapses to zero means the pages were found by reading a file rather than by
+following links, which is site-wide orphan evidence and is where it is now filed
+(CHECK-32). It is not an answer to "how deep is this site".
+
+`clickDepth` — `pages_query`'s `clickDepth`, and the
+`structure.click-depth-distribution` metric — is **the shortest chain of internal
+links from the home page**, computed by the engine's own breadth-first search over the
+link graph. 0 is the home page; **null means no chain of links reaches the page at
+all**, and the metric counts those as `nullCount` beside the distribution. That is
+CHECK-31's number, and the sitemap-only bucket the check has always demanded.
+
+The history, because it explains the shape of the checklist: until Phase 7 the engine
+had only discovery depth, and CHECK-31 had to be answered by rebuilding reachability
+by hand from `links.orphan` and `inlinks.sources-by-type` and then recorded as passing
+on its stated criteria while NOT MEASURED on its intent. **That hand-rebuild is
+finished** — the engine computes the walk now. Use the metric and `clickDepth`, and
+use `links.orphan` for what it is: the per-page verdict, cross-read against the
+unreachable set (a page that is unreachable but not an orphan is an island, linked
+only from other unreachable pages). CHECK-33b's "sitemap only" tier reads `clickDepth`
+for the same reason — counted off `depth` it was empty by construction.
+
+One gate on both: `clickDepth` is written by the RULES run, not by the crawl. Null on
+every page means the rules have not run over this crawl, which `crawl_status`'s
+`rulesRunAt` settles — a missing measurement, never a site with no internal links.
+
+**And one more silence to distrust: a rule that compares two columns is only
+evidence when the two are comparable.** `rulesRunAt` settles "did the rule run"; it
+says nothing about whether the rule COULD have fired. `content.csr-dependent`
+(CHECK-01) is the standing case: it needs `renderedWordCount` ≥ 2 × the
+markup-visible count with a 150-word margin, and on a site whose markup-visible
+count carries a fixed block of CSS-class-hidden chrome the rendered side is lower
+than the markup side on every page — the Phase 7 gate site ran 0.32 to 0.73, so the
+firing condition was unreachable whatever the site did. Zero findings there is not
+"no client-side rendering"; it is a comparison nothing could answer.
+
+`pages_query` publishes both columns, which is what makes this checkable rather than
+theoretical: before you record a diff rule's silence as a PASS, read the two columns
+on the pages the render pass covered and satisfy yourself the rule had a way to fire.
+Where it did not, the check is SKIP with the arithmetic in `notes` — and, per the
+hard rule at the top of this file, it is a bug report about the rule rather than a
+finding about the client. It matters most exactly where you want the answer: on the
+gate site CHECK-33b found 100% of products with no HTML link path, the symptom a
+client-side product grid produces, and CHECK-01 was the check that could not confirm
+it.
 
 ---
 
@@ -303,6 +411,15 @@ what it blocked — the same disposition as §3.3's browser sections, and the on
 Phase 6 gate's auditor arrived at by following this file's own honesty rule against
 this paragraph's earlier wording.
 
+**CHECK-38 goes the other way, and the contrast is the reason.** It keeps `AGENT`
+with no browser, because two metrics DID answer part of it — quote
+`content.metrics-by-type` and `content.template-similarity`, weigh them, and state
+in `notes` that no page was read and the intent-match half is unassessed. `AGENT`
+here asserts that a judgement was made on the evidence available, which is true;
+`SKIP` would throw away work that was done. What separates it from CHECK-41 and
+CHECK-42 is not how much of it a browser would have decided but whether ANY evidence
+existed to judge: those two have none at all.
+
 ### 3.2 Hybrid checks: the engine half and the deciding half
 
 Eleven of the in-scope checks are `Engine + DevTools` (03, 05, 22, 29, 30, 37, 39, 43,
@@ -328,9 +445,34 @@ half-answered hybrid check land on `PASS` — an engine half that passes is not 
 check passing, and recording it as one is how a site gets a clean bill of health for a
 question nothing asked.
 
+**The case that looks like an exception and is not: engine clean, browser would
+still decide.** A whole class of hybrids has an engine half whose SILENCE answers the
+check's pass condition while a browser-only criterion could independently fail it.
+`schema.breadcrumb-absent` does not fire, so BreadcrumbList markup exists on the site
+— and "the markup matches the visible breadcrumb" is unverifiable without a browser.
+`mobile.viewport-missing` does not fire, so every page declares a viewport — and
+whether the page is actually usable on a phone is a different question. The engine
+half is real evidence and it is not the verdict.
+
+**The ruling, and it is categorical: the verdict is `SKIP`, with the engine half
+quoted in `notes` as supporting evidence.** The test is one sentence — *if the
+missing tool could still fail the check, it is not a pass* — so a hybrid whose tool
+is absent can only FAIL (the engine found something) or be recorded as unaudited. It
+never passes. What the engine's silence buys is NARROWER, and record it as what it
+is: it eliminates one way the check could fail, which is worth writing down and is
+not an answer to the check.
+
+**The class is named so nobody re-derives it per audit.** On the Phase 7 gate site
+nine checks landed here — CHECK-05, CHECK-43, CHECK-44, CHECK-45, CHECK-46,
+CHECK-50, CHECK-52, CHECK-57, CHECK-68 and CHECK-70 — and they are most of the reason that
+audit's SKIP count was 42. That number is the policy working. The alternative
+reading, PASS-with-a-caveat, would have produced nine passes on questions nothing
+asked, on a site whose entire product catalogue turned out to be unreachable.
+
 This policy came out of the Phase 6 gate, where the auditor had to invent it mid-walk
-because the skill routed only the pure cases. It is written down so the next audit
-lands where that one did.
+because the skill routed only the pure cases; the paragraph above came out of the
+Phase 7 one, where the auditor had to rule on the half-answered class the same way.
+Both are written down so the next audit lands where those two did.
 
 ### 3.3 The browser and platform sections
 
@@ -366,6 +508,13 @@ a list:
 
 Write ONE JSON file: `ariadne-findings.json` in the audit's working directory.
 
+**The NAME is part of the interface too.** Both downstream skills open
+`ariadne-findings.json` by that name, and it says whose findings these are in a client
+folder that will also hold a crawl export, a report and a workbook. The Phase 6
+deliverable run wrote `findings.json` and the two skills went looking for the other
+spelling; if you meet a file under the old name, it is this shape and renaming it is
+the fix.
+
 **This shape is an interface, not an example.** The `ariadne-report` and
 `ariadne-action-plan` skills read it verbatim; a field renamed here is a deliverable
 broken there.
@@ -387,6 +536,8 @@ broken there.
     "pagesCrawled": 4821,
     "renderPassCount": 1,
     "rulesetVersion": "0.4.0",
+    "rulesRunAt": "2026-08-27T11:04:19.220Z",
+    "findingsCount": 1902,
     "frontier": { "pending": 0, "leased": 0, "done": 4821, "failed": 3, "renderPending": 0 },
     "rulesRun": { "pagesScanned": 4821, "findings": 1902, "metrics": 855 },
     "render": { "rendered": 240, "failures": 2, "unrendered": 4581, "budget": 241, "truncated": false },
@@ -503,13 +654,45 @@ broken there.
   - `{"kind": "observation", "source", "summary", "urls", "detail"}` — everything the
     agent saw: `source` is `browser`, `gsc`, `ga4`, `ahrefs` or `manual`. `urls` and
     `detail` are optional.
+
+    **A census is an observation, and it carries its call.** Several of the
+    strongest engine answers are not a rule's output and not a metric row: they are
+    what a `pages_query` sweep or the `robots_get` body says when you read it
+    yourself — click-depth buckets per template, a path match over the whole
+    listing, the pair of pages that share a title. Record those as `observation`
+    with `source: "manual"`, and add `tool` and `args` alongside `summary` so the
+    call is reproducible exactly as it is on a `finding` entry. An observation
+    nobody can re-run is the one evidence kind this file cannot check.
   A PASS reached because a rule found nothing carries a `finding` entry with
   `count: 0` and the `args` that were asked, so the reader can re-run the query.
 - **`args` reproduces the call.** The point is that anybody can repeat it and get the
   same answer.
 - **`crawl.rulesRun`** copies the `crawl_rules` summary's scalars — `pagesScanned`,
-  `findings`, `metrics`. The surface returns no `elapsedMs`; do not invent one, and do
-  not leave a null in its place.
+  `findings`, `metrics` — **when this audit ran that pass**. The surface returns no
+  `elapsedMs`; do not invent one, and do not leave a null in its place.
+
+  **It is `null` when you audited a crawl somebody else judged, and that is the
+  correct value, not a hole.** Phase 1 says a judged crawl is auditable by whoever
+  finds it, and re-running `crawl_rules` to fill this field would re-judge shared
+  state to satisfy a schema — the wrong trade every time. The summary is the only
+  route to `pagesScanned`; it is not on `crawl_status`. So:
+
+  write `"rulesRun": null` and put ONE line in `crawl.caveats` that names the marker
+  as the proof of judgement — *"rulesRun is null: this audit did not run the rules
+  pass; the crawl's own marker is the proof it was judged (`rulesRunAt`
+  2026-08-28T21:55:35.006Z, `findingsCount` 1326), and the 21 fired rules' counts
+  from the `issues_list` sweep sum to exactly 1326."*
+
+  The caveat is required with the null, and it names the marker pair as the
+  judgement proof plus whatever cross-check you have (the rules' counts against
+  `findingsCount` is the cheap one, and it is free once the sweep is done).
+  `crawl.rulesRunAt` is what a downstream skill actually gates on; this field is a
+  breakdown, and a breakdown you did not produce is absent rather than invented.
+- **`crawl.rulesRunAt` and `crawl.findingsCount`** are copied from `crawl_status`, and
+  they are what every PASS on an empty listing rests on. A findings file whose
+  `rulesRunAt` is null is a file whose passes assert nothing — the report and the
+  action plan are entitled to refuse it. Copy them even when you ran the rules
+  yourself: a reader six weeks later has the crawl, not your session.
 - **`crawl.caveats`** is where the evidence's limits go: a page cap reached, a render
   pass that covered a fraction, URLs that failed to fetch, a crawl that ended
   `cancelled`. Empty array when there are none — never absent.
@@ -518,7 +701,7 @@ broken there.
 ### Before you hand it over
 
 - Every check present, every `notes` written for the verdicts that need one.
-- No verdict resting on an empty listing without the `crawl_rules` summary behind it.
+- No verdict resting on an empty listing without a `rulesRunAt` timestamp behind it.
 - No engine-claimed check whose verdict came from a browser instead.
 - The counts in `coverage` add up.
 

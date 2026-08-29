@@ -156,12 +156,20 @@ rule, not a finding about the client.
 
 The inverse is equally binding. An empty listing from a crawl nobody judged is
 NOT a clean site: `issues_list` and `metrics_get` answer `{"items": []}` both when
-a rule found nothing and when `crawl_rules` never ran. Nothing on `crawl_status`
-says which — `rulesetVersion` is stamped when the crawl is accepted, not when it
-is judged — so the only proof is the `crawl_rules` summary. Run it yourself (it
-is idempotent: a second run re-judges the same crawl with the current ruleset)
-and keep its `{pagesScanned, findings, byRule, byMetric}` as the audit's evidence
-that every empty answer afterwards means "nothing found".
+a rule found nothing and when `crawl_rules` never ran. **`crawl_status` settles
+which, and one poll is the whole proof**: `rulesRunAt` is the timestamp of the last
+COMPLETED rules pass (null means no complete pass is on record) and `findingsCount`
+is how many findings that crawl holds. Read them as a pair — a timestamp with
+`findingsCount: 0` is "looked, found nothing"; a null with any count is a pass that
+died part-way; null with zero is "nobody has looked". Note that `rulesetVersion` is
+NOT that proof: it is stamped when the crawl is accepted, not when it is judged.
+
+So a crawl somebody else judged is as auditable as one you judged yourself, and you
+do not re-run `crawl_rules` to prove a marker that is already on the row. Run it when
+`rulesRunAt` is null, or deliberately to re-judge with a newer ruleset; its
+`{pagesScanned, findings, byRule, byMetric}` summary is then the per-rule breakdown
+of what that pass wrote, and it is worth keeping — but it is a breakdown, not the
+evidence that a pass happened.
 
 ## Analytics Tools (MCP Servers)
 
@@ -485,12 +493,28 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        robots questions below are unanswered on this crawl, not answered clean.
   2. `issues_list` with `checkId: "CHECK-05"` (`crawl.blocked`) for pages the crawl
      was refused — a robots-shaped block that shows up as a fetch outcome.
-- **DevTools** (the parts no crawl answers — the file's *contents*, and the gaps in it):
-  1. Navigate to `{domain}/robots.txt` — extract full content
-  2. Parse: User-agent blocks, Disallow rules, Sitemap lines, Crawl-delay
+  3. **`robots_get` — the file itself, as this crawl read it.** It answers
+     `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
+     sitemapSources, userAgent}`: `raw` is the text the crawl obeyed, `outcome` is
+     `read` / `absent` / `unreachable` (and `unreachable` is NOT `absent` — a site
+     that could not tell us its rules is a finding, not an allow-all), `truncated`
+     means `raw` is only the first 500KB so anything concluded about a rule past that
+     point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
+     (CHECK-06 reads it), and `userAgent` is the UA whose groups actually governed
+     the crawl. **Stored evidence, never re-fetched**: quote it rather than the live
+     file, and if you also read the live file, report the difference as the fact about
+     the site that it is.
+- **The file's contents** (steps 1-4 read `robots_get`'s `raw`; a browser only if the
+  crawl never stored one — `outcome: "unreachable"`):
+  1. Read `raw` in full. Note `truncated` in the finding if it is set.
+  2. Parse: User-agent blocks, Disallow rules, Sitemap lines, Crawl-delay. `robots_get`
+     already extracts the last two as `sitemapSources` and `crawlDelaySec` — quote
+     those rather than re-deriving them, and read the rest against `userAgent`, since
+     a rule in a group the crawler never matched did not apply to it.
   3. Check for AI bot rules: GPTBot, ChatGPT-User, Google-Extended, ClaudeBot, Anthropic-AI, PerplexityBot, CCBot
   4. Flag any Disallow rules blocking important content paths (/collections/, /products/, /blogs/)
-  5. **Pattern gap analysis** (MANDATORY): Don't just read the rules — test specific URL
+- **DevTools** (the part no stored text answers — testing URLs against the rules):
+  1. **Pattern gap analysis** (MANDATORY): Don't just read the rules — test specific URL
      patterns against them to find gaps. Construct these test URLs and check each:
      - Single filter: `/collections/{name}?filter.v.size=UK+10` — blocked?
      - Filter + pagination: `/collections/{name}?filter.v.size=UK+10&page=2` — blocked?
@@ -499,13 +523,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - Tag + pagination: `/blogs/{name}/tagged/{tag}?page=2` — blocked?
      - Sort + pagination: `/collections/{name}?sort_by=price&page=2` — blocked?
      Present results as a table showing each test URL pattern and whether it's blocked or passes through.
-  6. **Shopify-specific**: The default Shopify robots.txt blocks `*/collections/*filter*&*filter*`
+  2. **Shopify-specific**: The default Shopify robots.txt blocks `*/collections/*filter*&*filter*`
      (two+ filters) but NOT single filter URLs. It blocks `*sort_by*` but doesn't block
      `?page=` pagination. Check if these gaps exist and flag the crawl surface they create.
 - **Evaluate**:
-  - FAIL if robots.txt returns non-200
+  - FAIL if robots.txt returns non-200 — and say which kind, because the two do not
+    mean the same thing: `robots_get`'s `outcome` is `absent` for a 4xx (the site says
+    there are no rules, and crawling allow-all was correct) and `unreachable` for a
+    5xx, a timeout or a refused URL (rules nobody could read)
   - FAIL if key content paths are blocked
-  - WARN if no Sitemap: line declared
+  - WARN if no Sitemap: line declared — `sitemapSources` empty
   - WARN if single filter URLs or filter+pagination combinations pass through robots.txt rules
   - Record: blocked paths list, AI bot rules, sitemap declaration, blocked URL count from the engine, **pattern gap analysis table**
 
@@ -550,8 +577,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   reports pages the crawler was refused rather than served (the fetch was classified
   `blocked`; the evidence carries the status code). A branded, politely paced crawler
   being blocked is a bot-blocker finding, and `issue_urls` gives the affected URLs.
-  Report it against the user agent the crawl actually used — the claim is "this UA
-  was blocked on these URLs", never "all bots are blocked".
+  Report it against the user agent the crawl actually used (`robots_get`'s
+  `userAgent`) — the claim is "this UA was blocked on these URLs", never "all bots are
+  blocked".
+
+  **The census beside the finding**: `pages_query` with `fetchClass: "blocked"` lists
+  every blocked page with its `statusCode` and a `fetchReason` naming how many
+  attempts it took and what per-host spacing the engine had escalated to before it
+  gave up. That is what separates "the site rate-limited a crawl that went in too
+  fast" from "the site refuses this crawler", and only the second is a CHECK-05
+  finding. `crawl_status`'s `blockedPages` and `hostSpacingMs` are the same story at
+  crawl level — quote them when you report either.
 - **DevTools** (geo behaviour, which needs a browser and a location):
   1. Navigate to homepage — note any redirect chain (final URL, status codes)
   2. Navigate to a product page — same check
@@ -580,6 +616,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     `failureCount` (the true number).
   The sitemap's shape — index vs flat, how many child documents, how many entries
   each — is CHECK-08's metric; do not re-fetch the file to describe it.
+
+  **The robots.txt half is `robots_get`'s `sitemapSources`**: the `Sitemap:` lines the
+  crawl's walk was pointed at, in declaration order. Empty means the file declared
+  none, which is the WARN below — and it is a different fact from "no sitemap exists",
+  which is `sitemap.missing`. A site with a sitemap at the conventional location and
+  no declaration fails this half and passes the other; say both.
 - **Evaluate**:
   - FAIL if sitemap returns non-200 or robots.txt has no Sitemap: line
   - WARN if flat sitemap with >50k URLs
@@ -643,16 +685,26 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        3xx, found by the render pass (so it needs `renderPassCount` ≥ 1 to be measured)
      `issue_urls` per rule for the hops and the URLs.
   2. `metrics_get` with `metricId: "redirect.volume"` — the site row carries
-     `{redirectPages, totalPages, ratioPct, chains, loops}`: how much of what the
-     crawl fetched was a redirect, plus the exact chain and loop counts.
+     `{redirectPages, redirectInlinks, totalPages, ratioPct, chains, loops}`: how
+     much of what the crawl fetched was a redirect, how often the site links at
+     those redirects, plus the exact chain and loop counts.
      `redirectPages` counts one row per redirecting URL, so a template link that
      redirects on every page of the site is ONE redirect page here.
-  3. **What the engine does NOT measure: total redirect INLINKS.** The
-     crawl-budget number the Analysis below asks for is a link-graph question and
-     no rule claims it today. Report it as NOT MEASURED in the findings notes —
-     never substitute `ratioPct` for it, which is a different ratio (redirecting
-     URLs ÷ URLs fetched) and will understate a repeated template redirect by
-     exactly the factor that makes it worth reporting.
+  3. **`redirectInlinks` IS the total-redirect-inlink number the Analysis asks
+     for.** It counts internal `links` rows whose target is one of those
+     redirecting URLs — the same template link is one redirect page and one
+     inlink per page of the site, so on a site with three redirecting nav items
+     and ten thousand pages the pair reads `redirectPages: 3, redirectInlinks:
+     30,000`. Quote it; it is the crawl-budget half of this check and the number
+     the Evaluate line's 10% threshold is written against.
+     **Still never substitute `ratioPct` for it**, which is a different ratio
+     (redirecting URLs ÷ URLs fetched) and will understate a repeated template
+     redirect by exactly the factor that makes it worth reporting. The Phase 7
+     gate site is the worked example: `ratioPct: 1.8` beside `redirectInlinks:
+     898` on 551 URLs crawled — 1.8% of the crawl was a redirect, and the site
+     pointed at those ten URLs 898 times, **163% of the URLs crawled**. One of
+     those numbers passes the check and the other fails it critically; the
+     Evaluate line means the second.
 - **Important — Total Redirect Volume Analysis**: Do NOT just count unique redirect URLs.
   A site can have only 31 unique redirect URLs but 550K+ total redirect inlinks if the same
   redirecting link is repeated across thousands of pages (e.g., a template element like a
@@ -661,9 +713,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Analysis**:
   1. Unique redirect URLs: `redirect.volume`'s `redirectPages`, with `ratioPct` as
      its share of the crawl
-  2. **Total redirect inlinks**: NOT MEASURED by the engine (see the Engine note
-     above). Record the gap; if the client needs the number, it is a link-graph
-     export, not something to estimate from what is here
+  2. **Total redirect inlinks**: `redirect.volume`'s `redirectInlinks`, measured.
+     State it beside `redirectPages` ("10 redirecting URLs, linked at 898 times")
+     and against `totalPages` as the crawl-budget percentage the Evaluate line
+     grades — the arithmetic is `redirectInlinks ÷ totalPages`, written out, not
+     `ratioPct`
   3. If a redirect appears as an inlink from most page types, a template-level
      redirect exists — the redirect findings' URLs, grouped by `pageType`, are the
      evidence available for that claim today
@@ -673,8 +727,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      lives in the template. Common culprits: returns/refund widgets, footer links, promo
      banners, policy links. (The engine names the link; naming the *template element* is
      browser work.)
-  6. Crawl budget waste: state it as redirecting URLs ÷ URLs crawled (`ratioPct`) and
-     label it as such. Flag if >10%. The inlink-weighted version stays unmeasured.
+  6. Crawl budget waste: state BOTH ratios and label each. Redirecting URLs ÷
+     URLs crawled is `ratioPct`. The inlink-weighted one — `redirectInlinks` ÷
+     `totalPages` — is the one the Evaluate line's 10% threshold grades, and it
+     is the one that moves when a template link is repointed.
 - **Evaluate**:
   - FAIL if redirect chains > 0
   - CRITICAL if redirect loops found
@@ -715,13 +771,31 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-13: Soft-404s and thin OK responses
 - **Priority**: Medium | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-13"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-13"` — three rules:
   - `content.soft-404` (warning) — a 200 response whose text reads as a
     not-found page
   - `content.thin` (warning) — a 200 page with too little body text to serve any
     query (the same rule answers CHECK-40)
+  - `content.thin-skipped` (info) — the pages the thin check could not be run on,
+    below
   `issue_urls` per rule; `pages_query` for the word counts beside page type, which
   is how the "% of indexable pages" in the Evaluate line is computed.
+
+  **Both verdict rules judge `renderableWordCount`, not `wordCount`** — the page's
+  words minus the ones its own markup hides (`hidden`, inline `display:none`, a closed
+  `<dialog>` or `<details>`). `pages_query` returns both columns; quote the renderable
+  one, since it is what the verdict was reached on and what a visitor sees.
+
+  **`content.thin-skipped` is the NOT MEASURED marker** (`links.orphan-skipped` /
+  `robots.check-skipped` precedent): it fires per page where `wordCount` is present
+  and `renderableWordCount` is null — a row a pre-Phase-7 analyzer wrote, where the
+  page WAS read and the column the floor needs did not exist yet. The engine will not
+  fall back to `wordCount` there, because that column measures something else; on a
+  chrome-heavy site the fallback would answer four times high, silently, on old crawls
+  only. Where it fires, the thin count is a floor and a re-crawl is the fix. **Null in
+  BOTH columns is a different thing and not a skip**: no text was ever extracted for
+  that URL — a PDF, a 404, anything with no body — which `content.thin` was always
+  silent about and a re-crawl will not change.
 - **Evaluate**:
   - FAIL if soft 404s > 0
   - WARN if low content pages > 10% of indexable pages
@@ -1083,35 +1157,39 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-31: Crawl depth to key pages
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `metrics_get` with `metricId: "structure.depth-distribution"` — the shape of the
-     depth distribution over indexable 200 pages: `{count, min, p25, median, p75,
-     p95, max, mean}` for the site and for each page type (`scope: "page_type"`).
-     `count` is every page in the cohort; the percentiles describe only the pages
-     that HAVE a depth.
+  1. `metrics_get` with `metricId: "structure.click-depth-distribution"` — CLICK
+     depth: the shortest chain of internal links from the home page, computed by the
+     engine's own breadth-first search over the `links` table. The shape is
+     `{count, nullCount, min, p25, median, p75, p95, max, mean}` for the site and for
+     each page type (`scope: "page_type"`). The home page is 0.
+     - `count` is every page in the cohort (indexable 200s).
+     - **`nullCount` is the no-depth bucket the check below demands** — the pages no
+       chain of links reaches at all. They are NOT depth 0 and never were: a page
+       listed only in the sitemap has no click depth, and this column is where it is
+       counted. `count - nullCount` is the population the percentiles describe, so
+       percentages over the whole cohort use `count` as the denominator and the
+       unreachable pages appear as their own row.
+     - Links are followed as published: internal links only, and a link that lands on
+       a redirect leads no further — a page reachable only through a redirect is
+       counted unreachable, and the redirect is the thing to fix (CHECK-10).
   2. `issues_list` with `checkId: "CHECK-31"` — `structure.deep-page` (info) names
-     the individual pages past the depth threshold, and `issue_urls` lists them.
-  3. **The no-depth bucket is yours to count**, and the check below insists on it:
-     the metric does not break it out. Count the indexable pages whose `depth` is
-     null — `pages_query` with `indexable: true` shows `depth` per row, and
-     `export_crawl` with `dataset: "pages"` gives the whole set when the crawl is
-     large. `count` minus the pages that have a depth is the same number from the
-     other side; state which way you got it.
-  4. **CAVEAT — `depth` is DISCOVERY depth, not click depth.** It counts hops from a
-     seed, and **every sitemap URL is a seed**, so a page with no HTML link path at
-     all is recorded at depth 0 rather than at no depth. On a site whose sitemap
-     covers the estate the no-depth bucket is empty by construction and this check
-     passes on its criteria while measuring nothing it intends to (Phase 6 gate:
-     437 of 443 indexable pages at depth 0, median inbound links **zero**).
-
-     Detect it before trusting the histogram: `pages_query` reports `discoveredVia`,
-     and depth 0 dominated by `sitemap` rather than `seed`/`link` is the tell. When
-     it holds, rebuild reachability from the link graph instead — `links.orphan`
-     (pages with no inbound internal link, and note its `truncated`/`total`) plus
-     `inlinks.sources-by-type` (which templates link to which) plus
-     `inlinks.distribution` (the median page's inbound count) — and report CHECK-31
-     as passing on its stated criteria and NOT MEASURED on its intent, with both
-     halves in the notes. The same construction empties CHECK-33b's "sitemap only
-     (no depth)" tier; rebuild that one the same way.
+     individual pages past the depth threshold. **It still reads DISCOVERY depth**
+     (it is a page rule, and runs before the click-depth search): treat its list as a
+     lower bound, and take the per-page click depths from `pages_query`, which reports
+     `clickDepth` beside `depth`.
+  3. `metrics_get` with `metricId: "structure.depth-distribution"` — DISCOVERY depth,
+     kept as evidence about the CRAWL rather than about the site. It counts hops from
+     a seed, and **every sitemap URL is a seed**, so a page with no HTML link path is
+     recorded there at 0. Read it against the click-depth table: where discovery depth
+     is far shallower than click depth, the sitemap is doing the work the internal
+     linking should do. On the Phase 6 gate crawl this metric put 437 of 443 indexable
+     pages at "depth 0" beside a median inbound link count of **zero** — which is the
+     reading error this pair of metrics exists to make impossible.
+  4. Cross-read the unreachable pages against `links.orphan` (CHECK-32). The two
+     answer different questions and should broadly agree: an orphan has no inbound
+     internal link at all, while an unreachable page may be linked only from other
+     unreachable pages (an island). A page in `nullCount` but not in `links.orphan` is
+     exactly that island, and it is worth naming as one.
 - **Analysis**: the distribution is per indexable page — non-indexable pages
   (noindexed, canonicalised, blocked) are excluded, because their crawl depth is
   irrelevant. Present the buckets the table below asks for, with the percentiles from
@@ -1159,6 +1237,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     unfetched, or a page cap reached), so "nothing links to this page" cannot be
     distinguished from "the page that links to it was never crawled". When this
     fires, CHECK-32 is SKIP with the reason quoted, NOT a clean orphan count.
+
+  And the site-wide evidence beside those two verdicts: `metrics_get` with
+  `metricId: "structure.depth-distribution"` — DISCOVERY depth, how far into the
+  crawl each page was first found. It passes no verdict; it is the shape the orphan
+  findings make in aggregate. Every sitemap URL is enqueued as a starting point, so
+  a distribution that collapses to zero says the crawl found this site's pages by
+  reading a file rather than by following links — the site-wide shadow of the
+  per-page fact `links.orphan` reports, and the number to quote when a client asks
+  how widespread the orphaning is. Read it against
+  `structure.click-depth-distribution` (CHECK-31): where discovery depth is far
+  shallower than click depth, the sitemap is carrying the internal linking.
 - **CRITICAL — two different orphan populations, and the engine sees one of them**:
   - **Crawl orphans** (the engine's): pages this crawl reached, with no inbound
     internal link from any other crawled page. Complete for what was crawled.
@@ -1169,10 +1258,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   A total that silently mixes the two is the reporting error this section exists to
   prevent.
 
+- **The cross-check the pages listing answers directly.** `pages_query` takes
+  `discoveredVia` — `seed`, `link`, `sitemap` or `redirect` — which is how the CRAWLER
+  reached each URL. Pages at `discoveredVia: "sitemap"` were never linked from
+  anywhere the crawl walked, so that listing is the orphan finding's population read
+  from the other side: the two should agree, and where they do not, the difference is
+  informative (a page discovered by link whose only linker was later found
+  unreachable is an island, not an orphan). Read it against `clickDepth: null` from
+  CHECK-31 too — a page reachable by no chain of links at all.
 - **Analysis**:
   1. Take the total crawl-orphan count from `issues_list`'s `count` for `links.orphan`
   2. Break down by source: the finding evidence separates sitemap-listed orphans from
-     the rest; the GSC tier comes from GSC
+     the rest, and `pages_query` with `discoveredVia: "sitemap"` counts the same
+     population independently; the GSC tier comes from GSC
   3. **Break down by URL type — but classify carefully**. CDN asset URLs contain
      `/products/` in their path (e.g., `/cdn/shop/products/image.jpg`) and will
      false-positive as product pages if you match on `/products/` alone. Always
@@ -1237,40 +1335,56 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   with a pointer to the metric.
   - `{sources: {}}` on the product cohort is the finding: **nothing on the site links
     to products at all**.
+  - **The self-referential case is not a pass, and it is the common one.** A product
+    cohort whose sources map is `{"/products/:slug": 82}` — products linking only to
+    products — is an ISLAND: the links exist, and nothing outside the cohort reaches
+    them. Read the map for what links IN from other templates; a map with only the
+    cohort's own type in it answers "nothing links to products" just as `{}` does.
+    `clickDepth` is what proves it (the Phase 7 gate site: 148 of 148 products at
+    `clickDepth: null` with 82 product-to-product inlinks), so cross-read the two
+    rather than reading the map alone.
   - A cohort landing in `(untyped)` means the crawl could not type those pages — say
     so rather than reading the typed cohorts as the whole site.
 - **CRITICAL — three populations, do not confuse them**:
   - **Orphan products** = products with zero internal inlinks from anywhere in the
     crawl (`links.orphan`, filtered to the product cohort). Smallest count, worst case.
-  - **Products with no crawl depth** = products no HTML link path reaches from the
+  - **Products with no click depth** = products no HTML link path reaches from the
     homepage, a strictly larger set that includes products linked only from other
-    sitemap-discovered pages. `pages_query` with `pageType: "product"` shows `depth`
-    per row; the ones with `depth: null` are these.
+    sitemap-discovered pages. `pages_query` with `pageType: "product"` shows
+    `clickDepth` per row; the ones with `clickDepth: null` are these.
+    **Read `clickDepth`, never `depth`.** `depth` is DISCOVERY depth and every
+    sitemap URL is enqueued as a seed, so `depth: null` is a set that is empty by
+    construction — a tier counted that way is always zero and this check passes on
+    a site whose entire catalogue is unreachable. `clickDepth` is null exactly when
+    no chain of internal links reaches the page, and it is written by the rules run
+    (`crawl_rules`): if it is null on EVERY page, the rules have not been run, which
+    `crawl_status`'s `rulesRunAt` confirms — that is a missing measurement, not a
+    site with no internal links.
   - **GSC-only products** = products Google knows and the crawl never reached. Only
     GSC has them.
   The correct number for "products not reachable via HTML" is the second. Reporting
   the orphan count instead under-reports the problem, sometimes by several times.
 - **Analysis**: over the product cohort (`pages_query` with `pageType: "product"`, or
   `export_crawl` with `dataset: "pages"` on a large site):
-  1. **Link-discovered products**: count products WITH a `depth` value
-  2. **Sitemap-only products**: count products with `depth: null`
+  1. **Link-discovered products**: count products WITH a `clickDepth` value
+  2. **Sitemap-only products**: count products with `clickDepth: null`
   3. **GSC-only products**: from GSC — URLs it has impressions for that do not appear
      in the crawl at all
   4. Present as a three-tier breakdown table:
      ```
-     | Discovery Source       | Products | % of Total |
-     |------------------------|----------|------------|
-     | HTML links (with depth)| X        | X%         |
-     | Sitemap only (no depth)| X        | X%         |
-     | GSC only (not in crawl)| X        | X%         |
-     | TOTAL                  | X        | 100%       |
+     | Discovery Source            | Products | % of Total |
+     |-----------------------------|----------|------------|
+     | HTML links (with clickDepth)| X        | X%         |
+     | Sitemap only (no clickDepth)| X        | X%         |
+     | GSC only (not in crawl)     | X        | X%         |
+     | TOTAL                       | X        | 100%       |
      ```
   5. Cross-reference with CHECK-01: if the product grid is JS-dependent, the "sitemap only"
      and "GSC only" tiers will be large — this confirms the JS rendering impact on real crawl data
   6. Cross-reference with `inlinks.sources-by-type`: an empty or tiny `sources` map on
      the product cohort says the same thing from the link graph's side
 - **Evaluate**:
-  - PASS if >80% of products have crawl depth (discovered via HTML links)
+  - PASS if >80% of products have a click depth (reachable via HTML links)
   - WARN if 30-80% are sitemap/GSC-only
   - FAIL if >80% of products have no HTML link path (entirely dependent on sitemap for discovery)
   - Note: A "FAIL" here combined with a JS-dependent product grid (CHECK-01) means the site's
@@ -1301,14 +1415,21 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — three rules:
-  `title.missing` (warning), `title.too-short` (info), `title.too-long` (info). Use
-  `pageType` on `issues_list` to get each count per template cohort directly, which
-  is what the per-page-type breakdown below needs; `issue_urls` gives the titles
-  themselves in the evidence, which is where the template patterns and the samples
-  come from. Duplicate titles are not a rule today — see CHECK-39 for the content-level
-  duplicate rules, and record the duplicate-title count as NOT MEASURED rather than
-  inferring it from the samples.
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — four rules:
+  `title.missing` (warning), `title.too-short` (info), `title.too-long` (info) and
+  `title.duplicate` (warning). Use `pageType` on `issues_list` to get each count per
+  template cohort directly, which is what the per-page-type breakdown below needs;
+  `issue_urls` gives the titles themselves in the evidence, which is where the
+  template patterns and the samples come from.
+
+  **`title.duplicate` reports one finding per DUPLICATED TITLE, not per page.** Its
+  evidence is `{title, count, pages}` — the shared title, exactly how many indexable
+  pages carry it, and up to 20 of their URLs. So `issues_list`'s `count` is the number
+  of duplicate groups and the pages involved are the sum of the groups' own `count`s:
+  report both ("48 titles shared by 612 pages"), never the group count as a page
+  count. Capped at 200 groups, with the usual `truncated`/`total` note when the site
+  has more. Equality is exact after trimming — two titles differing by one character
+  are two groups here, and near-duplication is CHECK-39's question, not this one.
 - **Important — Analyse by Page Type, Not Just Global Counts**: Saying "99% of titles are
   over 60 chars" tells the client nothing useful. Different page types have different title
   templates, different keyword needs, and different SERP competition. The analysis must
@@ -1369,11 +1490,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-36: Meta descriptions — unique, compelling, and correct length
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
-  (warning), `meta-description.too-short` (info), `meta-description.too-long` (info).
-  Filter by `pageType` for the per-type breakdown; `issue_urls` carries each
-  description and its length, which is what the quality spot-check reads. As with
-  CHECK-35, duplicate descriptions are NOT MEASURED by a rule — say so rather than
-  estimating.
+  (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
+  and `meta-description.duplicate` (warning). Filter by `pageType` for the per-type
+  breakdown; `issue_urls` carries each description and its length, which is what the
+  quality spot-check reads. The duplicate rule has CHECK-35's group shape exactly —
+  one finding per shared description, evidence `{metaDescription, count, pages}` — so
+  quote the group count and the page total together. A template dumping one
+  description across a whole cohort is a single group with a very large `count`, which
+  is the shape the Analysis below calls a template-generated duplicate.
 - **Analysis** (break down by page type, same as CHECK-35):
   1. **Missing count by page type**: Products, collections, blog, info pages separately.
      Blog and info pages often have the highest missing rate — report this specifically.
@@ -1401,13 +1525,27 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-37: H1 and heading hierarchy
 - **Priority**: High | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-37"` — `headings.h1-missing`
-  (warning), `headings.h1-multiple` (info), `headings.level-skip` (info). Filter by
-  `pageType` for the per-template counts. The evidence carries the H1 COUNT, not the
-  H1 TEXT: the engine can tell you that every product page has two H1s, and cannot
-  tell you what they say.
+  (warning), `headings.h1-multiple` (info), `headings.level-skip` (info),
+  `h1.duplicate-text` (warning) and `h1.duplicate-skipped` (info). Filter by
+  `pageType` for the per-template counts.
+
+  **What the engine knows about heading TEXT, precisely.** It stores each page's
+  FIRST H1 as text (collapsed, trimmed, capped at 300 characters) and compares those
+  strings to each other: `h1.duplicate-text` reports one finding per shared heading,
+  evidence `{h1Text, count, pages}`, group-shaped exactly as CHECK-35's duplicate rule
+  is. Two consequences worth stating in the finding: a page with three H1s contributes
+  only its first, so a duplicate among the others is invisible; and the text is not
+  published per page anywhere else, so the H1 ↔ title alignment work in step 4 below
+  is still a sampled browser reading rather than a query.
+
+  **`h1.duplicate-skipped` is a NOT MEASURED marker, not a pass.** It fires when the
+  crawl stored no heading text at all while its pages do carry H1 elements — a
+  pre-Phase-7 crawl. Then the duplicate-heading question is unanswered on this crawl
+  and the answer is a re-crawl; record it as such rather than as zero duplicates.
 - **Analysis**:
-  1. **Global counts**: missing, multiple, level skips — from `issues_list`. Duplicate
-     H1 text is NOT MEASURED by a rule.
+  1. **Global counts**: missing, multiple, level skips and duplicate headings — all
+     from `issues_list`. For the duplicates, report the group count and the pages they
+     cover separately.
   2. **Break down multiple H1s by page type** with the `pageType` filter. If a whole
      cohort has the same H1 count above one, a template element is coded as an H1
      (e.g., a geo banner, promo bar, store selector). Confirm WHICH element in the
@@ -1433,9 +1571,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        (e.g., `.store-select` → `sections/store-selector.liquid`)
      - **The exact fix**: "Change `<h1 class="store-select__heading">` to `<div class="store-select__heading">`"
   4. **H1 ↔ Title alignment check**: For each page type, does the H1 match the title?
-     The engine holds the titles (CHECK-35's evidence) but not the H1 text, so this is
-     a sampled browser comparison — take 3-5 pages per page type from `pages_query`,
-     read both, and say the sample size in the finding.
+     The engine holds the titles (CHECK-35's evidence) and publishes H1 text only for
+     the headings that DUPLICATE each other, so a page-by-page comparison is still a
+     sampled browser reading — take 3-5 pages per page type from `pages_query`, read
+     both, and say the sample size in the finding.
      They don't need to be identical, but they should reinforce the same topic/keyword.
      **Normalise whitespace before comparing** — collapse multiple spaces, strip newlines,
      and trim. Template whitespace differences (double space vs single space) are a
@@ -1570,10 +1709,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-40: Thin or placeholder content
 - **Priority**: Medium | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-40"` — `content.thin` (warning, the
-  same rule CHECK-13 reads) and `content.placeholder` (warning: lorem ipsum and
-  friends left in live copy). `issue_urls` for both lists; filter `issues_list` by
+  same rule CHECK-13 reads), `content.thin-skipped` (info, the same marker CHECK-13
+  reads: pages carrying a `wordCount` and no `renderableWordCount`, which a pre-Phase-7
+  crawl wrote and this check cannot be run on — a re-crawl is the fix, and while it
+  fires the thin count is a floor) and `content.placeholder` (warning: lorem ipsum and
+  friends left in live copy). `issue_urls` for all three; filter `issues_list` by
   `pageType` to say which templates the thin pages belong to, and read
-  `content.metrics-by-type` for the word-count distribution behind the threshold.
+  `content.metrics-by-type` for the distributions behind the threshold — it carries
+  `wordCount`, `renderableWordCount` and `textRatio` per template. **The pair is the
+  finding**: a template whose median word count is 900 and whose median renderable
+  count is 200 ships 700 words of furniture on every page, and the thin verdict was
+  reached on the 200.
 - **Evaluate**:
   - FAIL if lorem ipsum > 0 (immediate fix needed)
   - WARN if low content > 10% of indexable pages
@@ -1706,9 +1852,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   fields. `issue_urls` names the missing fields PER PAGE in the evidence, across
   every product page the crawl reached — which is the field checklist below, answered
   at site scale instead of on the one product page a person opened.
-  A product page with NO Product markup at all is the other half: compare the product
-  cohort's size (`pages_query` with `pageType: "product"`) against how many pages the
-  rule considered.
+  A product page with NO Product markup at all is the other half, **and the surface
+  cannot answer it today.** A rule that found nothing is simply absent from
+  `issues_list`; there is no pages-considered count beside it, so "every product's
+  markup is complete" and "no product page carries Product markup at all" are
+  indistinguishable from a silent `schema.product-incomplete`. Do not try to close
+  the gap by comparing the product cohort's size against a number the surface does
+  not publish. Where the site-scoped `schema.none-on-site` is also silent you know
+  the crawl stored JSON-LD SOMEWHERE, which is weaker than it sounds and is not
+  per-cohort. So: a silent rule here is `SKIP` with the ambiguity written out, and
+  a browser reading of one product page settles it for that page — the missing
+  count is on the engine backlog, not something to estimate around.
 - **DevTools** (only for the structure the rule does not judge — the `offers` shape and
   the price format):
   1. Navigate to a product page the engine flagged
@@ -2083,19 +2237,26 @@ and each check names the call that answers it. What follows is the shape of thos
 calls, so a check's one-line **Engine** entry is enough.
 
 The tools are the MCP surface (`crawl_start`, `crawl_status`, `crawl_list`,
-`crawl_render`, `crawl_rules`, `crawl_mark_failed`, `issues_list`, `issue_urls`,
-`metrics_get`, `pages_query`, `export_crawl`). The HTTP API exposes the same
-service — `GET /crawls/:id/issues`, `/metrics`, `/pages`, `/issues/:ruleId/urls`,
-`/export` — and answers the same JSON, so an operator running `npm run api:serve`
-instead of `npm run mcp:serve` changes the transport and nothing else.
+`crawl_render`, `crawl_rules`, `crawl_mark_failed`, `robots_get`, `issues_list`,
+`issue_urls`, `metrics_get`, `pages_query`, `export_crawl`). The HTTP API exposes the
+same service — `GET /crawls/:id/issues`, `/metrics`, `/pages`, `/robots`,
+`/issues/:ruleId/urls`, `/export` — and answers the same JSON, so an operator running
+`npm run api:serve` instead of `npm run mcp:serve` changes the transport and nothing
+else.
 
-**The three query tools, and what each is for:**
+**Before reading any of it, check the crawl was judged.** `crawl_status` carries
+`rulesRunAt` (when a rules pass last completed; null means none is on record) and
+`findingsCount` (the findings that pass left). Every PASS this checklist reaches
+through an empty listing rests on that timestamp.
+
+**The query tools, and what each is for:**
 
 | Tool | Answers | Use it for |
 |------|---------|-----------|
 | `issues_list` | one row per rule that found something: `{ruleId, checkIds, severity, category, title, count, sampleUrls}` | the verdict on a check, and its size |
 | `issue_urls` | one row per finding: `{url, evidence}` | the URL list a developer gets, and the per-page evidence |
 | `metrics_get` | `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}` | every number a report quotes |
+| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
 
 **Filters that matter for a checklist walk:**
 
@@ -2103,8 +2264,17 @@ instead of `npm run mcp:serve` changes the transport and nothing else.
   `severity`, `ruleId`, `category` and `pageType`, which intersect.
 - `metrics_get` takes `metricId`, `scope` (`site`, `page_type`, `sitemap_doc`) and
   `scopeValue`.
-- `pages_query` takes `pageType`, `statusCode`, `indexable` and `rendered`. There is
-  no URL filter: match paths yourself over the listing.
+- `pages_query` takes `pageType`, `statusCode`, `indexable`, `rendered`, `fetchClass`
+  and `discoveredVia`. There is no URL filter: match paths yourself over the listing.
+  Several checks are written as path matches — CHECK-57, CHECK-65, CHECK-66 and
+  CHECK-67 among them — so each of those wants the WHOLE census, which is 3 calls at
+  `limit: 200` on a 551-page crawl and 250 on a 50,000-page one. **Past a few
+  thousand pages, take the census once with `export_crawl` (`dataset: "pages"`),
+  index it locally, and answer every path-matching check off that one file** rather
+  than paging the listing per check.
+  Each row carries `depth` AND `clickDepth`, `wordCount` AND `renderableWordCount`,
+  and `fetchReason` where the crawl has one to give — the pairs are two different
+  measurements each, never one with a fallback.
 
 **Every listing is paginated.** `{items, nextCursor}`; pass `nextCursor` back as
 `cursor` with the SAME filters. `nextCursor: null` is the end. A first page is not

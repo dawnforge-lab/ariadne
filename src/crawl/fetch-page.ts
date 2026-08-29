@@ -89,17 +89,24 @@ const HTML_MIME_TYPES = new Set(["text/html", "application/xhtml+xml"]);
  * not retried, not throttling — which may be right, but only if someone said
  * so. Audit all three when you add one; the sets carry a note naming the
  * member most likely to be misfiled.
+ *
+ * A LIST RATHER THAN A BARE UNION, and the type is derived from it: the agent
+ * surface validates a `fetchClass` filter against these values
+ * (`ApiService.listPages`), so the vocabulary has to exist at runtime. Deriving
+ * the type from the list rather than maintaining a second copy beside it is
+ * what keeps the two from drifting — a class added here is filterable the same
+ * day, and one that is not in this list is not a class at all.
  */
-export type FetchClass =
-  | "ok"
-  | "redirect"
-  | "client_error"
-  | "server_error"
-  | "blocked"
-  | "timeout"
-  | "network_error"
-  | "non_html"
-  | "too_large"
+export const FETCH_CLASSES = [
+  "ok",
+  "redirect",
+  "client_error",
+  "server_error",
+  "blocked",
+  "timeout",
+  "network_error",
+  "non_html",
+  "too_large",
   /**
    * The response carried a `content-encoding` we do not implement, so its
    * bytes are unreadable to us. Distinct from `network_error` because it is
@@ -108,8 +115,11 @@ export type FetchClass =
    * `accept-encoding` and answer `br` regardless; three fetches of that is
    * three times the rudeness for the same non-answer (rule 9).
    */
-  | "unsupported_encoding"
-  | "disallowed";
+  "unsupported_encoding",
+  "disallowed",
+] as const;
+
+export type FetchClass = (typeof FETCH_CLASSES)[number];
 
 export interface FetchResult {
   url: string;

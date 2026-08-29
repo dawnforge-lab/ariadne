@@ -62,6 +62,7 @@ import {
   frontierCounts,
   leaseBatch,
   releaseLeases,
+  type DiscoveredVia,
   type EnqueueItem,
   type FrontierCounts,
   type LeasedUrl,
@@ -715,7 +716,10 @@ async function runToCompletion(
   const enqueue = async (
     urls: readonly string[],
     depth: number,
-    discoveredVia: string,
+    // The frontier's closed vocabulary rather than a string: the agent surface
+    // filters `pages` by this value against `DISCOVERED_VIA`, so a fifth kind
+    // of discovery has to be declared there before it can be enqueued here.
+    discoveredVia: DiscoveredVia,
   ): Promise<void> => {
     if (frontierRows >= config.maxPages) return;
 

@@ -131,6 +131,23 @@ const DISTRIBUTION_AGGREGATES = sql`
   round(avg(v), 2)::float8 as mean`;
 
 /**
+ * The same eight numbers, plus the count of cohort pages whose measurement is
+ * NULL — the ninth column only a measure that can be absent has.
+ *
+ * The eight above already read a nullable `v` correctly: `count(*)` is the whole
+ * cohort, and every aggregate beside it (`min`, `avg`, `percentile_cont`)
+ * ignores nulls, so the statistics describe the pages that HAVE a value while
+ * the count describes the cohort. That is the right split and it is also
+ * invisible — a reader cannot tell `count: 443` with three unmeasured pages from
+ * `count: 443` with none. This column is what makes the difference legible, and
+ * for click depth it is not a footnote but the finding: a page no internal link
+ * reaches is the worst case in the table, worse than the deepest page in it, and
+ * CHECK-31 has demanded that bucket in block capitals since before any rule
+ * could compute it.
+ */
+const NULL_COUNT_AGGREGATE = sql`count(*) filter (where v is null)::int as null_count`;
+
+/**
  * The three row shapes below are type ALIASES rather than interfaces, and that
  * is a constraint of `db.execute<T>`, not a style choice: its `T` must extend
  * `Record<string, unknown>`, which an object type satisfies through its
@@ -151,6 +168,13 @@ type DistributionRow = {
   p95: number | null;
   max: number | null;
   mean: number | null;
+  /**
+   * Present only when the caller asked for it (`withNullCount`), because only a
+   * measure that can be absent has one. Declared optional rather than nullable:
+   * a null here would be a null COUNT, which is a different claim from "this
+   * distribution has no null bucket".
+   */
+  null_count?: number;
 };
 
 /**
@@ -169,22 +193,27 @@ async function distribution(
   crawlId: string,
   self: MetricIdentity,
   cohort: SQL,
+  withNullCount = false,
 ): Promise<Metric[]> {
   // Property 5: an unknown crawl would otherwise be a `count: 0` site row.
   await assertCrawl(db, crawlId, self.id);
 
+  const aggregates = withNullCount
+    ? sql`${DISTRIBUTION_AGGREGATES}, ${NULL_COUNT_AGGREGATE}`
+    : DISTRIBUTION_AGGREGATES;
+
   const rows = await db.execute<DistributionRow>(sql`
     with cohort as (${cohort})
-    select 'site' as scope, '' as scope_value, ${DISTRIBUTION_AGGREGATES} from cohort
+    select 'site' as scope, '' as scope_value, ${aggregates} from cohort
     union all
     select 'page_type' as scope, page_type as scope_value,
-           ${DISTRIBUTION_AGGREGATES}
+           ${aggregates}
     from cohort
     group by page_type
     order by scope, scope_value`);
 
   return rows.rows.map((row) => {
-    const value = {
+    const value: Record<string, number | null> = {
       count: num(row.count, "count", self.id),
       min: nullableNum(row.min, "min", self.id),
       p25: nullableNum(row.p25, "p25", self.id),
@@ -194,6 +223,10 @@ async function distribution(
       max: nullableNum(row.max, "max", self.id),
       mean: nullableNum(row.mean, "mean", self.id),
     };
+    // `num`, not `nullableNum`: the column is a count, so it is 0 over a cohort
+    // with nothing missing and never null. A null arriving here would mean the
+    // filtered aggregate had been edited into something else.
+    if (withNullCount) value["nullCount"] = num(row.null_count, "null_count", self.id);
     if (row.scope === "site") return metricRow(self, { scope: "site", value });
     return metricRow(self, { scope: "page_type", scopeValue: row.scope_value, value });
   });
@@ -351,7 +384,7 @@ const LINKS = "links";
 const TECHNICAL = "technical";
 
 /**
- * The four link-graph metrics.
+ * The five link-graph metrics.
  *
  * Each is assembled by `metricRule`, which writes the id once and hands it to
  * the body as `self`: the id the registry keys, the id `copyFor` looks up and
@@ -372,11 +405,32 @@ export const linkMetrics: MetricRule[] = [
     sourcesByType(db, crawlId, self),
   ),
 
+  // DISCOVERY depth: how the crawler first arrived at each page, which is a
+  // fact about the crawl and NOT about the site's structure. Every sitemap entry
+  // is enqueued as a seed at depth 0 (src/crawl/loop.ts), so on a site whose
+  // sitemap covers the estate this distribution collapses to zero and says
+  // nothing about how far a visitor is from anything — the Phase 6 gate crawl
+  // put 437 of 443 indexable pages at "depth 0" beside a median inbound link
+  // count of zero.
+  //
+  // IT KEEPS ITS DATA AND LOSES ITS CLAIM. The number is real evidence about
+  // crawl behaviour — which pages needed the sitemap to be found at all is
+  // exactly what `discoveredVia` and this metric together say — so the table
+  // stays and its copy now says discovery depth in its own words. CHECK-31 asks
+  // how many CLICKS from the home page a page is, and that question moved to
+  // the metric below it, which computes it.
+  //
   // Depth is a property of the page row rather than of the link table, so its
   // cohort is a plain select — but it is the SAME cohort, which is what lets a
   // reader put the depth table beside the inlink table and read them as two
   // views of one set of pages.
-  metricRule("structure.depth-distribution", ["CHECK-31"], TECHNICAL, async (db, crawlId, self) =>
+  // IT CLAIMS CHECK-32 rather than nothing, and the reason is not bookkeeping:
+  // a rule must claim a check (`defineRule`), and the check this table is
+  // evidence for is the ORPHAN one. A crawl whose depth distribution collapses
+  // to zero is a crawl that found its pages from the sitemap rather than from
+  // links, which is the site-wide shadow of the per-page fact `links.orphan`
+  // reports. The verdict stays with that rule; this is the shape beside it.
+  metricRule("structure.depth-distribution", ["CHECK-32"], TECHNICAL, async (db, crawlId, self) =>
     distribution(
       db,
       crawlId,
@@ -385,5 +439,31 @@ export const linkMetrics: MetricRule[] = [
           from pages p
           where ${cohortFilter(crawlId)}`,
     ),
+  ),
+
+  // CLICK depth, and the metric CHECK-31 has always meant: the shortest chain of
+  // internal links from the home page, computed by `deriveClickDepth` in the
+  // derivation phase and read here off `pages.click_depth`.
+  //
+  // The cohort is the same as every metric's, so this table sits beside the
+  // inlink table over one set of pages — and the shape is the same eight numbers
+  // plus the ninth this measure needs. `nullCount` is the pages the link graph
+  // does not reach: a sitemap-only page, which is the worst bucket in the
+  // distribution rather than a missing value, and which the DISCOVERY metric
+  // above structurally cannot show (it records such a page at 0).
+  metricRule(
+    "structure.click-depth-distribution",
+    ["CHECK-31"],
+    TECHNICAL,
+    async (db, crawlId, self) =>
+      distribution(
+        db,
+        crawlId,
+        self,
+        sql`select ${COHORT_PAGE_TYPE} as page_type, p.click_depth as v
+            from pages p
+            where ${cohortFilter(crawlId)}`,
+        true,
+      ),
   ),
 ];

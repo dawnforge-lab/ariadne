@@ -86,7 +86,15 @@ export const NEAR_DUPLICATE_HAMMING = 3;
  */
 export const NEAR_DUPLICATE_PAIR_CAP = 500;
 
-/** URLs quoted on an exact-duplicate finding. The count beside them is exact. */
+/**
+ * URLs quoted on a duplicate-GROUP finding. The count beside them is exact.
+ *
+ * Shared with the field-level duplicate rules (src/rules/query/field-duplicates.ts),
+ * which report the same shape over titles, meta descriptions and H1 text: a
+ * group finding quotes the same number of URLs whichever field produced it, so
+ * a reader meets one list length rather than two, and the number moves in one
+ * place.
+ */
 export const DUPLICATE_SAMPLE_URLS = 20;
 
 /** The three content rules' idea of a page worth judging, in SQL. */
@@ -132,6 +140,27 @@ function templateSimhash(probe: NotFoundProbeReading): bigint | null {
  *     text AND the page is under `SOFT_404_WORDS`. Neither half is enough on
  *     its own: an article about 404s carries the words, and a short page is
  *     `content.thin`'s finding, not this one.
+ *
+ *     THE LENGTH IS `renderable_word_count` (Phase 7), the words the page's
+ *     own markup does not hide — the same column `content.thin`'s floor reads,
+ *     and for a sharper version of the same reason. A soft 404 is a short page
+ *     rendered into the site's full shell, so its raw `word_count` carries
+ *     every word of that shell's mega-menu, currency picker and closed
+ *     accordions: on the site that provoked the change, ~740 of them, which is
+ *     more than twice this ceiling on its own. Reading the inflated column
+ *     makes the ceiling far too permissive and the failures are FALSE
+ *     NEGATIVES — a real soft 404 that never fires — which is the phase's own
+ *     defect direction.
+ *
+ *     NO COALESCE, deliberately. A pre-Phase-7 row has a `word_count` and no
+ *     renderable one, and `coalesce(renderable, word_count)` would reintroduce
+ *     exactly the silent wrong-column fallback the thin-content rule one file
+ *     away refuses by name. `null < 300` is NULL and SQL drops the row, so
+ *     such a page is not judged on this path — and it is not judged in
+ *     silence either: `content.thin-skipped` announces the same crawl's same
+ *     pages, once per page, with copy that says re-crawl. The `is not null`
+ *     guard stays for the JavaScript arm below, which re-derives the signal
+ *     list and must agree with the WHERE clause exactly.
  *  2. *template-match* — the page sits within `TEMPLATE_HAMMING` bits of the
  *     body the site served for a URL that cannot exist. This is the path that
  *     catches the soft 404 with no telltale wording at all, and it exists only
@@ -165,18 +194,19 @@ async function soft404Findings(db: Db, crawlId: string): Promise<Finding[]> {
     id: string;
     url: string;
     word_count: number | null;
+    renderable_word_count: number | null;
     has_soft404_phrases: boolean;
     hamming: number | null;
     total_matches: number;
   }>(sql`
-    select p.id, p.url, p.word_count, p.has_soft404_phrases,
+    select p.id, p.url, p.word_count, p.renderable_word_count, p.has_soft404_phrases,
            ${distance === null ? sql`null::int` : distance} as hamming,
            count(*) over ()::int as total_matches
     from pages p
     where p.crawl_id = ${crawlId} and ${AUDITABLE("p")}
       and (
-        (p.has_soft404_phrases and p.word_count is not null
-          and p.word_count < ${SOFT_404_WORDS})
+        (p.has_soft404_phrases and p.renderable_word_count is not null
+          and p.renderable_word_count < ${SOFT_404_WORDS})
         or ${
           distance === null
             ? sql`false`
@@ -188,7 +218,11 @@ async function soft404Findings(db: Db, crawlId: string): Promise<Finding[]> {
 
   const findings = result.rows.map((row) => {
     const signals: string[] = [];
-    if (row.has_soft404_phrases && row.word_count !== null && row.word_count < SOFT_404_WORDS) {
+    if (
+      row.has_soft404_phrases &&
+      row.renderable_word_count !== null &&
+      row.renderable_word_count < SOFT_404_WORDS
+    ) {
       signals.push("phrases");
     }
     if (row.hamming !== null && row.hamming <= TEMPLATE_HAMMING) signals.push("template-match");
@@ -206,7 +240,12 @@ async function soft404Findings(db: Db, crawlId: string): Promise<Finding[]> {
       pageUrl: row.url,
       evidence: {
         signals,
+        // Both counts, like `content.thin`'s finding: the ceiling was applied
+        // to the renderable one, and a reader comparing "42 words a visitor
+        // reaches, 780 in the HTML" can see at a glance that the page is a
+        // shell around an error message.
         wordCount: row.word_count,
+        renderableWordCount: row.renderable_word_count,
         ...(row.hamming === null ? {} : { hammingToTemplate: row.hamming }),
       },
       dedupeKey: row.url,
@@ -233,6 +272,18 @@ async function soft404Findings(db: Db, crawlId: string): Promise<Finding[]> {
  * quoted sample: duplicates spanning two templates (a product page and its
  * print version) are a different problem from duplicates inside one, and that
  * distinction must not depend on which twenty URLs happened to be quoted.
+ *
+ * **THE CAP COMES BEFORE THE LATERAL.** A `cross join lateral` under an
+ * `order by`/`limit` at the same query level is evaluated for every row the FROM
+ * produces — the limit cannot apply until the rows exist — so the twenty-URL
+ * lookup ran once per GROUP rather than once per reported group, and a
+ * templated site with thousands of duplicate groups paid minutes for it. The
+ * `capped` CTE takes the exact `count(*) over ()` total (a window is evaluated
+ * over the whole CTE before its own `order by`/`limit`, so it counts every
+ * group) and cuts to `URL_FINDING_CAP` first; the lateral then runs against at
+ * most two hundred rows. Semantics are untouched — same group order, same
+ * carrier, same totals — and the same restructure is in
+ * src/rules/query/field-duplicates.ts, which took this shape from here.
  */
 async function exactDuplicateFindings(db: Db, crawlId: string): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, EXACT.id);
@@ -253,24 +304,29 @@ async function exactDuplicateFindings(db: Db, crawlId: string): Promise<Finding[
       where p.crawl_id = ${crawlId} and ${AUDITABLE("p")} and p.content_hash is not null
       group by p.content_hash
       having count(*) > 1
+    ),
+    capped as (
+      select d.content_hash, d.page_count, d.page_types,
+             count(*) over ()::int as total_matches
+      from dupes d
+      order by d.content_hash
+      limit ${URL_FINDING_CAP}
     )
-    select d.content_hash, d.page_count, d.page_types,
-           count(*) over ()::int as total_matches,
+    select c.content_hash, c.page_count, c.page_types, c.total_matches,
            s.urls, s.first_id
-    from dupes d
+    from capped c
     cross join lateral (
       select array_agg(sample.url) as urls, (array_agg(sample.id))[1] as first_id
       from (
         select p2.id, p2.url
         from pages p2
         where p2.crawl_id = ${crawlId} and ${AUDITABLE("p2")}
-          and p2.content_hash = d.content_hash
+          and p2.content_hash = c.content_hash
         order by p2.url
         limit ${DUPLICATE_SAMPLE_URLS}
       ) sample
     ) s
-    order by d.content_hash
-    limit ${URL_FINDING_CAP}`);
+    order by c.content_hash`);
 
   const findings = result.rows.map((row) =>
     queryFinding(EXACT, {
