@@ -87,9 +87,46 @@ export interface PageRule extends RuleMeta {
   kind: "page";
   run: (page: PageRecord) => Finding[];
 }
+/**
+ * How much one rules run may LIST — the run-level budget every query rule is
+ * handed, rather than a constant each of them imports.
+ *
+ * It is a PARAMETER and not module state, and that is load-bearing rather than
+ * stylistic. `ApiService` serialises rules runs per crawl (`this.judging`), but
+ * nothing serialises them ACROSS crawls: two `runRulesForCrawl` calls for two
+ * different crawls interleave freely in one process, and one of them may be a
+ * billed uncapped audit while the other is a 200-capped first look. A cap held
+ * in a module variable — or in an `AsyncLocalStorage` a rule could forget to
+ * enter — would let the second run's budget decide what the first one reports.
+ * Passed down the call stack, each run's caps are unreachable from the other's.
+ *
+ * `null` on either field means UNCAPPED: list everything, and write no
+ * truncation note, because nothing was truncated. The defaults and how a crawl
+ * chooses live in src/rules/query/crawl-evidence.ts (`resolveRuleCaps`).
+ *
+ * WHAT IT DOES NOT GOVERN: the size of one finding's evidence. A duplicate
+ * GROUP finding quotes `DUPLICATE_SAMPLE_URLS` (20) URLs and the group's exact
+ * count, at every cap including none — the sample is a shape decision about
+ * what a single row of evidence should be, and a 5,000-element array in one
+ * `details` jsonb is a pathological row rather than a fuller picture. The cap
+ * governs HOW MANY FINDINGS a rule reports; the count inside each one is exact
+ * either way.
+ */
+export interface RuleCaps {
+  /** Findings a URL-scoped listing rule may report. */
+  listing: number | null;
+  /** Pairs `content.near-duplicate` may report — a different unit, its own budget. */
+  nearDuplicatePairs: number | null;
+}
+
 export interface QueryRule extends RuleMeta {
   kind: "query";
-  run: (db: Db, crawlId: string) => Promise<Finding[]>;
+  /**
+   * `caps` is optional so a direct caller — a rule test, a script — may invoke
+   * a rule without restating the engine's defaults; `capsOr` turns the absence
+   * into `DEFAULT_RULE_CAPS`. `runRules` always passes a resolved value.
+   */
+  run: (db: Db, crawlId: string, caps?: RuleCaps) => Promise<Finding[]>;
 }
 export interface MetricRule extends RuleMeta {
   kind: "metric";

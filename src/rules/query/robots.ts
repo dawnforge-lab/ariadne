@@ -12,12 +12,13 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import type { RuleCaps } from "../registry/types.js";
 import {
   assertNormalisedSitemap,
+  capsOr,
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
-  URL_FINDING_CAP,
   userAgentOf,
 } from "./crawl-evidence.js";
 
@@ -111,7 +112,7 @@ async function eachSitemapUrl(
  * target's rules govern are on that other origin and read as "not ours" —
  * silence, never a false accusation.
  */
-async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function blockedFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   const evidence = await readCrawlEvidence(db, crawlId, BLOCKS.id);
   // The fifth reader of `url_normalised`, gated for the same reason as the four
   // that join it — but failing the other way round. An empty spelling is not a
@@ -128,8 +129,8 @@ async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   const robotsUrl = new URL("/robots.txt", evidence.siteUrl).href;
   const rulesOrigin = new URL(robotsUrl).origin;
   const parsed = robotsParser(robotsUrl, raw);
-  // Split once, not once per URL: `raw` is up to 500KB and the cap allows 200
-  // findings, so the naive spelling would rebuild the array 200 times.
+  // Split once, not once per URL: `raw` is up to 500KB and a run may be
+  // uncapped, so the naive spelling would rebuild the array once per finding.
   const lines = raw.split(/\r?\n/);
 
   // The scan continues past the cap rather than stopping at it: `total` is the
@@ -148,7 +149,7 @@ async function blockedFindings(db: Db, crawlId: string): Promise<Finding[]> {
     const judged = onRulesOrigin(urlNormalised, rulesOrigin);
     if (parsed.isAllowed(judged, userAgent) !== false) return;
     total++;
-    if (findings.length >= URL_FINDING_CAP) return;
+    if (caps.listing !== null && findings.length >= caps.listing) return;
 
     // The line that decided, quoted from the file the site serves, so the fix
     // is a place in a file rather than a claim to be taken on trust. -1 means
@@ -226,7 +227,7 @@ export const robotsRules: QueryRule[] = [
     severity: BLOCKS.severity,
     ...copyFor(BLOCKS.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => blockedFindings(db, crawlId),
+    run: (db, crawlId, caps) => blockedFindings(db, crawlId, capsOr(caps)),
   }),
 
   // A check we could not run is visible, never silent (hard rule 7). One

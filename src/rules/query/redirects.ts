@@ -1,7 +1,7 @@
 /**
  * The redirect-graph rules: chains and loops, walked in SQL.
  *
- * Both cap what they LIST at `URL_FINDING_CAP` while counting what they find
+ * Both cap what they LIST at the run's `caps.listing` while counting what they find
  * in full: the walk visits every head and every headless cycle whatever the cap
  * says, so each case's dedupe key still goes into a set and the number behind
  * the cap is exact (`noteTruncation`). A migration that chained a whole legacy
@@ -26,7 +26,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { capsOr, noteTruncation } from "./crawl-evidence.js";
 
 const CATEGORY = "redirects";
 
@@ -101,7 +102,7 @@ interface WalkRow extends Record<string, unknown> {
  * result set is one row per seed rather than one per hop.
  *
  * Ordered by head, and that is load-bearing rather than tidiness. Both callers
- * stop listing at `URL_FINDING_CAP`, so the row order decides WHICH cases are
+ * stop listing at `caps.listing`, so the row order decides WHICH cases are
  * reported; an unordered CTE projection is whatever the plan happens to emit,
  * so a re-run of the same crawl could report a different two hundred. A defined
  * order makes the capped listing the same listing every time.
@@ -291,7 +292,7 @@ function unresolvedHeadless(rows: WalkRow[]): WalkRow[] {
  * ships (`/x` -> `/x/`) is not a chain — the fires-when is "a redirect whose
  * target is itself a redirect".
  */
-function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
+function chainFindings(self: RuleIdentity, rows: WalkRow[], caps: RuleCaps): Finding[] {
   const byHead = new Map<string, Finding>();
   /** Every head that yielded a chain, cap or no cap — the exact count. */
   const heads = new Set<string>();
@@ -318,7 +319,7 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
     if (hops < CHAIN_HOPS) continue;
     if (heads.has(row.head)) continue;
     heads.add(row.head);
-    if (byHead.size >= URL_FINDING_CAP) continue;
+    if (caps.listing !== null && byHead.size >= caps.listing) continue;
     byHead.set(
       row.head,
       queryFinding(self, {
@@ -351,7 +352,7 @@ function chainFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
  * walk into it, so findings are keyed by the cycle's members — sorted, hashed —
  * and the first one wins.
  */
-function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
+function loopFindings(self: RuleIdentity, rows: WalkRow[], caps: RuleCaps): Finding[] {
   const byCycle = new Map<string, Finding>();
   /** Every distinct cycle seen, cap or no cap — the exact count. */
   const cycles = new Set<string>();
@@ -362,7 +363,7 @@ function loopFindings(self: RuleIdentity, rows: WalkRow[]): Finding[] {
     const key = createHash("sha1").update([...new Set(cycle)].sort().join("\n")).digest("hex");
     if (cycles.has(key)) continue;
     cycles.add(key);
-    if (byCycle.size >= URL_FINDING_CAP) continue;
+    if (caps.listing !== null && byCycle.size >= caps.listing) continue;
     byCycle.set(
       key,
       queryFinding(self, {
@@ -405,12 +406,13 @@ export const redirectRules: QueryRule[] = [
     severity: CHAIN.severity,
     ...copyFor(CHAIN.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId) => {
+    run: async (db, crawlId, caps) => {
       const walk = await redirectWalk(db, crawlId);
-      return chainFindings(CHAIN, [
-        ...walk.fromHeads,
-        ...unresolvedHeadless(walk.headless),
-      ]);
+      return chainFindings(
+        CHAIN,
+        [...walk.fromHeads, ...unresolvedHeadless(walk.headless)],
+        capsOr(caps),
+      );
     },
   }),
 
@@ -422,9 +424,9 @@ export const redirectRules: QueryRule[] = [
     severity: LOOP.severity,
     ...copyFor(LOOP.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId) => {
+    run: async (db, crawlId, caps) => {
       const walk = await redirectWalk(db, crawlId);
-      return loopFindings(LOOP, [...walk.fromHeads, ...walk.headless]);
+      return loopFindings(LOOP, [...walk.fromHeads, ...walk.headless], capsOr(caps));
     },
   }),
 ];

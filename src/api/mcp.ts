@@ -831,6 +831,19 @@ function crawlStartShape() {
       .number()
       .describe("How many pages of each template cohort the render pass samples.")
       .optional(),
+    findingCap: z
+      .number()
+      .nullable()
+      .describe(
+        "How many findings each listing rule may report when this crawl is judged. " +
+          "Defaults to 200 (and 500 near-duplicate pairs) — a bounded first look. Pass " +
+          "null for a BILLED AUDIT: every orphan, every duplicate group, every blocked " +
+          "sitemap entry, listed in full, with no 'and N more' note because nothing was " +
+          "truncated. It costs wall time on a large site and it is the whole picture " +
+          "rather than a snapshot. It is read when the RULES run, not while crawling, so " +
+          "it must be set here — crawl_rules has no cap argument of its own.",
+      )
+      .optional(),
   };
 }
 

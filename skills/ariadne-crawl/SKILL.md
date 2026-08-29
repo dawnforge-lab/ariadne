@@ -118,6 +118,16 @@ Fields worth setting deliberately:
 - **`renderBudgetPct` / `renderMaxPages` / `renderSamplePerType`** — the render
   pass's sample, stored on the crawl row now and read by the render pass later. Set
   them here if the default sample would not cover the page types you care about.
+- **`findingCap`** — how many findings each listing rule may report when this crawl
+  is judged. Defaults to 200 (and 500 near-duplicate pairs): a bounded first look.
+  **Set `findingCap: null` for a billed audit** — the client is paying for the whole
+  picture, and "243 orphans, here are 200" is not a list they can finish. Like the
+  render knobs it is stored on the crawl row and spent later, which is why it must
+  be set HERE: `crawl_rules` has no cap argument, so a crawl started at the default
+  is re-judged at the default forever. Measured cost on a 20,000-page crawl: about a
+  minute of extra rules time, ~116MB RSS. See the audit skill's "Reading the
+  answers" for the one shape where uncapped is genuinely expensive
+  (`content.near-duplicate` on a site with thousands of byte-similar pages).
 
 ### The sitemap has two paths, and only two
 

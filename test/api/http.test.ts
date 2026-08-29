@@ -665,6 +665,31 @@ describe("domain allowlist", () => {
     expect(detail["sitemapUrls"]).toEqual([`${site}/sitemap.xml`]);
   });
 
+  // `findingCap` is the one wire field where NULL IS A VALUE: it says "list
+  // everything", which is a different instruction from omitting the field ("the
+  // engine's defaults"). Both have to cross the wire, and everything else has to
+  // be refused at accept time rather than by a rules run hours later.
+  it("400s a findingCap that is neither a positive integer nor null", async () => {
+    for (const bad of [0, -1, 1.5, "none"]) {
+      const res = await call("POST", "/crawls", {
+        body: { siteUrl: `${site}/`, findingCap: bad },
+      });
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(String(res.body["error"])).toContain("findingCap");
+    }
+  });
+
+  it("accepts findingCap: null and stores it as the crawl's uncapped judgement", async () => {
+    const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1, findingCap: null });
+    expect(res.status).toBe(202);
+    const crawlId = String(res.body["crawlId"]);
+    await settle(crawlId);
+    // Read off the row rather than off a response field: the rules run is what
+    // consumes this, and the row is where it looks (`storedFindingCap`).
+    const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    expect((rows[0]!.config as Record<string, unknown>)["findingCap"]).toBeNull();
+  });
+
   it("refuses every crawl when the allowlist is empty, but still answers queries", async () => {
     const started = await fetch(`${closedBase}/crawls`, {
       method: "POST",

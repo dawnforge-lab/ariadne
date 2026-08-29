@@ -14,7 +14,7 @@
  *
  * Nothing here fetches (hard rule 2) and nothing loads a table into memory
  * (hard rule 3): the site-scoped pair are two `exists` and a `count`, and the
- * two per-page rules select from `structured_data` under the `URL_FINDING_CAP`.
+ * two per-page rules select from `structured_data` under the run's finding cap.
  *
  * **The two site-scoped rules deliberately overlap.** A site with no structured
  * data at all fires both, because they are two different pieces of advice: one
@@ -38,7 +38,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import { assertCrawl, noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
 const CATEGORY = "structured-data" as const;
 
@@ -165,7 +166,7 @@ async function siteShape(
  * name. The number the finding carries is the same one the floor is drawn on,
  * so a reader is never told a threshold was applied to a figure they cannot see.
  */
-async function noneOnSiteFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function noneOnSiteFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, NONE.id);
   const { hasBlocks, indexablePages } = await siteShape(db, crawlId, null);
   if (hasBlocks || indexablePages < NONE_PAGE_FLOOR) return [];
@@ -188,7 +189,7 @@ async function noneOnSiteFindings(db: Db, crawlId: string): Promise<Finding[]> {
  * and what share of pages carry one, is the derivation's presence blob and
  * Phase 4's coverage metric.
  */
-async function breadcrumbFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function breadcrumbFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, BREADCRUMB_ABSENT.id);
   const { hasBlocks, indexablePages } = await siteShape(
     db,
@@ -290,7 +291,7 @@ function missingFields(
  * a named branch of `missingFields`, which throws telling the reader to re-run
  * the rules.
  */
-async function productFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function productFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, PRODUCT_INCOMPLETE.id);
   const profile = SCHEMA_PROFILES[PRODUCT_TYPE]!;
 
@@ -328,7 +329,7 @@ async function productFindings(db: Db, crawlId: string): Promise<Finding[]> {
        or jsonb_path_exists(pr.presence, '$.recommended.* ? (@.type() != "boolean")')
        or jsonb_path_exists(pr.presence, '$.required.* ? (@ == false)')
     order by p.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings: Finding[] = [];
   // Exact: every row the query listed becomes a finding or throws, so the
@@ -368,7 +369,7 @@ async function productFindings(db: Db, crawlId: string): Promise<Finding[]> {
  * the check rejects, so the truncation note never counts a row nobody listed.
  * Only the two field VALUES are read into memory, never the whole block.
  */
-async function selfServingFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function selfServingFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, SELF_SERVING.id);
   const types = sql.param([...SELF_SERVING_TYPES]);
 
@@ -394,7 +395,7 @@ async function selfServingFindings(db: Db, crawlId: string): Promise<Finding[]> 
       )
     group by sd.page_id, p.url, sd.schema_type
     order by p.url, sd.schema_type
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings: Finding[] = [];
   let total = result.rows[0]?.total_matches ?? 0;
@@ -435,7 +436,7 @@ export const structuredDataRules: QueryRule[] = [
     severity: NONE.severity,
     ...copyFor(NONE.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => noneOnSiteFindings(db, crawlId),
+    run: (db, crawlId, caps) => noneOnSiteFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -446,7 +447,7 @@ export const structuredDataRules: QueryRule[] = [
     severity: PRODUCT_INCOMPLETE.severity,
     ...copyFor(PRODUCT_INCOMPLETE.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => productFindings(db, crawlId),
+    run: (db, crawlId, caps) => productFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -457,7 +458,7 @@ export const structuredDataRules: QueryRule[] = [
     severity: BREADCRUMB_ABSENT.severity,
     ...copyFor(BREADCRUMB_ABSENT.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => breadcrumbFindings(db, crawlId),
+    run: (db, crawlId, caps) => breadcrumbFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -468,6 +469,6 @@ export const structuredDataRules: QueryRule[] = [
     severity: SELF_SERVING.severity,
     ...copyFor(SELF_SERVING.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => selfServingFindings(db, crawlId),
+    run: (db, crawlId, caps) => selfServingFindings(db, crawlId, capsOr(caps)),
   }),
 ];

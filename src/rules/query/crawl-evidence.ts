@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 
 import { ROBOTS_OUTCOMES } from "../../crawl/discovery.js";
 import type { DiscoveryTruncation } from "../../crawl/discovery.js";
@@ -12,9 +12,11 @@ import type {
 import type { Db } from "../../db/client.js";
 import { crawls, sitemapUrls } from "../../db/schema.js";
 import type { Finding } from "../registry/registry.js";
+import type { RuleCaps } from "../registry/types.js";
 
 /**
- * What a URL-scoped rule may report before it starts summarising instead.
+ * What a URL-scoped rule may report before it starts summarising instead, WHEN
+ * NOBODY SAYS OTHERWISE.
  *
  * Two hundred findings is already more than any action plan works through in
  * one pass, and the alternative — one row per URL on a sitemap of a hundred
@@ -25,8 +27,122 @@ import type { Finding } from "../registry/registry.js";
  * accumulator that grows with the site — the number reported is a lower bound
  * and says so (`noteAtLeastTruncation`). What is never on offer is a listing
  * cut short in silence.
+ *
+ * IT IS A DEFAULT, NOT A LAW, since P8-T4. A first look at an unknown site
+ * wants a bounded answer; a BILLED AUDIT wants the whole picture, because "243
+ * orphans, here are 200 of them" is a deliverable the client cannot action the
+ * tail of. `findingCap` on the crawl config chooses (see `resolveRuleCaps`),
+ * and an absent one lands exactly here — the behaviour every crawl had before
+ * the knob existed.
  */
 export const URL_FINDING_CAP = 200;
+
+/**
+ * Pairs `content.near-duplicate` reports before it stops listing, when nobody
+ * says otherwise.
+ *
+ * Pairs, not pages, and that is the reason for a default of its own: a site
+ * with a thousand templated near-identical pages has half a million pairs, and
+ * a findings table is not the place to enumerate them. See
+ * `nearDuplicateFindings` (src/rules/query/content.ts, which re-exports this
+ * beside the threshold it belongs with) for what the truncation note can and
+ * cannot say about the rest.
+ *
+ * Higher than `URL_FINDING_CAP` because it counts a different thing: five
+ * hundred pairs is roughly the same amount of *page* to look at as two hundred
+ * URL findings. That is why the two defaults differ, and why an explicit
+ * `findingCap` collapses them onto one number rather than scaling one from the
+ * other — see `resolveRuleCaps`.
+ */
+export const NEAR_DUPLICATE_PAIR_CAP = 500;
+
+/**
+ * The caps one rules run is judged under, resolved from `findingCap`.
+ *
+ * Three inputs, three outcomes, and the middle one is the whole feature:
+ *
+ *  - `undefined` — nobody chose. The engine's two calibrated defaults, which is
+ *    byte-for-byte what every crawl did before the knob existed.
+ *  - `null` — uncapped. Every listing rule lists everything it finds and NO
+ *    truncation note is written anywhere, because nothing was truncated. This
+ *    is what a billed audit asks for.
+ *  - a positive integer — that many, of every listing, pairs included.
+ *
+ * THE DISCONTINUITY IS DELIBERATE AND IS WORTH KNOWING: `findingCap: 200` is
+ * NOT the same as omitting the field. Omitting it means "the engine's two
+ * defaults" (200 URL findings, 500 pairs); naming 200 means "two hundred of
+ * anything, including pairs". A caller who states a number is stating a budget
+ * for what they will read, and a budget that silently became two and a half
+ * times larger for one rule would not be one.
+ */
+export function resolveRuleCaps(findingCap: number | null | undefined): RuleCaps {
+  if (findingCap === undefined) {
+    return { listing: URL_FINDING_CAP, nearDuplicatePairs: NEAR_DUPLICATE_PAIR_CAP };
+  }
+  if (findingCap === null) return { listing: null, nearDuplicatePairs: null };
+  return { listing: findingCap, nearDuplicatePairs: findingCap };
+}
+
+/**
+ * The caps the engine's defaults produce — what a rule invoked WITHOUT caps
+ * runs under.
+ *
+ * A query rule's `caps` parameter is optional because `runRules` is not its
+ * only caller: the rule tests invoke `rule.run(db, crawlId)` directly, and so
+ * may a script. Absent caps mean the same thing there as an absent `findingCap`
+ * does on a crawl row — "nobody chose, use the defaults" — which is a
+ * documented input rather than a failure being papered over (hard rule 7 is
+ * about hiding errors, and there is no error here to hide).
+ */
+export const DEFAULT_RULE_CAPS: RuleCaps = resolveRuleCaps(undefined);
+
+/** `caps ?? DEFAULT_RULE_CAPS`, named so every rule resolves it the same way. */
+export function capsOr(caps: RuleCaps | undefined): RuleCaps {
+  return caps ?? DEFAULT_RULE_CAPS;
+}
+
+/**
+ * A `LIMIT` clause for a cap that may be absent.
+ *
+ * `limit all` is SQL's own spelling of "no limit" (Postgres accepts it wherever
+ * a limit goes), so an uncapped rule runs the SAME query shape as a capped one
+ * rather than a second query built by string surgery. That matters for the
+ * rules whose limit sits inside a CTE the rest of the statement depends on:
+ * there is one statement to read, and the only thing the cap changes is how
+ * much of the result it keeps.
+ */
+export function limitTo(cap: number | null): SQL {
+  return cap === null ? sql`limit all` : sql`limit ${cap}`;
+}
+
+/**
+ * `findingCap` as a crawl's `config_jsonb` holds it, or `undefined` when the row
+ * predates the field or the crawl was started without one.
+ *
+ * Read as ONE KEY rather than through `parseStoredConfig`, deliberately: this
+ * runs over the row of any crawl a caller asks to judge, including rows written
+ * by the test suite and by earlier phases that carry a partial config, and a
+ * rules run must not start refusing crawls because a field it does not use is
+ * missing. What it will not do is guess: a value that is neither absent, null,
+ * nor a positive integer is a config we cannot read the operator's intent out
+ * of, and silently judging a billed audit at 200 because someone stored
+ * `findingCap: "none"` is exactly the quiet wrong answer hard rule 7 forbids.
+ */
+export function storedFindingCap(config: unknown, crawlId: string): number | null | undefined {
+  if (typeof config !== "object" || config === null || Array.isArray(config)) {
+    throw new Error(`crawl ${crawlId}: stored config is not readable`);
+  }
+  const value = (config as Record<string, unknown>)["findingCap"];
+  if (value === undefined || value === null) return value;
+  if (!Number.isInteger(value) || (value as number) < 1) {
+    throw new Error(
+      `crawl ${crawlId}: stored config.findingCap is ${JSON.stringify(value)}, which is ` +
+        "neither a positive integer nor null (null means uncapped) — the rules cannot " +
+        "tell how much of this crawl's evidence the operator asked for",
+    );
+  }
+  return value as number;
+}
 
 /** The crawl row the robots and sitemap rules read, validated. */
 export interface CrawlEvidence {

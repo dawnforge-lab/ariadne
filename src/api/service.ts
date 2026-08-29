@@ -205,9 +205,10 @@ export interface StartCrawlInput {
   renderBudgetPct?: number;
   renderMaxPages?: number;
   renderSamplePerType?: number;
+  findingCap?: number | null;
 }
 
-type FieldKind = "string" | "number" | "boolean" | "string[]";
+type FieldKind = "string" | "number" | "boolean" | "string[]" | "number|null";
 
 /**
  * The wire's whole vocabulary for starting a crawl.
@@ -237,6 +238,7 @@ export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
   renderBudgetPct: "number",
   renderMaxPages: "number",
   renderSamplePerType: "number",
+  findingCap: "number|null",
 };
 
 /**
@@ -373,6 +375,16 @@ function assertKind(key: string, value: unknown, kind: FieldKind): void {
     case "string[]":
       if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
         bad("an array of strings");
+      }
+      return;
+    case "number|null":
+      // NULL IS A VALUE HERE, not an omission, and it is the whole reason this
+      // kind exists: `findingCap: null` says "list everything", which is a
+      // different instruction from leaving the field out ("use the defaults").
+      // Every other field on the wire treats a null as a caller who meant to
+      // send nothing.
+      if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) {
+        bad("a finite number, or null");
       }
       return;
   }

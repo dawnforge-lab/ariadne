@@ -235,6 +235,52 @@ of three ways:
   the second as a fact nothing had counted. (Where a `pageType` filter is on, `count`
   is that cohort's rows while `total`/`atLeast` stay the whole rule's magnitude — the
   two are not two ends of one fraction.)
+
+- **A BILLED AUDIT ASKS FOR THE WHOLE PICTURE, NOT A SNAPSHOT: pass
+  `findingCap: null` to `crawl_start`.** The caps above are the default — 200
+  findings per listing rule, 500 near-duplicate pairs — and they exist for a first
+  look at an unknown site, where a bounded answer is the point. They are the wrong
+  setting for work a client is paying for: "243 orphans, here are 200" is a list the
+  client cannot work through to the end, and `atLeast: 501` cannot tell them whether
+  the real number is 502 or 40,000.
+
+  `findingCap: null` uncaps every listing rule and the pair scan together. An
+  uncapped run writes **no `truncated` note at all**, and that absence is the claim:
+  the list you have is the whole of it. `findingCap: <n>` sets a number instead —
+  and note that a stated number binds the pairs too, so `findingCap: 200` is not the
+  same as omitting the field (which leaves pairs at 500).
+
+  **It is set at `crawl_start` and nowhere else.** `crawl_rules` has no cap argument:
+  the choice lives on the crawl row so that re-judging the crawl months later
+  produces the same listing. A billed audit started without it has to be re-started,
+  not re-judged.
+
+  **What it costs, measured** (synthetic 20,000-page site, 1,000 duplicate title /
+  meta / h1 groups, 1,000 exact-duplicate content groups, 500 near-duplicate
+  clusters, 15,000 orphans):
+
+  | rule | default cap | uncapped |
+  | --- | --- | --- |
+  | `links.orphan` | 200 in 0.21s | 15,000 in 0.23s |
+  | `title.duplicate` | 200 in 2.5s | 1,000 in 10.6s |
+  | `meta-description.duplicate` | 200 in 3.0s | 1,000 in 13.7s |
+  | `h1.duplicate-text` | 200 in 2.9s | 1,000 in 11.7s |
+  | `content.exact-duplicate` | 200 in 4.5s | 1,000 in 18.4s |
+  | `content.near-duplicate` | 500 in 0.02s | 3,000 in 0.20s |
+
+  About a minute of extra wall time on a 20k crawl, at ~116MB RSS. That is the
+  billing story: the whole picture is minutes, not hours.
+
+  **The one place uncapped is genuinely dangerous, stated rather than discovered.**
+  `content.near-duplicate` is the only rule whose cap bounds a *scan* rather than a
+  listing, and on a site whose pages are near-identical in the thousands the pair
+  count is quadratic. Measured on a deliberately degenerate 5,000-page crawl (a few
+  hundred distinct fingerprints): **3,268,808 pairs, 28s, 2.0GB RSS**; the same
+  shape at 20,000 pages exhausted a 4GB heap. Real sites are nowhere near that — the
+  20k table above is a badly templated one — but if an uncapped run dies or the pair
+  count runs to six figures, the site is telling you something a listing cannot: it
+  has no distinct content, and that is the finding. Re-run with a number
+  (`findingCap: 5000`) and report the magnitude rather than the enumeration.
 - **Evidence shapes belong to their rules.** `issue_urls` returns `{url, evidence}`
   and the evidence's fields are whatever that rule wrote — read what it gives you
   rather than expecting a fixed set. `url` is null on a site-scoped finding (a fact
@@ -339,8 +385,13 @@ An audit that copies an older findings file forward will under-report all four:
   value itself, `count` (how many indexable pages share it — exact) and `pages` (up to
   20 of them). So `issues_list`'s `count` for these rules is the number of duplicate
   GROUPS, and the pages involved are the sum of the groups' own counts — quote both,
-  and never read the group count as a page count. Capped at 200 groups with the usual
-  `truncated`/`total` note. `h1.duplicate-skipped` (info) is the honest silence: a
+  and never read the group count as a page count. Capped at 200 GROUPS by default,
+  with the usual `truncated`/`total` note; `findingCap` moves that number and
+  `findingCap: null` removes it. What it never moves is the twenty URLs inside one
+  finding — `count` is the group's exact size at every setting, so a group of five
+  thousand pages stays one row saying "5,000, here are twenty" rather than becoming a
+  five-thousand-element array. Uncapped means more findings, not fatter ones.
+  `h1.duplicate-skipped` (info) is the honest silence: a
   pre-Phase-7 crawl stored no heading text, so the check is NOT MEASURED on it rather
   than clean, and a re-crawl is what answers it.
 - **Words a visitor can actually see.** `pages_query` returns `renderableWordCount`

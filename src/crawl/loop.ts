@@ -133,6 +133,22 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * exactly the way `legacyHosts` is.
    */
   sitemapUrls?: string[];
+  /**
+   * How many findings each listing rule may report when this crawl is judged.
+   * A positive integer, or `null` for UNCAPPED — every orphan, every duplicate
+   * group, every blocked sitemap entry, with no truncation note because nothing
+   * was truncated. Absent is the engine's defaults (200 URL findings, 500
+   * near-duplicate pairs), which is what every crawl before P8-T4 got.
+   *
+   * IT IS NOT A CRAWL SETTING AND THE CRAWL LOOP NEVER READS IT. It rides on
+   * the crawl config because that is the only durable place a crawl-start
+   * decision can live: the rules run is a separate call (`crawl_rules`, `POST
+   * /crawls/:id/rules`) with no argument of its own, so a billed audit that
+   * asked for the whole picture would silently be re-judged at 200 the moment
+   * anyone re-ran the rules. `runRules` reads this key off the row
+   * (`storedFindingCap`, src/rules/query/crawl-evidence.ts).
+   */
+  findingCap?: number | null;
 }
 
 /**
@@ -522,6 +538,7 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     renderBudgetPct: raw["renderBudgetPct"],
     renderMaxPages: raw["renderMaxPages"],
     renderSamplePerType: raw["renderSamplePerType"],
+    findingCap: raw["findingCap"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -556,6 +573,23 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     if (config[field] !== undefined && typeof config[field] !== "number") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
     }
+  }
+  // `findingCap` is the one field where NULL IS A VALUE rather than an absence,
+  // so it cannot join the loop above: null means "uncapped, list everything",
+  // absent means "the engine's defaults", and collapsing the two would turn a
+  // billed audit's explicit choice into the default the moment it was read back.
+  // Anything else — a string, a zero, a fraction — is a config we cannot read
+  // the operator's intent out of, and it stops here (the same ruling
+  // `storedFindingCap` makes for the rules-run path, which reads the raw jsonb
+  // rather than this).
+  if (
+    config.findingCap !== undefined &&
+    config.findingCap !== null &&
+    (!Number.isInteger(config.findingCap) || (config.findingCap as number) < 1)
+  ) {
+    throw new Error(
+      `crawl ${crawlId}: stored config.findingCap is neither a positive integer nor null`,
+    );
   }
   // The two string lists, on the same terms: a stored value of the wrong shape
   // is a config we cannot read, not a list to quietly treat as empty. A resume
@@ -622,6 +656,22 @@ export function validateCrawlConfig(config: CrawlConfig): void {
         `CrawlConfig.sitemapUrls entry is not an absolute http(s) URL: ${url}`,
       );
     }
+  }
+  // The finding cap, checked here even though the crawl loop never reads it:
+  // it is stored on the row at crawl start and spent hours later by a rules run,
+  // and `findingCap: 0` — a listing rule that may report nothing, which is the
+  // always-passes rule hard rule 1 forbids — must be refused by the request that
+  // set it rather than by a judgement nobody is watching. `null` is uncapped and
+  // is a legitimate value; absent is the engine's defaults.
+  if (
+    config.findingCap !== undefined &&
+    config.findingCap !== null &&
+    (!Number.isInteger(config.findingCap) || config.findingCap < 1)
+  ) {
+    throw new RangeError(
+      `CrawlConfig.findingCap must be an integer ≥ 1, or null for uncapped, got ` +
+        `${String(config.findingCap)}`,
+    );
   }
   // The render budget, checked by the module that will spend it. A nonsense
   // budget stops the crawl at line one rather than after the last page, where

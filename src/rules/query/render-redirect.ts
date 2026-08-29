@@ -36,7 +36,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import { assertCrawl, noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
 const JS_REDIRECT: RuleIdentity = { id: "redirect.js", severity: "warning" };
 
@@ -56,7 +57,7 @@ const JS_REDIRECT: RuleIdentity = { id: "redirect.js", severity: "warning" };
  * off-site error is a page that left the site entirely, which is a different
  * conversation from one that rewrote its own URL and stayed.
  */
-async function jsRedirectFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function jsRedirectFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   // A crawl id nothing knows scans no pages, which reads exactly like a site
   // with no JS redirects (`runRules`' precedent, hard rule 7).
   await assertCrawl(db, crawlId, JS_REDIRECT.id);
@@ -77,7 +78,7 @@ async function jsRedirectFindings(db: Db, crawlId: string): Promise<Finding[]> {
       and p.rendered_redirect_url is not null
       and p.fetch_class = 'ok'
     order by p.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = res.rows.map((row) =>
     queryFinding(JS_REDIRECT, {
@@ -105,6 +106,6 @@ export const renderRedirectRules: QueryRule[] = [
     severity: JS_REDIRECT.severity,
     ...copyFor(JS_REDIRECT.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => jsRedirectFindings(db, crawlId),
+    run: (db, crawlId, caps) => jsRedirectFindings(db, crawlId, capsOr(caps)),
   }),
 ];

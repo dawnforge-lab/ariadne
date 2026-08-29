@@ -32,7 +32,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import { noteTruncation, readCrawlEvidence, URL_FINDING_CAP } from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { capsOr, limitTo, noteTruncation, readCrawlEvidence } from "./crawl-evidence.js";
 
 const CATEGORY = "url" as const;
 
@@ -112,7 +113,7 @@ for (const name of TRACKING_PARAMS) {
  * an action plan needs a URL to point at, and the group's other members are in
  * the evidence beside it.
  */
-async function variantFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function variantFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, VARIANTS.id);
   const result = await db.execute<{
     url_normalised: string;
@@ -147,7 +148,7 @@ async function variantFindings(db: Db, crawlId: string): Promise<Finding[]> {
       ) sample
     ) s
     order by g.url_normalised
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = result.rows.map((row) =>
     queryFinding(VARIANTS, {
@@ -183,7 +184,7 @@ async function variantFindings(db: Db, crawlId: string): Promise<Finding[]> {
  * would mean unnesting every internal link's query string to rebuild a list
  * `URL.searchParams` already has.
  */
-async function trackingFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function trackingFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, TRACKING.id);
   const result = await db.execute<{
     target_url: string;
@@ -201,7 +202,7 @@ async function trackingFindings(db: Db, crawlId: string): Promise<Finding[]> {
       and substr(l.target_url, position('?' in l.target_url) + 1) ~ ${TRACKING_PATTERN}
     group by l.target_url, p.id
     order by l.target_url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const tracking = new Set(TRACKING_PARAMS);
   const findings: Finding[] = [];
@@ -265,7 +266,11 @@ async function trackingFindings(db: Db, crawlId: string): Promise<Finding[]> {
  * relative, carry a fragment, or spell its query string in another order, and
  * SQL cannot settle any of the three.
  */
-async function parameterPageFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function parameterPageFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, PARAM_PAGES.id);
 
   const findings: Finding[] = [];
@@ -299,7 +304,7 @@ async function parameterPageFindings(db: Db, crawlId: string): Promise<Finding[]
       // The scan continues past the cap so the total is the real number of
       // parameter pages, not the number that fitted (the robots.txt precedent).
       total++;
-      if (findings.length >= URL_FINDING_CAP) continue;
+      if (caps.listing !== null && findings.length >= caps.listing) continue;
       findings.push(
         queryFinding(PARAM_PAGES, {
           pageId: page.id,
@@ -325,7 +330,7 @@ export const urlHygieneRules: QueryRule[] = [
     severity: VARIANTS.severity,
     ...copyFor(VARIANTS.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => variantFindings(db, crawlId),
+    run: (db, crawlId, caps) => variantFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -336,7 +341,7 @@ export const urlHygieneRules: QueryRule[] = [
     severity: TRACKING.severity,
     ...copyFor(TRACKING.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => trackingFindings(db, crawlId),
+    run: (db, crawlId, caps) => trackingFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -347,6 +352,6 @@ export const urlHygieneRules: QueryRule[] = [
     severity: PARAM_PAGES.severity,
     ...copyFor(PARAM_PAGES.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => parameterPageFindings(db, crawlId),
+    run: (db, crawlId, caps) => parameterPageFindings(db, crawlId, capsOr(caps)),
   }),
 ];

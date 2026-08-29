@@ -11,11 +11,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import {
-  noteAtLeastTruncation,
-  noteTruncation,
-  URL_FINDING_CAP,
-} from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { capsOr, noteAtLeastTruncation, noteTruncation } from "./crawl-evidence.js";
 
 /**
  * BCP-47-lite: a 2–3 letter language, optionally followed by a region that is
@@ -253,10 +250,11 @@ async function targetContext(
  * be indexed, and "unknown" is not a finding (hard rule 1).
  *
  * The finding is one per (page, member) PAIR, so a cluster wired one way round
- * is O(pages × languages) of them: capped at `URL_FINDING_CAP` like every other
+ * is O(pages × languages) of them: capped at `caps.listing` like every other
  * URL-scoped rule. The walk runs to the end whatever the cap says — nothing
  * about it grows with what is kept — so the count behind the cap is exact
  * (`noteTruncation`): only the LISTING stops at the cap, never the counting.
+ * An uncapped run keeps every pair and writes no note.
  */
 async function declarationFindings(
   self: RuleIdentity,
@@ -267,6 +265,7 @@ async function declarationFindings(
     target: TargetPage,
     context: TargetContext,
   ) => Record<string, unknown> | null,
+  caps: RuleCaps,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   let total = 0;
@@ -277,7 +276,7 @@ async function declarationFindings(
       const evidence = fires(set, target, context);
       if (evidence === null) continue;
       total += 1;
-      if (findings.length >= URL_FINDING_CAP) continue;
+      if (caps.listing !== null && findings.length >= caps.listing) continue;
       findings.push(
         queryFinding(self, {
           pageId: set.pageId,
@@ -318,11 +317,23 @@ interface IncompleteSet {
  * a shop that ships a cluster per product has one per page — so unlike the
  * scans above, this one cannot count past its cap for free: knowing the total
  * means keeping every hash. It stops instead, one cluster past
- * `URL_FINDING_CAP`, and reports a LOWER BOUND (`noteAtLeastTruncation`). What
+ * `caps.listing`, and reports a LOWER BOUND (`noteAtLeastTruncation`). What
  * it did not scan it does not claim to have counted (the `content.near-
  * duplicate` precedent).
+ *
+ * UNCAPPED, the accumulator is the one this file has to be honest about: with
+ * `findingCap: null` it holds every distinct cluster on the site, which is
+ * O(clusters) rather than O(cap). That is the operator's own trade — the whole
+ * picture costs the memory the whole picture takes — and it is bounded by the
+ * number of DISTINCT target lists, not by pages: a shop shipping one cluster per
+ * product is the bad case, and it is the one the default cap exists for. The
+ * walk still stops nothing early, so the note is absent rather than wrong.
  */
-async function missingXDefaultFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function missingXDefaultFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
   const incomplete = new Map<string, IncompleteSet>();
   /** 1 once the walk has seen a cluster it could not keep, 0 while it fits. */
   let beyondCap = 0;
@@ -332,7 +343,7 @@ async function missingXDefaultFindings(db: Db, crawlId: string): Promise<Finding
     if (set.hasXDefault || set.targets.length < 2) return;
     const key = createHash("sha256").update(set.targets.join("\n")).digest("hex");
     if (incomplete.has(key)) return;
-    if (incomplete.size >= URL_FINDING_CAP) {
+    if (caps.listing !== null && incomplete.size >= caps.listing) {
       // One cluster past the cap is all the walk needs to prove there are more.
       beyondCap = 1;
       return "stop";
@@ -480,7 +491,7 @@ export const hreflangRules: QueryRule[] = [
     severity: X_DEFAULT.severity,
     ...copyFor(X_DEFAULT.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => missingXDefaultFindings(db, crawlId),
+    run: (db, crawlId, caps) => missingXDefaultFindings(db, crawlId, capsOr(caps)),
   }),
 
   // An hreflang annotation is only honoured when it is reciprocated: a page
@@ -500,13 +511,19 @@ export const hreflangRules: QueryRule[] = [
     severity: RETURN_LINK.severity,
     ...copyFor(RETURN_LINK.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      declarationFindings(RETURN_LINK, db, crawlId, (set, target, context) => {
-        const back = context.declares(target.url);
-        return back.has(set.pageKey)
-          ? null
-          : { target: target.url, targetHasHreflang: back.size > 0 };
-      }),
+    run: (db, crawlId, caps) =>
+      declarationFindings(
+        RETURN_LINK,
+        db,
+        crawlId,
+        (set, target, context) => {
+          const back = context.declares(target.url);
+          return back.has(set.pageKey)
+            ? null
+            : { target: target.url, targetHasHreflang: back.size > 0 };
+        },
+        capsOr(caps),
+      ),
   }),
 
   // An alternate that points at a redirect or at a page excluded from the
@@ -534,15 +551,21 @@ export const hreflangRules: QueryRule[] = [
     severity: NON_INDEXABLE.severity,
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      declarationFindings(NON_INDEXABLE, db, crawlId, (_set, target) =>
-        target.fetchClass === "redirect" || (isAuditable(target) && target.isIndexable === false)
-          ? {
-              target: target.url,
-              targetFetchClass: target.fetchClass,
-              targetIndexable: target.isIndexable,
-            }
-          : null,
+    run: (db, crawlId, caps) =>
+      declarationFindings(
+        NON_INDEXABLE,
+        db,
+        crawlId,
+        (_set, target) =>
+          target.fetchClass === "redirect" ||
+          (isAuditable(target) && target.isIndexable === false)
+            ? {
+                target: target.url,
+                targetFetchClass: target.fetchClass,
+                targetIndexable: target.isIndexable,
+              }
+            : null,
+        capsOr(caps),
       ),
   }),
 ];

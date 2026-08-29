@@ -572,6 +572,28 @@ describe("crawl_start", () => {
     expect(String(answer.body["error"])).toContain("sitemap.xml");
   });
 
+  // The agent-facing half of `findingCap`. The schema accepts a number OR null,
+  // and null is the billed-audit setting rather than an omission — an agent that
+  // sends it must get the whole picture, and an agent that sends nonsense must
+  // be told at accept time rather than by a rules run hours later.
+  it("refuses a findingCap that is neither a positive integer nor null", async () => {
+    for (const bad of [0, -1, 1.5]) {
+      const answer = await call("crawl_start", { siteUrl: `${site}/`, findingCap: bad });
+      expect(answer.isError, JSON.stringify(bad)).toBe(true);
+      expect(String(answer.body["error"] ?? answer.text)).toContain("findingCap");
+    }
+  });
+
+  it("accepts findingCap: null over the agent surface", async () => {
+    const answer = await call("crawl_start", {
+      siteUrl: `${site}/`,
+      maxPages: 1,
+      findingCap: null,
+    });
+    expect(answer.isError ?? false).toBe(false);
+    expect(String(answer.body["crawlId"])).toMatch(/^crawl_/);
+  });
+
   // The floor `crawl_start`'s description promises, on the transport it
   // promises it to. Both transports share `parseStartCrawlInput`, so this is
   // the same guard the HTTP suite asserts — checked here because a claim in a

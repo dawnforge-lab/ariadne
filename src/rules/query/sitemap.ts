@@ -49,12 +49,14 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import type { RuleCaps } from "../registry/types.js";
 import {
   assertNormalisedSitemap,
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
-  URL_FINDING_CAP,
+  capsOr,
+  limitTo,
 } from "./crawl-evidence.js";
 
 const CATEGORY = "sitemap";
@@ -93,8 +95,11 @@ interface JoinRow extends Record<string, unknown> {
  *
  * `count(*) over ()` is evaluated across the full result set before `limit`
  * takes its slice, so the exact total survives the cap and Postgres never
- * hands back more than `URL_FINDING_CAP` rows — the memory contract holds
- * whatever the size of the sitemap (hard rule 6).
+ * hands back more than `caps.listing` rows — the memory contract holds
+ * whatever the size of the sitemap (hard rule 6). An UNCAPPED run is the
+ * operator asking for a row per listed URL, and the honesty of that trade is
+ * the point: what comes back is bounded by the sitemap the site publishes, not
+ * by anything this rule chooses, and the run's memory is O(what was found).
  *
  * The crawl row is read first and its result discarded: none of the join rules
  * needs the discovery evidence, but all of them need the crawl to exist and to
@@ -107,6 +112,7 @@ async function joinFindings(
   crawlId: string,
   condition: SQL,
   evidenceOf: (row: JoinRow) => Record<string, unknown>,
+  caps: RuleCaps,
 ): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, self.id);
   await assertNormalisedSitemap(db, crawlId, self.id);
@@ -118,7 +124,7 @@ async function joinFindings(
     join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
     where s.crawl_id = ${crawlId} and ${condition}
     order by s.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = result.rows.map((row) =>
     queryFinding(self, {
@@ -224,7 +230,7 @@ export const sitemapRules: QueryRule[] = [
     severity: NON_200.severity,
     ...copyFor(NON_200.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
+    run: (db, crawlId, caps) =>
       joinFindings(
         NON_200,
         db,
@@ -236,6 +242,7 @@ export const sitemapRules: QueryRule[] = [
           statusCode: row.status_code,
           fetchClass: row.fetch_class,
         }),
+        capsOr(caps),
       ),
   }),
 
@@ -247,12 +254,19 @@ export const sitemapRules: QueryRule[] = [
     severity: REDIRECTED.severity,
     ...copyFor(REDIRECTED.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      joinFindings(REDIRECTED, db, crawlId, sql`p.fetch_class = 'redirect'`, (row) => ({
-        url: row.url,
-        statusCode: row.status_code,
-        redirectUrl: row.redirect_url,
-      })),
+    run: (db, crawlId, caps) =>
+      joinFindings(
+        REDIRECTED,
+        db,
+        crawlId,
+        sql`p.fetch_class = 'redirect'`,
+        (row) => ({
+          url: row.url,
+          statusCode: row.status_code,
+          redirectUrl: row.redirect_url,
+        }),
+        capsOr(caps),
+      ),
   }),
 
   // A listed URL that answers with a 200 page telling search engines to keep
@@ -268,7 +282,7 @@ export const sitemapRules: QueryRule[] = [
     severity: NON_INDEXABLE.severity,
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
+    run: (db, crawlId, caps) =>
       joinFindings(
         NON_INDEXABLE,
         db,
@@ -279,6 +293,7 @@ export const sitemapRules: QueryRule[] = [
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
         }),
+        capsOr(caps),
       ),
   }),
 
@@ -305,7 +320,7 @@ export const sitemapRules: QueryRule[] = [
     severity: UNCRAWLED.severity,
     ...copyFor(UNCRAWLED.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Finding[]> => {
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
       await assertNormalisedSitemap(db, crawlId, UNCRAWLED.id);
       const result = await db.execute<{
@@ -321,7 +336,7 @@ export const sitemapRules: QueryRule[] = [
         where s.crawl_id = ${crawlId}
           and (p.id is null or p.status_code is null)
         order by s.url
-        limit ${URL_FINDING_CAP}`);
+        ${limitTo(capsOr(caps).listing)}`);
 
       const findings = result.rows.map((row) =>
         queryFinding(UNCRAWLED, {
@@ -357,7 +372,7 @@ export const sitemapRules: QueryRule[] = [
     severity: NOT_IN_SITEMAP.severity,
     ...copyFor(NOT_IN_SITEMAP.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Finding[]> => {
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, NOT_IN_SITEMAP.id);
       await assertNormalisedSitemap(db, crawlId, NOT_IN_SITEMAP.id);
       const gate = await db.execute<{ has_sitemap: boolean }>(sql`
@@ -378,7 +393,7 @@ export const sitemapRules: QueryRule[] = [
             where s.crawl_id = ${crawlId} and s.url_normalised = p.url
           )
         order by p.url
-        limit ${URL_FINDING_CAP}`);
+        ${limitTo(capsOr(caps).listing)}`);
 
       const findings = result.rows.map((row) =>
         queryFinding(NOT_IN_SITEMAP, {

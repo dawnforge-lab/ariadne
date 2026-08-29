@@ -408,6 +408,21 @@ ship the tab: say which number is which and find out why.
   truncated is a deliverable. One that does not is a lie about the size of the
   problem.
 
+**On a billed audit these thresholds are the normal path, not the exception.** A
+crawl started with `findingCap: null` (the audit skill's setting for client work)
+has no 200-finding ceiling, so `count` is the site's real number: 15,000 orphans
+is 15,000 rows, not 200 with a note. Nothing about the arithmetic above changes —
+`issue_urls` pages by cursor at 200 rows a call and knows nothing about the cap,
+and `rows == count` still has to hold when the cursor ends — but you will hit the
+2,000-row export switchover on most tabs rather than on one or two, and the
+~5,000-row slice rule becomes the usual shape of a large tab.
+
+**What changes in the description row.** A capped crawl's tab says "200 shown of
+243" because the *rule* stopped listing. An uncapped crawl's tab says "200 shown
+of 15,000" because *this deliverable* stops listing — a different sentence with a
+different owner, and the export path is what makes the second one honest. Do not
+write "truncated by the engine" over a slice you chose.
+
 ## Step 4 — columns
 
 The tab body is the URL plus the rule's own evidence, flattened.

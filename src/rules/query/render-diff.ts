@@ -64,7 +64,8 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import { assertCrawl, noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
 const CSR: RuleIdentity = { id: "content.csr-dependent", severity: "critical" };
 const NAV: RuleIdentity = { id: "nav.js-only", severity: "critical" };
@@ -271,7 +272,7 @@ async function assertRenderedColumns(
  * 840 words", and a multiplier computed here would be a second number saying
  * the same thing with rounding of its own.
  */
-async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function csrDependentFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   // A crawl id nothing knows scans no pages, which reads exactly like a site
   // with no CSR problem (`runRules`' precedent, hard rule 7).
   await assertCrawl(db, crawlId, CSR.id);
@@ -307,7 +308,7 @@ async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]>
       and p.rendered_renderable_word_count - p.renderable_word_count
             >= ${CSR_MIN_ADDED_WORDS}
     order by p.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = res.rows.map((row) =>
     queryFinding(CSR, {
@@ -418,7 +419,7 @@ async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]>
  *   raw 5  (3+2), rendered 20        → 5 not < 5 — silent
  *   raw 0,        rendered 10        → FIRES (the empty shell's navigation)
  */
-async function navJsOnlyFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function navJsOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, NAV.id);
   await assertRenderedColumns(db, crawlId, NAV.id, [
     "rendered_nav_link_count",
@@ -454,7 +455,7 @@ async function navJsOnlyFindings(db: Db, crawlId: string): Promise<Finding[]> {
       and m.rendered_links >= ${NAV_RENDERED_MIN}
       and m.rendered_links >= ${NAV_RENDERED_MULTIPLE} * (m.raw_links + 1)
     order by m.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = res.rows.map((row) =>
     queryFinding(NAV, {
@@ -534,7 +535,7 @@ async function navJsOnlyFindings(db: Db, crawlId: string): Promise<Finding[]> {
  *   raw 1 link `?colour=red`,     rendered 5 → silent (the `?` arm)
  *   raw 1 link `/facet-a` (no ?), rendered 5 → silent (the regex arm)
  */
-async function filtersJsOnlyFindings(db: Db, crawlId: string): Promise<Finding[]> {
+async function filtersJsOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
   await assertCrawl(db, crawlId, FILTERS.id);
   await assertRenderedColumns(db, crawlId, FILTERS.id, ["rendered_filter_link_count"]);
 
@@ -562,7 +563,7 @@ async function filtersJsOnlyFindings(db: Db, crawlId: string): Promise<Finding[]
                or l.target_url ~* 'filter|facet|sort')
       )
     order by p.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = res.rows.map((row) =>
     queryFinding(FILTERS, {
@@ -590,7 +591,7 @@ export const renderDiffRules: QueryRule[] = [
     severity: CSR.severity,
     ...copyFor(CSR.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => csrDependentFindings(db, crawlId),
+    run: (db, crawlId, caps) => csrDependentFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -601,7 +602,7 @@ export const renderDiffRules: QueryRule[] = [
     severity: NAV.severity,
     ...copyFor(NAV.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => navJsOnlyFindings(db, crawlId),
+    run: (db, crawlId, caps) => navJsOnlyFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -612,6 +613,6 @@ export const renderDiffRules: QueryRule[] = [
     severity: FILTERS.severity,
     ...copyFor(FILTERS.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => filtersJsOnlyFindings(db, crawlId),
+    run: (db, crawlId, caps) => filtersJsOnlyFindings(db, crawlId, capsOr(caps)),
   }),
 ];

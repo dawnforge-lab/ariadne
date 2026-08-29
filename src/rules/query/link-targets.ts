@@ -12,7 +12,8 @@ import {
   type PageRecord,
   type QueryRule,
 } from "../registry/registry.js";
-import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
 /** Source URLs listed on a broken-target finding. The count is never sampled. */
 export const SAMPLE_SOURCES = 10;
@@ -37,8 +38,11 @@ export const CANONICAL_BATCH = 500;
  * 4xx only. A 5xx target is a server fault the page's own `http.server-error`
  * reports; calling it a broken link would point the client at the wrong repair.
  *
- * The `targets` CTE is capped at `URL_FINDING_CAP`, so the lateral runs for at
- * most that many targets and the findings list never grows with the site. The
+ * The `targets` CTE is capped at `caps.listing`, so the lateral runs for at
+ * most that many targets and the findings list never grows with the site (an
+ * uncapped run lists every broken target and writes no truncation note — the
+ * `SAMPLE_SOURCES` list inside each finding is unaffected either way: the cap
+ * is on how many findings there are, never on how fat one of them is). The
  * `count(*) over ()` window sits after the grouping and before the `limit`, so
  * it counts distinct broken TARGETS — the unit of the finding — and the exact
  * total survives the cap (`noteTruncation`).
@@ -47,6 +51,7 @@ async function brokenInternalFindings(
   self: RuleIdentity,
   db: Db,
   crawlId: string,
+  caps: RuleCaps,
 ): Promise<Finding[]> {
   const result = await db.execute<{
     target_page_id: string;
@@ -65,7 +70,7 @@ async function brokenInternalFindings(
       where l.crawl_id = ${crawlId} and l.is_internal and p.fetch_class = 'client_error'
       group by p.id, p.url, p.status_code
       order by p.url
-      limit ${URL_FINDING_CAP}
+      ${limitTo(caps.listing)}
     )
     select t.target_page_id, t.target_url, t.status_code, t.inlink_count,
            t.total_matches, s.sample_sources
@@ -185,7 +190,7 @@ async function eachCanonicalTarget(
     // Sorted by the DECLARING page's URL — the finding's own key — before
     // anything is handed on. The target lookup above has no ORDER BY, so its
     // row order is whatever the plan emits, and the callers stop listing at
-    // `URL_FINDING_CAP`: an unordered visit would let a re-run of the same
+    // `caps.listing`: an unordered visit would let a re-run of the same
     // crawl report a different two hundred. (While `issues` was append-only
     // that also grew the table past the cap run over run; a rules run now
     // recomputes it — see the delete at the top of `runRules` — so what a
@@ -200,7 +205,7 @@ async function eachCanonicalTarget(
  * The shape both canonical-target rules take: walk the resolved canonicals and
  * keep the ones the rule fires on.
  *
- * Capped at `URL_FINDING_CAP` like every other URL-scoped rule — a template
+ * Capped at `caps.listing` like every other URL-scoped rule — a template
  * that canonicalises a whole section at one dead URL is O(pages) findings —
  * and the scan runs to the end of the last batch either way, so the count
  * behind the cap is exact (`noteTruncation`): only the LISTING stops at the
@@ -216,6 +221,7 @@ async function canonicalTargetFindings(
   db: Db,
   crawlId: string,
   fires: (t: ResolvedTarget) => Record<string, unknown> | null,
+  caps: RuleCaps,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   let total = 0;
@@ -223,7 +229,7 @@ async function canonicalTargetFindings(
     const evidence = fires(t);
     if (evidence === null) return;
     total += 1;
-    if (findings.length >= URL_FINDING_CAP) return;
+    if (caps.listing !== null && findings.length >= caps.listing) return;
     findings.push(
       queryFinding(self, {
         pageId: t.page.id,
@@ -249,7 +255,7 @@ export const linkTargetRules: QueryRule[] = [
     severity: BROKEN.severity,
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) => brokenInternalFindings(BROKEN, db, crawlId),
+    run: (db, crawlId, caps) => brokenInternalFindings(BROKEN, db, crawlId, capsOr(caps)),
   }),
 
   // A canonical names the URL whose ranking signals every duplicate should be
@@ -274,11 +280,16 @@ export const linkTargetRules: QueryRule[] = [
     severity: NON_200.severity,
     ...copyFor(NON_200.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      canonicalTargetFindings(NON_200, db, crawlId, ({ target }) =>
-        target.statusCode !== null && target.statusCode !== 200
-          ? { targetStatus: target.statusCode, targetFetchClass: target.fetchClass }
-          : null,
+    run: (db, crawlId, caps) =>
+      canonicalTargetFindings(
+        NON_200,
+        db,
+        crawlId,
+        ({ target }) =>
+          target.statusCode !== null && target.statusCode !== 200
+            ? { targetStatus: target.statusCode, targetFetchClass: target.fetchClass }
+            : null,
+        capsOr(caps),
       ),
   }),
 
@@ -299,11 +310,16 @@ export const linkTargetRules: QueryRule[] = [
     severity: NON_INDEXABLE.severity,
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      canonicalTargetFindings(NON_INDEXABLE, db, crawlId, ({ target }) =>
-        isAuditable(target) && target.isIndexable === false
-          ? { targetRobotsMeta: target.robotsMeta, targetXRobotsTag: target.xRobotsTag }
-          : null,
+    run: (db, crawlId, caps) =>
+      canonicalTargetFindings(
+        NON_INDEXABLE,
+        db,
+        crawlId,
+        ({ target }) =>
+          isAuditable(target) && target.isIndexable === false
+            ? { targetRobotsMeta: target.robotsMeta, targetXRobotsTag: target.xRobotsTag }
+            : null,
+        capsOr(caps),
       ),
   }),
 ];

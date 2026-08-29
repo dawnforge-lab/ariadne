@@ -13,7 +13,8 @@ import {
   type PageRecord,
   type QueryRule,
 } from "../registry/registry.js";
-import { noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import type { RuleCaps } from "../registry/types.js";
+import { capsOr, noteTruncation } from "./crawl-evidence.js";
 
 const CATEGORY = "url";
 
@@ -137,7 +138,7 @@ async function eachPaginatedPage(
  * The shape all three pagination rules take: walk the paginated pages and keep
  * the ones the rule fires on.
  *
- * Capped at `URL_FINDING_CAP` like every other URL-scoped rule — an archive
+ * Capped at `caps.listing` like every other URL-scoped rule — an archive
  * carries `rel=next` on every page of every series, so a crawl that stops
  * short of the last page fires on O(pages) of them — and the scan runs to the
  * end of the last batch either way, so the count behind the cap is exact
@@ -148,6 +149,7 @@ async function paginationFindings(
   db: Db,
   crawlId: string,
   fires: (p: PaginatedPage) => Record<string, unknown> | null,
+  caps: RuleCaps,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   let total = 0;
@@ -155,7 +157,7 @@ async function paginationFindings(
     const evidence = fires(p);
     if (evidence === null) return;
     total += 1;
-    if (findings.length >= URL_FINDING_CAP) return;
+    if (caps.listing !== null && findings.length >= caps.listing) return;
     findings.push(
       queryFinding(self, {
         pageId: p.page.id,
@@ -183,16 +185,22 @@ export const paginationRules: QueryRule[] = [
     severity: NEXT_UNCRAWLED.severity,
     ...copyFor(NEXT_UNCRAWLED.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      paginationFindings(NEXT_UNCRAWLED, db, crawlId, (p) => {
-        if (p.relNext === null) return null;
-        if (p.resolvedNext === null) {
-          return { relNext: p.relNext, resolvedTo: null, unparseable: true };
-        }
-        return p.nextTarget === null
-          ? { relNext: p.relNext, resolvedTo: p.resolvedNext }
-          : null;
-      }),
+    run: (db, crawlId, caps) =>
+      paginationFindings(
+        NEXT_UNCRAWLED,
+        db,
+        crawlId,
+        (p) => {
+          if (p.relNext === null) return null;
+          if (p.resolvedNext === null) {
+            return { relNext: p.relNext, resolvedTo: null, unparseable: true };
+          }
+          return p.nextTarget === null
+            ? { relNext: p.relNext, resolvedTo: p.resolvedNext }
+            : null;
+        },
+        capsOr(caps),
+      ),
   }),
 
   // The series is held together by rel=next alone: the next page exists, was
@@ -207,11 +215,16 @@ export const paginationRules: QueryRule[] = [
     severity: NEXT_NOT_LINKED.severity,
     ...copyFor(NEXT_NOT_LINKED.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      paginationFindings(NEXT_NOT_LINKED, db, crawlId, (p) =>
-        p.relNext !== null && p.nextTarget !== null && !p.nextTarget.linked
-          ? { relNext: p.relNext, resolvedTo: p.nextTarget.url }
-          : null,
+    run: (db, crawlId, caps) =>
+      paginationFindings(
+        NEXT_NOT_LINKED,
+        db,
+        crawlId,
+        (p) =>
+          p.relNext !== null && p.nextTarget !== null && !p.nextTarget.linked
+            ? { relNext: p.relNext, resolvedTo: p.nextTarget.url }
+            : null,
+        capsOr(caps),
       ),
   }),
 
@@ -229,18 +242,24 @@ export const paginationRules: QueryRule[] = [
     severity: CANONICAL_TO_OTHER.severity,
     ...copyFor(CANONICAL_TO_OTHER.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      paginationFindings(CANONICAL_TO_OTHER, db, crawlId, ({ page }) => {
-        if (page.relPrev === null) return null;
-        const canonical = resolveEffectiveCanonical(page);
-        // A canonical that will not resolve is `canonical.points-elsewhere`'s
-        // finding, reported there as unparseable. It is not a pagination fault.
-        if (canonical === null || !canonical.pointsElsewhere) return null;
-        return {
-          canonical: canonical.canonical,
-          resolvedTo: canonical.resolved,
-          relPrev: page.relPrev,
-        };
-      }),
+    run: (db, crawlId, caps) =>
+      paginationFindings(
+        CANONICAL_TO_OTHER,
+        db,
+        crawlId,
+        ({ page }) => {
+          if (page.relPrev === null) return null;
+          const canonical = resolveEffectiveCanonical(page);
+          // A canonical that will not resolve is `canonical.points-elsewhere`'s
+          // finding, reported there as unparseable. It is not a pagination fault.
+          if (canonical === null || !canonical.pointsElsewhere) return null;
+          return {
+            canonical: canonical.canonical,
+            resolvedTo: canonical.resolved,
+            relPrev: page.relPrev,
+          };
+        },
+        capsOr(caps),
+      ),
   }),
 ];
