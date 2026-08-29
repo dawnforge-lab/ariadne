@@ -66,9 +66,9 @@
  * ONE THING THE RECOMPUTATION CANNOT SEE, and therefore the one thing this pass
  * does persist about its selection: whether the selection was made
  * automatically at all. From Phase 8 a caller may NAME the pages, and a named
- * list is an input no column of `pages` records. It is written to the crawl's
- * config blob beside the three render knobs that are already there — see
- * `recordRenderSelection`, which argues that placement rather than assuming it.
+ * list is an input no column of `pages` records. It is written to
+ * `crawls.render_urls_jsonb` — its own column since migration 0012 — see
+ * `recordRenderSelection`.
  */
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -86,7 +86,6 @@ import {
 } from "../frontier.js";
 import { PageRenderer, writeRenderResult, type RenderResult } from "./renderer.js";
 import {
-  RENDER_URLS_KEY,
   selectExplicitRenderSet,
   selectRenderSet,
   type RenderSelection,
@@ -444,51 +443,46 @@ export async function runRenderPass(
  * hand — a wrong answer delivered as a table of numbers, which is the worst
  * shape a wrong answer can take.
  *
- * ## Why it lives in `config_jsonb`, which is the crawl's INPUT
+ * ## Where it lives, and where it used to
  *
- * Because that is what it is. `config_jsonb` already carries the render pass's
- * three knobs — `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType` —
- * and `render.coverage` already reads them from there to reproduce the decision
- * the pass made. An explicit URL list is the fourth input of the same pass. The
- * only thing that distinguishes it is WHEN it arrives: the knobs are set when
- * the crawl starts, the list arrives with the render request, so the pass is
- * the only writer that can put it beside them.
+ * `crawls.render_urls_jsonb`, its own column since migration 0012. Through
+ * Phase 8 it lived under a `renderUrls` key inside `config_jsonb` beside the
+ * three render knobs `render.coverage` reads from there — defensible, because
+ * an explicit URL list IS an input of the same pass, and argued at length
+ * rather than assumed. What it cost was a second writer on a blob
+ * `storableConfig` was the sole author of, and a standing "patch keys
+ * individually, never rewrite the config" rule that every future writer had to
+ * know. 0012 paid that debt (docs/gates/phase-8.md §15) and backfilled the key
+ * out; `config_jsonb` has one writer again and this is a plain column write.
  *
  * Nothing about the OUTCOME is recorded here — not what rendered, not what
  * failed, not how long it took. Those are page rows and `render_pass_count`.
- * The rule this column has always carried ("the crawl's input, never a results
- * column") is therefore intact, and the reason it is worth restating is that
- * the alternative — deriving the mode from the evidence — is unsound in a way
- * that is easy to miss: an automatic pass renders only candidates, so a
- * rendered non-candidate would prove an explicit list, but an explicit list
- * that happens to name only candidates would be indistinguishable from an
- * automatic one. A guess that is right most of the time is exactly what hard
- * rule 7 forbids.
+ * This column says WHO CHOSE the pages and nothing else, because the
+ * alternative — deriving the mode from the evidence — is unsound in a way that
+ * is easy to miss: an automatic pass renders only candidates, so a rendered
+ * non-candidate would prove an explicit list, but an explicit list that happens
+ * to name only candidates would be indistinguishable from an automatic one. A
+ * guess that is right most of the time is exactly what hard rule 7 forbids.
  *
- * ## Why an automatic pass writes `null` rather than leaving the key alone
+ * ## Why an automatic pass writes NULL rather than leaving the column alone
  *
  * Because a crawl rendered from a list and then rendered automatically must
  * stop saying "explicit". Every pass overwrites the record, so it always
  * describes the LAST selection — which is the only selection the frontier and
- * the page rows describe either. A key that is ABSENT means no Phase 8 pass has
- * run over this crawl: never rendered, or rendered by an engine that had no
- * explicit mode, and in both of those the only selection that can have happened
- * is the automatic one.
- *
- * `jsonb_set(..., true)` creates the key when it is missing and replaces it
- * when it is not; unknown keys are ignored by `parseStoredConfig`, so a config
- * carrying this reads back exactly as it did before.
+ * the page rows describe either. NULL therefore means "not chosen by hand":
+ * the last pass selected automatically, or no pass has run at all. Those two
+ * are not distinguished here and do not need to be — `render_pass_count` says
+ * whether a pass ran, this says who chose the pages.
  */
 async function recordRenderSelection(
-  db: Pick<Db, "execute">,
+  db: Pick<Db, "update">,
   crawlId: string,
   urls: readonly string[] | null,
 ): Promise<void> {
-  await db.execute(sql`
-    update crawls
-      set config_jsonb = jsonb_set(
-        config_jsonb, ${`{${RENDER_URLS_KEY}}`}::text[], ${JSON.stringify(urls)}::jsonb, true)
-    where id = ${crawlId}`);
+  await db
+    .update(crawls)
+    .set({ renderUrlsJsonb: urls === null ? null : [...urls] })
+    .where(eq(crawls.id, crawlId));
 }
 
 /**

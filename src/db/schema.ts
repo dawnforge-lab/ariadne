@@ -80,6 +80,26 @@ export const crawls = pgTable("crawls", {
   // and found clean are different facts, and nothing else can tell them apart
   // (hard rule 7). The agent surface exposes it as `rulesRunAt`.
   rulesRunAt: timestamp("rules_run_at", { withTimezone: true }),
+  // The explicit render list, verbatim as the agent supplied it. NULL means no
+  // explicit pass was requested — automatic selection, or no render at all;
+  // render_pass_count says whether A pass ran, this says who chose the pages.
+  // Until migration 0012 this lived under RENDER_URLS_KEY in config_jsonb
+  // (the amended-doctrine detour recorded in the Phase 8 gate §12); 0012
+  // backfills it out and this column is the only home.
+  //
+  // Written by `recordRenderSelection` (src/crawl/render/run-render.ts), in the
+  // same transaction as the selection it describes, and read by
+  // `render.coverage` (src/rules/metric/render-metrics.ts) to say which of the
+  // two decisions chose this crawl's render set. Every pass overwrites it, so
+  // it always describes the LAST selection — a crawl rendered from a list and
+  // then rendered automatically must stop saying "explicit".
+  renderUrlsJsonb: jsonb("render_urls_jsonb"),
+  // Written by inferPageTemplates at crawl end: {shapesBefore, typesAfter,
+  // retyped, at}. NULL is a pre-Phase-8 crawl or one whose inference never
+  // ran — the ambiguity docs/gates/phase-8.md §7.2 warns about, now a column
+  // instead of a log line. Never backfilled: the old runs' numbers exist only
+  // in logs, and a guessed backfill would be a silent fallback (rule 7).
+  templateInferenceJsonb: jsonb("template_inference_jsonb"),
 });
 
 export const pages = pgTable("pages", {
@@ -427,6 +447,36 @@ export const pages = pgTable("pages", {
   index("pages_simhash_band1").on(t.crawlId, sql`((${t.simhash} >> 16) & 65535)`),
   index("pages_simhash_band2").on(t.crawlId, sql`((${t.simhash} >> 32) & 65535)`),
   index("pages_simhash_band3").on(t.crawlId, sql`((${t.simhash} >> 48) & 65535)`),
+  // The three duplicate rules' group aggregate and its sample lateral
+  // (`groupFindings`, src/rules/query/field-duplicates.ts): `group by
+  // btrim(<field>)` over the indexable cohort, then one `where btrim(<field>)
+  // = <value> order by url limit 20` lookup per surviving group. Measured on
+  // the Phase 8 gate's 20k-page shape at 10.4 ms PER GROUP; capped at 200
+  // groups that is 2s a rule, and an uncapped run makes the group count the
+  // site's rather than the cap's (gate doc §15, the Phase 9 migration ledger).
+  // The column order is the query's: `crawl_id` equality, then the grouped
+  // expression, then `url` so the lateral's `order by p2.url limit 20` is read
+  // off the index instead of sorted.
+  //
+  // PARTIAL, and the predicate is the SAME TEXTUAL COUPLING the simhash bands
+  // above carry, with a second edge. Postgres uses a partial index only when
+  // it can PROVE the query's WHERE implies the index's, so this predicate
+  // mirrors `INDEXABLE` (src/rules/query/field-duplicates.ts) VERBATIM —
+  // `fetch_class = 'ok' and status_code = 200 and is_indexable = true`. Widen
+  // the rule's cohort without widening these and the planner silently stops
+  // using them: a slow query, never an error. The trailing `<field> is not
+  // null` is implied on the rule's side by `btrim(<field>) = …` and by its own
+  // `is not null`, and it is what keeps the index off the rows that can never
+  // group. Change one file, change the other, and re-check with EXPLAIN.
+  index("pages_dupe_title")
+    .on(t.crawlId, sql`btrim(${t.title})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.title} is not null`),
+  index("pages_dupe_meta_description")
+    .on(t.crawlId, sql`btrim(${t.metaDescription})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.metaDescription} is not null`),
+  index("pages_dupe_h1_text")
+    .on(t.crawlId, sql`btrim(${t.h1Text})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.h1Text} is not null`),
 ]);
 
 export const links = pgTable("links", {

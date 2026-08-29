@@ -242,6 +242,12 @@ type PopulationRow = { page_type: string; paths: number };
  * A crawl id nothing knows throws rather than reporting a clean zero, which
  * would read exactly like a site whose types were all templates already
  * (hard rule 7, and `deriveFieldPresence`'s precedent).
+ *
+ * **It writes one column of its own**, since migration 0012:
+ * `crawls.template_inference_jsonb`, the record that this pass ran and what it
+ * did (`recordInference`). Both exits write it — a crawl with nothing to
+ * collapse is a crawl this ran over, not a crawl this never reached — and the
+ * collapsing exit writes it inside the retype transaction.
  */
 export async function inferPageTemplates(
   db: Db,
@@ -273,7 +279,18 @@ export async function inferPageTemplates(
   const typesAfter = new Set(
     members.map((m) => mapping.get(m.pageType) ?? m.pageType),
   ).size;
-  if (mapping.size === 0) return { typesBefore, typesAfter, pagesRetyped: 0 };
+  if (mapping.size === 0) {
+    // Nothing to collapse — but the pass RAN, and that is the fact migration
+    // 0012 added the column to hold. A crawl whose types were already templates
+    // and a crawl this pass never reached are different things, and before the
+    // column the only difference was a log line (hard rule 7; the ambiguity
+    // docs/gates/phase-8.md §7.2 warns about). No transaction here because
+    // there is no batch to be atomic with: this single statement is the whole
+    // of what this path writes.
+    const result = { typesBefore, typesAfter, pagesRetyped: 0 };
+    await recordInference(db, crawlId, result);
+    return result;
+  }
 
   const pairs = [...mapping].map(([from, to]) => sql`(${from}::text, ${to}::text)`);
   // ALL THE BATCHES OR NONE OF THEM, which is what the three sibling
@@ -307,6 +324,52 @@ export async function inferPageTemplates(
       }
       pagesRetyped += written.rowCount;
     }
+    // IN THE SAME TRANSACTION AS THE BATCHES, and that is the whole point of
+    // writing it here rather than at the call site: the marker is a claim about
+    // the population the batches just retyped. Committed without them it would
+    // describe a collapse that rolled back; committed after them, out of band,
+    // a crash between the two would leave the row silent about a crawl whose
+    // types HAD moved — the pre-0012 ambiguity, reintroduced at a narrower
+    // window. One transaction, one truth.
+    await recordInference(tx, crawlId, { typesBefore, typesAfter, pagesRetyped });
   });
   return { typesBefore, typesAfter, pagesRetyped };
+}
+
+/**
+ * Stamp `crawls.template_inference_jsonb` with what this pass did.
+ *
+ * The column's keys are NOT the interface's field names, deliberately.
+ * `shapesBefore` is what `typesBefore` counts — the URL shapes phase 1 produced
+ * before the population had a say — and it is the word the crawl summary
+ * already uses to a reader ("61 URL shape(s) -> 13 page type(s), 48 retyped",
+ * src/api/service.ts). The column is read by people and by agents, so it gets
+ * the honest name; the interface keeps the one its three call sites are pinned
+ * to.
+ *
+ * `at` from the Node clock, `new Date()`, which is the clock `closeCrawl` and
+ * the API's failure paths stamp `finished_at` from (src/crawl/loop.ts). One
+ * clock per row: a marker from `now()` could sit microseconds AFTER a
+ * `finished_at` written by a process whose clock differs, and a reader
+ * comparing them would see a crawl that typed itself after it ended.
+ *
+ * Takes the transaction (or the database) it should write through, so the
+ * caller decides what this is atomic with — see both call sites.
+ */
+async function recordInference(
+  db: Pick<Db, "update">,
+  crawlId: string,
+  inference: PageTemplateInference,
+): Promise<void> {
+  await db
+    .update(crawls)
+    .set({
+      templateInferenceJsonb: {
+        shapesBefore: inference.typesBefore,
+        typesAfter: inference.typesAfter,
+        retyped: inference.pagesRetyped,
+        at: new Date().toISOString(),
+      },
+    })
+    .where(eq(crawls.id, crawlId));
 }

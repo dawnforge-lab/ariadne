@@ -1029,14 +1029,18 @@ describe("POST /crawls/:id/render with a named list", () => {
     // And the record the coverage metric reads long afterwards: without it,
     // `render.coverage` would recompute the automatic decision and describe a
     // selection that never happened.
+    //
+    // MIGRATION 0012 MOVED THIS PIN: through Phase 8 the record was a
+    // `renderUrls` key the pass patched into `config_jsonb`; it is now
+    // `crawls.render_urls_jsonb`, and the crawl's stored config is untouched by
+    // the render pass — which is the second half of what is asserted here,
+    // because `storableConfig` is the only writer of that blob again.
     const [row] = await db
-      .select({ config: crawls.config })
+      .select({ config: crawls.config, renderUrls: crawls.renderUrlsJsonb })
       .from(crawls)
       .where(eq(crawls.id, namedCrawlId));
-    expect((row!.config as Record<string, unknown>)["renderUrls"]).toEqual([
-      `${site}/a`,
-      `${site}/b`,
-    ]);
+    expect(row!.renderUrls).toEqual([`${site}/a`, `${site}/b`]);
+    expect(Object.keys(row!.config as Record<string, unknown>)).not.toContain("renderUrls");
   }, 60_000);
 
   it("400s a URL this crawl never fetched, naming it, rather than fetching it", async () => {

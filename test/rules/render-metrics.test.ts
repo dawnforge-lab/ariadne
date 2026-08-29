@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
-import { RENDER_DEFAULTS, RENDER_URLS_KEY, SUSPICION } from "../../src/crawl/render/select.js";
+import { RENDER_DEFAULTS, SUSPICION } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
@@ -321,8 +321,9 @@ describe("render.coverage against the database", () => {
    * The same six pages, the same default knobs — so the AUTOMATIC decision over
    * this crawl is the first case in this file, `budget 1 / suspects 2 /
    * sampled 3 / selected 1 / truncated true`. None of that happened. The render
-   * pass was handed three URLs, and the record of that is the `renderUrls` list
-   * the pass wrote onto the crawl's config (`RENDER_URLS_KEY`).
+   * pass was handed three URLs, and the record of that is the list the pass
+   * wrote to `crawls.render_urls_jsonb` (its own column since migration 0012;
+   * through Phase 8 it was a `renderUrls` key inside `config_jsonb`).
    *
    * So every automatic number is NULL, and the numbers it would have reported
    * are named here to make the point: reporting them, or reporting zeroes in
@@ -331,11 +332,8 @@ describe("render.coverage against the database", () => {
   it("reports an explicit selection as explicit, with the automatic numbers null", async () => {
     const named = [url("/a3"), url("/b1"), url("/b2")];
     const crawlId = await newMetricCrawl(db, SITE, created, {
-      config: {
-        userAgent: "AriadneBot-test",
-        maxPages: 500,
-        [RENDER_URLS_KEY]: named,
-      },
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      renderUrlsJsonb: named,
     });
     await addPages(
       crawlId,
@@ -366,7 +364,8 @@ describe("render.coverage against the database", () => {
   // on this site — the two rows are told apart by the mode and by nothing else.
   it("does not mistake a one-page list for the automatic budget of one", async () => {
     const crawlId = await newMetricCrawl(db, SITE, created, {
-      config: { userAgent: "AriadneBot-test", maxPages: 500, [RENDER_URLS_KEY]: [url("/a3")] },
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      renderUrlsJsonb: [url("/a3")],
     });
     await addPages(crawlId, SITE_PAGES);
 
@@ -382,7 +381,8 @@ describe("render.coverage against the database", () => {
   // it must read as the automatic selection rather than as an empty one.
   it("reads a null URL list as the automatic selection it is", async () => {
     const crawlId = await newMetricCrawl(db, SITE, created, {
-      config: { userAgent: "AriadneBot-test", maxPages: 500, [RENDER_URLS_KEY]: null },
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      renderUrlsJsonb: null,
     });
     await addPages(crawlId, SITE_PAGES);
 
@@ -400,10 +400,11 @@ describe("render.coverage against the database", () => {
   // claim about HOW the pages were chosen, made from a value nobody can read.
   it("refuses a stored URL list that is not an array of strings", async () => {
     const crawlId = await newMetricCrawl(db, SITE, created, {
-      config: { userAgent: "AriadneBot-test", maxPages: 500, [RENDER_URLS_KEY]: "/a3" },
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      renderUrlsJsonb: "/a3",
     });
     await expect(rule("render.coverage").run(db, crawlId)).rejects.toThrow(
-      /config\.renderUrls is neither null nor an array of strings/,
+      /render_urls_jsonb is neither null nor an array of strings/,
     );
   });
 
