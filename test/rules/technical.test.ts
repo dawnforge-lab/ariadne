@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { buildRegistry } from "../../src/rules/index.js";
 import { SLOW_MS, technicalRules } from "../../src/rules/page/technical.js";
 import { expectSilentOnNonOkFetches, mkPage, ruleLookup } from "./mk-page.js";
 
@@ -169,9 +170,16 @@ describe("performance.slow-response", () => {
 // every sitemap entry is enqueued as a seed — so a rule judging the site on it
 // is judging the crawl. The rule that used to is now a query rule over
 // `click_depth`, with its pins in test/rules/link-graph-query.test.ts.
+//
+// EVERY page rule in the registry, not just this file's four: the claim is about
+// the kind, so a depth-reading rule added under any other module fails here too.
 describe("the depth a page rule may read", () => {
-  it("is none: no technical rule fires on discovery depth alone", () => {
-    for (const r of technicalRules) {
+  it("is none: no page rule in the registry fires on discovery depth alone", () => {
+    const pageRules = buildRegistry().byKind("page");
+    // The set is not empty, so the loop below is an assertion rather than a
+    // vacuous pass over nothing.
+    expect(pageRules.length).toBeGreaterThan(0);
+    for (const r of pageRules) {
       expect(r.run(mkPage({ depth: 11 })), r.id).toHaveLength(0);
     }
   });

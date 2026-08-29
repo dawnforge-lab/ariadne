@@ -164,8 +164,10 @@ describe("checklist coverage", () => {
     const byId = new Map(buildRegistry().all().map((r) => [r.id, r.checkIds]));
     expect(byId.get("structure.click-depth-distribution")).toEqual(["CHECK-31"]);
     expect(byId.get("structure.depth-distribution")).not.toContain("CHECK-31");
-    // And CHECK-31 never went unclaimed on the way: the page rule that names
-    // individual deep pages has claimed it since Phase 3.
+    // And CHECK-31 never went unclaimed on the way: the rule that names
+    // individual deep pages has claimed it since Phase 3 — as a page rule then,
+    // as a query rule over `click_depth` since Phase 9, with the claim carried
+    // across the move.
     expect(byId.get("structure.deep-page")).toContain("CHECK-31");
   });
 

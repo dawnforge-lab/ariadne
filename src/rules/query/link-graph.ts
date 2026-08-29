@@ -11,7 +11,6 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import {
-  assertCrawl,
   assertNormalisedSitemap,
   capsOr,
   limitTo,
@@ -33,6 +32,16 @@ const DEEP: RuleIdentity = { id: "structure.deep-page", severity: "info" };
  */
 export const DEEP_DEPTH = 5;
 
+/**
+ * The pages these rules count as the site: fetched OK, 200, indexable.
+ *
+ * One fragment rather than three lines repeated per rule, so "the same cohort
+ * `links.orphan` reports over" is a structural fact about the file instead of a
+ * claim in a comment that a future edit can quietly falsify. Same idiom as
+ * src/rules/query/structured-data.ts.
+ */
+const INDEXABLE = sql`p.fetch_class = 'ok' and p.status_code = 200 and p.is_indexable`;
+
 /** What the crawl row and the frontier say about whether the crawl finished. */
 interface Completeness {
   pagesCrawled: number;
@@ -42,7 +51,12 @@ interface Completeness {
   failed: number;
 }
 
-async function completeness(db: Db, crawlId: string): Promise<Completeness> {
+/**
+ * `ruleId` names the caller in the refusal, because three rules read this now
+ * and a message that always said `links.orphan` would send a reader of
+ * `structure.deep-page`'s failure to the wrong rule.
+ */
+async function completeness(db: Db, crawlId: string, ruleId: string): Promise<Completeness> {
   const rows = await db.execute<{
     pages_crawled: number;
     max_pages: string | null;
@@ -62,7 +76,7 @@ async function completeness(db: Db, crawlId: string): Promise<Completeness> {
   const row = rows.rows[0];
   // No crawl row means nothing can be said about completeness, and a rule that
   // answered anyway would be answering about a crawl that does not exist.
-  if (row === undefined) throw new Error(`links.orphan: no such crawl '${crawlId}'`);
+  if (row === undefined) throw new Error(`${ruleId}: no such crawl '${crawlId}'`);
 
   const maxPages = row.max_pages === null ? Number.NaN : Number(row.max_pages);
   return {
@@ -188,9 +202,7 @@ async function orphanFindings(
            count(*) over ()::int as total_matches
     from pages p
     where p.crawl_id = ${crawlId}
-      and p.fetch_class = 'ok'
-      and p.status_code = 200
-      and p.is_indexable
+      and ${INDEXABLE}
       and not (p.depth = 0 and p.discovered_via = 'seed')
       and not exists (
         select 1 from links l
@@ -224,8 +236,15 @@ async function orphanFindings(
  * is the link-graph BFS the reader actually clicks through. Reading
  * discovery depth kept this rule silent through two real audits on a site
  * with 356 sitemap-discovered pages (docs/gates/phase-8.md §15 item 1).
- * NULL click_depth is links.orphan's finding, not ours — excluded, not
- * treated as infinitely deep.
+ * A NULL click_depth is EXCLUDED rather than treated as infinitely deep: a page
+ * no link path reaches has no depth to be past a threshold. It is the
+ * distribution metric's `nullCount` bucket, and where nothing links to it at all
+ * it is `links.orphan`'s finding — but the two sets are not the same one, and
+ * the difference is a real page: an ISLAND is linked (from other unreachable
+ * pages), so it is null here and absent from the orphan list, which is exactly
+ * what CHECK-31's cross-read asks the agent to name. A page past
+ * `MAX_CLICK_DEPTH` is null for a third reason again. Excluding null is
+ * therefore "not this rule's finding", not "already reported once elsewhere".
  *
  * A QUERY rule for one reason, and it is the reason the move had to happen at
  * all: `deriveClickDepth` fills the column in the DERIVATION phase, which runs
@@ -239,17 +258,39 @@ async function orphanFindings(
  * going in the index is competing for neither. Burying a noindex page is not a
  * fault, so reporting it would be asking for a fix that should not be made.
  *
- * `click_depth > N` excludes null by SQL's own three-valued logic, which is the
- * behaviour this rule wants and states rather than relies on: a page no link
- * path reaches has no click depth to be past a threshold, and it is already
- * reported — once — by `links.orphan`.
+ * `click_depth > N` is what excludes null, by SQL's own three-valued logic —
+ * stated here rather than relied on, because it is the behaviour the paragraph
+ * above argues for and not an accident of the operator.
+ *
+ * AN INCOMPLETE CRAWL MAKES THIS RULE OVERSTATE, WHICH IS WHY EVERY FINDING
+ * CARRIES A CAVEAT WHEN THE CRAWL WAS ONE. A breadth-first search over a
+ * SUBGRAPH can only ever return an UPPER BOUND on the true shortest path:
+ * missing pages remove paths, they never add one, so a page the crawl left
+ * unfetched may hold the two-click route to a page reported here at nine. The
+ * copy says "the shortest route… from the home page" about the SITE, so on a
+ * truncated crawl a finding can be a false positive — the opposite direction
+ * from `links.orphan`, whose incompleteness produces the same false positive by
+ * a different mechanism and which therefore refuses to run at all.
+ *
+ * This rule does NOT refuse, and the asymmetry is a decision rather than an
+ * oversight. An orphan verdict on an incomplete crawl is unsound about every
+ * page it names; a depth verdict is right about most and overstated about some,
+ * and dropping the whole listing to avoid the some would hide the most (hard
+ * rule 7). So the crawl's own state travels with the finding — the same
+ * `caveat` channel `links.orphan` uses for its failed pages — and a reader who
+ * needs certainty re-crawls rather than being told nothing.
  *
  * Capped like every other URL-scoped rule, deepest first so the worst page is
  * the first one an action plan reads. `count(*) over ()` is evaluated across the
  * full result set before `limit` takes its slice, so the exact total survives
  * the cap.
  */
-async function deepPageFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+async function deepPageFindings(
+  db: Db,
+  crawlId: string,
+  state: Completeness,
+  caps: RuleCaps,
+): Promise<Finding[]> {
   const rows = await db.execute<{
     id: string;
     url: string;
@@ -259,22 +300,53 @@ async function deepPageFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
     select p.id, p.url, p.click_depth, count(*) over ()::int as total_matches
     from pages p
     where p.crawl_id = ${crawlId}
-      and p.fetch_class = 'ok'
-      and p.status_code = 200
-      and p.is_indexable
+      and ${INDEXABLE}
       and p.click_depth > ${DEEP_DEPTH}
     order by p.click_depth desc, p.url
     ${limitTo(caps.listing)}`);
 
+  const caveat = depthCaveat(state);
   const findings = rows.rows.map((row) =>
     queryFinding(DEEP, {
       pageId: String(row.id),
       pageUrl: String(row.url),
-      evidence: { clickDepth: Number(row.click_depth), threshold: DEEP_DEPTH },
+      evidence: {
+        clickDepth: Number(row.click_depth),
+        threshold: DEEP_DEPTH,
+        ...(caveat === null ? {} : { caveat }),
+      },
       dedupeKey: String(row.url),
     }),
   );
   return noteTruncation(findings, rows.rows[0]?.total_matches ?? 0);
+}
+
+/**
+ * What this crawl's own incompleteness does to a click depth, or null when
+ * nothing does.
+ *
+ * Two independent halves, either or both:
+ *
+ *  - `incompleteCrawl` — the crawl did not demonstrably run to completion, in
+ *    exactly the cases `skipReason` enumerates for `links.orphan`. Every unread
+ *    page is a link the search never followed, so every depth here is an upper
+ *    bound. The reason is carried verbatim rather than as a flag, because "500
+ *    URLs still pending" and "stopped at its 200-page limit" call for different
+ *    next steps.
+ *  - `failedPages` — URLs the crawl could not fetch. A bounded, countable blind
+ *    spot, and the same number under the same key `links.orphan` reports.
+ *
+ * A null return is a positive statement, not an absence: this crawl drained its
+ * frontier, stayed under its cap and failed nothing, so the depths are the site's
+ * own.
+ */
+function depthCaveat(c: Completeness): Record<string, unknown> | null {
+  const incomplete = skipReason(c);
+  if (incomplete === null && c.failed === 0) return null;
+  return {
+    ...(incomplete === null ? {} : { incompleteCrawl: incomplete }),
+    ...(c.failed > 0 ? { failedPages: c.failed } : {}),
+  };
 }
 
 /**
@@ -304,7 +376,7 @@ export const linkGraphRules: QueryRule[] = [
     ...copyFor(ORPHAN.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
-      const state = await completeness(db, crawlId);
+      const state = await completeness(db, crawlId, ORPHAN.id);
       if (skipReason(state) !== null) return [];
       return orphanFindings(db, crawlId, state.failed, capsOr(caps));
     },
@@ -322,7 +394,7 @@ export const linkGraphRules: QueryRule[] = [
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
-      const state = await completeness(db, crawlId);
+      const state = await completeness(db, crawlId, SKIPPED.id);
       const skipped = skipReason(state);
       if (skipped === null) return [];
       return [
@@ -336,12 +408,13 @@ export const linkGraphRules: QueryRule[] = [
     },
   }),
 
-  // No completeness gate, and the asymmetry with `links.orphan` above is the
-  // point: an unfinished crawl makes "nothing links to this page" unsound, but
-  // it only makes this rule's answer INCOMPLETE — every page it does report is
-  // a page whose click path this crawl walked. The existence check is still
-  // needed, because a crawl id nothing knows selects no rows and would read as
-  // a site with no buried pages.
+  // Reads the same completeness state the two rules above gate on, and CAVEATS
+  // rather than gates: a search over an incomplete crawl overstates depth (it
+  // cannot see the shorter path through a page nobody fetched), which makes a
+  // finding here possibly wrong rather than certainly unsound. See
+  // `deepPageFindings`. The state read also serves as the existence check — a
+  // crawl id nothing knows throws there, naming this rule, instead of selecting
+  // no rows and reading as a site with no buried pages.
   defineRule<QueryRule>({
     kind: "query",
     id: DEEP.id,
@@ -351,8 +424,8 @@ export const linkGraphRules: QueryRule[] = [
     ...copyFor(DEEP.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
-      await assertCrawl(db, crawlId, DEEP.id);
-      return deepPageFindings(db, crawlId, capsOr(caps));
+      const state = await completeness(db, crawlId, DEEP.id);
+      return deepPageFindings(db, crawlId, state, capsOr(caps));
     },
   }),
 ];

@@ -1235,9 +1235,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      ruleset 0.7.0 it is a query rule, running after the click-depth search), so its
      evidence is `{clickDepth, threshold}` and its list is the buried indexable pages
      rather than a lower bound. Pages with no click path at all are NOT in it — they
-     have no depth to be past a threshold and are `links.orphan`'s finding (CHECK-32)
-     — so read the two together. Per-page depths come from `pages_query`, which
-     reports `clickDepth` beside `depth`.
+     have no depth to be past a threshold; they are the `nullCount` bucket in the
+     distribution above, and where nothing links to them at all they are
+     `links.orphan`'s finding (CHECK-32). A page in `nullCount` but not in
+     `links.orphan` is the island step 4 asks about. Per-page depths come from
+     `pages_query`, which reports `clickDepth` beside `depth`.
+     **Read the caveat on each finding.** A click depth computed over an incomplete
+     crawl is an UPPER BOUND — an unfetched page can only have removed a shorter
+     route, never added one — so the evidence carries a caveat holding an
+     `incompleteCrawl` reason (when the crawl did not demonstrably finish) and/or a
+     `failedPages` count (URLs that could not be fetched). No caveat means the crawl
+     drained its frontier under its cap and the depths are the site's own.
   3. `metrics_get` with `metricId: "structure.depth-distribution"` — DISCOVERY depth,
      kept as evidence about the CRAWL rather than about the site. It counts hops from
      a seed, and **every sitemap URL is a seed**, so a page with no HTML link path is
