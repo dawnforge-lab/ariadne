@@ -508,7 +508,7 @@ describe("the tool surface", () => {
     }
     // And the tool that answers it names the three fields it gained.
     const status = listed.tools.find((t) => t.name === "crawl_status")?.description ?? "";
-    for (const field of ["rulesRunAt", "findingsCount", "legacyHosts", "sitemapUrls"]) {
+    for (const field of ["rulesRunAt", "findingsCount", "pagesScanned", "legacyHosts", "sitemapUrls"]) {
       expect(status, `crawl_status does not name ${field}`).toContain(field);
     }
   });
@@ -820,6 +820,9 @@ describe("crawl_rules", () => {
   it("judges the finished crawl, answers with the run summary, and marks it judged", async () => {
     const before = await ok("crawl_status", { crawlId: liveCrawlId });
     expect(before["rulesRunAt"]).toBeNull();
+    // Unjudged, and it still reports the pages a run would scan: the field
+    // describes the crawl.
+    expect(Number(before["pagesScanned"])).toBeGreaterThanOrEqual(3);
 
     const summary = await ok("crawl_rules", { crawlId: liveCrawlId });
     expect(Number(summary["pagesScanned"])).toBeGreaterThanOrEqual(3);
@@ -833,6 +836,16 @@ describe("crawl_rules", () => {
     const after = await ok("crawl_status", { crawlId: liveCrawlId });
     expect(Number.isNaN(Date.parse(String(after["rulesRunAt"])))).toBe(false);
     expect(after["findingsCount"]).toBe(summary["findings"]);
+
+    // AND THE PAGE COUNT IS THE RUN'S OWN, THROUGH THE TRANSPORT. The audit
+    // skill fills `crawl.rulesRun.pagesScanned` from crawl_status for a crawl
+    // somebody else judged, so this equality is the thing that entitles it to:
+    // the run counted its cursor's iterations, the status counts the rows that
+    // cursor walked, and they are one number rather than two that usually agree.
+    expect(after["pagesScanned"]).toBe(summary["pagesScanned"]);
+    // Before and after the judgement, unchanged — `pages` rows are immutable
+    // once the crawl has stopped, which is what makes the derivation sound.
+    expect(before["pagesScanned"]).toBe(after["pagesScanned"]);
   }, 90_000);
 
   it("refuses a crawl that has not stopped moving", async () => {

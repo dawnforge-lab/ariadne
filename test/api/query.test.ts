@@ -955,6 +955,21 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     expect(clean.body["rulesRunAt"]).toBeNull();
   });
 
+  // pagesScanned DESCRIBES THE CRAWL, NOT A RUN — which is the whole reason it
+  // is worth having. It counts the `pages` rows, and a rules run's page cursor
+  // iterates every one of them with no filter, so the number is answerable
+  // before anybody judges the crawl and stays true afterwards. Neither of these
+  // two crawls has ever been judged, and both report it.
+  it("reports the pages a rules run would scan, on crawls nobody has judged", async () => {
+    for (const id of [crawlA, crawlE]) {
+      const res = await call(`/crawls/${id}`);
+      const rows = await db.select({ id: pages.id }).from(pages).where(eq(pages.crawlId, id));
+      expect(rows.length, `${id} seeds no pages, so this proves nothing`).toBeGreaterThan(0);
+      expect(res.body["pagesScanned"], `${id} misreports its page count`).toBe(rows.length);
+      expect(res.body["rulesRunAt"]).toBeNull();
+    }
+  });
+
   // ONE STATEMENT, ONE SNAPSHOT. rulesRunAt and findingsCount describe each
   // other — an agent is told to read `findingsCount: 0` beside a timestamp as
   // "looked, found nothing" — and a rules run clears the marker and deletes the
@@ -990,6 +1005,23 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     // …and it is the one that reads the crawl row, marker included.
     expect(touchingIssues[0]).toMatch(/\bcrawls\b/);
     expect(touchingIssues[0]).toMatch(/rules_run_at/);
+    // The page count rides the SAME statement, for the same reason and not to
+    // save a round trip: `pagesScanned` beside `rulesRunAt` is read as "judged
+    // over N pages", so a torn read would let a crawl report a marker from
+    // before a re-crawl against a page count from after it. (`pages_crawled` is
+    // a different column and does not match this: `_` is a word character.)
+    expect(touchingIssues[0]).toMatch(/\bpages\b/);
+
+    // AND BOTH CORRELATIONS ARE QUALIFIED. An unqualified `where "crawl_id" =
+    // "id"` binds BOTH names in the subquery's own scope, so the correlation
+    // silently becomes `pages.crawl_id = pages.id` and the count is 0 on every
+    // crawl — which reads as "nothing there" rather than as an error. The page
+    // count was written that way first and counted zero; the findings count
+    // has always been written that way and is correct only because `issues`
+    // has no `id` column for the inner scope to capture. This pins the
+    // qualification instead of the accident.
+    expect(touchingIssues[0]).toMatch(/"issues"\."crawl_id" = "crawls"\."id"/);
+    expect(touchingIssues[0]).toMatch(/"pages"\."crawl_id" = "crawls"\."id"/);
   });
 
   it("reports the stamp a completed rules run leaves, as an ISO timestamp", async () => {

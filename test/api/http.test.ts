@@ -1118,6 +1118,9 @@ describe("POST /crawls/:id/rules", () => {
     // Before: this crawl has never been judged, and the surface says so.
     const before = await call("GET", `/crawls/${fixtureCrawlId}`);
     expect(before.body["rulesRunAt"]).toBeNull();
+    // Never judged, and the page count is already there: `pagesScanned`
+    // describes the crawl's `pages` rows, not a run over them.
+    expect(Number(before.body["pagesScanned"])).toBeGreaterThanOrEqual(3);
 
     const res = await call("POST", `/crawls/${fixtureCrawlId}/rules`);
     expect(res.status).toBe(200);
@@ -1141,6 +1144,11 @@ describe("POST /crawls/:id/rules", () => {
     expect(Number.isNaN(Date.parse(String(stamp)))).toBe(false);
     expect(Date.parse(String(stamp))).toBeGreaterThan(Date.parse(String(fixtureFinal["startedAt"])));
     expect(after.body["findingsCount"]).toBe(res.body["findings"]);
+    // The same equality for the page count: the run counts its cursor's
+    // iterations, the detail counts the rows the cursor walked, and the crawl's
+    // `pages` rows did not move in between.
+    expect(after.body["pagesScanned"]).toBe(res.body["pagesScanned"]);
+    expect(before.body["pagesScanned"]).toBe(res.body["pagesScanned"]);
   }, 60_000);
 
   // A rules run REWRITES the crawl's issues — it deletes them at the top and

@@ -218,7 +218,7 @@ target is not something this skill can crawl.
  renderPassCount, rulesetVersion, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
- rulesRunAt, findingsCount}
+ rulesRunAt, findingsCount, pagesScanned}
 ```
 
 What the fields mean when you are waiting:
@@ -260,6 +260,12 @@ What the fields mean when you are waiting:
   pass to re-run. They are on the crawl, so an auditor who never met your session can
   read them. Neither moves during the crawl itself — the rules cannot run until it
   stops.
+- **`pagesScanned`** — how many pages a rules pass over this crawl reads. It describes
+  the CRAWL, not a run, so it is answered before anybody judges it, and it is the same
+  number `crawl_rules` reports as its own `pagesScanned`. It is the denominator a
+  finding count is written against, and it is why an audit of a crawl somebody else
+  judged does not need a second pass to describe the first. Not `pagesCrawled`: that
+  is the crawl loop's own counter of what it fetched.
 - **`legacyHosts`** — the extra hosts this crawl was told the site used to live on,
   echoed from its stored config. Empty means none were given, which is what separates
   "the legacy domain does not redirect" from "nobody named a legacy domain" in

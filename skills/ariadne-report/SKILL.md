@@ -147,15 +147,15 @@ Sweep them: `metrics_get` with `crawlId` and no other filter, following
   `crawl_status` — is what distinguishes them, with `crawl.rulesRun` as the per-rule
   breakdown beside it. If the sweep is empty and those say the crawl was judged, stop:
   the findings file and the crawl do not describe the same run.
-- **`crawl.rulesRun` may be null, and null is not a defective findings file.** It
-  carries the `crawl_rules` summary's scalars only when the audit ran that pass
-  itself; an audit of a crawl somebody else judged writes null rather than re-judging
-  shared state to fill a field, and says so in `crawl.caveats`. **`crawl.rulesRunAt`
-  is the gate, not `rulesRun`** — a timestamp with a null breakdown is a judged crawl
-  and every PASS in the file stands on it. What you lose is `pagesScanned`, so where
-  the report would have written "over 4,821 pages scanned" use `crawl.pagesCrawled`
-  and call it what it is: the pages the crawl fetched. A null `rulesRunAt` is the
-  refusal case, and it stays one.
+- **`crawl.rulesRun` is filled for any judged crawl**, including one somebody else
+  judged: its `pagesScanned` and `findings` come from `crawl_status` and its `metrics`
+  from the audit's own metrics sweep, so the audit never re-judges shared state to
+  fill a field. Quote `rulesRun.pagesScanned` as the pages the rules read.
+  **`crawl.rulesRunAt` is still the gate, not `rulesRun`** — a null `rulesRunAt` is
+  the refusal case and it stays one. A `rulesRun` of null on a file whose `rulesRunAt`
+  carries a timestamp is an older findings file, written before those numbers were
+  readable without a run: use `crawl.pagesCrawled` there and call it what it is, the
+  pages the crawl fetched.
 
 ## Step 3 — severity in context
 
