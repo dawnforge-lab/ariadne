@@ -24,9 +24,11 @@ const api = createApiServer({
   config: {
     token: config.token,
     allowedDomains: config.allowedDomains,
-    // Undefined means the `renders/` default; see `ServiceConfig.renderDir`.
-    // Unlike `crawlDefaults` this IS an environment knob, and safely so: it
-    // names where the server keeps its own output, not what it may do.
+    // Undefined means each field's own default — `exports/` and `renders/`; see
+    // `ServiceConfig`. Unlike `crawlDefaults` these ARE environment knobs, and
+    // safely so: they name where the server keeps its own output, not what it
+    // may do.
+    ...(config.exportDir === undefined ? {} : { exportDir: config.exportDir }),
     ...(config.renderDir === undefined ? {} : { renderDir: config.renderDir }),
   },
 });
@@ -40,6 +42,11 @@ console.error(
 // per rendered page and an operator needs to know where, before it grows.
 console.error(
   `ariadne api: rendered documents -> ${config.renderDir ?? "renders/ (default; set ARIADNE_RENDER_DIR to move it)"}`,
+);
+// The same courtesy for the other output directory. On a billed audit
+// `export_crawl` is the normal path, so this one fills up too.
+console.error(
+  `ariadne api: crawl exports -> ${config.exportDir ?? "exports/ (default; set ARIADNE_EXPORT_DIR to move it)"}`,
 );
 if (config.allowedDomains.length === 0) {
   console.error(

@@ -864,12 +864,34 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   **Legacy and staging hosts are only checked if you named them.** Pass them as
   `legacyHosts` when starting the crawl (each one must be on the operator's
   allowlist in its own right — they are different sites by every definition the
-  engine has). A host nobody named is a host nobody probed, which is a SKIP, not a
-  pass.
+  engine has).
+
+  **When nobody named a legacy host, the check is a PASS with an unmeasured half —
+  not a SKIP.** This sentence used to read "a host nobody named is a host nobody
+  probed, which is a SKIP, not a pass", and two auditors reading it beside the
+  Evaluate line below landed on different verdicts for the same crawl. The Evaluate
+  line governs, and it asks one question: do the site's variants resolve to one
+  canonical host? The apex/www/http probe answers exactly that, it runs on every
+  crawl with `probeHosts` on, and its answer does not become unknown because a
+  legacy domain was never mentioned. So: **probe ran, no `host.duplicate-host-200`,
+  no legacy host named → PASS, and `notes` says the legacy/staging half was NOT
+  MEASURED because no `legacyHosts` were supplied.** Put the missing number in the
+  report's not-measured table like any other.
+
+  The SKIP reading is rejected, and it is worth saying why rather than just
+  dropping it: SKIP means nothing was measured, and here the probe measured the
+  thing the check is named for. A SKIP would file a site with one clean canonical
+  host beside sites nobody looked at. **The SKIP case is narrower and still
+  stands: `host.probe-skipped` fired** — the crawl ran with `probeHosts: false`, so
+  no variant was probed at all and there is no verdict to give. A named legacy host
+  on a crawl whose probe was skipped is that same SKIP.
 - **Evaluate**:
-  - PASS if all variants redirect to one canonical host
+  - PASS if all variants redirect to one canonical host — including when no
+    `legacyHosts` were named, with the legacy half recorded as NOT MEASURED
   - FAIL if multiple hosts resolve to live content
-  - Record: canonical host, redirect behavior per variant
+  - SKIP only if `host.probe-skipped` fired: nothing about any variant was measured
+  - Record: canonical host, redirect behavior per variant, and whether any
+    `legacyHosts` were supplied
 
 ---
 
@@ -2319,17 +2341,24 @@ define is refused BY NAME, so an empty page always means "nothing found" and nev
 "you asked wrong". Two refusals are routine and both are informative:
 
 - `checkId 'CHECK-08' is claimed only by metric rules … it is measured, not found` —
-  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38
-  answer this way.
+  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38 answer
+  this way, **for example**: the list is a sample of the shape, not the closed set.
 - `checkId 'CHECK-41' is claimed by no rule` — an agent check. There is no engine
-  answer and there is not meant to be one.
+  answer and there is not meant to be one. CHECK-41 is the standing example and
+  **it is far from the only one** — CHECK-42, CHECK-47 and the whole CHECK-71…81
+  analytics block answer the same way, as does every other check the coverage query
+  records as agent-owned. Neither list above is exhaustive and neither is meant to
+  be read as one: probe the check you are on, and take the refusal it gives you.
 
 **When a crawl is large**, `export_crawl` writes one dataset (`issues`, `pages`,
 `metrics`) to a gzipped JSONL file on the server and answers `{dataset, path, rows,
 bytes}` — the path, never the contents. Use it when you need every row (the full
 4xx list, a site-wide page census) rather than paging thousands of rows through a
 context window. The file is for a human or a pipeline; the counts and the samples
-are what belong in the audit.
+are what belong in the audit. **The directory is the server's choice, never
+yours**: it is `exports/` under the server's working directory unless the operator
+set `ARIADNE_EXPORT_DIR`, and the answer's `path` is where the file actually
+landed. Quote that path; do not construct one.
 
 ## Crawl Configuration Requirements
 

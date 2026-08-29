@@ -1430,13 +1430,14 @@ describe("boot configuration", () => {
     expect(() => loadApiConfig({ ARIADNE_API_TOKEN: TOKEN })).toThrow(/DATABASE_URL must be set/);
   });
 
-  it("reads the token, the allowlist, the port and the render directory", () => {
+  it("reads the token, the allowlist, the port and both output directories", () => {
     const config = loadApiConfig({
       ARIADNE_API_TOKEN: TOKEN,
       DATABASE_URL: "postgres://x",
       ARIADNE_ALLOWED_DOMAINS: "example.com,*.example.org",
       ARIADNE_API_PORT: "9123",
       ARIADNE_RENDER_DIR: "/srv/ariadne/renders",
+      ARIADNE_EXPORT_DIR: "/srv/ariadne/exports",
     });
     expect(config.token).toBe(TOKEN);
     expect(config.allowedDomains).toEqual(["example.com", "*.example.org"]);
@@ -1447,13 +1448,19 @@ describe("boot configuration", () => {
     // Unlike `crawlDefaults` it is safe to read from the environment — it names
     // where our own output lands, never what the server may do.
     expect(config.renderDir).toBe("/srv/ariadne/renders");
+    // The exports directory joined it in P8-T6 on the same argument, measured:
+    // the Phase 8 gate's deliverable run left one crawl's 384KB export in the
+    // repository because this variable did not exist. On a billed audit the
+    // export is the normal path, not the exception.
+    expect(config.exportDir).toBe("/srv/ariadne/exports");
   });
 
-  it("leaves the render directory undefined when nothing names one", () => {
+  it("leaves both output directories undefined when nothing names them", () => {
     // Unset is not an error and is not a path this function invents: it means
-    // "use the default", and the default (`renders/` under the cwd) is named
-    // once, in `ServiceConfig.renderDir`, where the service applies it.
+    // "use the default", and each default (`renders/` and `exports/` under the
+    // cwd) is named once, in `ServiceConfig`, where the service applies it.
     const config = loadApiConfig({ ARIADNE_API_TOKEN: TOKEN, DATABASE_URL: "postgres://x" });
     expect(config.renderDir).toBeUndefined();
+    expect(config.exportDir).toBeUndefined();
   });
 });

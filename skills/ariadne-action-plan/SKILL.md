@@ -86,6 +86,19 @@ is `FAIL` or `AGENT`. Three kinds of candidate come out:
 - **Rule-backed candidates.** The check's `evidence` carries `finding` entries with
   a `count` above zero. Each named rule is a candidate, and its tab body is an
   `issue_urls` feed.
+
+  **A `finding` entry is this check's own only when the rule claims this check.**
+  `issues_list` returns every rule's `checkIds`; a rule whose `checkIds` does not
+  contain the check id you are reading was cited as a CROSS-REFERENCE — context the
+  auditor quoted — and it is a candidate under whichever check does claim it, not
+  under this one. On the Phase 8 gate site CHECK-67 cited `title.duplicate` (5
+  groups) to say the two search pages share a title, while `title.duplicate`'s own
+  `checkIds` is `["CHECK-35"]` alone; taken as intake it would have opened the same
+  five groups under two checks. **This is a different shape from 1d's "a rule
+  claimed by two checks"**: there the rule genuinely names both checks and the
+  tiebreak decides between them; here only one check is named and the answer is
+  already written down. Record the cross-reference on the citing check's Summary
+  line, pointing at the tab that owns the rows.
 - **Check-level candidates: the judgement kind.** An `AGENT` check whose evidence is
   `observation` entries and nothing else. There is no rule, so there is no
   `issue_urls` feed: the tab body is the observations — their `urls`, their
@@ -221,6 +234,44 @@ genuinely different work — regenerate a file versus rewrite copy — they fall
 different lanes, and the lane split in Step 2 separates them into
 `Sitemap hygiene (platform)` and `Sitemap hygiene (pages)`.
 
+**The same-remedy merge: one change is one tab, whatever the volume.** Candidates
+whose `recommendation` names THE SAME REMEDY merge into a single tab even when
+they are at or above the volume floor, and even across sections. The Phase 8 gate
+site is the case this clause was written from: click depth (356 pages), orphan
+pages (243), product discovery (148) and pagination (4) were four tabs describing
+**one template change** — put links to the products on the collection grid — and
+1d as written could not consolidate them, because three were above the floor and
+one sat in another section. They shipped as four tabs and the Summary sheet had
+to say in prose what the workbook should have said in its structure. A team
+reading four tabs sizes four jobs.
+
+**The test for "the same remedy" is the recommendation text, not the theme.** Put
+the candidates' `recommendation` strings side by side and ask whether a developer
+doing the work makes ONE change or several. They agree when they name the same
+change to the same template, file or setting — "add product links to the
+collection grid template" written four ways is one remedy. They do NOT agree when
+they merely share a subject: *internal linking* is a theme, and four candidates
+under it whose fixes are a template change, a redirect map, a sitemap
+regeneration and a nav edit are four remedies and four tabs. The check that
+settles it: if you cannot write the merged tab's `Fix` column as one instruction
+without losing a clause one of its members needed, they were never the same
+remedy. When in doubt, do not merge — a merge that hides a distinct fix is worse
+than a tab count over target.
+
+**Inside the merged tab every member keeps its own block**, exactly as in a family
+tab: a block row naming that check's ids, its rule ids, its count and the clause
+of the fix specific to it, then that block's header and rows. **The merged tab
+carries all the merged checks' ids on its face** and each member's Summary line
+names the tab that owns it, so nothing loses its trace back to the checklist.
+Name the tab for the change, not for any one of its checks.
+
+**1e's protections then apply to the MERGED candidate, not to its members.** The
+merged candidate's priority is the highest any member held, its severity the
+highest, and its count the sum — so a merge can never become a way of cutting a
+protected check by absorbing it into a weaker one. A merged tab is also never a
+route around the *Considered, not included* ledger: every member is still a check
+that entered 1a and still leaves through exactly one named door.
+
 **A rule claimed by two checks belongs to one tab.** `checkIds` is a list: on this
 ruleset `content.thin` claims CHECK-40 and CHECK-13, so a check-keyed intake picks
 it up twice and would hand the same 22 URLs to two teams — and both tabs would pass
@@ -294,6 +345,24 @@ does not get to decide quietly that a site has less wrong with it than it has.
 
 Six to ten tabs is the target because a twenty-tab workbook is a database export,
 and the team that receives one does the triage you were supposed to do.
+
+**On a FAIL-heavy audit the protections govern and the target is advisory — that is
+measured, not feared.** On the Phase 8 gate site seventeen candidates reached 1e:
+five were `Critical`, twelve were at or above the volume floor, nine more were
+`High` priority or `critical` severity, and **exactly one candidate was eligible for
+the cut**. It was cut, at rank 16, and the workbook shipped sixteen tabs against a
+target of ten. A billed audit run with `findingCap: null` reaches that state easily,
+because uncapped counts put more candidates above the volume floor than a
+200-capped run ever could — the floor protection is doing exactly what it was
+written to do, on numbers that are now real.
+
+So the order stands: run the cut, apply the protections, and if what survives is
+over ten tabs, **the Summary sheet states the tab count, the target, and that the
+protections left nothing further cuttable.** Do not reopen the cut to reach the
+number. Do not merge candidates that are not the same remedy in order to look
+tidier — the same-remedy merge in 1d is a claim about the work, never a tab-count
+lever. A sixteen-tab plan that says why it is sixteen tabs is a deliverable; a
+ten-tab plan that got there by dropping six real work items is not.
 
 **Nothing is dropped silently, and the claim is over checks.** Every check that
 entered 1a, and every rule inside one, is either in a tab, in a family block, or on
@@ -397,9 +466,11 @@ ship the tab: say which number is which and find out why.
   `{ruleId, checkIds, severity, category, title, url, evidence}` — the same
   evidence, plus the rule's identity on every line.
 - **But check where the file landed.** `export_crawl` writes on the SERVER's
-  filesystem and hands back a server path. If the server is not on your machine,
-  that path is not yours to read, and the answer is to paginate anyway and say in
-  the tab how many rows you fetched.
+  filesystem and hands back a server path — `exports/` under the server's working
+  directory unless the operator set `ARIADNE_EXPORT_DIR`. Read the `path` the
+  answer gives you; never assemble one. If the server is not on your machine, that
+  path is not yours to read, and the answer is to paginate anyway and say in the
+  tab how many rows you fetched.
 - **Past ~5,000 rows a tab has stopped being a work list.** Nobody works through
   20,000 rows in Excel. Then the tab carries a deliberate slice — the affected
   page types with their counts, and the first N rows in the order below — and its
@@ -597,9 +668,16 @@ Save as `{client-or-domain}-action-plan.xlsx` beside the findings file — **the
 prefixed name is canonical**, for the reason the report skill gives: the findings
 file is `ariadne-findings.json` on every audit, so the deliverables carry the client
 and a folder of two quarters' work stays readable. A bare `action-plan.xlsx` is the
-same workbook under a name that collides with the next one; if the person who asked
-for it named the file, follow them and say which name you used. Then say in the
-conversation:
+same workbook under a name that collides with the next one.
+
+**If the person who asked for the plan named the file, use their name and say which
+name you used.** The prefixed spelling is the default for when nobody said, not a
+rule that outranks the request — a requester who asked for `action-plan.xlsx` and
+received the prefixed spelling instead has to go looking for their own
+deliverable. Renaming against the request is the worse failure of the two, and
+following it silently is the other one.
+
+Then say in the conversation:
 
 - where the file is;
 - the tabs, grouped by lane, with row counts — so the client can see at a glance

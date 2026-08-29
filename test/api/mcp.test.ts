@@ -1227,12 +1227,19 @@ describe("boot configuration", () => {
     // The whole shape, not a sample: what this config DOES NOT carry is the
     // point of the assertion, and a token quietly appearing in it would be the
     // trust model changing without anybody saying so. `renderDir` joined the
-    // set in P8-T1 — it names where the render pass keeps its documents, which
-    // is an operator's filesystem choice and not a credential.
-    expect(Object.keys(config).sort()).toEqual(["allowedDomains", "databaseUrl", "renderDir"]);
+    // set in P8-T1 and `exportDir` in P8-T6 — both name where this server keeps
+    // its own output, which is an operator's filesystem choice and not a
+    // credential.
+    expect(Object.keys(config).sort()).toEqual([
+      "allowedDomains",
+      "databaseUrl",
+      "exportDir",
+      "renderDir",
+    ]);
     // Unset means "use the default", which the service names — not a path this
-    // function invents. See `parseRenderDir`.
+    // function invents. See `parseOutputDir`.
     expect(config.renderDir).toBeUndefined();
+    expect(config.exportDir).toBeUndefined();
   });
 
   it("still reads the allowlist, and an empty one is a posture rather than an error", () => {
@@ -1251,5 +1258,36 @@ describe("boot configuration", () => {
     expect(
       loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_RENDER_DIR: "   " }).renderDir,
     ).toBeUndefined();
+  });
+
+  // ARIADNE_EXPORT_DIR reads the shell exactly as its twin does, and that is
+  // the assertion: one `parseOutputDir` serves both, so the two settings cannot
+  // drift apart on what an empty value means.
+  it("reads ARIADNE_EXPORT_DIR, and treats empty and unset alike", () => {
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_EXPORT_DIR: "/srv/ariadne/exports" })
+        .exportDir,
+    ).toBe("/srv/ariadne/exports");
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_EXPORT_DIR: "   " }).exportDir,
+    ).toBeUndefined();
+  });
+
+  // The two are independent: naming one must not move the other. Without this
+  // an entrypoint that read a single variable into both fields would pass every
+  // test above.
+  it("keeps the two output directories independent", () => {
+    const onlyExport = loadMcpConfig({
+      DATABASE_URL: "postgres://x",
+      ARIADNE_EXPORT_DIR: "/srv/ariadne/exports",
+    });
+    expect(onlyExport.exportDir).toBe("/srv/ariadne/exports");
+    expect(onlyExport.renderDir).toBeUndefined();
+    const onlyRender = loadMcpConfig({
+      DATABASE_URL: "postgres://x",
+      ARIADNE_RENDER_DIR: "/srv/ariadne/renders",
+    });
+    expect(onlyRender.renderDir).toBe("/srv/ariadne/renders");
+    expect(onlyRender.exportDir).toBeUndefined();
   });
 });

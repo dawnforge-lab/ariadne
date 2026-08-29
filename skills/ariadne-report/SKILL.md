@@ -207,8 +207,16 @@ Markdown, one file, written beside the findings file:
 the findings file is `ariadne-findings.json` on every audit, so the two deliverables
 carry the client instead, and a folder holding two quarters' work stays readable. A
 bare `audit-report.md` is the same document under a name that collides with the next
-one; if the person who asked for the report named the file, follow them and say which
-name you used. This is the shape; the words are yours.
+one.
+
+**If the person who asked for the report named the file, use their name and say at
+the top of the report which name you used.** The prefixed spelling is the default
+for when nobody said, not a rule that outranks the request — a requester who asked
+for `audit-report.md` and received the prefixed spelling instead has to go
+looking for their own deliverable. Renaming against the request is the worse
+failure of the two, and following it silently is the other one.
+
+This is the shape; the words are yours.
 
 ```markdown
 # SEO & GEO audit — {client} · {site}

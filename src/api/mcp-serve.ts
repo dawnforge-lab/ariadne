@@ -31,7 +31,9 @@ const mcp = createMcpServer({
   db,
   config: {
     allowedDomains: config.allowedDomains,
-    // Undefined means the `renders/` default; see `ServiceConfig.renderDir`.
+    // Undefined means each field's own default — `exports/` and `renders/`; see
+    // `ServiceConfig`.
+    ...(config.exportDir === undefined ? {} : { exportDir: config.exportDir }),
     ...(config.renderDir === undefined ? {} : { renderDir: config.renderDir }),
   },
 });
@@ -44,6 +46,9 @@ console.error(
 // operator needs to know where `crawl_render` leaves its documents.
 console.error(
   `ariadne mcp: rendered documents -> ${config.renderDir ?? "renders/ (default; set ARIADNE_RENDER_DIR to move it)"}`,
+);
+console.error(
+  `ariadne mcp: crawl exports -> ${config.exportDir ?? "exports/ (default; set ARIADNE_EXPORT_DIR to move it)"}`,
 );
 if (config.allowedDomains.length === 0) {
   console.error(
