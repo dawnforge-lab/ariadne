@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
-import { RENDER_DEFAULTS, SUSPICION } from "../../src/crawl/render/select.js";
+import { RENDER_DEFAULTS, RENDER_URLS_KEY, SUSPICION } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
@@ -205,6 +205,9 @@ describe("render.coverage against the database", () => {
     expect(Object.keys(rows)).toEqual(["site|"]);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
+      // P8-T2: which decision chose these pages. Automatic here — no URL
+      // list is on the crawl row.
+      selectionMode: "auto",
       selectionBudget: 1,
       selectionSuspects: 2,
       selectionSampled: 3,
@@ -244,6 +247,9 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
+      // P8-T2: which decision chose these pages. Automatic here — no URL
+      // list is on the crawl row.
+      selectionMode: "auto",
       selectionBudget: 2,
       selectionSuspects: 2,
       selectionSampled: 1,
@@ -275,6 +281,9 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
+      // P8-T2: which decision chose these pages. Automatic here — no URL
+      // list is on the crawl row.
+      selectionMode: "auto",
       selectionBudget: 6,
       selectionSuspects: 2,
       selectionSampled: 3,
@@ -293,6 +302,9 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 0,
+      // P8-T2: which decision chose these pages. Automatic here — no URL
+      // list is on the crawl row.
+      selectionMode: "auto",
       selectionBudget: 0,
       selectionSuspects: 0,
       selectionSampled: 0,
@@ -301,6 +313,98 @@ describe("render.coverage against the database", () => {
       pagesRendered: 0,
       renderFailures: 0,
     });
+  });
+
+  /**
+   * P8-T2. THE EXPLICIT SELECTION, and the whole reason `selectionMode` exists.
+   *
+   * The same six pages, the same default knobs — so the AUTOMATIC decision over
+   * this crawl is the first case in this file, `budget 1 / suspects 2 /
+   * sampled 3 / selected 1 / truncated true`. None of that happened. The render
+   * pass was handed three URLs, and the record of that is the `renderUrls` list
+   * the pass wrote onto the crawl's config (`RENDER_URLS_KEY`).
+   *
+   * So every automatic number is NULL, and the numbers it would have reported
+   * are named here to make the point: reporting them, or reporting zeroes in
+   * their place, would describe a decision that was never taken.
+   */
+  it("reports an explicit selection as explicit, with the automatic numbers null", async () => {
+    const named = [url("/a3"), url("/b1"), url("/b2")];
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: {
+        userAgent: "AriadneBot-test",
+        maxPages: 500,
+        [RENDER_URLS_KEY]: named,
+      },
+    });
+    await addPages(
+      crawlId,
+      SITE_PAGES.map((p) => (named.includes(url(p.path)) ? { ...p, rendered: true } : p)),
+    );
+
+    const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
+    expect(rows["site|"]).toEqual({
+      pagesCrawled: 6,
+      selectionMode: "explicit",
+      // Null, not 1 — the budget the automatic decision would have had — and
+      // not 0 either, which reads as "a budget of none".
+      selectionBudget: null,
+      // Null, not 2. `/a1` and `/a2` are still suspicious pages; nothing asked.
+      selectionSuspects: null,
+      selectionSampled: null,
+      // The list's length, and that is the whole derivation: every entry was
+      // checked against this crawl's pages before the pass ran.
+      selectionSelected: 3,
+      selectionTruncated: null,
+      pagesRendered: 3,
+      renderFailures: 0,
+    });
+  });
+
+  // An explicit list of one is still an explicit list. Worth its own case
+  // because `selectionSelected: 1` is also what the automatic decision reports
+  // on this site — the two rows are told apart by the mode and by nothing else.
+  it("does not mistake a one-page list for the automatic budget of one", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500, [RENDER_URLS_KEY]: [url("/a3")] },
+    });
+    await addPages(crawlId, SITE_PAGES);
+
+    const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
+    expect(rows["site|"]).toMatchObject({
+      selectionMode: "explicit",
+      selectionSelected: 1,
+      selectionBudget: null,
+    });
+  });
+
+  // An explicit NULL is what an automatic pass writes over an earlier list, and
+  // it must read as the automatic selection rather than as an empty one.
+  it("reads a null URL list as the automatic selection it is", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500, [RENDER_URLS_KEY]: null },
+    });
+    await addPages(crawlId, SITE_PAGES);
+
+    const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
+    expect(rows["site|"]).toMatchObject({
+      selectionMode: "auto",
+      selectionBudget: 1,
+      selectionSuspects: 2,
+      selectionSelected: 1,
+    });
+  });
+
+  // A shape this rule cannot read stops it, for the same reason a non-numeric
+  // knob does and with a sharper consequence: guessing "automatic" would be a
+  // claim about HOW the pages were chosen, made from a value nobody can read.
+  it("refuses a stored URL list that is not an array of strings", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500, [RENDER_URLS_KEY]: "/a3" },
+    });
+    await expect(rule("render.coverage").run(db, crawlId)).rejects.toThrow(
+      /config\.renderUrls is neither null nor an array of strings/,
+    );
   });
 
   // A stored knob that is not a number stops the metric, naming the crawl and

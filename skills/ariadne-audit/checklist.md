@@ -292,10 +292,18 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
      else.
   3. `metrics_get` with `metricId: "render.coverage"` for the denominator: how many
      pages were rendered out of how many crawled, the selection budget, and the
-     render failures. A finding count means nothing without it.
-  4. `pages_query` with `rendered: true` to see which pages the sample covered, and
-     which page types are represented. If a page type you care about was not
-     sampled, say so rather than generalising from the ones that were.
+     render failures. A finding count means nothing without it. **Read
+     `selectionMode` first** — `auto` means the engine sampled and the budget
+     numbers describe how; `explicit` means an auditor named the pages, and
+     `selectionBudget`, `selectionSuspects`, `selectionSampled` and
+     `selectionTruncated` are null rather than zero, because no automatic decision
+     was taken. Quoting a null as "no suspects" would be a claim about the site's
+     HTML that nothing measured.
+  4. `pages_query` with `rendered: true` to see which pages were covered, and which
+     page types are represented. If a page type you care about was not covered, say
+     so rather than generalising from the ones that were — and on an explicit pass
+     say which templates your list stood for, since that is the whole of the
+     coverage claim.
   5. The nav side of the same question is CHECK-34 (`nav.js-only`) and the facet
      side is CHECK-02 (`filters.js-only`). Read all three together before you
      conclude anything about crawlability without JS.
@@ -305,7 +313,7 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
   - WARN if navigation or key content is JS-dependent on some page types
   - FAIL if a page is essentially blank without JS (critical JS dependency: `addedWords` is most of `renderedRenderableWordCount`)
   - **FAIL if collection pages' product links are absent from raw HTML** — a crawler that does not render will miss most products, and Googlebot's initial crawl pass won't discover product URLs from collection pages. Products become entirely dependent on sitemap.xml for discovery. (Cross-read CHECK-33b: sitemap-only products are the same failure seen from the link graph.)
-  - Record: raw vs rendered word counts per page type (from the finding evidence), **the `renderedRenderableWordCount` / `renderableWordCount` RATIO beside `addedWords`** on the rendered pages, **the nav and filter link counts from CHECK-34 and CHECK-02**, render coverage (rendered / crawled, and the failures), recommendation for the next crawl's `renderBudgetPct`
+  - Record: raw vs rendered word counts per page type (from the finding evidence), **the `renderedRenderableWordCount` / `renderableWordCount` RATIO beside `addedWords`** on the rendered pages, **the nav and filter link counts from CHECK-34 and CHECK-02**, render coverage (rendered / crawled, the failures, and `selectionMode` with the templates the pass stood for), recommendation for the next crawl — which templates to name, or a `renderBudgetPct` if the next pass will be automatic
   - **Why the ratio and not only the delta.** Chrome that both documents carry cancels EXACTLY in `addedWords` (the 150-word arm) and does NOT cancel in the ratio arm, which reads `injected >= body + chrome`. So on a chrome-heavy theme the rule is still harder to trip than the thresholds alone suggest, and a zero is only a finding once you have looked at how close the ratio came. Quote it — a site whose rendered/renderable runs 1.6 across the board is a different story from one running 1.02, and only one of them is 'no client-side rendering'.
 
 ### CHECK-02: Filters / layered navigation — HTML or JS elements?

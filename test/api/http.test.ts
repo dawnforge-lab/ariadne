@@ -873,6 +873,129 @@ describe("POST /crawls/:id/render", () => {
   }, 60_000);
 });
 
+/**
+ * P8-T2 — the agent names the pages.
+ *
+ * ON ITS OWN CRAWL, deliberately. An explicit pass REPLACES the automatic
+ * selection and leaves a record of itself on the crawl row, so running one over
+ * `fixtureCrawlId` would change what every later test in this file reads about
+ * that crawl's rendering. A second crawl of the same three-page fixture costs a
+ * second and keeps the two stories separate.
+ *
+ * `renderMaxPages: 2` is set at crawl start so the cap has something to bite on:
+ * the site has three pages, so a list naming all three is over it.
+ */
+describe("POST /crawls/:id/render with a named list", () => {
+  let namedCrawlId = "";
+
+  beforeAll(async () => {
+    const accepted = await startCrawl({ siteUrl: `${site}/`, maxPages: 5, renderMaxPages: 2 });
+    expect(accepted.status).toBe(202);
+    namedCrawlId = String(accepted.body["crawlId"]);
+    await settle(namedCrawlId);
+  }, 60_000);
+
+  it("renders exactly the pages named, and records that it was told to", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, {
+      // `/a` twice: a repeated URL is one page, not two, and it must not be
+      // counted against the cap either.
+      body: { urls: [`${site}/a`, `${site}/b`, `${site}/a`] },
+    });
+    expect(res.status).toBe(200);
+
+    const selection = res.body["selection"] as Record<string, unknown>;
+    expect(selection["mode"]).toBe("explicit");
+    expect(selection["selected"]).toBe(2);
+    // Null, not zero. No budget was computed and nothing was suspected — see
+    // RenderSelection.mode. A zero here would read as an automatic selection
+    // that found nothing worth rendering.
+    expect(selection["budget"]).toBeNull();
+    expect(selection["suspects"]).toBeNull();
+    expect(selection["sampled"]).toBeNull();
+    expect(selection["truncated"]).toBeNull();
+    expect(Number(res.body["rendered"]) + Number(res.body["failures"])).toBe(2);
+    expect(res.body["unrendered"]).toBe(0);
+
+    // The pages rendered are the pages named, and nothing else. The home page
+    // is what the AUTOMATIC selection would have reached first on this crawl,
+    // so its absence is the property under test.
+    const rendered = await db
+      .select({ url: pages.url })
+      .from(pages)
+      .where(and(eq(pages.crawlId, namedCrawlId), eq(pages.rendered, true)));
+    expect(rendered.map((r) => r.url).sort()).toEqual([`${site}/a`, `${site}/b`]);
+
+    // And the record the coverage metric reads long afterwards: without it,
+    // `render.coverage` would recompute the automatic decision and describe a
+    // selection that never happened.
+    const [row] = await db
+      .select({ config: crawls.config })
+      .from(crawls)
+      .where(eq(crawls.id, namedCrawlId));
+    expect((row!.config as Record<string, unknown>)["renderUrls"]).toEqual([
+      `${site}/a`,
+      `${site}/b`,
+    ]);
+  }, 60_000);
+
+  it("400s a URL this crawl never fetched, naming it, rather than fetching it", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, {
+      body: { urls: [`${site}/a`, `${site}/never-crawled`] },
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain(`${site}/never-crawled`);
+    expect(String(res.body["error"])).toContain("already fetched");
+  });
+
+  it("400s a list longer than the crawl's renderMaxPages instead of trimming it", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, {
+      body: { urls: [`${site}/`, `${site}/a`, `${site}/b`] },
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("renderMaxPages of 2");
+  });
+
+  it("403s a host the URL policy refuses, whoever asked for it", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, {
+      // Link-local: refused even under the test-only allowPrivate hatch, which
+      // this server has on. Hard rule 5 applies to a URL a client supplies.
+      body: { urls: ["http://169.254.169.254/latest/meta-data"] },
+    });
+    expect(res.status).toBe(403);
+    expect(String(res.body["error"])).toContain("URL policy");
+  });
+
+  it("403s a host outside the site's family and outside the allowlist", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, {
+      body: { urls: ["http://192.168.7.7/somewhere"] },
+    });
+    expect(res.status).toBe(403);
+    expect(String(res.body["error"])).toContain("crawl allowlist");
+  });
+
+  it("400s an empty list rather than rendering nothing and calling it a pass", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, { body: { urls: [] } });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("empty list");
+  });
+
+  it("400s a body field it does not know rather than ignoring the instruction", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, {
+      body: { pages: [`${site}/a`] },
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("unknown field 'pages'");
+  });
+
+  it("400s urls that is not an array of strings", async () => {
+    const res = await call("POST", `/crawls/${namedCrawlId}/render`, {
+      body: { urls: `${site}/a` },
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("must be an array of strings");
+  });
+});
+
 describe("POST /crawls/:id/rules", () => {
   it("404s an unknown crawl", async () => {
     const res = await call("POST", "/crawls/crawl_missing/rules");

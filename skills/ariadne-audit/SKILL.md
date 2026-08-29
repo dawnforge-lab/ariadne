@@ -128,6 +128,43 @@ A crawl is fit to audit when:
 Record the crawl's shape before reading a single finding. It bounds every claim the
 audit makes.
 
+### Rendering key templates
+
+If the crawl still needs its render pass, this is where the audit decides which pages
+get a browser — and on a site you have just crawled, **you decide, the engine does
+not**. Rendering everything is a waste of somebody's server and of the audit's time;
+rendering whatever tripped a heuristic answers about the wrong pages. The method is in
+the `ariadne-crawl` skill under the same heading; the short form:
+
+1. `metrics_get` `content.metrics-by-type` — the cohort sizes. The big cohorts are the
+   site's real templates, and a render of one of them answers for all of them.
+2. `pages_query` — the URL patterns beside those sizes, so a cohort that is really one
+   page with its own path is not mistaken for a template.
+3. `crawl_render` with `urls`: the home page, 2-3 representatives of each real
+   template, plus any one-off that looks like a shell (a large document with almost no
+   words, no title, no outgoing links). **A four-template site is 10-15 renders**, not
+   551.
+4. `crawl_rules` — the diff rules only ever speak about pages the render pass covered,
+   so this order is not negotiable.
+
+`auto` — no `urls` — remains right for first contact with a site, or where the types
+give you no clear templates at all.
+
+**Then read what came back, and read the mode first.** `render.coverage`'s
+`selectionMode` says which decision chose the pages. On an `explicit` pass
+`selectionBudget`, `selectionSuspects`, `selectionSampled` and `selectionTruncated`
+are **null**, not zero: no automatic decision was taken, so quoting them as "no
+suspects found" would be a claim about the site's HTML that nobody made.
+`selectionSelected` is then the length of your own list, and what it covers is a
+question about that list — say which templates it stood for when you write the
+coverage note.
+
+Then read the four render rules, and read them against the columns they compare:
+`pages_query` publishes `renderableWordCount` and `renderedRenderableWordCount`, the
+two sides CHECK-01 measures, both produced by the same analyzer over the same page.
+That is the comparability check §2.4 asks for, and on an explicit pass it is cheap —
+you named the pages, so you know exactly which rows to read.
+
 ---
 
 ## Phase 2 — the engine-answered checks
@@ -550,7 +587,7 @@ broken there.
     "findingsCount": 1902,
     "frontier": { "pending": 0, "leased": 0, "done": 4821, "failed": 3, "renderPending": 0 },
     "rulesRun": { "pagesScanned": 4821, "findings": 1902, "metrics": 855 },
-    "render": { "rendered": 240, "failures": 2, "unrendered": 4581, "budget": 241, "truncated": false },
+    "render": { "mode": "auto", "rendered": 240, "failures": 2, "unrendered": 4581, "budget": 241, "truncated": false },
     "caveats": [
       "3 URLs failed to fetch; their checks are reported on 4818 pages, not 4821."
     ]

@@ -788,6 +788,7 @@ describe("issue copy", () => {
   it("render.coverage names every column of its shape and both of its sides", () => {
     const text = ISSUE_COPY["render.coverage"]!.explanation;
     expect(text, "pagesCrawled").toMatch(/how many pages the crawl read in total/i);
+    expect(text, "selectionMode").toMatch(/the selection mode, which says who chose the pages/i);
     expect(text, "selectionBudget").toMatch(/how many pages the render pass was allowed to open/i);
     expect(text, "selectionSuspects").toMatch(/how many candidates were suspects/i);
     expect(text, "selectionSampled").toMatch(/how many were sampled/i);
@@ -799,6 +800,11 @@ describe("issue copy", () => {
     expect(text, "the two sides need not agree").toMatch(
       /need not add up to the number selected/i,
     );
+    // P8-T2. The four automatic numbers are NULL on an explicit selection, and
+    // the copy has to say so where the reader meets them — a null in a table
+    // that nothing explains is read as a zero, and "0 suspects" is a claim about
+    // the site's HTML that no explicit pass ever made.
+    expect(text, "the explicit case's nulls").toMatch(/empty rather than zero/i);
   });
 
   // A metric states what was counted; it does not accuse the site of anything.

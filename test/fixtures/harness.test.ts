@@ -1489,6 +1489,10 @@ describe("the fixture site end to end", () => {
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
       pagesCrawled: 82,
+      // P8-T2. The harness renders the AUTOMATIC selection — it names no URLs —
+      // and this is the field that says so. The five numbers under it describe
+      // that decision and are present only because it was taken.
+      selectionMode: "auto",
       selectionBudget: 82,
       selectionSuspects: 63,
       selectionSampled: 9,

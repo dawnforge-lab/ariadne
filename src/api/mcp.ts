@@ -144,8 +144,9 @@ The order of operations is fixed by what the evidence means:
   1. crawl_start   accepts a crawl and returns a crawl id immediately. It is
                    queued, not finished; one crawl runs at a time per server.
   2. crawl_status  polls it. Poll until status is no longer 'queued'/'running'.
-  3. crawl_render  (optional) re-fetches a sample of pages in a real browser, so
+  3. crawl_render  (optional) re-fetches some pages in a real browser, so
                    client-side-rendered content is measured rather than guessed.
+                   Either the engine picks them or you name them with 'urls'.
                    Run it BEFORE the rules if you want rendered evidence judged.
   4. crawl_rules   runs every rule over the finished crawl and writes the
                    findings. Refused while the crawl is still moving.
@@ -299,21 +300,47 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     {
       title: "Run the render pass",
       description:
-        "Re-fetch a budgeted sample of a finished crawl's pages in a real browser " +
-        "and store what JavaScript added, so content that only exists after " +
-        "rendering is measured rather than guessed at. Answers counts — " +
-        "{rendered, failures, unrendered, elapsedMs, selection:{selected, budget, " +
-        "suspects, sampled, truncated}} — never a page list; read the pages " +
+        "Re-fetch some of a finished crawl's pages in a real browser and store " +
+        "what JavaScript added, so content that only exists after rendering is " +
+        "measured rather than guessed at. Answers counts — " +
+        "{rendered, failures, unrendered, elapsedMs, selection:{mode, selected, " +
+        "budget, suspects, sampled, truncated}} — never a page list; read the pages " +
         "themselves with pages_query (rendered=true).\n\n" +
+        "WHICH PAGES. Without urls the engine selects for itself: pages whose HTML " +
+        "looks incomplete, plus a few of every page type, cut to a budget — " +
+        "selection.mode is 'auto' and the four numbers beside it describe that " +
+        "decision. With urls you name the pages, which is what to do once you know " +
+        "the site's templates: the home page and two or three representatives of " +
+        "each real template beats a budget spent on whatever tripped a heuristic. " +
+        "A named list REPLACES the automatic selection for that pass, " +
+        "selection.mode is 'explicit', and budget/suspects/sampled/truncated come " +
+        "back null because no automatic decision was made — not zero.\n\n" +
+        "Every named URL must already be a page of this crawl that answered 200: " +
+        "this pass re-visits pages, it never fetches a URL for the first time, and " +
+        "one that is not there is refused by name. The list is capped at the " +
+        "crawl's renderMaxPages and a longer one is refused rather than trimmed.\n\n" +
         "Run it AFTER the crawl has stopped and BEFORE crawl_rules if you want " +
         "the rules to judge rendered evidence. It is refused on a crawl that is " +
         "still queued or running, on one another worker is rendering, and on one " +
         "with no discovery evidence (there would be no robots crawl-delay to " +
         "honour). The pass paces itself with the crawl's own delay and user " +
-        "agent, so it is not a second, ruder visit.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+        "agent, so it is not a second, ruder visit — a named list is no faster " +
+        "per page, only better spent.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        urls: z
+          .array(z.string())
+          .describe(
+            "Pages to render, in place of the automatic selection. Each must be a URL " +
+              "this crawl already fetched with a 200. Omit to let the engine select.",
+          )
+          .optional(),
+      }),
     },
-    async ({ crawlId }) => run("crawl_render", () => service.renderCrawl(crawlId)),
+    async ({ crawlId, urls }) =>
+      run("crawl_render", () =>
+        service.renderCrawl(crawlId, urls === undefined ? {} : { urls }),
+      ),
   );
 
   server.registerTool(

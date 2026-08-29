@@ -673,6 +673,83 @@ describe("crawl_render", () => {
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("no such crawl");
   });
+
+  /**
+   * P8-T2 — the same explicit mode over the OTHER transport.
+   *
+   * On its own crawl for the reason the HTTP suite gives: an explicit pass
+   * replaces the automatic selection and records itself on the crawl row, so
+   * running one over `liveCrawlId` would rewrite what the tests after this one
+   * read about that crawl's rendering.
+   */
+  describe("with a named list", () => {
+    let namedCrawlId = "";
+
+    beforeAll(async () => {
+      const accepted = await ok("crawl_start", {
+        siteUrl: `${site}/`,
+        maxPages: 5,
+        renderMaxPages: 2,
+      });
+      namedCrawlId = String(accepted["crawlId"]);
+      createdCrawls.push(namedCrawlId);
+      await settle(namedCrawlId);
+    }, 60_000);
+
+    it("advertises the urls parameter, so an agent can find it", async () => {
+      const tools = await client.listTools();
+      const render = tools.tools.find((t) => t.name === "crawl_render");
+      expect(Object.keys(render?.inputSchema.properties ?? {}).sort()).toEqual([
+        "crawlId",
+        "urls",
+      ]);
+    });
+
+    it("renders the pages the agent named and says the selection was explicit", async () => {
+      const summary = await ok("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: [`${site}/a`, `${site}/b`],
+      });
+      const selection = summary["selection"] as Record<string, unknown>;
+      expect(selection["mode"]).toBe("explicit");
+      expect(selection["selected"]).toBe(2);
+      // Null rather than zero — see RenderSelection.mode. The four numbers
+      // describe a decision that was not taken here.
+      expect(selection["budget"]).toBeNull();
+      expect(selection["suspects"]).toBeNull();
+      expect(Number(summary["rendered"]) + Number(summary["failures"])).toBe(2);
+      // Still counts, never a page list (obligation 1) — a named list going in
+      // does not license one coming back.
+      expect(JSON.stringify(summary)).not.toContain(`${site}/a`);
+    }, 90_000);
+
+    it("refuses a URL this crawl never fetched, by name, rather than fetching it", async () => {
+      const answer = await call("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: [`${site}/a`, `${site}/never-crawled`],
+      });
+      expect(answer.isError).toBe(true);
+      expect(String(answer.body["error"])).toContain(`${site}/never-crawled`);
+    });
+
+    it("refuses a list longer than the crawl's renderMaxPages instead of trimming", async () => {
+      const answer = await call("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: [`${site}/`, `${site}/a`, `${site}/b`],
+      });
+      expect(answer.isError).toBe(true);
+      expect(String(answer.body["error"])).toContain("renderMaxPages of 2");
+    });
+
+    it("refuses a host outside the site's family and outside the allowlist", async () => {
+      const answer = await call("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: ["http://192.168.7.7/somewhere"],
+      });
+      expect(answer.isError).toBe(true);
+      expect(String(answer.body["error"])).toContain("crawl allowlist");
+    });
+  });
 });
 
 describe("crawl_rules", () => {

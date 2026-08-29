@@ -290,12 +290,12 @@ and the answer is Step 5.
 
 ## Step 3 — render (before the rules, or not at all)
 
-`crawl_render` re-fetches a budgeted sample of the crawl's pages in a real browser
-and stores what JavaScript added. It answers counts:
+`crawl_render` re-fetches some of the crawl's pages in a real browser and stores what
+JavaScript added. It answers counts:
 
 ```
 {rendered, failures, unrendered,
- elapsedMs, selection: {selected, budget, suspects, sampled, truncated}}
+ elapsedMs, selection: {mode, selected, budget, suspects, sampled, truncated}}
 ```
 
 Run it when the audit needs to see what a crawler without JavaScript cannot — which
@@ -315,10 +315,68 @@ WIDER of the crawl's configured delay and the spacing the crawl earned
 (`hostSpacingMs`) — a site that pushed back during the crawl is not asked to say so
 twice. Expect the pass to take that long: 28 pages at 2000 ms is about a minute.
 
-Read the `selection` block rather than the `rendered` count alone: `budget` is what
-the crawl's render fields allowed, `suspects` and `sampled` are how the pages were
-chosen, and `truncated: true` means the budget cut the selection. A render pass that
-covered 20 of 4,000 pages is evidence about 20 pages.
+### Rendering key templates
+
+**There are two ways to choose the pages, and on a site you know anything about, the
+second is the right one.** Pass no `urls` and the engine chooses: pages whose HTML
+looks incomplete, plus a few of every page type, cut to a budget. Pass `urls` and you
+choose — the home page and two or three representatives of each real template. The
+`selection` block's `mode` says which happened: `auto` or `explicit`.
+
+**Never ask for the whole site.** Rendering every URL to learn what a dozen pages
+would have told you is a waste of resources — someone else's server, and hours of
+wall time at a polite pace. Rendering is the most expensive thing this engine does;
+spend it on the pages that stand for the most other pages.
+
+**The method, in order.** Do not guess a template count; derive it from this crawl:
+
+1. **Read the cohort sizes.** `metrics_get` with `content.metrics-by-type` gives one
+   row per page type with how many pages it covers. The big rows are the real
+   templates — the ones worth a browser, because a render of one answers for all of
+   them. Small rows are usually singleton paths, not templates.
+2. **Read the URL patterns beside them.** `pages_query` (filter by `pageType`, or
+   just page through) shows the actual paths. A cohort whose members share a shape —
+   `/products/…`, `/collections/…`, `/blog/…` — is a template. A cohort of one URL
+   that happens to have its own path segment is not, however the typing came out.
+3. **Name the pages.** The home page, then 2-3 members of each real template — not
+   the first three alphabetically; pick ones that differ (a product in stock and one
+   out of stock, a long article and a short one). Add any **one-off that looks
+   suspicious**: the automatic mode's triggers are still good signals and you can
+   apply them by eye — a big document with almost no words, a page with no title, a
+   page that links nowhere.
+4. **Then `crawl_rules`**, and read the result: the four render rules, plus the two
+   columns the content one compares (below).
+
+```
+crawl_render {crawlId, urls: ["https://site/", "https://site/products/a", …]}
+```
+
+**The arithmetic.** A four-template site is about 10-15 renders: one home page,
+2-3 each of four templates, two or three suspicious one-offs. At a 2000 ms pace
+that is under a minute of somebody's server. Compare with the automatic pass on the
+same site, which spends its whole budget before it reaches the fourth template.
+
+**What the engine checks before it renders anything you named.** Every URL must
+already be a page of that crawl that answered 200 — this pass RE-VISITS pages, it
+never fetches a URL for the first time — and one that is not there is refused by
+name, so a typo is one round trip from fixed rather than a silent omission. The list
+is deduplicated, and a list longer than the crawl's `renderMaxPages` is refused
+rather than trimmed: which of your templates to drop is not the engine's decision.
+
+**A named list REPLACES the automatic selection for that pass.** It does not add to
+it. Pages an earlier pass rendered keep their measurements, but the pass you just ran
+covered your list and nothing else, and that is what `selection` describes.
+
+### When `auto` is still the right answer
+
+First contact with a site nobody has crawled, or a crawl whose types give you no
+clear templates at all. The automatic mode is a reasonable answer to "we know
+nothing yet"; it is a poor answer to "we know the site has four templates".
+
+Then read the `selection` block rather than the `rendered` count alone: `budget` is
+what the crawl's render fields allowed, `suspects` and `sampled` are how the pages
+were chosen, and `truncated: true` means the budget cut the selection. A render pass
+that covered 20 of 4,000 pages is evidence about 20 pages.
 
 **`truncated: true` also means the sample was decided by page type, so know what the
 types are.** Candidates are sampled per page type and the budget cut takes the largest
@@ -330,7 +388,13 @@ once. Nothing is wrong when that happens — the templates are covered first —
 coverage you can claim is per template, not per page. Check which types were rendered
 (`pages_query` with `rendered: true`) before telling an audit that a template was
 measured, and raise `renderMaxPages` / `renderBudgetPct` if the tail crowded out
-something you needed. The typing heuristics are on the backlog.
+something you needed — or name the pages yourself, which is what the section above is
+for.
+
+On an explicit pass, `budget`, `suspects`, `sampled` and `truncated` come back
+**null**, not zero: no automatic decision was taken, so there was no budget, nothing
+was suspected and nothing was cut. `selected` is the length of your list. The same
+distinction reaches the audit as `render.coverage`'s `selectionMode`.
 
 ## Step 4 — run the rules
 
@@ -403,13 +467,16 @@ row, so one appearing in the results is a URL that failed three times, not once.
 
 ## What to hand over
 
-An audit needs three things from this skill, and they should be stated together:
+An audit needs four things from this skill, and they should be stated together:
 
 1. the **`crawlId`**;
 2. the **`crawl_status`** of the finished crawl — `pagesCrawled`, the frontier
    counts, `renderPassCount`, `blockedPages`, `hostSpacingMs`, `rulesRunAt` and
    `findingsCount`, and whether it stopped at a cap;
-3. the **`crawl_rules`** summary.
+3. the **`crawl_render`** `selection` block if a render pass ran — its `mode`
+   especially, and on an explicit pass the templates the named pages stood for. That
+   is the whole of the coverage claim, and nobody downstream can reconstruct it;
+4. the **`crawl_rules`** summary.
 
 Together they say what the evidence covers. The audit's job is to judge that
 evidence; its first duty is not to overstate it.

@@ -77,6 +77,7 @@ import {
   runRenderPass,
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
+import { resolveRenderConfig } from "../crawl/render/select.js";
 import { hostProbeStarts, normalizeUrl } from "../crawl/parse/url-utils.js";
 import { isUrlAllowed } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
@@ -221,6 +222,58 @@ export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
   renderMaxPages: "number",
   renderSamplePerType: "number",
 };
+
+/**
+ * The fields `POST /crawls/:id/render` accepts, on the same terms and for the
+ * same reason as `START_CRAWL_FIELDS`: the MCP tool advertises a schema, the
+ * HTTP route parses a body, and a test asserts the two sets are the same one.
+ */
+export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
+  urls: "string[]",
+};
+
+/**
+ * How many unrenderable URLs a refusal spells out before it says "…".
+ *
+ * A caller who pasted a whole listing can be wrong about all of it, and a 400
+ * carrying four hundred URLs is a body nobody reads. Enough to see the PATTERN
+ * of the mistake — a stale host, a missing trailing slash — and the count above
+ * it is exact either way.
+ */
+const MISSING_URLS_NAMED = 5;
+
+/**
+ * Validate a render body. Same discipline as `parseStartCrawlInput`: an unknown
+ * field is a refusal naming it, never an ignored instruction. A caller who sent
+ * `{"pages": [...]}` and got a 200 would believe the engine rendered what they
+ * named, and it would have rendered its own automatic selection instead.
+ *
+ * An ABSENT body is the automatic pass, which is why this accepts `undefined`
+ * where the crawl-start parser demands an object: the route existed for two
+ * phases without one and every caller of it sends nothing.
+ */
+export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
+  if (raw === undefined) return {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ServiceError("VALIDATION", "request body must be a JSON object");
+  }
+  const body = raw as Record<string, unknown>;
+
+  const input: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    const kind = RENDER_CRAWL_FIELDS[key as keyof RenderCrawlInput];
+    if (kind === undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        `unknown field '${clip(key)}' (accepted: ${Object.keys(RENDER_CRAWL_FIELDS).join(", ")})`,
+      );
+    }
+    if (value === undefined) continue;
+    assertKind(key, value, kind);
+    input[key] = value;
+  }
+  return input as RenderCrawlInput;
+}
 
 /**
  * Validate a crawl-start body. Never casts, never ignores a field it does not
@@ -484,12 +537,28 @@ export interface RenderSummaryOut {
   unrendered: number;
   elapsedMs: number;
   selection: {
+    /**
+     * Which decision chose the pages: `auto` (the engine's suspicion-plus-sample
+     * selection) or `explicit` (the caller named them). The four fields after it
+     * describe the automatic decision and are **null** when it did not run —
+     * never zero, which would read as an automatic selection that found nothing.
+     */
+    mode: "auto" | "explicit";
     selected: number;
-    budget: number;
-    suspects: number;
-    sampled: number;
-    truncated: boolean;
+    budget: number | null;
+    suspects: number | null;
+    sampled: number | null;
+    truncated: boolean | null;
   };
+}
+
+/** What `POST /crawls/:id/render` (and `crawl_render`) accepts as a body. */
+export interface RenderCrawlInput {
+  /**
+   * The pages to render, in place of the automatic selection. Absent is the
+   * default and leaves the pass exactly as it was.
+   */
+  urls?: string[];
 }
 
 /**
@@ -1126,8 +1195,21 @@ export class ApiService {
    * pass that paced itself differently from the crawl it belongs to would be a
    * politeness regression the site would experience as a second, ruder crawler
    * (rule 9).
+   *
+   * ## `urls`: the caller names the pages
+   *
+   * Absent, everything above is what happens and the pass is byte-identical to
+   * what it always was. Present, the list REPLACES the automatic selection for
+   * this pass — see `selectExplicitRenderSet` — and this method owns every
+   * refusal that stands in front of it, because each one is a status code and a
+   * sentence rather than a database question: see `checkRenderUrls`.
+   *
+   * The list is validated BEFORE the driver's own three refusals are reached. A
+   * malformed request is refused as a malformed request; whether the crawl is
+   * live is a fact about the world and is the driver's to state, in the same
+   * order `parseStartCrawlInput` puts a bad body ahead of a busy queue.
    */
-  async renderCrawl(crawlId: string): Promise<RenderSummaryOut> {
+  async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
     const row = await this.crawlRow(crawlId);
 
     let config: CrawlConfig;
@@ -1137,12 +1219,17 @@ export class ApiService {
       throw new ServiceError("CONFLICT", messageOf(error));
     }
     const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
+    const renderUrls =
+      input.urls === undefined
+        ? undefined
+        : await this.checkRenderUrls(crawlId, input.urls, config);
 
     let summary: RenderPassSummary;
     try {
       summary = await runRenderPass(this.db, crawlId, {
         ...config,
         robotsCrawlDelaySec,
+        ...(renderUrls === undefined ? {} : { renderUrls }),
         // NOT left to the pass's own cwd-relative default. The render pass
         // writes a file per rendered page, and a server that never said where
         // put them wherever it happened to be started — which is how this
@@ -1164,7 +1251,11 @@ export class ApiService {
       elapsedMs: summary.elapsedMs,
       // The selection's URL list is a page list, and a page list is not a
       // response body (obligation 1: never a full export inline). Its size is.
+      // `mode` rides beside it because the four numbers under it mean nothing
+      // without it: on an explicit pass they are null, and a caller that reads
+      // `budget: null` as "no budget was enforced" is reading it correctly.
       selection: {
+        mode: summary.selection.mode,
         selected: summary.selection.selected.length,
         budget: summary.selection.budget,
         suspects: summary.selection.suspects,
@@ -1884,6 +1975,150 @@ export class ApiService {
         );
       }
     }
+  }
+
+  /**
+   * The pages a caller named for the render pass, checked and resolved to this
+   * crawl's own spellings — or a refusal saying which entry stopped it.
+   *
+   * ## THE ORDER, and why it is this one
+   *
+   * Every step is a refusal, so the order decides which sentence a caller with
+   * two problems is told about first. It runs cheapest-and-most-fundamental to
+   * costliest:
+   *
+   *  1. **Non-empty.** An empty list is not "render nothing" — a pass meant to
+   *     be off is a pass that is not run, the same reading `renderBudgetPct: 0`
+   *     already gets.
+   *  2. **Readable as a URL** (`normalizeUrl`), which also rejects every scheme
+   *     the crawler does not speak. This is the spelling `pages.url` is stored
+   *     in, so it is normalisation and parse in one step.
+   *  3. **Deduplicated**, on that normalised spelling, first occurrence winning.
+   *     Before the cap, so a list that repeats a URL is not refused for a
+   *     ceiling it does not actually reach.
+   *  4. **The cap.** More than `renderMaxPages` distinct pages is a 400 naming
+   *     the cap, NOT a silent slice. The automatic budget cuts and says
+   *     `truncated: true`, because it built the candidate list itself; a list a
+   *     caller wrote is a deliberate statement about which pages matter, and
+   *     rendering the first N of it while answering 200 would be this engine
+   *     deciding which of somebody's templates to drop.
+   *  5. **The URL policy** — hard rule 5, on every URL this engine is about to
+   *     fetch, whoever supplied it. A render IS a fetch.
+   *  6. **The allowlist posture**, exactly as `checkLegacyHosts` applies it: a
+   *     host in the site's own family (apex/www × http/https) is authorised by
+   *     the crawl itself; anything else must be in this server's allowlist in
+   *     its own right. Reachable through `legacyHosts`, whose pages are in this
+   *     crawl and are a different site by every definition the engine has.
+   *  7. **It is a page of THIS crawl that fetched OK with a 200.** Last,
+   *     because it is the only step that needs the database — and it is what
+   *     makes this list a re-visit rather than a way to point the renderer at a
+   *     URL nobody crawled. A URL that misses is a 400 naming it; it is never
+   *     fetched.
+   *
+   * Steps 5 and 6 are belt-and-braces on a page the crawler already fetched
+   * under both rules, and they are here anyway: the request is a fetch
+   * instruction from a client, and hard rule 5 admits no "it was checked
+   * earlier" exemption.
+   */
+  private async checkRenderUrls(
+    crawlId: string,
+    urls: readonly string[],
+    config: CrawlConfig,
+  ): Promise<string[]> {
+    if (urls.length === 0) {
+      throw new ServiceError(
+        "VALIDATION",
+        "urls was given as an empty list: a render pass with no pages is a pass not " +
+          "run. Omit urls to let the engine select, or name at least one page",
+      );
+    }
+
+    const normalised: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of urls) {
+      const url = normalizeUrl(entry);
+      if (url === null) {
+        throw new ServiceError(
+          "VALIDATION",
+          `urls entry '${clip(entry)}' is not an http(s) URL this engine can render`,
+        );
+      }
+      if (seen.has(url)) continue;
+      seen.add(url);
+      normalised.push(url);
+    }
+
+    const { renderMaxPages } = resolveRenderConfig(config);
+    if (normalised.length > renderMaxPages) {
+      throw new ServiceError(
+        "VALIDATION",
+        `urls names ${normalised.length} distinct pages, above this crawl's ` +
+          `renderMaxPages of ${renderMaxPages}. The list is not silently trimmed — ` +
+          `a named list is a statement about which pages matter, so shorten it or ` +
+          `raise renderMaxPages on the crawl`,
+      );
+    }
+
+    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
+    // The site's own spellings, from the crawl's stored `siteUrl`. It reaches
+    // `hostProbeStarts` unvalidated as a URL — `parseStoredConfig` checks it is
+    // a string — so a row nothing this engine wrote could produce a throw here.
+    // That is the crawl's config being unreadable, not the caller's list being
+    // wrong, and it gets the 409 `parseStoredConfig`'s own failure gets.
+    let own: Set<string>;
+    try {
+      own = new Set(hostProbeStarts(config.siteUrl).map((start) => new URL(start).hostname));
+    } catch (error) {
+      throw new ServiceError("CONFLICT", messageOf(error));
+    }
+    for (const url of normalised) {
+      const verdict = await isUrlAllowed(url, { allowPrivate });
+      if (!verdict.allowed) {
+        throw new ServiceError(
+          "FORBIDDEN",
+          `urls entry '${clip(url)}' refused by the URL policy: ` +
+            `${verdict.reason ?? "no reason given"}`,
+        );
+      }
+      const host = new URL(url).hostname;
+      if (!own.has(host) && !isHostAllowed(host, this.config.allowedDomains)) {
+        throw new ServiceError(
+          "FORBIDDEN",
+          `urls entry '${clip(url)}' is on '${host}', which is neither a spelling of ` +
+            `this crawl's own site nor in this server's crawl allowlist`,
+        );
+      }
+    }
+
+    // One statement for the whole list. `= any(...)` rather than a round trip
+    // per URL, and the answer is the SET that resolved — the missing ones are
+    // computed here so the refusal can name them rather than say "one of these".
+    const found = await this.db
+      .select({ url: pages.url })
+      .from(pages)
+      .where(
+        and(
+          eq(pages.crawlId, crawlId),
+          eq(pages.fetchClass, "ok"),
+          eq(pages.statusCode, 200),
+          sql`${pages.url} = any(${sql.param(normalised)}::text[])`,
+        ),
+      );
+    const renderable = new Set(found.map((r) => r.url));
+    const missing = normalised.filter((url) => !renderable.has(url));
+    if (missing.length > 0) {
+      throw new ServiceError(
+        "VALIDATION",
+        `urls names ${missing.length} page(s) this crawl cannot render — ` +
+          `${missing.slice(0, MISSING_URLS_NAMED).map((u) => `'${clip(u)}'`).join(", ")}` +
+          `${missing.length > MISSING_URLS_NAMED ? ", …" : ""}. The render pass re-visits ` +
+          `pages this crawl already fetched, so a URL must be one of them and must have ` +
+          `answered 200; it is never fetched for the first time here. Check the spelling ` +
+          `with pages_query, or re-crawl if the page is genuinely missing`,
+      );
+    }
+
+    return normalised;
   }
 
   private effectiveConfig(siteUrl: string, input: StartCrawlInput): CrawlConfig {

@@ -630,13 +630,29 @@ async function main(): Promise<number> {
       const servedAfter = site.served();
 
       const attempted = render.rendered + render.failures;
-      console.log(line("budget", `${render.selection.budget} of ${pages.toLocaleString()} URLs`));
+      // The gate always renders the AUTOMATIC selection — it names no URLs —
+      // and the suspicion/sample numbers it reports exist only in that mode.
+      // Asserted rather than assumed: printing "null suspect + null sampled"
+      // would be a gate line nobody could act on (hard rule 7).
+      const selection = render.selection;
+      if (
+        selection.mode !== "auto" ||
+        selection.budget === null ||
+        selection.suspects === null ||
+        selection.sampled === null
+      ) {
+        throw new Error(
+          `gate: the render pass reported a '${selection.mode}' selection — the gate ` +
+            `names no URLs, so it must be 'auto' with its numbers present`,
+        );
+      }
+      console.log(line("budget", `${selection.budget} of ${pages.toLocaleString()} URLs`));
       console.log(
         line(
           "candidates",
-          `${render.selection.suspects} suspect + ${render.selection.sampled} sampled = ` +
-            `${render.selection.suspects + render.selection.sampled}` +
-            `${render.selection.truncated ? " (truncated to the budget)" : ""}`,
+          `${selection.suspects} suspect + ${selection.sampled} sampled = ` +
+            `${selection.suspects + selection.sampled}` +
+            `${selection.truncated === true ? " (truncated to the budget)" : ""}`,
         ),
       );
       console.log(line("selected", render.selection.selected.length.toLocaleString()));
