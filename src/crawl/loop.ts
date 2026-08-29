@@ -432,6 +432,13 @@ export async function resumeCrawl(
  * the API's queue creates the row when a crawl is ACCEPTED and runs it later
  * (src/api/service.ts), and it must strip the flag by the same authority rather
  * than by a second copy of the rule that could drift from this one.
+ *
+ * config_jsonb has a SECOND writer since P8-T2: the render pass records its
+ * requested URL list under RENDER_URLS_KEY (src/crawl/render/run-render.ts)
+ * hours after this insert. A whole-config rewrite (e.g. on resume) would
+ * silently erase that record and turn an explicit render pass into a reported
+ * "auto" — never `.set({config: storableConfig(...)})` an existing row; patch
+ * keys individually. (Backlog: a dedicated column at the next open migration.)
  */
 export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
   const { allowPrivate: _allowPrivate, ...rest } = config;
@@ -456,6 +463,11 @@ export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPri
  * render pass cannot end up with a different user agent or a different per-host
  * delay than the crawl it belongs to (rule 9). Its messages name the crawl
  * rather than a function, because two callers now raise them.
+ *
+ * The closed field set below is load-bearing beyond validation: config_jsonb
+ * also carries the render pass's RENDER_URLS_KEY record (see storableConfig's
+ * note), and ignoring unknown keys here is what keeps that record from leaking
+ * into a later pass's CrawlConfig.
  */
 export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   if (typeof value !== "object" || value === null) {
