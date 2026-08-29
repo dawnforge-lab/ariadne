@@ -62,6 +62,23 @@ export interface ServiceConfig {
    */
   exportDir?: string;
   /**
+   * Where `POST /crawls/:id/render` (and the MCP `crawl_render` tool) keeps the
+   * serialised post-JavaScript documents its pass produces — one directory per
+   * crawl underneath it. Defaults to `renders/` under the process's working
+   * directory (`RENDER_HTML_DIR`), and the `api:serve` / `mcp:serve`
+   * entrypoints let an operator move it with `ARIADNE_RENDER_DIR`.
+   *
+   * `exportDir`'s twin in every way that matters, and settable for the same
+   * reason plus one more. Like exports, it is a SERVER property and never a
+   * request parameter — a caller names a crawl, never a path. Unlike exports,
+   * it also grows without being asked to: every rendered page leaves a file
+   * behind, so an operator who cannot say where they land ends up with a crawl's
+   * evidence in whatever directory the process happened to start in. That is
+   * how this repository's own test suite left twelve stray crawl directories in
+   * the working tree before this field existed.
+   */
+  renderDir?: string;
+  /**
    * Where the server writes its own diagnostics — a queue pick-up, a crawl that
    * threw, the stack behind a 500. Never the response body (a stack trace in a
    * tenant-visible response is obligation 6's failure). Defaults to
@@ -91,12 +108,34 @@ export interface LoadedApiConfig {
   allowedDomains: string[];
   port: number;
   databaseUrl: string;
+  /** `ARIADNE_RENDER_DIR`, or undefined for the `renders/` default. */
+  renderDir: string | undefined;
 }
 
 /** Config read from the environment by the `mcp:serve` entrypoint. */
 export interface LoadedMcpConfig {
   allowedDomains: string[];
   databaseUrl: string;
+  /** `ARIADNE_RENDER_DIR`, or undefined for the `renders/` default. */
+  renderDir: string | undefined;
+}
+
+/**
+ * `ARIADNE_RENDER_DIR` as the service reads it: a path, or nothing.
+ *
+ * Unset and empty are the SAME answer — "use the default" — and the default is
+ * named in `ServiceConfig.renderDir` rather than repeated here. This is not the
+ * `ARIADNE_ALLOWED_DOMAINS` case where an unset value is a stated posture: a
+ * missing directory setting cannot silently permit anything, it can only put
+ * files somewhere predictable, so a default is the honest answer instead of a
+ * refusal. It is deliberately NOT validated for existence or writability at
+ * boot: the pass creates it, and a boot-time check would be a claim about a
+ * filesystem that can change before the first render anyway (hard rule 7 —
+ * the failure is loud where it happens).
+ */
+export function parseRenderDir(raw: string | undefined): string | undefined {
+  const dir = (raw ?? "").trim();
+  return dir === "" ? undefined : dir;
 }
 
 /**
@@ -155,6 +194,7 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): LoadedApiCo
     allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]),
     port,
     databaseUrl,
+    renderDir: parseRenderDir(env["ARIADNE_RENDER_DIR"]),
   };
 }
 
@@ -191,7 +231,11 @@ export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): LoadedMcpCo
   if (databaseUrl === "") {
     throw new Error("DATABASE_URL must be set: the MCP server holds the database handle");
   }
-  return { allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]), databaseUrl };
+  return {
+    allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]),
+    databaseUrl,
+    renderDir: parseRenderDir(env["ARIADNE_RENDER_DIR"]),
+  };
 }
 
 /**

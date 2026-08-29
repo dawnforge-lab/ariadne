@@ -62,6 +62,13 @@ let db: Db;
 let siteServer: Server;
 let site: string;
 let exportDir: string;
+/**
+ * Where every server in this file keeps the render pass's serialised
+ * documents. `crawl_render` writes a real HTML file per rendered page, and the
+ * default root is `renders/` under the process's cwd — the repository. Made in
+ * `beforeAll`, removed in `afterAll`, exactly as `exportDir` is.
+ */
+let renderDir: string;
 
 /** The server under test, and a client speaking to it in this process. */
 let mcp: AriadneMcpServer;
@@ -249,7 +256,7 @@ async function riggedServer(broken: Record<string, () => never>): Promise<{
 
   const server = createMcpServer({
     db: rigged,
-    config: { allowedDomains: ["127.0.0.1"], log: (line) => log.push(line) },
+    config: { allowedDomains: ["127.0.0.1"], renderDir, log: (line) => log.push(line) },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const riggedClient = new Client({ name: "ariadne-test-rigged", version: "0.0.1" });
@@ -262,6 +269,7 @@ beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-mcp-export-"));
+  renderDir = await mkdtemp(join(tmpdir(), "ariadne-mcp-renders-"));
 
   siteServer = createServer((req, res) => {
     const path = req.url ?? "/";
@@ -305,6 +313,7 @@ beforeAll(async () => {
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
       exportDir,
+      renderDir,
       log: (line) => serverLog.push(line),
     },
   });
@@ -315,7 +324,7 @@ beforeAll(async () => {
 
   closedMcp = createMcpServer({
     db,
-    config: { allowedDomains: [], exportDir, log: (line) => serverLog.push(line) },
+    config: { allowedDomains: [], exportDir, renderDir, log: (line) => serverLog.push(line) },
   });
   const [closedClientSide, closedServerSide] = InMemoryTransport.createLinkedPair();
   closedClient = new Client({ name: "ariadne-test-closed", version: "0.0.1" });
@@ -408,6 +417,7 @@ afterAll(async () => {
   await closeFetchAgents();
   await new Promise<void>((r) => siteServer.close(() => r()));
   rmSync(exportDir, { recursive: true, force: true });
+  rmSync(renderDir, { recursive: true, force: true });
 });
 
 describe("the tool surface", () => {
@@ -1030,10 +1040,32 @@ describe("boot configuration", () => {
       ARIADNE_ALLOWED_DOMAINS: "example.com,*.example.org",
     });
     expect(config.allowedDomains).toEqual(["example.com", "*.example.org"]);
-    expect(Object.keys(config).sort()).toEqual(["allowedDomains", "databaseUrl"]);
+    // The whole shape, not a sample: what this config DOES NOT carry is the
+    // point of the assertion, and a token quietly appearing in it would be the
+    // trust model changing without anybody saying so. `renderDir` joined the
+    // set in P8-T1 — it names where the render pass keeps its documents, which
+    // is an operator's filesystem choice and not a credential.
+    expect(Object.keys(config).sort()).toEqual(["allowedDomains", "databaseUrl", "renderDir"]);
+    // Unset means "use the default", which the service names — not a path this
+    // function invents. See `parseRenderDir`.
+    expect(config.renderDir).toBeUndefined();
   });
 
   it("still reads the allowlist, and an empty one is a posture rather than an error", () => {
     expect(loadMcpConfig({ DATABASE_URL: "postgres://x" }).allowedDomains).toEqual([]);
+  });
+
+  // ARIADNE_RENDER_DIR, both readings. An empty string is the same answer as an
+  // unset variable — "use the default" — because a shell that exports an empty
+  // value has said nothing, and treating it as a path would put a crawl's
+  // evidence at the filesystem root.
+  it("reads ARIADNE_RENDER_DIR, and treats empty and unset alike", () => {
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_RENDER_DIR: "/srv/ariadne/renders" })
+        .renderDir,
+    ).toBe("/srv/ariadne/renders");
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_RENDER_DIR: "   " }).renderDir,
+    ).toBeUndefined();
   });
 });

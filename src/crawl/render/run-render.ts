@@ -64,7 +64,7 @@
  * only writer of it.
  */
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { resolve } from "node:path";
 
 import { eq } from "drizzle-orm";
 
@@ -317,7 +317,16 @@ export async function runRenderPass(
   // re-run over a crawl that already has a directory is not an error: a
   // re-selected crawl legitimately re-renders pages, and the file it overwrites
   // is the same page's older document.
-  const htmlDir = join(cfg.renderHtmlDir ?? RENDER_HTML_DIR, crawlId);
+  //
+  // `resolve`, NOT `join`: the path this produces is written into
+  // `pages.rendered_html_path` and read back by a person, days later, from a
+  // different working directory. A relative pointer stored in a database is a
+  // pointer whose meaning depends on where the reader happens to be standing —
+  // it is only interpretable beside the cwd of the process that wrote it, which
+  // nothing records. Absolutising here means the default `renders/` is still
+  // "under wherever the server runs" and the STORED value still says where that
+  // was.
+  const htmlDir = resolve(cfg.renderHtmlDir ?? RENDER_HTML_DIR, crawlId);
   await mkdir(htmlDir, { recursive: true });
 
   const renderer = await PageRenderer.launch({

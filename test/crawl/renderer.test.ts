@@ -55,6 +55,7 @@ import {
 import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
 import {
   RENDER_PASS_DEFAULTS,
+  RenderPassRefusal,
   renderPaceMs,
   runRenderPass,
 } from "../../src/crawl/render/run-render.js";
@@ -427,12 +428,23 @@ describe("PageRenderer", () => {
     expect(analyzeHtml(saved, url).navLinkCount).toBe(result.navLinkCount);
   });
 
-  it("classifies a render whose document could not be saved, and keeps no counts", async () => {
-    // The write is part of a render. A measurement we cannot store the document
-    // for is recorded as a FAILED render — not as a successful one with a null
-    // path, which every reader downstream would take for complete evidence
-    // (hard rule 7). A directory that does not exist is the portable way to
-    // make `writeFile` fail; a full disk produces the same shape.
+  it("throws when the document cannot be saved: an environment failure is not a site's", async () => {
+    // THE PHASE BOUNDARY, and the one place the suite can provoke it.
+    //
+    // `render()` is in two phases (see its docblock). Phase 1 is what the SITE
+    // does and is classified into a `render_error`; phase 2 is what WE do to a
+    // document the browser already built — serialise, analyse, write — and sits
+    // outside that classifier, so a failure in it propagates. A directory that
+    // does not exist is the portable way to make `writeFile` fail; ENOSPC and
+    // EACCES take the same path.
+    //
+    // WHY A THROW RATHER THAN A CLASSIFIED ROW. A full disk is not evidence
+    // about a page. Recording it as a `render_error` would put an engine defect
+    // in site-evidence clothes AND consume the URL — `runWorker` completes the
+    // frontier row in the same transaction — so the page would be spent on a
+    // render whose document was thrown away, and `render.coverage` would count
+    // it against the site. A throw leaves the URL `render_pending` and
+    // unrendered: fix the disk, re-run, and no polite navigation was wasted.
     const missing = join(htmlDir, "no-such-directory");
     const doomed = await PageRenderer.launch({
       origin: site.base,
@@ -443,18 +455,21 @@ describe("PageRenderer", () => {
       allowPrivate: true,
     });
     try {
-      const result = await doomed.render(`${site.base}/csr`);
+      await expect(doomed.render(`${site.base}/csr`)).rejects.toThrow(
+        /render evidence not written/,
+      );
 
-      expect(result.rendered).toBe(false);
-      expect(result.error).toMatch(/^render evidence not written: /);
-      expect(result.error).toContain(missing);
-      // Both families empty, and the path null: the row says "this page was not
-      // measured", which is true, rather than "measured, evidence elsewhere".
-      expect(result.wordCount).toBeNull();
-      expect(result.analyzerWordCount).toBeNull();
-      expect(result.renderableWordCount).toBeNull();
-      expect(result.title).toBeNull();
-      expect(result.htmlPath).toBeNull();
+      // …and the thrown value itself, because what it IS decides how the API
+      // reports it. A plain Error, never a `RenderPassRefusal` — a refusal
+      // means "this crawl is busy, wait" and `mapRenderPassError` turns it into
+      // a 409, which would tell an operator to retry a full disk. This is a
+      // 500. The message names the file and the URL, the two things they need
+      // before they can act on it.
+      const thrown: unknown = await doomed.render(`${site.base}/csr`).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown).not.toBeInstanceOf(RenderPassRefusal);
+      expect(String((thrown as Error).message)).toContain(missing);
+      expect(String((thrown as Error).message)).toContain(`${site.base}/csr`);
     } finally {
       await doomed.close();
     }

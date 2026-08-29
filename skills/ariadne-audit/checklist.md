@@ -305,7 +305,8 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
   - WARN if navigation or key content is JS-dependent on some page types
   - FAIL if a page is essentially blank without JS (critical JS dependency: `addedWords` is most of `renderedRenderableWordCount`)
   - **FAIL if collection pages' product links are absent from raw HTML** — a crawler that does not render will miss most products, and Googlebot's initial crawl pass won't discover product URLs from collection pages. Products become entirely dependent on sitemap.xml for discovery. (Cross-read CHECK-33b: sitemap-only products are the same failure seen from the link graph.)
-  - Record: raw vs rendered word counts per page type (from the finding evidence), **the nav and filter link counts from CHECK-34 and CHECK-02**, render coverage (rendered / crawled, and the failures), recommendation for the next crawl's `renderBudgetPct`
+  - Record: raw vs rendered word counts per page type (from the finding evidence), **the `renderedRenderableWordCount` / `renderableWordCount` RATIO beside `addedWords`** on the rendered pages, **the nav and filter link counts from CHECK-34 and CHECK-02**, render coverage (rendered / crawled, and the failures), recommendation for the next crawl's `renderBudgetPct`
+  - **Why the ratio and not only the delta.** Chrome that both documents carry cancels EXACTLY in `addedWords` (the 150-word arm) and does NOT cancel in the ratio arm, which reads `injected >= body + chrome`. So on a chrome-heavy theme the rule is still harder to trip than the thresholds alone suggest, and a zero is only a finding once you have looked at how close the ratio came. Quote it — a site whose rendered/renderable runs 1.6 across the board is a different story from one running 1.02, and only one of them is 'no client-side rendering'.
 
 ### CHECK-02: Filters / layered navigation — HTML or JS elements?
 - **Priority**: High | **Requires**: Engine (render pass)

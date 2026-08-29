@@ -72,6 +72,7 @@ import { FETCH_CLASSES } from "../crawl/fetch-page.js";
 // validation refusal here. See `ROBOTS_OUTCOMES` in discovery.ts.
 import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 import {
+  RENDER_HTML_DIR,
   RenderPassRefusal,
   runRenderPass,
   type RenderPassSummary,
@@ -753,6 +754,16 @@ export class ApiService {
   private readonly allChecks: Set<string>;
   private readonly allCategories: Set<string>;
   private readonly exportDir: string;
+  /**
+   * Where this server's render passes keep their serialised documents — the
+   * ROOT, under which the pass makes one directory per crawl.
+   *
+   * Resolved once, here, exactly as `exportDir` is and for the same reason: the
+   * value is stored in `pages.rendered_html_path` and read back by a person who
+   * will not be standing in this process's working directory. Unset means
+   * `renders/` under it, which is what `RENDER_HTML_DIR` names.
+   */
+  private readonly renderDir: string;
 
   /**
    * Crawls this process is currently judging — one rules run at a time, per
@@ -793,6 +804,7 @@ export class ApiService {
     }
     this.log = config.log ?? ((line) => console.error(line));
     this.exportDir = resolvePath(config.exportDir ?? joinPath(process.cwd(), "exports"));
+    this.renderDir = resolvePath(config.renderDir ?? joinPath(process.cwd(), RENDER_HTML_DIR));
   }
 
   /**
@@ -1131,6 +1143,13 @@ export class ApiService {
       summary = await runRenderPass(this.db, crawlId, {
         ...config,
         robotsCrawlDelaySec,
+        // NOT left to the pass's own cwd-relative default. The render pass
+        // writes a file per rendered page, and a server that never said where
+        // put them wherever it happened to be started — which is how this
+        // repository's own suite left twelve crawl directories in the working
+        // tree. The directory is a SERVER property (`ServiceConfig.renderDir`),
+        // absolutised at construction, and no request may name it.
+        renderHtmlDir: this.renderDir,
         allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
       });
     } catch (error) {

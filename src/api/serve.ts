@@ -21,13 +21,25 @@ const config = loadApiConfig();
 const db = createDb(config.databaseUrl);
 const api = createApiServer({
   db,
-  config: { token: config.token, allowedDomains: config.allowedDomains },
+  config: {
+    token: config.token,
+    allowedDomains: config.allowedDomains,
+    // Undefined means the `renders/` default; see `ServiceConfig.renderDir`.
+    // Unlike `crawlDefaults` this IS an environment knob, and safely so: it
+    // names where the server keeps its own output, not what it may do.
+    ...(config.renderDir === undefined ? {} : { renderDir: config.renderDir }),
+  },
 });
 
 const bound = await api.listen(config.port, process.env["ARIADNE_API_HOST"] ?? "127.0.0.1");
 console.error(
   `ariadne api listening on http://${bound.host}:${bound.port} — ` +
     `${config.allowedDomains.length} allowed domain(s)`,
+);
+// Said at boot rather than left to be discovered: the render pass writes a file
+// per rendered page and an operator needs to know where, before it grows.
+console.error(
+  `ariadne api: rendered documents -> ${config.renderDir ?? "renders/ (default; set ARIADNE_RENDER_DIR to move it)"}`,
 );
 if (config.allowedDomains.length === 0) {
   console.error(

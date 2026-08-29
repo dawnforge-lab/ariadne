@@ -18,7 +18,11 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import { eq, sql } from "drizzle-orm";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -58,6 +62,13 @@ let base: string;
 /** A second server whose allowlist is empty — the read-only posture. */
 let closedApi: ApiServer;
 let closedBase: string;
+/**
+ * Where every server in this file keeps the render pass's serialised
+ * documents. A temp directory, made in `beforeAll` and removed in `afterAll`:
+ * the render endpoint writes a real file per rendered page, and the default
+ * root is `renders/` under the process's cwd — the repository.
+ */
+let renderDir: string;
 
 const createdCrawls: string[] = [];
 const serverLog: string[] = [];
@@ -147,6 +158,9 @@ async function riggedServer(broken: Record<string, () => never>): Promise<Rig> {
       token: TOKEN,
       allowedDomains: ["127.0.0.1"],
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+      // See `renderDir` in the main server below: a suite that renders must say
+      // where the documents go, or they land in the repository.
+      renderDir,
       log: (line) => log.push(line),
     },
   });
@@ -272,6 +286,7 @@ beforeAll(async () => {
   const namedAddr = namedServer.address();
   named = `http://localhost:${typeof namedAddr === "object" && namedAddr !== null ? namedAddr.port : 0}`;
 
+  renderDir = await mkdtemp(join(tmpdir(), "ariadne-http-renders-"));
   api = createApiServer({
     db,
     config: {
@@ -279,6 +294,13 @@ beforeAll(async () => {
       allowedDomains: ["127.0.0.1", "*.localhost"],
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+      // WHERE THE RENDER PASS PUTS ITS DOCUMENTS, and it is not optional for a
+      // test that renders. `POST /crawls/:id/render` writes one HTML file per
+      // rendered page; without this the server's default puts them in
+      // `renders/` under the repository, which is exactly what this suite did
+      // until the field existed — twelve stray crawl directories in a working
+      // tree, indistinguishable from a real pass's evidence.
+      renderDir,
       log: (line) => serverLog.push(line),
     },
   });
@@ -312,6 +334,7 @@ afterAll(async () => {
   }
   await closeDb(db);
   await closeFetchAgents();
+  await rm(renderDir, { recursive: true, force: true });
   await new Promise<void>((r) => siteServer.close(() => r()));
   await new Promise<void>((r) => namedServer.close(() => r()));
 });
@@ -825,6 +848,28 @@ describe("POST /crawls/:id/render", () => {
     expect(typeof selection["budget"]).toBe("number");
     expect(Number(res.body["rendered"]) + Number(res.body["failures"])).toBe(selection["selected"]);
     expect(res.body["unrendered"]).toBe(0);
+
+    // AND THE DOCUMENTS LANDED WHERE THE SERVER WAS TOLD (P8-T1 fix round 1).
+    // The pass writes one HTML file per rendered page, and where they go is a
+    // SERVER property — `ServiceConfig.renderDir`, absolutised at construction
+    // — never a request field. Before it was plumbed, this endpoint used the
+    // pass's cwd-relative default and this very suite left twelve crawl
+    // directories in the repository. Asserted from the page rows rather than by
+    // listing the directory, so what is checked is the pointer a reader
+    // actually follows.
+    const rows = await db
+      .select({ path: pages.renderedHtmlPath })
+      .from(pages)
+      .where(and(eq(pages.crawlId, fixtureCrawlId), eq(pages.rendered, true)));
+    expect(rows.length).toBe(Number(res.body["rendered"]));
+    for (const row of rows) {
+      expect(row.path, "every rendered page keeps its document").not.toBeNull();
+      // Under this server's configured root, and ABSOLUTE — the stored pointer
+      // has to mean the same thing to a reader standing somewhere else.
+      expect(row.path!.startsWith(`${renderDir}/`)).toBe(true);
+      expect(isAbsolute(row.path!)).toBe(true);
+      expect(existsSync(row.path!), `${row.path!} exists on disk`).toBe(true);
+    }
   }, 60_000);
 });
 
@@ -1140,15 +1185,30 @@ describe("boot configuration", () => {
     expect(() => loadApiConfig({ ARIADNE_API_TOKEN: TOKEN })).toThrow(/DATABASE_URL must be set/);
   });
 
-  it("reads the token, the allowlist and the port", () => {
+  it("reads the token, the allowlist, the port and the render directory", () => {
     const config = loadApiConfig({
       ARIADNE_API_TOKEN: TOKEN,
       DATABASE_URL: "postgres://x",
       ARIADNE_ALLOWED_DOMAINS: "example.com,*.example.org",
       ARIADNE_API_PORT: "9123",
+      ARIADNE_RENDER_DIR: "/srv/ariadne/renders",
     });
     expect(config.token).toBe(TOKEN);
     expect(config.allowedDomains).toEqual(["example.com", "*.example.org"]);
     expect(config.port).toBe(9123);
+    // WHERE THE RENDER PASS PUTS ITS DOCUMENTS is an operator's choice from
+    // P8-T1, because it is the one output of this server that grows on its own:
+    // a file per rendered page, forever, wherever the process was started.
+    // Unlike `crawlDefaults` it is safe to read from the environment — it names
+    // where our own output lands, never what the server may do.
+    expect(config.renderDir).toBe("/srv/ariadne/renders");
+  });
+
+  it("leaves the render directory undefined when nothing names one", () => {
+    // Unset is not an error and is not a path this function invents: it means
+    // "use the default", and the default (`renders/` under the cwd) is named
+    // once, in `ServiceConfig.renderDir`, where the service applies it.
+    const config = loadApiConfig({ ARIADNE_API_TOKEN: TOKEN, DATABASE_URL: "postgres://x" });
+    expect(config.renderDir).toBeUndefined();
   });
 });

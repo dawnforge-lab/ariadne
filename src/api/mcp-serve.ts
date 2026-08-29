@@ -27,11 +27,23 @@ import { createMcpServer } from "./mcp.js";
 
 const config = loadMcpConfig();
 const db = createDb(config.databaseUrl);
-const mcp = createMcpServer({ db, config: { allowedDomains: config.allowedDomains } });
+const mcp = createMcpServer({
+  db,
+  config: {
+    allowedDomains: config.allowedDomains,
+    // Undefined means the `renders/` default; see `ServiceConfig.renderDir`.
+    ...(config.renderDir === undefined ? {} : { renderDir: config.renderDir }),
+  },
+});
 
 await mcp.connect(new StdioServerTransport());
 console.error(
   `ariadne mcp: serving on stdio — ${config.allowedDomains.length} allowed domain(s)`,
+);
+// Stderr, like everything else here: stdout belongs to the protocol. An
+// operator needs to know where `crawl_render` leaves its documents.
+console.error(
+  `ariadne mcp: rendered documents -> ${config.renderDir ?? "renders/ (default; set ARIADNE_RENDER_DIR to move it)"}`,
 );
 if (config.allowedDomains.length === 0) {
   console.error(
