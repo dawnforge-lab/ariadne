@@ -62,6 +62,13 @@ let db: Db;
 let siteServer: Server;
 let site: string;
 let exportDir: string;
+/**
+ * Where every server in this file keeps the render pass's serialised
+ * documents. `crawl_render` writes a real HTML file per rendered page, and the
+ * default root is `renders/` under the process's cwd — the repository. Made in
+ * `beforeAll`, removed in `afterAll`, exactly as `exportDir` is.
+ */
+let renderDir: string;
 
 /** The server under test, and a client speaking to it in this process. */
 let mcp: AriadneMcpServer;
@@ -249,7 +256,7 @@ async function riggedServer(broken: Record<string, () => never>): Promise<{
 
   const server = createMcpServer({
     db: rigged,
-    config: { allowedDomains: ["127.0.0.1"], log: (line) => log.push(line) },
+    config: { allowedDomains: ["127.0.0.1"], renderDir, log: (line) => log.push(line) },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const riggedClient = new Client({ name: "ariadne-test-rigged", version: "0.0.1" });
@@ -262,6 +269,7 @@ beforeAll(async () => {
   db = createDb(databaseUrl());
   await runMigrations(db);
   exportDir = await mkdtemp(join(tmpdir(), "ariadne-mcp-export-"));
+  renderDir = await mkdtemp(join(tmpdir(), "ariadne-mcp-renders-"));
 
   siteServer = createServer((req, res) => {
     const path = req.url ?? "/";
@@ -305,6 +313,7 @@ beforeAll(async () => {
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
       exportDir,
+      renderDir,
       log: (line) => serverLog.push(line),
     },
   });
@@ -315,7 +324,7 @@ beforeAll(async () => {
 
   closedMcp = createMcpServer({
     db,
-    config: { allowedDomains: [], exportDir, log: (line) => serverLog.push(line) },
+    config: { allowedDomains: [], exportDir, renderDir, log: (line) => serverLog.push(line) },
   });
   const [closedClientSide, closedServerSide] = InMemoryTransport.createLinkedPair();
   closedClient = new Client({ name: "ariadne-test-closed", version: "0.0.1" });
@@ -357,6 +366,9 @@ beforeAll(async () => {
       siteUrl: `${SEEDED_SITE}/`,
       userAgent: "AriadneBot/0.1 (mcp-test)",
       legacyHosts: ["old.mcp-query.example"],
+      // A sitemap this site publishes and never declares, handed to the crawl
+      // at start. It is echoed on crawl_status and recorded in the evidence.
+      sitemapUrls: [`${SEEDED_SITE}/sitemap-extra.xml`],
     },
     discovery: {
       robots: {
@@ -367,8 +379,9 @@ beforeAll(async () => {
         truncated: false,
       },
       sitemapSources: [`${SEEDED_SITE}/sitemap.xml`],
-      truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 1 },
-      docsFetched: 1,
+      suppliedSitemaps: [`${SEEDED_SITE}/sitemap-extra.xml`],
+      truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 2 },
+      docsFetched: 2,
     },
   });
   await seedPage(surfaceCrawlId, {
@@ -408,6 +421,7 @@ afterAll(async () => {
   await closeFetchAgents();
   await new Promise<void>((r) => siteServer.close(() => r()));
   rmSync(exportDir, { recursive: true, force: true });
+  rmSync(renderDir, { recursive: true, force: true });
 });
 
 describe("the tool surface", () => {
@@ -494,7 +508,7 @@ describe("the tool surface", () => {
     }
     // And the tool that answers it names the three fields it gained.
     const status = listed.tools.find((t) => t.name === "crawl_status")?.description ?? "";
-    for (const field of ["rulesRunAt", "findingsCount", "legacyHosts"]) {
+    for (const field of ["rulesRunAt", "findingsCount", "legacyHosts", "sitemapUrls"]) {
       expect(status, `crawl_status does not name ${field}`).toContain(field);
     }
   });
@@ -534,6 +548,56 @@ describe("crawl_start", () => {
     });
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("victim.example");
+  });
+
+  // The same gate on the other field that names something to fetch. The
+  // discovery walk reads every supplied document before a page is crawled.
+  it("refuses a supplied sitemap on a host the allowlist does not name", async () => {
+    const answer = await call("crawl_start", {
+      siteUrl: `${site}/`,
+      sitemapUrls: ["https://victim.example/sitemap.xml"],
+    });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("victim.example");
+    expect(String(answer.body["error"])).toContain("sitemapUrls");
+  });
+
+  it("refuses a supplied sitemap that is not an absolute URL, naming the entry", async () => {
+    const answer = await call("crawl_start", {
+      siteUrl: `${site}/`,
+      sitemapUrls: ["sitemap.xml"],
+    });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("sitemapUrls");
+    expect(String(answer.body["error"])).toContain("sitemap.xml");
+  });
+
+  // The agent-facing half of `findingCap`. The schema accepts a number OR null,
+  // and null is the billed-audit setting rather than an omission — an agent that
+  // sends it must get the whole picture, and an agent that sends nonsense must
+  // be told at accept time rather than by a rules run hours later.
+  it("refuses a findingCap that is neither a positive integer nor null", async () => {
+    for (const bad of [0, -1, 1.5]) {
+      const answer = await call("crawl_start", { siteUrl: `${site}/`, findingCap: bad });
+      expect(answer.isError, JSON.stringify(bad)).toBe(true);
+      expect(String(answer.body["error"] ?? answer.text)).toContain("findingCap");
+    }
+  });
+
+  it("accepts findingCap: null over the agent surface, and crawl_status confirms it", async () => {
+    const answer = await call("crawl_start", {
+      siteUrl: `${site}/`,
+      maxPages: 1,
+      findingCap: null,
+    });
+    expect(answer.isError ?? false).toBe(false);
+    const crawlId = String(answer.body["crawlId"]);
+    expect(crawlId).toMatch(/^crawl_/);
+    // The agent that set it must be able to read it back: the cap lives on the
+    // crawl row and `crawl_rules` has no argument to restate it, so this is the
+    // only way to know a billed audit was actually started as one.
+    const detail = await ok("crawl_status", { crawlId });
+    expect(detail["findingCap"]).toBeNull();
   });
 
   // The floor `crawl_start`'s description promises, on the transport it
@@ -583,13 +647,23 @@ describe("crawl_status / crawl_list", () => {
     expect(detail["findingsCount"]).toBe(0);
     // No legacy domain was named for this crawl: present and empty.
     expect(detail["legacyHosts"]).toEqual([]);
+    // Nor was a sitemap handed to it. Same reading: this engine never probes
+    // for an undeclared sitemap, so an empty list is "nobody supplied one".
+    expect(detail["sitemapUrls"]).toEqual([]);
+    // And no finding cap was named, so the crawl will be judged at the engine's
+    // default and the default is what is reported. `null` here would mean
+    // uncapped, which is a different crawl.
+    expect(detail["findingCap"]).toBe(200);
   });
 
-  it("echoes the legacy hosts a crawl was configured with", async () => {
-    // Without this, the legacy-redirect check has no denominator: no finding
-    // could mean the redirects are fine or that nobody named a legacy domain.
+  it("echoes the legacy hosts and the supplied sitemaps a crawl was configured with", async () => {
+    // Without these, two checks have no denominator: no legacy-redirect finding
+    // could mean the redirects are fine or that nobody named a legacy domain,
+    // and "robots.txt declares no sitemap" reads differently depending on
+    // whether anybody has yet handed the crawl the document.
     const detail = await ok("crawl_status", { crawlId: surfaceCrawlId });
     expect(detail["legacyHosts"]).toEqual(["old.mcp-query.example"]);
+    expect(detail["sitemapUrls"]).toEqual([`${SEEDED_SITE}/sitemap-extra.xml`]);
   });
 
   it("counts the crawl's blocked pages", async () => {
@@ -662,6 +736,83 @@ describe("crawl_render", () => {
     const answer = await call("crawl_render", { crawlId: "crawl_missing" });
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("no such crawl");
+  });
+
+  /**
+   * P8-T2 — the same explicit mode over the OTHER transport.
+   *
+   * On its own crawl for the reason the HTTP suite gives: an explicit pass
+   * replaces the automatic selection and records itself on the crawl row, so
+   * running one over `liveCrawlId` would rewrite what the tests after this one
+   * read about that crawl's rendering.
+   */
+  describe("with a named list", () => {
+    let namedCrawlId = "";
+
+    beforeAll(async () => {
+      const accepted = await ok("crawl_start", {
+        siteUrl: `${site}/`,
+        maxPages: 5,
+        renderMaxPages: 2,
+      });
+      namedCrawlId = String(accepted["crawlId"]);
+      createdCrawls.push(namedCrawlId);
+      await settle(namedCrawlId);
+    }, 60_000);
+
+    it("advertises the urls parameter, so an agent can find it", async () => {
+      const tools = await client.listTools();
+      const render = tools.tools.find((t) => t.name === "crawl_render");
+      expect(Object.keys(render?.inputSchema.properties ?? {}).sort()).toEqual([
+        "crawlId",
+        "urls",
+      ]);
+    });
+
+    it("renders the pages the agent named and says the selection was explicit", async () => {
+      const summary = await ok("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: [`${site}/a`, `${site}/b`],
+      });
+      const selection = summary["selection"] as Record<string, unknown>;
+      expect(selection["mode"]).toBe("explicit");
+      expect(selection["selected"]).toBe(2);
+      // Null rather than zero — see RenderSelection.mode. The four numbers
+      // describe a decision that was not taken here.
+      expect(selection["budget"]).toBeNull();
+      expect(selection["suspects"]).toBeNull();
+      expect(Number(summary["rendered"]) + Number(summary["failures"])).toBe(2);
+      // Still counts, never a page list (obligation 1) — a named list going in
+      // does not license one coming back.
+      expect(JSON.stringify(summary)).not.toContain(`${site}/a`);
+    }, 90_000);
+
+    it("refuses a URL this crawl never fetched, by name, rather than fetching it", async () => {
+      const answer = await call("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: [`${site}/a`, `${site}/never-crawled`],
+      });
+      expect(answer.isError).toBe(true);
+      expect(String(answer.body["error"])).toContain(`${site}/never-crawled`);
+    });
+
+    it("refuses a list longer than the crawl's renderMaxPages instead of trimming", async () => {
+      const answer = await call("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: [`${site}/`, `${site}/a`, `${site}/b`],
+      });
+      expect(answer.isError).toBe(true);
+      expect(String(answer.body["error"])).toContain("renderMaxPages of 2");
+    });
+
+    it("refuses a host outside the site's family and outside the allowlist", async () => {
+      const answer = await call("crawl_render", {
+        crawlId: namedCrawlId,
+        urls: ["http://192.168.7.7/somewhere"],
+      });
+      expect(answer.isError).toBe(true);
+      expect(String(answer.body["error"])).toContain("crawl allowlist");
+    });
   });
 });
 
@@ -821,6 +972,9 @@ describe("pages_query", () => {
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
       "pageType", "renderError", "renderableWordCount", "rendered", "renderedWordCount",
+      // See the same assertion in test/api/query.test.ts: the analyzer's count
+      // over the post-JavaScript DOM, which is the column the CSR rule reads.
+      "renderedRenderableWordCount",
       "statusCode", "url", "wordCount",
     ].sort());
   });
@@ -895,13 +1049,56 @@ describe("robots_get", () => {
     expect(body["crawlDelaySec"]).toBe(3);
     expect(body["note"]).toBeNull();
     expect(body["sitemapSources"]).toEqual([`${SEEDED_SITE}/sitemap.xml`]);
+    // The provenance of the walk's other document: this one was handed to the
+    // crawl, not declared by the file. Two lists, because a supplied sitemap
+    // folded into the declared ones would be a claim about robots.txt.
+    expect(body["suppliedSitemaps"]).toEqual([`${SEEDED_SITE}/sitemap-extra.xml`]);
     expect(body["userAgent"]).toBe("AriadneBot/0.1 (mcp-test)");
     // The wrapper is closed: the sitemap walk's counters live in the same blob
     // and none of them are here.
     expect(Object.keys(body).sort()).toEqual([
       "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
-      "sitemapSources", "truncated", "userAgent",
+      "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
+  });
+
+  it("answers an empty supplied list for a crawl whose evidence predates the field", async () => {
+    // A discovery blob written before a client could supply a sitemap. Absent
+    // is EMPTY here and that is a fact, not a fallback: nobody could have
+    // supplied one. The endpoint answers rather than refusing.
+    const id = await seedCrawl({
+      id: `crawl_mcp_presupply_${Date.now()}`,
+      status: "finished",
+      config: { siteUrl: `${SEEDED_SITE}/`, userAgent: "AriadneBot/0.1 (mcp-test)" },
+      discovery: {
+        robots: { outcome: "read", crawlDelaySec: null, note: null, raw: SEEDED_ROBOTS, truncated: false },
+        sitemapSources: [`${SEEDED_SITE}/sitemap.xml`],
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 1 },
+        docsFetched: 1,
+      },
+    });
+    const body = await ok("robots_get", { crawlId: id });
+    expect(body["suppliedSitemaps"]).toEqual([]);
+  });
+
+  it("refuses a supplied-sitemap list of the wrong shape rather than reading it as none", async () => {
+    // "Nobody supplied a sitemap" is a claim about how the crawl was run. A
+    // blob this engine did not write must not be read into one.
+    const id = await seedCrawl({
+      id: `crawl_mcp_badsupply_${Date.now()}`,
+      status: "finished",
+      config: { siteUrl: `${SEEDED_SITE}/`, userAgent: "AriadneBot/0.1 (mcp-test)" },
+      discovery: {
+        robots: { outcome: "read", crawlDelaySec: null, note: null, raw: SEEDED_ROBOTS, truncated: false },
+        sitemapSources: [],
+        suppliedSitemaps: `${SEEDED_SITE}/sitemap-extra.xml`,
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+        docsFetched: 0,
+      },
+    });
+    const answer = await call("robots_get", { crawlId: id });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("suppliedSitemaps");
   });
 
   it("reads the live crawl's own file, which the crawler fetched rather than this tool", async () => {
@@ -1027,10 +1224,70 @@ describe("boot configuration", () => {
       ARIADNE_ALLOWED_DOMAINS: "example.com,*.example.org",
     });
     expect(config.allowedDomains).toEqual(["example.com", "*.example.org"]);
-    expect(Object.keys(config).sort()).toEqual(["allowedDomains", "databaseUrl"]);
+    // The whole shape, not a sample: what this config DOES NOT carry is the
+    // point of the assertion, and a token quietly appearing in it would be the
+    // trust model changing without anybody saying so. `renderDir` joined the
+    // set in P8-T1 and `exportDir` in P8-T6 — both name where this server keeps
+    // its own output, which is an operator's filesystem choice and not a
+    // credential.
+    expect(Object.keys(config).sort()).toEqual([
+      "allowedDomains",
+      "databaseUrl",
+      "exportDir",
+      "renderDir",
+    ]);
+    // Unset means "use the default", which the service names — not a path this
+    // function invents. See `parseOutputDir`.
+    expect(config.renderDir).toBeUndefined();
+    expect(config.exportDir).toBeUndefined();
   });
 
   it("still reads the allowlist, and an empty one is a posture rather than an error", () => {
     expect(loadMcpConfig({ DATABASE_URL: "postgres://x" }).allowedDomains).toEqual([]);
+  });
+
+  // ARIADNE_RENDER_DIR, both readings. An empty string is the same answer as an
+  // unset variable — "use the default" — because a shell that exports an empty
+  // value has said nothing, and treating it as a path would put a crawl's
+  // evidence at the filesystem root.
+  it("reads ARIADNE_RENDER_DIR, and treats empty and unset alike", () => {
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_RENDER_DIR: "/srv/ariadne/renders" })
+        .renderDir,
+    ).toBe("/srv/ariadne/renders");
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_RENDER_DIR: "   " }).renderDir,
+    ).toBeUndefined();
+  });
+
+  // ARIADNE_EXPORT_DIR reads the shell exactly as its twin does, and that is
+  // the assertion: one `parseOutputDir` serves both, so the two settings cannot
+  // drift apart on what an empty value means.
+  it("reads ARIADNE_EXPORT_DIR, and treats empty and unset alike", () => {
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_EXPORT_DIR: "/srv/ariadne/exports" })
+        .exportDir,
+    ).toBe("/srv/ariadne/exports");
+    expect(
+      loadMcpConfig({ DATABASE_URL: "postgres://x", ARIADNE_EXPORT_DIR: "   " }).exportDir,
+    ).toBeUndefined();
+  });
+
+  // The two are independent: naming one must not move the other. Without this
+  // an entrypoint that read a single variable into both fields would pass every
+  // test above.
+  it("keeps the two output directories independent", () => {
+    const onlyExport = loadMcpConfig({
+      DATABASE_URL: "postgres://x",
+      ARIADNE_EXPORT_DIR: "/srv/ariadne/exports",
+    });
+    expect(onlyExport.exportDir).toBe("/srv/ariadne/exports");
+    expect(onlyExport.renderDir).toBeUndefined();
+    const onlyRender = loadMcpConfig({
+      DATABASE_URL: "postgres://x",
+      ARIADNE_RENDER_DIR: "/srv/ariadne/renders",
+    });
+    expect(onlyRender.renderDir).toBe("/srv/ariadne/renders");
+    expect(onlyRender.exportDir).toBeUndefined();
   });
 });

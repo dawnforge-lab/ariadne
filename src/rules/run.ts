@@ -4,6 +4,7 @@ import { crawls, issues, metrics, pages } from "../db/schema.js";
 import { deriveClickDepth } from "./derive/click-depth.js";
 import { deriveFieldPresence } from "./derive/field-presence.js";
 import { deriveUrlParams } from "./derive/url-params.js";
+import { resolveRuleCaps, storedFindingCap } from "./query/crawl-evidence.js";
 import { RULESET_VERSION, type Registry } from "./registry/registry.js";
 import { METRIC_SCOPES, type Finding, type Metric } from "./registry/types.js";
 
@@ -32,6 +33,27 @@ export interface RunSummary {
    * different things.
    */
   byMetric: Record<string, number>;
+}
+
+/**
+ * What a caller may say about a run that the crawl's own row does not already
+ * say.
+ *
+ * One field today, and its precedence is the house pattern rather than a new
+ * one: `ResumeOpts.config` overrides the stored crawl config the same way, for
+ * the same reason — a stored value is the crawl's own decision, and an explicit
+ * argument is this call's. Absent means "read the crawl's config", which is the
+ * normal path and the only one the API uses: `crawl_rules` takes no cap argument,
+ * so a crawl started as a billed audit must carry that choice on its own row or
+ * lose it the moment the judgement is re-run.
+ */
+export interface RunOptions {
+  /**
+   * Findings each listing rule may report: a positive integer, or `null` for
+   * uncapped. Omit to use the crawl's `config.findingCap`, and omit that for
+   * the engine's defaults (`resolveRuleCaps`).
+   */
+  findingCap?: number | null;
 }
 
 /**
@@ -86,17 +108,38 @@ export async function runRules(
   db: Db,
   crawlId: string,
   registry: Registry,
+  opts: RunOptions = {},
 ): Promise<RunSummary> {
   // A crawl id nothing knows selects no pages, and a run over no pages looks
   // exactly like a clean site: zero findings, no error. Ask the `crawls` table
   // first so a typo or a deleted crawl is an error rather than a green report
   // about nothing (hard rule 7).
   const crawl = await db
-    .select({ id: crawls.id })
+    .select({ id: crawls.id, config: crawls.config })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
-  if (crawl.length === 0) throw new Error(`no such crawl '${crawlId}'`);
+  const row = crawl[0];
+  if (row === undefined) throw new Error(`no such crawl '${crawlId}'`);
+
+  // THE RUN'S CAPS, RESOLVED ONCE AND HELD ON THIS STACK.
+  //
+  // Not a module constant and not module state: `ApiService` holds a per-crawl
+  // lock, so two runs over ONE crawl cannot overlap — but two runs over two
+  // DIFFERENT crawls can, in this process, at the same time, and one of them
+  // may be a billed uncapped audit while the other is a 200-capped first look.
+  // A cap resolved into a variable outside this function would let whichever
+  // run started last decide what both of them report. This `const` is
+  // per-invocation, and it reaches a rule as an argument (`RuleCaps`), so there
+  // is no path by which one run can read another's budget.
+  //
+  // Sourced from the crawl's own row unless this call says otherwise, because
+  // the cap is a crawl-start decision and `crawl_rules` has no argument to
+  // restate it with. A stored value that is neither absent, null, nor a
+  // positive integer throws here rather than being read as "the default".
+  const caps = resolveRuleCaps(
+    opts.findingCap !== undefined ? opts.findingCap : storedFindingCap(row.config, crawlId),
+  );
 
   // Planner statistics, before any rule reads a table.
   //
@@ -307,11 +350,33 @@ export async function runRules(
   // Query rules run after the page rules: they read the crawl's tables whole
   // (in SQL), so they are unaffected by the page cursor.
   for (const rule of registry.byKind("query")) {
+    let produced: Finding[];
     try {
-      for (const f of await rule.run(db, crawlId)) record(f);
+      produced = await rule.run(db, crawlId, caps);
     } catch (error) {
       await flush();
       throw new Error(`rule '${rule.id}' threw`, { cause: error });
+    }
+    // Buffered in batches rather than in one go, which is what an UNCAPPED run
+    // needs: with `findingCap: null` a listing rule may hand back every orphan
+    // on the site, and holding all of them in `buffer` *as well as* in
+    // `produced` doubled the peak for no reason. The buffer now stays
+    // O(INSERT_BATCH) here exactly as it does in the page loop above.
+    //
+    // WHAT REMAINS O(FINDINGS) AND IS NOT PRETENDED OTHERWISE: `produced`
+    // itself. A query rule's contract is `Promise<Finding[]>` — it returns its
+    // findings, it does not stream them — so one rule's whole listing is in
+    // memory while it is written. That is bounded by what ONE rule found on ONE
+    // crawl (5,000 orphans is a few megabytes of small objects), never by the
+    // crawl's page count times the ruleset, and the rules-run memory contract
+    // is stated in those terms rather than claimed to be O(1).
+    //
+    // The flush is outside the try above on purpose: a failure to WRITE is not
+    // "rule X threw", and labelling it so would send a reader to a rule that
+    // did its job.
+    for (const f of produced) {
+      record(f);
+      if (buffer.length >= INSERT_BATCH) await flush();
     }
     await flush();
   }

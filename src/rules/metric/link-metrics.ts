@@ -44,7 +44,9 @@
  *     of "does this crawl exist" is a second answer waiting to disagree.
  *
  * `page_type` cohorts group by the crawler's own template detection
- * (`derivePageType`). The column is nullable, so a null groups under the
+ * (src/crawl/page-type.ts, whose crawl-end pass has already collapsed a URL
+ * shape that occurred once into the family it belongs to — a cohort here is a
+ * template). The column is nullable, so a null groups under the
  * documented sentinel `UNTYPED` rather than vanishing: a cohort of pages the
  * detector could not type is still a cohort, and dropping it would silently
  * change what "the site" means between two metrics. The sentinel, the cohort

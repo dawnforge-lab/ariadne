@@ -702,6 +702,11 @@ describe("GET /crawls/:id/pages", () => {
       // per page, so the projection carries it.
       "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
       "pageType", "rendered", "renderError", "renderableWordCount", "renderedWordCount",
+      // The rendered side of `content.csr-dependent` since P8-T1, published so
+      // an agent can check the rule COULD have fired before reading its silence
+      // as a pass. `renderedWordCount` beside it is the browser's innerText and
+      // is now evidence only — two instruments, both on the wire, named apart.
+      "renderedRenderableWordCount",
       "statusCode", "url", "wordCount",
     ].sort());
     // The column nobody selected stays where it is.
@@ -826,6 +831,10 @@ describe("GET /crawls/:id/robots", () => {
     expect(res.body["crawlDelaySec"]).toBe(2);
     expect(res.body["note"]).toBeNull();
     expect(res.body["sitemapSources"]).toEqual([`${SITE}/sitemap.xml`]);
+    // This crawl's evidence carries no supplied list — it was written before a
+    // client could hand the crawl a sitemap. Absent reads as empty, which is
+    // the only thing it can honestly mean.
+    expect(res.body["suppliedSitemaps"]).toEqual([]);
     // The groups in the file that governed this crawl.
     expect(res.body["userAgent"]).toBe("AriadneBot/0.1 (query-test)");
 
@@ -834,7 +843,7 @@ describe("GET /crawls/:id/robots", () => {
     // walk's counters too, and none of them are here.
     expect(Object.keys(res.body).sort()).toEqual([
       "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
-      "sitemapSources", "truncated", "userAgent",
+      "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
   });
 

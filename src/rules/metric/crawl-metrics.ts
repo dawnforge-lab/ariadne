@@ -72,12 +72,18 @@ type FindingCountRow = {
  * How many findings one rule actually has for this crawl — the listing, or the
  * exact total behind it where the listing was capped.
  *
- * `redirect.chain` and `redirect.loop` stop LISTING at `URL_FINDING_CAP` (200)
- * and write the exact total into the last finding's evidence as
+ * `redirect.chain` and `redirect.loop` stop LISTING at the run's finding cap
+ * (200 by default, whatever `findingCap` says otherwise, nothing at all when it
+ * is null) and write the exact total into the last finding's evidence as
  * `truncated: {reported, total}` — an `ExactTruncation`, because both rules run
  * their scan to completion and count every case (`heads.size`, `cycles.size`).
  * Counting the issues rows alone would therefore report exactly 200 chains for
  * a site with four thousand, and 200 is a number a client would act on.
+ *
+ * NOTHING HERE CHANGED WHEN THE CAP BECAME A KNOB, and that is the point of
+ * reading the note rather than the number: an uncapped run writes no note, which
+ * case 1 below already handles as "the listing is complete", so the metric is
+ * exact at every cap without knowing what the cap was.
  *
  * **Three situations, three different answers, and only one of them is a
  * count.** `redirectVolume`'s second query hands back the rows a rule listed and
@@ -178,7 +184,7 @@ function exactFindingCount(row: FindingCountRow, self: MetricIdentity): number {
  *    crawl was redirects" is a claim the absence of pages does not support.
  *  - `chains` / `loops` — how many redirect chains and loops the QUERY rules
  *    found on this crawl, read from their own `issues` rows. EXACT, including
- *    where those rules stopped listing at `URL_FINDING_CAP`: see
+ *    where those rules stopped listing at the run's finding cap: see
  *    `exactFindingCount` for the three shapes a truncation note can take and
  *    why two of them throw rather than report the listing.
  *

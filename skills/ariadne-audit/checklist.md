@@ -273,15 +273,37 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
      (critical). It fires on a rendered page whose rendered word count is at least
      twice its raw word count AND at least 150 words larger, which is the
      "most of what this page says arrived with the JavaScript" claim.
+
+     **BOTH SIDES OF THAT COMPARISON ARE THE SAME INSTRUMENT (ruleset 0.6.0).**
+     The rule reads `renderedRenderableWordCount` — the crawl's own analyzer run
+     over the post-JavaScript DOM — against `renderableWordCount`, the same
+     function over the bytes the server sent. It does NOT read
+     `renderedWordCount` (the browser's `innerText`) any more. That change is
+     what makes the rule able to fire on a theme carrying CSS-class-hidden
+     chrome: the chrome is in both documents, so it lands on both sides of the
+     subtraction and cancels. A finding from ruleset 0.5.0 or earlier used the
+     older comparison and is not row-comparable with one from 0.6.0.
   2. `issue_urls` with `ruleId: "content.csr-dependent"` for the page list. Each
-     row's evidence carries `{rawWordCount, renderedWordCount, addedWords}` — quote
-     these, per page type, in place of the old JS-on/JS-off counts.
+     row's evidence carries `{rawWordCount, renderableWordCount,
+     renderedAnalyzerWordCount, renderedRenderableWordCount, addedWords}` — two
+     readings of each document by one instrument, and the difference between the
+     renderable pair. Quote these, per page type, in place of the old JS-on/JS-off
+     counts. `addedWords` is the words JavaScript put on the page and nothing
+     else.
   3. `metrics_get` with `metricId: "render.coverage"` for the denominator: how many
      pages were rendered out of how many crawled, the selection budget, and the
-     render failures. A finding count means nothing without it.
-  4. `pages_query` with `rendered: true` to see which pages the sample covered, and
-     which page types are represented. If a page type you care about was not
-     sampled, say so rather than generalising from the ones that were.
+     render failures. A finding count means nothing without it. **Read
+     `selectionMode` first** — `auto` means the engine sampled and the budget
+     numbers describe how; `explicit` means an auditor named the pages, and
+     `selectionBudget`, `selectionSuspects`, `selectionSampled` and
+     `selectionTruncated` are null rather than zero, because no automatic decision
+     was taken. Quoting a null as "no suspects" would be a claim about the site's
+     HTML that nothing measured.
+  4. `pages_query` with `rendered: true` to see which pages were covered, and which
+     page types are represented. If a page type you care about was not covered, say
+     so rather than generalising from the ones that were — and on an explicit pass
+     say which templates your list stood for, since that is the whole of the
+     coverage claim.
   5. The nav side of the same question is CHECK-34 (`nav.js-only`) and the facet
      side is CHECK-02 (`filters.js-only`). Read all three together before you
      conclude anything about crawlability without JS.
@@ -289,9 +311,10 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
   - Do NOT assume SSR means everything is fine — read the raw-vs-rendered numbers
   - PASS if the render diff found no CSR-dependent pages and no JS-only navigation, across a sample that covered every page type
   - WARN if navigation or key content is JS-dependent on some page types
-  - FAIL if a page is essentially blank without JS (critical JS dependency: `addedWords` is most of `renderedWordCount`)
+  - FAIL if a page is essentially blank without JS (critical JS dependency: `addedWords` is most of `renderedRenderableWordCount`)
   - **FAIL if collection pages' product links are absent from raw HTML** — a crawler that does not render will miss most products, and Googlebot's initial crawl pass won't discover product URLs from collection pages. Products become entirely dependent on sitemap.xml for discovery. (Cross-read CHECK-33b: sitemap-only products are the same failure seen from the link graph.)
-  - Record: raw vs rendered word counts per page type (from the finding evidence), **the nav and filter link counts from CHECK-34 and CHECK-02**, render coverage (rendered / crawled, and the failures), recommendation for the next crawl's `renderBudgetPct`
+  - Record: raw vs rendered word counts per page type (from the finding evidence), **the `renderedRenderableWordCount` / `renderableWordCount` RATIO beside `addedWords`** on the rendered pages, **the nav and filter link counts from CHECK-34 and CHECK-02**, render coverage (rendered / crawled, the failures, and `selectionMode` with the templates the pass stood for), recommendation for the next crawl — which templates to name, or a `renderBudgetPct` if the next pass will be automatic
+  - **Why the ratio and not only the delta.** Chrome that both documents carry cancels EXACTLY in `addedWords` (the 150-word arm) and does NOT cancel in the ratio arm, which reads `injected >= body + chrome`. So on a chrome-heavy theme the rule is still harder to trip than the thresholds alone suggest, and a zero is only a finding once you have looked at how close the ratio came. Quote it — a site whose rendered/renderable runs 1.6 across the board is a different story from one running 1.02, and only one of them is 'no client-side rendering'.
 
 ### CHECK-02: Filters / layered navigation — HTML or JS elements?
 - **Priority**: High | **Requires**: Engine (render pass)
@@ -495,15 +518,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      was refused — a robots-shaped block that shows up as a fetch outcome.
   3. **`robots_get` — the file itself, as this crawl read it.** It answers
      `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
-     sitemapSources, userAgent}`: `raw` is the text the crawl obeyed, `outcome` is
-     `read` / `absent` / `unreachable` (and `unreachable` is NOT `absent` — a site
-     that could not tell us its rules is a finding, not an allow-all), `truncated`
-     means `raw` is only the first 500KB so anything concluded about a rule past that
-     point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
-     (CHECK-06 reads it), and `userAgent` is the UA whose groups actually governed
-     the crawl. **Stored evidence, never re-fetched**: quote it rather than the live
-     file, and if you also read the live file, report the difference as the fact about
-     the site that it is.
+     sitemapSources, suppliedSitemaps, userAgent}`: `raw` is the text the crawl
+     obeyed, `outcome` is `read` / `absent` / `unreachable` (and `unreachable` is NOT
+     `absent` — a site that could not tell us its rules is a finding, not an
+     allow-all), `truncated` means `raw` is only the first 500KB so anything
+     concluded about a rule past that point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
+     (CHECK-06 reads it), `suppliedSitemaps` is the documents the crawl was HANDED at
+     start rather than told about by the file — a sitemap listed only there is one the
+     site publishes and does not declare, and CHECK-06 still fires — and `userAgent`
+     is the UA whose groups actually governed the crawl. **Stored evidence, never
+     re-fetched**: quote it rather than the live file, and if you also read the live
+     file, report the difference as the fact about the site that it is.
 - **The file's contents** (steps 1-4 read `robots_get`'s `raw`; a browser only if the
   crawl never stored one — `outcome: "unreachable"`):
   1. Read `raw` in full. Note `truncated` in the finding if it is set.
@@ -618,10 +643,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   each — is CHECK-08's metric; do not re-fetch the file to describe it.
 
   **The robots.txt half is `robots_get`'s `sitemapSources`**: the `Sitemap:` lines the
-  crawl's walk was pointed at, in declaration order. Empty means the file declared
-  none, which is the WARN below — and it is a different fact from "no sitemap exists",
-  which is `sitemap.missing`. A site with a sitemap at the conventional location and
-  no declaration fails this half and passes the other; say both.
+  file declared, in declaration order. Empty means the file declared none, which is
+  the WARN below — and it is a different fact from "no sitemap exists", which is
+  `sitemap.missing`. A site with a sitemap at the conventional location and no
+  declaration fails this half and passes the other; say both.
+
+  **`suppliedSitemaps` is how you get to say the second half at all.** The engine
+  never probes for an undeclared sitemap, so a crawl that read none has no sitemap
+  evidence — every CHECK-07 and CHECK-08 answer below would be a silence about a
+  document nobody looked at. When `sitemapSources` is empty and `suppliedSitemaps`
+  is empty too, the sitemap questions are NOT MEASURED: find the document (ask the
+  owner, the CMS, Search Console) and re-crawl with `crawl_start`'s `sitemapUrls`,
+  then judge. Supplying it does not settle this check — robots.txt still declares
+  nothing, `sitemap.missing` still fires, and the one-line fix is still the site's.
 - **Evaluate**:
   - FAIL if sitemap returns non-200 or robots.txt has no Sitemap: line
   - WARN if flat sitemap with >50k URLs
@@ -634,8 +668,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `sitemap.non-200` (warning) — a listed URL that did not answer 200
   - `sitemap.redirected` (warning) — a listed URL that redirects
   - `sitemap.non-indexable` (warning) — a listed URL the crawl judged non-indexable
-  - `sitemap.uncrawled` (info) — a listed URL this crawl never reached (blocked by
-    robots, or outside the crawl's budget). NOT MEASURED, not clean.
+  - `sitemap.uncrawled` (info) — a listed URL this crawl never reached: blocked by
+    robots or outside the crawl's budget, off this crawl's origin (another host,
+    port, or scheme — never attempted by design; the evidence's `offOrigin` flag
+    marks these), or attempted and no response came back. NOT MEASURED, not clean.
   `issue_urls` per rule for the URL lists; `metrics_get` with
   `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
 - **Evaluate**:
@@ -830,12 +866,34 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   **Legacy and staging hosts are only checked if you named them.** Pass them as
   `legacyHosts` when starting the crawl (each one must be on the operator's
   allowlist in its own right — they are different sites by every definition the
-  engine has). A host nobody named is a host nobody probed, which is a SKIP, not a
-  pass.
+  engine has).
+
+  **When nobody named a legacy host, the check is a PASS with an unmeasured half —
+  not a SKIP.** This sentence used to read "a host nobody named is a host nobody
+  probed, which is a SKIP, not a pass", and two auditors reading it beside the
+  Evaluate line below landed on different verdicts for the same crawl. The Evaluate
+  line governs, and it asks one question: do the site's variants resolve to one
+  canonical host? The apex/www/http probe answers exactly that, it runs on every
+  crawl with `probeHosts` on, and its answer does not become unknown because a
+  legacy domain was never mentioned. So: **probe ran, no `host.duplicate-host-200`,
+  no legacy host named → PASS, and `notes` says the legacy/staging half was NOT
+  MEASURED because no `legacyHosts` were supplied.** Put the missing number in the
+  report's not-measured table like any other.
+
+  The SKIP reading is rejected, and it is worth saying why rather than just
+  dropping it: SKIP means nothing was measured, and here the probe measured the
+  thing the check is named for. A SKIP would file a site with one clean canonical
+  host beside sites nobody looked at. **The SKIP case is narrower and still
+  stands: `host.probe-skipped` fired** — the crawl ran with `probeHosts: false`, so
+  no variant was probed at all and there is no verdict to give. A named legacy host
+  on a crawl whose probe was skipped is that same SKIP.
 - **Evaluate**:
-  - PASS if all variants redirect to one canonical host
+  - PASS if all variants redirect to one canonical host — including when no
+    `legacyHosts` were named, with the legacy half recorded as NOT MEASURED
   - FAIL if multiple hosts resolve to live content
-  - Record: canonical host, redirect behavior per variant
+  - SKIP only if `host.probe-skipped` fired: nothing about any variant was measured
+  - Record: canonical host, redirect behavior per variant, and whether any
+    `legacyHosts` were supplied
 
 ---
 
@@ -2256,7 +2314,7 @@ through an empty listing rests on that timestamp.
 | `issues_list` | one row per rule that found something: `{ruleId, checkIds, severity, category, title, count, sampleUrls}` | the verdict on a check, and its size |
 | `issue_urls` | one row per finding: `{url, evidence}` | the URL list a developer gets, and the per-page evidence |
 | `metrics_get` | `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}` | every number a report quotes |
-| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
+| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, suppliedSitemaps, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
 
 **Filters that matter for a checklist walk:**
 
@@ -2285,17 +2343,24 @@ define is refused BY NAME, so an empty page always means "nothing found" and nev
 "you asked wrong". Two refusals are routine and both are informative:
 
 - `checkId 'CHECK-08' is claimed only by metric rules … it is measured, not found` —
-  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38
-  answer this way.
+  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38 answer
+  this way, **for example**: the list is a sample of the shape, not the closed set.
 - `checkId 'CHECK-41' is claimed by no rule` — an agent check. There is no engine
-  answer and there is not meant to be one.
+  answer and there is not meant to be one. CHECK-41 is the standing example and
+  **it is far from the only one** — CHECK-42, CHECK-47 and the whole CHECK-71…81
+  analytics block answer the same way, as does every other check the coverage query
+  records as agent-owned. Neither list above is exhaustive and neither is meant to
+  be read as one: probe the check you are on, and take the refusal it gives you.
 
 **When a crawl is large**, `export_crawl` writes one dataset (`issues`, `pages`,
 `metrics`) to a gzipped JSONL file on the server and answers `{dataset, path, rows,
 bytes}` — the path, never the contents. Use it when you need every row (the full
 4xx list, a site-wide page census) rather than paging thousands of rows through a
 context window. The file is for a human or a pipeline; the counts and the samples
-are what belong in the audit.
+are what belong in the audit. **The directory is the server's choice, never
+yours**: it is `exports/` under the server's working directory unless the operator
+set `ARIADNE_EXPORT_DIR`, and the answer's `path` is where the file actually
+landed. Quote that path; do not construct one.
 
 ## Crawl Configuration Requirements
 

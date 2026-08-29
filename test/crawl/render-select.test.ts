@@ -35,6 +35,7 @@ import {
 import {
   RENDER_DEFAULTS,
   renderSelectionStats,
+  selectExplicitRenderSet,
   selectRenderSet,
   SUSPICION,
   type RenderSelection,
@@ -219,6 +220,9 @@ describe("selectRenderSet", () => {
     });
 
     expect(result).toEqual<RenderSelection>({
+      // P8-T2: the automatic decision now names itself, so an explicit list
+      // cannot be read as one. See RenderSelection.mode.
+      mode: "auto",
       selected: [
         url("/dead-end"), // T2
         url("/framework"), // T4
@@ -392,6 +396,9 @@ describe("selectRenderSet", () => {
     });
 
     expect(result).toEqual<RenderSelection>({
+      // P8-T2: the automatic decision now names itself, so an explicit list
+      // cannot be read as one. See RenderSelection.mode.
+      mode: "auto",
       selected: [
         // product (5 pages) — the largest template, so it is seated first.
         url("/p/1"), url("/p/2"), url("/p/3"),
@@ -411,8 +418,13 @@ describe("selectRenderSet", () => {
    * THE GATE SITE — the shape the first real-site crawl actually had, shrunk.
    *
    * lavishalice.com produced 196 page types over 551 pages: two or three real
-   * templates plus ~170 collection URLs that `derivePageType` left as singleton
-   * types of their own. 176 candidates competed for 28 seats, and because the
+   * templates plus ~170 collection URLs that the per-URL typing left as
+   * singleton types of their own (P8-T5's `inferPageTemplates` now merges those
+   * into `/collections/:slug` at crawl end — this test keeps the shape anyway,
+   * because size-ordering is what protects the selection on any site whose
+   * types are genuinely many and small, and the inference is not allowed to be
+   * the only thing standing between the audit and an empty answer).
+   * 176 candidates competed for 28 seats, and because the
    * cut was taken in URL order every seat went to `/apps/*` and
    * `/collections/a-b*` — **zero of the 211 `/products/:slug` pages rendered**,
    * so the four JavaScript rules came back empty for the biggest template on an
@@ -450,6 +462,9 @@ describe("selectRenderSet", () => {
     });
 
     expect(result).toEqual<RenderSelection>({
+      // P8-T2: the automatic decision now names itself, so an explicit list
+      // cannot be read as one. See RenderSelection.mode.
+      mode: "auto",
       selected: [
         // The 12-page template first, all three of its sampled pages — this is
         // the whole point: three renders that answer for twelve pages.
@@ -521,6 +536,9 @@ describe("selectRenderSet", () => {
       renderSamplePerType: 3,
     });
     expect(capped).toEqual<RenderSelection>({
+      // P8-T2: the automatic decision now names itself, so an explicit list
+      // cannot be read as one. See RenderSelection.mode.
+      mode: "auto",
       selected: [url("/s/1"), url("/s/2"), url("/s/3"), url("/s/4")],
       budget: 4,
       suspects: 5,
@@ -541,6 +559,9 @@ describe("selectRenderSet", () => {
       renderSamplePerType: 3,
     });
     expect(wider).toEqual<RenderSelection>({
+      // P8-T2: the automatic decision now names itself, so an explicit list
+      // cannot be read as one. See RenderSelection.mode.
+      mode: "auto",
       selected: [
         url("/s/1"), url("/s/2"), url("/s/3"), url("/s/4"), url("/s/5"),
         url("/h/1"), url("/h/2"),
@@ -635,6 +656,9 @@ describe("selectRenderSet", () => {
     const crawlId = await newCrawl();
     const result = await selectRenderSet(db, crawlId, {});
     expect(result).toEqual<RenderSelection>({
+      // P8-T2: the automatic decision now names itself, so an explicit list
+      // cannot be read as one. See RenderSelection.mode.
+      mode: "auto",
       selected: [],
       budget: 0,
       suspects: 0,
@@ -664,6 +688,144 @@ describe("selectRenderSet", () => {
         RangeError,
       );
     }
+  });
+
+  // ------------------------------------------------- P8-T2: the named list
+  //
+  // The explicit selection reuses the automatic one's promotion and demotion
+  // CTEs verbatim, so what these cases have to establish is not that an INSERT
+  // works — it is the same insert — but the three things that are genuinely
+  // different: the list is honoured in the caller's own order, it REPLACES
+  // whatever selection stood before it, and it refuses to render a shorter list
+  // than it was handed.
+
+  it("promotes exactly the named pages, in the caller's order", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, BUDGET_SITE);
+
+    // Deliberately NOT in URL order and NOT what any automatic decision would
+    // choose: the automatic selection over this site leads with the five
+    // framework-marker suspects (/s/1 … /s/5), and every page named here is one
+    // of the healthy ones it would have reached last or not at all.
+    const named = [url("/h/5"), url("/h/1"), url("/h/3")];
+    const result = await selectExplicitRenderSet(db, crawlId, named);
+
+    expect(result).toEqual<RenderSelection>({
+      mode: "explicit",
+      selected: named,
+      // Null, not zero: no budget was computed, nothing was suspected, nothing
+      // was sampled and nothing was cut. See RenderSelection.mode.
+      budget: null,
+      suspects: null,
+      sampled: null,
+      truncated: null,
+    });
+    expect(await frontierState(crawlId)).toEqual({
+      [url("/h/5")]: "render_pending",
+      [url("/h/1")]: "render_pending",
+      [url("/h/3")]: "render_pending",
+    });
+  });
+
+  /**
+   * THE REPLACEMENT SEMANTICS, which is the case a reader is most likely to get
+   * wrong: a named list does not ADD to the automatic selection, it stands in
+   * for it. An earlier pass's leftover `render_pending` rows go back to `done`.
+   *
+   * Without the demotion the pass that followed would render eight pages and
+   * report three, which is the exact shape of a coverage number that lies.
+   */
+  it("replaces an earlier automatic selection, demoting the rows it does not name", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, BUDGET_SITE);
+
+    // First, the automatic decision: five suspects and the three lowest-URL
+    // sample rows, eight seats and eight candidates.
+    const auto = await selectRenderSet(db, crawlId, {
+      renderBudgetPct: 100,
+      renderMaxPages: 8,
+      renderSamplePerType: 3,
+    });
+    expect(auto.selected).toHaveLength(8);
+    expect(auto.mode).toBe("auto");
+
+    // Then a list that names two of those eight and one page it never chose.
+    const named = [url("/s/1"), url("/h/1"), url("/h/7")];
+    const explicit = await selectExplicitRenderSet(db, crawlId, named);
+    expect(explicit.selected).toEqual(named);
+
+    // The frontier is now the LIST, and only the list. Every other row the
+    // automatic pass had promoted is back at 'done'.
+    const state = await frontierState(crawlId);
+    const pending = Object.entries(state)
+      .filter(([, s]) => s === "render_pending")
+      .map(([u]) => u)
+      .sort();
+    expect(pending).toEqual([...named].sort());
+    for (const u of [url("/s/2"), url("/s/3"), url("/s/4"), url("/s/5"), url("/h/2")]) {
+      expect(state[u], `${u} demoted`).toBe("done");
+    }
+  });
+
+  // …and the reverse: an automatic pass after an explicit one takes the
+  // frontier back, so neither mode leaves the other's rows standing.
+  it("is replaced in its turn by the next automatic selection", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, BUDGET_SITE);
+
+    await selectExplicitRenderSet(db, crawlId, [url("/h/6"), url("/h/7")]);
+    const auto = await selectRenderSet(db, crawlId, {
+      renderBudgetPct: 100,
+      renderMaxPages: 2,
+      renderSamplePerType: 0,
+    });
+    expect(auto.selected).toEqual([url("/s/1"), url("/s/2")]);
+    const state = await frontierState(crawlId);
+    expect(state[url("/h/6")]).toBe("done");
+    expect(state[url("/h/7")]).toBe("done");
+    expect(state[url("/s/1")]).toBe("render_pending");
+  });
+
+  /**
+   * A URL that is not a renderable page of this crawl stops the selection.
+   *
+   * The transport is supposed to have refused it with a 400 naming the URL
+   * (`checkRenderUrls`), so reaching here is a defect above this line — and the
+   * answer to a defect is not to render the subset that happened to match. The
+   * three shapes are the three ways a URL can be present in the crawl and still
+   * not be renderable evidence.
+   */
+  it("refuses to render a shorter list than it was handed", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/ok" },
+      { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+      { path: "/moved", fetchClass: "redirect", statusCode: 301 },
+    ]);
+
+    for (const bad of [url("/never-crawled"), url("/gone"), url("/moved")]) {
+      await expect(
+        selectExplicitRenderSet(db, crawlId, [url("/ok"), bad]),
+        bad,
+      ).rejects.toThrow(/resolved 1 of 2 named URL/);
+    }
+    // …AND NOTHING WAS PROMOTED ON THE WAY. The refusal is total: the
+    // eligibility question is asked in a read before anything is written, so a
+    // refused list never leaves the URLs that DID resolve sitting in the
+    // frontier waiting for a pass nobody authorised.
+    expect(await frontierState(crawlId)).toEqual({});
+  });
+
+  it("refuses an empty list rather than reading it as 'render nothing'", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/ok" }]);
+    await expect(selectExplicitRenderSet(db, crawlId, [])).rejects.toThrow(/empty URL list/);
+  });
+
+  it("refuses a crawl id nothing knows", async () => {
+    await expect(
+      selectExplicitRenderSet(db, `crawl_${randomUUID()}`, [url("/ok")]),
+    ).rejects.toThrow(/no such crawl/);
   });
 });
 

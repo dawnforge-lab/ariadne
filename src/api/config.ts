@@ -52,15 +52,42 @@ export interface ServiceConfig {
   crawlDefaults?: Partial<CrawlConfig>;
   /**
    * Where `GET /crawls/:id/export` (and the MCP `export_crawl` tool) writes its
-   * files. Defaults to `exports/` under the process's working directory.
+   * files. Defaults to `exports/` under the process's working directory, and the
+   * `api:serve` / `mcp:serve` entrypoints let an operator move it with
+   * `ARIADNE_EXPORT_DIR`.
    *
    * The directory is a server property rather than a request parameter, and
    * that is the whole point: a caller names a crawl and a dataset, never a
    * path. An API that took a destination from the wire would be a file-write
    * primitive with a bearer token in front of it. The response carries the
    * path the server chose so a human or a pipeline can pick the file up.
+   *
+   * `renderDir`'s twin, and settable for the same reason: on a billed audit the
+   * export is the NORMAL path rather than the exception (the action-plan skill
+   * switches to it past 2,000 rows, and an uncapped crawl passes that on its
+   * first large rule), so the files accumulate wherever the process was started.
+   * The Phase 8 gate is the measurement: a skills-only deliverable run left
+   * 384,526 bytes of one crawl's findings in the repository's own `exports/`
+   * while the renders — already movable — went where the operator asked.
    */
   exportDir?: string;
+  /**
+   * Where `POST /crawls/:id/render` (and the MCP `crawl_render` tool) keeps the
+   * serialised post-JavaScript documents its pass produces — one directory per
+   * crawl underneath it. Defaults to `renders/` under the process's working
+   * directory (`RENDER_HTML_DIR`), and the `api:serve` / `mcp:serve`
+   * entrypoints let an operator move it with `ARIADNE_RENDER_DIR`.
+   *
+   * `exportDir`'s twin in every way that matters, and settable for the same
+   * reason plus one more. Like exports, it is a SERVER property and never a
+   * request parameter — a caller names a crawl, never a path. Unlike exports,
+   * it also grows without being asked to: every rendered page leaves a file
+   * behind, so an operator who cannot say where they land ends up with a crawl's
+   * evidence in whatever directory the process happened to start in. That is
+   * how this repository's own test suite left twelve stray crawl directories in
+   * the working tree before this field existed.
+   */
+  renderDir?: string;
   /**
    * Where the server writes its own diagnostics — a queue pick-up, a crawl that
    * threw, the stack behind a 500. Never the response body (a stack trace in a
@@ -91,12 +118,45 @@ export interface LoadedApiConfig {
   allowedDomains: string[];
   port: number;
   databaseUrl: string;
+  /** `ARIADNE_EXPORT_DIR`, or undefined for the `exports/` default. */
+  exportDir: string | undefined;
+  /** `ARIADNE_RENDER_DIR`, or undefined for the `renders/` default. */
+  renderDir: string | undefined;
 }
 
 /** Config read from the environment by the `mcp:serve` entrypoint. */
 export interface LoadedMcpConfig {
   allowedDomains: string[];
   databaseUrl: string;
+  /** `ARIADNE_EXPORT_DIR`, or undefined for the `exports/` default. */
+  exportDir: string | undefined;
+  /** `ARIADNE_RENDER_DIR`, or undefined for the `renders/` default. */
+  renderDir: string | undefined;
+}
+
+/**
+ * `ARIADNE_EXPORT_DIR` / `ARIADNE_RENDER_DIR` as the service reads them: a path,
+ * or nothing.
+ *
+ * ONE function for both variables because they are one decision — where this
+ * server's own output lands — and the two settings must not drift apart in how
+ * they read a shell. Both are safe environment knobs for the same reason
+ * `crawlDefaults` is not one: they name where our files go, never what the
+ * server may do.
+ *
+ * Unset and empty are the SAME answer — "use the default" — and each default is
+ * named in its own `ServiceConfig` field rather than repeated here. This is not
+ * the `ARIADNE_ALLOWED_DOMAINS` case where an unset value is a stated posture: a
+ * missing directory setting cannot silently permit anything, it can only put
+ * files somewhere predictable, so a default is the honest answer instead of a
+ * refusal. Neither is validated for existence or writability at boot: the write
+ * path creates the directory, and a boot-time check would be a claim about a
+ * filesystem that can change before the first write anyway (hard rule 7 — the
+ * failure is loud where it happens).
+ */
+export function parseOutputDir(raw: string | undefined): string | undefined {
+  const dir = (raw ?? "").trim();
+  return dir === "" ? undefined : dir;
 }
 
 /**
@@ -155,6 +215,8 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): LoadedApiCo
     allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]),
     port,
     databaseUrl,
+    exportDir: parseOutputDir(env["ARIADNE_EXPORT_DIR"]),
+    renderDir: parseOutputDir(env["ARIADNE_RENDER_DIR"]),
   };
 }
 
@@ -191,7 +253,12 @@ export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): LoadedMcpCo
   if (databaseUrl === "") {
     throw new Error("DATABASE_URL must be set: the MCP server holds the database handle");
   }
-  return { allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]), databaseUrl };
+  return {
+    allowedDomains: parseAllowedDomains(env["ARIADNE_ALLOWED_DOMAINS"]),
+    databaseUrl,
+    exportDir: parseOutputDir(env["ARIADNE_EXPORT_DIR"]),
+    renderDir: parseOutputDir(env["ARIADNE_RENDER_DIR"]),
+  };
 }
 
 /**

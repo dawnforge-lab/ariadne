@@ -31,6 +31,13 @@
  *     row and its frontier row is completed in the SAME transaction, then the
  *     pass writes its count to `crawls.render_pass_count`.
  *
+ * AND ONE THING THAT IS NOT A STEP: the pass creates `<renderHtmlDir>/<crawlId>/`
+ * between steps 2 and 3, because from Phase 8 the renderer writes each
+ * serialised post-JavaScript document there (src/crawl/render/renderer.ts). The
+ * directory is made once, here, before the browser launches — a permission or a
+ * disk problem is then one error at the top of the pass instead of one
+ * classified `render_error` per page saying the same thing.
+ *
  * WHY A FAILED RENDER IS NOT RETRIED. `leaseRenderUrls` increments `attempts`,
  * but nothing in this pass reads it, because nothing in this pass loops: a URL
  * is leased once, rendered once, and completed once, whatever the outcome. A
@@ -55,8 +62,18 @@
  * (`rendered = true` / `render_error is not null`). What IS persisted is
  * `crawls.render_pass_count`, because that column exists and the pass is the
  * only writer of it.
+ *
+ * ONE THING THE RECOMPUTATION CANNOT SEE, and therefore the one thing this pass
+ * does persist about its selection: whether the selection was made
+ * automatically at all. From Phase 8 a caller may NAME the pages, and a named
+ * list is an input no column of `pages` records. It is written to the crawl's
+ * config blob beside the three render knobs that are already there — see
+ * `recordRenderSelection`, which argues that placement rather than assuming it.
  */
-import { eq } from "drizzle-orm";
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
+
+import { eq, sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
@@ -69,6 +86,8 @@ import {
 } from "../frontier.js";
 import { PageRenderer, writeRenderResult, type RenderResult } from "./renderer.js";
 import {
+  RENDER_URLS_KEY,
+  selectExplicitRenderSet,
   selectRenderSet,
   type RenderSelection,
   type RenderSelectionConfig,
@@ -106,6 +125,18 @@ export class RenderPassRefusal extends Error {
   }
 }
 
+/**
+ * Where a crawl's serialised post-JavaScript documents go, relative to the
+ * process's working directory unless a caller names an absolute path.
+ *
+ * One directory per crawl underneath it (`<root>/<crawlId>/`), because a crawl
+ * is the unit a reader deletes, archives or hands to somebody: a flat directory
+ * of hashes from every crawl this machine ever ran is not evidence anybody can
+ * use. Git-ignored — see .gitignore — and its disk cost belongs in the gate
+ * document, not in a silent assumption that a laptop has room.
+ */
+export const RENDER_HTML_DIR = "renders";
+
 export const RENDER_PASS_DEFAULTS = {
   /**
    * Browser contexts alive at once. Four is the crawl's initial window, and a
@@ -138,6 +169,27 @@ export interface RenderPassConfig extends RenderSelectionConfig {
   renderConcurrency?: number;
   navigationTimeoutMs?: number;
   settleMs?: number;
+  /**
+   * Root directory for this pass's serialised documents; defaults to
+   * `RENDER_HTML_DIR`. The pass creates `<root>/<crawlId>/` itself, before the
+   * browser launches, so a permission or disk problem is one error at the top
+   * of the pass rather than seventy identical ones inside it.
+   */
+  renderHtmlDir?: string;
+  /**
+   * The pages a caller NAMED, in place of the automatic selection.
+   *
+   * Absent (or undefined) is the default and the only behaviour that existed
+   * before Phase 8: the pass selects for itself. Present, it must be a list of
+   * URLs that are already pages of this crawl, already validated by whoever
+   * accepted them — see `selectExplicitRenderSet`, which states what it refuses
+   * to guess and what belongs to the transport.
+   *
+   * A list REPLACES the automatic selection for this pass rather than adding to
+   * it, and the pass around it is byte-identical either way: the same three
+   * refusals, the same pacing, the same earned spacing, the same evidence.
+   */
+  renderUrls?: readonly string[];
   /** TEST ONLY — the fixture-server escape hatch. See `CrawlConfig`. */
   allowPrivate?: boolean;
 }
@@ -280,11 +332,45 @@ export async function runRenderPass(
     );
   }
 
-  // STEP 2. Choose the set. After this statement the frontier is the selection.
-  const selection = await selectRenderSet(db, crawlId, cfg);
+  // STEP 2. Choose the set. After this statement the frontier is the selection
+  // — either the automatic one, or the list the caller named, which REPLACES it
+  // (see selectExplicitRenderSet).
+  //
+  // The selection and the record of HOW it was made are written in one
+  // transaction, because a reader a week later has only the record:
+  // `render.coverage` recomputes the automatic decision from SQL and, without
+  // this, could not tell "the automatic selection chose these twelve pages"
+  // from "an agent named twelve pages". See `recordRenderSelection`.
+  const named = cfg.renderUrls;
+  const selection = await db.transaction(async (tx) => {
+    const chosen =
+      named === undefined
+        ? await selectRenderSet(tx, crawlId, cfg)
+        : await selectExplicitRenderSet(tx, crawlId, named);
+    await recordRenderSelection(tx, crawlId, named ?? null);
+    return chosen;
+  });
+
+  // …and make the place this pass's evidence goes, ONCE, before the browser
+  // exists. `recursive` so a first-ever pass creates the root too, and so a
+  // re-run over a crawl that already has a directory is not an error: a
+  // re-selected crawl legitimately re-renders pages, and the file it overwrites
+  // is the same page's older document.
+  //
+  // `resolve`, NOT `join`: the path this produces is written into
+  // `pages.rendered_html_path` and read back by a person, days later, from a
+  // different working directory. A relative pointer stored in a database is a
+  // pointer whose meaning depends on where the reader happens to be standing —
+  // it is only interpretable beside the cwd of the process that wrote it, which
+  // nothing records. Absolutising here means the default `renders/` is still
+  // "under wherever the server runs" and the STORED value still says where that
+  // was.
+  const htmlDir = resolve(cfg.renderHtmlDir ?? RENDER_HTML_DIR, crawlId);
+  await mkdir(htmlDir, { recursive: true });
 
   const renderer = await PageRenderer.launch({
     origin: new URL(cfg.siteUrl).origin,
+    htmlDir,
     userAgent: cfg.userAgent,
     // NOT `cfg.perHostDelayMs`. The crawl's ratchet may have earned a wider
     // spacing than the config asked for, and that lesson is the site's, not
@@ -342,6 +428,67 @@ export async function runRenderPass(
     unrendered: after.renderPending,
     elapsedMs: Date.now() - started,
   };
+}
+
+/**
+ * Record WHICH INPUT this pass's selection was made from: the caller's URL
+ * list, or `null` for the automatic selection.
+ *
+ * ## Why this is written at all
+ *
+ * `render.coverage` describes the selection long after the pass is over, and it
+ * does so by RECOMPUTING the automatic decision from the crawl's columns (see
+ * that rule's header for why recomputation is sound). Recomputation cannot see
+ * a list somebody named. Without this record the metric would describe an
+ * automatic selection that never ran, on a crawl whose render set was chosen by
+ * hand — a wrong answer delivered as a table of numbers, which is the worst
+ * shape a wrong answer can take.
+ *
+ * ## Why it lives in `config_jsonb`, which is the crawl's INPUT
+ *
+ * Because that is what it is. `config_jsonb` already carries the render pass's
+ * three knobs — `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType` —
+ * and `render.coverage` already reads them from there to reproduce the decision
+ * the pass made. An explicit URL list is the fourth input of the same pass. The
+ * only thing that distinguishes it is WHEN it arrives: the knobs are set when
+ * the crawl starts, the list arrives with the render request, so the pass is
+ * the only writer that can put it beside them.
+ *
+ * Nothing about the OUTCOME is recorded here — not what rendered, not what
+ * failed, not how long it took. Those are page rows and `render_pass_count`.
+ * The rule this column has always carried ("the crawl's input, never a results
+ * column") is therefore intact, and the reason it is worth restating is that
+ * the alternative — deriving the mode from the evidence — is unsound in a way
+ * that is easy to miss: an automatic pass renders only candidates, so a
+ * rendered non-candidate would prove an explicit list, but an explicit list
+ * that happens to name only candidates would be indistinguishable from an
+ * automatic one. A guess that is right most of the time is exactly what hard
+ * rule 7 forbids.
+ *
+ * ## Why an automatic pass writes `null` rather than leaving the key alone
+ *
+ * Because a crawl rendered from a list and then rendered automatically must
+ * stop saying "explicit". Every pass overwrites the record, so it always
+ * describes the LAST selection — which is the only selection the frontier and
+ * the page rows describe either. A key that is ABSENT means no Phase 8 pass has
+ * run over this crawl: never rendered, or rendered by an engine that had no
+ * explicit mode, and in both of those the only selection that can have happened
+ * is the automatic one.
+ *
+ * `jsonb_set(..., true)` creates the key when it is missing and replaces it
+ * when it is not; unknown keys are ignored by `parseStoredConfig`, so a config
+ * carrying this reads back exactly as it did before.
+ */
+async function recordRenderSelection(
+  db: Pick<Db, "execute">,
+  crawlId: string,
+  urls: readonly string[] | null,
+): Promise<void> {
+  await db.execute(sql`
+    update crawls
+      set config_jsonb = jsonb_set(
+        config_jsonb, ${`{${RENDER_URLS_KEY}}`}::text[], ${JSON.stringify(urls)}::jsonb, true)
+    where id = ${crawlId}`);
 }
 
 /**

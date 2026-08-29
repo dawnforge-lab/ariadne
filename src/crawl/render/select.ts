@@ -6,7 +6,16 @@
  * crawl. It runs over a *selection*, and this file is the whole of that
  * decision, taken in SQL against the evidence the crawl already wrote.
  *
- * The selection has two halves and one hard bound:
+ * TWO WAYS A SELECTION IS MADE, and they are alternatives rather than layers:
+ * `selectRenderSet` (the automatic one, described below, and the default) and
+ * `selectExplicitRenderSet`, where a caller who already knows the site's
+ * templates NAMES the pages. Both end in the same place — frontier rows at
+ * `render_pending`, everything they do not name demoted — so the pass that
+ * follows cannot tell them apart. What the two differ in is what they can say
+ * about themselves, which is why `RenderSelection.mode` exists and why the
+ * automatic numbers are null rather than zero in the explicit case.
+ *
+ * The automatic selection has two halves and one hard bound:
  *
  *  - **Suspects.** Pages whose raw HTML looks like it is not the whole page: a
  *    long document with almost no words in it, a page that links nowhere, a
@@ -43,6 +52,16 @@
  * template that mattered most, which reads as "clean" and means "unasked".
  * Alphabetical order is not a priority. Template size is. `url asc` remains the
  * final tiebreak, so the selection is as deterministic as it ever was.
+ *
+ * P8-T5 fixed the other half of that crawl's problem — `inferPageTemplates`
+ * (src/crawl/page-type.ts) collapses those ~170 singletons into
+ * `/collections/:slug` before this module ever reads the column, so a type here
+ * is a template — but it did NOT retire the ordering above, and the ordering is
+ * not to be read as a workaround that has served its purpose. A flat site, a
+ * site with dozens of genuinely small sections, and any crawl whose tail is
+ * long still put many size-1 types in front of a big one; size-ordering is what
+ * keeps the biggest template seated first in all of those, and it is the only
+ * thing that does.
  *
  * Everything here is one statement's worth of SQL over `pages` and `links`.
  * Nothing loads a page list into memory except the selection itself, which the
@@ -83,6 +102,20 @@ export const RENDER_DEFAULTS = {
   renderMaxPages: 500,
   renderSamplePerType: 3,
 } as const;
+
+/**
+ * The key an explicit render pass's URL list is kept under, inside the crawl's
+ * own `config_jsonb`.
+ *
+ * Spelled once, here, for its two users: `recordRenderSelection` writes it at
+ * the moment the selection is made (src/crawl/render/run-render.ts, whose
+ * docblock carries the whole argument for the placement), and `render.coverage`
+ * reads it to say which of the two decisions this crawl's render set came from
+ * (src/rules/metric/render-metrics.ts). It lives in THIS module rather than in
+ * the render driver so the rule layer can import it without importing a
+ * browser.
+ */
+export const RENDER_URLS_KEY = "renderUrls";
 
 /**
  * The four suspicion thresholds, named because two of them are also quoted in
@@ -127,14 +160,12 @@ export interface RenderSelectionConfig {
 /** The same three numbers, all resolved. */
 export type ResolvedRenderConfig = Required<RenderSelectionConfig>;
 
-export interface RenderSelection {
-  /**
-   * The URLs now sitting in the frontier as `render_pending`, in the order the
-   * seats were handed out: suspects first, then largest page type first, then
-   * URL. Bounded by `budget`, so this array is the one page list this module is
-   * allowed to hold.
-   */
-  selected: string[];
+/**
+ * The three numbers the automatic decision reports about itself, plus the flag
+ * saying whether it had room for all of them. Returned on its own by
+ * `renderSelectionStats`, which asks the decision read-only.
+ */
+export interface RenderSelectionStats {
   /** `min(ceil(pages × pct/100), renderMaxPages)` — the seats available. */
   budget: number;
   /** Candidates that tripped a suspicion trigger, BEFORE the budget cut. */
@@ -147,6 +178,45 @@ export interface RenderSelection {
   sampled: number;
   /** `suspects + sampled > budget`: some candidate was cut. */
   truncated: boolean;
+}
+
+export interface RenderSelection {
+  /**
+   * WHICH DECISION PRODUCED THIS SET, and therefore how the four numbers below
+   * are to be read.
+   *
+   *  - `auto` — `selectRenderSet` chose it: suspicion plus a per-type sample,
+   *    cut to a budget. All four numbers are present and describe that.
+   *  - `explicit` — a caller NAMED the pages (`selectExplicitRenderSet`). There
+   *    was no budget, nothing was suspected, nothing was sampled and nothing
+   *    was cut, so all four are **null** rather than zero. Zeroes would read as
+   *    "the automatic selection ran and found nothing", which is a different
+   *    fact and the one a reader would draw the wrong conclusion from
+   *    (hard rule 7).
+   *
+   * The invariant, stated because the type cannot: `mode === "auto"` exactly
+   * when the four are non-null. One function produces each mode, so it holds by
+   * construction rather than by a check.
+   */
+  mode: "auto" | "explicit";
+  /**
+   * The URLs now sitting in the frontier as `render_pending`.
+   *
+   * In `auto` mode, in the order the seats were handed out: suspects first,
+   * then largest page type first, then URL; bounded by `budget`. In `explicit`
+   * mode, the caller's list in the caller's order. Either way this array is the
+   * one page list this module is allowed to hold, and both bounds — the budget
+   * and `renderMaxPages` — are enforced before it exists.
+   */
+  selected: string[];
+  /** See `mode`: null in `explicit` mode. */
+  budget: number | null;
+  /** See `mode`: null in `explicit` mode. */
+  suspects: number | null;
+  /** See `mode`: null in `explicit` mode. */
+  sampled: number | null;
+  /** See `mode`: null in `explicit` mode. */
+  truncated: boolean | null;
 }
 
 /**
@@ -201,7 +271,7 @@ function stripUndefined(cfg: RenderSelectionConfig): RenderSelectionConfig {
  * `render_pending` and stay there, and the numbers come back identical.
  */
 export async function selectRenderSet(
-  db: Db,
+  db: Pick<Db, "execute">,
   crawlId: string,
   cfg: RenderSelectionConfig,
 ): Promise<RenderSelection> {
@@ -318,7 +388,160 @@ export async function selectRenderSet(
     );
   }
 
-  return { selected, budget, suspects, sampled, truncated: total > budget };
+  return { mode: "auto", selected, budget, suspects, sampled, truncated: total > budget };
+}
+
+/**
+ * A render pass whose caller NAMED the pages.
+ *
+ * ## Why this exists at all
+ *
+ * The automatic selection is a good answer to "we have never seen this site".
+ * It is a poor answer to "the audit knows this site has four templates and
+ * needs the home page and three products". Suspicion cannot see a template; the
+ * per-type sample can, but only through `page_type` — and until P8-T5 that
+ * splintered into singletons on a real site (551 URLs, 196 types on the Phase 6
+ * gate crawl), so the sample spent much of its budget on pages that exist once.
+ * `inferPageTemplates` closes that half of it BEFORE this module runs: the
+ * crawl collapses its own types on the way out, so a sampled type is a
+ * template. What it cannot supply is intent — which templates this audit is
+ * about, and which page stands for each. An auditing agent that has read the
+ * cohort sizes and the URL patterns knows that, and this is how it says so.
+ *
+ * The alternative it exists to avoid is rendering everything, which was
+ * considered and rejected: a browser per page is the most expensive thing this
+ * engine can do, and doing it to every URL of a site to learn what a dozen
+ * pages would have told you is waste, not rigour.
+ *
+ * ## AN EXPLICIT LIST REPLACES THE AUTOMATIC SELECTION FOR THIS PASS
+ *
+ * This is the same statement `selectRenderSet` runs, with `picked` supplied
+ * rather than computed — INCLUDING the `cleared` CTE. So a crawl that was
+ * selected automatically and is now given a list has the leftover
+ * `render_pending` rows of that earlier selection demoted back to `done`,
+ * exactly as a re-selection under a smaller budget does. It is a replacement,
+ * not an addition: after this statement the frontier's render set is the list
+ * and nothing else, which is what makes `rendered + failures == selected.length`
+ * hold for the pass that follows.
+ *
+ * Pages ALREADY RENDERED by an earlier pass keep their `rendered_*` columns —
+ * demotion moves a frontier row, it does not erase evidence — which is the
+ * same asymmetry `render.coverage`'s module header describes and refuses to
+ * assert away.
+ *
+ * ## What this function does NOT do
+ *
+ * It does not validate the URLs. The url-policy check, the allowlist posture,
+ * normalisation, deduplication and the `renderMaxPages` cap all belong to the
+ * transport that accepted the request, because each of them is a refusal with a
+ * status code and a sentence for the caller (src/api/service.ts). What it does
+ * do is REFUSE TO GUESS: every URL handed to it must resolve to a page of this
+ * crawl that fetched OK with a 200, and if the count that comes back differs
+ * from the count that went in, it throws rather than rendering a shorter list
+ * than it was given.
+ */
+export async function selectExplicitRenderSet(
+  db: Pick<Db, "execute">,
+  crawlId: string,
+  urls: readonly string[],
+): Promise<RenderSelection> {
+  if (urls.length === 0) {
+    throw new Error(`selectExplicitRenderSet: crawl '${crawlId}' was given an empty URL list`);
+  }
+
+  const crawl = await db.execute(sql`select id from crawls where id = ${crawlId} limit 1`);
+  if (crawl.rows.length === 0) {
+    throw new Error(`selectExplicitRenderSet: no such crawl '${crawlId}'`);
+  }
+
+  // RESOLVE BEFORE WRITING. The check could be made after the promotion — the
+  // returned row count would answer it — and that would leave a REFUSED list
+  // half-promoted whenever this function is called outside a transaction: the
+  // URLs that did resolve would sit in the frontier as `render_pending`,
+  // waiting for a pass that was never authorised. A read first costs one
+  // statement and makes the refusal total.
+  const resolved = await db.execute(sql`
+      select p.url from pages p
+      where p.crawl_id = ${crawlId}
+        and p.fetch_class = 'ok'
+        and p.status_code = 200
+        and p.url = any(${sql.param(urls as string[])}::text[])`);
+  if (resolved.rows.length !== urls.length) {
+    throw new Error(
+      `selectExplicitRenderSet: crawl '${crawlId}' resolved ${resolved.rows.length} of ` +
+        `${urls.length} named URL(s) to renderable pages — every URL must already be ` +
+        `a page of this crawl that fetched OK with a 200, named once`,
+    );
+  }
+
+  const res = await db.execute(sql`
+      with named as (
+        -- WITH ORDINALITY so the answer comes back in the order the caller
+        -- wrote it. The frontier does not care, but the caller's echo of its
+        -- own list does: a reordered list reads like a different list.
+        select u.url, u.ord
+        from unnest(${sql.param(urls as string[])}::text[]) with ordinality as u(url, ord)
+      ),
+      picked as (
+        -- The same eligibility selectRenderSet's cohort applies — fetched OK
+        -- with a 200 body — asked of the named URLs instead of of every page.
+        -- A URL that misses here is simply absent from the result, and the
+        -- length check below is what turns that into an error rather than a
+        -- quietly shorter pass.
+        select p.url, p.depth, n.ord
+        from pages p
+        join named n on n.url = p.url
+        where p.crawl_id = ${crawlId}
+          and p.fetch_class = 'ok'
+          and p.status_code = 200
+      ),
+      moved as (
+        -- Identical to the automatic selection's promotion, down to the
+        -- conflict clause: see selectRenderSet for why a 'failed' frontier row
+        -- beside a good page row is promoted rather than skipped, and why
+        -- attempts is reset.
+        insert into frontier (crawl_id, url, state, depth, discovered_via)
+        select ${crawlId}, p.url, 'render_pending', p.depth, 'render'
+        from picked p
+        on conflict (crawl_id, url) do update
+          set state = 'render_pending',
+              lease_id = null,
+              leased_until = null,
+              attempts = 0
+        returning 1
+      ),
+      cleared as (
+        -- THE REPLACEMENT SEMANTICS, in four lines. Anything an earlier
+        -- selection — automatic or explicit — left at 'render_pending' and this
+        -- list does not name goes back to 'done'. Without it a named list would
+        -- ADD to whatever the last automatic pass chose, and the pass would
+        -- render pages nobody asked for while reporting the list's length.
+        update frontier f
+          set state = 'done', lease_id = null, leased_until = null
+        where f.crawl_id = ${crawlId}
+          and f.state = 'render_pending'
+          and not exists (select 1 from picked p where p.url = f.url)
+        returning 1
+      )
+      select p.url from picked p order by p.ord asc`);
+
+  const selected = res.rows
+    .map((row) => row["url"])
+    .filter((value): value is string => typeof value === "string");
+
+  // The same count again, over the statement that actually wrote. The read
+  // above is what makes a refusal total; this is what makes the promotion
+  // honest — a page deleted between the two statements, or two page rows
+  // sharing a URL, must not come back as a shorter pass reported as a whole one
+  // (the invariant discipline `selectRenderSet` applies to its own cut).
+  if (selected.length !== urls.length) {
+    throw new Error(
+      `selectExplicitRenderSet: crawl '${crawlId}' promoted ${selected.length} of ` +
+        `${urls.length} named URL(s) — the pages moved under the selection`,
+    );
+  }
+
+  return { mode: "explicit", selected, budget: null, suspects: null, sampled: null, truncated: null };
 }
 
 /**
@@ -342,10 +565,10 @@ export async function selectRenderSet(
  * coverage metric would then describe a selection that never happened.
  */
 export async function renderSelectionStats(
-  db: Db,
+  db: Pick<Db, "execute">,
   crawlId: string,
   cfg: RenderSelectionConfig,
-): Promise<Omit<RenderSelection, "selected">> {
+): Promise<RenderSelectionStats> {
   const resolved = resolveRenderConfig(cfg);
 
   const res = await db.execute(sql`

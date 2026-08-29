@@ -128,6 +128,43 @@ A crawl is fit to audit when:
 Record the crawl's shape before reading a single finding. It bounds every claim the
 audit makes.
 
+### Rendering key templates
+
+If the crawl still needs its render pass, this is where the audit decides which pages
+get a browser — and on a site you have just crawled, **you decide, the engine does
+not**. Rendering everything is a waste of somebody's server and of the audit's time;
+rendering whatever tripped a heuristic answers about the wrong pages. The method is in
+the `ariadne-crawl` skill under the same heading; the short form:
+
+1. `metrics_get` `content.metrics-by-type` — the cohort sizes. The big cohorts are the
+   site's real templates, and a render of one of them answers for all of them.
+2. `pages_query` — the URL patterns beside those sizes, so a cohort that is really one
+   page with its own path is not mistaken for a template.
+3. `crawl_render` with `urls`: the home page, 2-3 representatives of each real
+   template, plus any one-off that looks like a shell (a large document with almost no
+   words, no title, no outgoing links). **A four-template site is 10-15 renders**, not
+   551.
+4. `crawl_rules` — the diff rules only ever speak about pages the render pass covered,
+   so this order is not negotiable.
+
+`auto` — no `urls` — remains right for first contact with a site, or where the types
+give you no clear templates at all.
+
+**Then read what came back, and read the mode first.** `render.coverage`'s
+`selectionMode` says which decision chose the pages. On an `explicit` pass
+`selectionBudget`, `selectionSuspects`, `selectionSampled` and `selectionTruncated`
+are **null**, not zero: no automatic decision was taken, so quoting them as "no
+suspects found" would be a claim about the site's HTML that nobody made.
+`selectionSelected` is then the length of your own list, and what it covers is a
+question about that list — say which templates it stood for when you write the
+coverage note.
+
+Then read the four render rules, and read them against the columns they compare:
+`pages_query` publishes `renderableWordCount` and `renderedRenderableWordCount`, the
+two sides CHECK-01 measures, both produced by the same analyzer over the same page.
+That is the comparability check §2.4 asks for, and on an explicit pass it is cheap —
+you named the pages, so you know exactly which rows to read.
+
 ---
 
 ## Phase 2 — the engine-answered checks
@@ -198,6 +235,63 @@ of three ways:
   the second as a fact nothing had counted. (Where a `pageType` filter is on, `count`
   is that cohort's rows while `total`/`atLeast` stay the whole rule's magnitude — the
   two are not two ends of one fraction.)
+
+- **A BILLED AUDIT ASKS FOR THE WHOLE PICTURE, NOT A SNAPSHOT: pass
+  `findingCap: null` to `crawl_start`.** The caps above are the default — 200
+  findings per listing rule, 500 near-duplicate pairs — and they exist for a first
+  look at an unknown site, where a bounded answer is the point. They are the wrong
+  setting for work a client is paying for: "243 orphans, here are 200" is a list the
+  client cannot work through to the end, and `atLeast: 501` cannot tell them whether
+  the real number is 502 or 40,000.
+
+  `findingCap: null` uncaps every listing rule and the pair reporting cap together.
+  `findingCap: <n>` sets a number instead — and note that a stated number binds the
+  pairs too, so `findingCap: 200` is not the same as omitting the field (which
+  leaves pairs at 500).
+
+  **Keep reading the `truncated` note, not the setting.** The rule above does not
+  change: a note means the list is incomplete, and only its ABSENCE means it is
+  complete. An uncapped run normally writes none — nothing truncated it — but
+  "uncapped" is not a promise of "noteless". `content.near-duplicate` has a
+  100,000-pair scan ceiling that `findingCap` cannot lift (it is the engine's memory
+  contract, not a preference), so an uncapped run that reaches it carries an
+  `atLeast` note like any other truncated listing. Never infer completeness from the
+  crawl's `findingCap`; infer it from the absence of the note.
+
+  **It is set at `crawl_start` and nowhere else.** `crawl_rules` has no cap argument:
+  the choice lives on the crawl row so that re-judging the crawl months later
+  produces the same listing. A billed audit started without it has to be re-started,
+  not re-judged.
+
+  **What it costs, measured** (synthetic 20,000-page site, 1,000 duplicate title /
+  meta / h1 groups, 1,000 exact-duplicate content groups, 500 near-duplicate
+  clusters, 15,000 orphans):
+
+  | rule | default cap | uncapped |
+  | --- | --- | --- |
+  | `links.orphan` | 200 in 0.21s | 15,000 in 0.23s |
+  | `title.duplicate` | 200 in 2.5s | 1,000 in 10.6s |
+  | `meta-description.duplicate` | 200 in 3.0s | 1,000 in 13.7s |
+  | `h1.duplicate-text` | 200 in 2.9s | 1,000 in 11.7s |
+  | `content.exact-duplicate` | 200 in 4.5s | 1,000 in 18.4s |
+  | `content.near-duplicate` | 500 in 0.02s | 3,000 in 0.20s |
+
+  About a minute of extra wall time on a 20k crawl, at ~116MB RSS. That is the
+  billing story: the whole picture is minutes, not hours.
+
+  **The one ceiling `findingCap` cannot lift, and what to do when you meet it.**
+  `content.near-duplicate` is the only rule whose cap bounds a *scan* rather than a
+  listing, and on a site whose pages are near-identical in the thousands the pair
+  count is quadratic. Left uncapped it broke the engine's 512MB memory contract at
+  2,000 degenerate pages (521MB RSS), produced 3,268,808 pairs at 2.0GB at 5,000,
+  and exhausted a 4GB heap at 20,000 — so the SCAN stops at **100,000 pairs** no
+  matter what `findingCap` says, and writes `{reported: 100000, atLeast: 100001}`.
+  Real sites are nowhere near that; the 20k table above is a badly templated one.
+  If you do meet the ceiling, report it as what it is: **the site has no distinct
+  content**, which is a finding in its own right and a far more useful sentence than
+  an enumeration of a hundred thousand pairs. Quote the `atLeast`, say the scan
+  stopped there, and take the magnitude from `content.template-similarity` and the
+  duplicate-group rules rather than from the pair list.
 - **Evidence shapes belong to their rules.** `issue_urls` returns `{url, evidence}`
   and the evidence's fields are whatever that rule wrote — read what it gives you
   rather than expecting a fixed set. `url` is null on a site-scoped finding (a fact
@@ -212,21 +306,25 @@ of three ways:
   report it as its own bucket rather than folding it into a template.
 
   **Know what the detection actually produces before you filter on it.** A page type
-  is derived from the URL path, and today it only collapses into a template
-  (`/products/:slug`) where the path has a repeated shape. A path that occurs once
-  becomes its own type. The gate site produced **196 types over 551 pages**: four
-  real templates and about 170 singletons — and `(untyped)` occurred **zero** times,
-  so the bucket this file and the checklist both tell you to report may simply not
-  exist on a given crawl. Say that it was empty rather than inventing one.
+  is derived from the URL path, and the crawl decides which paths are templates by
+  looking at all of them together, once it has finished: a group of three or more
+  pages sharing a path shape becomes one template (`/collections/:slug`), and a page
+  with no such group keeps its own path as its type (`/cart`, `/about`). So expect a
+  handful of `:slug` templates plus a short tail of one-off pages — the gate site's
+  551 URLs, which used to type as 196 separate things, now read as its four real
+  templates and a few named pages. A tail entry is a real page, not a failure to
+  type; report it as the page it is.
 
-  Practical consequence: the cohort ids are not guessable, so discover them first —
-  one `metrics_get` scoped pass or a `pages_query` census — and filter on the ids you
-  saw. Where the per-template breakdown the checklist asks for (CHECK-35 / 36 / 37:
-  products, collections, blog, info pages, separately) cannot be produced from those
-  ids, group by first path segment and SAY SO in `notes`. Both halves of this —
-  singleton types, and the missing `(untyped)` bucket — are recorded on the backlog
-  as the `derivePageType` heuristics item; they are engine behaviour to work around
-  today, not something to fix inside an audit.
+  `(untyped)` is a different thing again, and on that site it occurred **zero**
+  times — the bucket this file and the checklist both tell you to report may simply
+  not exist on a given crawl. Say that it was empty rather than inventing one.
+
+  Practical consequence: the cohort ids are still not guessable, so discover them
+  first — one `metrics_get` scoped pass or a `pages_query` census — and filter on the
+  ids you saw. The per-template breakdown the checklist asks for (CHECK-35 / 36 / 37:
+  products, collections, blog, info pages, separately) is normally producible from
+  those ids now; where a site's URLs genuinely do not separate that way, group by
+  first path segment and SAY SO in `notes`.
 - **A refusal names its field.** An unrecognised `severity`, `checkId`, `ruleId`,
   `category` or `pageType` is refused rather than answered with an unfiltered listing.
   Read the message; do not retry with a guess.
@@ -239,8 +337,9 @@ of three ways:
   walked. Both are closed vocabularies and a value outside them is refused by name.
 - **The robots.txt the crawl obeyed is readable.** `robots_get` returns the stored
   file — `raw` (the text as served, `truncated` when it is only the first 500KB),
-  `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources` and
-  the `userAgent` the crawl matched under. It is EVIDENCE, not a re-fetch: a file that
+  `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources`,
+  `suppliedSitemaps` (documents the crawl was handed at start rather than told about
+  by the file) and the `userAgent` the crawl matched under. It is EVIDENCE, not a re-fetch: a file that
   has changed since the crawl is a fact about the site, and reading today's copy over
   the crawl's would hide it.
 - **Large lists go to a file.** `export_crawl` writes `issues`, `pages` or `metrics`
@@ -301,8 +400,13 @@ An audit that copies an older findings file forward will under-report all four:
   value itself, `count` (how many indexable pages share it — exact) and `pages` (up to
   20 of them). So `issues_list`'s `count` for these rules is the number of duplicate
   GROUPS, and the pages involved are the sum of the groups' own counts — quote both,
-  and never read the group count as a page count. Capped at 200 groups with the usual
-  `truncated`/`total` note. `h1.duplicate-skipped` (info) is the honest silence: a
+  and never read the group count as a page count. Capped at 200 GROUPS by default,
+  with the usual `truncated`/`total` note; `findingCap` moves that number and
+  `findingCap: null` removes it. What it never moves is the twenty URLs inside one
+  finding — `count` is the group's exact size at every setting, so a group of five
+  thousand pages stays one row saying "5,000, here are twenty" rather than becoming a
+  five-thousand-element array. Uncapped means more findings, not fatter ones.
+  `h1.duplicate-skipped` (info) is the honest silence: a
   pre-Phase-7 crawl stored no heading text, so the check is NOT MEASURED on it rather
   than clean, and a re-crawl is what answers it.
 - **Words a visitor can actually see.** `pages_query` returns `renderableWordCount`
@@ -362,16 +466,26 @@ every page means the rules have not run over this crawl, which `crawl_status`'s
 **And one more silence to distrust: a rule that compares two columns is only
 evidence when the two are comparable.** `rulesRunAt` settles "did the rule run"; it
 says nothing about whether the rule COULD have fired. `content.csr-dependent`
-(CHECK-01) is the standing case: it needs `renderedWordCount` ≥ 2 × the
-markup-visible count with a 150-word margin, and on a site whose markup-visible
-count carries a fixed block of CSS-class-hidden chrome the rendered side is lower
-than the markup side on every page — the Phase 7 gate site ran 0.32 to 0.73, so the
-firing condition was unreachable whatever the site did. Zero findings there is not
-"no client-side rendering"; it is a comparison nothing could answer.
+(CHECK-01) is the case this engine learned it on. Until ruleset 0.6.0 the rule
+compared the browser's `renderedWordCount` against the markup-visible count, and on
+a site whose markup carries a fixed block of CSS-class-hidden chrome the rendered
+side is lower than the markup side on every page — the Phase 7 gate site ran 0.32
+to 0.73, so the firing condition was unreachable whatever the site did. Zero
+findings there was not "no client-side rendering"; it was a comparison nothing
+could answer.
 
-`pages_query` publishes both columns, which is what makes this checkable rather than
-theoretical: before you record a diff rule's silence as a PASS, read the two columns
-on the pages the render pass covered and satisfy yourself the rule had a way to fire.
+**Ruleset 0.6.0 fixed that particular one** by putting the same instrument on both
+sides: the rule now reads `renderedRenderableWordCount` (the crawl's analyzer over
+the post-JavaScript DOM) against `renderableWordCount`, so chrome present in both
+documents cancels. **The habit survives the fix**, which is the point of keeping
+this paragraph: the next unreachable comparison will be in some other rule, and
+nothing but this check will find it.
+
+`pages_query` publishes both of the columns that rule compares —
+`renderableWordCount` and `renderedRenderableWordCount` — which is what makes this
+checkable rather than theoretical: before you record a diff rule's silence as a
+PASS, read the two columns on the pages the render pass covered and satisfy
+yourself the rule had a way to fire.
 Where it did not, the check is SKIP with the arithmetic in `notes` — and, per the
 hard rule at the top of this file, it is a bug report about the rule rather than a
 finding about the client. It matters most exactly where you want the answer: on the
@@ -540,7 +654,7 @@ broken there.
     "findingsCount": 1902,
     "frontier": { "pending": 0, "leased": 0, "done": 4821, "failed": 3, "renderPending": 0 },
     "rulesRun": { "pagesScanned": 4821, "findings": 1902, "metrics": 855 },
-    "render": { "rendered": 240, "failures": 2, "unrendered": 4581, "budget": 241, "truncated": false },
+    "render": { "mode": "auto", "rendered": 240, "failures": 2, "unrendered": 4581, "budget": 241, "truncated": false },
     "caveats": [
       "3 URLs failed to fetch; their checks are reported on 4818 pages, not 4821."
     ]

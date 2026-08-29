@@ -190,6 +190,12 @@ export const pages = pgTable("pages", {
   // render pass's `rendered_word_count` is CSS-hidden text, which is evidence
   // about the site rather than error in the measurement.
   //
+  // ITS PHASE 8 PARTNER is `rendered_renderable_word_count`: the same function
+  // over the post-JavaScript DOM. That pair — not this column against
+  // `rendered_word_count` — is what `content.csr-dependent` subtracts, because
+  // only two readings by one instrument cancel the chrome they both contain.
+  // See the family-2 block further down.
+  //
   // NULLABLE, AND THE NULL IS A GATE. It means "no P7-or-later analyzer wrote
   // this row" — a pre-P7 crawl, whose `word_count` also carries the old
   // template semantics. The rules that read it (`content.thin`'s floor,
@@ -278,6 +284,23 @@ export const pages = pgTable("pages", {
     .notNull()
     .default(sql`'[]'::jsonb`),
   rendered: boolean("rendered").notNull().default(false),
+  // ==========================================================================
+  // MEASUREMENT FAMILY 1 — the browser's own `innerText` / DOM-selector counts
+  // (P5-T4). Five columns, written by `MEASURE_SCRIPT` inside the page.
+  // ==========================================================================
+  //
+  // What a READER sees: `innerText` excludes CSS-hidden copy and script bodies,
+  // and `document.querySelectorAll` counts anchors as the DOM holds them. No
+  // tokenizer can reproduce either number without doing layout (hard rule 4).
+  //
+  // WHO READS THEM SINCE PHASE 8. `rendered_nav_link_count` and
+  // `rendered_footer_link_count` are `nav.js-only`'s rendered side;
+  // `rendered_filter_link_count` is `filters.js-only`'s. `rendered_word_count`
+  // and `rendered_link_count` are read by NO RULE: `content.csr-dependent`
+  // stopped comparing against `rendered_word_count` in P8-T1 (see family 2) and
+  // they are kept as EVIDENCE — the only number in the database that says what
+  // a reader actually sees, which is what makes the CSS-hidden chrome on a page
+  // computable at all (`renderable_word_count − rendered_word_count`).
   renderedWordCount: integer("rendered_word_count"),
   renderedLinkCount: integer("rendered_link_count"),
   // The render pass's side of the comparison, ALL WRITTEN BY THE RENDER PASS
@@ -291,6 +314,68 @@ export const pages = pgTable("pages", {
   // Links the rendered DOM exposes that look like faceted-navigation filters —
   // the crawl-budget signal a raw-HTML crawl cannot see at all.
   renderedFilterLinkCount: integer("rendered_filter_link_count"),
+  // ==========================================================================
+  // MEASUREMENT FAMILY 2 — the SAME ANALYZER, run over the post-JavaScript DOM
+  // (P8-T1, migration 0011). Written by the render pass and by nothing else.
+  // ==========================================================================
+  //
+  // After the settle the renderer serialises `document.documentElement.
+  // outerHTML` and runs `analyzeHtml` (src/crawl/parse/page-analyzer.ts) over
+  // it — the very function the crawl ran over the bytes the server sent. So
+  // `word_count` / `rendered_analyzer_word_count` and `renderable_word_count` /
+  // `rendered_renderable_word_count` are two readings by ONE instrument, and
+  // subtracting them is legitimate in a way subtracting family 1 from the
+  // analyzer's columns never was.
+  //
+  // WHY THE FAMILY EXISTS. The Phase 7 gate (docs/gates/phase-7.md §4.2)
+  // measured `renderable_word_count − rendered_word_count` across 28 rendered
+  // pages of a real Shopify theme and found a NEAR-CONSTANT ~425-word offset —
+  // class-hidden chrome the tokenizer counts and `innerText` does not. That
+  // offset made `content.csr-dependent`'s firing condition arithmetically
+  // unreachable on that crawl whatever the site did (§4.9): a zero that was not
+  // a finding but an unanswerable comparison. The chrome markup is present in
+  // BOTH documents, so measuring both with the same instrument cancels it.
+  //
+  // WHO READS THEM. `content.csr-dependent` (src/rules/query/render-diff.ts)
+  // reads `rendered_renderable_word_count` against `renderable_word_count`;
+  // `rendered_analyzer_word_count` travels in its evidence as the raw pair's
+  // partner. The other three carry no rule yet — they are the diff surface a
+  // later phase widens into (`render.title-drift` and its siblings), and an
+  // unread column is honest where a rule that always passes is not (hard
+  // rule 1).
+  //
+  // ALL NULLABLE, and null means exactly one thing: this row was not rendered
+  // by a Phase-8-or-later pass. A pre-P8 crawl has null here on every row and
+  // CANNOT be re-judged — the rendered HTML of a finished crawl is not
+  // recoverable — so a rule reading them must refuse the crawl loudly rather
+  // than compare against a column that measures something else (the
+  // `renderable_word_count` precedent, and `assertRenderedColumns` is where the
+  // refusal lives).
+  renderedAnalyzerWordCount: integer("rendered_analyzer_word_count"),
+  renderedRenderableWordCount: integer("rendered_renderable_word_count"),
+  // The `<title>` of the DOM the browser ended on, stored exactly as the raw
+  // `title` column is: whatever the analyzer's text accumulator collapsed, with
+  // no cap of its own (`text`, like `pages.title`). A page whose title is
+  // rewritten by its own JavaScript is the drift this column makes visible.
+  renderedTitle: text("rendered_title"),
+  // `<h1>` elements the post-JS DOM holds, counted as `h1_count` counts them.
+  renderedH1Count: integer("rendered_h1_count"),
+  // The first `<link rel=canonical>` href in the post-JS DOM, stored as
+  // `canonical_html` stores it. Nullable for TWO reasons that are not the same
+  // fact, exactly as on the raw side: the page was not rendered, or it was and
+  // it declares no canonical.
+  renderedCanonical: text("rendered_canonical"),
+  // Where this page's serialised post-JS DOM was written:
+  // `<renderHtmlDir>/<crawlId>/<sha256(url)>.html`, git-ignored, one file per
+  // rendered page. NOT in Postgres — a crawl's rendered HTML is tens of
+  // megabytes and no rule reads it (hard rule 2: rules read the database) — but
+  // on disk, because an auditor who disbelieves a render-diff finding needs the
+  // document the numbers came from, which is the inspection story a Screaming
+  // Frog user already expects.
+  //
+  // A WRITE FAILURE IS A CLASSIFIED `render_error`, never a null path beside
+  // `rendered = true`: see `RenderResult` in src/crawl/render/renderer.ts.
+  renderedHtmlPath: text("rendered_html_path"),
   // Where the page navigated itself to while rendering (a JS redirect): a URL
   // the HTTP layer never saw a Location header for.
   //

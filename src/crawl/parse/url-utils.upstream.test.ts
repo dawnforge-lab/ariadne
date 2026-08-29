@@ -100,8 +100,10 @@ describe("detectUrlTemplate", () => {
     ).toBe("/orders/:uuid");
   });
 
-  // page_type derivation (Task 9/11) inherits this bias: a two-part slug is
-  // assumed to be a fixed route, so /blog/hello-world is its own template.
+  // Per-URL, /blog/hello-world is therefore its own template — a two-part slug
+  // is assumed to be a fixed route. The crawl-end pass over the population
+  // (`inferPageTemplates`, tested in test/crawl/page-templates.test.ts) is what
+  // merges it back into /blog/:slug when the rest of the site says it is one.
   it("leaves two-part hyphenated segments literal", () => {
     expect(detectUrlTemplate("/blog/hello-world")).toBe("/blog/hello-world");
     expect(detectUrlTemplate("/my-account")).toBe("/my-account");

@@ -21,13 +21,32 @@ const config = loadApiConfig();
 const db = createDb(config.databaseUrl);
 const api = createApiServer({
   db,
-  config: { token: config.token, allowedDomains: config.allowedDomains },
+  config: {
+    token: config.token,
+    allowedDomains: config.allowedDomains,
+    // Undefined means each field's own default — `exports/` and `renders/`; see
+    // `ServiceConfig`. Unlike `crawlDefaults` these ARE environment knobs, and
+    // safely so: they name where the server keeps its own output, not what it
+    // may do.
+    ...(config.exportDir === undefined ? {} : { exportDir: config.exportDir }),
+    ...(config.renderDir === undefined ? {} : { renderDir: config.renderDir }),
+  },
 });
 
 const bound = await api.listen(config.port, process.env["ARIADNE_API_HOST"] ?? "127.0.0.1");
 console.error(
   `ariadne api listening on http://${bound.host}:${bound.port} — ` +
     `${config.allowedDomains.length} allowed domain(s)`,
+);
+// Said at boot rather than left to be discovered: the render pass writes a file
+// per rendered page and an operator needs to know where, before it grows.
+console.error(
+  `ariadne api: rendered documents -> ${config.renderDir ?? "renders/ (default; set ARIADNE_RENDER_DIR to move it)"}`,
+);
+// The same courtesy for the other output directory. On a billed audit
+// `export_crawl` is the normal path, so this one fills up too.
+console.error(
+  `ariadne api: crawl exports -> ${config.exportDir ?? "exports/ (default; set ARIADNE_EXPORT_DIR to move it)"}`,
 );
 if (config.allowedDomains.length === 0) {
   console.error(

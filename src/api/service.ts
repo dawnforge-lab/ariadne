@@ -72,10 +72,12 @@ import { FETCH_CLASSES } from "../crawl/fetch-page.js";
 // validation refusal here. See `ROBOTS_OUTCOMES` in discovery.ts.
 import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 import {
+  RENDER_HTML_DIR,
   RenderPassRefusal,
   runRenderPass,
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
+import { resolveRenderConfig } from "../crawl/render/select.js";
 import { hostProbeStarts, normalizeUrl } from "../crawl/parse/url-utils.js";
 import { isUrlAllowed } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
@@ -86,6 +88,7 @@ import {
   type Severity,
 } from "../rules/registry/types.js";
 import { UNTYPED } from "../rules/metric/cohort.js";
+import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence.js";
 import { runRules, type RunSummary } from "../rules/run.js";
 import { isHostAllowed, type ServiceConfig } from "./config.js";
 
@@ -168,6 +171,20 @@ export const API_CRAWL_DEFAULTS = { maxPages: 500 } as const;
  */
 export const MIN_PER_HOST_DELAY_MS = 250;
 
+/**
+ * How many sitemap documents one crawl-start request may name.
+ *
+ * The walk itself is capped at 300 documents including everything a sitemap
+ * INDEX points at (`MAX_SITEMAP_DOCS`, src/crawl/discovery.ts), so this is not
+ * the limit that protects the origin — it is the limit on what a REQUEST may
+ * carry into `config_jsonb`, which is a column every resume and every render
+ * pass reads back. Fifty root documents is already a site whose sitemap has an
+ * index, and supplying the index is both shorter and more faithful to what the
+ * site publishes. Refused rather than trimmed: a list this engine silently cut
+ * would leave the caller believing every document was walked (hard rule 7).
+ */
+export const MAX_SUPPLIED_SITEMAPS = 50;
+
 /** Rows per page when the caller does not say, and the ceiling when they do. */
 export const PAGE_SIZE_DEFAULT = 50;
 export const PAGE_SIZE_MAX = 200;
@@ -185,12 +202,14 @@ export interface StartCrawlInput {
   maxConcurrency?: number;
   probeHosts?: boolean;
   legacyHosts?: string[];
+  sitemapUrls?: string[];
   renderBudgetPct?: number;
   renderMaxPages?: number;
   renderSamplePerType?: number;
+  findingCap?: number | null;
 }
 
-type FieldKind = "string" | "number" | "boolean" | "string[]";
+type FieldKind = "string" | "number" | "boolean" | "string[]" | "number|null";
 
 /**
  * The wire's whole vocabulary for starting a crawl.
@@ -216,10 +235,64 @@ export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
   maxConcurrency: "number",
   probeHosts: "boolean",
   legacyHosts: "string[]",
+  sitemapUrls: "string[]",
   renderBudgetPct: "number",
   renderMaxPages: "number",
   renderSamplePerType: "number",
+  findingCap: "number|null",
 };
+
+/**
+ * The fields `POST /crawls/:id/render` accepts, on the same terms and for the
+ * same reason as `START_CRAWL_FIELDS`: the MCP tool advertises a schema, the
+ * HTTP route parses a body, and a test asserts the two sets are the same one.
+ */
+export const RENDER_CRAWL_FIELDS: Record<keyof RenderCrawlInput, FieldKind> = {
+  urls: "string[]",
+};
+
+/**
+ * How many unrenderable URLs a refusal spells out before it says "…".
+ *
+ * A caller who pasted a whole listing can be wrong about all of it, and a 400
+ * carrying four hundred URLs is a body nobody reads. Enough to see the PATTERN
+ * of the mistake — a stale host, a missing trailing slash — and the count above
+ * it is exact either way.
+ */
+const MISSING_URLS_NAMED = 5;
+
+/**
+ * Validate a render body. Same discipline as `parseStartCrawlInput`: an unknown
+ * field is a refusal naming it, never an ignored instruction. A caller who sent
+ * `{"pages": [...]}` and got a 200 would believe the engine rendered what they
+ * named, and it would have rendered its own automatic selection instead.
+ *
+ * An ABSENT body is the automatic pass, which is why this accepts `undefined`
+ * where the crawl-start parser demands an object: the route existed for two
+ * phases without one and every caller of it sends nothing.
+ */
+export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
+  if (raw === undefined) return {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ServiceError("VALIDATION", "request body must be a JSON object");
+  }
+  const body = raw as Record<string, unknown>;
+
+  const input: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    const kind = RENDER_CRAWL_FIELDS[key as keyof RenderCrawlInput];
+    if (kind === undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        `unknown field '${clip(key)}' (accepted: ${Object.keys(RENDER_CRAWL_FIELDS).join(", ")})`,
+      );
+    }
+    if (value === undefined) continue;
+    assertKind(key, value, kind);
+    input[key] = value;
+  }
+  return input as RenderCrawlInput;
+}
 
 /**
  * Validate a crawl-start body. Never casts, never ignores a field it does not
@@ -303,6 +376,16 @@ function assertKind(key: string, value: unknown, kind: FieldKind): void {
     case "string[]":
       if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
         bad("an array of strings");
+      }
+      return;
+    case "number|null":
+      // NULL IS A VALUE HERE, not an omission, and it is the whole reason this
+      // kind exists: `findingCap: null` says "list everything", which is a
+      // different instruction from leaving the field out ("use the defaults").
+      // Every other field on the wire treats a null as a caller who meant to
+      // send nothing.
+      if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) {
+        bad("a finite number, or null");
       }
       return;
   }
@@ -390,9 +473,45 @@ export interface CrawlDetail extends CrawlListItem {
    *
    * Empty is a real answer, not a fallback: `legacyHosts` is optional, so an
    * absent key means nobody named one. A stored value of the wrong SHAPE is a
-   * refusal instead (see `legacyHostsOf`).
+   * refusal instead (see `configStringList`).
    */
   legacyHosts: string[];
+  /**
+   * The sitemap documents this crawl was handed at start, echoed from its
+   * stored config. Empty when none were supplied.
+   *
+   * Beside `legacyHosts` for the same reason: it is a denominator. This engine
+   * never probes for an undeclared sitemap, so `sitemap.missing` (CHECK-06)
+   * reporting an undeclared sitemap next to an empty list here means nobody has
+   * yet handed the crawl the document — a crawl to re-run with it, not a report
+   * to write. Next to a non-empty list it means the supplied document WAS
+   * walked and robots.txt still does not declare it, which is the site's own
+   * finding.
+   */
+  sitemapUrls: string[];
+  /**
+   * How many findings each listing rule may report when this crawl is judged:
+   * a positive integer, or `null` for uncapped.
+   *
+   * RESOLVED, NOT RAW. The three cases the stored config can be in map onto the
+   * two values a reader gets:
+   *  - the key is ABSENT — nobody chose, so the crawl will be judged under the
+   *    engine's default and that default is what is reported: 200.
+   *  - the key is `null` — uncapped, reported as `null`.
+   *  - the key is a number — that number.
+   *
+   * So this answers "what will this crawl's listings be cut at", which is the
+   * question an agent that just set `findingCap` has. It is on the detail beside
+   * `legacyHosts` and `sitemapUrls` for the same reason those are: the audit and
+   * crawl skills now tell an agent to set `findingCap: null` for client work, and
+   * a setting nothing can confirm is a setting nobody can trust took effect.
+   *
+   * The one thing it cannot distinguish is an explicit `200` from an absent key.
+   * They differ only in the near-duplicate PAIR budget (200 against the default
+   * 500), and surfacing a second number for that would put an implementation
+   * detail of one rule on the crawl's shape. The crawl skill states it instead.
+   */
+  findingCap: number | null;
   /**
    * When the rules last COMPLETED a pass over this crawl, or null.
    *
@@ -458,8 +577,18 @@ export interface RobotsEvidence {
   crawlDelaySec: number | null;
   /** Why the rules are what they are, when that needed saying. Null when read. */
   note: string | null;
-  /** The `Sitemap:` lines the walk was pointed at, in the order declared. */
+  /** The `Sitemap:` lines THIS FILE carried, in the order declared. */
   sitemapSources: string[];
+  /**
+   * The sitemap documents the crawl was handed at start (`sitemapUrls`), which
+   * the walk read alongside the declared ones. Empty when none were supplied.
+   *
+   * It is here rather than only on the crawl detail because this is the endpoint
+   * that answers "which sitemaps did this crawl read": the two lists together
+   * are that answer, and either one alone is a different, smaller claim. A
+   * document in BOTH was declared and re-supplied — the walk fetched it once.
+   */
+  suppliedSitemaps: string[];
   /**
    * The user agent the crawl identified as — the groups in this file that
    * governed it. Null when the stored config does not carry one, which is a
@@ -483,12 +612,28 @@ export interface RenderSummaryOut {
   unrendered: number;
   elapsedMs: number;
   selection: {
+    /**
+     * Which decision chose the pages: `auto` (the engine's suspicion-plus-sample
+     * selection) or `explicit` (the caller named them). The four fields after it
+     * describe the automatic decision and are **null** when it did not run —
+     * never zero, which would read as an automatic selection that found nothing.
+     */
+    mode: "auto" | "explicit";
     selected: number;
-    budget: number;
-    suspects: number;
-    sampled: number;
-    truncated: boolean;
+    budget: number | null;
+    suspects: number | null;
+    sampled: number | null;
+    truncated: boolean | null;
   };
+}
+
+/** What `POST /crawls/:id/render` (and `crawl_render`) accepts as a body. */
+export interface RenderCrawlInput {
+  /**
+   * The pages to render, in place of the automatic selection. Absent is the
+   * default and leaves the pass exactly as it was.
+   */
+  urls?: string[];
 }
 
 /**
@@ -636,7 +781,15 @@ export interface PageRow {
    */
   renderableWordCount: number | null;
   rendered: boolean;
+  /** The browser's `innerText` count — what a reader sees. Read by no rule. */
   renderedWordCount: number | null;
+  /**
+   * The analyzer's renderable count over the post-JavaScript DOM: the rendered
+   * side of `content.csr-dependent`, comparable with `renderableWordCount`
+   * because one function produced both. Null on an unrendered page and on every
+   * page of a pre-Phase-8 crawl.
+   */
+  renderedRenderableWordCount: number | null;
   /** Why an ATTEMPTED render produced nothing. Null is not "it worked". */
   renderError: string | null;
 }
@@ -745,6 +898,16 @@ export class ApiService {
   private readonly allChecks: Set<string>;
   private readonly allCategories: Set<string>;
   private readonly exportDir: string;
+  /**
+   * Where this server's render passes keep their serialised documents — the
+   * ROOT, under which the pass makes one directory per crawl.
+   *
+   * Resolved once, here, exactly as `exportDir` is and for the same reason: the
+   * value is stored in `pages.rendered_html_path` and read back by a person who
+   * will not be standing in this process's working directory. Unset means
+   * `renders/` under it, which is what `RENDER_HTML_DIR` names.
+   */
+  private readonly renderDir: string;
 
   /**
    * Crawls this process is currently judging — one rules run at a time, per
@@ -785,6 +948,7 @@ export class ApiService {
     }
     this.log = config.log ?? ((line) => console.error(line));
     this.exportDir = resolvePath(config.exportDir ?? joinPath(process.cwd(), "exports"));
+    this.renderDir = resolvePath(config.renderDir ?? joinPath(process.cwd(), RENDER_HTML_DIR));
   }
 
   /**
@@ -800,9 +964,11 @@ export class ApiService {
    * crawl row that fails later for a reason they must go and read.
    *
    * THE SEED IS NOT THE ONLY HOST A CRAWL FETCHES. `legacyHosts` adds hosts the
-   * host probe visits before any robots.txt has been read, so they go through
-   * the same two checks — see `checkLegacyHosts`, which is where the allowlist
-   * would otherwise have had a hole big enough to drive a crawler through.
+   * host probe visits before any robots.txt has been read, and `sitemapUrls`
+   * adds documents the discovery walk fetches that no robots.txt pointed at, so
+   * both go through the same two checks — see `checkLegacyHosts` and
+   * `checkSitemapUrls`, which is where the allowlist would otherwise have had a
+   * hole big enough to drive a crawler through.
    */
   async startCrawl(input: StartCrawlInput): Promise<CrawlAccepted> {
     if (this.closed) {
@@ -841,6 +1007,10 @@ export class ApiService {
     }
 
     await this.checkLegacyHosts(siteUrl, input.legacyHosts, allowPrivate);
+    // The other list of URLs a request adds to the crawl: documents the walk
+    // will fetch that no robots.txt pointed at (hard rule 5 — the policy runs
+    // on every URL a client supplies, not only on the seed).
+    await this.checkSitemapUrls(siteUrl, input.sitemapUrls, allowPrivate);
 
     const crawlConfig = this.effectiveConfig(siteUrl, input);
     try {
@@ -969,7 +1139,9 @@ export class ApiService {
       liveLeases,
       blockedPages,
       hostSpacingMs: row.hostSpacingMs,
-      legacyHosts: legacyHostsOf(row.config, crawlId),
+      legacyHosts: configStringList(row.config, "legacyHosts", crawlId),
+      sitemapUrls: configStringList(row.config, "sitemapUrls", crawlId),
+      findingCap: configFindingCap(row.config, crawlId),
       rulesRunAt: row.rulesRunAt === null ? null : row.rulesRunAt.toISOString(),
       findingsCount,
     };
@@ -1021,6 +1193,7 @@ export class ApiService {
       crawlDelaySec: robots.crawlDelaySec,
       note: robots.note,
       sitemapSources: robots.sitemapSources,
+      suppliedSitemaps: robots.suppliedSitemaps,
       userAgent,
     };
   }
@@ -1106,8 +1279,21 @@ export class ApiService {
    * pass that paced itself differently from the crawl it belongs to would be a
    * politeness regression the site would experience as a second, ruder crawler
    * (rule 9).
+   *
+   * ## `urls`: the caller names the pages
+   *
+   * Absent, everything above is what happens and the pass is byte-identical to
+   * what it always was. Present, the list REPLACES the automatic selection for
+   * this pass — see `selectExplicitRenderSet` — and this method owns every
+   * refusal that stands in front of it, because each one is a status code and a
+   * sentence rather than a database question: see `checkRenderUrls`.
+   *
+   * The list is validated BEFORE the driver's own three refusals are reached. A
+   * malformed request is refused as a malformed request; whether the crawl is
+   * live is a fact about the world and is the driver's to state, in the same
+   * order `parseStartCrawlInput` puts a bad body ahead of a busy queue.
    */
-  async renderCrawl(crawlId: string): Promise<RenderSummaryOut> {
+  async renderCrawl(crawlId: string, input: RenderCrawlInput = {}): Promise<RenderSummaryOut> {
     const row = await this.crawlRow(crawlId);
 
     let config: CrawlConfig;
@@ -1117,12 +1303,24 @@ export class ApiService {
       throw new ServiceError("CONFLICT", messageOf(error));
     }
     const robotsCrawlDelaySec = this.robotsCrawlDelay(row.discovery, crawlId);
+    const renderUrls =
+      input.urls === undefined
+        ? undefined
+        : await this.checkRenderUrls(crawlId, input.urls, config);
 
     let summary: RenderPassSummary;
     try {
       summary = await runRenderPass(this.db, crawlId, {
         ...config,
         robotsCrawlDelaySec,
+        ...(renderUrls === undefined ? {} : { renderUrls }),
+        // NOT left to the pass's own cwd-relative default. The render pass
+        // writes a file per rendered page, and a server that never said where
+        // put them wherever it happened to be started — which is how this
+        // repository's own suite left twelve crawl directories in the working
+        // tree. The directory is a SERVER property (`ServiceConfig.renderDir`),
+        // absolutised at construction, and no request may name it.
+        renderHtmlDir: this.renderDir,
         allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
       });
     } catch (error) {
@@ -1137,7 +1335,11 @@ export class ApiService {
       elapsedMs: summary.elapsedMs,
       // The selection's URL list is a page list, and a page list is not a
       // response body (obligation 1: never a full export inline). Its size is.
+      // `mode` rides beside it because the four numbers under it mean nothing
+      // without it: on an explicit pass they are null, and a caller that reads
+      // `budget: null` as "no budget was enforced" is reading it correctly.
       selection: {
+        mode: summary.selection.mode,
         selected: summary.selection.selected.length,
         budget: summary.selection.budget,
         suspects: summary.selection.suspects,
@@ -1756,8 +1958,20 @@ export class ApiService {
         config: entry.config,
         signal,
       });
+      // The template inference beside the page count, because the pair is the
+      // whole of "what shape is this site" and the alternative is a second
+      // census over `pages` to find out. `pageTemplates` is null only when the
+      // pass did not run (a crawl that failed before it had a population), and
+      // that is said in those words rather than printed as a zero.
+      const templates =
+        summary.pageTemplates === null
+          ? "page types not inferred"
+          : `${summary.pageTemplates.typesBefore} URL shape(s) -> ` +
+            `${summary.pageTemplates.typesAfter} page type(s), ` +
+            `${summary.pageTemplates.pagesRetyped} retyped`;
       this.log(
-        `api: crawl ${entry.crawlId} ${summary.status} — ${summary.pagesCrawled} page(s)`,
+        `api: crawl ${entry.crawlId} ${summary.status} — ` +
+          `${summary.pagesCrawled} page(s), ${templates}`,
       );
     } catch (error) {
       // The crawl's own failure path has already closed the row as `failed`
@@ -1832,31 +2046,282 @@ export class ApiService {
       throw new ServiceError("VALIDATION", messageOf(error));
     }
 
-    const own = new Set(ownSpellings);
+    await this.checkAddedHosts(everyStart, ownSpellings, allowPrivate, {
+      allowlist: (host) =>
+        `legacyHosts names '${host}', which is not in this server's crawl allowlist: ` +
+        `the host probe fetches every legacy host, and those fetches are the only ` +
+        `ones the crawler makes before it has read anybody's robots.txt`,
+      policy: (host, reason) => `legacyHosts entry '${host}' refused by the URL policy: ${reason}`,
+    });
+  }
+
+  /**
+   * The sitemap documents a client handed the crawl, checked on exactly the
+   * terms `legacyHosts` is.
+   *
+   * WHY THE FIELD EXISTS. The crawler never probes `/sitemap.xml` on spec (the
+   * P1 ruling in src/crawl/discovery.ts): a document nobody pointed at is not
+   * something this engine invents a request for, and reporting whatever comes
+   * back as the site's published sitemap would be a fact we made up. That
+   * leaves a real site — one whose sitemap exists and whose robots.txt never
+   * says so — uncrawlable through its sitemap, and this is the other half of
+   * the ruling: somebody who KNOWS where the document is says so, once, at
+   * crawl start. The undeclared sitemap is still reported (`sitemap.missing`,
+   * CHECK-06), because it is still worth fixing.
+   *
+   * WHAT IS GATED. Each entry must be an absolute http(s) URL — a 400 naming
+   * the entry, here, rather than a walk failure the operator would read as the
+   * site's — and each must be a URL this server may point a fetch at: the
+   * site's own family (apex/www × http/https) is authorised by the crawl
+   * itself, and anything else must be on the allowlist in its own right. A
+   * sitemap on a CDN or a subdomain is ordinary and is exactly what the second
+   * clause is for; `{siteUrl: <allowed>, sitemapUrls: ["https://victim/x.xml"]}`
+   * is what it refuses.
+   *
+   * The order matters: unreadable URLs are named first (a 400 the caller can
+   * fix from the message), then the allowlist, then the URL policy — the same
+   * order and the same authority as `startCrawl`'s own checks.
+   */
+  private async checkSitemapUrls(
+    siteUrl: string,
+    sitemapUrls: readonly string[] | undefined,
+    allowPrivate: boolean,
+  ): Promise<void> {
+    if (sitemapUrls === undefined || sitemapUrls.length === 0) return;
+
+    if (sitemapUrls.length > MAX_SUPPLIED_SITEMAPS) {
+      throw new ServiceError(
+        "VALIDATION",
+        `sitemapUrls names ${sitemapUrls.length} documents, above this server's limit of ` +
+          `${MAX_SUPPLIED_SITEMAPS}. A site with more sitemap documents than that has a ` +
+          `sitemap INDEX — supply the index and the walk follows it, three levels deep`,
+      );
+    }
+
+    const targets: string[] = [];
+    for (const entry of sitemapUrls) {
+      // `normalizeUrl` is parse and canonicalisation in one, and it rejects
+      // every scheme the crawler does not speak. The entry is quoted back as
+      // the caller wrote it; the crawl fetches that spelling too (discovery
+      // normalises only to compare documents, never to rewrite one).
+      if (normalizeUrl(entry) === null) {
+        throw new ServiceError(
+          "VALIDATION",
+          `sitemapUrls entry '${clip(entry)}' is not an absolute http(s) URL. A sitemap ` +
+            `document is named in full ('https://site.example/sitemap.xml'); the walk ` +
+            `resolves nothing relative`,
+        );
+      }
+      targets.push(entry);
+    }
+
+    let ownSpellings: string[];
+    try {
+      ownSpellings = hostProbeStarts(siteUrl);
+    } catch (error) {
+      throw new ServiceError("VALIDATION", messageOf(error));
+    }
+
+    await this.checkAddedHosts(targets, ownSpellings, allowPrivate, {
+      allowlist: (host) =>
+        `sitemapUrls names a document on '${host}', which is neither a spelling of this ` +
+        `crawl's own site nor in this server's crawl allowlist: the walk fetches every ` +
+        `document it is handed, so each host must be permitted in its own right`,
+      policy: (host, reason) =>
+        `sitemapUrls entry on '${host}' refused by the URL policy: ${reason}`,
+    });
+  }
+
+  /**
+   * The allowlist and the URL policy, applied to the hosts a request ADDS to a
+   * crawl beyond the seed's own family.
+   *
+   * One implementation for the two fields that add them (`legacyHosts` and
+   * `sitemapUrls`) rather than a copy each: the posture is a single decision —
+   * the site's own spellings are authorised by the crawl, everything else is a
+   * different site and is allowlisted or refused — and two copies of it would
+   * be two chances to fix a hole once. Callers supply the sentences, because a
+   * refusal that does not say which field it is about is a refusal nobody can
+   * act on.
+   *
+   * `own` is the site's own start URLs (`hostProbeStarts(siteUrl)`), compared
+   * by hostname; `targets` are absolute URLs. One check per distinct added
+   * host — the policy's verdict is about the host and the scheme, not the path.
+   */
+  private async checkAddedHosts(
+    targets: readonly string[],
+    own: readonly string[],
+    allowPrivate: boolean,
+    refusal: {
+      allowlist: (host: string) => string;
+      policy: (host: string, reason: string) => string;
+    },
+  ): Promise<void> {
+    const ownHosts = new Set(own.map((start) => new URL(start).hostname));
     const checked = new Set<string>();
-    for (const start of everyStart) {
-      if (own.has(start)) continue;
-      const host = new URL(start).hostname;
+    for (const target of targets) {
+      const host = new URL(target).hostname;
+      if (ownHosts.has(host)) continue;
       if (checked.has(host)) continue;
       checked.add(host);
 
       if (!isHostAllowed(host, this.config.allowedDomains)) {
-        throw new ServiceError(
-          "FORBIDDEN",
-          `legacyHosts names '${host}', which is not in this server's crawl allowlist: ` +
-            `the host probe fetches every legacy host, and those fetches are the only ` +
-            `ones the crawler makes before it has read anybody's robots.txt`,
-        );
+        throw new ServiceError("FORBIDDEN", refusal.allowlist(host));
       }
-      const verdict = await isUrlAllowed(start, { allowPrivate });
+      const verdict = await isUrlAllowed(target, { allowPrivate });
       if (!verdict.allowed) {
         throw new ServiceError(
           "FORBIDDEN",
-          `legacyHosts entry '${host}' refused by the URL policy: ` +
-            `${verdict.reason ?? "no reason given"}`,
+          refusal.policy(host, verdict.reason ?? "no reason given"),
         );
       }
     }
+  }
+
+  /**
+   * The pages a caller named for the render pass, checked and resolved to this
+   * crawl's own spellings — or a refusal saying which entry stopped it.
+   *
+   * ## THE ORDER, and why it is this one
+   *
+   * Every step is a refusal, so the order decides which sentence a caller with
+   * two problems is told about first. It runs cheapest-and-most-fundamental to
+   * costliest:
+   *
+   *  1. **Non-empty.** An empty list is not "render nothing" — a pass meant to
+   *     be off is a pass that is not run, the same reading `renderBudgetPct: 0`
+   *     already gets.
+   *  2. **Readable as a URL** (`normalizeUrl`), which also rejects every scheme
+   *     the crawler does not speak. This is the spelling `pages.url` is stored
+   *     in, so it is normalisation and parse in one step.
+   *  3. **Deduplicated**, on that normalised spelling, first occurrence winning.
+   *     Before the cap, so a list that repeats a URL is not refused for a
+   *     ceiling it does not actually reach.
+   *  4. **The cap.** More than `renderMaxPages` distinct pages is a 400 naming
+   *     the cap, NOT a silent slice. The automatic budget cuts and says
+   *     `truncated: true`, because it built the candidate list itself; a list a
+   *     caller wrote is a deliberate statement about which pages matter, and
+   *     rendering the first N of it while answering 200 would be this engine
+   *     deciding which of somebody's templates to drop.
+   *  5. **The URL policy** — hard rule 5, on every URL this engine is about to
+   *     fetch, whoever supplied it. A render IS a fetch.
+   *  6. **The allowlist posture**, exactly as `checkLegacyHosts` applies it: a
+   *     host in the site's own family (apex/www × http/https) is authorised by
+   *     the crawl itself; anything else must be in this server's allowlist in
+   *     its own right. Reachable through `legacyHosts`, whose pages are in this
+   *     crawl and are a different site by every definition the engine has.
+   *  7. **It is a page of THIS crawl that fetched OK with a 200.** Last,
+   *     because it is the only step that needs the database — and it is what
+   *     makes this list a re-visit rather than a way to point the renderer at a
+   *     URL nobody crawled. A URL that misses is a 400 naming it; it is never
+   *     fetched.
+   *
+   * Steps 5 and 6 are belt-and-braces on a page the crawler already fetched
+   * under both rules, and they are here anyway: the request is a fetch
+   * instruction from a client, and hard rule 5 admits no "it was checked
+   * earlier" exemption.
+   */
+  private async checkRenderUrls(
+    crawlId: string,
+    urls: readonly string[],
+    config: CrawlConfig,
+  ): Promise<string[]> {
+    if (urls.length === 0) {
+      throw new ServiceError(
+        "VALIDATION",
+        "urls was given as an empty list: a render pass with no pages is a pass not " +
+          "run. Omit urls to let the engine select, or name at least one page",
+      );
+    }
+
+    const normalised: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of urls) {
+      const url = normalizeUrl(entry);
+      if (url === null) {
+        throw new ServiceError(
+          "VALIDATION",
+          `urls entry '${clip(entry)}' is not an http(s) URL this engine can render`,
+        );
+      }
+      if (seen.has(url)) continue;
+      seen.add(url);
+      normalised.push(url);
+    }
+
+    const { renderMaxPages } = resolveRenderConfig(config);
+    if (normalised.length > renderMaxPages) {
+      throw new ServiceError(
+        "VALIDATION",
+        `urls names ${normalised.length} distinct pages, above this crawl's ` +
+          `renderMaxPages of ${renderMaxPages}. The list is not silently trimmed — ` +
+          `a named list is a statement about which pages matter, so shorten it to ` +
+          `${renderMaxPages} or fewer. A crawl's renderMaxPages is fixed at ` +
+          `crawl_start and cannot be changed afterwards: a bigger budget means a ` +
+          `new crawl started with a higher renderMaxPages`,
+      );
+    }
+
+    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
+    // The site's own spellings, from the crawl's stored `siteUrl`. It reaches
+    // `hostProbeStarts` unvalidated as a URL — `parseStoredConfig` checks it is
+    // a string — so a row nothing this engine wrote could produce a throw here.
+    // That is the crawl's config being unreadable, not the caller's list being
+    // wrong, and it gets the 409 `parseStoredConfig`'s own failure gets.
+    let own: Set<string>;
+    try {
+      own = new Set(hostProbeStarts(config.siteUrl).map((start) => new URL(start).hostname));
+    } catch (error) {
+      throw new ServiceError("CONFLICT", messageOf(error));
+    }
+    for (const url of normalised) {
+      const verdict = await isUrlAllowed(url, { allowPrivate });
+      if (!verdict.allowed) {
+        throw new ServiceError(
+          "FORBIDDEN",
+          `urls entry '${clip(url)}' refused by the URL policy: ` +
+            `${verdict.reason ?? "no reason given"}`,
+        );
+      }
+      const host = new URL(url).hostname;
+      if (!own.has(host) && !isHostAllowed(host, this.config.allowedDomains)) {
+        throw new ServiceError(
+          "FORBIDDEN",
+          `urls entry '${clip(url)}' is on '${host}', which is neither a spelling of ` +
+            `this crawl's own site nor in this server's crawl allowlist`,
+        );
+      }
+    }
+
+    // One statement for the whole list. `= any(...)` rather than a round trip
+    // per URL, and the answer is the SET that resolved — the missing ones are
+    // computed here so the refusal can name them rather than say "one of these".
+    const found = await this.db
+      .select({ url: pages.url })
+      .from(pages)
+      .where(
+        and(
+          eq(pages.crawlId, crawlId),
+          eq(pages.fetchClass, "ok"),
+          eq(pages.statusCode, 200),
+          sql`${pages.url} = any(${sql.param(normalised)}::text[])`,
+        ),
+      );
+    const renderable = new Set(found.map((r) => r.url));
+    const missing = normalised.filter((url) => !renderable.has(url));
+    if (missing.length > 0) {
+      throw new ServiceError(
+        "VALIDATION",
+        `urls names ${missing.length} page(s) this crawl cannot render — ` +
+          `${missing.slice(0, MISSING_URLS_NAMED).map((u) => `'${clip(u)}'`).join(", ")}` +
+          `${missing.length > MISSING_URLS_NAMED ? ", …" : ""}. The render pass re-visits ` +
+          `pages this crawl already fetched, so a URL must be one of them and must have ` +
+          `answered 200; it is never fetched for the first time here. Check the spelling ` +
+          `with pages_query, or re-crawl if the page is genuinely missing`,
+      );
+    }
+
+    return normalised;
   }
 
   private effectiveConfig(siteUrl: string, input: StartCrawlInput): CrawlConfig {
@@ -2261,6 +2726,7 @@ export class ApiService {
     crawlDelaySec: number | null;
     note: string | null;
     sitemapSources: string[];
+    suppliedSitemaps: string[];
   } {
     if (discovery === null || discovery === undefined) {
       throw new ServiceError(
@@ -2306,11 +2772,24 @@ export class ApiService {
       bad("a non-numeric robots.crawlDelaySec");
     }
     // The declared sitemaps live one level up, on the discovery blob itself —
-    // they are what the WALK was pointed at, and every one of them came off a
-    // `Sitemap:` line in this file (`discoveryEvidence`, src/crawl/loop.ts).
+    // every one of them came off a `Sitemap:` line in this file
+    // (`discoveryEvidence`, src/crawl/loop.ts).
     const sources = discovery["sitemapSources"];
     if (!Array.isArray(sources) || sources.some((s) => typeof s !== "string")) {
       bad("no sitemapSources array of strings");
+    }
+    // Its sibling: the documents the CLIENT supplied, which the walk read too.
+    // Absent is empty — the field arrived with the ability to supply a sitemap,
+    // so a crawl written before it had none — and the wrong shape is a refusal,
+    // because "no sitemap was supplied" is a claim about how this crawl was run
+    // and must not be invented (the `parseDiscovery` ruling, hard rule 7).
+    const supplied = discovery["suppliedSitemaps"];
+    if (
+      supplied !== undefined &&
+      supplied !== null &&
+      (!Array.isArray(supplied) || supplied.some((s) => typeof s !== "string"))
+    ) {
+      bad("a suppliedSitemaps that is not an array of strings");
     }
 
     return {
@@ -2320,6 +2799,7 @@ export class ApiService {
       crawlDelaySec: (delay as number | null | undefined) ?? null,
       note: (note as string | null | undefined) ?? null,
       sitemapSources: sources as string[],
+      suppliedSitemaps: (supplied as string[] | null | undefined) ?? [],
     };
   }
 
@@ -2334,29 +2814,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * `legacyHosts` off a stored config, checked rather than cast.
+ * One of the crawl config's string lists (`legacyHosts`, `sitemapUrls`) off a
+ * stored config, checked rather than cast.
  *
- * Absent is `[]` and that is the honest reading: the field is optional, and a
- * crawl started without one was told about no legacy domain. A value of the
- * wrong SHAPE is a different matter — it is a config this engine did not write,
- * and echoing `[]` for it would report "no legacy hosts were configured" about
- * a row that says otherwise (hard rule 7). `parseStoredConfig` refuses the same
- * shape for the same reason; this is the read-only half of it, which does not
- * demand the rest of the config be readable in order to answer a status poll.
+ * Absent is `[]` and that is the honest reading: both fields are optional, and
+ * a crawl started without one was told about no legacy domain and handed no
+ * sitemap. A value of the wrong SHAPE is a different matter — it is a config
+ * this engine did not write, and echoing `[]` for it would report "nothing was
+ * configured" about a row that says otherwise (hard rule 7).
+ * `parseStoredConfig` refuses the same shape for the same reason; this is the
+ * read-only half of it, which does not demand the rest of the config be
+ * readable in order to answer a status poll.
  */
-function legacyHostsOf(config: unknown, crawlId: string): string[] {
+function configStringList(config: unknown, field: string, crawlId: string): string[] {
   if (!isRecord(config)) {
     throw new ServiceError("CONFLICT", `crawl ${crawlId} has a stored config that is not an object`);
   }
-  const hosts = config["legacyHosts"];
-  if (hosts === undefined || hosts === null) return [];
-  if (!Array.isArray(hosts) || hosts.some((host) => typeof host !== "string")) {
+  const value = config[field];
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
     throw new ServiceError(
       "CONFLICT",
-      `crawl ${crawlId} has a stored config.legacyHosts that is not an array of strings`,
+      `crawl ${crawlId} has a stored config.${field} that is not an array of strings`,
     );
   }
-  return hosts as string[];
+  return value as string[];
+}
+
+/**
+ * The finding cap this crawl will be judged under, for `CrawlDetail`.
+ *
+ * Through the rules layer's own reader and resolver rather than a second copy of
+ * the mapping: `runRules` reads this row with exactly these two functions, so
+ * what the detail reports and what the judgement applies cannot drift. A stored
+ * value of the wrong shape is a refusal rather than a guess, and it is mapped to
+ * the same 409 `configStringList` raises one field along — the crawl's config is
+ * unreadable, which is a state of the row rather than a fault in the request.
+ */
+function configFindingCap(config: unknown, crawlId: string): number | null {
+  try {
+    return resolveRuleCaps(storedFindingCap(config, crawlId)).listing;
+  } catch (error) {
+    throw new ServiceError("CONFLICT", messageOf(error));
+  }
 }
 
 /**
@@ -2468,6 +2968,25 @@ export const PAGE_FIELDS = {
   renderableWordCount: pages.renderableWordCount,
   rendered: pages.rendered,
   renderedWordCount: pages.renderedWordCount,
+  /**
+   * THE OTHER HALF OF `content.csr-dependent`'s COMPARISON (P8-T1), and the
+   * reason it is on the wire at all.
+   *
+   * `renderedWordCount` above is the browser's `innerText`; this is the crawl's
+   * own analyzer run over the serialised post-JavaScript DOM, so it and
+   * `renderableWordCount` are two readings by ONE instrument and the rule
+   * subtracts them. Publishing it is not decoration: the audit skill tells an
+   * agent to check that a diff rule COULD have fired before recording its
+   * silence as a PASS, and that check is exactly "read these two columns on the
+   * rendered pages". Without it the instruction is unfollowable and the Phase 7
+   * disposition (CHECK-01 recorded as a SKIP with the arithmetic in the notes)
+   * could not have been reached from the surface.
+   *
+   * Null on a page nobody rendered, and on every page of a crawl rendered
+   * before Phase 8 — which is a crawl `content.csr-dependent` refuses outright
+   * rather than judges.
+   */
+  renderedRenderableWordCount: pages.renderedRenderableWordCount,
   renderError: pages.renderError,
 } as const;
 

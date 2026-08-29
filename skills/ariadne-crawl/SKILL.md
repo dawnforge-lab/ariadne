@@ -37,6 +37,8 @@ of them is worked around.
    (`*.example.com`). An empty list refuses every crawl and answers every query.
 3. **Every legacy host is on it too**, separately, if you plan to pass
    `legacyHosts` — the probe fetches those before it has read anyone's robots.txt.
+   Same for a `sitemapUrls` document that lives off the site's own hosts (a CDN,
+   a subdomain): the discovery walk fetches every document it is handed.
 4. **Chromium, if you intend to render.** The render pass drives a real browser
    through Playwright: `npx playwright install chromium`, once per machine. Without
    it `crawl_render` fails at launch, and it fails UNHELPFULLY — a missing browser is
@@ -110,9 +112,51 @@ Fields worth setting deliberately:
   unanswerable rather than clean.
 - **`legacyHosts`** — hosts the site used to live on. Each must be allowlisted in its
   own right; they are different sites by every definition the engine has.
+- **`sitemapUrls`** — sitemap documents to walk beyond the ones robots.txt declares.
+  See "The sitemap has two paths" below; leave it unset when robots.txt declares the
+  sitemap, which is most sites.
 - **`renderBudgetPct` / `renderMaxPages` / `renderSamplePerType`** — the render
   pass's sample, stored on the crawl row now and read by the render pass later. Set
   them here if the default sample would not cover the page types you care about.
+- **`findingCap`** — how many findings each listing rule may report when this crawl
+  is judged. Defaults to 200 (and 500 near-duplicate pairs): a bounded first look.
+  **Set `findingCap: null` for a billed audit** — the client is paying for the whole
+  picture, and "243 orphans, here are 200" is not a list they can finish. Like the
+  render knobs it is stored on the crawl row and spent later, which is why it must
+  be set HERE: `crawl_rules` has no cap argument, so a crawl started at the default
+  is re-judged at the default forever. Measured cost on a 20,000-page crawl: about a
+  minute of extra rules time, ~116MB RSS. See the audit skill's "Reading the
+  answers" for the one shape where uncapped is genuinely expensive
+  (`content.near-duplicate` on a site with thousands of byte-similar pages).
+
+### The sitemap has two paths, and only two
+
+**Declared.** robots.txt carries a `Sitemap:` line, the walk follows it, and there is
+nothing to do — this is most sites.
+
+**Undeclared.** The site publishes a sitemap and never points at it. Pass its URL in
+`sitemapUrls` at crawl start; the walk reads it beside the declared ones, follows a
+sitemap index three levels deep, and its entries become sitemap entries of the crawl
+like any other. Full http(s) URLs, absolute — a relative path is a 400 naming the
+entry, and a host outside the site's own spellings (apex/www × http/https) must be on
+the allowlist in its own right, because the walk fetches every document it is handed.
+
+**There is no third path: the engine never probes for a sitemap URL on spec.** A
+document nobody pointed at is a request somebody has to decide to make, and reporting
+whatever comes back as the site's published sitemap would be a fact the crawl made
+up — a guessed 200 from a CMS catch-all route would enter the evidence as a sitemap
+the site publishes. So when a crawl reports **`sitemap.missing` (CHECK-06 — "robots.txt
+declares no sitemap")** and `crawl_status` shows an empty `sitemapUrls`, the honest
+next step is to **ask where the sitemap is** (the site owner, the CMS, the usual
+sitemap paths in a browser, Search Console) and re-crawl with `sitemapUrls` set. Do
+not report the site's sitemap coverage from a crawl that never read its sitemap.
+
+Supplying the URL does **not** hide the finding, and must not be used to: robots.txt
+still declares nothing, `sitemap.missing` still fires, and the fix — one `Sitemap:`
+line — is still the site's to make. `robots_get` keeps the two provenances apart:
+`sitemapSources` are the `Sitemap:` lines the file carried, `suppliedSitemaps` are the
+documents this crawl was handed. A document in both was declared and re-supplied; the
+walk fetched it once.
 
 **`userAgent`**, **`perHostDelayMs`** and **`maxConcurrency`** are the politeness
 settings, not tuning knobs for speed. The user agent must stay identifiable, and
@@ -171,7 +215,7 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion, legacyHosts,
+ renderPassCount, rulesetVersion, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
  rulesRunAt, findingsCount}
@@ -220,6 +264,14 @@ What the fields mean when you are waiting:
   echoed from its stored config. Empty means none were given, which is what separates
   "the legacy domain does not redirect" from "nobody named a legacy domain" in
   CHECK-15.
+- **`findingCap`** — what this crawl's listing rules will be cut at when the rules
+  run. `200` is the default (nobody chose); `null` is uncapped, the billed-audit
+  setting; a number is what was set. **Check it before running the rules on client
+  work**: the cap lives on the crawl row and `crawl_rules` has no argument to restate
+  it, so a billed audit started at the default has to be re-crawled, not re-judged.
+  A reported `200` does not distinguish an explicit `findingCap: 200` from an absent
+  one; they differ only in the near-duplicate pair budget (200 against the default
+  500).
 
 Poll every 15-30 seconds early and back off to a minute on a long crawl; there is
 nothing to gain from tighter polling, since the crawl's pace is set by politeness
@@ -290,12 +342,12 @@ and the answer is Step 5.
 
 ## Step 3 — render (before the rules, or not at all)
 
-`crawl_render` re-fetches a budgeted sample of the crawl's pages in a real browser
-and stores what JavaScript added. It answers counts:
+`crawl_render` re-fetches some of the crawl's pages in a real browser and stores what
+JavaScript added. It answers counts:
 
 ```
 {rendered, failures, unrendered,
- elapsedMs, selection: {selected, budget, suspects, sampled, truncated}}
+ elapsedMs, selection: {mode, selected, budget, suspects, sampled, truncated}}
 ```
 
 Run it when the audit needs to see what a crawler without JavaScript cannot — which
@@ -315,22 +367,89 @@ WIDER of the crawl's configured delay and the spacing the crawl earned
 (`hostSpacingMs`) — a site that pushed back during the crawl is not asked to say so
 twice. Expect the pass to take that long: 28 pages at 2000 ms is about a minute.
 
-Read the `selection` block rather than the `rendered` count alone: `budget` is what
-the crawl's render fields allowed, `suspects` and `sampled` are how the pages were
-chosen, and `truncated: true` means the budget cut the selection. A render pass that
-covered 20 of 4,000 pages is evidence about 20 pages.
+### Rendering key templates
+
+**There are two ways to choose the pages, and on a site you know anything about, the
+second is the right one.** Pass no `urls` and the engine chooses: pages whose HTML
+looks incomplete, plus a few of every page type, cut to a budget. Pass `urls` and you
+choose — the home page and two or three representatives of each real template. The
+`selection` block's `mode` says which happened: `auto` or `explicit`.
+
+**Never ask for the whole site.** Rendering every URL to learn what a dozen pages
+would have told you is a waste of resources — someone else's server, and hours of
+wall time at a polite pace. Rendering is the most expensive thing this engine does;
+spend it on the pages that stand for the most other pages.
+
+**The method, in order.** Do not guess a template count; derive it from this crawl:
+
+1. **Read the cohort sizes.** `metrics_get` with `content.metrics-by-type` gives one
+   row per page type with how many pages it covers. The big rows are the real
+   templates — the ones worth a browser, because a render of one answers for all of
+   them. Small rows are usually singleton paths, not templates.
+2. **Read the URL patterns beside them.** `pages_query` (filter by `pageType`, or
+   just page through) shows the actual paths. A cohort whose members share a shape —
+   `/products/…`, `/collections/…`, `/blog/…` — is a template. A cohort of one URL
+   that happens to have its own path segment is not, however the typing came out.
+3. **Name the pages.** The home page, then 2-3 members of each real template — not
+   the first three alphabetically; pick ones that differ (a product in stock and one
+   out of stock, a long article and a short one). Add any **one-off that looks
+   suspicious**: the automatic mode's triggers are still good signals and you can
+   apply them by eye — a big document with almost no words, a page with no title, a
+   page that links nowhere.
+4. **Then `crawl_rules`**, and read the result: the four render rules, plus the two
+   columns the content one compares (below).
+
+```
+crawl_render {crawlId, urls: ["https://site/", "https://site/products/a", …]}
+```
+
+**The arithmetic.** A four-template site is about 10-15 renders: one home page,
+2-3 each of four templates, two or three suspicious one-offs. At a 2000 ms pace
+that is under a minute of somebody's server. Compare with the automatic pass on the
+same site, which spends its whole budget before it reaches the fourth template.
+
+**What the engine checks before it renders anything you named.** Every URL must
+already be a page of that crawl that answered 200 — this pass RE-VISITS pages, it
+never fetches a URL for the first time — and one that is not there is refused by
+name, so a typo is one round trip from fixed rather than a silent omission. The list
+is deduplicated, and a list longer than the crawl's `renderMaxPages` is refused
+rather than trimmed: which of your templates to drop is not the engine's decision.
+
+**A named list REPLACES the automatic selection for that pass.** It does not add to
+it. Pages an earlier pass rendered keep their measurements, but the pass you just ran
+covered your list and nothing else, and that is what `selection` describes.
+
+### When `auto` is still the right answer
+
+First contact with a site nobody has crawled, or a crawl whose types give you no
+clear templates at all. The automatic mode is a reasonable answer to "we know
+nothing yet"; it is a poor answer to "we know the site has four templates".
+
+Then read the `selection` block rather than the `rendered` count alone: `budget` is
+what the crawl's render fields allowed, `suspects` and `sampled` are how the pages
+were chosen, and `truncated: true` means the budget cut the selection. A render pass
+that covered 20 of 4,000 pages is evidence about 20 pages.
 
 **`truncated: true` also means the sample was decided by page type, so know what the
 types are.** Candidates are sampled per page type and the budget cut takes the largest
 templates first, which is what makes a handful of renders stand for a whole template.
-But a page type is derived from the URL path, and a path that occurs once becomes its
-own type: the Phase 6 gate site produced 196 types over 551 pages, four of them real
-templates and about 170 singletons, so roughly half the seats went to pages that exist
-once. Nothing is wrong when that happens — the templates are covered first — but the
-coverage you can claim is per template, not per page. Check which types were rendered
-(`pages_query` with `rendered: true`) before telling an audit that a template was
-measured, and raise `renderMaxPages` / `renderBudgetPct` if the tail crowded out
-something you needed. The typing heuristics are on the backlog.
+A page type is derived from the URL path, and the crawl collapses those paths into
+templates over the whole population before it closes — a shape three or more pages
+share becomes one template, and a genuine one-off keeps its own path as its type. The
+Phase 6 gate site's 551 URLs typed as 196 separate things before that pass existed and
+roughly half the sample's seats went to pages that exist once; they now go to
+templates. The tail is still there and still costs seats, so the coverage you can
+claim is per template, not per page. Check which types were rendered (`pages_query`
+with `rendered: true`) before telling an audit that a template was measured. If the
+tail crowded out something you needed, `renderMaxPages` / `renderBudgetPct` are
+`crawl_start` fields — a finished crawl's cannot be raised, so start a new crawl with
+higher ones — or name the pages yourself on this crawl, which is what the section
+above is for.
+
+On an explicit pass, `budget`, `suspects`, `sampled` and `truncated` come back
+**null**, not zero: no automatic decision was taken, so there was no budget, nothing
+was suspected and nothing was cut. `selected` is the length of your list. The same
+distinction reaches the audit as `render.coverage`'s `selectionMode`.
 
 ## Step 4 — run the rules
 
@@ -403,13 +522,16 @@ row, so one appearing in the results is a URL that failed three times, not once.
 
 ## What to hand over
 
-An audit needs three things from this skill, and they should be stated together:
+An audit needs four things from this skill, and they should be stated together:
 
 1. the **`crawlId`**;
 2. the **`crawl_status`** of the finished crawl — `pagesCrawled`, the frontier
    counts, `renderPassCount`, `blockedPages`, `hostSpacingMs`, `rulesRunAt` and
    `findingsCount`, and whether it stopped at a cap;
-3. the **`crawl_rules`** summary.
+3. the **`crawl_render`** `selection` block if a render pass ran — its `mode`
+   especially, and on an explicit pass the templates the named pages stood for. That
+   is the whole of the coverage claim, and nobody downstream can reconstruct it;
+4. the **`crawl_rules`** summary.
 
 Together they say what the evidence covers. The audit's job is to judge that
 evidence; its first duty is not to overstate it.

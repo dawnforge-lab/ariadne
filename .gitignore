@@ -6,3 +6,7 @@ drizzle/meta/_journal.json.bak
 .env
 .tmp/
 .superpowers/
+# The render pass's serialised post-JavaScript documents, one directory per
+# crawl (src/crawl/render/run-render.ts, RENDER_HTML_DIR). Evidence a reader
+# inspects and deletes, never source.
+renders/

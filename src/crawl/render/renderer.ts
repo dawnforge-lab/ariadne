@@ -37,16 +37,50 @@
  *    columns null. "Rendered and empty" and "never rendered" stay different
  *    facts.
  *
- * The DOM is measured once, by a single in-page expression (`MEASURE_SCRIPT`),
- * and nothing but counts crosses back — no HTML, no link list. That is the
- * memory contract (rule 6) applied to a browser: RAM is O(concurrency), never
- * O(page size × URLs).
+ * THE DOM IS MEASURED TWICE, BY TWO DIFFERENT INSTRUMENTS, and the two answers
+ * are kept in two families of columns that no rule may mix (see the family
+ * blocks on `pages` in src/db/schema.ts):
+ *
+ *  1. **`MEASURE_SCRIPT`, in the page** (P5-T4): `innerText` and
+ *     `querySelectorAll` — what a READER sees, which no tokenizer can compute
+ *     without doing layout.
+ *  2. **`analyzeHtml`, over the serialised post-JS DOM** (P8-T1): the SAME
+ *     streaming analyzer the crawl ran over the bytes the server sent.
+ *
+ * **WHY THE SECOND ONE EXISTS, in one paragraph, because it is the whole of
+ * Phase 8 Task 1.** A diff is a subtraction, and a subtraction is only
+ * meaningful between two answers to the same question. Comparing the analyzer's
+ * `renderable_word_count` against `innerText` was not that: the analyzer cannot
+ * cascade CSS (hard rules 2 and 4), so every word a stylesheet hides is on the
+ * raw side of the subtraction and on neither side of the rendered one. The
+ * Phase 7 gate measured what that costs on a real Shopify theme
+ * (docs/gates/phase-7.md §4.2): a **near-constant 425-word offset** across 28
+ * rendered pages — one block of class-hidden chrome, identical on a 196-word
+ * page and on an 1,137-word one — which made `content.csr-dependent`'s firing
+ * condition arithmetically unreachable on that crawl whatever the site did
+ * (§4.9). **That chrome markup is present in BOTH documents.** It is in the
+ * bytes the server sent and it is in the DOM the browser built; only the
+ * *renderer* knows it is invisible. So measuring both documents with the SAME
+ * instrument puts the chrome on both sides of the subtraction, where it
+ * cancels, and what is left is the text JavaScript added — which is what the
+ * rule was always about.
+ *
+ * The serialised HTML crosses the process seam ONCE, is analysed and written to
+ * disk, and is not held: RAM stays O(concurrency × page size), never O(URLs),
+ * which is the memory contract (rule 6) applied to a browser. The file written
+ * is byte-identical to the string the numbers were computed from, so an auditor
+ * who disbelieves a finding can re-run the analyzer over the evidence itself.
  */
+import { createHash } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { chromium, errors as playwrightErrors, type Browser, type Route } from "playwright";
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { HostGate } from "../politeness.js";
+import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
 import { isUrlAllowed } from "../url-policy.js";
 
@@ -79,6 +113,18 @@ const PAINT_ONLY_RESOURCES: ReadonlySet<string> = new Set(["image", "media", "fo
 export interface RendererOptions {
   /** The crawl's own origin. Every request to another one is aborted. */
   origin: string;
+  /**
+   * The directory this pass writes serialised post-JS documents into — one
+   * `<sha256(url)>.html` per rendered page. **The caller creates it**
+   * (`runRenderPass` does, once, before the browser launches); the renderer
+   * writes into it and records the path.
+   *
+   * REQUIRED, and deliberately not optional-with-a-default. An optional
+   * directory is an invitation to render a whole site and keep none of the
+   * documents the findings were computed from, which is the silent half of a
+   * fallback (rule 7). A caller that means "somewhere temporary" says so.
+   */
+  htmlDir: string;
   /** The crawl's branded UA, so a site sees one client, not two (rule 9). */
   userAgent: string;
   /** Minimum spacing between two navigations to one host. */
@@ -110,11 +156,42 @@ export interface RenderResult {
   /** The URL asked for — the frontier/page key, not `page.url()`. */
   url: string;
   rendered: boolean;
+  // --- family 1: `MEASURE_SCRIPT`, in the page (P5-T4) --------------------
   wordCount: number | null;
   linkCount: number | null;
   navLinkCount: number | null;
   footerLinkCount: number | null;
   filterLinkCount: number | null;
+  // --- family 2: `analyzeHtml`, over the serialised DOM (P8-T1) -----------
+  /**
+   * `analyzeHtml(serialisedDom).wordCount` — every word the post-JS DOM's
+   * markup carries, on exactly the terms `pages.word_count` carries them
+   * (templates excluded, script/style/noscript/svg subtrees skipped).
+   */
+  analyzerWordCount: number | null;
+  /**
+   * …and the same analysis's `renderableWordCount`: that count minus what the
+   * DOM's own MARKUP hides. The comparable partner of `renderable_word_count`,
+   * and the rendered side of `content.csr-dependent` since P8-T1.
+   */
+  renderableWordCount: number | null;
+  /** The post-JS `<title>`, as the analyzer collapsed it. */
+  title: string | null;
+  /** `<h1>` elements in the post-JS DOM. */
+  h1Count: number | null;
+  /** The first post-JS `<link rel=canonical>` href, or null if there is none. */
+  canonical: string | null;
+  /**
+   * Where the serialised document was written — an ABSOLUTE path, because the
+   * driver absolutises the directory before the renderer sees it (see
+   * `runRenderPass`) and this value is stored for a reader who will be standing
+   * somewhere else.
+   *
+   * Non-null on every successful render and null on every failed one. There is
+   * no third shape: a document we could not keep is not a failed render either,
+   * it is a pass that stops (see `writeSerialisedDom`).
+   */
+  htmlPath: string | null;
   /**
    * Where the page navigated itself to, if that is not where it started.
    *
@@ -186,6 +263,72 @@ const MEASURE_SCRIPT = `(() => {
 })()`;
 
 /**
+ * The file one render's serialised DOM is kept in.
+ *
+ * `sha256(url)` rather than the URL itself: a page URL is not a filename — it
+ * carries `/`, `?`, `%`, unicode and no length bound — and every scheme that
+ * *escapes* one into a filename either collides (two URLs, one file, and the
+ * evidence of one of them silently gone) or is unreadable anyway. A hash is
+ * neither: it is fixed-width, collision-free at any crawl size this engine will
+ * see, and it is reproducible, so an auditor holding a URL can find its file
+ * with one `sha256sum`. The mapping back is the `rendered_html_path` column and
+ * the page row beside it.
+ */
+export function renderedHtmlFilename(url: string): string {
+  return `${createHash("sha256").update(url, "utf8").digest("hex")}.html`;
+}
+
+/**
+ * Write one serialised document beside its measurements, or THROW.
+ *
+ * THE RULING, and it is the taxonomy this file already has rather than a new
+ * one: **a failed write is an ENVIRONMENT failure, not something the site did.**
+ * `ENOSPC`, `EACCES`, a directory somebody deleted under a running pass — none
+ * of them is evidence about a page, and the module header's own line covers the
+ * class exactly: a `render_error` records "what a SITE did to a render", and
+ * anything that is our machine's fault "must stop the pass rather than mark a
+ * site unrenderable". A full disk is the browser-is-gone case wearing different
+ * boots.
+ *
+ * The two shapes this rejects, and why each is worse:
+ *
+ *  - **A null path beside `rendered = true`** is hard rule 7's silent fallback
+ *    wearing a nullable column's clothes: every reader downstream takes the row
+ *    for a complete render and none ever learns the evidence is missing.
+ *  - **A classified `render_error`** — which this function used to return — is
+ *    an engine defect in site-evidence clothing, and it costs more than a
+ *    mislabel. `runWorker` writes the classified row and COMPLETES the frontier
+ *    URL in the same transaction, so the URL is consumed by a render that
+ *    produced nothing keepable, `render.coverage` counts it as a site-side
+ *    `renderFailure`, and a re-run has to re-navigate every one of them. A throw
+ *    leaves the URL `render_pending` and unconsumed: the pass stops, the
+ *    operator fixes the disk, and the re-run picks up exactly what was left —
+ *    with no polite navigations spent on evidence that was thrown away.
+ *
+ * A PLAIN `Error`, deliberately, and never a `RenderPassRefusal`: a refusal
+ * means "wait and try again, this crawl is busy" and maps to a 409. This is a
+ * 500, because it is ours.
+ *
+ * The measurements are computed from the same string this writes, so a file on
+ * disk is always the document its row's numbers came from.
+ */
+async function writeSerialisedDom(dir: string, url: string, html: string): Promise<string> {
+  const path = join(dir, renderedHtmlFilename(url));
+  try {
+    await writeFile(path, html, "utf8");
+    return path;
+  } catch (error) {
+    throw new Error(
+      `render evidence not written: could not save the rendered DOM of ${url} to ${path} ` +
+        `(${firstLine(error)}) — this is the render pass's own environment failing, not ` +
+        "the site, so the pass stops with the URL still unrendered rather than recording " +
+        "a page it cannot show you the document for",
+      { cause: error },
+    );
+  }
+}
+
+/**
  * A launched browser plus the policy every render through it obeys.
  *
  * One instance per pass, `renderConcurrency` contexts live at any moment — and
@@ -229,6 +372,7 @@ export class PageRenderer {
       browser,
       {
         origin: options.origin,
+        htmlDir: options.htmlDir,
         userAgent: options.userAgent,
         perHostDelayMs: options.perHostDelayMs,
         navigationTimeoutMs,
@@ -251,8 +395,21 @@ export class PageRenderer {
    * NEVER THROWS FOR ANYTHING THE SITE DID. A refused URL, a dead host, a page
    * that never finishes loading — each comes back as a `RenderResult` carrying
    * a classified `error`, because the pass records failures rather than
-   * skipping URLs (rule 7). It DOES throw if the browser itself is gone, which
-   * is our bug and must stop the pass rather than mark a site unrenderable.
+   * skipping URLs (rule 7). It DOES throw for anything that is OURS: a browser
+   * that is gone, our own instruments failing on a document the browser
+   * successfully built, a disk that will not take the evidence. Those must stop
+   * the pass rather than mark a site unrenderable.
+   *
+   * THE BODY IS IN TWO PHASES AND THE SPLIT IS THAT DISTINCTION, made
+   * structural rather than left to a comment (P8-T1 fix round 1). Phase 1 is
+   * everything a SITE participates in — the gate, the navigation, the settle,
+   * where the browser ended up, and the in-page measurement — and it is the
+   * only code the classifying `catch` wraps. Phase 2 is our own reading of a
+   * document the browser already built: serialise, analyse, write. It sits
+   * OUTSIDE that catch, so a defect in it propagates instead of arriving in the
+   * database as `render_error: navigation error: …` — a bug of ours wearing
+   * site-evidence clothes, which is what it did before this split and which
+   * `render.coverage` would have counted as the site's failure.
    */
   async render(url: string): Promise<RenderResult> {
     const verdict = await isUrlAllowed(url, { allowPrivate: this.opts.allowPrivate });
@@ -331,35 +488,115 @@ export class PageRenderer {
 
     const page = await context.newPage();
     try {
-      // The gate is acquired HERE, not before the context: launching a context
-      // takes tens of milliseconds and a slot claimed before it would be partly
-      // spent on our own setup, so two renders of one host would arrive closer
-      // together than the configured delay (rule 9).
-      await this.gate.acquire(new URL(url).hostname);
+      // ---------------------------------------------------------------------
+      // PHASE 1 — what the SITE does. Everything in this inner try is
+      // classified rather than thrown, because every way it can fail is a fact
+      // about the page (rule 7). It ends either by returning a classified
+      // `RenderResult` or by handing phase 2 the document it built.
+      // ---------------------------------------------------------------------
+      let navigated: { finalUrl: string; measured: Measurement };
+      try {
+        // The gate is acquired HERE, not before the context: launching a
+        // context takes tens of milliseconds and a slot claimed before it would
+        // be partly spent on our own setup, so two renders of one host would
+        // arrive closer together than the configured delay (rule 9).
+        await this.gate.acquire(new URL(url).hostname);
 
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: this.opts.navigationTimeoutMs,
-      });
-      if (this.opts.settleMs > 0) await page.waitForTimeout(this.opts.settleMs);
+        await page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: this.opts.navigationTimeoutMs,
+        });
+        if (this.opts.settleMs > 0) await page.waitForTimeout(this.opts.settleMs);
 
-      // WHERE THE BROWSER ENDED UP decides whether there is anything to
-      // measure. A navigation this pass aborted — off-site, or policy-refused —
-      // leaves Chromium on its own `chrome-error://` surface, and measuring
-      // that would report the browser's error page as the site's rendered DOM.
-      // It is a failed render carrying a redirect, not a render (rule 7).
-      const finalUrl = page.url();
-      if (!isHttpUrl(finalUrl)) {
+        // WHERE THE BROWSER ENDED UP decides whether there is anything to
+        // measure. A navigation this pass aborted — off-site, or policy-refused
+        // — leaves Chromium on its own `chrome-error://` surface, and measuring
+        // that would report the browser's error page as the site's rendered
+        // DOM. It is a failed render carrying a redirect, not a render (rule 7).
+        const finalUrl = page.url();
+        if (!isHttpUrl(finalUrl)) {
+          if (refusedNavigation !== null) {
+            return failure(url, `policy refusal: ${refusedNavigation}`, null, blocked, skipped);
+          }
+          if (offSite !== null) {
+            return failure(url, `off-site navigation: ${offSite}`, offSite, blocked, skipped);
+          }
+          return failure(
+            url,
+            `navigation error: browser ended on ${finalUrl}`,
+            null,
+            blocked,
+            skipped,
+          );
+        }
+
+        // IN PHASE 1 RATHER THAN PHASE 2, deliberately, even though it is one
+        // of our own instruments: `page.evaluate` runs INSIDE the document, so
+        // the way it fails in practice is a page navigating away underneath it
+        // ("Execution context was destroyed"), which is the site doing
+        // something and is right to classify.
+        navigated = { finalUrl, measured: (await page.evaluate(MEASURE_SCRIPT)) as Measurement };
+      } catch (error) {
+        // Order matters: a page that redirected itself before it finished
+        // loading aborts its own navigation, and "we stopped it" is a truer
+        // classification than the `net::ERR_ABORTED` the browser reports for it.
         if (refusedNavigation !== null) {
           return failure(url, `policy refusal: ${refusedNavigation}`, null, blocked, skipped);
         }
         if (offSite !== null) {
           return failure(url, `off-site navigation: ${offSite}`, offSite, blocked, skipped);
         }
-        return failure(url, `navigation error: browser ended on ${finalUrl}`, null, blocked, skipped);
+        if (error instanceof playwrightErrors.TimeoutError) {
+          return failure(
+            url,
+            `timeout: navigation did not reach domcontentloaded within ${this.opts.navigationTimeoutMs}ms`,
+            null,
+            blocked,
+            skipped,
+          );
+        }
+        return failure(url, `navigation error: ${firstLine(error)}`, null, blocked, skipped);
       }
+      const { finalUrl, measured } = navigated;
 
-      const measured = (await page.evaluate(MEASURE_SCRIPT)) as Measurement;
+      // ---------------------------------------------------------------------
+      // PHASE 2 — what WE do to a document the browser already built. Outside
+      // the classifier above: a throw here is an engine defect or an
+      // environment failure, and either must stop the pass rather than be
+      // recorded against the site (see this method's docblock).
+      // ---------------------------------------------------------------------
+      //
+      // THE SECOND INSTRUMENT. `page.content()` is `document.documentElement.
+      // outerHTML` with the document's doctype prepended — the same
+      // serialisation, plus the one line a saved file needs to reopen as the
+      // document it was. It crosses the seam once, is analysed here in the
+      // render worker (`analyzeHtml` is pure and does not fetch — hard rule 2)
+      // and is written to disk; nothing retains it, so the cost is
+      // O(concurrency × page size).
+      //
+      // `finalUrl`, not `url`, is what the analysis resolves against: this is a
+      // measurement OF THE DOCUMENT THE BROWSER ENDED ON, exactly as family 1
+      // above is (the same reason the same page's `rendered_word_count` reports
+      // the destination of a JavaScript redirect).
+      let serialised: string;
+      let analysis: RawPageAnalysis;
+      try {
+        serialised = await page.content();
+        analysis = analyzeHtml(serialised, finalUrl);
+      } catch (error) {
+        // Re-thrown with the real cause named, because the bare message a
+        // tokenizer or a serialiser produces says nothing about which URL it
+        // was reading. It stays a plain `Error`: this is a 500, not a "the
+        // crawl is busy" refusal (see `mapRenderPassError`).
+        throw new Error(
+          `render measurement failed on ${url}: the browser built a document and the ` +
+            `engine could not read it (${firstLine(error)}) — this is our defect, not ` +
+            "the site's, so it stops the pass instead of being recorded as a render error",
+          { cause: error },
+        );
+      }
+      const htmlPath = await writeSerialisedDom(this.opts.htmlDir, url, serialised);
+
       return {
         url,
         rendered: true,
@@ -368,6 +605,12 @@ export class PageRenderer {
         navLinkCount: measured.navLinkCount,
         footerLinkCount: measured.footerLinkCount,
         filterLinkCount: measured.filterLinkCount,
+        analyzerWordCount: analysis.wordCount,
+        renderableWordCount: analysis.renderableWordCount,
+        title: analysis.title,
+        h1Count: analysis.headingCounts[0],
+        canonical: analysis.canonicalHtml,
+        htmlPath,
         // `offSite` first: when the page tried to leave and we stopped it, the
         // URL it asked for is the redirect — `page.url()` is still where it
         // started, which would report "no redirect" for the very case CHECK-10
@@ -377,26 +620,6 @@ export class PageRenderer {
         blockedRequests: blocked,
         skippedPaintRequests: skipped,
       };
-    } catch (error) {
-      // Order matters: a page that redirected itself before it finished loading
-      // aborts its own navigation, and "we stopped it" is a truer classification
-      // than the `net::ERR_ABORTED` the browser reports for it.
-      if (refusedNavigation !== null) {
-        return failure(url, `policy refusal: ${refusedNavigation}`, null, blocked, skipped);
-      }
-      if (offSite !== null) {
-        return failure(url, `off-site navigation: ${offSite}`, offSite, blocked, skipped);
-      }
-      if (error instanceof playwrightErrors.TimeoutError) {
-        return failure(
-          url,
-          `timeout: navigation did not reach domcontentloaded within ${this.opts.navigationTimeoutMs}ms`,
-          null,
-          blocked,
-          skipped,
-        );
-      }
-      return failure(url, `navigation error: ${firstLine(error)}`, null, blocked, skipped);
     } finally {
       // Closing the context closes its pages and releases the browser's memory
       // for them. Without it a pass is O(URLs) contexts and the memory contract
@@ -426,6 +649,12 @@ function failure(
     navLinkCount: null,
     footerLinkCount: null,
     filterLinkCount: null,
+    analyzerWordCount: null,
+    renderableWordCount: null,
+    title: null,
+    h1Count: null,
+    canonical: null,
+    htmlPath: null,
     redirectUrl,
     error,
     blockedRequests,
@@ -478,8 +707,10 @@ function firstLine(error: unknown): string {
  * measurement on the floor (rule 7). `zero rows updated` is the only signal
  * Postgres gives us for that, so it is checked, not assumed.
  *
- * The five counts are written together with `rendered`, so no reader ever sees
- * `rendered = true` with null measurements.
+ * BOTH MEASUREMENT FAMILIES are written together with `rendered`, so no reader
+ * ever sees `rendered = true` with null measurements — and no reader ever sees
+ * one family filled and the other empty, which would be a page measured by half
+ * an instrument.
  */
 export async function writeRenderResult(
   db: Pick<Db, "execute">,
@@ -494,6 +725,12 @@ export async function writeRenderResult(
       rendered_nav_link_count = ${result.navLinkCount},
       rendered_footer_link_count = ${result.footerLinkCount},
       rendered_filter_link_count = ${result.filterLinkCount},
+      rendered_analyzer_word_count = ${result.analyzerWordCount},
+      rendered_renderable_word_count = ${result.renderableWordCount},
+      rendered_title = ${result.title},
+      rendered_h1_count = ${result.h1Count},
+      rendered_canonical = ${result.canonical},
+      rendered_html_path = ${result.htmlPath},
       rendered_redirect_url = ${result.redirectUrl},
       render_error = ${result.error}
     where crawl_id = ${crawlId} and url = ${result.url}

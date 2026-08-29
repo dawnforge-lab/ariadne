@@ -17,9 +17,11 @@ import { sql, type SQL } from "drizzle-orm";
  *
  * Parenthesised so it reads as a label rather than as a template name a site
  * might really have — but that is a courtesy to the reader, NOT a uniqueness
- * claim. `derivePageType` returns a detected URL template (`/blog/:id/:slug`),
- * which cannot be spelled this way, or a CLIENT-CONFIGURED name, which can:
- * nothing stops a client calling a bucket `(untyped)`.
+ * claim. The crawler's typing (src/crawl/page-type.ts) produces a detected URL
+ * template (`/blog/:id/:slug`, per URL and then collapsed over the whole
+ * population at crawl end), which cannot be spelled this way, or a
+ * CLIENT-CONFIGURED name, which can: nothing stops a client calling a bucket
+ * `(untyped)`.
  *
  * That case is handled rather than argued away, and the handling is the reason
  * the coalesce lives inside each cohort CTE instead of in an outer `GROUP BY`:

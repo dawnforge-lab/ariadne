@@ -20,6 +20,15 @@
  *    the CRAWL pass and the render pass writes only `rendered_*` columns, so the
  *    recomputation returns the same numbers before the pass, during it, and a
  *    week later (the function's own header states this contract).
+ *
+ *    **One thing recomputation cannot see, and it governs the rest of that
+ *    side**: whether the automatic decision was the one that ran. Since Phase 8
+ *    a caller may NAME the pages worth a browser, and a named list is an input
+ *    no `pages` column records — so the render pass writes it to the crawl's
+ *    config beside the three knobs this rule already reads from there
+ *    (`RENDER_URLS_KEY`; the argument for that placement is in
+ *    src/crawl/render/run-render.ts). `selectionMode` is that record, and in
+ *    the explicit case the four automatic numbers are null rather than zero.
  *  - the EVIDENCE side (`pages*`, `renderFailures`) — what is actually on the
  *    page rows now: how many say `rendered`, and how many carry a
  *    `render_error`.
@@ -45,7 +54,11 @@
  */
 import { eq, sql } from "drizzle-orm";
 
-import { renderSelectionStats, type RenderSelectionConfig } from "../../crawl/render/select.js";
+import {
+  RENDER_URLS_KEY,
+  renderSelectionStats,
+  type RenderSelectionConfig,
+} from "../../crawl/render/select.js";
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
@@ -70,11 +83,23 @@ const RENDER_CONFIG_KEYS = [
  * an error — it is a crawl that left the knob at its default, which is what the
  * render pass itself did with the same row.
  */
+interface StoredRenderInputs {
+  /** The three knobs, as the crawl stored them. */
+  cfg: RenderSelectionConfig;
+  /**
+   * The URL list the last render pass was given, or null for the automatic
+   * selection — including the null a crawl that has never been rendered by a
+   * Phase 8 pass gets, where automatic is the only decision that can have
+   * happened. See `RENDER_URLS_KEY`.
+   */
+  renderUrls: string[] | null;
+}
+
 async function readRenderConfig(
   db: Db,
   crawlId: string,
   ruleId: string,
-): Promise<RenderSelectionConfig> {
+): Promise<StoredRenderInputs> {
   const rows = await db
     .select({ config: crawls.config })
     .from(crawls)
@@ -102,7 +127,25 @@ async function readRenderConfig(
     }
     cfg[key] = value;
   }
-  return cfg;
+
+  // The fourth input, validated on the same terms and for a sharper reason: a
+  // shape this rule cannot read would otherwise be reported as "the automatic
+  // selection", which is a claim about how the pages were chosen and would be
+  // false. Absent is not malformed — see `StoredRenderInputs.renderUrls`.
+  const named = stored[RENDER_URLS_KEY];
+  let renderUrls: string[] | null = null;
+  if (named !== undefined && named !== null) {
+    if (!Array.isArray(named) || named.some((entry) => typeof entry !== "string")) {
+      throw new Error(
+        `${ruleId}: crawl '${crawlId}' config.${RENDER_URLS_KEY} is neither null nor an ` +
+          "array of strings — the render selection this metric describes cannot be " +
+          "reproduced from it",
+      );
+    }
+    renderUrls = named as string[];
+  }
+
+  return { cfg, renderUrls };
 }
 
 /**
@@ -114,6 +157,9 @@ async function readRenderConfig(
  *    same denominator the budget is a percentage OF, deliberately: `budget` is
  *    `min(ceil(pages × pct/100), renderMaxPages)` over this number, not over the
  *    renderable subset.
+ *  - `selectionMode` — `auto` or `explicit`: WHICH DECISION chose the pages, and
+ *    therefore how the four numbers after it are to be read. It comes first
+ *    among the selection columns because it governs them.
  *  - `selectionBudget` — the seats the selection had.
  *  - `selectionSuspects` — candidates that tripped a suspicion trigger (a long
  *    document with no words, a titleless page, a framework marker, a page that
@@ -135,10 +181,35 @@ async function readRenderConfig(
  *
  * See the module header for why `pagesRendered + renderFailures` is not asserted
  * to equal `selectionSelected`.
+ *
+ * ## THE EXPLICIT CASE: four nulls, not four zeroes
+ *
+ * When `selectionMode` is `explicit`, an auditing agent named the pages and the
+ * automatic decision never ran. `selectionBudget`, `selectionSuspects`,
+ * `selectionSampled` and `selectionTruncated` are then **null**, and
+ * `selectionSelected` is the length of the list.
+ *
+ * The tempting alternatives are both worse, and both were considered:
+ *
+ *  - **Zeroes.** `selectionSuspects: 0` beside `selectionSampled: 0` says "the
+ *    automatic selection ran and found no candidate" — a real and different
+ *    fact, and one a reader would quote as evidence that the site's HTML looked
+ *    complete. It is exactly the mis-reading `selectionMode` exists to prevent,
+ *    so putting it in the columns beside the mode would defeat the field.
+ *  - **The automatic numbers anyway**, recomputed for information. They describe
+ *    a selection that did not happen. `selectionSelected` would then contradict
+ *    the pages actually rendered for no reason a reader could work out.
+ *
+ * A null here means "this question does not apply to how these pages were
+ * chosen", which is what it means everywhere else in this engine.
  */
 async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
-  const cfg = await readRenderConfig(db, crawlId, self.id);
-  const selection = await renderSelectionStats(db, crawlId, cfg);
+  const { cfg, renderUrls } = await readRenderConfig(db, crawlId, self.id);
+  // Recomputed only when it describes something. On an explicit pass the
+  // automatic decision is not merely unreported, it is not asked: running the
+  // candidate SQL to throw the answer away would invite a later reader to
+  // publish it.
+  const selection = renderUrls === null ? await renderSelectionStats(db, crawlId, cfg) : null;
 
   const res = await db.execute<{
     pages_crawled: number;
@@ -163,11 +234,19 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
       scope: "site",
       value: {
         pagesCrawled: num(row.pages_crawled, "pages_crawled", self.id),
-        selectionBudget: selection.budget,
-        selectionSuspects: selection.suspects,
-        selectionSampled: selection.sampled,
-        selectionSelected: Math.min(selection.budget, selection.suspects + selection.sampled),
-        selectionTruncated: selection.truncated,
+        selectionMode: selection === null ? "explicit" : "auto",
+        selectionBudget: selection?.budget ?? null,
+        selectionSuspects: selection?.suspects ?? null,
+        selectionSampled: selection?.sampled ?? null,
+        selectionSelected:
+          selection === null
+            ? // The list IS the selection: every entry was checked against this
+              // crawl's pages before the pass ran, and the pass refuses to
+              // render a shorter list than it was handed
+              // (selectExplicitRenderSet's own invariant).
+              (renderUrls?.length ?? 0)
+            : Math.min(selection.budget, selection.suspects + selection.sampled),
+        selectionTruncated: selection?.truncated ?? null,
         pagesRendered: num(row.pages_rendered, "pages_rendered", self.id),
         renderFailures: num(row.render_failures, "render_failures", self.id),
       },

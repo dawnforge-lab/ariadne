@@ -9,6 +9,7 @@ import { PageWriter } from "../../src/crawl/persist.js";
 import {
   runCrawl,
   resumeCrawl,
+  parseStoredConfig,
   type CrawlConfig,
   type DiscoveryEvidence,
   type NotFoundProbeSample,
@@ -32,6 +33,9 @@ function databaseUrl(): string {
  *   /missing         -> 404
  *   /d               -> reachable only from the sitemap
  *   /admin/secret    -> served, but must never be fetched
+ *   /e               -> listed only by /sitemap-extra.xml, which robots.txt does
+ *                       NOT declare: the page a crawl reaches only when the
+ *                       client hands it the undeclared sitemap (P8-T3)
  */
 let siteServer: Server;
 let base: string;
@@ -171,6 +175,18 @@ beforeAll(async () => {
       );
       return;
     }
+    // A sitemap no `Sitemap:` line points at. The engine never probes for it —
+    // it is read only when a crawl is started with `sitemapUrls`.
+    if (path === "/sitemap-extra.xml") {
+      res.setHeader("content-type", "application/xml");
+      res.end(
+        `<?xml version="1.0" encoding="UTF-8"?>` +
+          `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+          `<url><loc>${base}/e</loc><lastmod>2026-08-20</lastmod></url>` +
+          `</urlset>`,
+      );
+      return;
+    }
     if (path === "/b") {
       res.writeHead(301, { location: `${base}/c` });
       res.end();
@@ -191,6 +207,8 @@ beforeAll(async () => {
       "/a": html(`<a href="/c">c</a>`),
       "/c": html(`<a href="/missing">missing</a>`),
       "/d": html(`<p>sitemap only</p>`),
+      // Linked from nowhere and listed only by the undeclared sitemap.
+      "/e": html(`<p>undeclared sitemap only</p>`),
       "/admin/secret": html(`<p>secret</p>`),
     };
     const body = bodies[path];
@@ -446,6 +464,50 @@ describe("runCrawl", () => {
     expect(summary.discovery.sitemapEntries).toBe(2);
   });
 
+  /**
+   * The client-supplied sitemap (P8-T3). The engine refuses to guess at
+   * `/sitemap.xml`, so a document the site publishes and never declares is
+   * reachable exactly one way: somebody names it at crawl start.
+   */
+  it("walks a sitemap the client supplied that robots.txt never declares", async () => {
+    const summary = await crawl(config({ sitemapUrls: [`${base}/sitemap-extra.xml`] }));
+
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    const e = rows.find((r) => r.url === `${base}/e`);
+    // Fetched, and recorded as a sitemap discovery rather than a link: nothing
+    // on this site links to /e.
+    expect(e?.fetchClass).toBe("ok");
+    expect(e?.discoveredVia).toBe("sitemap");
+
+    // And the entry is in `sitemap_urls` with the document it came from, with
+    // the normalised spelling the sitemap rules join to `pages.url` on — a
+    // supplied document's entries are evidence on exactly the same terms as a
+    // declared one's.
+    const entries = await db
+      .select()
+      .from(sitemapUrls)
+      .where(eq(sitemapUrls.crawlId, summary.crawlId));
+    const supplied = entries.find((r) => r.url === `${base}/e`);
+    expect(supplied?.sitemapSource).toBe(`${base}/sitemap-extra.xml`);
+    expect(supplied?.urlNormalised).toBe(`${base}/e`);
+    expect(supplied?.lastmod).toBe("2026-08-20");
+    // The declared document was walked too — supplying one adds, never replaces.
+    expect(entries.map((r) => r.url).sort()).toEqual(
+      [`${base}/`, `${base}/d`, `${base}/e`].sort(),
+    );
+  });
+
+  it("walks a supplied sitemap the site already declares exactly once", async () => {
+    // The client re-states what robots.txt says, in a spelling of their own.
+    // Two names, one document: the origin gets one request, not two.
+    const summary = await crawl(
+      config({ sitemapUrls: [`${base}/sitemap.xml#gid=0`] }),
+    );
+    expect(summary.discovery.truncation.docsFetched).toBe(1);
+    expect(summary.discovery.sitemapEntries).toBe(2);
+    expect(summary.discovery.truncation.failures).toEqual([]);
+  });
+
   it("respects maxPages", async () => {
     const summary = await crawl(config({ maxPages: 2 }));
     expect(summary.pagesCrawled).toBeLessThanOrEqual(2);
@@ -679,8 +741,48 @@ describe("crawl-level evidence", () => {
     // reading the whole file or the start of one.
     expect(discovery.robots.truncated).toBe(false);
     expect(discovery.sitemapSources).toEqual([`${base}/sitemap.xml`]);
+    // Nobody handed this crawl a sitemap: present and empty, which is what
+    // "the walk read only what robots.txt declared" looks like.
+    expect(discovery.suppliedSitemaps).toEqual([]);
     expect(discovery.docsFetched).toBe(1);
     expect(discovery.truncation.failures).toEqual([]);
+  });
+
+  /**
+   * The provenance of the documents the walk read. Two lists, never one: a
+   * supplied sitemap folded into `sitemapSources` would make `sitemap.missing`
+   * (CHECK-06) go quiet about a robots.txt that still declares nothing.
+   */
+  it("records which sitemaps robots.txt declared and which the client supplied", async () => {
+    const summary = await crawl(config({ sitemapUrls: [`${base}/sitemap-extra.xml`] }));
+    const discovery = (await crawlRow(summary.crawlId)).discovery as DiscoveryEvidence;
+
+    expect(discovery.sitemapSources).toEqual([`${base}/sitemap.xml`]);
+    expect(discovery.suppliedSitemaps).toEqual([`${base}/sitemap-extra.xml`]);
+    // Both documents were read; neither list is the whole of the walk.
+    expect(discovery.docsFetched).toBe(2);
+    expect(discovery.truncation.failures).toEqual([]);
+  });
+
+  it("keeps both provenances for a document that was declared and supplied", async () => {
+    const summary = await crawl(config({ sitemapUrls: [`${base}/sitemap.xml`] }));
+    const discovery = (await crawlRow(summary.crawlId)).discovery as DiscoveryEvidence;
+
+    // The same document in both lists. It was declared AND it was supplied,
+    // and either fact alone would be a smaller, less true answer — while the
+    // walk still fetched it once (docsFetched).
+    expect(discovery.sitemapSources).toEqual([`${base}/sitemap.xml`]);
+    expect(discovery.suppliedSitemaps).toEqual([`${base}/sitemap.xml`]);
+    expect(discovery.docsFetched).toBe(1);
+  });
+
+  it("refuses a supplied sitemap it cannot read, before the crawl row exists", async () => {
+    const before = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
+    await expect(
+      runCrawl(db, config({ sitemapUrls: ["/sitemap.xml"] })),
+    ).rejects.toThrow(/sitemapUrls/);
+    const after = await db.select().from(crawls).where(eq(crawls.siteUrl, base));
+    expect(after).toHaveLength(before.length);
   });
 
   it("records discovery even when robots.txt refuses the crawl", async () => {
@@ -917,6 +1019,32 @@ describe("allowPrivate is not persisted", () => {
       perHostDelayMs: 0,
       maxConcurrency: 4,
     });
+  });
+
+  /**
+   * The supplied sitemap list is a FIRST-CLASS config field, not a start-time
+   * argument: a resume must walk the same documents the first run did, or it
+   * would report the difference as the site's.
+   */
+  it("carries the supplied sitemaps through the stored config and back", async () => {
+    const summary = await crawl(config({ sitemapUrls: [`${base}/sitemap-extra.xml`] }));
+    const rows = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
+    const stored = rows[0]?.config as Record<string, unknown>;
+
+    // The allowPrivate strip took only allowPrivate.
+    expect(stored).not.toHaveProperty("allowPrivate");
+    expect(stored["sitemapUrls"]).toEqual([`${base}/sitemap-extra.xml`]);
+    // And the closed field set reads it back rather than dropping it.
+    expect(parseStoredConfig(stored, summary.crawlId).sitemapUrls).toEqual([
+      `${base}/sitemap-extra.xml`,
+    ]);
+  });
+
+  it("refuses a stored sitemapUrls of the wrong shape rather than resuming without it", async () => {
+    const summary = await crawl(config());
+    expect(() =>
+      parseStoredConfig({ ...config(), sitemapUrls: "one.xml" }, summary.crawlId),
+    ).toThrow(/sitemapUrls is not an array of strings/);
   });
 
   it("does not come back on a resume that does not re-assert it", async () => {

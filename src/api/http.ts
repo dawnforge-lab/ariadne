@@ -19,7 +19,10 @@
  *   GET  /crawls                       list crawls, newest first, paginated
  *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings
  *   POST /crawls/:id/fail              close a crawl nobody is working
- *   POST /crawls/:id/render            run the render pass
+ *   POST /crawls/:id/render            run the render pass. No body: the engine
+ *                                      selects. `{"urls": [...]}`: those pages
+ *                                      instead, replacing the automatic
+ *                                      selection for that pass
  *   POST /crawls/:id/rules             run the rules
  *   GET  /crawls/:id/issues            findings grouped by rule (the triage view).
  *                                      A group's `count` is the rows the rule
@@ -48,7 +51,13 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
 import { checkBearer } from "./auth.js";
-import { ApiService, ServiceError, parseStartCrawlInput, type ServiceErrorCode } from "./service.js";
+import {
+  ApiService,
+  ServiceError,
+  parseRenderCrawlInput,
+  parseStartCrawlInput,
+  type ServiceErrorCode,
+} from "./service.js";
 
 /**
  * Largest request body this server will read.
@@ -226,10 +235,15 @@ function buildRoutes(): Route[] {
       method: "POST",
       pattern: ["crawls", id, "render"],
       query: [],
-      handler: async (service, ctx) => {
-        noBody(ctx);
-        return { status: 200, body: await service.renderCrawl(param(ctx, "id")) };
-      },
+      // The one POST here that takes an OPTIONAL body: no body is the automatic
+      // pass this route has always run, `{"urls": [...]}` names the pages
+      // instead. `parseRenderCrawlInput` refuses an unknown field rather than
+      // ignoring it, for `noBody`'s reason — a caller who mistyped the field
+      // would otherwise get a 200 describing a selection they did not ask for.
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.renderCrawl(param(ctx, "id"), parseRenderCrawlInput(ctx.body)),
+      }),
     },
     {
       method: "POST",

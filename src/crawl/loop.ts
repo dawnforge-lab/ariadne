@@ -72,6 +72,7 @@ import {
   resolveRenderConfig,
   type RenderSelectionConfig,
 } from "./render/select.js";
+import { inferPageTemplates, type PageTemplateInference } from "./page-type.js";
 import { analyzePage } from "./parse/page-analyzer.js";
 import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { PageWriter, type PageWriterStats } from "./persist.js";
@@ -115,6 +116,47 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * quietly dropped (see hostProbeStarts).
    */
   legacyHosts?: string[];
+  /**
+   * Sitemap documents the client handed the crawl, walked alongside the ones
+   * robots.txt declares (discovery's `extraSitemaps`).
+   *
+   * IT IS NOT A WAY AROUND THE NO-SPECULATIVE-PROBE RULE, it is the other half
+   * of it: the engine never guesses at `/sitemap.xml`, so a site that publishes
+   * a sitemap without declaring it in robots.txt has exactly one way to get it
+   * crawled — somebody who knows where it is says so. `sitemap.missing`
+   * (CHECK-06) still reports the undeclared sitemap, because that is still true
+   * of the site and still worth fixing.
+   *
+   * Full http(s) URLs, absolute; anything else throws in `validateCrawlConfig`
+   * rather than being dropped mid-walk. The API applies the URL policy and the
+   * allowlist to each one before the crawl row exists (`checkSitemapUrls`,
+   * src/api/service.ts) — this field is trusted by the time it reaches here in
+   * exactly the way `legacyHosts` is.
+   */
+  sitemapUrls?: string[];
+  /**
+   * How many findings each listing rule may report when this crawl is judged.
+   * A positive integer, or `null` for UNCAPPED — every orphan, every duplicate
+   * group, every blocked sitemap entry. Absent is the engine's defaults (200 URL
+   * findings, 500 near-duplicate pairs), which is what every crawl before P8-T4
+   * got.
+   *
+   * An uncapped listing normally carries no truncation note, and the direction
+   * that matters is the other one: a note means the list is incomplete, and its
+   * absence means it is complete. `null` does not promise "no note anywhere" —
+   * `content.near-duplicate`'s scan ceiling is not the operator's to lift (hard
+   * rule 6, `NEAR_DUPLICATE_PAIR_CEILING`), and a run that reaches it says so in
+   * the usual honest way.
+   *
+   * IT IS NOT A CRAWL SETTING AND THE CRAWL LOOP NEVER READS IT. It rides on
+   * the crawl config because that is the only durable place a crawl-start
+   * decision can live: the rules run is a separate call (`crawl_rules`, `POST
+   * /crawls/:id/rules`) with no argument of its own, so a billed audit that
+   * asked for the whole picture would silently be re-judged at 200 the moment
+   * anyone re-ran the rules. `runRules` reads this key off the row
+   * (`storedFindingCap`, src/rules/query/crawl-evidence.ts).
+   */
+  findingCap?: number | null;
 }
 
 /**
@@ -123,10 +165,20 @@ export interface CrawlConfig extends RenderSelectionConfig {
  * `robots.raw` is the robots.txt text as served (discovery caps the read at
  * 500KB), stored verbatim so the rules can re-parse it against the URLs the
  * crawl found instead of re-fetching it — hard rule 3, in a column.
- * `sitemapSources` is the sitemap documents the walk was *pointed at*, so
- * "no sitemap is declared" and "the declared sitemap could not be read" stay
- * different facts: the second one shows up in `truncation.failures` with a
- * non-empty `sitemapSources`.
+ * `sitemapSources` is the sitemap documents ROBOTS.TXT DECLARED, so "no sitemap
+ * is declared" and "the declared sitemap could not be read" stay different
+ * facts: the second one shows up in `truncation.failures` with a non-empty
+ * `sitemapSources`.
+ *
+ * `suppliedSitemaps` is the documents the CLIENT named at crawl start
+ * (`CrawlConfig.sitemapUrls`). It is a second list rather than more entries in
+ * the first one, and that is the whole of the provenance record: a document in
+ * `sitemapSources` was declared, a document in `suppliedSitemaps` was supplied,
+ * and a document in both was both — which is the honest answer for a client who
+ * re-states a sitemap the site already declares. Folding the two together would
+ * make `sitemap.missing` (CHECK-06) go quiet the moment a client supplied a
+ * URL, reporting "robots.txt declares a sitemap" about a robots.txt that
+ * declares nothing.
  */
 export interface DiscoveryEvidence {
   robots: {
@@ -145,6 +197,13 @@ export interface DiscoveryEvidence {
     truncated: boolean;
   };
   sitemapSources: string[];
+  /**
+   * The sitemap documents the crawl was handed at start. Empty when nobody
+   * supplied one — including on every crawl written before the field existed,
+   * where nobody could (readers treat an absent value as empty and a value of
+   * the wrong shape as a refusal; see `parseDiscovery`).
+   */
+  suppliedSitemaps: string[];
   truncation: DiscoveryTruncation;
   /** Sitemap documents attempted. Lifted out of `truncation` for the rules. */
   docsFetched: number;
@@ -211,6 +270,13 @@ export interface CrawlSummary {
   writer: PageWriterStats;
   robots: { outcome: RobotsInfo["outcome"]; note: string | null };
   discovery: { sitemapEntries: number; truncation: DiscoveryTruncation };
+  /**
+   * What the crawl-end template inference did (`inferPageTemplates`), or null
+   * when it did not run — which today means a crawl that failed before it could
+   * see its own population. Null is not "nothing to collapse": that is
+   * `pagesRetyped: 0`, and the two must not be read as the same thing.
+   */
+  pageTemplates: PageTemplateInference | null;
   /** Why the crawl ended, when that needs saying. Null on a clean finish. */
   note: string | null;
 }
@@ -432,6 +498,13 @@ export async function resumeCrawl(
  * the API's queue creates the row when a crawl is ACCEPTED and runs it later
  * (src/api/service.ts), and it must strip the flag by the same authority rather
  * than by a second copy of the rule that could drift from this one.
+ *
+ * config_jsonb has a SECOND writer since P8-T2: the render pass records its
+ * requested URL list under RENDER_URLS_KEY (src/crawl/render/run-render.ts)
+ * hours after this insert. A whole-config rewrite (e.g. on resume) would
+ * silently erase that record and turn an explicit render pass into a reported
+ * "auto" — never `.set({config: storableConfig(...)})` an existing row; patch
+ * keys individually. (Backlog: a dedicated column at the next open migration.)
  */
 export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
   const { allowPrivate: _allowPrivate, ...rest } = config;
@@ -456,6 +529,11 @@ export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPri
  * render pass cannot end up with a different user agent or a different per-host
  * delay than the crawl it belongs to (rule 9). Its messages name the crawl
  * rather than a function, because two callers now raise them.
+ *
+ * The closed field set below is load-bearing beyond validation: config_jsonb
+ * also carries the render pass's RENDER_URLS_KEY record (see storableConfig's
+ * note), and ignoring unknown keys here is what keeps that record from leaking
+ * into a later pass's CrawlConfig.
  */
 export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   if (typeof value !== "object" || value === null) {
@@ -471,9 +549,11 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     maxConcurrency: raw["maxConcurrency"],
     probeHosts: raw["probeHosts"],
     legacyHosts: raw["legacyHosts"],
+    sitemapUrls: raw["sitemapUrls"],
     renderBudgetPct: raw["renderBudgetPct"],
     renderMaxPages: raw["renderMaxPages"],
     renderSamplePerType: raw["renderSamplePerType"],
+    findingCap: raw["findingCap"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -509,14 +589,37 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
     }
   }
+  // `findingCap` is the one field where NULL IS A VALUE rather than an absence,
+  // so it cannot join the loop above: null means "uncapped, list everything",
+  // absent means "the engine's defaults", and collapsing the two would turn a
+  // billed audit's explicit choice into the default the moment it was read back.
+  // Anything else — a string, a zero, a fraction — is a config we cannot read
+  // the operator's intent out of, and it stops here (the same ruling
+  // `storedFindingCap` makes for the rules-run path, which reads the raw jsonb
+  // rather than this).
   if (
-    config.legacyHosts !== undefined &&
-    (!Array.isArray(config.legacyHosts) ||
-      !config.legacyHosts.every((host) => typeof host === "string"))
+    config.findingCap !== undefined &&
+    config.findingCap !== null &&
+    (!Number.isInteger(config.findingCap) || (config.findingCap as number) < 1)
   ) {
     throw new Error(
-      `crawl ${crawlId}: stored config.legacyHosts is not an array of strings`,
+      `crawl ${crawlId}: stored config.findingCap is neither a positive integer nor null`,
     );
+  }
+  // The two string lists, on the same terms: a stored value of the wrong shape
+  // is a config we cannot read, not a list to quietly treat as empty. A resume
+  // that dropped `sitemapUrls` would walk fewer documents than the first run
+  // and report the difference as the site's.
+  for (const field of ["legacyHosts", "sitemapUrls"] as const) {
+    const value = config[field];
+    if (
+      value !== undefined &&
+      (!Array.isArray(value) || !value.every((entry) => typeof entry === "string"))
+    ) {
+      throw new Error(
+        `crawl ${crawlId}: stored config.${field} is not an array of strings`,
+      );
+    }
   }
   return config as CrawlConfig;
 }
@@ -556,6 +659,34 @@ export function validateCrawlConfig(config: CrawlConfig): void {
     // Throws on a legacyHosts entry that names no host — here, before the
     // crawls row exists, rather than four fetches into the run.
     hostProbeStarts(config.siteUrl, config.legacyHosts ?? []);
+  }
+  // A supplied sitemap must be an absolute http(s) URL: the sitemaps protocol
+  // has no relative documents, and `discover` resolves nothing — a bare
+  // `/sitemap.xml` would reach the walk as a URL nothing can fetch and be
+  // recorded as a failure the operator would read as the site's. Named here,
+  // before the row exists, for the same reason legacyHosts is.
+  for (const url of config.sitemapUrls ?? []) {
+    if (normalizeUrl(url) === null) {
+      throw new Error(
+        `CrawlConfig.sitemapUrls entry is not an absolute http(s) URL: ${url}`,
+      );
+    }
+  }
+  // The finding cap, checked here even though the crawl loop never reads it:
+  // it is stored on the row at crawl start and spent hours later by a rules run,
+  // and `findingCap: 0` — a listing rule that may report nothing, which is the
+  // always-passes rule hard rule 1 forbids — must be refused by the request that
+  // set it rather than by a judgement nobody is watching. `null` is uncapped and
+  // is a legitimate value; absent is the engine's defaults.
+  if (
+    config.findingCap !== undefined &&
+    config.findingCap !== null &&
+    (!Number.isInteger(config.findingCap) || config.findingCap < 1)
+  ) {
+    throw new RangeError(
+      `CrawlConfig.findingCap must be an integer ≥ 1, or null for uncapped, got ` +
+        `${String(config.findingCap)}`,
+    );
   }
   // The render budget, checked by the module that will spend it. A nonsense
   // budget stops the crawl at line one rather than after the last page, where
@@ -624,6 +755,9 @@ async function runToCompletion(
   const discovery = await discover(config.siteUrl, {
     userAgent: config.userAgent,
     allowPrivate,
+    // The documents the client named, walked beside the declared ones. The
+    // engine still probes nothing on its own (see discover's header).
+    extraSitemaps: config.sitemapUrls,
   });
 
   // INSERTION 2 — discovery's own findings, written before anything branches on
@@ -631,7 +765,7 @@ async function runToCompletion(
   // exactly the crawl whose discovery evidence a reader most needs.
   await db
     .update(crawls)
-    .set({ discovery: discoveryEvidence(discovery) })
+    .set({ discovery: discoveryEvidence(discovery, config) })
     .where(eq(crawls.id, crawlId));
 
   // Complete disallow: robots.txt could not be read, which is not permission
@@ -647,7 +781,7 @@ async function runToCompletion(
       skipped: `not probed: ${note}`,
     });
     await closeCrawl(db, crawlId, "failed", crawled);
-    return summarise(db, crawlId, "failed", crawled, emptyWriterStats(), discovery, note);
+    return summarise(db, crawlId, "failed", crawled, emptyWriterStats(), discovery, null, note);
   }
 
   const writer = new PageWriter(db, crawlId);
@@ -1000,6 +1134,41 @@ async function runToCompletion(
     }
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
+
+  // INSERTION 4 — the crawl types its own population, now that it has one.
+  //
+  // WHY HERE AND NOWHERE ELSE. `page_type` is written per URL as each page is
+  // persisted, and a single URL cannot say whether `/collections/all-white` is
+  // a template or a page — only the other 550 URLs can. This is the one moment
+  // when the population is complete and no reader has acted on it yet, and the
+  // readers who come next all want the collapsed answer:
+  //
+  //  - the auditing agent, which reads the crawl's page types to name the key
+  //    templates it wants rendered (`crawl_render` with `urls`) BEFORE the
+  //    rules ever run — the flow P8-T2 built, and the one this collapse exists
+  //    to serve;
+  //  - the automatic render selection, whose per-type sample means "one page
+  //    per template" only if a type is a template;
+  //  - `pages_query`/`issues_list`'s `pageType` filter, which must give the
+  //    same answer before and after a rules run — a crawl's evidence changing
+  //    under a reader who did nothing is not evidence;
+  //  - the metric cohorts, last rather than first.
+  //
+  // The alternative considered and rejected was a derivation in the rules run
+  // (`deriveClickDepth`'s slot). It is a smaller change and it leaves this file
+  // untouched, but it collapses the types AFTER the two readers above have
+  // already used them — the agent would still be naming templates out of 196
+  // singletons, which is the defect. It also re-runs on every `crawl_rules`
+  // call, while the population it reasons about only ever changes when the
+  // crawl does.
+  //
+  // Not contained the way the 404 probe is: this issues no request and touches
+  // no site, so a failure here is our bug over rows we already hold, and there
+  // is no column in which to write "the types are the parse-time ones". It
+  // propagates, `execute` closes the row `failed`, and the operator finds out
+  // (hard rule 7) rather than reading singleton cohorts that look deliberate.
+  const pageTemplates = await inferPageTemplates(db, crawlId);
+
   await closeCrawl(db, crawlId, status, pagesCrawled);
   return summarise(
     db,
@@ -1008,6 +1177,7 @@ async function runToCompletion(
     pagesCrawled,
     writer.stats(),
     discovery,
+    pageTemplates,
     aborted
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
@@ -1031,8 +1201,18 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The `crawls.discovery_jsonb` row for one discovery result. */
-function discoveryEvidence(discovery: DiscoveryResult): DiscoveryEvidence {
+/**
+ * The `crawls.discovery_jsonb` row for one discovery result.
+ *
+ * The config is the second argument because the PROVENANCE of the sitemap
+ * documents is not something the walk can report: `discover` is handed two
+ * lists and merges them, so which document came from where is known here and
+ * only here. Both lists are written, unfolded — see `DiscoveryEvidence`.
+ */
+function discoveryEvidence(
+  discovery: DiscoveryResult,
+  config: CrawlConfig,
+): DiscoveryEvidence {
   return {
     robots: {
       outcome: discovery.robots.outcome,
@@ -1041,11 +1221,11 @@ function discoveryEvidence(discovery: DiscoveryResult): DiscoveryEvidence {
       raw: discovery.robots.raw,
       truncated: discovery.robots.truncated,
     },
-    // The documents the walk was pointed at. Today that is exactly what
-    // robots.txt declared, because `discover` is called without
-    // `extraSitemaps`; a caller that starts passing them must add them here,
-    // or "the site declares no sitemap" becomes a lie.
+    // The `Sitemap:` lines robots.txt carried, and nothing else. A supplied
+    // document belongs in the list below it: putting it here would turn "the
+    // site declares no sitemap" into a lie about the site.
     sitemapSources: [...discovery.robots.sitemapUrls],
+    suppliedSitemaps: [...(config.sitemapUrls ?? [])],
     truncation: discovery.truncation,
     docsFetched: discovery.truncation.docsFetched,
   };
@@ -1235,6 +1415,7 @@ async function summarise(
   pagesCrawled: number,
   writerStats: PageWriterStats,
   discovery: DiscoveryResult,
+  pageTemplates: PageTemplateInference | null,
   note: string | null,
 ): Promise<CrawlSummary> {
   return {
@@ -1248,6 +1429,7 @@ async function summarise(
       sitemapEntries: discovery.sitemapEntries.length,
       truncation: discovery.truncation,
     },
+    pageTemplates,
     note,
   };
 }

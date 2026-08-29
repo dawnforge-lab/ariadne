@@ -40,6 +40,11 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+// `isSameOrigin` comes from the pure url-utils module for the reason the host
+// rules import `hostProbeStarts` from it: it is the crawl boundary's own
+// predicate, and taking it from src/crawl/loop.ts would pull the fetch stack
+// into every rule run (hard rule 2 — rules read the database).
+import { isSameOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -49,12 +54,14 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import type { RuleCaps } from "../registry/types.js";
 import {
   assertNormalisedSitemap,
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
-  URL_FINDING_CAP,
+  capsOr,
+  limitTo,
 } from "./crawl-evidence.js";
 
 const CATEGORY = "sitemap";
@@ -93,8 +100,11 @@ interface JoinRow extends Record<string, unknown> {
  *
  * `count(*) over ()` is evaluated across the full result set before `limit`
  * takes its slice, so the exact total survives the cap and Postgres never
- * hands back more than `URL_FINDING_CAP` rows — the memory contract holds
- * whatever the size of the sitemap (hard rule 6).
+ * hands back more than `caps.listing` rows — the memory contract holds
+ * whatever the size of the sitemap (hard rule 6). An UNCAPPED run is the
+ * operator asking for a row per listed URL, and the honesty of that trade is
+ * the point: what comes back is bounded by the sitemap the site publishes, not
+ * by anything this rule chooses, and the run's memory is O(what was found).
  *
  * The crawl row is read first and its result discarded: none of the join rules
  * needs the discovery evidence, but all of them need the crawl to exist and to
@@ -107,6 +117,7 @@ async function joinFindings(
   crawlId: string,
   condition: SQL,
   evidenceOf: (row: JoinRow) => Record<string, unknown>,
+  caps: RuleCaps,
 ): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, self.id);
   await assertNormalisedSitemap(db, crawlId, self.id);
@@ -118,7 +129,7 @@ async function joinFindings(
     join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
     where s.crawl_id = ${crawlId} and ${condition}
     order by s.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = result.rows.map((row) =>
     queryFinding(self, {
@@ -224,7 +235,7 @@ export const sitemapRules: QueryRule[] = [
     severity: NON_200.severity,
     ...copyFor(NON_200.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
+    run: (db, crawlId, caps) =>
       joinFindings(
         NON_200,
         db,
@@ -236,6 +247,7 @@ export const sitemapRules: QueryRule[] = [
           statusCode: row.status_code,
           fetchClass: row.fetch_class,
         }),
+        capsOr(caps),
       ),
   }),
 
@@ -247,12 +259,19 @@ export const sitemapRules: QueryRule[] = [
     severity: REDIRECTED.severity,
     ...copyFor(REDIRECTED.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      joinFindings(REDIRECTED, db, crawlId, sql`p.fetch_class = 'redirect'`, (row) => ({
-        url: row.url,
-        statusCode: row.status_code,
-        redirectUrl: row.redirect_url,
-      })),
+    run: (db, crawlId, caps) =>
+      joinFindings(
+        REDIRECTED,
+        db,
+        crawlId,
+        sql`p.fetch_class = 'redirect'`,
+        (row) => ({
+          url: row.url,
+          statusCode: row.status_code,
+          redirectUrl: row.redirect_url,
+        }),
+        capsOr(caps),
+      ),
   }),
 
   // A listed URL that answers with a 200 page telling search engines to keep
@@ -268,7 +287,7 @@ export const sitemapRules: QueryRule[] = [
     severity: NON_INDEXABLE.severity,
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
+    run: (db, crawlId, caps) =>
       joinFindings(
         NON_INDEXABLE,
         db,
@@ -279,21 +298,42 @@ export const sitemapRules: QueryRule[] = [
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
         }),
+        capsOr(caps),
       ),
   }),
 
-  // A listed URL this crawl has no usable record of, which is TWO shapes in
+  // A listed URL this crawl has no usable record of, which is THREE shapes in
   // the database and one thing to tell a client:
-  //  - no `pages` row at all: the crawl never attempted the URL. Usually its
-  //    own boundary — a page cap, a depth cap, a URL robots.txt disallowed.
+  //  - no `pages` row at all, for a URL inside the crawl boundary: the crawl
+  //    never attempted it and could have. Usually its own limit — a page cap,
+  //    a depth cap, a URL robots.txt disallowed.
+  //  - no `pages` row at all, for a URL OUTSIDE the crawl boundary: the crawl
+  //    never attempted it and never would have. `isSameOrigin` is the gate the
+  //    frontier applies to every candidate (src/crawl/loop.ts), so such an
+  //    entry is skipped by design, not by any limit. Usually another host;
+  //    equally another port, or the plain-http spelling of a site crawled over
+  //    https, because an origin is all three. The www twin of the site's own
+  //    host is INSIDE the boundary — `isSameOrigin` admits it — which is why
+  //    the question is asked of that function and not of the hostname.
   //  - a `pages` row with a null status: the crawl attempted it and got no
   //    HTTP answer back (a timeout, a connection failure, an address the
   //    policy refused at connect time). Nothing is known about the page.
   //
-  // The second belongs here rather than in `sitemap.non-200`, which would have
+  // The third belongs here rather than in `sitemap.non-200`, which would have
   // to invent a status to report, and it must not be silent: an attempted-and-
   // failed URL HAS a row, so the "no row" test alone would drop it. `attempted`
-  // says which shape it is, and `fetchClass` names the failure.
+  // says whether a fetch happened, and `fetchClass` names the failure.
+  //
+  // `offOrigin` separates the first two, and it exists because the copy of this
+  // finding names causes. A supplied or declared sitemap may legitimately list
+  // URLs this crawl's boundary excludes — a CDN-hosted sitemap is now an
+  // ordinary case (the crawl skill invites one) — and telling an operator that
+  // such an entry hit a page limit, a robots disallow or a failed request would
+  // send them chasing three causes none of which is true. It is computed with
+  // `isSameOrigin` over the frontier key, the same function and the same input
+  // the loop gates on, so it says what the crawler actually did rather than
+  // approximating it. A rule may not fetch (hard rule 2); this is arithmetic on
+  // two strings the database already holds.
   //
   // Info either way: the crawl not reaching a URL is a limit of this crawl
   // first, and a fault on the site only once someone confirms it.
@@ -305,23 +345,24 @@ export const sitemapRules: QueryRule[] = [
     severity: UNCRAWLED.severity,
     ...copyFor(UNCRAWLED.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Finding[]> => {
-      await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
+      const { siteUrl } = await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
       await assertNormalisedSitemap(db, crawlId, UNCRAWLED.id);
       const result = await db.execute<{
         url: string;
+        url_normalised: string;
         page_id: string | null;
         fetch_class: string | null;
         total_matches: number;
       }>(sql`
-        select s.url, p.id as page_id, p.fetch_class,
+        select s.url, s.url_normalised, p.id as page_id, p.fetch_class,
                count(*) over ()::int as total_matches
         from sitemap_urls s
         left join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
         where s.crawl_id = ${crawlId}
           and (p.id is null or p.status_code is null)
         order by s.url
-        limit ${URL_FINDING_CAP}`);
+        ${limitTo(capsOr(caps).listing)}`);
 
       const findings = result.rows.map((row) =>
         queryFinding(UNCRAWLED, {
@@ -333,6 +374,11 @@ export const sitemapRules: QueryRule[] = [
           evidence: {
             url: row.url,
             attempted: row.page_id !== null,
+            // The frontier key, not the published `<loc>`: `isSameOrigin` is
+            // asked the same question about the same string the loop asked it
+            // about. `assertNormalisedSitemap` has already refused a crawl
+            // whose rows carry the empty-string default, so this is a URL.
+            offOrigin: !isSameOrigin(row.url_normalised, siteUrl),
             ...(row.page_id === null ? {} : { fetchClass: row.fetch_class, statusCode: null }),
           },
           dedupeKey: row.url,
@@ -357,7 +403,7 @@ export const sitemapRules: QueryRule[] = [
     severity: NOT_IN_SITEMAP.severity,
     ...copyFor(NOT_IN_SITEMAP.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Finding[]> => {
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, NOT_IN_SITEMAP.id);
       await assertNormalisedSitemap(db, crawlId, NOT_IN_SITEMAP.id);
       const gate = await db.execute<{ has_sitemap: boolean }>(sql`
@@ -378,7 +424,7 @@ export const sitemapRules: QueryRule[] = [
             where s.crawl_id = ${crawlId} and s.url_normalised = p.url
           )
         order by p.url
-        limit ${URL_FINDING_CAP}`);
+        ${limitTo(capsOr(caps).listing)}`);
 
       const findings = result.rows.map((row) =>
         queryFinding(NOT_IN_SITEMAP, {

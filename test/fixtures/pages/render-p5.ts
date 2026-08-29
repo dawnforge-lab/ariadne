@@ -134,8 +134,73 @@ export function offsiteRedirectTarget(): string {
  * `noscript` and `svg` subtrees, and `contentHash` and `simhash` read that same
  * accumulator. That is also why re-using `lorem` here cannot make this page a
  * near-duplicate of anything: no two raw texts are involved.
+ *
+ * **250 UNTIL PHASE 8, 200 NOW, AND THE CHANGE IS THE POINT** — see
+ * `CSR_CHROME_WORDS` below for the arithmetic it belongs to.
  */
-const CSR_INJECTED_WORDS = 250;
+const CSR_INJECTED_WORDS = 200;
+
+/**
+ * The page's CSS-hidden chrome: a region-and-currency popover the theme ships
+ * on every page, collapsed. Exactly 100 words, and the number is load-bearing.
+ *
+ * **THIS BLOCK IS WHAT MAKES THIS FIXTURE PROVE THE PHASE 8 CANCELLATION.** It
+ * is hidden by a CLASS, in a stylesheet, which is the one kind of hiding the
+ * analyzer cannot see (hard rules 2 and 4: it does not fetch and it does not
+ * cascade). So it is counted as renderable text on the raw side AND on the
+ * rendered side, and a reader sees none of it — which is exactly the shape the
+ * Phase 7 gate measured at a near-constant 425 words on a real Shopify theme
+ * (docs/gates/phase-7.md §4.2) and exactly the shape that made
+ * `content.csr-dependent` unable to fire there at all (§4.9).
+ *
+ * The whole page's arithmetic, which is what the harness pins end to end:
+ *
+ *   shell copy (h1 + one sentence)                     S = 32
+ *   this popover, hidden by a CLASS                    C = 100
+ *   the account drawer, hidden by the `hidden` ATTRIBUTE D = 40
+ *   the paragraph the script writes into `#app`        J = 200
+ *
+ *   word_count                     = S + C + D     = 172
+ *   renderable_word_count          = S + C         = 132   (markup-hidden D out)
+ *   rendered_analyzer_word_count   = S + C + D + J = 372
+ *   rendered_renderable_word_count = S + C + J     = 332
+ *   rendered_word_count (innerText)= S + J         = 232   (C and D both hidden)
+ *
+ *  - **The rule as it is now** compares the two renderable counts: 332 ≥ 2 × 132
+ *    = 264 ✓ and 332 − 132 = 200 ≥ 150 ✓ — it FIRES, and `addedWords` is
+ *    exactly J. The 100 words of chrome are on both sides of the subtraction and
+ *    cancel to nothing: that identity IS the proof, and it is why the evidence
+ *    the harness pins reads 200 and not 300 or 100.
+ *  - **The comparison Phase 8 retired** put `innerText` on the rendered side:
+ *    232 ≥ 264 ✗ and 232 − 132 = 100 ≥ 150 ✗ — SILENT ON BOTH ARMS. A page that
+ *    ships a shell and paints two hundred words of catalogue would have gone
+ *    unreported, which is the false negative §4.9 found in the field, reproduced
+ *    here in forty lines of markup.
+ *
+ * `content.thin` still fires because 132 is under its 150-word floor, and that
+ * is honest twice over: the page really is thin as shipped, and the number the
+ * floor reads is itself 100 words of chrome above what a reader can see.
+ */
+export const CSR_CHROME_WORDS = 100;
+
+/** …and the drawer the markup hides outright. Exactly 40 words. */
+const CSR_DRAWER_WORDS = 40;
+
+const CSR_CHROME_TEXT =
+  "Choose where you are shopping from and the prices below will change to " +
+  "match. Deliveries to addresses inside the United Kingdom leave our warehouse " +
+  "on the same working day when an order is placed before noon. Parcels " +
+  "travelling to the European Union clear customs in Rotterdam and usually " +
+  "arrive within four working days. Shoppers in the United States and Canada " +
+  "are billed in dollars at the rate our payment provider publishes each " +
+  "morning. Australian and New Zealand addresses are served from the same " +
+  "warehouse and take longer. Every price shown includes the tax the " +
+  "destination country requires us to collect.";
+
+const CSR_DRAWER_TEXT =
+  "Sign in to see the orders you have placed, the addresses you have saved and " +
+  "the payment methods this account remembers. None of this panel is visible to " +
+  "anybody until somebody presses the small account button sitting in the header.";
 
 const csrContent: Fixture = {
   path: "/render/csr-content",
@@ -153,8 +218,15 @@ const csrContent: Fixture = {
       title: "The catalogue that arrives with the JavaScript",
       metaDescription:
         "A shell page whose visible copy is written into the DOM by a script, so the HTML a crawler reads holds almost none of what a reader sees.",
+      // The stylesheet is INLINE and one declaration long, for the renderer's
+      // own reasons: the render pass aborts nothing that can build DOM but a
+      // linked stylesheet would make this fixture's claim depend on a second
+      // request completing, and the claim is about counting, not about loading.
+      headExtra: '<style>.chrome-popover { display: none }</style>',
       bodyHtml: `<h1>The catalogue is still loading</h1>
 <p>Everything a reader sees below this sentence is written into the page by a script, so the markup the server sent says very little on its own.</p>
+<div class="chrome-popover" id="region-picker"><p>${CSR_CHROME_TEXT}</p></div>
+<div hidden id="account-drawer"><p>${CSR_DRAWER_TEXT}</p></div>
 <div id="app"></div>
 <script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{}},"page":"/render/csr-content","buildId":"fixture"}</script>
 <script>
@@ -163,6 +235,30 @@ document.getElementById('app').innerHTML =
 </script>`,
     })),
 };
+
+/**
+ * The fixture's own arithmetic, exported so the harness pins the numbers this
+ * file DERIVES rather than numbers somebody typed twice.
+ *
+ * `CSR_SHELL_WORDS` is counted from the markup above: the `<h1>` is five words
+ * and the sentence under it is twenty-seven.
+ */
+export const CSR_SHELL_WORDS = 32;
+export const CSR_EXPECTED = {
+  /** `pages.word_count` — every word the response body carries. */
+  wordCount: CSR_SHELL_WORDS + CSR_CHROME_WORDS + CSR_DRAWER_WORDS,
+  /** `pages.renderable_word_count` — minus what the MARKUP hides. */
+  renderableWordCount: CSR_SHELL_WORDS + CSR_CHROME_WORDS,
+  /** `pages.rendered_analyzer_word_count` — the same analyzer, post-JS DOM. */
+  renderedAnalyzerWordCount:
+    CSR_SHELL_WORDS + CSR_CHROME_WORDS + CSR_DRAWER_WORDS + CSR_INJECTED_WORDS,
+  /** `pages.rendered_renderable_word_count` — the rule's rendered side. */
+  renderedRenderableWordCount: CSR_SHELL_WORDS + CSR_CHROME_WORDS + CSR_INJECTED_WORDS,
+  /** `pages.rendered_word_count` — the browser's `innerText`, no longer a verdict. */
+  renderedWordCount: CSR_SHELL_WORDS + CSR_INJECTED_WORDS,
+  /** What the rule reports, and the whole of the cancellation claim. */
+  addedWords: CSR_INJECTED_WORDS,
+} as const;
 
 // ---------------------------------------------------------------------------
 // /render/js-nav — nav.js-only (CHECK-34)

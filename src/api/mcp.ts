@@ -144,8 +144,9 @@ The order of operations is fixed by what the evidence means:
   1. crawl_start   accepts a crawl and returns a crawl id immediately. It is
                    queued, not finished; one crawl runs at a time per server.
   2. crawl_status  polls it. Poll until status is no longer 'queued'/'running'.
-  3. crawl_render  (optional) re-fetches a sample of pages in a real browser, so
+  3. crawl_render  (optional) re-fetches some pages in a real browser, so
                    client-side-rendered content is measured rather than guessed.
+                   Either the engine picks them or you name them with 'urls'.
                    Run it BEFORE the rules if you want rendered evidence judged.
   4. crawl_rules   runs every rule over the finished crawl and writes the
                    findings. Refused while the crawl is still moving.
@@ -238,7 +239,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
-        "legacyHosts, rulesRunAt and findingsCount.\n\n" +
+        "legacyHosts, sitemapUrls, findingCap, rulesRunAt and findingsCount.\n\n" +
         "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
         "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
         "complete pass is on record — never judged, being judged right now, or " +
@@ -250,7 +251,16 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "legacyHosts echoes the domains this crawl was told the site used to live " +
         "on (empty when none were named) — the host-probe findings about legacy " +
         "redirects mean nothing without it: no finding on an empty list is 'the " +
-        "crawl was never given a legacy domain', not 'the redirects are fine'.\n\n" +
+        "crawl was never given a legacy domain', not 'the redirects are fine'. " +
+        "sitemapUrls echoes the sitemap documents the crawl was handed at start, " +
+        "and reads the same way: this engine never probes for an undeclared " +
+        "sitemap, so 'no sitemap declared' beside an empty sitemapUrls is a crawl " +
+        "to re-run with the document, not yet a report to write.\n\n" +
+        "findingCap is what this crawl's listing rules will be cut at when the rules " +
+        "run: 200 when nobody chose (the default), null when the crawl was started " +
+        "uncapped for a billed audit, or the number that was set. It is here so a " +
+        "caller that passed findingCap to crawl_start can confirm it took — the cap " +
+        "lives on the crawl row and crawl_rules has no argument to restate it.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
@@ -299,21 +309,47 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     {
       title: "Run the render pass",
       description:
-        "Re-fetch a budgeted sample of a finished crawl's pages in a real browser " +
-        "and store what JavaScript added, so content that only exists after " +
-        "rendering is measured rather than guessed at. Answers counts — " +
-        "{rendered, failures, unrendered, elapsedMs, selection:{selected, budget, " +
-        "suspects, sampled, truncated}} — never a page list; read the pages " +
+        "Re-fetch some of a finished crawl's pages in a real browser and store " +
+        "what JavaScript added, so content that only exists after rendering is " +
+        "measured rather than guessed at. Answers counts — " +
+        "{rendered, failures, unrendered, elapsedMs, selection:{mode, selected, " +
+        "budget, suspects, sampled, truncated}} — never a page list; read the pages " +
         "themselves with pages_query (rendered=true).\n\n" +
+        "WHICH PAGES. Without urls the engine selects for itself: pages whose HTML " +
+        "looks incomplete, plus a few of every page type, cut to a budget — " +
+        "selection.mode is 'auto' and the four numbers beside it describe that " +
+        "decision. With urls you name the pages, which is what to do once you know " +
+        "the site's templates: the home page and two or three representatives of " +
+        "each real template beats a budget spent on whatever tripped a heuristic. " +
+        "A named list REPLACES the automatic selection for that pass, " +
+        "selection.mode is 'explicit', and budget/suspects/sampled/truncated come " +
+        "back null because no automatic decision was made — not zero.\n\n" +
+        "Every named URL must already be a page of this crawl that answered 200: " +
+        "this pass re-visits pages, it never fetches a URL for the first time, and " +
+        "one that is not there is refused by name. The list is capped at the " +
+        "crawl's renderMaxPages and a longer one is refused rather than trimmed.\n\n" +
         "Run it AFTER the crawl has stopped and BEFORE crawl_rules if you want " +
         "the rules to judge rendered evidence. It is refused on a crawl that is " +
         "still queued or running, on one another worker is rendering, and on one " +
         "with no discovery evidence (there would be no robots crawl-delay to " +
         "honour). The pass paces itself with the crawl's own delay and user " +
-        "agent, so it is not a second, ruder visit.",
-      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+        "agent, so it is not a second, ruder visit — a named list is no faster " +
+        "per page, only better spent.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        urls: z
+          .array(z.string())
+          .describe(
+            "Pages to render, in place of the automatic selection. Each must be a URL " +
+              "this crawl already fetched with a 200. Omit to let the engine select.",
+          )
+          .optional(),
+      }),
     },
-    async ({ crawlId }) => run("crawl_render", () => service.renderCrawl(crawlId)),
+    async ({ crawlId, urls }) =>
+      run("crawl_render", () =>
+        service.renderCrawl(crawlId, urls === undefined ? {} : { urls }),
+      ),
   );
 
   server.registerTool(
@@ -513,7 +549,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The crawl's pages, slim and filtered: {url, statusCode, fetchClass, " +
         "fetchReason, pageType, indexable, depth, clickDepth, discoveredVia, " +
-        "wordCount, renderableWordCount, rendered, renderedWordCount, renderError}. " +
+        "wordCount, renderableWordCount, rendered, renderedWordCount, " +
+        "renderedRenderableWordCount, renderError}. " +
         "Use it to answer questions about the site itself — how deep the blog is, " +
         "which product pages are non-indexable, which URLs only the sitemap knows " +
         "about, what a render actually added — rather than about its faults.\n\n" +
@@ -537,6 +574,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the gap between them is markup that ships but does not show. It is null on " +
         "a page crawled before this measurement existed, which is 'never measured', " +
         "not zero — do not fall back to wordCount there, it counts something else.\n\n" +
+        "AND TWO RENDERED WORD COUNTS, MEASURED BY DIFFERENT INSTRUMENTS. " +
+        "renderedWordCount is the browser's innerText: what a reader sees, and no " +
+        "rule reads it. renderedRenderableWordCount is the crawl's OWN analyzer run " +
+        "over the post-JavaScript DOM — the same function that produced " +
+        "renderableWordCount over the bytes the server sent — so those two are the " +
+        "pair content.csr-dependent subtracts, and chrome present in both documents " +
+        "cancels between them. Before recording that rule's silence as a pass, read " +
+        "both on the rendered pages and satisfy yourself it had a way to fire. " +
+        "renderedRenderableWordCount is null on every page of a crawl rendered " +
+        "before the measurement existed, which such a crawl is REFUSED on rather " +
+        "than judged.\n\n" +
         "fetchReason is why a row has no usable body, in plain words, and is null " +
         "for a page that fetched normally. On fetchClass 'blocked' it names the " +
         "status, how many attempts the URL got, and the per-host spacing the engine " +
@@ -550,7 +598,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "run; it says nothing about these). clickDepth is the exception among the " +
         "crawl's own columns: it is computed by crawl_rules, so it is null " +
         "everywhere until the rules have run over the crawl. rendered, " +
-        "renderedWordCount and renderError are written by crawl_render: before that " +
+        "renderedWordCount, renderedRenderableWordCount and renderError are written " +
+        "by crawl_render: before that " +
         "pass has run, rendered is false on every page and 'rendered: true' answers " +
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
         "rendered'. Check crawl_status's renderPassCount before reading anything " +
@@ -616,7 +665,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The robots.txt this crawl actually obeyed, out of its stored evidence: " +
         "{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, " +
-        "sitemapSources, userAgent}. Nothing is re-fetched — this is the text the " +
+        "sitemapSources, suppliedSitemaps, userAgent}. Nothing is re-fetched — this is the text the " +
         "crawler read at crawl time, which is what its findings were judged " +
         "against. A file that has changed since is a fact about the site, and " +
         "fetching the current one here would hide it.\n\n" +
@@ -630,7 +679,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "true means raw is a 500KB PREFIX: a rule you cannot find in it may simply " +
         "be past the cap, so do not report 'robots.txt does not disallow X' from a " +
         "truncated copy. crawlDelaySec is the delay the crawl honoured. " +
-        "sitemapSources are the Sitemap: lines the walk was pointed at. userAgent " +
+        "sitemapSources are the Sitemap: lines THIS FILE declared; suppliedSitemaps " +
+        "are the documents the crawl was handed at start (crawl_start's sitemapUrls), " +
+        "which the walk read as well. The two are separate because the difference is " +
+        "the finding: a sitemap that only appears in suppliedSitemaps is one the site " +
+        "publishes and does not declare, and a document in both was declared and " +
+        "re-supplied — the walk fetched it once. userAgent " +
         "is the string the crawl identified as — the groups in the file that " +
         "governed it, which matters when the file has per-agent sections.\n\n" +
         "Refused for a crawl that never completed discovery: there is no stored " +
@@ -758,6 +812,18 @@ function crawlStartShape() {
           "different sites by every definition the engine has.",
       )
       .optional(),
+    sitemapUrls: z
+      .array(z.string())
+      .describe(
+        "Sitemap documents to walk in addition to the ones robots.txt declares — the " +
+          "way to crawl a sitemap the site publishes but never points at. The engine " +
+          "does NOT probe /sitemap.xml on spec, so an undeclared sitemap is only read " +
+          "if you name it here. Full http(s) URLs; a host outside this site's own " +
+          "spellings must be on the allowlist in its own right. Supplying one does not " +
+          "hide the finding: robots.txt still declares no sitemap, and the audit still " +
+          "says so.",
+      )
+      .optional(),
     renderBudgetPct: z
       .number()
       .describe("Share of the crawl's pages the later render pass may re-fetch, as a percentage.")
@@ -769,6 +835,24 @@ function crawlStartShape() {
     renderSamplePerType: z
       .number()
       .describe("How many pages of each template cohort the render pass samples.")
+      .optional(),
+    findingCap: z
+      .number()
+      .nullable()
+      .describe(
+        "How many findings each listing rule may report when this crawl is judged. " +
+          "Defaults to 200 (and 500 near-duplicate pairs) — a bounded first look. Pass " +
+          "null for a BILLED AUDIT: every orphan, every duplicate group, every blocked " +
+          "sitemap entry, listed in full. It costs wall time on a large site and it is " +
+          "the whole picture rather than a snapshot. It is read when the RULES run, not " +
+          "while crawling, so it must be set here — crawl_rules has no cap argument of " +
+          "its own. Uncapped listings normally carry no 'and N more' note, but keep " +
+          "reading the note rather than the setting: a note means the list is " +
+          "incomplete and its absence means complete. content.near-duplicate has a " +
+          "100,000-pair scan ceiling that findingCap cannot lift (it is the engine's " +
+          "memory contract), and a site that reaches it gets the usual 'at least' note " +
+          "— which is itself the finding: that site has no distinct content.",
+      )
       .optional(),
   };
 }

@@ -23,11 +23,19 @@
  *    `done` row is a promise that the page is in the database.
  *
  * Concurrency safety lives in one statement, `leaseBatch`: an `UPDATE` whose
- * row set comes from a `SELECT … FOR UPDATE SKIP LOCKED` sub-select. Two
- * workers leasing at the same instant get disjoint batches because the second
- * one skips the rows the first has locked, rather than blocking on them or —
- * far worse — reading them as available. Do not reshape it into a read then a
- * write: that gap is exactly where two workers crawl the same URL twice.
+ * row set comes from a `SELECT … FOR UPDATE SKIP LOCKED` picked out in a
+ * `WITH … AS MATERIALIZED` CTE. Two workers leasing at the same instant get
+ * disjoint batches because the second one skips the rows the first has locked,
+ * rather than blocking on them or — far worse — reading them as available. Do
+ * not reshape it into a read then a write: that gap is exactly where two
+ * workers crawl the same URL twice. And the CTE must stay MATERIALIZED with the
+ * update joining it: the earlier `WHERE (crawl_id, url) IN (subselect)` shape
+ * let the planner run the subselect once per candidate row, and because each
+ * update makes the just-claimed row stop matching the subselect's WHERE, each
+ * re-evaluation claimed a FRESH row — `LIMIT n` leased more than n whenever the
+ * planner chose that plan (it did, on CI's freshly-analyzed tables; PR #7 run
+ * 33268659558). A materialized CTE is evaluated exactly once, so `LIMIT n`
+ * means n.
  *
  * The frontier serves TWO passes. The crawl pass owns `pending` / `leased`; the
  * render pass owns `render_pending`, which `selectRenderSet` (src/crawl/render/
@@ -221,17 +229,19 @@ export async function leaseBatch(
   validateLease("leaseBatch", n, leaseSeconds);
 
   const res = await db.execute(sql`
-    update frontier set state = 'leased', lease_id = ${leaseId},
-      leased_until = now() + make_interval(secs => ${leaseSeconds}::double precision),
-      attempts = attempts + 1
-    where (crawl_id, url) in (
+    with picked as materialized (
       select crawl_id, url from frontier
       where crawl_id = ${crawlId}
         and (state = 'pending' or (state = 'leased' and leased_until < now()))
       order by depth asc, discovered_at asc
       limit ${n}
       for update skip locked)
-    returning url, depth, discovered_via, attempts`);
+    update frontier set state = 'leased', lease_id = ${leaseId},
+      leased_until = now() + make_interval(secs => ${leaseSeconds}::double precision),
+      attempts = attempts + 1
+    from picked
+    where frontier.crawl_id = picked.crawl_id and frontier.url = picked.url
+    returning frontier.url, frontier.depth, frontier.discovered_via, frontier.attempts`);
 
   return toLeased(res.rows);
 }
@@ -258,10 +268,11 @@ function toLeased(rows: readonly Record<string, unknown>[]): LeasedUrl[] {
 /**
  * Claim up to `n` URLs of the RENDER pass for `leaseId` for `leaseSeconds`.
  *
- * The same mechanism as `leaseBatch` — an `UPDATE` over a `SELECT … FOR UPDATE
- * SKIP LOCKED` sub-select, a `lease_id`, a `leased_until` deadline that is a
- * crash-resume mechanism rather than a lock — over the rows `selectRenderSet`
- * moved to `render_pending`.
+ * The same mechanism as `leaseBatch` — an `UPDATE` joining a `SELECT … FOR
+ * UPDATE SKIP LOCKED` materialized CTE (see the module header for why
+ * MATERIALIZED is load-bearing), a `lease_id`, a `leased_until` deadline that
+ * is a crash-resume mechanism rather than a lock — over the rows
+ * `selectRenderSet` moved to `render_pending`.
  *
  * ONE DELIBERATE DIFFERENCE, and it is the reason the two passes cannot
  * collide: a render lease does NOT move the row to `leased`. It writes the
@@ -293,10 +304,7 @@ export async function leaseRenderUrls(
   validateLease("leaseRenderUrls", n, leaseSeconds);
 
   const res = await db.execute(sql`
-    update frontier set lease_id = ${leaseId},
-      leased_until = now() + make_interval(secs => ${leaseSeconds}::double precision),
-      attempts = attempts + 1
-    where (crawl_id, url) in (
+    with picked as materialized (
       select crawl_id, url from frontier
       where crawl_id = ${crawlId}
         and state = 'render_pending'
@@ -304,7 +312,12 @@ export async function leaseRenderUrls(
       order by url asc
       limit ${n}
       for update skip locked)
-    returning url, depth, discovered_via, attempts`);
+    update frontier set lease_id = ${leaseId},
+      leased_until = now() + make_interval(secs => ${leaseSeconds}::double precision),
+      attempts = attempts + 1
+    from picked
+    where frontier.crawl_id = picked.crawl_id and frontier.url = picked.url
+    returning frontier.url, frontier.depth, frontier.discovered_via, frontier.attempts`);
 
   return toLeased(res.rows).sort((a, b) => (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
 }

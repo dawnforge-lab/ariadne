@@ -9,10 +9,12 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import type { RuleCaps } from "../registry/types.js";
 import {
   assertNormalisedSitemap,
+  capsOr,
+  limitTo,
   noteTruncation,
-  URL_FINDING_CAP,
 } from "./crawl-evidence.js";
 
 const ORPHAN: RuleIdentity = { id: "links.orphan", severity: "warning" };
@@ -135,14 +137,24 @@ function skipReason(c: Completeness): string | null {
  * here — which is why every finding carries the count as a caveat rather than
  * the whole check being suppressed.
  *
- * Capped at `URL_FINDING_CAP` like every other URL-scoped rule. A site whose
+ * Capped at `caps.listing` like every other URL-scoped rule. A site whose
  * navigation is built in JavaScript this crawl does not run, or one that
  * publishes a large sitemap and links none of it, produces an orphan per page
  * — O(pages) findings out of a rule that is supposed to name a problem, not
  * mirror the site. `count(*) over ()` is evaluated across the full result set
  * before `limit` takes its slice, so the exact total survives the cap.
+ *
+ * An UNCAPPED run (`findingCap: null`) lists every orphan and writes no
+ * truncation note, because nothing was truncated — the case a billed audit asks
+ * for, where "243 orphans, here are 200" is not a list anyone can work through
+ * to the end. The `order by p.url` is what makes both answers reproducible.
  */
-async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<Finding[]> {
+async function orphanFindings(
+  db: Db,
+  crawlId: string,
+  failed: number,
+  caps: RuleCaps,
+): Promise<Finding[]> {
   // The `inSitemap` evidence reads `sitemap_urls.url_normalised`, so this rule
   // is gated on that column being populated exactly like the sitemap rules
   // are: on a pre-Phase-4 crawl every orphan would be labelled `inSitemap:
@@ -174,7 +186,7 @@ async function orphanFindings(db: Db, crawlId: string, failed: number): Promise<
           and l.source_page_id <> p.id
       )
     order by p.url
-    limit ${URL_FINDING_CAP}`);
+    ${limitTo(caps.listing)}`);
 
   const findings = rows.rows.map((row) =>
     queryFinding(ORPHAN, {
@@ -211,10 +223,10 @@ export const linkGraphRules: QueryRule[] = [
     severity: ORPHAN.severity,
     ...copyFor(ORPHAN.id),
     rulesetVersion: RULESET_VERSION,
-    run: async (db, crawlId): Promise<Finding[]> => {
+    run: async (db, crawlId, caps): Promise<Finding[]> => {
       const state = await completeness(db, crawlId);
       if (skipReason(state) !== null) return [];
-      return orphanFindings(db, crawlId, state.failed);
+      return orphanFindings(db, crawlId, state.failed, capsOr(caps));
     },
   }),
 

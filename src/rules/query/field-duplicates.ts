@@ -32,9 +32,15 @@
  *    of it (`DUPLICATE_SAMPLE_URLS`). A templated catalogue can put one title on
  *    ten thousand URLs, and a findings row is not the place to list them; the
  *    count is what says how big the problem is.
- *  - the LISTING of groups stops at `URL_FINDING_CAP` with an exact
+ *  - the LISTING of groups stops at the run's `caps.listing` with an exact
  *    `noteTruncation` total behind it, because the grouping runs to completion
- *    either way — only the listing is cut.
+ *    either way — only the listing is cut. An uncapped run (`findingCap: null`)
+ *    reports every group and writes no note.
+ *  - `findingCap` moves the number of GROUPS, never `DUPLICATE_SAMPLE_URLS`.
+ *    One finding quotes twenty URLs and the group's exact count at every cap:
+ *    the magnitude is the count, the sample is there to open. A row carrying a
+ *    ten-thousand-element array would be a pathological finding, not a fuller
+ *    picture.
  *
  * **The cohort is indexable 200s**, the same one `content.exact-duplicate`
  * uses. A duplicate title on a page search engines are told to ignore is not a
@@ -60,8 +66,9 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
+import type { RuleCaps } from "../registry/types.js";
 import { DUPLICATE_SAMPLE_URLS } from "./content.js";
-import { assertCrawl, noteTruncation, URL_FINDING_CAP } from "./crawl-evidence.js";
+import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
 /**
  * The category, for all four rules.
@@ -152,7 +159,7 @@ type GroupRow = {
  * ones the plan emitted first (the deterministic-cap lesson).
  *
  * **Group ordering is by the group's first URL** — the same key the finding
- * lands on — so which groups survive `URL_FINDING_CAP` is settled and readable
+ * lands on — so which groups survive the cap is settled and readable
  * rather than arbitrary. Like every other URL ordering in the rule layer it is
  * the database's collation, so a database created with a different one may cut
  * a different last group; the COUNT behind the cap is exact either way.
@@ -172,8 +179,16 @@ type GroupRow = {
  *     key and the finding's carrier are computed once and for free;
  *  2. `capped` takes the `count(*) over ()` exact total (a window is evaluated
  *     over the whole CTE before its own `order by`/`limit`, so the total is
- *     every group) and cuts to `URL_FINDING_CAP`;
- *  3. the lateral then runs against at most two hundred surviving rows.
+ *     every group) and cuts to `caps.listing`;
+ *  3. the lateral then runs against the surviving rows and no more.
+ *
+ * AN UNCAPPED RUN IS WHERE THAT SHAPE EARNS ITS KEEP RATHER THAN LOSING IT.
+ * With `limit all` the third step runs the twenty-URL lookup once per group
+ * again — which is the cost the operator asked for, one indexed lookup per
+ * finding they will actually read — and it is still ordered, still counted
+ * exactly, and still one row per group. The 2m41s regression above came from
+ * running the lateral for groups nobody would ever see; here nothing is
+ * discarded.
  *
  * Every semantic above is preserved — same group order, same carrier, same
  * exact totals, same truncation note — and the 20,000-page case measured 3.3s
@@ -185,6 +200,7 @@ async function groupFindings(
   crawlId: string,
   self: RuleIdentity,
   field: DuplicateField,
+  caps: RuleCaps,
 ): Promise<Finding[]> {
   // A crawl id nothing knows groups nothing and would report a clean bill of
   // health for a crawl that does not exist (hard rule 7, `links.orphan`'s
@@ -215,7 +231,7 @@ async function groupFindings(
              count(*) over ()::int as total_matches
       from dupes d
       order by d.first_url
-      limit ${URL_FINDING_CAP}
+      ${limitTo(caps.listing)}
     )
     select c.value, c.page_count, c.total_matches, s.urls, s.first_id
     from capped c
@@ -342,8 +358,8 @@ export const fieldDuplicateRules: QueryRule[] = [
     severity: TITLE.severity,
     ...copyFor(TITLE.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      groupFindings(db, crawlId, TITLE, { column: "title", evidenceKey: "title" }),
+    run: (db, crawlId, caps) =>
+      groupFindings(db, crawlId, TITLE, { column: "title", evidenceKey: "title" }, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({
@@ -354,11 +370,14 @@ export const fieldDuplicateRules: QueryRule[] = [
     severity: META.severity,
     ...copyFor(META.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      groupFindings(db, crawlId, META, {
-        column: "meta_description",
-        evidenceKey: "metaDescription",
-      }),
+    run: (db, crawlId, caps) =>
+      groupFindings(
+        db,
+        crawlId,
+        META,
+        { column: "meta_description", evidenceKey: "metaDescription" },
+        capsOr(caps),
+      ),
   }),
 
   // The heading rule reads `pages.h1_text`: the FIRST h1's text, collapsed,
@@ -388,8 +407,8 @@ export const fieldDuplicateRules: QueryRule[] = [
     severity: H1.severity,
     ...copyFor(H1.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId) =>
-      groupFindings(db, crawlId, H1, { column: "h1_text", evidenceKey: "h1Text" }),
+    run: (db, crawlId, caps) =>
+      groupFindings(db, crawlId, H1, { column: "h1_text", evidenceKey: "h1Text" }, capsOr(caps)),
   }),
 
   // A check we could not run is visible, never silent (hard rule 7). One

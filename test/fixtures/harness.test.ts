@@ -15,11 +15,15 @@
  * assertion below reads the same result, so adding a fixture costs a page fetch
  * and a render, not a crawl.
  */
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/loop.js";
+import { renderedHtmlFilename } from "../../src/crawl/render/renderer.js";
 import { runRenderPass, type RenderPassSummary } from "../../src/crawl/render/run-render.js";
 import { RENDER_DEFAULTS } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -47,7 +51,12 @@ import {
   P7_SHARED_H1_PATHS,
   P7_WORD_COUNT,
 } from "./pages/authored-p7.js";
-import { startOffsiteHost, type OffsiteHost } from "./pages/render-p5.js";
+import {
+  CSR_CHROME_WORDS,
+  CSR_EXPECTED,
+  startOffsiteHost,
+  type OffsiteHost,
+} from "./pages/render-p5.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -205,6 +214,16 @@ let app: FixtureApp;
 let offsite: OffsiteHost;
 let summary: CrawlSummary;
 let render: RenderPassSummary;
+/**
+ * Where this run's serialised post-JavaScript documents go.
+ *
+ * A temporary directory rather than the production `renders/`, and removed in
+ * `afterAll` with the crawl row: a suite that left seventy HTML files in the
+ * repository would be indistinguishable from a real pass's evidence, and the
+ * next run's `crawlId` would make a second copy rather than replacing the
+ * first.
+ */
+let renderHtmlRoot: string;
 let registry: Registry;
 
 /**
@@ -357,9 +376,11 @@ beforeAll(async () => {
   // A `CrawlConfig` satisfies `RenderPassConfig` structurally on purpose, so
   // the render cannot end up with a different user agent or a different
   // per-host delay from the crawl it belongs to (hard rule 9).
+  renderHtmlRoot = await mkdtemp(join(tmpdir(), "ariadne-harness-renders-"));
   render = await runRenderPass(db, summary.crawlId, {
     ...config,
     settleMs: RENDER_SETTLE_MS,
+    renderHtmlDir: renderHtmlRoot,
   });
 
   registry = buildRegistry();
@@ -433,6 +454,7 @@ afterAll(async () => {
     await db.delete(crawls).where(eq(crawls.id, summary.crawlId));
   }
   if (db !== undefined) await closeDb(db);
+  if (renderHtmlRoot !== undefined) await rm(renderHtmlRoot, { recursive: true, force: true });
   await closeFetchAgents();
   if (app !== undefined) await app.close();
   if (offsite !== undefined) await offsite.close();
@@ -628,7 +650,10 @@ describe("the fixture site end to end", () => {
       // `attempted: false` is the shape that matters: there is no `pages` row at
       // all, because the crawl refused to enqueue a URL robots.txt disallows.
       // A URL that was fetched and failed would carry a fetch class instead.
-      { pageUrl: blockedUrl, url: blockedUrl, attempted: false },
+      // `offOrigin: false` says which of the two never-attempted cases this is:
+      // the URL is on this site and the robots disallow is the real reason, so
+      // the copy's first cause is the true one here.
+      { pageUrl: blockedUrl, url: blockedUrl, attempted: false, offOrigin: false },
     ]);
 
     expect(siteFindings.get("sitemap.invalid")).toEqual([
@@ -972,7 +997,13 @@ describe("the fixture site end to end", () => {
       contentHash: expect.any(String),
       urls: [`${app.base}/content/duplicate-a`, `${app.base}/content/duplicate-b`],
       count: 2,
-      pageTypes: ["/content/duplicate-a", "/content/duplicate-b"],
+      // ONE type, not two, since P8-T5. Both pages used to be their own page
+      // type — `duplicate-a` is two hyphen-parts, so the slug rule left it
+      // literal — and the crawl-end template inference now reads the eight
+      // pages under `/content/` as one family and types them all
+      // `/content/:slug`. The distinct-array is what the rule reports, so a
+      // duplicate pair that spans one template says so in one entry.
+      pageTypes: ["/content/:slug"],
     });
 
     // The click-chain's rungs are one template with a number substituted, so
@@ -1148,19 +1179,25 @@ describe("the fixture site end to end", () => {
     // "did it fire" is a question only the `metrics` table can answer — and
     // every one of the twelve CAN answer it here: ten always emit a site row,
     // `inlinks.sources-by-type` emits one per target cohort type and this site
-    // has 50 of them, and `content.template-similarity` emits one per type with
+    // has 16 of them, and `content.template-similarity` emits one per type with
     // two fingerprinted pages, which the `/deep/:id`, `/head/:slug`,
-    // `/content/:slug`, `/authored/:slug`, `/authored3/:slug` and now
-    // `/authored7/:slug` templates give it. There is no exemption paragraph to
-    // write.
+    // `/content/:slug`, `/authored/:slug`, `/authored3/:slug`, `/authored7/:slug`,
+    // `/index/:slug` and `/render/:slug` templates give it. There is no
+    // exemption paragraph to write.
     //
-    // The type count moved by ONE for P7-T2's two pages rather than by two, and
-    // the reason is `detectUrlTemplate`'s slug rule (src/crawl/parse/url-utils.ts):
-    // a segment is a `:slug` only when it has THREE OR MORE hyphen-separated
-    // parts, since two-part segments ("my-account") are more often fixed routes
-    // than content slugs. `shared-h1-a` and `shared-h1-b` are three parts each,
-    // so both collapse to `/authored7/:slug` and share one type; `hidden-chrome`
-    // is two parts, stays literal, and remains a type of its own.
+    // BOTH COUNTS MOVED IN P8-T5, and the second test below pins the first of
+    // them. The crawl-end template inference (`inferPageTemplates`) reads this
+    // site's 61 parse-time page types as 17 templates: `detectUrlTemplate`'s
+    // slug rule leaves a two-part segment literal ("my-account" is more often a
+    // route than a slug), so `/head/empty-h1`, `/content/duplicate-a` and
+    // `/authored7/hidden-chrome` each used to be a page type of one page. They
+    // are now members of the family they were always part of. What does NOT
+    // collapse is as deliberate: `/`, `/control` and `/kitchen-sink` sit at the
+    // root, where there is no family name to collapse under; `/perf/slow-response`
+    // is the only page under `/perf/`; and `/structure/` has exactly two pages
+    // (`no-outgoing-links` and `orphan`), which is under MIN_COHORT — two pages
+    // are two pages, so they keep the names `/structure/:slug` and
+    // `/structure/orphan`.
     //
     // `render.coverage` is among the nine, and since P5-T6 its row is no longer
     // all selection and no evidence: this harness runs the render pass over the
@@ -1192,6 +1229,51 @@ describe("the fixture site end to end", () => {
         .map((rule) => rule.id)
         .sort(),
     );
+  });
+
+  it("the metric cohorts are this site's templates, not its URLs (P8-T5)", () => {
+    // The claim the paragraph above makes, made mechanical. `inlinks.sources-by-type`
+    // writes one row per target cohort type, so its key set IS the set of
+    // templates the metric layer groups this site by — and before the
+    // crawl-end template inference it was fifty of them, most holding one page.
+    //
+    // Hand-derived from the fixture collection: the sixteen below are the
+    // seventeen types the crawl ends with, minus `/status/:slug` (all three
+    // `/status/*` fixtures answer 403, 404 or 500, so none is in the cohort
+    // every metric shares). Each `:slug` entry is a family the inference
+    // collapsed; each literal entry is a page with no family, and there is no
+    // `(untyped)` row because this site's every URL has a path the detector
+    // can read.
+    expect([...(metricsById.get("inlinks.sources-by-type") ?? new Map()).keys()].sort()).toEqual(
+      [
+        "page_type|/",
+        "page_type|/authored/:slug",
+        "page_type|/authored3/:slug",
+        "page_type|/authored7/:slug",
+        "page_type|/content/:slug",
+        "page_type|/control",
+        "page_type|/deep/:id",
+        "page_type|/head/:slug",
+        "page_type|/index/:slug",
+        "page_type|/kitchen-sink",
+        "page_type|/links/:slug",
+        "page_type|/perf/slow-response",
+        "page_type|/redirect/:slug",
+        "page_type|/render/:slug",
+        "page_type|/structure/:slug",
+        "page_type|/structure/orphan",
+      ].sort(),
+    );
+
+    // And what the crawl itself said it did, on its way out: 61 parse-time
+    // types over 82 pages became 17, and 48 pages were retyped. The summary
+    // carries it because "the types were collapsed" and "there was nothing to
+    // collapse" are different facts about a crawl and a null field is neither.
+    expect(summary.pageTemplates).toEqual({
+      typesBefore: 61,
+      typesAfter: 17,
+      pagesRetyped: 48,
+    });
   });
 
   it("the three quotable site metrics carry the numbers this site actually has", () => {
@@ -1448,31 +1530,47 @@ describe("the fixture site end to end", () => {
     // anchor), so all three are suspects. That is why this number has moved by
     // three across the phase while `selectionSampled` has not moved at all.
     //
-    // selectionSampled = 9. The sample takes `renderSamplePerType` (3) pages of
-    // every page type in URL order, and a page that is both a suspect and a
-    // sample member counts on the SUSPECT side — so this number counts only the
-    // twelve above. Six of them are the sole member of their page type and are
-    // therefore its first row: `/`, `/links/broken-internal-link`, the three
-    // `paged-*` pages, and `/render/healthy`. The other six share the
-    // `/deep/:id` type with a seventh page, and URL order seats `/deep/1`,
-    // `/deep/2` and `/deep/3`. 6 + 3 = 9, and `/deep/4`, `/deep/5` and
-    // `/deep/6` are the only three cohort pages this selection does not name.
+    // selectionSampled = 6, and it MOVED FROM 9 IN P8-T5 — the one number in
+    // this file that the template inference changes, and the change is the
+    // point of it. The sample takes `renderSamplePerType` (3) pages of every
+    // page type in URL order, and a page that is both a suspect and a sample
+    // member counts on the SUSPECT side — so this number counts only the twelve
+    // above, and only where they fall inside their type's first three rows.
+    // The crawl now types this site with 17 templates instead of 61, so:
     //
-    // selectionSelected = min(82, 63 + 9) = 72, selectionTruncated = false:
-    // the budget is ten seats larger than the need, so nothing was cut.
+    //   /                            1 — the only page of its type
+    //   /links/broken-internal-link  1 — `/links/:slug` has one member
+    //   /deep/1, /deep/2, /deep/3    3 — the first three of `/deep/:id`'s seven
+    //   /render/healthy              1 — second of `/render/:slug`'s seven, in
+    //                                    URL order after `/render/csr-content`
     //
-    // pagesRendered = 71 and renderFailures = 1, and the two are disjoint and
-    // sum to the 72 selected — the single-pass invariant this crawl happens to
+    // 1 + 1 + 3 + 1 = 6. The three seats lost are `/authored3/paged-1`, `-2`
+    // and `-3`, which used to be three page types of one page each and are now
+    // the twelfth, thirteenth and fourteenth rows of `/authored3/:slug` — past
+    // the three the sample takes. That is the collapse working: the seats it
+    // freed were being spent on pages that exist once, and on a real site they
+    // go to templates instead (the Phase 7 gate crawl spent roughly half its
+    // sample that way).
+    //
+    // selectionSelected = min(82, 63 + 6) = 69, selectionTruncated = false:
+    // the budget is thirteen seats larger than the need, so nothing was cut.
+    //
+    // pagesRendered = 68 and renderFailures = 1, and the two are disjoint and
+    // sum to the 69 selected — the single-pass invariant this crawl happens to
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
       pagesCrawled: 82,
+      // P8-T2. The harness renders the AUTOMATIC selection — it names no URLs —
+      // and this is the field that says so. The five numbers under it describe
+      // that decision and are present only because it was taken.
+      selectionMode: "auto",
       selectionBudget: 82,
       selectionSuspects: 63,
-      selectionSampled: 9,
-      selectionSelected: 72,
+      selectionSampled: 6,
+      selectionSelected: 69,
       selectionTruncated: false,
-      pagesRendered: 71,
+      pagesRendered: 68,
       renderFailures: 1,
     });
 
@@ -1482,19 +1580,23 @@ describe("the fixture site end to end", () => {
     // happened rather than one it would make today.
     expect(render.selection.budget).toBe(82);
     expect(render.selection.suspects).toBe(63);
-    expect(render.selection.sampled).toBe(9);
+    expect(render.selection.sampled).toBe(6);
     expect(render.selection.truncated).toBe(false);
-    expect(render.selection.selected).toHaveLength(72);
-    expect(render.rendered).toBe(71);
+    expect(render.selection.selected).toHaveLength(69);
+    expect(render.rendered).toBe(68);
     expect(render.failures).toBe(1);
     // No URL left behind: the pass was not aborted, so every leased render was
     // recorded and completed.
     expect(render.unrendered).toBe(0);
 
-    // The three cohort pages the selection deliberately does not name. Asserted
+    // The three `/deep/` pages the selection deliberately does not name — 4, 5
+    // and 6, the members of `/deep/:id` past the sample's third seat. Asserted
     // by absence rather than left as arithmetic, because it is the one part of
     // the derivation above that a change to `renderSamplePerType` would silently
-    // undo — and the sample size is read from the constant, not restated.
+    // undo — and the sample size is read from the constant, not restated. (The
+    // `/authored3/paged-*` pages are now unnamed for the same reason, on a type
+    // eighteen pages long; this one stays the assertion because seven pages and
+    // three seats is arithmetic a reader can check by eye.)
     expect(RENDER_DEFAULTS.renderSamplePerType).toBe(3);
     const selectedPaths = new Set(render.selection.selected.map((url) => new URL(url).pathname));
     expect([...selectedPaths].filter((p) => p.startsWith("/deep/")).sort()).toEqual([
@@ -1509,7 +1611,7 @@ describe("the fixture site end to end", () => {
       .select({ count: crawls.renderPassCount })
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
-    expect(crawlRow?.count).toBe(71);
+    expect(crawlRow?.count).toBe(68);
   });
 
   it("each render rule fires on exactly the fixture built for it", () => {
@@ -1547,24 +1649,27 @@ describe("the fixture site end to end", () => {
 
     // THE EVIDENCE, page by page, against the markup that produced it.
     //
-    // CSR: the shell's own 32 words (a heading and one sentence), plus the 250
-    // `lorem` words the script writes into `#app`. 282 ≥ 2 × 32 = 64 clears the
-    // ratio arm, and 250 added words clears `CSR_MIN_ADDED_WORDS` (150) by a
-    // hundred. The injected text sits inside a `<script>` string literal, so it
-    // contributes nothing to the raw side — the analyzer skips script subtrees.
+    // CSR, AND SINCE PHASE 8 THIS IS THE CANCELLATION ASSERTION. The fixture
+    // carries chrome in BOTH documents — a 100-word region popover hidden by a
+    // CSS class (invisible to the analyzer, which does not cascade) and a
+    // 40-word account drawer hidden by the `hidden` attribute (which the
+    // analyzer does see) — plus the 200 `lorem` words the script writes into
+    // `#app`. Its whole arithmetic is derived in test/fixtures/pages/render-p5.ts
+    // and imported here rather than retyped, so the fixture and the assertion
+    // cannot drift into agreeing about different numbers.
     //
-    // THE TWO RAW NUMBERS ARE EQUAL HERE, and that is worth reading rather than
-    // skipping past: the comparison is made in `renderableWordCount` since
-    // Phase 7, and this shell hides nothing in its markup, so the corrected
-    // column holds the same 32 the old one did. The fixture's arithmetic did
-    // not move because the fixture has no chrome to remove — which is exactly
-    // what the correction claims about pages like it.
+    // What makes it a proof: `addedWords` is 200 EXACTLY. The hundred words of
+    // class-hidden chrome are counted on both sides of the subtraction by the
+    // same instrument and cancel to nothing — which is the whole claim of
+    // P8-T1, and which the retired `innerText` comparison could not make (on
+    // this same page it is silent on both arms; see the fixture's docblock).
     expect(detailsByPath.get("/render/csr-content\ncontent.csr-dependent")).toEqual({
       pageUrl: `${app.base}/render/csr-content`,
-      rawWordCount: 32,
-      renderableWordCount: 32,
-      renderedWordCount: 282,
-      addedWords: 250,
+      rawWordCount: CSR_EXPECTED.wordCount,
+      renderableWordCount: CSR_EXPECTED.renderableWordCount,
+      renderedAnalyzerWordCount: CSR_EXPECTED.renderedAnalyzerWordCount,
+      renderedRenderableWordCount: CSR_EXPECTED.renderedRenderableWordCount,
+      addedWords: CSR_EXPECTED.addedWords,
     });
 
     // NAV: the raw document contains no `<nav>`, no `<footer>` and no anchor at
@@ -1629,14 +1734,24 @@ describe("the fixture site end to end", () => {
     expect(page.rendered).toBe(false);
     expect(page.renderError).toBe(`off-site navigation: ${offsiteTarget}`);
     expect(page.renderedRedirectUrl).toBe(offsiteTarget);
-    // All five, not a sample: "rendered and empty" and "never rendered" are
-    // different facts, and a failed render must not leave one count behind that
-    // a diff rule could read as a zero.
+    // BOTH MEASUREMENT FAMILIES, every column of each and not a sample:
+    // "rendered and empty" and "never rendered" are different facts, and a
+    // failed render must not leave one count behind that a diff rule could read
+    // as a zero. The six analyzer-side columns joined this assertion in P8-T1;
+    // `renderedHtmlPath` is in it for a second reason as well — there is no
+    // document on disk for a render that never had one, and a path pointing at
+    // a file that does not exist would be worse than no path.
     expect(page.renderedWordCount).toBeNull();
     expect(page.renderedLinkCount).toBeNull();
     expect(page.renderedNavLinkCount).toBeNull();
     expect(page.renderedFooterLinkCount).toBeNull();
     expect(page.renderedFilterLinkCount).toBeNull();
+    expect(page.renderedAnalyzerWordCount).toBeNull();
+    expect(page.renderedRenderableWordCount).toBeNull();
+    expect(page.renderedTitle).toBeNull();
+    expect(page.renderedH1Count).toBeNull();
+    expect(page.renderedCanonical).toBeNull();
+    expect(page.renderedHtmlPath).toBeNull();
 
     // And the finding, which a `rendered = true` gate would have lost outright.
     // It is the ONLY finding on the page: the three diff rules all open with
@@ -1654,6 +1769,90 @@ describe("the fixture site end to end", () => {
       rendered: false,
       renderError: `off-site navigation: ${offsiteTarget}`,
     });
+  });
+
+  it("the render pass measures the post-JavaScript DOM with the crawl's own analyzer", async () => {
+    // P8-T1 end to end: the SECOND measurement family, written by a real
+    // Chromium's serialised DOM through the same `analyzeHtml` the crawl ran
+    // over the bytes the server sent (src/db/schema.ts, the family blocks).
+    //
+    // Three pages, chosen because between them they are the whole argument:
+    // one where JavaScript adds text, and two where it adds none.
+    const csr = pageByPath.get("/render/csr-content");
+    const healthy = pageByPath.get("/render/healthy");
+    const chromeOnly = pageByPath.get(P7_HIDDEN_CHROME_PATH);
+    if (csr === undefined || healthy === undefined || chromeOnly === undefined) {
+      throw new Error("one of the three P8 render fixtures has no pages row");
+    }
+
+    // 1. THE CSR PAGE — every number the fixture derives, in the row a real
+    // crawl and a real render wrote. The `innerText` column is asserted BESIDE
+    // the analyzer's, unchanged in meaning and no longer read by any rule: it
+    // is 232, a hundred words under the 332 the analyzer counts, and that
+    // hundred is exactly the class-hidden popover. Two instruments disagreeing
+    // by precisely the chrome is what the whole task is about.
+    expect(csr.wordCount).toBe(CSR_EXPECTED.wordCount);
+    expect(csr.renderableWordCount).toBe(CSR_EXPECTED.renderableWordCount);
+    expect(csr.renderedAnalyzerWordCount).toBe(CSR_EXPECTED.renderedAnalyzerWordCount);
+    expect(csr.renderedRenderableWordCount).toBe(CSR_EXPECTED.renderedRenderableWordCount);
+    expect(csr.renderedWordCount).toBe(CSR_EXPECTED.renderedWordCount);
+    expect(
+      csr.renderedRenderableWordCount! - csr.renderedWordCount!,
+      "the class-hidden popover, seen by the analyzer and not by the browser",
+    ).toBe(CSR_CHROME_WORDS);
+    // The three head columns the same analysis produced. Nothing on this page
+    // rewrites its own head, so each is the raw column back again — which is
+    // the baseline a future `render.title-drift` would be a departure from.
+    expect(csr.renderedTitle).toBe(csr.title);
+    expect(csr.renderedH1Count).toBe(1);
+    expect(csr.renderedCanonical).toBe(`${app.base}/render/csr-content`);
+
+    // 2. AND 3. THE TWO SILENT CONTROLS, which are where the cancellation is
+    // visible as an IDENTITY rather than as arithmetic.
+    //
+    // `/render/healthy` runs no script at all, so the DOM the browser built is
+    // the document the server sent and both analyzer counts come back equal to
+    // their raw twins. `/authored7/hidden-chrome` is the chrome-only page: a
+    // template, a `hidden` drawer, an inline-`display:none` picker and a closed
+    // `<details>`, 82 words of markup-hidden text and no JavaScript anywhere.
+    // The analyzer suppresses exactly the same 82 words on the rendered side as
+    // on the raw one — the markup that hides them survives serialisation — so
+    // BOTH pairs match and `content.csr-dependent` has nothing to report.
+    for (const [label, page] of [
+      ["/render/healthy", healthy],
+      [P7_HIDDEN_CHROME_PATH, chromeOnly],
+    ] as const) {
+      expect(page.rendered, label).toBe(true);
+      expect(page.renderedAnalyzerWordCount, label).toBe(page.wordCount);
+      expect(page.renderedRenderableWordCount, label).toBe(page.renderableWordCount);
+      expect(page.renderedTitle, label).toBe(page.title);
+      expect(page.renderedH1Count, label).toBe(page.h1Count);
+      expect([...(issuesByPath.get(label) ?? new Set<string>())], label).not.toContain(
+        "content.csr-dependent",
+      );
+    }
+
+    // THE DOCUMENT ON DISK. Every rendered page has one, it is named by the
+    // sha256 of the URL asked for, and it is the very string the numbers above
+    // were computed from — so an auditor who disbelieves the finding can re-run
+    // the analyzer over the evidence itself. Asserted by reading the CSR page's
+    // file back and finding in it the paragraph the SCRIPT wrote, which is in
+    // no byte the server ever sent.
+    expect(csr.renderedHtmlPath).toBe(
+      join(renderHtmlRoot, summary.crawlId, renderedHtmlFilename(csr.url)),
+    );
+    const saved = await readFile(csr.renderedHtmlPath!, "utf8");
+    expect(saved).toContain('<div id="app"><p>the quick brown fox');
+    expect(saved).toContain('class="chrome-popover"');
+
+    // …and every OTHER rendered page has one too, while no failed render does.
+    // Stated as a partition rather than as a spot check: a pass that wrote 70
+    // of 71 documents would satisfy any single assertion above.
+    const rows = [...pageByPath.values()];
+    expect(rows.filter((p) => p.rendered && p.renderedHtmlPath !== null)).toHaveLength(
+      render.rendered,
+    );
+    expect(rows.filter((p) => !p.rendered && p.renderedHtmlPath !== null)).toHaveLength(0);
   });
 
   it("every registered rule fires on at least one fixture", () => {
