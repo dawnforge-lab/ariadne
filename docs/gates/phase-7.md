@@ -860,8 +860,8 @@ Node 22, a cached `npx playwright install --with-deps chromium` keyed on the
 locked Playwright version, then `npm ci` → `npx tsc --noEmit` → `npm run
 db:migrate` → `npm test`, on push to `main` and every pull request.
 
-**First CI run on this branch: _(to be filled from the PR — the precedent is
-Phase 6's, which links the job URL and its wall time)_.**
+**First CI run on this branch: PR #6, `test` pass in 3m16s —
+<https://github.com/dawnforge-lab/ariadne/actions/runs/33244250696/job/99078829150>.**
 
 The gate is not part of CI and cannot be: it crawls a third party's website with
 their permission.
