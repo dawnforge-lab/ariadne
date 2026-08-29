@@ -2255,8 +2255,10 @@ export class ApiService {
         "VALIDATION",
         `urls names ${normalised.length} distinct pages, above this crawl's ` +
           `renderMaxPages of ${renderMaxPages}. The list is not silently trimmed — ` +
-          `a named list is a statement about which pages matter, so shorten it or ` +
-          `raise renderMaxPages on the crawl`,
+          `a named list is a statement about which pages matter, so shorten it to ` +
+          `${renderMaxPages} or fewer. A crawl's renderMaxPages is fixed at ` +
+          `crawl_start and cannot be changed afterwards: a bigger budget means a ` +
+          `new crawl started with a higher renderMaxPages`,
       );
     }
 
