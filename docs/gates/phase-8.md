@@ -822,11 +822,15 @@ cannot prove that a claimant answers the check.**
    `sitemap.missing` (§5).
 6. **`crawl_status.pagesScanned`**, which would let `crawl.rulesRun` and its three
    defensive caveats go away (§9.2).
-7. **Off-origin sitemap entries fire `sitemap.uncrawled` with copy naming three
+7. ~~**Off-origin sitemap entries fire `sitemap.uncrawled` with copy naming three
    wrong causes and wrong fix advice** (ledgered in T3). The skill now invites
    CDN-hosted sitemaps, which makes the case ordinary: up to 200 misdescribed info
    findings per supplied cross-host sitemap. Honest fix: an `offOrigin` evidence
-   flag or a copy clause.
+   flag or a copy clause.~~ **CLOSED in the final-review fix wave** — both, in the
+   end: the rule now writes `offOrigin` on every `sitemap.uncrawled` finding,
+   computed with the frontier's own `isSameOrigin` over the same string the loop
+   gates on, and the copy names the off-origin case as a third cause with a remedy
+   of its own. No firing condition, threshold or check id moved.
 8. **Carried unchanged:** the politeness event log (C-2, still untested — nothing
    escalated for the third crawl running); render-pass `blockedRequests` evidence
    (C-5); the scoped-run field (D-7); `renderPassCount`'s name (D-5); streaming

@@ -650,7 +650,10 @@ describe("the fixture site end to end", () => {
       // `attempted: false` is the shape that matters: there is no `pages` row at
       // all, because the crawl refused to enqueue a URL robots.txt disallows.
       // A URL that was fetched and failed would carry a fetch class instead.
-      { pageUrl: blockedUrl, url: blockedUrl, attempted: false },
+      // `offOrigin: false` says which of the two never-attempted cases this is:
+      // the URL is on this site and the robots disallow is the real reason, so
+      // the copy's first cause is the true one here.
+      { pageUrl: blockedUrl, url: blockedUrl, attempted: false, offOrigin: false },
     ]);
 
     expect(siteFindings.get("sitemap.invalid")).toEqual([

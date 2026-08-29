@@ -374,16 +374,24 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Decide which is right. If the page should rank, remove the noindex directive; if it should not, remove it from the sitemap. Filtered, paginated and thank-you pages usually belong in the second group.",
   },
-  // Accuracy: two shapes, one statement. The finding covers a URL the crawl
-  // never attempted AND one it attempted without getting any HTTP answer back;
-  // `attempted` in the evidence says which. Copy that named only the first
-  // would be false of half the findings.
+  // Accuracy: THREE shapes, one statement. The finding covers a URL the crawl
+  // stopped short of, a URL on another host that the crawl was never going to
+  // attempt, and one it attempted without getting any HTTP answer back;
+  // `attempted` and `offOrigin` in the evidence say which. Copy that named only
+  // the first two causes would be false of every off-origin entry, and that is
+  // the case that has to be named rather than left implied: a page limit, a
+  // robots disallow and a failed request are all untrue of a URL the frontier
+  // skipped by design, so copy naming only those sends an operator after three
+  // causes, none of them the reason. A supplied or declared sitemap listing
+  // another host is an ordinary case, not a pathological one.
+  // The fields are named in prose rather than spelled — this text reaches a
+  // client in a report, and the rest of the copy names shapes the same way.
   "sitemap.uncrawled": {
     title: "Sitemap lists a URL this crawl did not reach",
     explanation:
-      "This URL is published in the site's sitemap and this crawl has no usable record of it. Either it was never fetched — a page limit, a depth limit, or a URL robots.txt disallows — or the request was made and no response came back at all: a timeout, a connection failure, or an address the crawler refused to connect to. The evidence says which, and names the failure where there was one. This is reported as information rather than as a defect, because the first case is usually a limit of the crawl; the second is worth confirming, since a URL you publish that does not answer is one a search engine cannot index either.",
+      "This URL is published in the site's sitemap and this crawl has no usable record of it, for one of three reasons. It may be a URL on this site that the crawl stopped short of — a page limit, a depth limit, or a URL robots.txt disallows. It may be a URL outside the boundary this crawl was given — usually one on another host, and equally one on another port or served over plain HTTP by a site crawled over HTTPS: entries outside the crawl's own origin are not fetched by design, so no limit was reached and nothing was measured about them. Or the request may have been made and no response came back at all: a timeout, a connection failure, or an address the crawler refused to connect to. The evidence says which — it marks the off-origin entries, and it says whether a fetch was attempted and what it ran into. This is reported as information rather than as a defect: the first two cases are facts about this crawl rather than faults on the site, and the third is worth confirming, since a URL you publish that does not answer is one a search engine cannot index either.",
     howToFix:
-      "Check the evidence first. If the URL was never attempted, see whether it is reachable by following links from the homepage and whether robots.txt allows it — a URL reachable only through the sitemap needs internal links — and re-run the crawl with a higher page limit if it simply stopped short. If the attempt failed, request the URL yourself and fix whatever did not answer.",
+      "Check the evidence first, because the three cases have different answers. An entry marked as off-origin needs nothing changed about the crawl — the URL is outside the origin this crawl was pointed at, so it was never going to be visited — and the only question is whether it belongs in the file: verify that the sitemap is this site's and that the other spelling is one the site genuinely serves pages from, then either leave these entries alone or take them out of the sitemap. Where the whole file is on another host and its entries are not, nothing is wrong at all. If the URL is on this site and no fetch was attempted, see whether it is reachable by following links from the homepage and whether robots.txt allows it — a URL reachable only through the sitemap needs internal links — and re-run the crawl with a higher page limit if it simply stopped short. If the attempt failed, request the URL yourself and fix whatever did not answer.",
   },
   "pages.not-in-sitemap": {
     title: "Indexable page is not listed in the sitemap",

@@ -125,14 +125,21 @@ describe("the sitemap rules against the database", () => {
     return new Map(rows.map((r, i) => [specs[i]!.path, r.id]));
   }
 
+  /**
+   * Sitemap entries, given as paths on the site under test — or, for the
+   * off-origin cases, as absolute URLs on another host, which is what a
+   * cross-host `<loc>` actually looks like in the column.
+   */
   async function addSitemapUrls(crawlId: string, paths: string[]): Promise<void> {
+    const published = (path: string): string =>
+      /^https?:\/\//i.test(path) ? path : url(path);
     await db.insert(sitemapUrls).values(
       paths.map((path) => ({
         crawlId,
-        url: url(path),
+        url: published(path),
         // What the crawl loop writes beside the published `<loc>`, and what
         // every join below reads.
-        urlNormalised: normalised(url(path)),
+        urlNormalised: normalised(published(path)),
         sitemapSource: `${SITE}/sitemap.xml`,
         lastmod: null,
       })),
@@ -366,7 +373,65 @@ describe("the sitemap rules against the database", () => {
       pageUrl: url("/never-reached"),
       dedupeKey: url("/never-reached"),
     });
-    expect(found[0]!.evidence).toEqual({ url: url("/never-reached"), attempted: false });
+    expect(found[0]!.evidence).toEqual({
+      url: url("/never-reached"),
+      attempted: false,
+      // Inside the crawl boundary, so the causes the copy names — a page
+      // limit, a depth limit, a robots disallow — are the ones in play.
+      offOrigin: false,
+    });
+  });
+
+  // A sitemap may list URLs on another host: a file that belongs to a different
+  // property, or one a client supplied that covers more than the site under
+  // audit. The frontier gates every candidate on `isSameOrigin`, so such an
+  // entry is never attempted BY DESIGN — no page limit was reached, no robots
+  // rule applied, no request failed. The finding still fires, because the crawl
+  // genuinely has no record of the URL, and it has to say which case this is:
+  // the copy names causes, and all the others are false here.
+  it("marks a sitemap entry on another host as off-origin", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [{ path: "/ok" }]);
+    const foreign = "https://cdn.other.example/page";
+    await addSitemapUrls(crawlId, ["/ok", foreign]);
+
+    const found = await run("sitemap.uncrawled", crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!).toMatchObject({
+      pageId: null,
+      pageUrl: foreign,
+      dedupeKey: foreign,
+    });
+    expect(found[0]!.evidence).toEqual({
+      url: foreign,
+      attempted: false,
+      offOrigin: true,
+    });
+  });
+
+  // The flag is the frontier's own predicate, not string equality on the
+  // hostname, and it answers exactly what the crawler would have done:
+  //  - the www twin of the site's host IS inside the boundary (`isSameOrigin`
+  //    admits it), so calling it off-origin would send an operator to check a
+  //    sitemap that is correct;
+  //  - the plain-http spelling of a site crawled over https is NOT — an origin
+  //    is a scheme, a host and a port, and the frontier skips that spelling
+  //    exactly as it skips another host. Saying it hit a page limit would be
+  //    the same lie for the same reason, so it is marked the same way.
+  it("reads the crawl boundary the frontier reads, www twin and scheme included", async () => {
+    const crawlId = await newCrawl();
+    await addSitemapUrls(crawlId, [
+      "https://www.sitemaps.example/twin",
+      "http://sitemaps.example/plain",
+    ]);
+
+    const found = await run("sitemap.uncrawled", crawlId);
+    expect(
+      Object.fromEntries(found.map((f) => [f.evidence["url"], f.evidence["offOrigin"]])),
+    ).toEqual({
+      "https://www.sitemaps.example/twin": false,
+      "http://sitemaps.example/plain": true,
+    });
   });
 
   // A fetch that got no HTTP answer has a `pages` row with a null status, so
@@ -393,6 +458,11 @@ describe("the sitemap rules against the database", () => {
     expect(found[0]!.evidence).toEqual({
       url: url("/slow"),
       attempted: true,
+      // A URL the crawl fetched is inside the boundary by construction — only
+      // same-origin URLs ever reach the frontier — so this is always false
+      // beside `attempted: true`. It is still stated, because the finding's
+      // copy sends the reader to this field.
+      offOrigin: false,
       fetchClass: "timeout",
       statusCode: null,
     });

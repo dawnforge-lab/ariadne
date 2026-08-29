@@ -339,6 +339,32 @@ describe("issue copy", () => {
     expect(fix).toMatch(/WAF|bot-protection|allowlist/i);
   });
 
+  // THREE causes, and the third is not a variant of the other two: the frontier
+  // gates every candidate on `isSameOrigin`, so a listed URL outside the crawl's
+  // origin was never attempted BY DESIGN. A page limit, a depth limit, a robots
+  // disallow and a failed request are all untrue of it, and copy offering only
+  // those sends an operator after a cause that cannot be the reason — on up to
+  // `URL_FINDING_CAP` findings for one cross-host sitemap, quoted verbatim into
+  // the deliverables. So the case has to be named, and it has to have a remedy
+  // of its own rather than sharing "re-run with a higher page limit".
+  it("sitemap.uncrawled names the off-origin cause and gives it its own remedy", () => {
+    const c = ISSUE_COPY["sitemap.uncrawled"]!;
+    expect(c.explanation, "the cause is named").toMatch(
+      /outside the boundary|outside the crawl|another host/i,
+    );
+    expect(c.explanation, "and named as deliberate, not as a limit").toMatch(
+      /by design|never going to be|was not asked/i,
+    );
+    expect(c.howToFix, "the remedy is addressed to that case").toMatch(/off-origin/i);
+    expect(c.howToFix, "and it does not ask for a bigger crawl").toMatch(
+      /needs nothing changed about the crawl|nothing is wrong/i,
+    );
+    // The other two causes keep their own remedies: the off-origin sentence
+    // must not have replaced them.
+    expect(c.howToFix, "the limit case survives").toMatch(/higher page limit/i);
+    expect(c.howToFix, "the failed-fetch case survives").toMatch(/request the URL yourself/i);
+  });
+
   // The rule fires on `outcome === "absent"`, which is the site ANSWERING with
   // a 4xx. A server that could not serve robots.txt is a different finding
   // (`robots.check-skipped`), and copy blurring the two would tell a client to

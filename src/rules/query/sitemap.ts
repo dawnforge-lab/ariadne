@@ -40,6 +40,11 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+// `isSameOrigin` comes from the pure url-utils module for the reason the host
+// rules import `hostProbeStarts` from it: it is the crawl boundary's own
+// predicate, and taking it from src/crawl/loop.ts would pull the fetch stack
+// into every rule run (hard rule 2 — rules read the database).
+import { isSameOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -297,18 +302,38 @@ export const sitemapRules: QueryRule[] = [
       ),
   }),
 
-  // A listed URL this crawl has no usable record of, which is TWO shapes in
+  // A listed URL this crawl has no usable record of, which is THREE shapes in
   // the database and one thing to tell a client:
-  //  - no `pages` row at all: the crawl never attempted the URL. Usually its
-  //    own boundary — a page cap, a depth cap, a URL robots.txt disallowed.
+  //  - no `pages` row at all, for a URL inside the crawl boundary: the crawl
+  //    never attempted it and could have. Usually its own limit — a page cap,
+  //    a depth cap, a URL robots.txt disallowed.
+  //  - no `pages` row at all, for a URL OUTSIDE the crawl boundary: the crawl
+  //    never attempted it and never would have. `isSameOrigin` is the gate the
+  //    frontier applies to every candidate (src/crawl/loop.ts), so such an
+  //    entry is skipped by design, not by any limit. Usually another host;
+  //    equally another port, or the plain-http spelling of a site crawled over
+  //    https, because an origin is all three. The www twin of the site's own
+  //    host is INSIDE the boundary — `isSameOrigin` admits it — which is why
+  //    the question is asked of that function and not of the hostname.
   //  - a `pages` row with a null status: the crawl attempted it and got no
   //    HTTP answer back (a timeout, a connection failure, an address the
   //    policy refused at connect time). Nothing is known about the page.
   //
-  // The second belongs here rather than in `sitemap.non-200`, which would have
+  // The third belongs here rather than in `sitemap.non-200`, which would have
   // to invent a status to report, and it must not be silent: an attempted-and-
   // failed URL HAS a row, so the "no row" test alone would drop it. `attempted`
-  // says which shape it is, and `fetchClass` names the failure.
+  // says whether a fetch happened, and `fetchClass` names the failure.
+  //
+  // `offOrigin` separates the first two, and it exists because the copy of this
+  // finding names causes. A supplied or declared sitemap may legitimately list
+  // URLs this crawl's boundary excludes — a CDN-hosted sitemap is now an
+  // ordinary case (the crawl skill invites one) — and telling an operator that
+  // such an entry hit a page limit, a robots disallow or a failed request would
+  // send them chasing three causes none of which is true. It is computed with
+  // `isSameOrigin` over the frontier key, the same function and the same input
+  // the loop gates on, so it says what the crawler actually did rather than
+  // approximating it. A rule may not fetch (hard rule 2); this is arithmetic on
+  // two strings the database already holds.
   //
   // Info either way: the crawl not reaching a URL is a limit of this crawl
   // first, and a fault on the site only once someone confirms it.
@@ -321,15 +346,16 @@ export const sitemapRules: QueryRule[] = [
     ...copyFor(UNCRAWLED.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
-      await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
+      const { siteUrl } = await readCrawlEvidence(db, crawlId, UNCRAWLED.id);
       await assertNormalisedSitemap(db, crawlId, UNCRAWLED.id);
       const result = await db.execute<{
         url: string;
+        url_normalised: string;
         page_id: string | null;
         fetch_class: string | null;
         total_matches: number;
       }>(sql`
-        select s.url, p.id as page_id, p.fetch_class,
+        select s.url, s.url_normalised, p.id as page_id, p.fetch_class,
                count(*) over ()::int as total_matches
         from sitemap_urls s
         left join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
@@ -348,6 +374,11 @@ export const sitemapRules: QueryRule[] = [
           evidence: {
             url: row.url,
             attempted: row.page_id !== null,
+            // The frontier key, not the published `<loc>`: `isSameOrigin` is
+            // asked the same question about the same string the loop asked it
+            // about. `assertNormalisedSitemap` has already refused a crawl
+            // whose rows carry the empty-string default, so this is a URL.
+            offOrigin: !isSameOrigin(row.url_normalised, siteUrl),
             ...(row.page_id === null ? {} : { fetchClass: row.fetch_class, statusCode: null }),
           },
           dedupeKey: row.url,
