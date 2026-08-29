@@ -31,6 +31,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
 import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
+import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -679,15 +680,35 @@ describe("domain allowlist", () => {
     }
   });
 
-  it("accepts findingCap: null and stores it as the crawl's uncapped judgement", async () => {
+  it("accepts findingCap: null, stores it, and echoes it on the detail", async () => {
     const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1, findingCap: null });
     expect(res.status).toBe(202);
     const crawlId = String(res.body["crawlId"]);
-    await settle(crawlId);
-    // Read off the row rather than off a response field: the rules run is what
-    // consumes this, and the row is where it looks (`storedFindingCap`).
+    const detail = await settle(crawlId);
+    // The row is what the rules run reads (`storedFindingCap`)…
     const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
     expect((rows[0]!.config as Record<string, unknown>)["findingCap"]).toBeNull();
+    // …and the detail is how the caller confirms it took. The skills tell an
+    // agent to set this for client work, so a setting nothing can confirm would
+    // be a setting nobody could trust.
+    expect(detail["findingCap"]).toBeNull();
+  });
+
+  // The three cases the stored config can be in collapse onto the two values a
+  // reader gets, and the interesting one is ABSENT: nobody chose, so the crawl
+  // will be judged at the engine's default and the default is what is reported.
+  it("reports the default finding cap for a crawl that named none", async () => {
+    const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1 });
+    expect(res.status).toBe(202);
+    const detail = await settle(String(res.body["crawlId"]));
+    expect(detail["findingCap"]).toBe(URL_FINDING_CAP);
+  });
+
+  it("echoes a stated finding cap on the detail", async () => {
+    const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1, findingCap: 25 });
+    expect(res.status).toBe(202);
+    const detail = await settle(String(res.body["crawlId"]));
+    expect(detail["findingCap"]).toBe(25);
   });
 
   it("refuses every crawl when the allowlist is empty, but still answers queries", async () => {

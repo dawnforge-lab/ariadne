@@ -239,7 +239,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
-        "legacyHosts, sitemapUrls, rulesRunAt and findingsCount.\n\n" +
+        "legacyHosts, sitemapUrls, findingCap, rulesRunAt and findingsCount.\n\n" +
         "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
         "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
         "complete pass is on record — never judged, being judged right now, or " +
@@ -256,6 +256,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "and reads the same way: this engine never probes for an undeclared " +
         "sitemap, so 'no sitemap declared' beside an empty sitemapUrls is a crawl " +
         "to re-run with the document, not yet a report to write.\n\n" +
+        "findingCap is what this crawl's listing rules will be cut at when the rules " +
+        "run: 200 when nobody chose (the default), null when the crawl was started " +
+        "uncapped for a billed audit, or the number that was set. It is here so a " +
+        "caller that passed findingCap to crawl_start can confirm it took — the cap " +
+        "lives on the crawl row and crawl_rules has no argument to restate it.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
@@ -838,10 +843,15 @@ function crawlStartShape() {
         "How many findings each listing rule may report when this crawl is judged. " +
           "Defaults to 200 (and 500 near-duplicate pairs) — a bounded first look. Pass " +
           "null for a BILLED AUDIT: every orphan, every duplicate group, every blocked " +
-          "sitemap entry, listed in full, with no 'and N more' note because nothing was " +
-          "truncated. It costs wall time on a large site and it is the whole picture " +
-          "rather than a snapshot. It is read when the RULES run, not while crawling, so " +
-          "it must be set here — crawl_rules has no cap argument of its own.",
+          "sitemap entry, listed in full. It costs wall time on a large site and it is " +
+          "the whole picture rather than a snapshot. It is read when the RULES run, not " +
+          "while crawling, so it must be set here — crawl_rules has no cap argument of " +
+          "its own. Uncapped listings normally carry no 'and N more' note, but keep " +
+          "reading the note rather than the setting: a note means the list is " +
+          "incomplete and its absence means complete. content.near-duplicate has a " +
+          "100,000-pair scan ceiling that findingCap cannot lift (it is the engine's " +
+          "memory contract), and a site that reaches it gets the usual 'at least' note " +
+          "— which is itself the finding: that site has no distinct content.",
       )
       .optional(),
   };

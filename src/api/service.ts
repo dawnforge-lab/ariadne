@@ -88,6 +88,7 @@ import {
   type Severity,
 } from "../rules/registry/types.js";
 import { UNTYPED } from "../rules/metric/cohort.js";
+import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence.js";
 import { runRules, type RunSummary } from "../rules/run.js";
 import { isHostAllowed, type ServiceConfig } from "./config.js";
 
@@ -488,6 +489,29 @@ export interface CrawlDetail extends CrawlListItem {
    * finding.
    */
   sitemapUrls: string[];
+  /**
+   * How many findings each listing rule may report when this crawl is judged:
+   * a positive integer, or `null` for uncapped.
+   *
+   * RESOLVED, NOT RAW. The three cases the stored config can be in map onto the
+   * two values a reader gets:
+   *  - the key is ABSENT — nobody chose, so the crawl will be judged under the
+   *    engine's default and that default is what is reported: 200.
+   *  - the key is `null` — uncapped, reported as `null`.
+   *  - the key is a number — that number.
+   *
+   * So this answers "what will this crawl's listings be cut at", which is the
+   * question an agent that just set `findingCap` has. It is on the detail beside
+   * `legacyHosts` and `sitemapUrls` for the same reason those are: the audit and
+   * crawl skills now tell an agent to set `findingCap: null` for client work, and
+   * a setting nothing can confirm is a setting nobody can trust took effect.
+   *
+   * The one thing it cannot distinguish is an explicit `200` from an absent key.
+   * They differ only in the near-duplicate PAIR budget (200 against the default
+   * 500), and surfacing a second number for that would put an implementation
+   * detail of one rule on the crawl's shape. The crawl skill states it instead.
+   */
+  findingCap: number | null;
   /**
    * When the rules last COMPLETED a pass over this crawl, or null.
    *
@@ -1117,6 +1141,7 @@ export class ApiService {
       hostSpacingMs: row.hostSpacingMs,
       legacyHosts: configStringList(row.config, "legacyHosts", crawlId),
       sitemapUrls: configStringList(row.config, "sitemapUrls", crawlId),
+      findingCap: configFindingCap(row.config, crawlId),
       rulesRunAt: row.rulesRunAt === null ? null : row.rulesRunAt.toISOString(),
       findingsCount,
     };
@@ -2800,6 +2825,24 @@ function configStringList(config: unknown, field: string, crawlId: string): stri
     );
   }
   return value as string[];
+}
+
+/**
+ * The finding cap this crawl will be judged under, for `CrawlDetail`.
+ *
+ * Through the rules layer's own reader and resolver rather than a second copy of
+ * the mapping: `runRules` reads this row with exactly these two functions, so
+ * what the detail reports and what the judgement applies cannot drift. A stored
+ * value of the wrong shape is a refusal rather than a guess, and it is mapped to
+ * the same 409 `configStringList` raises one field along — the crawl's config is
+ * unreadable, which is a state of the row rather than a fault in the request.
+ */
+function configFindingCap(config: unknown, crawlId: string): number | null {
+  try {
+    return resolveRuleCaps(storedFindingCap(config, crawlId)).listing;
+  } catch (error) {
+    throw new ServiceError("CONFLICT", messageOf(error));
+  }
 }
 
 /**

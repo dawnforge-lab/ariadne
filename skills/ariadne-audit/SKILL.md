@@ -244,11 +244,19 @@ of three ways:
   client cannot work through to the end, and `atLeast: 501` cannot tell them whether
   the real number is 502 or 40,000.
 
-  `findingCap: null` uncaps every listing rule and the pair scan together. An
-  uncapped run writes **no `truncated` note at all**, and that absence is the claim:
-  the list you have is the whole of it. `findingCap: <n>` sets a number instead —
-  and note that a stated number binds the pairs too, so `findingCap: 200` is not the
-  same as omitting the field (which leaves pairs at 500).
+  `findingCap: null` uncaps every listing rule and the pair reporting cap together.
+  `findingCap: <n>` sets a number instead — and note that a stated number binds the
+  pairs too, so `findingCap: 200` is not the same as omitting the field (which
+  leaves pairs at 500).
+
+  **Keep reading the `truncated` note, not the setting.** The rule above does not
+  change: a note means the list is incomplete, and only its ABSENCE means it is
+  complete. An uncapped run normally writes none — nothing truncated it — but
+  "uncapped" is not a promise of "noteless". `content.near-duplicate` has a
+  100,000-pair scan ceiling that `findingCap` cannot lift (it is the engine's memory
+  contract, not a preference), so an uncapped run that reaches it carries an
+  `atLeast` note like any other truncated listing. Never infer completeness from the
+  crawl's `findingCap`; infer it from the absence of the note.
 
   **It is set at `crawl_start` and nowhere else.** `crawl_rules` has no cap argument:
   the choice lives on the crawl row so that re-judging the crawl months later
@@ -271,16 +279,19 @@ of three ways:
   About a minute of extra wall time on a 20k crawl, at ~116MB RSS. That is the
   billing story: the whole picture is minutes, not hours.
 
-  **The one place uncapped is genuinely dangerous, stated rather than discovered.**
+  **The one ceiling `findingCap` cannot lift, and what to do when you meet it.**
   `content.near-duplicate` is the only rule whose cap bounds a *scan* rather than a
   listing, and on a site whose pages are near-identical in the thousands the pair
-  count is quadratic. Measured on a deliberately degenerate 5,000-page crawl (a few
-  hundred distinct fingerprints): **3,268,808 pairs, 28s, 2.0GB RSS**; the same
-  shape at 20,000 pages exhausted a 4GB heap. Real sites are nowhere near that — the
-  20k table above is a badly templated one — but if an uncapped run dies or the pair
-  count runs to six figures, the site is telling you something a listing cannot: it
-  has no distinct content, and that is the finding. Re-run with a number
-  (`findingCap: 5000`) and report the magnitude rather than the enumeration.
+  count is quadratic. Left uncapped it broke the engine's 512MB memory contract at
+  2,000 degenerate pages (521MB RSS), produced 3,268,808 pairs at 2.0GB at 5,000,
+  and exhausted a 4GB heap at 20,000 — so the SCAN stops at **100,000 pairs** no
+  matter what `findingCap` says, and writes `{reported: 100000, atLeast: 100001}`.
+  Real sites are nowhere near that; the 20k table above is a badly templated one.
+  If you do meet the ceiling, report it as what it is: **the site has no distinct
+  content**, which is a finding in its own right and a far more useful sentence than
+  an enumeration of a hundred thousand pairs. Quote the `atLeast`, say the scan
+  stopped there, and take the magnitude from `content.template-similarity` and the
+  duplicate-group rules rather than from the pair list.
 - **Evidence shapes belong to their rules.** `issue_urls` returns `{url, evidence}`
   and the evidence's fields are whatever that rule wrote — read what it gives you
   rather than expecting a fixed set. `url` is null on a site-scoped finding (a fact

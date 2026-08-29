@@ -434,21 +434,11 @@ function pairKey(urlA: string, urlB: string): string {
  * number is 502 or 40,000 — and it is the reason the number is a knob rather
  * than a new default.
  *
- * **THE ONE UNBOUNDED SHAPE IN THE RULESET, MEASURED RATHER THAN FEARED.** Every
- * other rule's uncapped output is bounded by something the site has — pages,
- * groups, sitemap entries. This one is bounded by PAIRS, which is quadratic in
- * the near-identical cohort, and `limit all` is therefore the only rule in the
- * ruleset that can ask Postgres for more rows than the site has pages. On a
- * healthy 20,000-page crawl (500 clusters of 4) it is 3,000 pairs in 0.20s. On a
- * deliberately degenerate 5,000-page crawl — a few hundred distinct fingerprints
- * across the whole site — it measured **3,268,808 pairs, 28s and 2.0GB RSS**, and
- * the same shape at 20,000 pages exhausted a 4GB heap.
- *
- * That is disclosed rather than silently re-capped, because a cap this rule
- * applied on its own would be exactly the invisible ceiling `findingCap: null`
- * exists to remove. What the operator needs to know is in the audit skill: a site
- * that produces millions of pairs has no distinct content, which is a FINDING
- * rather than a listing, and the answer is to re-run with a number.
+ * **AND THE SCAN THEREFORE HAS A CEILING `findingCap` CANNOT LIFT** — see
+ * `NEAR_DUPLICATE_PAIR_CEILING`. It is not prudence, it is hard rule 6: without
+ * it an uncapped run over a degenerate site puts the process past the 512MB
+ * memory contract at 2,000 pages and exhausts a 4GB heap at 20,000. The ceiling
+ * restores the contract; `findingCap` governs the REPORTING cap below it.
  *
  * The threshold (`NEAR_DUPLICATE_HAMMING`, 3 bits) is NOT part of the knob and
  * does not move with it: it defines what a near-duplicate IS, and widening it
@@ -459,10 +449,22 @@ async function nearDuplicateFindings(
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
-  // `cap + 1` is what makes the `atLeast` note honest: seeing one more pair than
-  // may be listed is how the rule knows there ARE more without counting them.
-  // Uncapped there is nothing to overshoot, and nothing to note.
-  const pairs = caps.nearDuplicatePairs;
+  // THE TWO LIMITS, RESOLVED INTO ONE.
+  //
+  // `caps.nearDuplicatePairs` is what the operator asked to have LISTED, and
+  // `caps.nearDuplicatePairCeiling` is what this process can hold. The scan runs
+  // to the smaller of them, so an uncapped run is uncapped up to the ceiling and
+  // capped by it beyond — which is exactly what a run that hits the ceiling then
+  // says out loud, because the honest `atLeast` note is written either way.
+  //
+  // `+ 1` is what makes that note honest: seeing one more pair than may be listed
+  // is how the rule knows there ARE more without counting them. There is no case
+  // left where the scan is unbounded, so there is no case where the absence of a
+  // note is a guess.
+  const pairs =
+    caps.nearDuplicatePairs === null
+      ? caps.nearDuplicatePairCeiling
+      : Math.min(caps.nearDuplicatePairs, caps.nearDuplicatePairCeiling);
   await readCrawlEvidence(db, crawlId, NEAR.id);
   const result = await db.execute<{
     id_a: string;
@@ -486,9 +488,9 @@ async function nearDuplicateFindings(
     where a.crawl_id = ${crawlId} and ${AUDITABLE("a")} and ${AUDITABLE("b")}
       and a.simhash is not null and b.simhash is not null
       and bit_count((a.simhash # b.simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
-    ${limitTo(pairs === null ? null : pairs + 1)}`);
+    ${limitTo(pairs + 1)}`);
 
-  const findings = (pairs === null ? result.rows : result.rows.slice(0, pairs)).map((row) => {
+  const findings = result.rows.slice(0, pairs).map((row) => {
     // The join orders the pair by row id, which says nothing to a reader. The
     // finding is stated in URL order instead, and the page type travels with
     // its own URL rather than with its side of the join.
@@ -515,10 +517,13 @@ async function nearDuplicateFindings(
   // limit cut it — which is exactly the lower bound this note may claim. The
   // other two rules in this file hand `noteTruncation` an exact `count(*)`.
   //
-  // Uncapped, `rows.length` and `findings.length` are the same number and
-  // `noteAtLeastTruncation` writes nothing: an uncapped listing was not
-  // truncated, so there is no note to write, and its absence is what tells a
-  // reader the list is the whole of it.
+  // Below the ceiling and inside the reporting cap, `rows.length` and
+  // `findings.length` are the same number and `noteAtLeastTruncation` writes
+  // nothing — the listing was not truncated, and the absence of the note is what
+  // tells a reader the list is the whole of it. The contrapositive is the
+  // load-bearing half and it holds at every setting including uncapped: a note
+  // means the list is incomplete, and only its absence means complete. An
+  // uncapped run that hits the ceiling therefore carries one.
   return noteAtLeastTruncation(findings, result.rows.length);
 }
 

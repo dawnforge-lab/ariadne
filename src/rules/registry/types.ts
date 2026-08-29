@@ -100,9 +100,18 @@ export interface PageRule extends RuleMeta {
  * enter — would let the second run's budget decide what the first one reports.
  * Passed down the call stack, each run's caps are unreachable from the other's.
  *
- * `null` on either field means UNCAPPED: list everything, and write no
- * truncation note, because nothing was truncated. The defaults and how a crawl
- * chooses live in src/rules/query/crawl-evidence.ts (`resolveRuleCaps`).
+ * `null` on either listing field means UNCAPPED: list everything the rule finds.
+ * The defaults and how a crawl chooses live in
+ * src/rules/query/crawl-evidence.ts (`resolveRuleCaps`).
+ *
+ * WHAT A TRUNCATION NOTE MEANS, STATED AS THE CONTRAPOSITIVE BECAUSE THAT IS THE
+ * HALF READERS DEPEND ON: **a note means the list is incomplete; its absence
+ * means it is complete.** Uncapped usually produces no note — nothing truncated
+ * it — but "uncapped" and "noteless" are not the same claim, and one rule can
+ * write a note on an uncapped run: `content.near-duplicate` has a SCAN CEILING
+ * that `findingCap` cannot lift (`nearDuplicatePairCeiling`), and when it bites
+ * the honest `atLeast` note is written. A reader must therefore go on reading
+ * the note rather than inferring completeness from the crawl's configuration.
  *
  * WHAT IT DOES NOT GOVERN: the size of one finding's evidence. A duplicate
  * GROUP finding quotes `DUPLICATE_SAMPLE_URLS` (20) URLs and the group's exact
@@ -117,6 +126,19 @@ export interface RuleCaps {
   listing: number | null;
   /** Pairs `content.near-duplicate` may report — a different unit, its own budget. */
   nearDuplicatePairs: number | null;
+  /**
+   * The hard ceiling on the near-duplicate SCAN, which `findingCap` cannot lift.
+   *
+   * A number, never null: this is the one budget that is not the operator's to
+   * remove. `resolveRuleCaps` sets it to `NEAR_DUPLICATE_PAIR_CEILING` whatever
+   * `findingCap` says, so no request or stored config can reach it.
+   *
+   * It is a FIELD rather than a constant the rule imports for the same reason
+   * every other budget here is one: it has to be per-run state, and a test needs
+   * an honest seam to drive a smaller value through without mutating module
+   * state that a concurrent run would share.
+   */
+  nearDuplicatePairCeiling: number;
 }
 
 export interface QueryRule extends RuleMeta {

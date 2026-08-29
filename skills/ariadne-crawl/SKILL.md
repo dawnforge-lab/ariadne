@@ -215,7 +215,7 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion, legacyHosts, sitemapUrls,
+ renderPassCount, rulesetVersion, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
  rulesRunAt, findingsCount}
@@ -264,6 +264,14 @@ What the fields mean when you are waiting:
   echoed from its stored config. Empty means none were given, which is what separates
   "the legacy domain does not redirect" from "nobody named a legacy domain" in
   CHECK-15.
+- **`findingCap`** — what this crawl's listing rules will be cut at when the rules
+  run. `200` is the default (nobody chose); `null` is uncapped, the billed-audit
+  setting; a number is what was set. **Check it before running the rules on client
+  work**: the cap lives on the crawl row and `crawl_rules` has no argument to restate
+  it, so a billed audit started at the default has to be re-crawled, not re-judged.
+  A reported `200` does not distinguish an explicit `findingCap: 200` from an absent
+  one; they differ only in the near-duplicate pair budget (200 against the default
+  500).
 
 Poll every 15-30 seconds early and back off to a minute on a long crawl; there is
 nothing to gain from tighter polling, since the crawl's pace is set by politeness

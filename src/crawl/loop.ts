@@ -136,9 +136,16 @@ export interface CrawlConfig extends RenderSelectionConfig {
   /**
    * How many findings each listing rule may report when this crawl is judged.
    * A positive integer, or `null` for UNCAPPED — every orphan, every duplicate
-   * group, every blocked sitemap entry, with no truncation note because nothing
-   * was truncated. Absent is the engine's defaults (200 URL findings, 500
-   * near-duplicate pairs), which is what every crawl before P8-T4 got.
+   * group, every blocked sitemap entry. Absent is the engine's defaults (200 URL
+   * findings, 500 near-duplicate pairs), which is what every crawl before P8-T4
+   * got.
+   *
+   * An uncapped listing normally carries no truncation note, and the direction
+   * that matters is the other one: a note means the list is incomplete, and its
+   * absence means it is complete. `null` does not promise "no note anywhere" —
+   * `content.near-duplicate`'s scan ceiling is not the operator's to lift (hard
+   * rule 6, `NEAR_DUPLICATE_PAIR_CEILING`), and a run that reaches it says so in
+   * the usual honest way.
    *
    * IT IS NOT A CRAWL SETTING AND THE CRAWL LOOP NEVER READS IT. It rides on
    * the crawl config because that is the only durable place a crawl-start

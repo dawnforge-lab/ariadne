@@ -22,6 +22,7 @@ import { contentRules } from "../../src/rules/query/content.js";
 import {
   DEFAULT_RULE_CAPS,
   NEAR_DUPLICATE_PAIR_CAP,
+  NEAR_DUPLICATE_PAIR_CEILING,
   resolveRuleCaps,
   storedFindingCap,
   URL_FINDING_CAP,
@@ -53,19 +54,40 @@ describe("resolveRuleCaps", () => {
     expect(resolveRuleCaps(undefined)).toEqual({
       listing: URL_FINDING_CAP,
       nearDuplicatePairs: NEAR_DUPLICATE_PAIR_CAP,
+      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
     });
     expect(DEFAULT_RULE_CAPS).toEqual(resolveRuleCaps(undefined));
   });
 
-  it("uncaps both budgets on null — the billed-audit setting", () => {
-    expect(resolveRuleCaps(null)).toEqual({ listing: null, nearDuplicatePairs: null });
+  it("uncaps both reporting budgets on null — the billed-audit setting", () => {
+    expect(resolveRuleCaps(null)).toEqual({
+      listing: null,
+      nearDuplicatePairs: null,
+      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
+    });
+  });
+
+  // The one budget that is not the operator's to remove. It is the memory
+  // contract (hard rule 6) rather than a preference: uncapped, the pair scan
+  // measured 521MB RSS at 2,000 degenerate pages and exhausted a 4GB heap at
+  // 20,000. No `findingCap` reaches it — not null, not a number above it.
+  it("holds the near-duplicate scan ceiling at every findingCap", () => {
+    for (const cap of [undefined, null, 7, NEAR_DUPLICATE_PAIR_CEILING * 10]) {
+      expect(resolveRuleCaps(cap).nearDuplicatePairCeiling, String(cap)).toBe(
+        NEAR_DUPLICATE_PAIR_CEILING,
+      );
+    }
   });
 
   // The documented discontinuity: a stated number is a budget for what the
   // caller will read, and it binds the pair listing too. `findingCap: 200` is
   // therefore NOT the same as omitting the field, which leaves pairs at 500.
   it("collapses both budgets onto a stated number, pairs included", () => {
-    expect(resolveRuleCaps(7)).toEqual({ listing: 7, nearDuplicatePairs: 7 });
+    expect(resolveRuleCaps(7)).toEqual({
+      listing: 7,
+      nearDuplicatePairs: 7,
+      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
+    });
     expect(resolveRuleCaps(URL_FINDING_CAP)).not.toEqual(resolveRuleCaps(undefined));
   });
 });
@@ -268,7 +290,7 @@ describe("the finding cap against the database", () => {
     expect(found[1]!.evidence["truncated"]).toEqual({ reported: 2, atLeast: 3 });
   });
 
-  it("lists every pair and writes no note when the cap is null", async () => {
+  it("lists every pair and writes no note when the cap is null and the scan fits", async () => {
     const crawlId = await newCrawl();
     await addNearDuplicates(crawlId);
 
@@ -283,6 +305,58 @@ describe("the finding cap against the database", () => {
     // Distinct pairs, not the same pair six times.
     expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(6);
   });
+
+  /**
+   * THE CEILING, AGAINST THE PRODUCTION CONSTANT.
+   *
+   * No override seam and no shrunken test value: 450 pages sharing one simhash
+   * are C(450,2) = 101,025 pairs, all at hamming 0 and therefore all inside
+   * `NEAR_DUPLICATE_HAMMING`, which clears the real 100,000 ceiling with 1,025
+   * to spare. Distinct `content_hash` per page, so `content.exact-duplicate`
+   * owns none of them and every pair reaches this rule. The join itself measures
+   * ~40ms; the cost is building the findings, which is the point — that is the
+   * allocation the ceiling exists to bound.
+   *
+   * The assertion is the ROW COUNT plus the note, which is the ceiling's
+   * observable consequence: the rule holds 100,000 findings rather than 101,025,
+   * and it says out loud that it stopped. At the measured ~500 bytes a finding
+   * that is ~50MB, inside the 512MB contract; asserting bytes here would be
+   * asserting the GC's schedule, so the bound is asserted as the count it is
+   * derived from.
+   */
+  it("stops the pair SCAN at the ceiling no findingCap can lift, and says so", async () => {
+    const crawlId = await newCrawl({ findingCap: null });
+    const rows = [];
+    for (let i = 0; i < 450; i++) {
+      const url = `${SITE}/c/${String(i).padStart(4, "0")}`;
+      rows.push(
+        mkPage({
+          id: `page_${randomUUID()}`,
+          crawlId,
+          url,
+          urlNormalised: url,
+          canonicalHtml: url,
+          contentHash: `ceil-${String(i)}`,
+          simhash: 0n,
+        }),
+      );
+    }
+    await db.insert(pages).values(rows);
+
+    const found = await rule(contentRules, "content.near-duplicate").run(
+      db,
+      crawlId,
+      resolveRuleCaps(null),
+    );
+    expect(found).toHaveLength(NEAR_DUPLICATE_PAIR_CEILING);
+    // Uncapped, and NOT noteless: the ceiling truncated the listing, so the
+    // listing says it was truncated. A reader takes completeness from the
+    // absence of this note, never from the crawl's `findingCap`.
+    expect(found[NEAR_DUPLICATE_PAIR_CEILING - 1]!.evidence["truncated"]).toEqual({
+      reported: NEAR_DUPLICATE_PAIR_CEILING,
+      atLeast: NEAR_DUPLICATE_PAIR_CEILING + 1,
+    });
+  }, 180_000);
 
   it("takes the cap off the crawl's own row when the caller states none", async () => {
     const capped = await newCrawl({ findingCap: 3 });
@@ -380,8 +454,16 @@ describe("the finding cap against the database", () => {
     ]);
     clearTimeout(timer);
 
-    expect(seen.get(a)).toEqual({ listing: 2, nearDuplicatePairs: 2 });
-    expect(seen.get(b)).toEqual({ listing: null, nearDuplicatePairs: null });
+    expect(seen.get(a)).toEqual({
+      listing: 2,
+      nearDuplicatePairs: 2,
+      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
+    });
+    expect(seen.get(b)).toEqual({
+      listing: null,
+      nearDuplicatePairs: null,
+      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
+    });
     // And the findings each run wrote are its own crawl's, not the other's.
     expect(ra.byRule["links.orphan"]).toBe(2);
     expect(rb.byRule["links.orphan"]).toBe(6);

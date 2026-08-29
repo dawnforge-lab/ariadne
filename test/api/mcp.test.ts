@@ -584,14 +584,20 @@ describe("crawl_start", () => {
     }
   });
 
-  it("accepts findingCap: null over the agent surface", async () => {
+  it("accepts findingCap: null over the agent surface, and crawl_status confirms it", async () => {
     const answer = await call("crawl_start", {
       siteUrl: `${site}/`,
       maxPages: 1,
       findingCap: null,
     });
     expect(answer.isError ?? false).toBe(false);
-    expect(String(answer.body["crawlId"])).toMatch(/^crawl_/);
+    const crawlId = String(answer.body["crawlId"]);
+    expect(crawlId).toMatch(/^crawl_/);
+    // The agent that set it must be able to read it back: the cap lives on the
+    // crawl row and `crawl_rules` has no argument to restate it, so this is the
+    // only way to know a billed audit was actually started as one.
+    const detail = await ok("crawl_status", { crawlId });
+    expect(detail["findingCap"]).toBeNull();
   });
 
   // The floor `crawl_start`'s description promises, on the transport it
@@ -644,6 +650,10 @@ describe("crawl_status / crawl_list", () => {
     // Nor was a sitemap handed to it. Same reading: this engine never probes
     // for an undeclared sitemap, so an empty list is "nobody supplied one".
     expect(detail["sitemapUrls"]).toEqual([]);
+    // And no finding cap was named, so the crawl will be judged at the engine's
+    // default and the default is what is reported. `null` here would mean
+    // uncapped, which is a different crawl.
+    expect(detail["findingCap"]).toBe(200);
   });
 
   it("echoes the legacy hosts and the supplied sitemaps a crawl was configured with", async () => {

@@ -57,16 +57,53 @@ export const URL_FINDING_CAP = 200;
 export const NEAR_DUPLICATE_PAIR_CAP = 500;
 
 /**
+ * The hard ceiling on the near-duplicate SCAN. `findingCap` cannot lift it.
+ *
+ * THIS IS HARD RULE 6 IN A CONSTANT, not prudence. Every other rule's uncapped
+ * output is bounded by something the site has — pages, groups, sitemap entries.
+ * `content.near-duplicate` is bounded by PAIRS, which is quadratic in the
+ * near-identical cohort, so `limit all` there is the one query in the ruleset
+ * that can ask Postgres for more rows than the site has pages. Measured on a
+ * deliberately degenerate crawl (a few hundred distinct fingerprints across the
+ * whole site): **521MB RSS at 2,000 pages — already past the 512MB memory
+ * contract — 3,268,808 pairs and 2.0GB at 5,000, and an exhausted 4GB heap at
+ * 20,000.** An uncapped run without this ceiling breaks the contract on real
+ * hardware, and the contract's own rule is to find the unbounded structure
+ * rather than raise the limit.
+ *
+ * One hundred thousand pairs is ~500 bytes of `Finding` each, so ~50MB: the
+ * whole picture for any site whose content is genuinely distinct, and a bounded
+ * refusal to enumerate for one whose content is not.
+ *
+ * NOTHING IS HIDDEN WHEN IT BITES. The scan reads one pair past the ceiling and
+ * `noteAtLeastTruncation` writes the same honest note a capped run writes —
+ * "reported 100,000, at least 100,001" — so a listing cut by the ceiling is
+ * indistinguishable in kind from a listing cut by a cap, which is exactly right:
+ * both are incomplete and both say so. A site that reaches this has no distinct
+ * content, and THAT is the finding rather than the enumeration.
+ */
+export const NEAR_DUPLICATE_PAIR_CEILING = 100_000;
+
+/**
  * The caps one rules run is judged under, resolved from `findingCap`.
  *
  * Three inputs, three outcomes, and the middle one is the whole feature:
  *
  *  - `undefined` — nobody chose. The engine's two calibrated defaults, which is
  *    byte-for-byte what every crawl did before the knob existed.
- *  - `null` — uncapped. Every listing rule lists everything it finds and NO
- *    truncation note is written anywhere, because nothing was truncated. This
- *    is what a billed audit asks for.
+ *  - `null` — uncapped. Every listing rule lists everything it finds. This is
+ *    what a billed audit asks for.
  *  - a positive integer — that many, of every listing, pairs included.
+ *
+ * `nearDuplicatePairCeiling` is set to `NEAR_DUPLICATE_PAIR_CEILING` in all
+ * three: it is the memory contract, not a preference, and no `findingCap` can
+ * reach it.
+ *
+ * WHAT A TRUNCATION NOTE MEANS, AND THE DIRECTION THAT IS LOAD-BEARING: a note
+ * means the list is incomplete; its ABSENCE means it is complete. An uncapped
+ * run normally writes none — nothing truncated it — but "uncapped" is not a
+ * promise of "noteless": a run that hits the near-duplicate scan ceiling above
+ * writes one, and it is telling the truth. Read the note, never the config.
  *
  * THE DISCONTINUITY IS DELIBERATE AND IS WORTH KNOWING: `findingCap: 200` is
  * NOT the same as omitting the field. Omitting it means "the engine's two
@@ -76,11 +113,22 @@ export const NEAR_DUPLICATE_PAIR_CAP = 500;
  * times larger for one rule would not be one.
  */
 export function resolveRuleCaps(findingCap: number | null | undefined): RuleCaps {
+  const ceiling = NEAR_DUPLICATE_PAIR_CEILING;
   if (findingCap === undefined) {
-    return { listing: URL_FINDING_CAP, nearDuplicatePairs: NEAR_DUPLICATE_PAIR_CAP };
+    return {
+      listing: URL_FINDING_CAP,
+      nearDuplicatePairs: NEAR_DUPLICATE_PAIR_CAP,
+      nearDuplicatePairCeiling: ceiling,
+    };
   }
-  if (findingCap === null) return { listing: null, nearDuplicatePairs: null };
-  return { listing: findingCap, nearDuplicatePairs: findingCap };
+  if (findingCap === null) {
+    return { listing: null, nearDuplicatePairs: null, nearDuplicatePairCeiling: ceiling };
+  }
+  return {
+    listing: findingCap,
+    nearDuplicatePairs: findingCap,
+    nearDuplicatePairCeiling: ceiling,
+  };
 }
 
 /**
