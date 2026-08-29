@@ -174,6 +174,23 @@ describe("the sitemap rules against the database", () => {
     expect(await run("sitemap.missing", crawlId)).toHaveLength(0);
   });
 
+  // The claim is about ROBOTS.TXT, so a sitemap the client handed the crawl
+  // does not answer it. This is why the evidence keeps the supplied documents
+  // in their own list (`suppliedSitemaps`): folded into `sitemapSources` they
+  // would silence a finding about a robots.txt that still declares nothing —
+  // and the fix the site owner has to make would go unreported.
+  it("still fires when the sitemap was supplied to the crawl rather than declared", async () => {
+    const crawlId = await newCrawl(
+      mkDiscovery({
+        sitemapSources: [],
+        suppliedSitemaps: [`${SITE}/sitemap-extra.xml`],
+      }),
+    );
+    const found = await run("sitemap.missing", crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).toEqual({ robotsOutcome: "read", sitemapSources: [] });
+  });
+
   // An absent robots.txt is a complete answer — there is no file, so no file
   // declares a sitemap — and the finding is sound. This is the one case where
   // "declared in robots.txt" is true of a site with no robots.txt at all.

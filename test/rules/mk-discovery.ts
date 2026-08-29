@@ -36,6 +36,7 @@ export function mkTruncation(
 export function mkDiscovery(overrides: {
   robots?: Partial<DiscoveryEvidence["robots"]>;
   sitemapSources?: string[];
+  suppliedSitemaps?: string[];
   truncation?: Partial<DiscoveryTruncation>;
   docsFetched?: number;
 } = {}): DiscoveryEvidence {
@@ -52,6 +53,9 @@ export function mkDiscovery(overrides: {
     // Only the emptiness of this list is ever read (by `sitemap.missing`), so
     // the default is one declared source under a name no test asserts on.
     sitemapSources: overrides.sitemapSources ?? ["https://declared.example/sitemap.xml"],
+    // The healthy site was handed nothing: its sitemap is declared, so nobody
+    // had to supply one. A test about the supplied path states its own list.
+    suppliedSitemaps: overrides.suppliedSitemaps ?? [],
     truncation,
     docsFetched: overrides.docsFetched ?? truncation.docsFetched,
   };

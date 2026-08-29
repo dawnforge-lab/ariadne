@@ -94,6 +94,22 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
     return bad("has no sitemapSources array of strings");
   }
 
+  // The client-supplied half of the sitemap provenance (P8-T3). ABSENT IS
+  // EMPTY, and that is a fact rather than a fallback: the field arrived with
+  // the ability to supply a sitemap at all, so a crawl written before it had
+  // none supplied, and one written after stores the list it was given (the
+  // loop writes it unconditionally). A value of the wrong SHAPE is refused like
+  // every other — it is evidence we cannot read, and reading it as "nobody
+  // supplied a sitemap" would credit the site with a document it never declared.
+  const supplied = value["suppliedSitemaps"];
+  if (
+    supplied !== undefined &&
+    supplied !== null &&
+    (!Array.isArray(supplied) || supplied.some((s) => typeof s !== "string"))
+  ) {
+    return bad("has a suppliedSitemaps that is not an array of strings");
+  }
+
   const truncation = value["truncation"];
   if (!isRecord(truncation)) return bad("has no truncation object");
   const failures = truncation["failures"];
@@ -129,6 +145,7 @@ function parseDiscovery(value: unknown, ruleId: string, crawlId: string): Discov
       truncated: robots["truncated"],
     },
     sitemapSources: sources as string[],
+    suppliedSitemaps: (supplied as string[] | undefined | null) ?? [],
     // `failures`, `oversizedDocsSkipped` and `entryLimited` are checked above,
     // because those are the three a rule reads (`sitemap.invalid`, and
     // `sitemap.structure`'s site row). The counters beside them are carried

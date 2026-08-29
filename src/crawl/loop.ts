@@ -115,6 +115,24 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * quietly dropped (see hostProbeStarts).
    */
   legacyHosts?: string[];
+  /**
+   * Sitemap documents the client handed the crawl, walked alongside the ones
+   * robots.txt declares (discovery's `extraSitemaps`).
+   *
+   * IT IS NOT A WAY AROUND THE NO-SPECULATIVE-PROBE RULE, it is the other half
+   * of it: the engine never guesses at `/sitemap.xml`, so a site that publishes
+   * a sitemap without declaring it in robots.txt has exactly one way to get it
+   * crawled — somebody who knows where it is says so. `sitemap.missing`
+   * (CHECK-06) still reports the undeclared sitemap, because that is still true
+   * of the site and still worth fixing.
+   *
+   * Full http(s) URLs, absolute; anything else throws in `validateCrawlConfig`
+   * rather than being dropped mid-walk. The API applies the URL policy and the
+   * allowlist to each one before the crawl row exists (`checkSitemapUrls`,
+   * src/api/service.ts) — this field is trusted by the time it reaches here in
+   * exactly the way `legacyHosts` is.
+   */
+  sitemapUrls?: string[];
 }
 
 /**
@@ -123,10 +141,20 @@ export interface CrawlConfig extends RenderSelectionConfig {
  * `robots.raw` is the robots.txt text as served (discovery caps the read at
  * 500KB), stored verbatim so the rules can re-parse it against the URLs the
  * crawl found instead of re-fetching it — hard rule 3, in a column.
- * `sitemapSources` is the sitemap documents the walk was *pointed at*, so
- * "no sitemap is declared" and "the declared sitemap could not be read" stay
- * different facts: the second one shows up in `truncation.failures` with a
- * non-empty `sitemapSources`.
+ * `sitemapSources` is the sitemap documents ROBOTS.TXT DECLARED, so "no sitemap
+ * is declared" and "the declared sitemap could not be read" stay different
+ * facts: the second one shows up in `truncation.failures` with a non-empty
+ * `sitemapSources`.
+ *
+ * `suppliedSitemaps` is the documents the CLIENT named at crawl start
+ * (`CrawlConfig.sitemapUrls`). It is a second list rather than more entries in
+ * the first one, and that is the whole of the provenance record: a document in
+ * `sitemapSources` was declared, a document in `suppliedSitemaps` was supplied,
+ * and a document in both was both — which is the honest answer for a client who
+ * re-states a sitemap the site already declares. Folding the two together would
+ * make `sitemap.missing` (CHECK-06) go quiet the moment a client supplied a
+ * URL, reporting "robots.txt declares a sitemap" about a robots.txt that
+ * declares nothing.
  */
 export interface DiscoveryEvidence {
   robots: {
@@ -145,6 +173,13 @@ export interface DiscoveryEvidence {
     truncated: boolean;
   };
   sitemapSources: string[];
+  /**
+   * The sitemap documents the crawl was handed at start. Empty when nobody
+   * supplied one — including on every crawl written before the field existed,
+   * where nobody could (readers treat an absent value as empty and a value of
+   * the wrong shape as a refusal; see `parseDiscovery`).
+   */
+  suppliedSitemaps: string[];
   truncation: DiscoveryTruncation;
   /** Sitemap documents attempted. Lifted out of `truncation` for the rules. */
   docsFetched: number;
@@ -483,6 +518,7 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     maxConcurrency: raw["maxConcurrency"],
     probeHosts: raw["probeHosts"],
     legacyHosts: raw["legacyHosts"],
+    sitemapUrls: raw["sitemapUrls"],
     renderBudgetPct: raw["renderBudgetPct"],
     renderMaxPages: raw["renderMaxPages"],
     renderSamplePerType: raw["renderSamplePerType"],
@@ -521,14 +557,20 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
     }
   }
-  if (
-    config.legacyHosts !== undefined &&
-    (!Array.isArray(config.legacyHosts) ||
-      !config.legacyHosts.every((host) => typeof host === "string"))
-  ) {
-    throw new Error(
-      `crawl ${crawlId}: stored config.legacyHosts is not an array of strings`,
-    );
+  // The two string lists, on the same terms: a stored value of the wrong shape
+  // is a config we cannot read, not a list to quietly treat as empty. A resume
+  // that dropped `sitemapUrls` would walk fewer documents than the first run
+  // and report the difference as the site's.
+  for (const field of ["legacyHosts", "sitemapUrls"] as const) {
+    const value = config[field];
+    if (
+      value !== undefined &&
+      (!Array.isArray(value) || !value.every((entry) => typeof entry === "string"))
+    ) {
+      throw new Error(
+        `crawl ${crawlId}: stored config.${field} is not an array of strings`,
+      );
+    }
   }
   return config as CrawlConfig;
 }
@@ -568,6 +610,18 @@ export function validateCrawlConfig(config: CrawlConfig): void {
     // Throws on a legacyHosts entry that names no host — here, before the
     // crawls row exists, rather than four fetches into the run.
     hostProbeStarts(config.siteUrl, config.legacyHosts ?? []);
+  }
+  // A supplied sitemap must be an absolute http(s) URL: the sitemaps protocol
+  // has no relative documents, and `discover` resolves nothing — a bare
+  // `/sitemap.xml` would reach the walk as a URL nothing can fetch and be
+  // recorded as a failure the operator would read as the site's. Named here,
+  // before the row exists, for the same reason legacyHosts is.
+  for (const url of config.sitemapUrls ?? []) {
+    if (normalizeUrl(url) === null) {
+      throw new Error(
+        `CrawlConfig.sitemapUrls entry is not an absolute http(s) URL: ${url}`,
+      );
+    }
   }
   // The render budget, checked by the module that will spend it. A nonsense
   // budget stops the crawl at line one rather than after the last page, where
@@ -636,6 +690,9 @@ async function runToCompletion(
   const discovery = await discover(config.siteUrl, {
     userAgent: config.userAgent,
     allowPrivate,
+    // The documents the client named, walked beside the declared ones. The
+    // engine still probes nothing on its own (see discover's header).
+    extraSitemaps: config.sitemapUrls,
   });
 
   // INSERTION 2 — discovery's own findings, written before anything branches on
@@ -643,7 +700,7 @@ async function runToCompletion(
   // exactly the crawl whose discovery evidence a reader most needs.
   await db
     .update(crawls)
-    .set({ discovery: discoveryEvidence(discovery) })
+    .set({ discovery: discoveryEvidence(discovery, config) })
     .where(eq(crawls.id, crawlId));
 
   // Complete disallow: robots.txt could not be read, which is not permission
@@ -1043,8 +1100,18 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The `crawls.discovery_jsonb` row for one discovery result. */
-function discoveryEvidence(discovery: DiscoveryResult): DiscoveryEvidence {
+/**
+ * The `crawls.discovery_jsonb` row for one discovery result.
+ *
+ * The config is the second argument because the PROVENANCE of the sitemap
+ * documents is not something the walk can report: `discover` is handed two
+ * lists and merges them, so which document came from where is known here and
+ * only here. Both lists are written, unfolded — see `DiscoveryEvidence`.
+ */
+function discoveryEvidence(
+  discovery: DiscoveryResult,
+  config: CrawlConfig,
+): DiscoveryEvidence {
   return {
     robots: {
       outcome: discovery.robots.outcome,
@@ -1053,11 +1120,11 @@ function discoveryEvidence(discovery: DiscoveryResult): DiscoveryEvidence {
       raw: discovery.robots.raw,
       truncated: discovery.robots.truncated,
     },
-    // The documents the walk was pointed at. Today that is exactly what
-    // robots.txt declared, because `discover` is called without
-    // `extraSitemaps`; a caller that starts passing them must add them here,
-    // or "the site declares no sitemap" becomes a lie.
+    // The `Sitemap:` lines robots.txt carried, and nothing else. A supplied
+    // document belongs in the list below it: putting it here would turn "the
+    // site declares no sitemap" into a lie about the site.
     sitemapSources: [...discovery.robots.sitemapUrls],
+    suppliedSitemaps: [...(config.sitemapUrls ?? [])],
     truncation: discovery.truncation,
     docsFetched: discovery.truncation.docsFetched,
   };

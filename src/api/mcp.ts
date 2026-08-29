@@ -239,7 +239,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
-        "legacyHosts, rulesRunAt and findingsCount.\n\n" +
+        "legacyHosts, sitemapUrls, rulesRunAt and findingsCount.\n\n" +
         "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
         "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
         "complete pass is on record — never judged, being judged right now, or " +
@@ -251,7 +251,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "legacyHosts echoes the domains this crawl was told the site used to live " +
         "on (empty when none were named) — the host-probe findings about legacy " +
         "redirects mean nothing without it: no finding on an empty list is 'the " +
-        "crawl was never given a legacy domain', not 'the redirects are fine'.\n\n" +
+        "crawl was never given a legacy domain', not 'the redirects are fine'. " +
+        "sitemapUrls echoes the sitemap documents the crawl was handed at start, " +
+        "and reads the same way: this engine never probes for an undeclared " +
+        "sitemap, so 'no sitemap declared' beside an empty sitemapUrls is a crawl " +
+        "to re-run with the document, not yet a report to write.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
@@ -656,7 +660,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The robots.txt this crawl actually obeyed, out of its stored evidence: " +
         "{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, " +
-        "sitemapSources, userAgent}. Nothing is re-fetched — this is the text the " +
+        "sitemapSources, suppliedSitemaps, userAgent}. Nothing is re-fetched — this is the text the " +
         "crawler read at crawl time, which is what its findings were judged " +
         "against. A file that has changed since is a fact about the site, and " +
         "fetching the current one here would hide it.\n\n" +
@@ -670,7 +674,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "true means raw is a 500KB PREFIX: a rule you cannot find in it may simply " +
         "be past the cap, so do not report 'robots.txt does not disallow X' from a " +
         "truncated copy. crawlDelaySec is the delay the crawl honoured. " +
-        "sitemapSources are the Sitemap: lines the walk was pointed at. userAgent " +
+        "sitemapSources are the Sitemap: lines THIS FILE declared; suppliedSitemaps " +
+        "are the documents the crawl was handed at start (crawl_start's sitemapUrls), " +
+        "which the walk read as well. The two are separate because the difference is " +
+        "the finding: a sitemap that only appears in suppliedSitemaps is one the site " +
+        "publishes and does not declare, and a document in both was declared and " +
+        "re-supplied — the walk fetched it once. userAgent " +
         "is the string the crawl identified as — the groups in the file that " +
         "governed it, which matters when the file has per-agent sections.\n\n" +
         "Refused for a crawl that never completed discovery: there is no stored " +
@@ -796,6 +805,18 @@ function crawlStartShape() {
         "Extra hosts that used to serve this site, to probe alongside the seed's own " +
           "spellings. EACH ONE must be on the allowlist in its own right — they are " +
           "different sites by every definition the engine has.",
+      )
+      .optional(),
+    sitemapUrls: z
+      .array(z.string())
+      .describe(
+        "Sitemap documents to walk in addition to the ones robots.txt declares — the " +
+          "way to crawl a sitemap the site publishes but never points at. The engine " +
+          "does NOT probe /sitemap.xml on spec, so an undeclared sitemap is only read " +
+          "if you name it here. Full http(s) URLs; a host outside this site's own " +
+          "spellings must be on the allowlist in its own right. Supplying one does not " +
+          "hide the finding: robots.txt still declares no sitemap, and the audit still " +
+          "says so.",
       )
       .optional(),
     renderBudgetPct: z

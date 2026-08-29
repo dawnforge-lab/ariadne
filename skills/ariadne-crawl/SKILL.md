@@ -37,6 +37,8 @@ of them is worked around.
    (`*.example.com`). An empty list refuses every crawl and answers every query.
 3. **Every legacy host is on it too**, separately, if you plan to pass
    `legacyHosts` — the probe fetches those before it has read anyone's robots.txt.
+   Same for a `sitemapUrls` document that lives off the site's own hosts (a CDN,
+   a subdomain): the discovery walk fetches every document it is handed.
 4. **Chromium, if you intend to render.** The render pass drives a real browser
    through Playwright: `npx playwright install chromium`, once per machine. Without
    it `crawl_render` fails at launch, and it fails UNHELPFULLY — a missing browser is
@@ -110,9 +112,41 @@ Fields worth setting deliberately:
   unanswerable rather than clean.
 - **`legacyHosts`** — hosts the site used to live on. Each must be allowlisted in its
   own right; they are different sites by every definition the engine has.
+- **`sitemapUrls`** — sitemap documents to walk beyond the ones robots.txt declares.
+  See "The sitemap has two paths" below; leave it unset when robots.txt declares the
+  sitemap, which is most sites.
 - **`renderBudgetPct` / `renderMaxPages` / `renderSamplePerType`** — the render
   pass's sample, stored on the crawl row now and read by the render pass later. Set
   them here if the default sample would not cover the page types you care about.
+
+### The sitemap has two paths, and only two
+
+**Declared.** robots.txt carries a `Sitemap:` line, the walk follows it, and there is
+nothing to do — this is most sites.
+
+**Undeclared.** The site publishes a sitemap and never points at it. Pass its URL in
+`sitemapUrls` at crawl start; the walk reads it beside the declared ones, follows a
+sitemap index three levels deep, and its entries become sitemap entries of the crawl
+like any other. Full http(s) URLs, absolute — a relative path is a 400 naming the
+entry, and a host outside the site's own spellings (apex/www × http/https) must be on
+the allowlist in its own right, because the walk fetches every document it is handed.
+
+**There is no third path: the engine never probes for a sitemap URL on spec.** A
+document nobody pointed at is a request somebody has to decide to make, and reporting
+whatever comes back as the site's published sitemap would be a fact the crawl made
+up — a guessed 200 from a CMS catch-all route would enter the evidence as a sitemap
+the site publishes. So when a crawl reports **`sitemap.missing` (CHECK-06 — "robots.txt
+declares no sitemap")** and `crawl_status` shows an empty `sitemapUrls`, the honest
+next step is to **ask where the sitemap is** (the site owner, the CMS, the usual
+sitemap paths in a browser, Search Console) and re-crawl with `sitemapUrls` set. Do
+not report the site's sitemap coverage from a crawl that never read its sitemap.
+
+Supplying the URL does **not** hide the finding, and must not be used to: robots.txt
+still declares nothing, `sitemap.missing` still fires, and the fix — one `Sitemap:`
+line — is still the site's to make. `robots_get` keeps the two provenances apart:
+`sitemapSources` are the `Sitemap:` lines the file carried, `suppliedSitemaps` are the
+documents this crawl was handed. A document in both was declared and re-supplied; the
+walk fetched it once.
 
 **`userAgent`**, **`perHostDelayMs`** and **`maxConcurrency`** are the politeness
 settings, not tuning knobs for speed. The user agent must stay identifiable, and
@@ -171,7 +205,7 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion, legacyHosts,
+ renderPassCount, rulesetVersion, legacyHosts, sitemapUrls,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
  rulesRunAt, findingsCount}

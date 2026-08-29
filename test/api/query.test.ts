@@ -831,6 +831,10 @@ describe("GET /crawls/:id/robots", () => {
     expect(res.body["crawlDelaySec"]).toBe(2);
     expect(res.body["note"]).toBeNull();
     expect(res.body["sitemapSources"]).toEqual([`${SITE}/sitemap.xml`]);
+    // This crawl's evidence carries no supplied list — it was written before a
+    // client could hand the crawl a sitemap. Absent reads as empty, which is
+    // the only thing it can honestly mean.
+    expect(res.body["suppliedSitemaps"]).toEqual([]);
     // The groups in the file that governed this crawl.
     expect(res.body["userAgent"]).toBe("AriadneBot/0.1 (query-test)");
 
@@ -839,7 +843,7 @@ describe("GET /crawls/:id/robots", () => {
     // walk's counters too, and none of them are here.
     expect(Object.keys(res.body).sort()).toEqual([
       "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
-      "sitemapSources", "truncated", "userAgent",
+      "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
   });
 

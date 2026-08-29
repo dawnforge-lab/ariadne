@@ -366,6 +366,9 @@ beforeAll(async () => {
       siteUrl: `${SEEDED_SITE}/`,
       userAgent: "AriadneBot/0.1 (mcp-test)",
       legacyHosts: ["old.mcp-query.example"],
+      // A sitemap this site publishes and never declares, handed to the crawl
+      // at start. It is echoed on crawl_status and recorded in the evidence.
+      sitemapUrls: [`${SEEDED_SITE}/sitemap-extra.xml`],
     },
     discovery: {
       robots: {
@@ -376,8 +379,9 @@ beforeAll(async () => {
         truncated: false,
       },
       sitemapSources: [`${SEEDED_SITE}/sitemap.xml`],
-      truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 1 },
-      docsFetched: 1,
+      suppliedSitemaps: [`${SEEDED_SITE}/sitemap-extra.xml`],
+      truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 2 },
+      docsFetched: 2,
     },
   });
   await seedPage(surfaceCrawlId, {
@@ -504,7 +508,7 @@ describe("the tool surface", () => {
     }
     // And the tool that answers it names the three fields it gained.
     const status = listed.tools.find((t) => t.name === "crawl_status")?.description ?? "";
-    for (const field of ["rulesRunAt", "findingsCount", "legacyHosts"]) {
+    for (const field of ["rulesRunAt", "findingsCount", "legacyHosts", "sitemapUrls"]) {
       expect(status, `crawl_status does not name ${field}`).toContain(field);
     }
   });
@@ -544,6 +548,28 @@ describe("crawl_start", () => {
     });
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("victim.example");
+  });
+
+  // The same gate on the other field that names something to fetch. The
+  // discovery walk reads every supplied document before a page is crawled.
+  it("refuses a supplied sitemap on a host the allowlist does not name", async () => {
+    const answer = await call("crawl_start", {
+      siteUrl: `${site}/`,
+      sitemapUrls: ["https://victim.example/sitemap.xml"],
+    });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("victim.example");
+    expect(String(answer.body["error"])).toContain("sitemapUrls");
+  });
+
+  it("refuses a supplied sitemap that is not an absolute URL, naming the entry", async () => {
+    const answer = await call("crawl_start", {
+      siteUrl: `${site}/`,
+      sitemapUrls: ["sitemap.xml"],
+    });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("sitemapUrls");
+    expect(String(answer.body["error"])).toContain("sitemap.xml");
   });
 
   // The floor `crawl_start`'s description promises, on the transport it
@@ -593,13 +619,19 @@ describe("crawl_status / crawl_list", () => {
     expect(detail["findingsCount"]).toBe(0);
     // No legacy domain was named for this crawl: present and empty.
     expect(detail["legacyHosts"]).toEqual([]);
+    // Nor was a sitemap handed to it. Same reading: this engine never probes
+    // for an undeclared sitemap, so an empty list is "nobody supplied one".
+    expect(detail["sitemapUrls"]).toEqual([]);
   });
 
-  it("echoes the legacy hosts a crawl was configured with", async () => {
-    // Without this, the legacy-redirect check has no denominator: no finding
-    // could mean the redirects are fine or that nobody named a legacy domain.
+  it("echoes the legacy hosts and the supplied sitemaps a crawl was configured with", async () => {
+    // Without these, two checks have no denominator: no legacy-redirect finding
+    // could mean the redirects are fine or that nobody named a legacy domain,
+    // and "robots.txt declares no sitemap" reads differently depending on
+    // whether anybody has yet handed the crawl the document.
     const detail = await ok("crawl_status", { crawlId: surfaceCrawlId });
     expect(detail["legacyHosts"]).toEqual(["old.mcp-query.example"]);
+    expect(detail["sitemapUrls"]).toEqual([`${SEEDED_SITE}/sitemap-extra.xml`]);
   });
 
   it("counts the crawl's blocked pages", async () => {
@@ -985,13 +1017,56 @@ describe("robots_get", () => {
     expect(body["crawlDelaySec"]).toBe(3);
     expect(body["note"]).toBeNull();
     expect(body["sitemapSources"]).toEqual([`${SEEDED_SITE}/sitemap.xml`]);
+    // The provenance of the walk's other document: this one was handed to the
+    // crawl, not declared by the file. Two lists, because a supplied sitemap
+    // folded into the declared ones would be a claim about robots.txt.
+    expect(body["suppliedSitemaps"]).toEqual([`${SEEDED_SITE}/sitemap-extra.xml`]);
     expect(body["userAgent"]).toBe("AriadneBot/0.1 (mcp-test)");
     // The wrapper is closed: the sitemap walk's counters live in the same blob
     // and none of them are here.
     expect(Object.keys(body).sort()).toEqual([
       "crawlDelaySec", "crawlId", "note", "outcome", "raw", "robotsUrl",
-      "sitemapSources", "truncated", "userAgent",
+      "sitemapSources", "suppliedSitemaps", "truncated", "userAgent",
     ]);
+  });
+
+  it("answers an empty supplied list for a crawl whose evidence predates the field", async () => {
+    // A discovery blob written before a client could supply a sitemap. Absent
+    // is EMPTY here and that is a fact, not a fallback: nobody could have
+    // supplied one. The endpoint answers rather than refusing.
+    const id = await seedCrawl({
+      id: `crawl_mcp_presupply_${Date.now()}`,
+      status: "finished",
+      config: { siteUrl: `${SEEDED_SITE}/`, userAgent: "AriadneBot/0.1 (mcp-test)" },
+      discovery: {
+        robots: { outcome: "read", crawlDelaySec: null, note: null, raw: SEEDED_ROBOTS, truncated: false },
+        sitemapSources: [`${SEEDED_SITE}/sitemap.xml`],
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 1 },
+        docsFetched: 1,
+      },
+    });
+    const body = await ok("robots_get", { crawlId: id });
+    expect(body["suppliedSitemaps"]).toEqual([]);
+  });
+
+  it("refuses a supplied-sitemap list of the wrong shape rather than reading it as none", async () => {
+    // "Nobody supplied a sitemap" is a claim about how the crawl was run. A
+    // blob this engine did not write must not be read into one.
+    const id = await seedCrawl({
+      id: `crawl_mcp_badsupply_${Date.now()}`,
+      status: "finished",
+      config: { siteUrl: `${SEEDED_SITE}/`, userAgent: "AriadneBot/0.1 (mcp-test)" },
+      discovery: {
+        robots: { outcome: "read", crawlDelaySec: null, note: null, raw: SEEDED_ROBOTS, truncated: false },
+        sitemapSources: [],
+        suppliedSitemaps: `${SEEDED_SITE}/sitemap-extra.xml`,
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+        docsFetched: 0,
+      },
+    });
+    const answer = await call("robots_get", { crawlId: id });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("suppliedSitemaps");
   });
 
   it("reads the live crawl's own file, which the crawler fetched rather than this tool", async () => {

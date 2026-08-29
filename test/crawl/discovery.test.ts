@@ -511,6 +511,39 @@ describe("discover: sitemaps", () => {
     );
   });
 
+  // A supplied document is not a speculative one: somebody named it. What the
+  // walk owes the origin is not fetching the same document twice because two
+  // people named it in two spellings.
+  it("walks a supplied document the site already declares exactly once", async () => {
+    const declaredOnly = await discover(base, OPTS);
+    // The same URL the robots.txt declares, in a spelling a person would paste
+    // off a screen: same document, different string.
+    const alsoSupplied = await discover(base, {
+      ...OPTS,
+      extraSitemaps: [`${base}/sitemap.xml#gid=0`],
+    });
+
+    expect(alsoSupplied.truncation.docsFetched).toBe(declaredOnly.truncation.docsFetched);
+    expect(alsoSupplied.sitemapEntries.map((e) => e.url).sort()).toEqual(
+      declaredOnly.sitemapEntries.map((e) => e.url).sort(),
+    );
+  });
+
+  it("walks a supplied document robots.txt never declared", async () => {
+    // `bare`'s robots.txt 404s, so it declares nothing: without the supplied
+    // URL this walk reads no document at all, because the engine never guesses
+    // at one nobody named.
+    const d = await discover(bare, {
+      ...OPTS,
+      extraSitemaps: [`${bare}/gz/encoded.xml`],
+    });
+    expect(d.truncation.docsFetched).toBe(1);
+    expect(d.sitemapEntries.length).toBeGreaterThan(0);
+    // The entries carry the supplied document as their source, so a reader can
+    // tell which document published a URL.
+    expect(d.sitemapEntries.every((e) => e.source === `${bare}/gz/encoded.xml`)).toBe(true);
+  });
+
   it("skips oversized shards whole and counts them", async () => {
     const d = await discover(base, OPTS);
     expect(d.truncation.oversizedDocsSkipped).toBe(1);

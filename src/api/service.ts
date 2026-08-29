@@ -170,6 +170,20 @@ export const API_CRAWL_DEFAULTS = { maxPages: 500 } as const;
  */
 export const MIN_PER_HOST_DELAY_MS = 250;
 
+/**
+ * How many sitemap documents one crawl-start request may name.
+ *
+ * The walk itself is capped at 300 documents including everything a sitemap
+ * INDEX points at (`MAX_SITEMAP_DOCS`, src/crawl/discovery.ts), so this is not
+ * the limit that protects the origin — it is the limit on what a REQUEST may
+ * carry into `config_jsonb`, which is a column every resume and every render
+ * pass reads back. Fifty root documents is already a site whose sitemap has an
+ * index, and supplying the index is both shorter and more faithful to what the
+ * site publishes. Refused rather than trimmed: a list this engine silently cut
+ * would leave the caller believing every document was walked (hard rule 7).
+ */
+export const MAX_SUPPLIED_SITEMAPS = 50;
+
 /** Rows per page when the caller does not say, and the ceiling when they do. */
 export const PAGE_SIZE_DEFAULT = 50;
 export const PAGE_SIZE_MAX = 200;
@@ -187,6 +201,7 @@ export interface StartCrawlInput {
   maxConcurrency?: number;
   probeHosts?: boolean;
   legacyHosts?: string[];
+  sitemapUrls?: string[];
   renderBudgetPct?: number;
   renderMaxPages?: number;
   renderSamplePerType?: number;
@@ -218,6 +233,7 @@ export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
   maxConcurrency: "number",
   probeHosts: "boolean",
   legacyHosts: "string[]",
+  sitemapUrls: "string[]",
   renderBudgetPct: "number",
   renderMaxPages: "number",
   renderSamplePerType: "number",
@@ -444,9 +460,22 @@ export interface CrawlDetail extends CrawlListItem {
    *
    * Empty is a real answer, not a fallback: `legacyHosts` is optional, so an
    * absent key means nobody named one. A stored value of the wrong SHAPE is a
-   * refusal instead (see `legacyHostsOf`).
+   * refusal instead (see `configStringList`).
    */
   legacyHosts: string[];
+  /**
+   * The sitemap documents this crawl was handed at start, echoed from its
+   * stored config. Empty when none were supplied.
+   *
+   * Beside `legacyHosts` for the same reason: it is a denominator. This engine
+   * never probes for an undeclared sitemap, so `sitemap.missing` (CHECK-06)
+   * reporting an undeclared sitemap next to an empty list here means nobody has
+   * yet handed the crawl the document — a crawl to re-run with it, not a report
+   * to write. Next to a non-empty list it means the supplied document WAS
+   * walked and robots.txt still does not declare it, which is the site's own
+   * finding.
+   */
+  sitemapUrls: string[];
   /**
    * When the rules last COMPLETED a pass over this crawl, or null.
    *
@@ -512,8 +541,18 @@ export interface RobotsEvidence {
   crawlDelaySec: number | null;
   /** Why the rules are what they are, when that needed saying. Null when read. */
   note: string | null;
-  /** The `Sitemap:` lines the walk was pointed at, in the order declared. */
+  /** The `Sitemap:` lines THIS FILE carried, in the order declared. */
   sitemapSources: string[];
+  /**
+   * The sitemap documents the crawl was handed at start (`sitemapUrls`), which
+   * the walk read alongside the declared ones. Empty when none were supplied.
+   *
+   * It is here rather than only on the crawl detail because this is the endpoint
+   * that answers "which sitemaps did this crawl read": the two lists together
+   * are that answer, and either one alone is a different, smaller claim. A
+   * document in BOTH was declared and re-supplied — the walk fetched it once.
+   */
+  suppliedSitemaps: string[];
   /**
    * The user agent the crawl identified as — the groups in this file that
    * governed it. Null when the stored config does not carry one, which is a
@@ -889,9 +928,11 @@ export class ApiService {
    * crawl row that fails later for a reason they must go and read.
    *
    * THE SEED IS NOT THE ONLY HOST A CRAWL FETCHES. `legacyHosts` adds hosts the
-   * host probe visits before any robots.txt has been read, so they go through
-   * the same two checks — see `checkLegacyHosts`, which is where the allowlist
-   * would otherwise have had a hole big enough to drive a crawler through.
+   * host probe visits before any robots.txt has been read, and `sitemapUrls`
+   * adds documents the discovery walk fetches that no robots.txt pointed at, so
+   * both go through the same two checks — see `checkLegacyHosts` and
+   * `checkSitemapUrls`, which is where the allowlist would otherwise have had a
+   * hole big enough to drive a crawler through.
    */
   async startCrawl(input: StartCrawlInput): Promise<CrawlAccepted> {
     if (this.closed) {
@@ -930,6 +971,10 @@ export class ApiService {
     }
 
     await this.checkLegacyHosts(siteUrl, input.legacyHosts, allowPrivate);
+    // The other list of URLs a request adds to the crawl: documents the walk
+    // will fetch that no robots.txt pointed at (hard rule 5 — the policy runs
+    // on every URL a client supplies, not only on the seed).
+    await this.checkSitemapUrls(siteUrl, input.sitemapUrls, allowPrivate);
 
     const crawlConfig = this.effectiveConfig(siteUrl, input);
     try {
@@ -1058,7 +1103,8 @@ export class ApiService {
       liveLeases,
       blockedPages,
       hostSpacingMs: row.hostSpacingMs,
-      legacyHosts: legacyHostsOf(row.config, crawlId),
+      legacyHosts: configStringList(row.config, "legacyHosts", crawlId),
+      sitemapUrls: configStringList(row.config, "sitemapUrls", crawlId),
       rulesRunAt: row.rulesRunAt === null ? null : row.rulesRunAt.toISOString(),
       findingsCount,
     };
@@ -1110,6 +1156,7 @@ export class ApiService {
       crawlDelaySec: robots.crawlDelaySec,
       note: robots.note,
       sitemapSources: robots.sitemapSources,
+      suppliedSitemaps: robots.suppliedSitemaps,
       userAgent,
     };
   }
@@ -1950,28 +1997,133 @@ export class ApiService {
       throw new ServiceError("VALIDATION", messageOf(error));
     }
 
-    const own = new Set(ownSpellings);
+    await this.checkAddedHosts(everyStart, ownSpellings, allowPrivate, {
+      allowlist: (host) =>
+        `legacyHosts names '${host}', which is not in this server's crawl allowlist: ` +
+        `the host probe fetches every legacy host, and those fetches are the only ` +
+        `ones the crawler makes before it has read anybody's robots.txt`,
+      policy: (host, reason) => `legacyHosts entry '${host}' refused by the URL policy: ${reason}`,
+    });
+  }
+
+  /**
+   * The sitemap documents a client handed the crawl, checked on exactly the
+   * terms `legacyHosts` is.
+   *
+   * WHY THE FIELD EXISTS. The crawler never probes `/sitemap.xml` on spec (the
+   * P1 ruling in src/crawl/discovery.ts): a document nobody pointed at is not
+   * something this engine invents a request for, and reporting whatever comes
+   * back as the site's published sitemap would be a fact we made up. That
+   * leaves a real site — one whose sitemap exists and whose robots.txt never
+   * says so — uncrawlable through its sitemap, and this is the other half of
+   * the ruling: somebody who KNOWS where the document is says so, once, at
+   * crawl start. The undeclared sitemap is still reported (`sitemap.missing`,
+   * CHECK-06), because it is still worth fixing.
+   *
+   * WHAT IS GATED. Each entry must be an absolute http(s) URL — a 400 naming
+   * the entry, here, rather than a walk failure the operator would read as the
+   * site's — and each must be a URL this server may point a fetch at: the
+   * site's own family (apex/www × http/https) is authorised by the crawl
+   * itself, and anything else must be on the allowlist in its own right. A
+   * sitemap on a CDN or a subdomain is ordinary and is exactly what the second
+   * clause is for; `{siteUrl: <allowed>, sitemapUrls: ["https://victim/x.xml"]}`
+   * is what it refuses.
+   *
+   * The order matters: unreadable URLs are named first (a 400 the caller can
+   * fix from the message), then the allowlist, then the URL policy — the same
+   * order and the same authority as `startCrawl`'s own checks.
+   */
+  private async checkSitemapUrls(
+    siteUrl: string,
+    sitemapUrls: readonly string[] | undefined,
+    allowPrivate: boolean,
+  ): Promise<void> {
+    if (sitemapUrls === undefined || sitemapUrls.length === 0) return;
+
+    if (sitemapUrls.length > MAX_SUPPLIED_SITEMAPS) {
+      throw new ServiceError(
+        "VALIDATION",
+        `sitemapUrls names ${sitemapUrls.length} documents, above this server's limit of ` +
+          `${MAX_SUPPLIED_SITEMAPS}. A site with more sitemap documents than that has a ` +
+          `sitemap INDEX — supply the index and the walk follows it, three levels deep`,
+      );
+    }
+
+    const targets: string[] = [];
+    for (const entry of sitemapUrls) {
+      // `normalizeUrl` is parse and canonicalisation in one, and it rejects
+      // every scheme the crawler does not speak. The entry is quoted back as
+      // the caller wrote it; the crawl fetches that spelling too (discovery
+      // normalises only to compare documents, never to rewrite one).
+      if (normalizeUrl(entry) === null) {
+        throw new ServiceError(
+          "VALIDATION",
+          `sitemapUrls entry '${clip(entry)}' is not an absolute http(s) URL. A sitemap ` +
+            `document is named in full ('https://site.example/sitemap.xml'); the walk ` +
+            `resolves nothing relative`,
+        );
+      }
+      targets.push(entry);
+    }
+
+    let ownSpellings: string[];
+    try {
+      ownSpellings = hostProbeStarts(siteUrl);
+    } catch (error) {
+      throw new ServiceError("VALIDATION", messageOf(error));
+    }
+
+    await this.checkAddedHosts(targets, ownSpellings, allowPrivate, {
+      allowlist: (host) =>
+        `sitemapUrls names a document on '${host}', which is neither a spelling of this ` +
+        `crawl's own site nor in this server's crawl allowlist: the walk fetches every ` +
+        `document it is handed, so each host must be permitted in its own right`,
+      policy: (host, reason) =>
+        `sitemapUrls entry on '${host}' refused by the URL policy: ${reason}`,
+    });
+  }
+
+  /**
+   * The allowlist and the URL policy, applied to the hosts a request ADDS to a
+   * crawl beyond the seed's own family.
+   *
+   * One implementation for the two fields that add them (`legacyHosts` and
+   * `sitemapUrls`) rather than a copy each: the posture is a single decision —
+   * the site's own spellings are authorised by the crawl, everything else is a
+   * different site and is allowlisted or refused — and two copies of it would
+   * be two chances to fix a hole once. Callers supply the sentences, because a
+   * refusal that does not say which field it is about is a refusal nobody can
+   * act on.
+   *
+   * `own` is the site's own start URLs (`hostProbeStarts(siteUrl)`), compared
+   * by hostname; `targets` are absolute URLs. One check per distinct added
+   * host — the policy's verdict is about the host and the scheme, not the path.
+   */
+  private async checkAddedHosts(
+    targets: readonly string[],
+    own: readonly string[],
+    allowPrivate: boolean,
+    refusal: {
+      allowlist: (host: string) => string;
+      policy: (host: string, reason: string) => string;
+    },
+  ): Promise<void> {
+    const ownHosts = new Set(own.map((start) => new URL(start).hostname));
     const checked = new Set<string>();
-    for (const start of everyStart) {
-      if (own.has(start)) continue;
-      const host = new URL(start).hostname;
+    for (const target of targets) {
+      const host = new URL(target).hostname;
+      if (ownHosts.has(host)) continue;
       if (checked.has(host)) continue;
       checked.add(host);
 
       if (!isHostAllowed(host, this.config.allowedDomains)) {
-        throw new ServiceError(
-          "FORBIDDEN",
-          `legacyHosts names '${host}', which is not in this server's crawl allowlist: ` +
-            `the host probe fetches every legacy host, and those fetches are the only ` +
-            `ones the crawler makes before it has read anybody's robots.txt`,
-        );
+        throw new ServiceError("FORBIDDEN", refusal.allowlist(host));
       }
-      const verdict = await isUrlAllowed(start, { allowPrivate });
+      const verdict = await isUrlAllowed(target, { allowPrivate });
       if (!verdict.allowed) {
         throw new ServiceError(
           "FORBIDDEN",
-          `legacyHosts entry '${host}' refused by the URL policy: ` +
-            `${verdict.reason ?? "no reason given"}`,
+          refusal.policy(host, verdict.reason ?? "no reason given"),
         );
       }
     }
@@ -2523,6 +2675,7 @@ export class ApiService {
     crawlDelaySec: number | null;
     note: string | null;
     sitemapSources: string[];
+    suppliedSitemaps: string[];
   } {
     if (discovery === null || discovery === undefined) {
       throw new ServiceError(
@@ -2568,11 +2721,24 @@ export class ApiService {
       bad("a non-numeric robots.crawlDelaySec");
     }
     // The declared sitemaps live one level up, on the discovery blob itself —
-    // they are what the WALK was pointed at, and every one of them came off a
-    // `Sitemap:` line in this file (`discoveryEvidence`, src/crawl/loop.ts).
+    // every one of them came off a `Sitemap:` line in this file
+    // (`discoveryEvidence`, src/crawl/loop.ts).
     const sources = discovery["sitemapSources"];
     if (!Array.isArray(sources) || sources.some((s) => typeof s !== "string")) {
       bad("no sitemapSources array of strings");
+    }
+    // Its sibling: the documents the CLIENT supplied, which the walk read too.
+    // Absent is empty — the field arrived with the ability to supply a sitemap,
+    // so a crawl written before it had none — and the wrong shape is a refusal,
+    // because "no sitemap was supplied" is a claim about how this crawl was run
+    // and must not be invented (the `parseDiscovery` ruling, hard rule 7).
+    const supplied = discovery["suppliedSitemaps"];
+    if (
+      supplied !== undefined &&
+      supplied !== null &&
+      (!Array.isArray(supplied) || supplied.some((s) => typeof s !== "string"))
+    ) {
+      bad("a suppliedSitemaps that is not an array of strings");
     }
 
     return {
@@ -2582,6 +2748,7 @@ export class ApiService {
       crawlDelaySec: (delay as number | null | undefined) ?? null,
       note: (note as string | null | undefined) ?? null,
       sitemapSources: sources as string[],
+      suppliedSitemaps: (supplied as string[] | null | undefined) ?? [],
     };
   }
 
@@ -2596,29 +2763,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * `legacyHosts` off a stored config, checked rather than cast.
+ * One of the crawl config's string lists (`legacyHosts`, `sitemapUrls`) off a
+ * stored config, checked rather than cast.
  *
- * Absent is `[]` and that is the honest reading: the field is optional, and a
- * crawl started without one was told about no legacy domain. A value of the
- * wrong SHAPE is a different matter — it is a config this engine did not write,
- * and echoing `[]` for it would report "no legacy hosts were configured" about
- * a row that says otherwise (hard rule 7). `parseStoredConfig` refuses the same
- * shape for the same reason; this is the read-only half of it, which does not
- * demand the rest of the config be readable in order to answer a status poll.
+ * Absent is `[]` and that is the honest reading: both fields are optional, and
+ * a crawl started without one was told about no legacy domain and handed no
+ * sitemap. A value of the wrong SHAPE is a different matter — it is a config
+ * this engine did not write, and echoing `[]` for it would report "nothing was
+ * configured" about a row that says otherwise (hard rule 7).
+ * `parseStoredConfig` refuses the same shape for the same reason; this is the
+ * read-only half of it, which does not demand the rest of the config be
+ * readable in order to answer a status poll.
  */
-function legacyHostsOf(config: unknown, crawlId: string): string[] {
+function configStringList(config: unknown, field: string, crawlId: string): string[] {
   if (!isRecord(config)) {
     throw new ServiceError("CONFLICT", `crawl ${crawlId} has a stored config that is not an object`);
   }
-  const hosts = config["legacyHosts"];
-  if (hosts === undefined || hosts === null) return [];
-  if (!Array.isArray(hosts) || hosts.some((host) => typeof host !== "string")) {
+  const value = config[field];
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
     throw new ServiceError(
       "CONFLICT",
-      `crawl ${crawlId} has a stored config.legacyHosts that is not an array of strings`,
+      `crawl ${crawlId} has a stored config.${field} that is not an array of strings`,
     );
   }
-  return hosts as string[];
+  return value as string[];
 }
 
 /**

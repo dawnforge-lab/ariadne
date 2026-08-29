@@ -276,8 +276,9 @@ of three ways:
   walked. Both are closed vocabularies and a value outside them is refused by name.
 - **The robots.txt the crawl obeyed is readable.** `robots_get` returns the stored
   file — `raw` (the text as served, `truncated` when it is only the first 500KB),
-  `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources` and
-  the `userAgent` the crawl matched under. It is EVIDENCE, not a re-fetch: a file that
+  `outcome` (`read` / `absent` / `unreachable`), `crawlDelaySec`, `sitemapSources`,
+  `suppliedSitemaps` (documents the crawl was handed at start rather than told about
+  by the file) and the `userAgent` the crawl matched under. It is EVIDENCE, not a re-fetch: a file that
   has changed since the crawl is a fact about the site, and reading today's copy over
   the crawl's would hide it.
 - **Large lists go to a file.** `export_crawl` writes `issues`, `pages` or `metrics`

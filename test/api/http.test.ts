@@ -30,7 +30,7 @@ import { crawls, frontier, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
-import { MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
+import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -614,6 +614,57 @@ describe("domain allowlist", () => {
     expect(detail["legacyHosts"]).toEqual(["old.localhost"]);
   });
 
+  // `sitemapUrls` is the third way a request names something to fetch, and it
+  // is fetched by the discovery walk before a single page is. The allowlist
+  // posture is `legacyHosts`': the site's own spellings are authorised by the
+  // crawl, everything else must be on the list in its own right.
+  it("403s a supplied sitemap on a host nobody allowlisted, naming it", async () => {
+    const res = await call("POST", "/crawls", {
+      body: { siteUrl: `${site}/`, sitemapUrls: ["https://victim.example/sitemap.xml"] },
+    });
+    expect(res.status).toBe(403);
+    expect(String(res.body["error"])).toContain("victim.example");
+    expect(String(res.body["error"])).toContain("sitemapUrls");
+  });
+
+  it("400s a sitemapUrls entry that is not an absolute URL, at accept time", async () => {
+    // A relative path is the mistake somebody makes reading it off a CMS. The
+    // walk resolves nothing, so this would otherwise be a walk failure the
+    // operator reads as the site's.
+    const res = await call("POST", "/crawls", {
+      body: { siteUrl: `${site}/`, sitemapUrls: ["/sitemap.xml"] },
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("sitemapUrls");
+    expect(String(res.body["error"])).toContain("/sitemap.xml");
+  });
+
+  it("400s a sitemapUrls list longer than the server's limit rather than trimming it", async () => {
+    const many = Array.from(
+      { length: MAX_SUPPLIED_SITEMAPS + 1 },
+      (_unused, i) => `${site}/sitemap-${i}.xml`,
+    );
+    const res = await call("POST", "/crawls", {
+      body: { siteUrl: `${site}/`, sitemapUrls: many },
+    });
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain(String(MAX_SUPPLIED_SITEMAPS));
+  });
+
+  it("accepts a supplied sitemap on the site's own host, and echoes it", async () => {
+    const res = await startCrawl({
+      siteUrl: `${site}/`,
+      maxPages: 2,
+      sitemapUrls: [`${site}/sitemap.xml`],
+    });
+    expect(res.status).toBe(202);
+    const detail = await settle(String(res.body["crawlId"]));
+    // The echo, beside legacyHosts and for the same reason: "no sitemap
+    // declared" beside an empty list is a crawl to re-run with the document,
+    // not a report to write.
+    expect(detail["sitemapUrls"]).toEqual([`${site}/sitemap.xml`]);
+  });
+
   it("refuses every crawl when the allowlist is empty, but still answers queries", async () => {
     const started = await fetch(`${closedBase}/crawls`, {
       method: "POST",
@@ -657,6 +708,10 @@ describe("crawl lifecycle", () => {
     expect(fixtureFinal["findingsCount"]).toBe(0);
     // Nobody named a legacy domain for this crawl: present and empty.
     expect(fixtureFinal["legacyHosts"]).toEqual([]);
+    // …and nobody handed it a sitemap either. Same reading: the engine never
+    // probes for an undeclared one, so an empty list is "nobody has supplied
+    // it yet", never "the site has none".
+    expect(fixtureFinal["sitemapUrls"]).toEqual([]);
   });
 
   it("counts the crawl's blocked pages on the status body", async () => {
@@ -1074,8 +1129,29 @@ describe("GET /crawls/:id/robots", () => {
     // The file declares no Crawl-delay, which is null rather than 0.
     expect(res.body["crawlDelaySec"]).toBeNull();
     expect(res.body["sitemapSources"]).toEqual([`${site}/sitemap.xml`]);
+    // Nobody handed this crawl a sitemap, so the supplied half is present and
+    // empty — the two lists together are "which sitemaps did this crawl read".
+    expect(res.body["suppliedSitemaps"]).toEqual([]);
     // The agent the crawl identified as: the groups in this file that bound it.
     expect(String(res.body["userAgent"])).toContain("AriadneBot");
+  });
+
+  it("names the sitemaps the client supplied beside the ones robots.txt declared", async () => {
+    const started = await startCrawl({
+      siteUrl: `${site}/`,
+      maxPages: 2,
+      // The same document robots.txt declares, re-stated by the caller: it is
+      // both declared and supplied, and the evidence says both.
+      sitemapUrls: [`${site}/sitemap.xml`],
+    });
+    expect(started.status).toBe(202);
+    const crawlId = String(started.body["crawlId"]);
+    await settle(crawlId);
+
+    const res = await call("GET", `/crawls/${crawlId}/robots`);
+    expect(res.status).toBe(200);
+    expect(res.body["sitemapSources"]).toEqual([`${site}/sitemap.xml`]);
+    expect(res.body["suppliedSitemaps"]).toEqual([`${site}/sitemap.xml`]);
   });
 
   it("409s a crawl that never completed discovery, and 404s one nothing knows", async () => {

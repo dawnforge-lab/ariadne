@@ -48,7 +48,7 @@ import { XMLParser } from "fast-xml-parser";
 import robotsParserImport from "robots-parser";
 import { request } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
-import { isSameOrigin, onRulesOrigin } from "./parse/url-utils.js";
+import { isSameOrigin, normalizeUrl, onRulesOrigin } from "./parse/url-utils.js";
 import {
   blockedAddressMessage,
   decodeBody,
@@ -234,7 +234,19 @@ export interface DiscoveryResult {
 
 export interface DiscoveryOpts {
   userAgent: string;
-  /** Sitemaps to walk in addition to the ones robots.txt declares. */
+  /**
+   * Sitemaps to walk in addition to the ones robots.txt declares — documents
+   * somebody NAMED (the site's owner, through the operator or the agent that
+   * started the crawl), never documents this engine guessed at. See `discover`
+   * on why the difference is the whole of the policy.
+   *
+   * They are merged with the declared ones and deduplicated on the normalised
+   * spelling, first mention winning, so a client who supplies a sitemap the
+   * site already declares costs the origin one request rather than two.
+   * WHICH list a document came from is not recorded here: `discover` returns
+   * facts about the walk, and the two lists are the caller's own — the crawl
+   * loop writes both into `crawls.discovery_jsonb` (see `discoveryEvidence`).
+   */
   extraSitemaps?: string[];
   /** Per-document deadline: connect, headers and body together. */
   timeoutMs?: number;
@@ -695,6 +707,37 @@ function parseSitemapDoc(xml: string): ParsedDoc | null {
 }
 
 /**
+ * The documents the walk starts from: what robots.txt declared, then what the
+ * caller supplied, with each document named once.
+ *
+ * DEDUPED ON THE NORMALISED SPELLING rather than on the string, because the two
+ * lists are written by different people. A site declares
+ * `Sitemap: https://site.example/sitemap.xml` and the client, reading it off a
+ * CMS screen, supplies `https://site.example/sitemap.xml#gid=0` or the same URL
+ * with its query parameters in the other order. Those are one document, and
+ * fetching it twice would be one extra request to an origin we are about to
+ * spend a whole crawl on (rule 9), plus a second, identical set of entries the
+ * dedupe downstream would silently absorb.
+ *
+ * The URL KEPT is the first spelling, not the normalised key: what is fetched
+ * is what somebody wrote, and normalisation is a comparison device here, not an
+ * edit. A URL `normalizeUrl` cannot read is kept as its own key and passed
+ * through — `fetchDoc` refuses it by policy and the refusal is recorded with the
+ * URL as given, which is more use to whoever mistyped it than a silent drop.
+ */
+function startingSources(declared: readonly string[], supplied: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const sources: string[] = [];
+  for (const url of [...declared, ...supplied]) {
+    const key = normalizeUrl(url) ?? url;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    sources.push(url);
+  }
+  return sources;
+}
+
+/**
  * Read robots.txt and walk the sitemap tree it points at.
  *
  * Never throws for anything the target site does — an absent robots.txt, a
@@ -706,6 +749,18 @@ function parseSitemapDoc(xml: string): ParsedDoc | null {
  * `extraSitemaps`; there is no speculative probe of `/sitemap.xml`, because a
  * document nobody pointed at is the caller's decision to make (and to pay the
  * request for), not ours to make silently.
+ *
+ * A SUPPLIED SITEMAP IS NOT A SPECULATIVE ONE, and the stance above is what
+ * makes `extraSitemaps` the right seam rather than an exception to it: the
+ * request is still one somebody decided to make, and the crawl still records
+ * who pointed at each document. What the engine refuses to do is invent a URL
+ * and then report whatever comes back as if the site had published it. The two
+ * paths — declared in robots.txt, or handed to the crawl at start — are the
+ * only two, and a site with neither has an undeclared sitemap, which is a
+ * finding (`sitemap.missing`, CHECK-06) rather than something to paper over.
+ *
+ * The two lists are merged and deduplicated on the normalised spelling
+ * (`startingSources`): a document both named is walked once.
  *
  * Documents are read one at a time, spaced by the crawl-delay robots.txt asked
  * for (capped, see MAX_CRAWL_DELAY_MS). Discovery is a handful of requests on
@@ -734,7 +789,7 @@ export async function discover(
 
   const robots = await fetchRobots(siteUrl, opts, unreachableMode);
 
-  const sources = [...robots.sitemapUrls, ...(opts.extraSitemaps ?? [])];
+  const sources = startingSources(robots.sitemapUrls, opts.extraSitemaps ?? []);
 
   // Complete disallow means complete: we do not go on to pull 300 sitemap
   // shards off an origin that could not serve its robots.txt. The sources are

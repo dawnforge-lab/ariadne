@@ -518,15 +518,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      was refused — a robots-shaped block that shows up as a fetch outcome.
   3. **`robots_get` — the file itself, as this crawl read it.** It answers
      `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note,
-     sitemapSources, userAgent}`: `raw` is the text the crawl obeyed, `outcome` is
-     `read` / `absent` / `unreachable` (and `unreachable` is NOT `absent` — a site
-     that could not tell us its rules is a finding, not an allow-all), `truncated`
-     means `raw` is only the first 500KB so anything concluded about a rule past that
-     point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
-     (CHECK-06 reads it), and `userAgent` is the UA whose groups actually governed
-     the crawl. **Stored evidence, never re-fetched**: quote it rather than the live
-     file, and if you also read the live file, report the difference as the fact about
-     the site that it is.
+     sitemapSources, suppliedSitemaps, userAgent}`: `raw` is the text the crawl
+     obeyed, `outcome` is `read` / `absent` / `unreachable` (and `unreachable` is NOT
+     `absent` — a site that could not tell us its rules is a finding, not an
+     allow-all), `truncated` means `raw` is only the first 500KB so anything
+     concluded about a rule past that point is unsound, `sitemapSources` is the `Sitemap:` lines in declaration order
+     (CHECK-06 reads it), `suppliedSitemaps` is the documents the crawl was HANDED at
+     start rather than told about by the file — a sitemap listed only there is one the
+     site publishes and does not declare, and CHECK-06 still fires — and `userAgent`
+     is the UA whose groups actually governed the crawl. **Stored evidence, never
+     re-fetched**: quote it rather than the live file, and if you also read the live
+     file, report the difference as the fact about the site that it is.
 - **The file's contents** (steps 1-4 read `robots_get`'s `raw`; a browser only if the
   crawl never stored one — `outcome: "unreachable"`):
   1. Read `raw` in full. Note `truncated` in the finding if it is set.
@@ -641,10 +643,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   each — is CHECK-08's metric; do not re-fetch the file to describe it.
 
   **The robots.txt half is `robots_get`'s `sitemapSources`**: the `Sitemap:` lines the
-  crawl's walk was pointed at, in declaration order. Empty means the file declared
-  none, which is the WARN below — and it is a different fact from "no sitemap exists",
-  which is `sitemap.missing`. A site with a sitemap at the conventional location and
-  no declaration fails this half and passes the other; say both.
+  file declared, in declaration order. Empty means the file declared none, which is
+  the WARN below — and it is a different fact from "no sitemap exists", which is
+  `sitemap.missing`. A site with a sitemap at the conventional location and no
+  declaration fails this half and passes the other; say both.
+
+  **`suppliedSitemaps` is how you get to say the second half at all.** The engine
+  never probes for an undeclared sitemap, so a crawl that read none has no sitemap
+  evidence — every CHECK-07 and CHECK-08 answer below would be a silence about a
+  document nobody looked at. When `sitemapSources` is empty and `suppliedSitemaps`
+  is empty too, the sitemap questions are NOT MEASURED: find the document (ask the
+  owner, the CMS, Search Console) and re-crawl with `crawl_start`'s `sitemapUrls`,
+  then judge. Supplying it does not settle this check — robots.txt still declares
+  nothing, `sitemap.missing` still fires, and the one-line fix is still the site's.
 - **Evaluate**:
   - FAIL if sitemap returns non-200 or robots.txt has no Sitemap: line
   - WARN if flat sitemap with >50k URLs
@@ -2279,7 +2290,7 @@ through an empty listing rests on that timestamp.
 | `issues_list` | one row per rule that found something: `{ruleId, checkIds, severity, category, title, count, sampleUrls}` | the verdict on a check, and its size |
 | `issue_urls` | one row per finding: `{url, evidence}` | the URL list a developer gets, and the per-page evidence |
 | `metrics_get` | `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}` | every number a report quotes |
-| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
+| `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, suppliedSitemaps, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
 
 **Filters that matter for a checklist walk:**
 
