@@ -269,7 +269,10 @@ const ALLOWLIST: Record<string, string> = {
   // Ours, but not on the agent surface.
   allowPrivate: "the crawl-defaults field the API refuses by name, never accepts",
   correlationId: "the internal-error envelope's field, built inline in mcp.ts and http.ts",
-  derivePageType: "the page-type heuristic named on the backlog, an internal function",
+  // `derivePageType` was allowed here while the skills had to warn the agent
+  // about the page-type heuristics on the backlog. P8-T5 closed that item and
+  // the warnings became a description of what the crawl now does, written in
+  // the agent's own vocabulary — no internal function named, so no exemption.
 };
 
 const allowlistUsed = new Set<string>();

@@ -418,8 +418,13 @@ describe("selectRenderSet", () => {
    * THE GATE SITE — the shape the first real-site crawl actually had, shrunk.
    *
    * lavishalice.com produced 196 page types over 551 pages: two or three real
-   * templates plus ~170 collection URLs that `derivePageType` left as singleton
-   * types of their own. 176 candidates competed for 28 seats, and because the
+   * templates plus ~170 collection URLs that the per-URL typing left as
+   * singleton types of their own (P8-T5's `inferPageTemplates` now merges those
+   * into `/collections/:slug` at crawl end — this test keeps the shape anyway,
+   * because size-ordering is what protects the selection on any site whose
+   * types are genuinely many and small, and the inference is not allowed to be
+   * the only thing standing between the audit and an empty answer).
+   * 176 candidates competed for 28 seats, and because the
    * cut was taken in URL order every seat went to `/apps/*` and
    * `/collections/a-b*` — **zero of the 211 `/products/:slug` pages rendered**,
    * so the four JavaScript rules came back empty for the biggest template on an

@@ -433,15 +433,16 @@ that covered 20 of 4,000 pages is evidence about 20 pages.
 **`truncated: true` also means the sample was decided by page type, so know what the
 types are.** Candidates are sampled per page type and the budget cut takes the largest
 templates first, which is what makes a handful of renders stand for a whole template.
-But a page type is derived from the URL path, and a path that occurs once becomes its
-own type: the Phase 6 gate site produced 196 types over 551 pages, four of them real
-templates and about 170 singletons, so roughly half the seats went to pages that exist
-once. Nothing is wrong when that happens — the templates are covered first — but the
-coverage you can claim is per template, not per page. Check which types were rendered
-(`pages_query` with `rendered: true`) before telling an audit that a template was
-measured, and raise `renderMaxPages` / `renderBudgetPct` if the tail crowded out
-something you needed — or name the pages yourself, which is what the section above is
-for.
+A page type is derived from the URL path, and the crawl collapses those paths into
+templates over the whole population before it closes — a shape three or more pages
+share becomes one template, and a genuine one-off keeps its own path as its type. The
+Phase 6 gate site's 551 URLs typed as 196 separate things before that pass existed and
+roughly half the sample's seats went to pages that exist once; they now go to
+templates. The tail is still there and still costs seats, so the coverage you can
+claim is per template, not per page. Check which types were rendered (`pages_query`
+with `rendered: true`) before telling an audit that a template was measured, and raise
+`renderMaxPages` / `renderBudgetPct` if the tail crowded out something you needed — or
+name the pages yourself, which is what the section above is for.
 
 On an explicit pass, `budget`, `suspects`, `sampled` and `truncated` come back
 **null**, not zero: no automatic decision was taken, so there was no budget, nothing

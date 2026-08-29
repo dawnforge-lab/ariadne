@@ -195,9 +195,15 @@ export function onRulesOrigin(url: string, rulesOrigin: string): string {
  * Slug rule: a segment is only treated as a slug when it has **three or more**
  * hyphen-separated parts. Two-part segments ("my-account", "john-doe",
  * "hello-world") are far more often fixed routes than content slugs, so they
- * stay literal. Downstream `page_type` derivation inherits that bias: a site
- * whose posts live at /blog/two-word-title gets one template per post rather
- * than a single /blog/:slug bucket.
+ * stay literal. That bias is per URL and cannot be otherwise — this function
+ * sees one path and no population, so a site whose posts live at
+ * /blog/two-word-title gets one template per post out of THIS function.
+ *
+ * The `page_type` a crawl ends up with does not stop here: `inferPageTemplates`
+ * (src/crawl/page-type.ts) runs over the whole crawl's URLs once the crawl is
+ * complete and merges those per-post types into the family they belong to. This
+ * function's job is to name one URL's shape; deciding which shapes are
+ * templates is a question about the other URLs, and it is answered there.
  */
 export function detectUrlTemplate(pathname: string): string {
   const segments = pathname.split("/").filter(Boolean);

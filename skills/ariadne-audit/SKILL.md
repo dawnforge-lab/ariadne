@@ -306,21 +306,25 @@ of three ways:
   report it as its own bucket rather than folding it into a template.
 
   **Know what the detection actually produces before you filter on it.** A page type
-  is derived from the URL path, and today it only collapses into a template
-  (`/products/:slug`) where the path has a repeated shape. A path that occurs once
-  becomes its own type. The gate site produced **196 types over 551 pages**: four
-  real templates and about 170 singletons — and `(untyped)` occurred **zero** times,
-  so the bucket this file and the checklist both tell you to report may simply not
-  exist on a given crawl. Say that it was empty rather than inventing one.
+  is derived from the URL path, and the crawl decides which paths are templates by
+  looking at all of them together, once it has finished: a group of three or more
+  pages sharing a path shape becomes one template (`/collections/:slug`), and a page
+  with no such group keeps its own path as its type (`/cart`, `/about`). So expect a
+  handful of `:slug` templates plus a short tail of one-off pages — the gate site's
+  551 URLs, which used to type as 196 separate things, now read as its four real
+  templates and a few named pages. A tail entry is a real page, not a failure to
+  type; report it as the page it is.
 
-  Practical consequence: the cohort ids are not guessable, so discover them first —
-  one `metrics_get` scoped pass or a `pages_query` census — and filter on the ids you
-  saw. Where the per-template breakdown the checklist asks for (CHECK-35 / 36 / 37:
-  products, collections, blog, info pages, separately) cannot be produced from those
-  ids, group by first path segment and SAY SO in `notes`. Both halves of this —
-  singleton types, and the missing `(untyped)` bucket — are recorded on the backlog
-  as the `derivePageType` heuristics item; they are engine behaviour to work around
-  today, not something to fix inside an audit.
+  `(untyped)` is a different thing again, and on that site it occurred **zero**
+  times — the bucket this file and the checklist both tell you to report may simply
+  not exist on a given crawl. Say that it was empty rather than inventing one.
+
+  Practical consequence: the cohort ids are still not guessable, so discover them
+  first — one `metrics_get` scoped pass or a `pages_query` census — and filter on the
+  ids you saw. The per-template breakdown the checklist asks for (CHECK-35 / 36 / 37:
+  products, collections, blog, info pages, separately) is normally producible from
+  those ids now; where a site's URLs genuinely do not separate that way, group by
+  first path segment and SAY SO in `notes`.
 - **A refusal names its field.** An unrecognised `severity`, `checkId`, `ruleId`,
   `category` or `pageType` is refused rather than answered with an unfiltered listing.
   Read the message; do not retry with a guess.

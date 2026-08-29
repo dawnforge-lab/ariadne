@@ -72,6 +72,7 @@ import {
   resolveRenderConfig,
   type RenderSelectionConfig,
 } from "./render/select.js";
+import { inferPageTemplates, type PageTemplateInference } from "./page-type.js";
 import { analyzePage } from "./parse/page-analyzer.js";
 import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { PageWriter, type PageWriterStats } from "./persist.js";
@@ -269,6 +270,13 @@ export interface CrawlSummary {
   writer: PageWriterStats;
   robots: { outcome: RobotsInfo["outcome"]; note: string | null };
   discovery: { sitemapEntries: number; truncation: DiscoveryTruncation };
+  /**
+   * What the crawl-end template inference did (`inferPageTemplates`), or null
+   * when it did not run — which today means a crawl that failed before it could
+   * see its own population. Null is not "nothing to collapse": that is
+   * `pagesRetyped: 0`, and the two must not be read as the same thing.
+   */
+  pageTemplates: PageTemplateInference | null;
   /** Why the crawl ended, when that needs saying. Null on a clean finish. */
   note: string | null;
 }
@@ -773,7 +781,7 @@ async function runToCompletion(
       skipped: `not probed: ${note}`,
     });
     await closeCrawl(db, crawlId, "failed", crawled);
-    return summarise(db, crawlId, "failed", crawled, emptyWriterStats(), discovery, note);
+    return summarise(db, crawlId, "failed", crawled, emptyWriterStats(), discovery, null, note);
   }
 
   const writer = new PageWriter(db, crawlId);
@@ -1126,6 +1134,41 @@ async function runToCompletion(
     }
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
+
+  // INSERTION 4 — the crawl types its own population, now that it has one.
+  //
+  // WHY HERE AND NOWHERE ELSE. `page_type` is written per URL as each page is
+  // persisted, and a single URL cannot say whether `/collections/all-white` is
+  // a template or a page — only the other 550 URLs can. This is the one moment
+  // when the population is complete and no reader has acted on it yet, and the
+  // readers who come next all want the collapsed answer:
+  //
+  //  - the auditing agent, which reads the crawl's page types to name the key
+  //    templates it wants rendered (`crawl_render` with `urls`) BEFORE the
+  //    rules ever run — the flow P8-T2 built, and the one this collapse exists
+  //    to serve;
+  //  - the automatic render selection, whose per-type sample means "one page
+  //    per template" only if a type is a template;
+  //  - `pages_query`/`issues_list`'s `pageType` filter, which must give the
+  //    same answer before and after a rules run — a crawl's evidence changing
+  //    under a reader who did nothing is not evidence;
+  //  - the metric cohorts, last rather than first.
+  //
+  // The alternative considered and rejected was a derivation in the rules run
+  // (`deriveClickDepth`'s slot). It is a smaller change and it leaves this file
+  // untouched, but it collapses the types AFTER the two readers above have
+  // already used them — the agent would still be naming templates out of 196
+  // singletons, which is the defect. It also re-runs on every `crawl_rules`
+  // call, while the population it reasons about only ever changes when the
+  // crawl does.
+  //
+  // Not contained the way the 404 probe is: this issues no request and touches
+  // no site, so a failure here is our bug over rows we already hold, and there
+  // is no column in which to write "the types are the parse-time ones". It
+  // propagates, `execute` closes the row `failed`, and the operator finds out
+  // (hard rule 7) rather than reading singleton cohorts that look deliberate.
+  const pageTemplates = await inferPageTemplates(db, crawlId);
+
   await closeCrawl(db, crawlId, status, pagesCrawled);
   return summarise(
     db,
@@ -1134,6 +1177,7 @@ async function runToCompletion(
     pagesCrawled,
     writer.stats(),
     discovery,
+    pageTemplates,
     aborted
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
@@ -1371,6 +1415,7 @@ async function summarise(
   pagesCrawled: number,
   writerStats: PageWriterStats,
   discovery: DiscoveryResult,
+  pageTemplates: PageTemplateInference | null,
   note: string | null,
 ): Promise<CrawlSummary> {
   return {
@@ -1384,6 +1429,7 @@ async function summarise(
       sitemapEntries: discovery.sitemapEntries.length,
       truncation: discovery.truncation,
     },
+    pageTemplates,
     note,
   };
 }

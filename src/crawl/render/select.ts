@@ -389,11 +389,14 @@ export async function selectRenderSet(
  * The automatic selection is a good answer to "we have never seen this site".
  * It is a poor answer to "the audit knows this site has four templates and
  * needs the home page and three products". Suspicion cannot see a template; the
- * per-type sample can, but only through `page_type`, which on a real site
- * splinters into singletons (551 URLs, 196 types on the Phase 6 gate crawl) and
- * spends the budget on pages that exist once. An auditing agent that has read
- * the cohort sizes and the URL patterns knows which pages a browser is worth
- * spending on, and this is how it says so.
+ * per-type sample can, but only through `page_type` — and until P8-T5 that
+ * splintered into singletons on a real site (551 URLs, 196 types on the Phase 6
+ * gate crawl), so the sample spent much of its budget on pages that exist once.
+ * `inferPageTemplates` closes that half of it BEFORE this module runs: the
+ * crawl collapses its own types on the way out, so a sampled type is a
+ * template. What it cannot supply is intent — which templates this audit is
+ * about, and which page stands for each. An auditing agent that has read the
+ * cohort sizes and the URL patterns knows that, and this is how it says so.
  *
  * The alternative it exists to avoid is rendering everything, which was
  * considered and rejected: a browser per page is the most expensive thing this

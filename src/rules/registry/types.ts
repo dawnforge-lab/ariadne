@@ -20,8 +20,10 @@ export interface Finding {
  * thing in `scope_value`, and the pair is part of the metrics primary key.
  *
  *  - `page_type` — one cohort of pages, named by the crawler's own template
- *    detection (`derivePageType`), with the untyped pages under the `UNTYPED`
- *    sentinel.
+ *    detection (src/crawl/page-type.ts: per URL as each page is written, then
+ *    collapsed over the whole population at crawl end, so a cohort is a
+ *    template rather than a URL shape that occurred once), with the untyped
+ *    pages under the `UNTYPED` sentinel.
  *  - `sitemap_doc` — one sitemap document, named by the URL it was fetched
  *    from. It exists because `sitemap.structure` has per-document rows and a
  *    sitemap document is NOT a page type: filing `https://site/sitemap-1.xml`

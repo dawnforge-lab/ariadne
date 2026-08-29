@@ -168,6 +168,15 @@ info). Derive it once with URL template detection (OpenSEO's
 `detectUrlTemplate`) plus optional client-supplied path patterns, and store it.
 Without this column, a dozen checks cannot be answered.
 
+One URL cannot say whether its shape is a template, so the crawl makes a second
+pass over its own population before it closes: path shapes sharing a family
+(`/collections/*`) merge into one template id when at least three distinct paths
+carry the family and more than one shape is in it; a page with no such family
+keeps its own path as its type, and nothing is swept into a catch-all bucket.
+Per-URL typing alone produced 196 types over 551 pages on the Phase 6/7 gate
+site, which is a cohort column no reader can group by
+(`inferPageTemplates`, src/crawl/page-type.ts).
+
 ---
 
 ## 3. Rule engine contract
