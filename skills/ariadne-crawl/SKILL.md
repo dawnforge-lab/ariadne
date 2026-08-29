@@ -440,9 +440,11 @@ Phase 6 gate site's 551 URLs typed as 196 separate things before that pass exist
 roughly half the sample's seats went to pages that exist once; they now go to
 templates. The tail is still there and still costs seats, so the coverage you can
 claim is per template, not per page. Check which types were rendered (`pages_query`
-with `rendered: true`) before telling an audit that a template was measured, and raise
-`renderMaxPages` / `renderBudgetPct` if the tail crowded out something you needed — or
-name the pages yourself, which is what the section above is for.
+with `rendered: true`) before telling an audit that a template was measured. If the
+tail crowded out something you needed, `renderMaxPages` / `renderBudgetPct` are
+`crawl_start` fields — a finished crawl's cannot be raised, so start a new crawl with
+higher ones — or name the pages yourself on this crawl, which is what the section
+above is for.
 
 On an explicit pass, `budget`, `suspects`, `sampled` and `truncated` come back
 **null**, not zero: no automatic decision was taken, so there was no budget, nothing

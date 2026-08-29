@@ -668,8 +668,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `sitemap.non-200` (warning) — a listed URL that did not answer 200
   - `sitemap.redirected` (warning) — a listed URL that redirects
   - `sitemap.non-indexable` (warning) — a listed URL the crawl judged non-indexable
-  - `sitemap.uncrawled` (info) — a listed URL this crawl never reached (blocked by
-    robots, or outside the crawl's budget). NOT MEASURED, not clean.
+  - `sitemap.uncrawled` (info) — a listed URL this crawl never reached: blocked by
+    robots or outside the crawl's budget, off this crawl's origin (another host,
+    port, or scheme — never attempted by design; the evidence's `offOrigin` flag
+    marks these), or attempted and no response came back. NOT MEASURED, not clean.
   `issue_urls` per rule for the URL lists; `metrics_get` with
   `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
 - **Evaluate**:
