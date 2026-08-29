@@ -894,9 +894,26 @@ Node 22, a cached `npx playwright install --with-deps chromium` keyed on the
 locked Playwright version, then `npm ci` → `npx tsc --noEmit` → `npm run
 db:migrate` → `npm test`, on push to `main` and every pull request.
 
-**First CI run on this branch: _pending_.** This branch is **stacked on the
-unmerged Phase 7 PR #6**; PR #7 opens once #6 merges (or retargets), and the run
-link is added here then — the same placeholder-then-fill the Phase 7 gate used.
+**First CI run on this branch: FAILED — and the failure was real.**
+PR #6 merged and PR #7 opened against main
+(https://github.com/dawnforge-lab/ariadne/pull/7). Its first run
+(https://github.com/dawnforge-lab/ariadne/actions/runs/33268659558) failed five
+lease-count assertions that three local full-suite runs on the same tree never
+touched. Not flake: both frontier lease statements claimed rows through
+`UPDATE … WHERE (crawl_id, url) IN (SELECT … LIMIT n FOR UPDATE SKIP LOCKED)`,
+and Postgres may plan that `IN` as a per-candidate-row subplan — each claimed
+row stops matching the subselect the moment it is updated, so every
+re-evaluation locks a fresh row and `LIMIT n` leases more than n. CI's
+freshly-analyzed tables chose that plan; our local statistics never did.
+`92fd17d` moves both statements to a `WITH … AS MATERIALIZED` CTE the update
+joins — evaluated exactly once, so a lease of n is a lease of n on every plan.
+
+**Second run, on `92fd17d`: green** —
+https://github.com/dawnforge-lab/ariadne/actions/runs/33269229365 (3m26s,
+1424/1424 across 62 files). The same placeholder-then-fill the Phase 7 gate
+used, with one lesson on top: the gate's three green local runs proved the
+tree, and CI's different query-planner statistics still bought a real
+concurrency defect. That is what a second environment is for.
 
 The gate is not part of CI and cannot be: it crawls a third party's website with
 their permission.
