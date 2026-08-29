@@ -89,6 +89,17 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     renderedNavLinkCount: null,
     renderedFooterLinkCount: null,
     renderedFilterLinkCount: null,
+    // The second measurement family (P8-T1): the same analyzer over the
+    // serialised post-JavaScript DOM. Null for the same reason as the five
+    // above and one more of its own — a null here also means "no Phase-8 render
+    // pass wrote this row", which is the gate `content.csr-dependent` refuses a
+    // pre-P8 crawl on.
+    renderedAnalyzerWordCount: null,
+    renderedRenderableWordCount: null,
+    renderedTitle: null,
+    renderedH1Count: null,
+    renderedCanonical: null,
+    renderedHtmlPath: null,
     renderedRedirectUrl: null,
     renderError: null,
     ...overrides,

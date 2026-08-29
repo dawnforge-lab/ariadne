@@ -37,16 +37,50 @@
  *    columns null. "Rendered and empty" and "never rendered" stay different
  *    facts.
  *
- * The DOM is measured once, by a single in-page expression (`MEASURE_SCRIPT`),
- * and nothing but counts crosses back — no HTML, no link list. That is the
- * memory contract (rule 6) applied to a browser: RAM is O(concurrency), never
- * O(page size × URLs).
+ * THE DOM IS MEASURED TWICE, BY TWO DIFFERENT INSTRUMENTS, and the two answers
+ * are kept in two families of columns that no rule may mix (see the family
+ * blocks on `pages` in src/db/schema.ts):
+ *
+ *  1. **`MEASURE_SCRIPT`, in the page** (P5-T4): `innerText` and
+ *     `querySelectorAll` — what a READER sees, which no tokenizer can compute
+ *     without doing layout.
+ *  2. **`analyzeHtml`, over the serialised post-JS DOM** (P8-T1): the SAME
+ *     streaming analyzer the crawl ran over the bytes the server sent.
+ *
+ * **WHY THE SECOND ONE EXISTS, in one paragraph, because it is the whole of
+ * Phase 8 Task 1.** A diff is a subtraction, and a subtraction is only
+ * meaningful between two answers to the same question. Comparing the analyzer's
+ * `renderable_word_count` against `innerText` was not that: the analyzer cannot
+ * cascade CSS (hard rules 2 and 4), so every word a stylesheet hides is on the
+ * raw side of the subtraction and on neither side of the rendered one. The
+ * Phase 7 gate measured what that costs on a real Shopify theme
+ * (docs/gates/phase-7.md §4.2): a **near-constant 425-word offset** across 28
+ * rendered pages — one block of class-hidden chrome, identical on a 196-word
+ * page and on an 1,137-word one — which made `content.csr-dependent`'s firing
+ * condition arithmetically unreachable on that crawl whatever the site did
+ * (§4.9). **That chrome markup is present in BOTH documents.** It is in the
+ * bytes the server sent and it is in the DOM the browser built; only the
+ * *renderer* knows it is invisible. So measuring both documents with the SAME
+ * instrument puts the chrome on both sides of the subtraction, where it
+ * cancels, and what is left is the text JavaScript added — which is what the
+ * rule was always about.
+ *
+ * The serialised HTML crosses the process seam ONCE, is analysed and written to
+ * disk, and is not held: RAM stays O(concurrency × page size), never O(URLs),
+ * which is the memory contract (rule 6) applied to a browser. The file written
+ * is byte-identical to the string the numbers were computed from, so an auditor
+ * who disbelieves a finding can re-run the analyzer over the evidence itself.
  */
+import { createHash } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { chromium, errors as playwrightErrors, type Browser, type Route } from "playwright";
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { HostGate } from "../politeness.js";
+import { analyzeHtml } from "../parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
 import { isUrlAllowed } from "../url-policy.js";
 
@@ -79,6 +113,18 @@ const PAINT_ONLY_RESOURCES: ReadonlySet<string> = new Set(["image", "media", "fo
 export interface RendererOptions {
   /** The crawl's own origin. Every request to another one is aborted. */
   origin: string;
+  /**
+   * The directory this pass writes serialised post-JS documents into — one
+   * `<sha256(url)>.html` per rendered page. **The caller creates it**
+   * (`runRenderPass` does, once, before the browser launches); the renderer
+   * writes into it and records the path.
+   *
+   * REQUIRED, and deliberately not optional-with-a-default. An optional
+   * directory is an invitation to render a whole site and keep none of the
+   * documents the findings were computed from, which is the silent half of a
+   * fallback (rule 7). A caller that means "somewhere temporary" says so.
+   */
+  htmlDir: string;
   /** The crawl's branded UA, so a site sees one client, not two (rule 9). */
   userAgent: string;
   /** Minimum spacing between two navigations to one host. */
@@ -110,11 +156,38 @@ export interface RenderResult {
   /** The URL asked for — the frontier/page key, not `page.url()`. */
   url: string;
   rendered: boolean;
+  // --- family 1: `MEASURE_SCRIPT`, in the page (P5-T4) --------------------
   wordCount: number | null;
   linkCount: number | null;
   navLinkCount: number | null;
   footerLinkCount: number | null;
   filterLinkCount: number | null;
+  // --- family 2: `analyzeHtml`, over the serialised DOM (P8-T1) -----------
+  /**
+   * `analyzeHtml(serialisedDom).wordCount` — every word the post-JS DOM's
+   * markup carries, on exactly the terms `pages.word_count` carries them
+   * (templates excluded, script/style/noscript/svg subtrees skipped).
+   */
+  analyzerWordCount: number | null;
+  /**
+   * …and the same analysis's `renderableWordCount`: that count minus what the
+   * DOM's own MARKUP hides. The comparable partner of `renderable_word_count`,
+   * and the rendered side of `content.csr-dependent` since P8-T1.
+   */
+  renderableWordCount: number | null;
+  /** The post-JS `<title>`, as the analyzer collapsed it. */
+  title: string | null;
+  /** `<h1>` elements in the post-JS DOM. */
+  h1Count: number | null;
+  /** The first post-JS `<link rel=canonical>` href, or null if there is none. */
+  canonical: string | null;
+  /**
+   * Where the serialised document was written. Non-null on every successful
+   * render and null on every failed one — there is no third shape, because a
+   * document we could not keep is a render this pass does not claim to have
+   * made (see `writeSerialisedDom`).
+   */
+  htmlPath: string | null;
   /**
    * Where the page navigated itself to, if that is not where it started.
    *
@@ -186,6 +259,61 @@ const MEASURE_SCRIPT = `(() => {
 })()`;
 
 /**
+ * The file one render's serialised DOM is kept in.
+ *
+ * `sha256(url)` rather than the URL itself: a page URL is not a filename — it
+ * carries `/`, `?`, `%`, unicode and no length bound — and every scheme that
+ * *escapes* one into a filename either collides (two URLs, one file, and the
+ * evidence of one of them silently gone) or is unreadable anyway. A hash is
+ * neither: it is fixed-width, collision-free at any crawl size this engine will
+ * see, and it is reproducible, so an auditor holding a URL can find its file
+ * with one `sha256sum`. The mapping back is the `rendered_html_path` column and
+ * the page row beside it.
+ */
+export function renderedHtmlFilename(url: string): string {
+  return `${createHash("sha256").update(url, "utf8").digest("hex")}.html`;
+}
+
+/**
+ * Write one serialised document beside its measurements, or classify the
+ * failure.
+ *
+ * THE RULING, because it discards a real measurement and that deserves saying
+ * out loud: a render whose document we could not keep is recorded as a FAILED
+ * render (`rendered = false`, a classified `render_error`, no counts), not as a
+ * successful one with a null path. The alternative shapes are both worse. A
+ * null path beside `rendered = true` is a silent fallback (rule 7) wearing a
+ * nullable column's clothes — every reader downstream would take the row for a
+ * complete render and no reader would ever learn the evidence is missing. A
+ * throw would stop the pass, which is right for a browser that died (that is
+ * our bug and it makes every subsequent render meaningless) and wrong here: a
+ * full disk is loud on the very first page and every row after it says the same
+ * thing, so the pass ends with an audit that names its own defect on every line
+ * rather than with a crawl that has to be re-run to find out why.
+ *
+ * The measurements are computed from the same string this writes, so a file on
+ * disk is always the document its row's numbers came from.
+ */
+async function writeSerialisedDom(
+  dir: string,
+  url: string,
+  html: string,
+): Promise<{ path: string } | { error: string }> {
+  const path = join(dir, renderedHtmlFilename(url));
+  try {
+    await writeFile(path, html, "utf8");
+    return { path };
+  } catch (error) {
+    return {
+      error:
+        `render evidence not written: could not save the rendered DOM to ${path} ` +
+        `(${firstLine(error)}) — the measurement was taken and is being discarded ` +
+        "rather than stored without the document it came from",
+    };
+  }
+}
+
+/**
  * A launched browser plus the policy every render through it obeys.
  *
  * One instance per pass, `renderConcurrency` contexts live at any moment — and
@@ -229,6 +357,7 @@ export class PageRenderer {
       browser,
       {
         origin: options.origin,
+        htmlDir: options.htmlDir,
         userAgent: options.userAgent,
         perHostDelayMs: options.perHostDelayMs,
         navigationTimeoutMs,
@@ -360,6 +489,30 @@ export class PageRenderer {
       }
 
       const measured = (await page.evaluate(MEASURE_SCRIPT)) as Measurement;
+
+      // THE SECOND INSTRUMENT. `page.content()` is `document.documentElement.
+      // outerHTML` with the document's doctype prepended — the same
+      // serialisation, plus the one line a saved file needs to reopen as the
+      // document it was. It crosses the seam once, is analysed here in the
+      // render worker (`analyzeHtml` is pure and does not fetch — hard rule 2)
+      // and is written to disk; nothing retains it, so the cost is
+      // O(concurrency × page size).
+      //
+      // `finalUrl`, not `url`, is what the analysis resolves against: this is a
+      // measurement OF THE DOCUMENT THE BROWSER ENDED ON, exactly as family 1
+      // above is (the same reason the same page's `rendered_word_count` reports
+      // the destination of a JavaScript redirect).
+      const serialised = await page.content();
+      const analysis = analyzeHtml(serialised, finalUrl);
+      const written = await writeSerialisedDom(this.opts.htmlDir, url, serialised);
+      if ("error" in written) {
+        // The redirect survives the classification, for `redirect.js`'s sake:
+        // that rule gates on `rendered_redirect_url`, never on `rendered`, so a
+        // page that sent itself somewhere is still reported even though the
+        // render it was discovered by is now a failure.
+        return failure(url, written.error, navigatedTo(url, finalUrl), blocked, skipped);
+      }
+
       return {
         url,
         rendered: true,
@@ -368,6 +521,12 @@ export class PageRenderer {
         navLinkCount: measured.navLinkCount,
         footerLinkCount: measured.footerLinkCount,
         filterLinkCount: measured.filterLinkCount,
+        analyzerWordCount: analysis.wordCount,
+        renderableWordCount: analysis.renderableWordCount,
+        title: analysis.title,
+        h1Count: analysis.headingCounts[0],
+        canonical: analysis.canonicalHtml,
+        htmlPath: written.path,
         // `offSite` first: when the page tried to leave and we stopped it, the
         // URL it asked for is the redirect — `page.url()` is still where it
         // started, which would report "no redirect" for the very case CHECK-10
@@ -426,6 +585,12 @@ function failure(
     navLinkCount: null,
     footerLinkCount: null,
     filterLinkCount: null,
+    analyzerWordCount: null,
+    renderableWordCount: null,
+    title: null,
+    h1Count: null,
+    canonical: null,
+    htmlPath: null,
     redirectUrl,
     error,
     blockedRequests,
@@ -478,8 +643,10 @@ function firstLine(error: unknown): string {
  * measurement on the floor (rule 7). `zero rows updated` is the only signal
  * Postgres gives us for that, so it is checked, not assumed.
  *
- * The five counts are written together with `rendered`, so no reader ever sees
- * `rendered = true` with null measurements.
+ * BOTH MEASUREMENT FAMILIES are written together with `rendered`, so no reader
+ * ever sees `rendered = true` with null measurements — and no reader ever sees
+ * one family filled and the other empty, which would be a page measured by half
+ * an instrument.
  */
 export async function writeRenderResult(
   db: Pick<Db, "execute">,
@@ -494,6 +661,12 @@ export async function writeRenderResult(
       rendered_nav_link_count = ${result.navLinkCount},
       rendered_footer_link_count = ${result.footerLinkCount},
       rendered_filter_link_count = ${result.filterLinkCount},
+      rendered_analyzer_word_count = ${result.analyzerWordCount},
+      rendered_renderable_word_count = ${result.renderableWordCount},
+      rendered_title = ${result.title},
+      rendered_h1_count = ${result.h1Count},
+      rendered_canonical = ${result.canonical},
+      rendered_html_path = ${result.htmlPath},
       rendered_redirect_url = ${result.redirectUrl},
       render_error = ${result.error}
     where crawl_id = ${crawlId} and url = ${result.url}

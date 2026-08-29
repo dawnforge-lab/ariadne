@@ -273,9 +273,23 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
      (critical). It fires on a rendered page whose rendered word count is at least
      twice its raw word count AND at least 150 words larger, which is the
      "most of what this page says arrived with the JavaScript" claim.
+
+     **BOTH SIDES OF THAT COMPARISON ARE THE SAME INSTRUMENT (ruleset 0.6.0).**
+     The rule reads `renderedRenderableWordCount` — the crawl's own analyzer run
+     over the post-JavaScript DOM — against `renderableWordCount`, the same
+     function over the bytes the server sent. It does NOT read
+     `renderedWordCount` (the browser's `innerText`) any more. That change is
+     what makes the rule able to fire on a theme carrying CSS-class-hidden
+     chrome: the chrome is in both documents, so it lands on both sides of the
+     subtraction and cancels. A finding from ruleset 0.5.0 or earlier used the
+     older comparison and is not row-comparable with one from 0.6.0.
   2. `issue_urls` with `ruleId: "content.csr-dependent"` for the page list. Each
-     row's evidence carries `{rawWordCount, renderedWordCount, addedWords}` — quote
-     these, per page type, in place of the old JS-on/JS-off counts.
+     row's evidence carries `{rawWordCount, renderableWordCount,
+     renderedAnalyzerWordCount, renderedRenderableWordCount, addedWords}` — two
+     readings of each document by one instrument, and the difference between the
+     renderable pair. Quote these, per page type, in place of the old JS-on/JS-off
+     counts. `addedWords` is the words JavaScript put on the page and nothing
+     else.
   3. `metrics_get` with `metricId: "render.coverage"` for the denominator: how many
      pages were rendered out of how many crawled, the selection budget, and the
      render failures. A finding count means nothing without it.
@@ -289,7 +303,7 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
   - Do NOT assume SSR means everything is fine — read the raw-vs-rendered numbers
   - PASS if the render diff found no CSR-dependent pages and no JS-only navigation, across a sample that covered every page type
   - WARN if navigation or key content is JS-dependent on some page types
-  - FAIL if a page is essentially blank without JS (critical JS dependency: `addedWords` is most of `renderedWordCount`)
+  - FAIL if a page is essentially blank without JS (critical JS dependency: `addedWords` is most of `renderedRenderableWordCount`)
   - **FAIL if collection pages' product links are absent from raw HTML** — a crawler that does not render will miss most products, and Googlebot's initial crawl pass won't discover product URLs from collection pages. Products become entirely dependent on sitemap.xml for discovery. (Cross-read CHECK-33b: sitemap-only products are the same failure seen from the link graph.)
   - Record: raw vs rendered word counts per page type (from the finding evidence), **the nav and filter link counts from CHECK-34 and CHECK-02**, render coverage (rendered / crawled, and the failures), recommendation for the next crawl's `renderBudgetPct`
 

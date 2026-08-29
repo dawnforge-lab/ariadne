@@ -702,6 +702,11 @@ describe("GET /crawls/:id/pages", () => {
       // per page, so the projection carries it.
       "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
       "pageType", "rendered", "renderError", "renderableWordCount", "renderedWordCount",
+      // The rendered side of `content.csr-dependent` since P8-T1, published so
+      // an agent can check the rule COULD have fired before reading its silence
+      // as a pass. `renderedWordCount` beside it is the browser's innerText and
+      // is now evidence only — two instruments, both on the wire, named apart.
+      "renderedRenderableWordCount",
       "statusCode", "url", "wordCount",
     ].sort());
     // The column nobody selected stays where it is.

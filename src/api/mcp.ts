@@ -513,7 +513,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The crawl's pages, slim and filtered: {url, statusCode, fetchClass, " +
         "fetchReason, pageType, indexable, depth, clickDepth, discoveredVia, " +
-        "wordCount, renderableWordCount, rendered, renderedWordCount, renderError}. " +
+        "wordCount, renderableWordCount, rendered, renderedWordCount, " +
+        "renderedRenderableWordCount, renderError}. " +
         "Use it to answer questions about the site itself — how deep the blog is, " +
         "which product pages are non-indexable, which URLs only the sitemap knows " +
         "about, what a render actually added — rather than about its faults.\n\n" +
@@ -537,6 +538,17 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the gap between them is markup that ships but does not show. It is null on " +
         "a page crawled before this measurement existed, which is 'never measured', " +
         "not zero — do not fall back to wordCount there, it counts something else.\n\n" +
+        "AND TWO RENDERED WORD COUNTS, MEASURED BY DIFFERENT INSTRUMENTS. " +
+        "renderedWordCount is the browser's innerText: what a reader sees, and no " +
+        "rule reads it. renderedRenderableWordCount is the crawl's OWN analyzer run " +
+        "over the post-JavaScript DOM — the same function that produced " +
+        "renderableWordCount over the bytes the server sent — so those two are the " +
+        "pair content.csr-dependent subtracts, and chrome present in both documents " +
+        "cancels between them. Before recording that rule's silence as a pass, read " +
+        "both on the rendered pages and satisfy yourself it had a way to fire. " +
+        "renderedRenderableWordCount is null on every page of a crawl rendered " +
+        "before the measurement existed, which such a crawl is REFUSED on rather " +
+        "than judged.\n\n" +
         "fetchReason is why a row has no usable body, in plain words, and is null " +
         "for a page that fetched normally. On fetchClass 'blocked' it names the " +
         "status, how many attempts the URL got, and the per-host spacing the engine " +
@@ -550,7 +562,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "run; it says nothing about these). clickDepth is the exception among the " +
         "crawl's own columns: it is computed by crawl_rules, so it is null " +
         "everywhere until the rules have run over the crawl. rendered, " +
-        "renderedWordCount and renderError are written by crawl_render: before that " +
+        "renderedWordCount, renderedRenderableWordCount and renderError are written " +
+        "by crawl_render: before that " +
         "pass has run, rendered is false on every page and 'rendered: true' answers " +
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
         "rendered'. Check crawl_status's renderPassCount before reading anything " +

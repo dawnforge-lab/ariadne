@@ -636,7 +636,15 @@ export interface PageRow {
    */
   renderableWordCount: number | null;
   rendered: boolean;
+  /** The browser's `innerText` count — what a reader sees. Read by no rule. */
   renderedWordCount: number | null;
+  /**
+   * The analyzer's renderable count over the post-JavaScript DOM: the rendered
+   * side of `content.csr-dependent`, comparable with `renderableWordCount`
+   * because one function produced both. Null on an unrendered page and on every
+   * page of a pre-Phase-8 crawl.
+   */
+  renderedRenderableWordCount: number | null;
   /** Why an ATTEMPTED render produced nothing. Null is not "it worked". */
   renderError: string | null;
 }
@@ -2468,6 +2476,25 @@ export const PAGE_FIELDS = {
   renderableWordCount: pages.renderableWordCount,
   rendered: pages.rendered,
   renderedWordCount: pages.renderedWordCount,
+  /**
+   * THE OTHER HALF OF `content.csr-dependent`'s COMPARISON (P8-T1), and the
+   * reason it is on the wire at all.
+   *
+   * `renderedWordCount` above is the browser's `innerText`; this is the crawl's
+   * own analyzer run over the serialised post-JavaScript DOM, so it and
+   * `renderableWordCount` are two readings by ONE instrument and the rule
+   * subtracts them. Publishing it is not decoration: the audit skill tells an
+   * agent to check that a diff rule COULD have fired before recording its
+   * silence as a PASS, and that check is exactly "read these two columns on the
+   * rendered pages". Without it the instruction is unfollowable and the Phase 7
+   * disposition (CHECK-01 recorded as a SKIP with the arithmetic in the notes)
+   * could not have been reached from the surface.
+   *
+   * Null on a page nobody rendered, and on every page of a crawl rendered
+   * before Phase 8 — which is a crawl `content.csr-dependent` refuses outright
+   * rather than judges.
+   */
+  renderedRenderableWordCount: pages.renderedRenderableWordCount,
   renderError: pages.renderError,
 } as const;
 

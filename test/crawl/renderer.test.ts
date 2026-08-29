@@ -26,8 +26,11 @@
  * pinned as constants, once, rather than paid for in every test.
  */
 import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 
@@ -45,9 +48,11 @@ import { selectRenderSet } from "../../src/crawl/render/select.js";
 import {
   PageRenderer,
   RENDERER_DEFAULTS,
+  renderedHtmlFilename,
   writeRenderResult,
   type RenderResult,
 } from "../../src/crawl/render/renderer.js";
+import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
 import {
   RENDER_PASS_DEFAULTS,
   renderPaceMs,
@@ -148,6 +153,48 @@ function thirdPartyHtml(otherOrigin: string): string {
 <img src="/own.png" alt="ours" width="1" height="1"></body></html>`;
 }
 
+/**
+ * `/chrome`: the two kinds of hiding, side by side, so the divergence between
+ * the two measurement families is a pinned number rather than a claim.
+ *
+ * Five visible words, five hidden by the `hidden` ATTRIBUTE (which the analyzer
+ * reads) and five hidden by a CSS CLASS (which it cannot — it does not
+ * cascade). So over the serialised DOM:
+ *
+ *   analyzerWordCount   = 5 + 5 + 5 = 15   every word the markup carries
+ *   renderableWordCount = 5     + 5 = 10   minus what the MARKUP hides
+ *   wordCount (innerText) = 5              what a reader actually sees
+ *
+ * The five-word gap between the last two is the whole of Phase 7's 425-word
+ * finding in miniature, and the reason `content.csr-dependent` compares the
+ * middle number against its raw twin rather than the bottom one.
+ */
+function chromeHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Chrome</title>
+<style>.folded { display: none }</style></head>
+<body><p>five visible words here now</p>
+<div hidden><p>five words the markup hides</p></div>
+<div class="folded"><p>five words a class hides</p></div>
+</body></html>`;
+}
+
+/**
+ * `/malformed`: an `<a href>` left open across a `<nav>` boundary — the one
+ * divergence the raw tokenizer has against a real tree builder.
+ *
+ * A browser's adoption agency algorithm reconstructs the open anchor INSIDE the
+ * `<nav>`, so the DOM holds an anchor the byte stream never contained and the
+ * streaming analyzer counts one fewer than `querySelectorAll('nav a[href]')`.
+ * The test below uses this page to show that the divergence is a property of
+ * the BYTES, not of the analyzer: run the same analyzer over the browser's own
+ * serialisation and it agrees with the browser exactly.
+ */
+function malformedHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Malformed</title></head>
+<body><a href="/outside">before<nav><a href="/one">one</a></nav>
+<p>tail text here</p></body></html>`;
+}
+
 /** `/static/{n}`: three same-host pages, for the politeness spacing test. */
 function staticHtml(n: string): string {
   return `<!doctype html><html lang="en"><head><title>Static ${n}</title></head>
@@ -171,6 +218,8 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
       res.end(body);
     };
     if (path === "/csr") return html(csrHtml());
+    if (path === "/chrome") return html(chromeHtml());
+    if (path === "/malformed") return html(malformedHtml());
     if (path === "/js-redirect") return html(jsRedirectHtml(`${siteBase(server)}/csr`));
     if (path === "/offsite-redirect") return html(jsRedirectHtml(`${otherOrigin()}/elsewhere`));
     if (path === "/third-party") return html(thirdPartyHtml(otherOrigin()));
@@ -234,13 +283,23 @@ describe("PageRenderer", () => {
   let site: Site;
   let third: Site;
   let renderer: PageRenderer;
+  /**
+   * Where this describe's serialised documents go. A real directory, because
+   * the write is part of what a render IS from Phase 8 — a renderer pointed at
+   * `/dev/null` would be testing a code path production never takes — and a
+   * temporary one, because the suite must leave nothing behind that reads like
+   * a pass's evidence.
+   */
+  let htmlDir: string;
   const blocked: string[] = [];
 
   beforeAll(async () => {
     third = await startThirdParty();
     site = await startSite(() => third.base);
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-unit-"));
     renderer = await PageRenderer.launch({
       origin: site.base,
+      htmlDir,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       // No `navigationTimeoutMs`: the production 15s. Every page this renderer
@@ -256,6 +315,7 @@ describe("PageRenderer", () => {
     await renderer.close();
     await site.close();
     await third.close();
+    await rm(htmlDir, { recursive: true, force: true });
   });
 
   it("pins the production navigation timeout and settle", () => {
@@ -277,6 +337,127 @@ describe("PageRenderer", () => {
     // `/b?sort=asc` and `/d?page=2` (a `?`) and `/facet/blue` (the word).
     expect(result.filterLinkCount).toBe(3);
     expect(result.redirectUrl).toBeNull();
+
+    // THE SECOND INSTRUMENT (P8-T1), on the same render. `analyzeHtml` over the
+    // serialised post-JS DOM sees the same 15 words the browser does, and that
+    // agreement is derivable rather than lucky: `<a>` is an inline tag in both
+    // (INLINE_TEXT_TAGS), so `<a>a</a><a>b</a>` is the single word "ab" to the
+    // tokenizer exactly as it is to `innerText`. This page hides nothing, so
+    // the renderable count is the same number again — the `/chrome` test below
+    // is where the three diverge.
+    expect(result.analyzerWordCount).toBe(CSR_RENDERED_WORDS);
+    expect(result.renderableWordCount).toBe(CSR_RENDERED_WORDS);
+    expect(result.title).toBe("CSR");
+    expect(result.h1Count).toBe(0);
+    expect(result.canonical).toBeNull();
+  });
+
+  it("keeps the document the numbers came from, named by the URL's hash", async () => {
+    const url = `${site.base}/csr`;
+    const result = await renderer.render(url);
+
+    expect(result.htmlPath).toBe(join(htmlDir, renderedHtmlFilename(url)));
+    const saved = await readFile(result.htmlPath!, "utf8");
+
+    // 1. IT IS THE POST-JS DOM, not the bytes the server sent: the paragraph
+    // the script wrote is in it and the `insertAdjacentHTML` call that wrote it
+    // is still there too, which is what makes the file a document rather than a
+    // diff.
+    expect(saved).toContain("<div id=\"app\">one two three four five six seven");
+    expect(saved).toContain("<nav><a href=\"/a\">a</a>");
+
+    // 2. IT IS THE SAME STRING THE MEASUREMENT WAS TAKEN FROM. Re-running the
+    // analyzer over the file reproduces the row's numbers exactly — which is
+    // the property that makes this evidence an auditor can check rather than a
+    // souvenir. If the renderer ever analysed one string and wrote another,
+    // this is where it would show.
+    const reanalyzed = analyzeHtml(saved, url);
+    expect(reanalyzed.wordCount).toBe(result.analyzerWordCount);
+    expect(reanalyzed.renderableWordCount).toBe(result.renderableWordCount);
+    expect(reanalyzed.title).toBe(result.title);
+  });
+
+  it("counts markup-hidden and class-hidden chrome the way each instrument can", async () => {
+    // The divergence Phase 8 is built around, as three numbers on one page.
+    const result = await renderer.render(`${site.base}/chrome`);
+
+    expect(result.error).toBeNull();
+    // The browser: five words, because both blocks are invisible to a reader.
+    expect(result.wordCount).toBe(5);
+    // The analyzer: fifteen, because it counts every word the markup carries…
+    expect(result.analyzerWordCount).toBe(15);
+    // …and ten once it removes what the MARKUP itself says is hidden. The five
+    // it cannot remove are the class-hidden block: no tokenizer can, and that
+    // is the residual the Phase 7 gate measured at ~425 words on a real theme.
+    expect(result.renderableWordCount).toBe(10);
+
+    // AND THE POINT OF ALL THREE: the same five class-hidden words are in the
+    // RAW document too, so the analyzer counts them on both sides and they
+    // cancel in the subtraction `content.csr-dependent` makes. Asserted by
+    // running the analyzer over the bytes the server sent and getting the same
+    // renderable count back — this page runs no script, so the two documents
+    // differ in nothing at all.
+    const raw = analyzeHtml(chromeHtml(), `${site.base}/chrome`);
+    expect(raw.renderableWordCount).toBe(result.renderableWordCount);
+    expect(raw.wordCount).toBe(result.analyzerWordCount);
+  });
+
+  it("reads a browser-repaired tree exactly as the browser does", async () => {
+    // The malformed-DOM round trip, and the evidence behind a decision this
+    // phase took: `nav.js-only` was NOT re-sided onto the analyzer's rendered
+    // counts (see its docblock in src/rules/query/render-diff.ts).
+    //
+    // The raw byte stream leaves an `<a href>` open across a `<nav>` boundary.
+    // A streaming tokenizer counts the anchors it was given; a tree builder
+    // reconstructs the open one inside the container. So the raw count is UNDER
+    // the browser's — one-directional, at most one per unclosed anchor — and
+    // that is the divergence the nav rule's six-anchor margin absorbs.
+    const url = `${site.base}/malformed`;
+    const result = await renderer.render(url);
+    const rawNav = analyzeHtml(malformedHtml(), url).navLinkCount;
+
+    expect(rawNav).toBeLessThan(result.navLinkCount!);
+
+    // …and re-siding WOULD remove it, which is why the decision had to be
+    // argued rather than assumed: the same analyzer over the browser's own
+    // serialisation agrees with the browser's selector exactly. The rule keeps
+    // the browser's counts anyway, because a bounded ±1 inside a margin of six
+    // is not worth two more columns and a re-derivation of every threshold.
+    const saved = await readFile(result.htmlPath!, "utf8");
+    expect(analyzeHtml(saved, url).navLinkCount).toBe(result.navLinkCount);
+  });
+
+  it("classifies a render whose document could not be saved, and keeps no counts", async () => {
+    // The write is part of a render. A measurement we cannot store the document
+    // for is recorded as a FAILED render — not as a successful one with a null
+    // path, which every reader downstream would take for complete evidence
+    // (hard rule 7). A directory that does not exist is the portable way to
+    // make `writeFile` fail; a full disk produces the same shape.
+    const missing = join(htmlDir, "no-such-directory");
+    const doomed = await PageRenderer.launch({
+      origin: site.base,
+      htmlDir: missing,
+      userAgent: "AriadneBot/0.1 (render test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+    try {
+      const result = await doomed.render(`${site.base}/csr`);
+
+      expect(result.rendered).toBe(false);
+      expect(result.error).toMatch(/^render evidence not written: /);
+      expect(result.error).toContain(missing);
+      // Both families empty, and the path null: the row says "this page was not
+      // measured", which is true, rather than "measured, evidence elsewhere".
+      expect(result.wordCount).toBeNull();
+      expect(result.analyzerWordCount).toBeNull();
+      expect(result.renderableWordCount).toBeNull();
+      expect(result.title).toBeNull();
+      expect(result.htmlPath).toBeNull();
+    } finally {
+      await doomed.close();
+    }
   });
 
   it("records where a page sent itself with JavaScript", async () => {
@@ -357,6 +538,7 @@ describe("PageRenderer", () => {
     // machine to fail a test about anything but timeouts.
     const hangRenderer = await PageRenderer.launch({
       origin: site.base,
+      htmlDir,
       userAgent: "AriadneBot/0.1 (render test)",
       perHostDelayMs: 0,
       navigationTimeoutMs: NAV_TIMEOUT_MS,
@@ -396,6 +578,8 @@ describe("runRenderPass", () => {
   let db: Db;
   let site: Site;
   let third: Site;
+  /** The root the pass makes its per-crawl directory under. See `passConfig`. */
+  let htmlRoot: string;
   const createdCrawls: string[] = [];
 
   beforeAll(async () => {
@@ -403,6 +587,7 @@ describe("runRenderPass", () => {
     await runMigrations(db);
     third = await startThirdParty();
     site = await startSite(() => third.base);
+    htmlRoot = await mkdtemp(join(tmpdir(), "ariadne-render-pass-"));
   }, 120_000);
 
   afterAll(async () => {
@@ -410,6 +595,7 @@ describe("runRenderPass", () => {
     await closeDb(db);
     await site.close();
     await third.close();
+    await rm(htmlRoot, { recursive: true, force: true });
   });
 
   function passConfig(overrides: Record<string, unknown> = {}): Parameters<typeof runRenderPass>[2] {
@@ -422,6 +608,9 @@ describe("runRenderPass", () => {
       renderBudgetPct: 100,
       allowPrivate: true,
       settleMs: SETTLE_MS,
+      // A temporary root, not the production `renders/`: the pass creates
+      // `<root>/<crawlId>/` under it and this suite runs dozens of crawls.
+      renderHtmlDir: htmlRoot,
       // No `navigationTimeoutMs`: the pass gets the production 15s. Only the
       // `/hang` test below overrides it, because only that test is about a
       // navigation deadline — see the module header.
@@ -579,6 +768,26 @@ describe("runRenderPass", () => {
     expect(csr.renderedFilterLinkCount).toBe(3);
     expect(csr.renderedRedirectUrl).toBeNull();
     expect(csr.renderError).toBeNull();
+    // The P8 family, written by the same statement: `rendered = true` never
+    // reaches the database with one family filled and the other empty.
+    expect(csr.renderedAnalyzerWordCount).toBe(CSR_RENDERED_WORDS);
+    expect(csr.renderedRenderableWordCount).toBe(CSR_RENDERED_WORDS);
+    expect(csr.renderedTitle).toBe("CSR");
+    expect(csr.renderedH1Count).toBe(0);
+    expect(csr.renderedCanonical).toBeNull();
+    // …and the document itself, under the directory the PASS created for this
+    // crawl. One file per rendered page, and the crawl id in the path is what
+    // makes a run's evidence a thing a reader can archive or delete whole.
+    const crawlDir = join(htmlRoot, crawlId);
+    expect(csr.renderedHtmlPath).toBe(
+      join(crawlDir, renderedHtmlFilename(`${site.base}/csr`)),
+    );
+    expect((await readdir(crawlDir)).sort()).toEqual(
+      [
+        renderedHtmlFilename(`${site.base}/csr`),
+        renderedHtmlFilename(`${site.base}/js-redirect`),
+      ].sort(),
+    );
 
     const redirected = await pageRow(crawlId, "/js-redirect");
     expect(redirected.renderedRedirectUrl).toBe(`${site.base}/csr`);
@@ -610,6 +819,8 @@ describe("runRenderPass", () => {
     expect(row.rendered).toBe(false);
     expect(row.renderError).toMatch(/^timeout: /);
     expect(row.renderedWordCount).toBeNull();
+    expect(row.renderedRenderableWordCount).toBeNull();
+    expect(row.renderedHtmlPath).toBeNull();
 
     const frontierRows = await db
       .select()
@@ -736,6 +947,12 @@ describe("runRenderPass", () => {
       navLinkCount: 0,
       footerLinkCount: 0,
       filterLinkCount: 0,
+      analyzerWordCount: 1,
+      renderableWordCount: 1,
+      title: "A ghost",
+      h1Count: 0,
+      canonical: null,
+      htmlPath: "/dev/null",
       redirectUrl: null,
       error: null,
       blockedRequests: 0,

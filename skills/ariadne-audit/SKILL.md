@@ -362,16 +362,26 @@ every page means the rules have not run over this crawl, which `crawl_status`'s
 **And one more silence to distrust: a rule that compares two columns is only
 evidence when the two are comparable.** `rulesRunAt` settles "did the rule run"; it
 says nothing about whether the rule COULD have fired. `content.csr-dependent`
-(CHECK-01) is the standing case: it needs `renderedWordCount` ≥ 2 × the
-markup-visible count with a 150-word margin, and on a site whose markup-visible
-count carries a fixed block of CSS-class-hidden chrome the rendered side is lower
-than the markup side on every page — the Phase 7 gate site ran 0.32 to 0.73, so the
-firing condition was unreachable whatever the site did. Zero findings there is not
-"no client-side rendering"; it is a comparison nothing could answer.
+(CHECK-01) is the case this engine learned it on. Until ruleset 0.6.0 the rule
+compared the browser's `renderedWordCount` against the markup-visible count, and on
+a site whose markup carries a fixed block of CSS-class-hidden chrome the rendered
+side is lower than the markup side on every page — the Phase 7 gate site ran 0.32
+to 0.73, so the firing condition was unreachable whatever the site did. Zero
+findings there was not "no client-side rendering"; it was a comparison nothing
+could answer.
 
-`pages_query` publishes both columns, which is what makes this checkable rather than
-theoretical: before you record a diff rule's silence as a PASS, read the two columns
-on the pages the render pass covered and satisfy yourself the rule had a way to fire.
+**Ruleset 0.6.0 fixed that particular one** by putting the same instrument on both
+sides: the rule now reads `renderedRenderableWordCount` (the crawl's analyzer over
+the post-JavaScript DOM) against `renderableWordCount`, so chrome present in both
+documents cancels. **The habit survives the fix**, which is the point of keeping
+this paragraph: the next unreachable comparison will be in some other rule, and
+nothing but this check will find it.
+
+`pages_query` publishes both of the columns that rule compares —
+`renderableWordCount` and `renderedRenderableWordCount` — which is what makes this
+checkable rather than theoretical: before you record a diff rule's silence as a
+PASS, read the two columns on the pages the render pass covered and satisfy
+yourself the rule had a way to fire.
 Where it did not, the check is SKIP with the arithmetic in `notes` — and, per the
 hard rule at the top of this file, it is a bug report about the rule rather than a
 finding about the client. It matters most exactly where you want the answer: on the

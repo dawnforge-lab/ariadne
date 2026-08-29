@@ -15,11 +15,15 @@
  * assertion below reads the same result, so adding a fixture costs a page fetch
  * and a render, not a crawl.
  */
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/loop.js";
+import { renderedHtmlFilename } from "../../src/crawl/render/renderer.js";
 import { runRenderPass, type RenderPassSummary } from "../../src/crawl/render/run-render.js";
 import { RENDER_DEFAULTS } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -47,7 +51,12 @@ import {
   P7_SHARED_H1_PATHS,
   P7_WORD_COUNT,
 } from "./pages/authored-p7.js";
-import { startOffsiteHost, type OffsiteHost } from "./pages/render-p5.js";
+import {
+  CSR_CHROME_WORDS,
+  CSR_EXPECTED,
+  startOffsiteHost,
+  type OffsiteHost,
+} from "./pages/render-p5.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -205,6 +214,16 @@ let app: FixtureApp;
 let offsite: OffsiteHost;
 let summary: CrawlSummary;
 let render: RenderPassSummary;
+/**
+ * Where this run's serialised post-JavaScript documents go.
+ *
+ * A temporary directory rather than the production `renders/`, and removed in
+ * `afterAll` with the crawl row: a suite that left seventy HTML files in the
+ * repository would be indistinguishable from a real pass's evidence, and the
+ * next run's `crawlId` would make a second copy rather than replacing the
+ * first.
+ */
+let renderHtmlRoot: string;
 let registry: Registry;
 
 /**
@@ -357,9 +376,11 @@ beforeAll(async () => {
   // A `CrawlConfig` satisfies `RenderPassConfig` structurally on purpose, so
   // the render cannot end up with a different user agent or a different
   // per-host delay from the crawl it belongs to (hard rule 9).
+  renderHtmlRoot = await mkdtemp(join(tmpdir(), "ariadne-harness-renders-"));
   render = await runRenderPass(db, summary.crawlId, {
     ...config,
     settleMs: RENDER_SETTLE_MS,
+    renderHtmlDir: renderHtmlRoot,
   });
 
   registry = buildRegistry();
@@ -433,6 +454,7 @@ afterAll(async () => {
     await db.delete(crawls).where(eq(crawls.id, summary.crawlId));
   }
   if (db !== undefined) await closeDb(db);
+  if (renderHtmlRoot !== undefined) await rm(renderHtmlRoot, { recursive: true, force: true });
   await closeFetchAgents();
   if (app !== undefined) await app.close();
   if (offsite !== undefined) await offsite.close();
@@ -1547,24 +1569,27 @@ describe("the fixture site end to end", () => {
 
     // THE EVIDENCE, page by page, against the markup that produced it.
     //
-    // CSR: the shell's own 32 words (a heading and one sentence), plus the 250
-    // `lorem` words the script writes into `#app`. 282 ≥ 2 × 32 = 64 clears the
-    // ratio arm, and 250 added words clears `CSR_MIN_ADDED_WORDS` (150) by a
-    // hundred. The injected text sits inside a `<script>` string literal, so it
-    // contributes nothing to the raw side — the analyzer skips script subtrees.
+    // CSR, AND SINCE PHASE 8 THIS IS THE CANCELLATION ASSERTION. The fixture
+    // carries chrome in BOTH documents — a 100-word region popover hidden by a
+    // CSS class (invisible to the analyzer, which does not cascade) and a
+    // 40-word account drawer hidden by the `hidden` attribute (which the
+    // analyzer does see) — plus the 200 `lorem` words the script writes into
+    // `#app`. Its whole arithmetic is derived in test/fixtures/pages/render-p5.ts
+    // and imported here rather than retyped, so the fixture and the assertion
+    // cannot drift into agreeing about different numbers.
     //
-    // THE TWO RAW NUMBERS ARE EQUAL HERE, and that is worth reading rather than
-    // skipping past: the comparison is made in `renderableWordCount` since
-    // Phase 7, and this shell hides nothing in its markup, so the corrected
-    // column holds the same 32 the old one did. The fixture's arithmetic did
-    // not move because the fixture has no chrome to remove — which is exactly
-    // what the correction claims about pages like it.
+    // What makes it a proof: `addedWords` is 200 EXACTLY. The hundred words of
+    // class-hidden chrome are counted on both sides of the subtraction by the
+    // same instrument and cancel to nothing — which is the whole claim of
+    // P8-T1, and which the retired `innerText` comparison could not make (on
+    // this same page it is silent on both arms; see the fixture's docblock).
     expect(detailsByPath.get("/render/csr-content\ncontent.csr-dependent")).toEqual({
       pageUrl: `${app.base}/render/csr-content`,
-      rawWordCount: 32,
-      renderableWordCount: 32,
-      renderedWordCount: 282,
-      addedWords: 250,
+      rawWordCount: CSR_EXPECTED.wordCount,
+      renderableWordCount: CSR_EXPECTED.renderableWordCount,
+      renderedAnalyzerWordCount: CSR_EXPECTED.renderedAnalyzerWordCount,
+      renderedRenderableWordCount: CSR_EXPECTED.renderedRenderableWordCount,
+      addedWords: CSR_EXPECTED.addedWords,
     });
 
     // NAV: the raw document contains no `<nav>`, no `<footer>` and no anchor at
@@ -1629,14 +1654,24 @@ describe("the fixture site end to end", () => {
     expect(page.rendered).toBe(false);
     expect(page.renderError).toBe(`off-site navigation: ${offsiteTarget}`);
     expect(page.renderedRedirectUrl).toBe(offsiteTarget);
-    // All five, not a sample: "rendered and empty" and "never rendered" are
-    // different facts, and a failed render must not leave one count behind that
-    // a diff rule could read as a zero.
+    // BOTH MEASUREMENT FAMILIES, every column of each and not a sample:
+    // "rendered and empty" and "never rendered" are different facts, and a
+    // failed render must not leave one count behind that a diff rule could read
+    // as a zero. The six analyzer-side columns joined this assertion in P8-T1;
+    // `renderedHtmlPath` is in it for a second reason as well — there is no
+    // document on disk for a render that never had one, and a path pointing at
+    // a file that does not exist would be worse than no path.
     expect(page.renderedWordCount).toBeNull();
     expect(page.renderedLinkCount).toBeNull();
     expect(page.renderedNavLinkCount).toBeNull();
     expect(page.renderedFooterLinkCount).toBeNull();
     expect(page.renderedFilterLinkCount).toBeNull();
+    expect(page.renderedAnalyzerWordCount).toBeNull();
+    expect(page.renderedRenderableWordCount).toBeNull();
+    expect(page.renderedTitle).toBeNull();
+    expect(page.renderedH1Count).toBeNull();
+    expect(page.renderedCanonical).toBeNull();
+    expect(page.renderedHtmlPath).toBeNull();
 
     // And the finding, which a `rendered = true` gate would have lost outright.
     // It is the ONLY finding on the page: the three diff rules all open with
@@ -1654,6 +1689,90 @@ describe("the fixture site end to end", () => {
       rendered: false,
       renderError: `off-site navigation: ${offsiteTarget}`,
     });
+  });
+
+  it("the render pass measures the post-JavaScript DOM with the crawl's own analyzer", async () => {
+    // P8-T1 end to end: the SECOND measurement family, written by a real
+    // Chromium's serialised DOM through the same `analyzeHtml` the crawl ran
+    // over the bytes the server sent (src/db/schema.ts, the family blocks).
+    //
+    // Three pages, chosen because between them they are the whole argument:
+    // one where JavaScript adds text, and two where it adds none.
+    const csr = pageByPath.get("/render/csr-content");
+    const healthy = pageByPath.get("/render/healthy");
+    const chromeOnly = pageByPath.get(P7_HIDDEN_CHROME_PATH);
+    if (csr === undefined || healthy === undefined || chromeOnly === undefined) {
+      throw new Error("one of the three P8 render fixtures has no pages row");
+    }
+
+    // 1. THE CSR PAGE — every number the fixture derives, in the row a real
+    // crawl and a real render wrote. The `innerText` column is asserted BESIDE
+    // the analyzer's, unchanged in meaning and no longer read by any rule: it
+    // is 232, a hundred words under the 332 the analyzer counts, and that
+    // hundred is exactly the class-hidden popover. Two instruments disagreeing
+    // by precisely the chrome is what the whole task is about.
+    expect(csr.wordCount).toBe(CSR_EXPECTED.wordCount);
+    expect(csr.renderableWordCount).toBe(CSR_EXPECTED.renderableWordCount);
+    expect(csr.renderedAnalyzerWordCount).toBe(CSR_EXPECTED.renderedAnalyzerWordCount);
+    expect(csr.renderedRenderableWordCount).toBe(CSR_EXPECTED.renderedRenderableWordCount);
+    expect(csr.renderedWordCount).toBe(CSR_EXPECTED.renderedWordCount);
+    expect(
+      csr.renderedRenderableWordCount! - csr.renderedWordCount!,
+      "the class-hidden popover, seen by the analyzer and not by the browser",
+    ).toBe(CSR_CHROME_WORDS);
+    // The three head columns the same analysis produced. Nothing on this page
+    // rewrites its own head, so each is the raw column back again — which is
+    // the baseline a future `render.title-drift` would be a departure from.
+    expect(csr.renderedTitle).toBe(csr.title);
+    expect(csr.renderedH1Count).toBe(1);
+    expect(csr.renderedCanonical).toBe(`${app.base}/render/csr-content`);
+
+    // 2. AND 3. THE TWO SILENT CONTROLS, which are where the cancellation is
+    // visible as an IDENTITY rather than as arithmetic.
+    //
+    // `/render/healthy` runs no script at all, so the DOM the browser built is
+    // the document the server sent and both analyzer counts come back equal to
+    // their raw twins. `/authored7/hidden-chrome` is the chrome-only page: a
+    // template, a `hidden` drawer, an inline-`display:none` picker and a closed
+    // `<details>`, 82 words of markup-hidden text and no JavaScript anywhere.
+    // The analyzer suppresses exactly the same 82 words on the rendered side as
+    // on the raw one — the markup that hides them survives serialisation — so
+    // BOTH pairs match and `content.csr-dependent` has nothing to report.
+    for (const [label, page] of [
+      ["/render/healthy", healthy],
+      [P7_HIDDEN_CHROME_PATH, chromeOnly],
+    ] as const) {
+      expect(page.rendered, label).toBe(true);
+      expect(page.renderedAnalyzerWordCount, label).toBe(page.wordCount);
+      expect(page.renderedRenderableWordCount, label).toBe(page.renderableWordCount);
+      expect(page.renderedTitle, label).toBe(page.title);
+      expect(page.renderedH1Count, label).toBe(page.h1Count);
+      expect([...(issuesByPath.get(label) ?? new Set<string>())], label).not.toContain(
+        "content.csr-dependent",
+      );
+    }
+
+    // THE DOCUMENT ON DISK. Every rendered page has one, it is named by the
+    // sha256 of the URL asked for, and it is the very string the numbers above
+    // were computed from — so an auditor who disbelieves the finding can re-run
+    // the analyzer over the evidence itself. Asserted by reading the CSR page's
+    // file back and finding in it the paragraph the SCRIPT wrote, which is in
+    // no byte the server ever sent.
+    expect(csr.renderedHtmlPath).toBe(
+      join(renderHtmlRoot, summary.crawlId, renderedHtmlFilename(csr.url)),
+    );
+    const saved = await readFile(csr.renderedHtmlPath!, "utf8");
+    expect(saved).toContain('<div id="app"><p>the quick brown fox');
+    expect(saved).toContain('class="chrome-popover"');
+
+    // …and every OTHER rendered page has one too, while no failed render does.
+    // Stated as a partition rather than as a spot check: a pass that wrote 70
+    // of 71 documents would satisfy any single assertion above.
+    const rows = [...pageByPath.values()];
+    expect(rows.filter((p) => p.rendered && p.renderedHtmlPath !== null)).toHaveLength(
+      render.rendered,
+    );
+    expect(rows.filter((p) => !p.rendered && p.renderedHtmlPath !== null)).toHaveLength(0);
   });
 
   it("every registered rule fires on at least one fixture", () => {

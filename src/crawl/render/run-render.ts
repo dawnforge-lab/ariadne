@@ -31,6 +31,13 @@
  *     row and its frontier row is completed in the SAME transaction, then the
  *     pass writes its count to `crawls.render_pass_count`.
  *
+ * AND ONE THING THAT IS NOT A STEP: the pass creates `<renderHtmlDir>/<crawlId>/`
+ * between steps 2 and 3, because from Phase 8 the renderer writes each
+ * serialised post-JavaScript document there (src/crawl/render/renderer.ts). The
+ * directory is made once, here, before the browser launches — a permission or a
+ * disk problem is then one error at the top of the pass instead of one
+ * classified `render_error` per page saying the same thing.
+ *
  * WHY A FAILED RENDER IS NOT RETRIED. `leaseRenderUrls` increments `attempts`,
  * but nothing in this pass reads it, because nothing in this pass loops: a URL
  * is leased once, rendered once, and completed once, whatever the outcome. A
@@ -56,6 +63,9 @@
  * `crawls.render_pass_count`, because that column exists and the pass is the
  * only writer of it.
  */
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+
 import { eq } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
@@ -106,6 +116,18 @@ export class RenderPassRefusal extends Error {
   }
 }
 
+/**
+ * Where a crawl's serialised post-JavaScript documents go, relative to the
+ * process's working directory unless a caller names an absolute path.
+ *
+ * One directory per crawl underneath it (`<root>/<crawlId>/`), because a crawl
+ * is the unit a reader deletes, archives or hands to somebody: a flat directory
+ * of hashes from every crawl this machine ever ran is not evidence anybody can
+ * use. Git-ignored — see .gitignore — and its disk cost belongs in the gate
+ * document, not in a silent assumption that a laptop has room.
+ */
+export const RENDER_HTML_DIR = "renders";
+
 export const RENDER_PASS_DEFAULTS = {
   /**
    * Browser contexts alive at once. Four is the crawl's initial window, and a
@@ -138,6 +160,13 @@ export interface RenderPassConfig extends RenderSelectionConfig {
   renderConcurrency?: number;
   navigationTimeoutMs?: number;
   settleMs?: number;
+  /**
+   * Root directory for this pass's serialised documents; defaults to
+   * `RENDER_HTML_DIR`. The pass creates `<root>/<crawlId>/` itself, before the
+   * browser launches, so a permission or disk problem is one error at the top
+   * of the pass rather than seventy identical ones inside it.
+   */
+  renderHtmlDir?: string;
   /** TEST ONLY — the fixture-server escape hatch. See `CrawlConfig`. */
   allowPrivate?: boolean;
 }
@@ -283,8 +312,17 @@ export async function runRenderPass(
   // STEP 2. Choose the set. After this statement the frontier is the selection.
   const selection = await selectRenderSet(db, crawlId, cfg);
 
+  // …and make the place this pass's evidence goes, ONCE, before the browser
+  // exists. `recursive` so a first-ever pass creates the root too, and so a
+  // re-run over a crawl that already has a directory is not an error: a
+  // re-selected crawl legitimately re-renders pages, and the file it overwrites
+  // is the same page's older document.
+  const htmlDir = join(cfg.renderHtmlDir ?? RENDER_HTML_DIR, crawlId);
+  await mkdir(htmlDir, { recursive: true });
+
   const renderer = await PageRenderer.launch({
     origin: new URL(cfg.siteUrl).origin,
+    htmlDir,
     userAgent: cfg.userAgent,
     // NOT `cfg.perHostDelayMs`. The crawl's ratchet may have earned a wider
     // spacing than the config asked for, and that lesson is the site's, not

@@ -120,6 +120,16 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.6.0: Phase 8. `content.csr-dependent` compares two readings by ONE
+    // instrument — the analyzer's `renderable_word_count` against the same
+    // function's count over the serialised post-JavaScript DOM — where it used
+    // to compare the analyzer against the browser's `innerText`. The Phase 7
+    // gate measured that older comparison as unable to fire at all on a
+    // chrome-heavy theme (docs/gates/phase-7.md §4.2, §4.9), so this is a
+    // change in what the ruleset SAYS about a site and not only in how it says
+    // it: a stored CHECK-01 verdict from 0.5.0 is not row-comparable with one
+    // from 0.6.0, and its evidence keys differ too.
+    //
     // 0.5.0: Phase 7. `content.thin` now judges a page on the words its markup
     // does not hide rather than on every word in the HTML,
     // `content.csr-dependent` subtracts the same corrected column, and
@@ -133,7 +143,7 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. T1 bumped; this
     // task verifies rather than bumping again.
-    expect(RULESET_VERSION).toBe("0.5.0");
+    expect(RULESET_VERSION).toBe("0.6.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

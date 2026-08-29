@@ -821,6 +821,9 @@ describe("pages_query", () => {
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "clickDepth", "depth", "discoveredVia", "fetchClass", "fetchReason", "indexable",
       "pageType", "renderError", "renderableWordCount", "rendered", "renderedWordCount",
+      // See the same assertion in test/api/query.test.ts: the analyzer's count
+      // over the post-JavaScript DOM, which is the column the CSR rule reads.
+      "renderedRenderableWordCount",
       "statusCode", "url", "wordCount",
     ].sort());
   });

@@ -24,6 +24,30 @@
  * `assertRenderedColumns`. That combination is not a page, it is a defect in
  * whatever wrote the row.
  *
+ * **WHICH INSTRUMENT EACH RULE COMPARES, and why they are not all the same
+ * (P8-T1).** The render pass measures every page it renders twice — once with
+ * `innerText` and DOM selectors inside the browser, once by running the crawl's
+ * own `analyzeHtml` over the serialised post-JavaScript DOM (see the two family
+ * blocks on `pages` in src/db/schema.ts). Phase 8 moved ONE of these three
+ * rules onto the second family and deliberately left the other two on the
+ * first:
+ *
+ *  - `content.csr-dependent` reads `rendered_renderable_word_count` against
+ *    `renderable_word_count` — ONE instrument, two documents. It had to move:
+ *    the analyzer cannot see a stylesheet, so class-hidden chrome sat on the
+ *    raw side of the subtraction and on neither side of the rendered one, and
+ *    the Phase 7 gate measured that as a near-constant 425 words which made the
+ *    rule arithmetically unable to fire (docs/gates/phase-7.md §4.2, §4.9).
+ *  - `nav.js-only` and `filters.js-only` stay on the browser's counts, and the
+ *    comparability argument for each is written at its own docblock. In short:
+ *    the nav rule's markup-vs-DOM divergence is BOUNDED (≤1 per unclosed
+ *    anchor, one-directional, pinned by a named test) and the rule's thresholds
+ *    are a derived margin of six against it, so re-siding would move a
+ *    divergence that is already inside the noise the rule was built to absorb —
+ *    and the filter rule's asymmetry is DELIBERATE, chosen for what it reports
+ *    rather than tolerated. Symmetry is worth having where it decides an
+ *    answer; churn is what it is called where it does not.
+ *
  * Everything here is SQL over `pages` and (for the filter rule) `links`.
  * Nothing fetches (hard rule 2), nothing loads the link table into memory
  * (hard rule 3), and nothing re-reads a page's HTML: both sides of every
@@ -164,24 +188,62 @@ async function assertRenderedColumns(
  *
  * Fires when BOTH hold, on a page the render pass actually measured:
  *
- *   rendered_word_count >= CSR_WORD_MULTIPLE * greatest(renderable_word_count, 1)
- *   rendered_word_count - renderable_word_count >= CSR_MIN_ADDED_WORDS
+ *   rendered_renderable_word_count
+ *     >= CSR_WORD_MULTIPLE * greatest(renderable_word_count, 1)
+ *   rendered_renderable_word_count - renderable_word_count >= CSR_MIN_ADDED_WORDS
  *
- * **THE RAW SIDE IS `renderable_word_count`, NOT `word_count` (Phase 7).** The
- * two sides of a subtraction have to be answers to the same question, and they
- * were not: the rendered side is `innerText`, which is what a reader sees, while
- * `word_count` includes every word the markup hides. On the site that provoked
- * the change that gap was ~740 words of drawer, picker and accordion on every
- * page, which made the raw side larger than the rendered one everywhere and
- * could mask a genuinely client-rendered page — a FALSE NEGATIVE, silent by
- * construction. `renderable_word_count` removes what the markup itself hides, so
- * what remains between the two sides is CSS-hidden text and JavaScript-injected
- * text, which is what this rule is about.
+ * **BOTH SIDES ARE NOW THE SAME INSTRUMENT (Phase 8), and the old comparison is
+ * retired from this rule.** Until P8-T1 the rendered side was `innerText`
+ * (`rendered_word_count`) and the raw side was the analyzer's
+ * `renderable_word_count`. Phase 7 had already corrected the raw side once —
+ * from `word_count`, which counted every word the markup hides, to the subset
+ * it does not — and predicted the two columns would then differ only on
+ * CSS-hidden chrome, small enough to compare directly.
  *
- * The thresholds are unchanged. They were derived against a raw side that was
- * inflated, so on a chrome-heavy site the corrected column can only make this
- * rule MORE willing to fire — which is the direction the diagnosis says it was
- * wrong in.
+ * **THE PHASE 7 GATE FALSIFIED THAT PREDICTION, and this rule is what it cost.**
+ * Measured across 28 rendered pages of a real Shopify theme
+ * (docs/gates/phase-7.md §4.2), `renderable_word_count − rendered_word_count`
+ * was **min 425, max 489, and exactly 425 on 19 of the 28** — not a ratio that
+ * grew with the page but ONE CONSTANT BLOCK of class-hidden chrome, the same
+ * 425 words on a 196-word page and on an 1,137-word one. The analyzer cannot
+ * see a class (hard rules 2 and 4), so those words were on the raw side of the
+ * subtraction and on neither side of the rendered one. §4.9 states the
+ * consequence plainly: **the firing condition was arithmetically unreachable on
+ * that crawl whatever the site did** — every rendered page's
+ * rendered/renderable ratio ran 0.32–0.73 where the rule needs 2.0. The zero it
+ * reported was not "no client-side rendering"; it was a comparison nothing
+ * could answer, on the very site where CHECK-33b had just found 100% of
+ * products with no HTML link path.
+ *
+ * **WHY THE SAME INSTRUMENT ON BOTH SIDES FIXES IT.** The chrome markup — the
+ * drawers, popovers, `<template>`s and off-canvas menus — is present in BOTH
+ * documents. It is in the bytes the server sent and it is still in the DOM
+ * after the JavaScript has run; only the *renderer* knows a stylesheet hides
+ * it. So the analyzer, which counts it in both, puts it on both sides:
+ *
+ *   raw      = chrome + server-rendered body            (C + B)
+ *   rendered = chrome + server-rendered body + injected (C + B + J)
+ *
+ * and the FLOOR ARM CANCELS IT EXACTLY: (C + B + J) − (C + B) = J, the words
+ * JavaScript added, which is the number this rule was always about. The RATIO
+ * ARM does not cancel — it becomes `J >= B + C` — and that is stated rather
+ * than glossed: chrome still makes a page harder to report, as it should
+ * (a page that ships 400 words of anything and adds 100 is not client-rendered).
+ * What changed is that the ratio is now REACHABLE: before, the rendered side
+ * lacked C entirely, so on a chrome-heavy theme the ratio was structurally
+ * below 1 and no page could ever reach 2.
+ *
+ * `rendered_word_count` is not deleted and is not read here: it stays the only
+ * number in the database that says what a READER sees, and
+ * `renderable_word_count − rendered_word_count` is what makes a site's
+ * class-hidden chrome computable at all. It is evidence; it is no longer a
+ * verdict.
+ *
+ * The thresholds are unchanged, and re-derived rather than inherited: the four
+ * boundary cases below are the same arithmetic in the new column, and the
+ * fixture that proves the cancellation end to end (`/render/csr-content`,
+ * test/fixtures/pages/render-p5.ts) is built so that the retired comparison is
+ * SILENT on it and this one fires.
  *
  * `greatest(renderable_word_count, 1)` is the divide-by-nothing guard, and
  * Postgres' `greatest` is the right function for it precisely because it IGNORES
@@ -196,19 +258,33 @@ async function assertRenderedColumns(
  *   renderable 100, rendered 249 → 249 ≥ 200 but 149 < 150 — silent on the floor
  *   renderable 200, rendered 399 → 199 ≥ 150 but 399 < 400 — silent on the ratio
  *   renderable 0,   rendered 150 → 150 ≥ 2·1 and 150 ≥ 150 — FIRES (the empty shell)
+ *   …and the cancellation itself, which the four above cannot show because none
+ *   of them carries chrome:
+ *   raw 172 / renderable 132, rendered 372 / renderable 332 (132 of chrome on
+ *   BOTH sides, 200 words injected) → 332 ≥ 264 and 332 − 132 = 200 ≥ 150 —
+ *   FIRES, and `addedWords` is exactly the 200 the script wrote. The retired
+ *   comparison on the same page is `rendered_word_count` 232 against 132:
+ *   232 < 264 and 100 < 150, SILENT on both arms.
  *
- * The evidence carries both counts and the difference rather than a ratio: an
- * action plan quotes "this page's HTML holds 12 of its 840 words", and a
- * multiplier computed here would be a second number saying the same thing with
- * rounding of its own.
+ * The evidence carries the two readings by each instrument and the difference
+ * rather than a ratio: an action plan quotes "this page's HTML holds 12 of its
+ * 840 words", and a multiplier computed here would be a second number saying
+ * the same thing with rounding of its own.
  */
 async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]> {
   // A crawl id nothing knows scans no pages, which reads exactly like a site
   // with no CSR problem (`runRules`' precedent, hard rule 7).
   await assertCrawl(db, crawlId, CSR.id);
+  // The guard set is THE COLUMNS THIS RULE NOW READS, which is what changed in
+  // P8-T1: `rendered_word_count` left it because the rule no longer compares
+  // against it, and `rendered_renderable_word_count` joined it. A crawl
+  // rendered before Phase 8 has null there on every rendered row and CANNOT be
+  // re-judged — the rendered DOM of a finished pass is not recoverable — so it
+  // is refused loudly rather than compared against a column measuring something
+  // else, exactly as a pre-P7 `renderable_word_count` is.
   await assertRenderedColumns(db, crawlId, CSR.id, [
     "renderable_word_count",
-    "rendered_word_count",
+    "rendered_renderable_word_count",
   ]);
 
   const res = await db.execute<{
@@ -216,16 +292,20 @@ async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]>
     url: string;
     word_count: number | null;
     renderable_word_count: number;
-    rendered_word_count: number;
+    rendered_analyzer_word_count: number | null;
+    rendered_renderable_word_count: number;
     total_matches: number;
   }>(sql`
-    select p.id, p.url, p.word_count, p.renderable_word_count, p.rendered_word_count,
+    select p.id, p.url, p.word_count, p.renderable_word_count,
+           p.rendered_analyzer_word_count, p.rendered_renderable_word_count,
            count(*) over ()::int as total_matches
     from pages p
     where p.crawl_id = ${crawlId}
       and p.rendered = true
-      and p.rendered_word_count >= ${CSR_WORD_MULTIPLE} * greatest(p.renderable_word_count, 1)
-      and p.rendered_word_count - p.renderable_word_count >= ${CSR_MIN_ADDED_WORDS}
+      and p.rendered_renderable_word_count
+            >= ${CSR_WORD_MULTIPLE} * greatest(p.renderable_word_count, 1)
+      and p.rendered_renderable_word_count - p.renderable_word_count
+            >= ${CSR_MIN_ADDED_WORDS}
     order by p.url
     limit ${URL_FINDING_CAP}`);
 
@@ -234,15 +314,22 @@ async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]>
       pageId: row.id,
       pageUrl: row.url,
       evidence: {
-        // Both raw numbers travel: `rawWordCount` is every word the HTML
-        // carried and `renderableWordCount` is the subset the markup does not
-        // hide, which is the one the arithmetic below is done in. A reader who
-        // saw only the second could not tell a shell from a page whose copy is
-        // merely folded away.
+        // FOUR NUMBERS, TWO DOCUMENTS, ONE INSTRUMENT. Each side carries the
+        // analyzer's whole count and the subset its own markup does not hide,
+        // so a reader can see the chrome on each side (`raw − renderable`) and
+        // watch it cancel in `addedWords`. A reader given only the renderable
+        // pair could not tell a shell from a page whose copy is merely folded
+        // away; a reader given only one side could not check the subtraction.
+        //
+        // `renderedWordCount` — the browser's `innerText`, this rule's rendered
+        // side until Phase 8 — is deliberately NOT here. It is a different
+        // instrument, and putting it in the evidence of a subtraction it takes
+        // no part in is the confusion this phase removed.
         rawWordCount: row.word_count,
         renderableWordCount: row.renderable_word_count,
-        renderedWordCount: row.rendered_word_count,
-        addedWords: row.rendered_word_count - row.renderable_word_count,
+        renderedAnalyzerWordCount: row.rendered_analyzer_word_count,
+        renderedRenderableWordCount: row.rendered_renderable_word_count,
+        addedWords: row.rendered_renderable_word_count - row.renderable_word_count,
       },
       dedupeKey: row.url,
     }),
@@ -294,6 +381,36 @@ async function csrDependentFindings(db: Db, crawlId: string): Promise<Finding[]>
  * rendered navigation is several times what the HTML holds"), so it is what
  * keeps the rule honest if either threshold ever moves; the test pins the
  * coincidence at raw 4 rather than leaving it as arithmetic nobody re-checks.
+ *
+ * **WHY THIS RULE DID NOT MOVE TO THE ANALYZER'S RENDERED COUNTS IN PHASE 8,
+ * when `content.csr-dependent` did.** The option was real: running
+ * `analyzeHtml` over the serialised post-JS DOM would count `nav a[href]` with
+ * the same tokenizer that counted the raw side, and would therefore remove the
+ * adoption-agency divergence above entirely — a browser's serialisation of its
+ * own tree has no unclosed anchors left in it. It was assessed and declined,
+ * and the difference from the CSR case is one of KIND, not of degree:
+ *
+ *  - **The CSR asymmetry decided answers.** Class-hidden chrome is unbounded,
+ *    it grows with the theme rather than with the defect, and the Phase 7 gate
+ *    measured it at a near-constant 425 words — enough to make the rule's
+ *    firing condition unreachable on every page of a real site (§4.9). Nothing
+ *    short of re-siding could fix that.
+ *  - **This asymmetry is bounded, one-directional and already absorbed.** It is
+ *    at most −1 per anchor left unclosed across a container boundary, never
+ *    positive, and pinned by a named parity test. The margin computed above
+ *    says the cheapest false positive it can produce needs SIX such anchors in
+ *    one page's nav or footer, against a realistic floor of two or three. The
+ *    correction re-siding would buy is therefore strictly inside the noise
+ *    these thresholds were derived to tolerate.
+ *  - **Re-siding is not free.** It needs two more `pages` columns (this phase
+ *    ships exactly one migration, and its column set is ruled), and `NAV_RAW_MAX`,
+ *    `NAV_RENDERED_MIN`, the multiple and the six-anchor margin would all have
+ *    to be re-derived honestly against an instrument whose divergence is zero —
+ *    a re-derivation that changes no answer this engine has ever given.
+ *
+ * So the rule keeps the browser's counts and this paragraph records the
+ * decision. If a later phase adds the analyzer-side nav columns for another
+ * reason, the margin arithmetic above is what has to be redone with it.
  *
  * Hand-derived boundaries (each pinned by the test):
  *   raw 4  (4+0), rendered 10 (10+0) → all three exactly at — FIRES
@@ -390,6 +507,26 @@ async function navJsOnlyFindings(db: Db, crawlId: string): Promise<Finding[]> {
  *    a faceted navigation a crawler cannot follow without executing script is
  *    precisely the defect, whether the script runs from an href or from a
  *    listener.
+ *
+ * **WHY THIS RULE DID NOT MOVE TO THE ANALYZER'S RENDERED COUNTS IN PHASE 8
+ * EITHER, and here the reason is the opposite of the nav rule's.** Running
+ * `analyzeHtml` over the serialised post-JS DOM would produce a rendered filter
+ * count out of the SAME extraction the raw side is stored from — deduplicated
+ * by target, protocol-filtered, fragment-stripped — so the two operands would
+ * at last be the same set. That is precisely why it was declined: **the
+ * asymmetry above is not an error this rule tolerates, it is a choice this rule
+ * makes.** The one difference that can change an answer is protocol filtering,
+ * and the page it changes the answer on is a collection whose only route into
+ * its facets is a `javascript:` or `mailto:` href — a page this rule REPORTS,
+ * and correctly, because a facet space no crawler can follow without executing
+ * script is the defect CHECK-02 exists to find. Making the sides symmetric
+ * would silence exactly that page. The other difference, deduplication, cannot
+ * manufacture the zero the gate needs and therefore changes nothing at all.
+ *
+ * Symmetry is a means here, not a virtue: `content.csr-dependent` needed it
+ * because its asymmetry was unbounded and decided every answer; this rule's is
+ * bounded to one shape of page and decides that page in the direction the check
+ * wants. Recorded rather than re-litigated each phase.
  *
  * Hand-derived boundaries (each pinned by the test):
  *   raw 0 links,                  rendered 5 → FIRES

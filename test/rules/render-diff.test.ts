@@ -8,13 +8,21 @@
  * the database (hard rule 3), so the browser's contribution to these tests is a
  * number in a column.
  *
- * EVERY RENDERED FIXTURE CARRIES ALL FIVE RENDER COUNTS, because that is what
- * the render pass writes — `rendered = true` and five numbers, or `rendered =
- * false` with an error and no numbers (`RenderResult`, src/crawl/render/
- * renderer.ts). Filling them all has a second use here: the three rules share
- * one crawl, so a fixture written for one of them is also a page the other two
- * must stay silent about, and the exact-URL assertions below are what says they
- * did.
+ * EVERY RENDERED FIXTURE CARRIES EVERY RENDER COUNT OF BOTH MEASUREMENT
+ * FAMILIES, because that is what the render pass writes — `rendered = true`
+ * with all of them, or `rendered = false` with an error and none of them
+ * (`RenderResult`, src/crawl/render/renderer.ts). Filling them all has a second
+ * use here: the three rules share one crawl, so a fixture written for one of
+ * them is also a page the other two must stay silent about, and the exact-URL
+ * assertions below are what says they did.
+ *
+ * THE TWO FAMILIES, since P8-T1 (src/db/schema.ts has the full account):
+ * `renderedWordCount` is the browser's `innerText` and `renderedRenderableWordCount`
+ * is the crawl's own analyzer run over the serialised post-JavaScript DOM.
+ * `content.csr-dependent` reads the SECOND against the raw `renderableWordCount`
+ * — one instrument, two documents — and no longer reads the first at all. The
+ * specs below therefore default the two independently, and `/csr-cancels-chrome`
+ * is the fixture that shows why they must not be conflated.
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -122,6 +130,25 @@ describe("the render diff rules against the database", () => {
      * differ, and it is the one that proves which column the rule reads.
      */
     renderableWordCount?: number | null;
+    /**
+     * THE RULE'S RENDERED SIDE since P8-T1: the crawl's own analyzer run over
+     * the serialised post-JavaScript DOM, minus what that DOM's own markup
+     * hides. Every boundary case below states this column, because this is the
+     * column the arithmetic is done in.
+     */
+    renderedRenderableWordCount?: number | null;
+    /**
+     * The same analysis's whole count — evidence only, and defaulted to the
+     * renderable one (a rendered DOM with no markup-hidden chrome).
+     */
+    renderedAnalyzerWordCount?: number | null;
+    /**
+     * The browser's `innerText`. Written by every render and read by NO rule
+     * since P8-T1; defaulted to the renderable count above, which is the
+     * relationship on a page with no CSS-hidden chrome.
+     * `/csr-cancels-chrome` is where the two differ, and it is the one that
+     * proves which instrument the rule reads.
+     */
     renderedWordCount?: number | null;
     navLinkCount?: number;
     footerLinkCount?: number;
@@ -173,10 +200,25 @@ describe("the render diff rules against the database", () => {
         navLinkCount: s.navLinkCount ?? 12,
         footerLinkCount: s.footerLinkCount ?? 8,
         rendered,
-        // A page nobody rendered stores null in all five, whatever a spec says:
-        // there is no such row as an unrendered page with counts, and building
-        // one would test a shape the writer cannot produce.
-        renderedWordCount: rendered ? (s.renderedWordCount === undefined ? 400 : s.renderedWordCount) : null,
+        // A page nobody rendered stores null in every render column of both
+        // families, whatever a spec says: there is no such row as an unrendered
+        // page with counts, and building one would test a shape the writer
+        // cannot produce.
+        //
+        // The three word columns cascade: the rule's column takes the spec's
+        // value or 400, and the other two follow it unless a spec separates
+        // them — which only the chrome fixture does.
+        renderedRenderableWordCount: rendered
+          ? s.renderedRenderableWordCount === undefined
+            ? 400
+            : s.renderedRenderableWordCount
+          : null,
+        renderedAnalyzerWordCount: rendered
+          ? (s.renderedAnalyzerWordCount ?? s.renderedRenderableWordCount ?? 400)
+          : null,
+        renderedWordCount: rendered
+          ? (s.renderedWordCount ?? s.renderedRenderableWordCount ?? 400)
+          : null,
         renderedLinkCount: rendered ? 20 : null,
         renderedNavLinkCount: rendered
           ? s.renderedNavLinkCount === undefined
@@ -232,9 +274,10 @@ describe("the render diff rules against the database", () => {
     await closeDb(db);
   });
 
-  // CONTENT.CSR-DEPENDENT. Both arms must hold, and RAW HERE IS THE RENDERABLE
-  // COUNT since Phase 7 — the words the page's markup does not hide, which is
-  // the only raw number comparable with an `innerText` measurement:
+  // CONTENT.CSR-DEPENDENT. Both arms must hold, and BOTH SIDES ARE THE SAME
+  // INSTRUMENT since Phase 8 — the analyzer's renderable count over the bytes
+  // the server sent, against the same function's renderable count over the
+  // serialised post-JavaScript DOM:
   //   rendered >= 2 * greatest(renderable, 1)   and   rendered - renderable >= 150
   //
   //   /csr-both-exact   raw 100, rendered 250: 250 >= 200 ✓, 150 >= 150 ✓  FIRES
@@ -243,9 +286,12 @@ describe("the render diff rules against the database", () => {
   //   /csr-empty-shell  raw   0, rendered 150: 150 >= 2·1 ✓, 150 >= 150 ✓  FIRES
   //   /csr-shell-under  raw   0, rendered 149: 149 >= 2·1 ✓, 149 >= 150 ✗  silent
   //
-  // None of these five pages hides anything, so their renderable count IS their
-  // word count and every boundary above is the same arithmetic it always was —
-  // re-derived rather than assumed: the column moved, the numbers did not.
+  // None of these five pages hides anything on either side, so all three word
+  // columns hold the same number and every boundary above is the same
+  // arithmetic it always was — RE-DERIVED rather than assumed: the rendered
+  // column moved from `rendered_word_count` to
+  // `rendered_renderable_word_count`, and on a page with no chrome the two are
+  // equal, so no threshold and no boundary needed to move with it.
   //
   // The last two are what `greatest(renderable_word_count, 1)` is for: without
   // it the ratio arm of a zero-word page would read `rendered >= 0`, true of
@@ -253,11 +299,11 @@ describe("the render diff rules against the database", () => {
   it("content.csr-dependent fires on both arms and stops one word short of either", async () => {
     const crawlId = await newCrawl();
     await addPages(crawlId, [
-      { path: "/csr-both-exact", wordCount: 100, renderedWordCount: 250 },
-      { path: "/csr-under-floor", wordCount: 100, renderedWordCount: 249 },
-      { path: "/csr-under-ratio", wordCount: 200, renderedWordCount: 399 },
-      { path: "/csr-empty-shell", wordCount: 0, renderedWordCount: 150 },
-      { path: "/csr-shell-under", wordCount: 0, renderedWordCount: 149 },
+      { path: "/csr-both-exact", wordCount: 100, renderedRenderableWordCount: 250 },
+      { path: "/csr-under-floor", wordCount: 100, renderedRenderableWordCount: 249 },
+      { path: "/csr-under-ratio", wordCount: 200, renderedRenderableWordCount: 399 },
+      { path: "/csr-empty-shell", wordCount: 0, renderedRenderableWordCount: 150 },
+      { path: "/csr-shell-under", wordCount: 0, renderedRenderableWordCount: 149 },
     ]);
 
     expect(await firedPaths("content.csr-dependent", crawlId)).toEqual([
@@ -274,7 +320,7 @@ describe("the render diff rules against the database", () => {
   it("content.csr-dependent quotes every count and the difference between them", async () => {
     const crawlId = await newCrawl();
     const ids = await addPages(crawlId, [
-      { path: "/csr-evidence", wordCount: 12, renderedWordCount: 840 },
+      { path: "/csr-evidence", wordCount: 12, renderedRenderableWordCount: 840 },
     ]);
     const findings = await rule("content.csr-dependent").run(db, crawlId);
     expect(findings).toHaveLength(1);
@@ -284,14 +330,16 @@ describe("the render diff rules against the database", () => {
     expect(findings[0]!.evidence).toEqual({
       rawWordCount: 12,
       renderableWordCount: 12,
-      renderedWordCount: 840,
+      renderedAnalyzerWordCount: 840,
+      renderedRenderableWordCount: 840,
       addedWords: 828,
     });
   });
 
   it("content.csr-dependent compares the renderable count, not the raw one", async () => {
-    // The lavishalice shape: 1,000 words in the HTML of which 740 are hidden
-    // chrome, and a browser that shows 900.
+    // The lavishalice shape: 1,000 words in the HTML of which 740 are hidden by
+    // MARKUP, and a post-JavaScript DOM the same analyzer reads 900 renderable
+    // words in.
     //
     //   against the RAW count:        900 >= 2·1000 ✗ — silent (the false
     //                                 negative the diagnosis predicted)
@@ -303,8 +351,8 @@ describe("the render diff rules against the database", () => {
     // chrome, because a reader can already see what the browser shows.
     const crawlId = await newCrawl();
     await addPages(crawlId, [
-      { path: "/csr-hidden-chrome", wordCount: 1000, renderableWordCount: 260, renderedWordCount: 900 },
-      { path: "/csr-visible-copy", wordCount: 1000, renderableWordCount: 900, renderedWordCount: 900 },
+      { path: "/csr-hidden-chrome", wordCount: 1000, renderableWordCount: 260, renderedRenderableWordCount: 900 },
+      { path: "/csr-visible-copy", wordCount: 1000, renderableWordCount: 900, renderedRenderableWordCount: 900 },
     ]);
 
     expect(await firedPaths("content.csr-dependent", crawlId)).toEqual(["/csr-hidden-chrome"]);
@@ -313,8 +361,67 @@ describe("the render diff rules against the database", () => {
     expect(findings[0]!.evidence).toEqual({
       rawWordCount: 1000,
       renderableWordCount: 260,
-      renderedWordCount: 900,
+      renderedAnalyzerWordCount: 900,
+      renderedRenderableWordCount: 900,
       addedWords: 640,
+    });
+  });
+
+  // THE CANCELLATION, which is the whole of P8-T1 stated as two rows.
+  //
+  // Both pages carry 100 words of CSS-class-hidden chrome — the shape the
+  // Phase 7 gate measured at a near-constant 425 words on a real theme
+  // (docs/gates/phase-7.md §4.2). The analyzer cannot see a class, so it counts
+  // that chrome in the raw renderable column AND in the rendered one; the
+  // browser's `innerText` sees it in neither.
+  //
+  //   /csr-cancels-chrome   shell 32 + chrome 100 + drawer 40, script adds 200
+  //     raw 172 / renderable 132   rendered 372 / renderable 332   innerText 232
+  //     THE RULE:    332 >= 2·132 = 264 ✓ and 332 − 132 = 200 >= 150 ✓  FIRES
+  //     …and `addedWords` is 200 EXACTLY: the 100 chrome words are on both
+  //     sides of the subtraction and cancel. That identity is the proof.
+  //     THE RETIRED COMPARISON (innerText on the rendered side):
+  //                  232 >= 264 ✗ and 232 − 132 = 100 >= 150 ✗       silent
+  //     — the false negative §4.9 found in the field, in one row.
+  //
+  //   /csr-chrome-only      the same chrome, no script at all
+  //     raw 172 / renderable 132   rendered 172 / renderable 132   innerText 32
+  //     THE RULE:    132 >= 264 ✗                                   silent
+  //     Chrome ALONE cannot make this rule speak, which is the other half of
+  //     the claim: cancelling it did not make the rule eager, it made it able
+  //     to answer at all.
+  it("content.csr-dependent cancels chrome that both documents carry", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      {
+        path: "/csr-cancels-chrome",
+        wordCount: 172,
+        renderableWordCount: 132,
+        renderedAnalyzerWordCount: 372,
+        renderedRenderableWordCount: 332,
+        renderedWordCount: 232,
+      },
+      {
+        path: "/csr-chrome-only",
+        wordCount: 172,
+        renderableWordCount: 132,
+        renderedAnalyzerWordCount: 172,
+        renderedRenderableWordCount: 132,
+        renderedWordCount: 32,
+      },
+    ]);
+
+    expect(await firedPaths("content.csr-dependent", crawlId)).toEqual(["/csr-cancels-chrome"]);
+
+    const findings = await rule("content.csr-dependent").run(db, crawlId);
+    expect(findings[0]!.evidence).toEqual({
+      rawWordCount: 172,
+      renderableWordCount: 132,
+      renderedAnalyzerWordCount: 372,
+      renderedRenderableWordCount: 332,
+      // 200, not 300 and not 100: the chrome is in both readings and leaves
+      // the subtraction entirely. This one field is the task's whole claim.
+      addedWords: 200,
     });
   });
 
@@ -534,7 +641,7 @@ describe("the render diff rules against the database", () => {
       {
         path: "/rendered-twin",
         wordCount: 3,
-        renderedWordCount: 900,
+        renderedRenderableWordCount: 900,
         navLinkCount: 0,
         footerLinkCount: 0,
         renderedNavLinkCount: 20,
@@ -558,9 +665,13 @@ describe("the render diff rules against the database", () => {
   it("throws, naming page and column, on a rendered page with a null count", async () => {
     const cases: [string, string, PageSpec][] = [
       [
+        // THE RENDERED SIDE, which since Phase 8 is the analyzer's renderable
+        // count over the serialised post-JS DOM. A crawl rendered before P8 has
+        // null here on every rendered row and cannot be re-judged — the DOM of
+        // a finished pass is not recoverable — so it is refused loudly.
         "content.csr-dependent",
-        "rendered_word_count",
-        { path: "/bad-rendered-words", renderedWordCount: null },
+        "rendered_renderable_word_count",
+        { path: "/bad-rendered-words", renderedRenderableWordCount: null },
       ],
       [
         // The raw side of the same comparison, which since Phase 7 is the
@@ -637,7 +748,7 @@ describe("the render diff rules against the database", () => {
   // assertion above while reporting the neighbouring crawl's pages.
   it("reads only its own crawl", async () => {
     const other = await newCrawl();
-    await addPages(other, [{ path: "/other-shell", wordCount: 0, renderedWordCount: 500 }]);
+    await addPages(other, [{ path: "/other-shell", wordCount: 0, renderedRenderableWordCount: 500 }]);
     const mine = await newCrawl();
     await addPages(mine, [{ path: "/mine-clean" }]);
     expect(await firedPaths("content.csr-dependent", mine)).toEqual([]);
