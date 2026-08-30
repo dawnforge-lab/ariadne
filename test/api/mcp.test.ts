@@ -592,6 +592,7 @@ describe("crawl_start", () => {
     });
     expect(answer.isError ?? false).toBe(false);
     const crawlId = String(answer.body["crawlId"]);
+    createdCrawls.push(crawlId);
     expect(crawlId).toMatch(/^crawl_/);
     // The agent that set it must be able to read it back: the cap lives on the
     // crawl row and `crawl_rules` has no argument to restate it, so this is the

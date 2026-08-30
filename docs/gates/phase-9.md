@@ -605,8 +605,13 @@ Both are findings, recorded rather than smoothed over.
    finished one-page `127.0.0.1` crawls and 51 rows stuck in `running` on
    `https://runner.example`. This full-suite run left **exactly one** new row
    behind — `crawl_75ae3c13…`, whose stored config is
-   `{maxPages: 1, findingCap: null}`, the shape `test/api/http.test.ts:684`
-   starts — so the pattern is **one leaked row per suite run**, accumulated over
+   `{maxPages: 1, findingCap: null}`. *(Correction, final review: the leaker
+   is `test/api/mcp.test.ts` — its findingCap-null test never pushed the crawl
+   id to `createdCrawls`, while `http.test.ts`'s helper tracks and deletes
+   every id; proven by isolated runs, +1 for mcp alone, +0 for http alone.
+   The original attribution to `test/api/http.test.ts:684` matched the config
+   shape, which both tests share. Fixed at source in the final-review fix
+   wave.)* So the pattern was **one leaked row per suite run**, accumulated over
    dozens of runs, plus an older family from the runner tests that never reach a
    terminal status. Pre-existing test hygiene, not this phase's doing, and it costs
    something real: `test/rules/run.test.ts` is the suite's long pole and its cost

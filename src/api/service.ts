@@ -547,8 +547,10 @@ export interface CrawlDetail extends CrawlListItem {
    * approximation. `runRules` counts one `pagesScanned` per iteration of its
    * page cursor, and that cursor selects from `pages` on `crawl_id` alone —
    * no status filter, no type filter, no cap (src/rules/run.ts, the
-   * `PAGE_BATCH` keyset loop). `pages` rows are written by the crawl and are
-   * immutable once it has stopped. So `count(*) where crawl_id = …` IS the
+   * `PAGE_BATCH` keyset loop). The `pages` row SET is fixed once the crawl
+   * has stopped — later passes UPDATE rows in place (the renderer,
+   * `deriveClickDepth`, the template retype) but none inserts or deletes
+   * one, and a count sees only the set. So `count(*) where crawl_id = …` IS the
    * number that run reported, not an estimate of it, and the config doctrine
    * applies: do not store what the tables already say.
    *

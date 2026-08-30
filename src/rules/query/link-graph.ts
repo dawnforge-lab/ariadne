@@ -232,10 +232,12 @@ async function orphanFindings(
  * Pages the reader has to click too many times to reach.
  *
  * click_depth, not discovery depth: discovery depth is "how the crawler
- * found it" (a sitemap URL is depth 1 however buried it is); click_depth
- * is the link-graph BFS the reader actually clicks through. Reading
- * discovery depth kept this rule silent through two real audits on a site
- * with 356 sitemap-discovered pages (docs/gates/phase-8.md §15 item 1).
+ * found it" (a sitemap URL is seeded at depth 0 however buried it is);
+ * click_depth is the link-graph BFS the reader actually clicks through.
+ * Reading discovery depth kept this rule silent through two real audits on
+ * a site whose 437 sitemap-discovered pages all sat at discovery depth 0
+ * (docs/gates/phase-8.md §15 item 1; the numbers disentangled in
+ * docs/gates/phase-9.md §9.1).
  * A NULL click_depth is EXCLUDED rather than treated as infinitely deep: a page
  * no link path reaches has no depth to be past a threshold. It is the
  * distribution metric's `nullCount` bucket, and where nothing links to it at all
