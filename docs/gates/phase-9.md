@@ -703,15 +703,20 @@ Node 22, a cached `npx playwright install --with-deps chromium` keyed on the
 locked Playwright version, then `npm ci` → `npx tsc --noEmit` → `npm run
 db:migrate` → `npm test`, on push to `main` and every pull request.
 
-**PR #8 opens against `main` when this phase gets its integration word**, on the
-Phase 7 and Phase 8 precedent (push, PR, CI link filled into this section, merge
-on the owner's word). The run link is filled in then; this placeholder is the
-record that it was expected, not forgotten.
+**PR #8 opened against `main` on the owner's word**
+(https://github.com/dawnforge-lab/ariadne/pull/8), on the Phase 7 and Phase 8
+precedent (push, PR, CI link filled into this section, merge on the owner's
+word).
 
-One thing CI will exercise that this gate could not: **migration 0012 applied to
-an empty database**, where the backfill's two `UPDATE`s match zero rows for a
-different reason than they do here. The gate is not part of CI and cannot be — it
-reads a third party's crawl data.
+**First CI run: GREEN, first try** —
+https://github.com/dawnforge-lab/ariadne/actions/runs/33308036352 (3m57s,
+1440/1440 across 63 files). Worth naming after Phase 8's lesson (its first run
+caught a real planner-dependent lease defect): this run exercised the two
+things the gate could not — **migration 0012 applied to an empty database**,
+where the backfill's two `UPDATE`s match zero rows for a different reason than
+they do here, and the three partial expression indexes created and used under
+CI's fresh table statistics. Both held. The gate itself is not part of CI and
+cannot be — it reads a third party's crawl data.
 
 ## Commit inventory
 
