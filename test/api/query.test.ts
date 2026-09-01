@@ -2618,6 +2618,11 @@ describe("GET /compare/urls", () => {
  * spreadsheet is a response too. It found one real thing when it was written:
  * the `ruleset-mismatch` caveat cited `docs/gates/phase-8.md §7.2` at the
  * tenant — see `rulesetCaveat`.
+ *
+ * **THE PATH LIST BELOW IS HAND-ENUMERATED, AND THAT IS ITS ONE WEAKNESS.**
+ * Nothing derives it from the route table, so a route added later is not swept
+ * until somebody adds it here — the count assertion only stops the list
+ * SHRINKING silently. A new surface owes this test a line.
  */
 describe("nothing inside the process reaches a caller", () => {
   /** Markers that would mean an internal detail escaped into a payload. */

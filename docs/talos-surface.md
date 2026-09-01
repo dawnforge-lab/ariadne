@@ -29,6 +29,14 @@ Two properties make the double-transport claim below cheap to trust:
   `test/api/mcp.test.ts:1988` asserts the CSV a route streams is
   byte-identical to the file the tool writes.
 
+  **What that equality does NOT cover**, stated so nobody reads more into it
+  than it says: the four **command** tools — `crawl_start`, `crawl_mark_failed`,
+  `crawl_render`, `crawl_rules` — are excluded, because each one *changes* the
+  database and a second identical call would be answering a different question
+  (their own transport suites cover them). And it compares **first pages only**:
+  cursor behaviour is pinned per transport, by walks that page a listing to a
+  null cursor, but page two is not compared across the two.
+
 ---
 
 ## 1. Transports, auth and trust
@@ -85,7 +93,7 @@ contract is refused, never clamped (`PAGE_SIZE_DEFAULT` / `PAGE_SIZE_MAX`,
 **Closed vocabularies.** Every query parameter, body field and tool argument is
 on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
-(`test/api/query.test.ts:2686`). MCP argument typos are refused by the SDK's
+(`test/api/query.test.ts:2691`). MCP argument typos are refused by the SDK's
 schema validator before the handler runs (`test/api/mcp.test.ts:686`).
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
@@ -162,21 +170,31 @@ an unknown field (400, naming it).
 
 ### 4.2 `crawl_status` → the crawl in full
 
+The live answer for `crawl_02ff6f7a`, pasted as it came back (2026-09-01) —
+nothing here is elided or tidied:
+
 ```json
-{"crawlId":"crawl_…","siteUrl":"https://lavishalice.com/","status":"finished",
- "startedAt":"…","finishedAt":"…","pagesCrawled":551,"pagesTotal":null,
- "renderPassCount":0,"rulesetVersion":"0.6.0",
+{"crawlId":"crawl_02ff6f7a-203c-4771-805c-feede04aed11",
+ "siteUrl":"https://lavishalice.com/","status":"finished",
+ "startedAt":"2026-08-29T15:21:44.994Z","finishedAt":"2026-08-29T15:40:16.915Z",
+ "pagesCrawled":551,"pagesTotal":null,"renderPassCount":14,
+ "rulesetVersion":"0.6.0",
  "frontier":{"pending":0,"leased":0,"done":551,"failed":0,"renderPending":0},
- "queuePosition":null,"liveLeases":0,"blockedPages":0,"hostSpacingMs":1000,
- "legacyHosts":[],"sitemapUrls":["…"],"findingCap":null,
- "rulesRunAt":"2026-09-01T08:51:55.386Z","findingsCount":17659,"pagesScanned":551}
+ "queuePosition":null,"liveLeases":0,"blockedPages":0,"hostSpacingMs":2000,
+ "legacyHosts":[],"sitemapUrls":["https://lavishalice.com/sitemap.xml"],
+ "findingCap":null,"rulesRunAt":"2026-09-01T08:51:55.386Z",
+ "findingsCount":17659,"pagesScanned":551}
 ```
 
 Read as a Talos dashboard: `blockedPages` and `hostSpacingMs` are the
-politeness pair (§8); `rulesRunAt` + `findingsCount` are the judged-state pair
-(§5); `findingCap` is **resolved** — an absent config key reports the engine's
-default `200`, not `null`. `rulesetVersion` here is the ruleset at CRAWL time,
-which is not necessarily the one that judged it (§7).
+politeness pair (§8) — this crawl was configured at `perHostDelayMs: 2000` and
+finished at a spacing of 2000 with zero blocks, which is the shape of a crawl
+that never had to back off; `rulesRunAt` + `findingsCount` are the judged-state
+pair (§5); `findingCap` is **resolved** — an absent config key reports the
+engine's default `200`, not `null`. `rulesetVersion` here is the ruleset at
+CRAWL time, which is not necessarily the one that judged it (§7):
+`renderPassCount: 14` pages were rendered under 0.6.0 and every finding on this
+crawl was written under 0.7.0.
 
 Pinned: `test/api/query.test.ts:1316` (the whole describe block — the marker,
 the live findings count, `pagesScanned`, the one-statement read); shape
@@ -358,10 +376,17 @@ One row per crawl, `scope: "site"`:
   the site.
 - **`cleanRatio` is `null` over an empty census** — nothing was measured, and
   both 0 and 1 would be claims about a site with no auditable pages.
-- **`urlsWithCritical` is structurally near-empty today.** The reference crawl
-  reports 0, and that is honest rather than flattering: only the render-pass
-  rules carry `critical` severity, so a crawl with no render pass can barely
-  populate that bucket. Do not read `urlsWithCritical: 0` as "nothing serious".
+- **`urlsWithCritical` is structurally near-empty today**, and the reference
+  crawl's 0 is honest rather than flattering. Exactly three rules carry
+  `critical` severity, and none of them can readily fill this bucket:
+  `content.csr-dependent` and `nav.js-only` judge only pages the render pass
+  actually rendered — that crawl rendered **14 of its 551 pages**, about 3% of
+  the census, and neither rule fired on any of them — while `redirect.loop`
+  fires on redirecting pages, which are **outside the auditable census by
+  definition** (they are part of `pagesNotAuditable`), so its criticals can
+  never enter a bucket at all. Do not read `urlsWithCritical: 0` as "nothing
+  serious was found": read it as "almost nothing here is eligible to be
+  critical".
 
 **The check id is a filing, not an answer.** `site.health` carries `CHECK-32`
 because that is where the checklist keeps a partition of the page census — and
@@ -593,7 +618,7 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:2640` and `test/api/query.test.ts:2675`.
+  `test/api/query.test.ts:2645` and `test/api/query.test.ts:2680`.
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the
   two hostnames the caller asked about.
@@ -747,10 +772,12 @@ before the header), `test/api/http.test.ts:1363` (the tear, distinguished from
 - No resource fetching (§10) — Phase 11, with its own plan and gate.
 - `site.health`'s `CHECK-32` filing is a temporary bridge; the eventual home is
   an owner-designed check about engine coverage (§6).
-- `urlsWithCritical` stays near-empty until a crawl runs the render pass (§6).
-- No index on `crawls.site_url`: the site filter is a sequential scan (1.1 ms
-  over 153 rows today). At a hundred thousand crawls it wants an expression
-  index on the hostname.
+- `urlsWithCritical` stays near-empty until a crawl renders a large share of its
+  pages: two of the three `critical` rules judge only rendered pages, and the
+  third fires outside the census (§6).
+- No index on `crawls.site_url`: the site filter is a sequential scan — 1.1 ms
+  over the 153 rows the dev table held when it was measured, and 139 rows today.
+  At a hundred thousand crawls it wants an expression index on the hostname.
 - The comparison's identity collapses multi-finding rules to per-URL presence
   (§7.1). Nothing on the surface can un-collapse it; `issues_list` counts are
   the row-level truth.

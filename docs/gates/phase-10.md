@@ -163,19 +163,34 @@ single grouped statement, nothing written:
 **The plan's gate line said "buckets partition 551". It is wrong and this
 supersedes it.** The census is the *auditable* pages — fetched OK, 200, HTML —
 which is 443; the other 108 decompose, re-queried tonight, into **97 × 404,
-10 × 301 and one non-HTML 200**. Task 2 discovered this while measuring and added a seventh column,
-`pagesNotAuditable`, rather than letting 108 pages disappear beside a gauge.
-Talos is unaffected: an added key, no changed semantics.
+10 × 301 and one non-HTML 200**. Task 2 discovered this while measuring and
+added a seventh column, `pagesNotAuditable`, rather than letting 108 pages
+disappear beside a gauge. Talos is unaffected: an added key, no changed
+semantics.
 
 **`pagesNotAuditable` lumps unlike things into one number on purpose.** It is a
 remainder, not a taxonomy; which kinds those 108 are is a `pages_query`
 question. One of them — a non-HTML 200 — is counted by **no other table at
 all**, which is the other reason the column exists.
 
-**`urlsWithCritical: 0` is structural, not flattering.** Only render-pass rules
-carry `critical` severity and these crawls had no render pass, so that bucket can
-barely be populated. Recorded here so nobody reads a zero there as "nothing
-serious found".
+**`urlsWithCritical: 0` is structural, not flattering — and the first draft of
+this paragraph got the reason wrong.** It said these crawls had no render pass.
+They all did: 14, 28 and 38 rendered pages respectively (`pages.rendered`,
+re-queried tonight), and `crawl_02ff6f7a`'s `crawl_status` reports
+`renderPassCount: 14`. The correct reason is narrower and stronger. Exactly
+three rules in the ruleset carry `critical`:
+
+| rule | why it cannot fill the bucket here |
+|---|---|
+| `content.csr-dependent` | judges only rendered pages — **14 of 551**, ~3% of the census — and fired on none of them |
+| `nav.js-only` | same cohort, same result |
+| `redirect.loop` | fires on redirecting pages, which are **outside the auditable census by definition** — its criticals can never enter a bucket |
+
+The crawl's severity histogram tonight is `warning: 17,274`, `info: 385`,
+**critical: 0** — no critical row exists to be bucketed. So the reading a
+consumer must not make is unchanged and the ground under it is firmer: a zero
+here means "almost nothing on this crawl was eligible to be critical", not
+"nothing serious was found".
 
 **`cleanRatio` is a convenience and the four counts are the authority** — at
 50,000 pages, four decimal places round one clean page to `0.0000`. The copy
@@ -350,7 +365,7 @@ spent; migrations remain 0000–0012.**
 
 ### 4.1 Exported tonight from `crawl_02ff6f7a`
 
-| view | rows | bytes | ms | source, counted independently in SQL |
+| view | rows | bytes | ms | the source, counted in SQL |
 |---|---|---|---|---|
 | `issues` | 17,659 | 5,315,760 | 330 | `issues` for the crawl = **17,659** |
 | `issue_urls` (`links.orphan`) | 243 | 29,521 | 5 | that rule's rows = **243** |
@@ -359,7 +374,15 @@ spent; migrations remain 0000–0012.**
 | `anchor_texts` | 35,145 | 4,664,393 | 884 | `links` from the crawl's pages = **35,145** |
 | `redirects` | 10 | 2,034 | 15 | pages with a 3xx status = **10** |
 
-**Every row count equals its source exactly.**
+**Every row count equals its source exactly.** One honesty note on what
+"independently" can mean here: the *writer* is independent — the SQL was typed by
+hand against the tables — but three of the six counts can only be reproduced
+through the same join the view itself uses (`links_to_4xx`'s 99 needs
+`pages.url = links.target_url` with the target's `fetch_class`, and there is no
+other way to ask). So this check catches a streaming, batching, cursor or
+serialisation fault, and it does not independently confirm the join those views
+are defined by. The join's own correctness is pinned by the fixture tests, where
+the expected rows are written out.
 
 ### 4.2 Re-parsed independently
 
@@ -495,8 +518,8 @@ surface and it was not in this phase.
 
 **The sweep is now two standing guards** rather than something somebody did once:
 
-- `test/api/query.test.ts:2640` walks fourteen live answers (eight of them
-  refusals) and `:2675` walks four CSV exports, failing on any stack frame,
+- `test/api/query.test.ts:2645` walks fourteen live answers (eight of them
+  refusals) and `test/api/query.test.ts:2680` walks four CSV exports, failing on any stack frame,
   absolute path, repository document, connection string or private host. It fails
   on the caveat above when the fix is reverted — demonstrated.
 - `test/api/mcp.test.ts:1915` / `:1931` / `:1988` — the cross-transport
@@ -505,6 +528,13 @@ surface and it was not in this phase.
   and status-for-status, and the streamed CSV asserted byte-identical to the file
   the tool writes. Three transport-level mutations, three kills (a field added to
   a route's body, a `code` added to the HTTP error body, a truncated stream).
+
+  **Its two boundaries, stated rather than implied:** the four command tools
+  (`crawl_start`, `crawl_mark_failed`, `crawl_render`, `crawl_rules`) are not
+  paired — they mutate, so calling one twice asks two different questions, and
+  each is covered by its own transport's suite. And the comparison is over
+  **first pages**: each transport's cursor contract is pinned by its own walk to
+  a null cursor, but page two is not compared across transports.
 
 ---
 
