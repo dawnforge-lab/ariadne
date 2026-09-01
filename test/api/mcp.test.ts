@@ -1063,6 +1063,32 @@ describe("rules_catalog", () => {
     expect(total).toBe(4);
   });
 
+  // A METRIC RULE'S ZERO IS NOT A CLEAN CHECK. It measures rather than finds
+  // and writes no issues on any crawl, so `{count: 0}` alone — the same shape a
+  // rule that genuinely found nothing uses — would have a dashboard render
+  // "passed" against a rule that never had a verdict to give. issue_urls
+  // refuses to answer for these rules at all; the catalog cannot refuse (it
+  // lists the whole ruleset), so it says which kind of zero this is.
+  it("marks a metric rule's structural zero, and leaves the real cleans alone", async () => {
+    const rules = rulesOf(await ok("rules_catalog", { crawlId: catalogCrawlId }));
+    const metrics = rules.filter((r) => r["kind"] === "metric");
+    expect(metrics.length).toBe(registry.byKind("metric").length);
+    expect(metrics.length).toBeGreaterThan(0);
+    for (const rule of metrics) {
+      expect(rule["fired"], `${String(rule["id"])} is not marked`).toEqual({
+        count: 0,
+        measuresOnly: true,
+      });
+    }
+    // Rules that DO find carry no such flag — including the ones that found
+    // nothing, whose zero is the measurement the flag must not be confused with.
+    for (const rule of rules.filter((r) => r["kind"] !== "metric")) {
+      expect(rule["fired"], `${String(rule["id"])} claims to be a metric`).not.toHaveProperty(
+        "measuresOnly",
+      );
+    }
+  });
+
   it("answers fired null on a crawl nobody has judged, rows or no rows", async () => {
     const detail = await ok("crawl_status", { crawlId: seededCrawlId });
     expect(detail["rulesRunAt"]).toBeNull();
@@ -1094,9 +1120,11 @@ describe("rules_catalog", () => {
         for (const key of Object.keys(fired)) fields.add(key);
       }
     }
-    // The live answer carries both truncation states, so `atLeast` is in here
-    // because a rule actually reported it — not because it was listed by hand.
+    // The live answer carries both truncation states and the metric
+    // discriminator, so these are in here because rules actually reported them
+    // — not because they were listed by hand.
     expect(fields.has("atLeast")).toBe(true);
+    expect(fields.has("measuresOnly")).toBe(true);
     for (const field of fields) {
       expect(text, `rules_catalog's description does not name '${field}'`).toContain(field);
     }
@@ -1107,6 +1135,17 @@ describe("rules_catalog", () => {
     expect(text).toContain("never been judged");
     expect(text).toContain("found nothing");
     expect(text).toContain("rulesRunAt");
+
+    // THE FIELD-NAME LOOP ABOVE IS NOT ENOUGH ON ITS OWN: it is satisfied by
+    // ordinary English, so the paragraph that carries the metric rules'
+    // explanation could be deleted and every assertion so far would still
+    // pass. These pin the sentence itself — the same claim `findingRule`
+    // refuses issues_list with, in the words the payload flag is named for.
+    expect(text).toContain("metric");
+    expect(text).toContain("measures rather than finds");
+    expect(text).toContain("0 on EVERY judged");
+    // And the honest size, so an agent can decide before spending the context.
+    expect(text).toMatch(/\d+KB/);
   });
 });
 

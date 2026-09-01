@@ -38,7 +38,14 @@
  *                                      client-facing copy. `?crawlId=` joins
  *                                      one crawl's fired state onto it —
  *                                      `{count}` on a judged crawl (0 is a real
- *                                      value) and `null` on one nobody judged
+ *                                      value) and `null` on one nobody judged.
+ *                                      `atLeast: true` beside a count means the
+ *                                      rule capped its listing, so the count is
+ *                                      a floor and the magnitude is on the
+ *                                      issues route. `measuresOnly: true` marks
+ *                                      a metric rule, whose 0 is structural —
+ *                                      it measures rather than finds and writes
+ *                                      no issues at all (see `RuleFired`)
  *   GET  /crawls/:id/export            write a dataset to disk, answer with the path
  *
  * ## What a caller can never be told

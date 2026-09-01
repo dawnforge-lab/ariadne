@@ -744,16 +744,23 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "so count is a floor rather than the number of cases — report it as 'N or " +
         "more' and read the exact magnitude (truncated + total | atLeast) off " +
         "issues_list, which owns it. No atLeast means count is the whole number.\n\n" +
-        "METRIC RULES MEASURE RATHER THAN FAULT, so a rule with kind 'metric' " +
-        "writes no findings and reports count 0 on every judged crawl. That zero " +
-        "is not a verdict about the site; its numbers are in metrics_get.\n\n" +
+        "fired.measuresOnly: true marks a rule with kind 'metric', which measures " +
+        "rather than finds: it writes no issues, so its count is 0 on EVERY judged " +
+        "crawl whatever the site is like. That zero is structural and is not a " +
+        "check the site passed — the flag is on the payload so it cannot be missed. " +
+        "Its numbers are in metrics_get (which is also what issue_urls tells you " +
+        "when you name a metric rule there).\n\n" +
         "The copy is always the CURRENT ruleset's (rulesetVersion says which), " +
         "including when the named crawl was judged by an older one. A crawl " +
         "holding findings for a rule this ruleset no longer defines is refused " +
         "rather than answered with a count missing from the list — re-run " +
         "crawl_rules over it.\n\n" +
-        "Not paginated: the ruleset is a fixed, small list that does not grow " +
-        "with the size of a crawl.",
+        "Not paginated: the ruleset is a fixed list that does not grow with the " +
+        "size of a crawl — but it is not small, and there is no cursor to take it " +
+        "in pieces. Every rule's full copy is tens of kilobytes in one answer " +
+        "(about 80KB, roughly 20k tokens, at this ruleset), so spend the context " +
+        "deliberately: if you only need the rules that FOUND something, " +
+        "issues_list is a fraction of the size.",
       inputSchema: z.strictObject({
         crawlId: z
           .string()

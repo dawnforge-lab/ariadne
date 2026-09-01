@@ -1136,6 +1136,32 @@ describe("GET /rules", () => {
     expect(total).toBeGreaterThan(0);
   });
 
+  it("marks a metric rule's structural zero apart from a real clean", async () => {
+    // A metric rule measures rather than finds: it writes no issues on ANY
+    // crawl, so its count is 0 by construction. In the bare `{count: 0}` shape
+    // that is indistinguishable from a rule that ran and found nothing, and a
+    // dashboard would render "passed" against a rule that never had a verdict
+    // to give. The issues routes refuse to answer for these rules at all
+    // (`findingRule`); the catalog lists the whole ruleset and cannot refuse,
+    // so it says which kind of zero this is — on the payload, not only in a
+    // tool description a UI author never reads.
+    const rules = byId(await call(`/rules?crawlId=${crawlB}`));
+    const metricIds = registry.byKind("metric").map((r) => r.id);
+    expect(metricIds.length).toBeGreaterThan(0);
+    for (const id of metricIds) {
+      expect(rules.get(id)?.["fired"], `${id} is not marked`).toEqual({
+        count: 0,
+        measuresOnly: true,
+      });
+    }
+    // The flag is the metric rules' and nobody else's — least of all the rules
+    // whose zero IS the measurement it must not be confused with.
+    for (const [id, rule] of rules) {
+      if (metricIds.includes(id)) continue;
+      expect(rule["fired"], `${id} claims to be a metric`).not.toHaveProperty("measuresOnly");
+    }
+  });
+
   it("says fired null on a crawl nobody has judged, however many rows it holds", async () => {
     // crawlA's issues table is full — seeded, never judged. THE DISTINCTION IS
     // THE POINT: null is "never measured", {count: 0} is "measured, clean", and

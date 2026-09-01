@@ -778,10 +778,27 @@ function truncationOf(raw: unknown, ruleId: string): IssueTruncation {
  * looking at; here it would be a second, subtly different number on every row
  * of a checklist. The flag says "this count is not the whole story"; the tool that
  * tells the rest of the story is named in the description.
+ *
+ * ## `measuresOnly`, and the claim it stops the catalog making
+ *
+ * Present, and always `true`, on a rule whose `kind` is `metric`. A metric rule
+ * **measures rather than finds: it writes no issues** — the same sentence
+ * `findingRule` refuses `issues_list` and `issue_urls` with when a caller names
+ * one — so its `count` is 0 on every judged crawl, structurally, whatever the
+ * site is like.
+ *
+ * Without the flag the catalog would state in a payload exactly what that route
+ * refuses to state at all: `{count: 0}`, in the identical shape a genuine clean
+ * check uses. A dashboard would render "passed" against a rule that never had a
+ * verdict to give. Saying so only in the MCP tool description is not enough —
+ * that is the one transport a UI author does not read — so the discriminator is
+ * on the payload, where every consumer sees it. The numbers such a rule DID
+ * produce are in the metrics listing.
  */
 export interface RuleFired {
   count: number;
   atLeast?: true;
+  measuresOnly?: true;
 }
 
 /**
@@ -1613,10 +1630,15 @@ export class ApiService {
    * Obligation 1 forbids a full export inline. This is not one: it is a CLOSED
    * resource whose size is the ruleset's, not the crawl's. It does not grow
    * with pages, findings or links — the three things that make an export an
-   * export — and it is the same few dozen rows on a 5-page site and a 50k-page
-   * one. A cursor over it would make every consumer loop to assemble a
-   * checklist they need whole in order to draw anything at all. The listings
-   * that DO scale with the data are all paginated, and none of them is this.
+   * export — and it is the same rows on a 5-page site and a 50k-page one. A
+   * cursor over it would make every consumer loop to assemble a checklist they
+   * need whole in order to draw anything at all. The listings that DO scale
+   * with the data are all paginated, and none of them is this.
+   *
+   * BOUNDED IS NOT THE SAME AS SMALL, and the tool description says so rather
+   * than letting a caller find out: every rule's full client-facing copy is
+   * tens of kilobytes in one answer (about 80KB at ruleset 0.7.0 — roughly
+   * 20k tokens for an agent deciding whether to spend the context on it).
    *
    * ## One walk, one query
    *
@@ -1652,6 +1674,14 @@ export class ApiService {
     }
 
     const { judged, fired } = await this.firedByRule(opts.crawlId);
+    const firedFor = (rule: AnyRule): RuleFired => {
+      const counted = fired.get(rule.id) ?? { count: 0 };
+      // A metric rule's zero is structural, not a verdict: it measures rather
+      // than finds, so it writes no issues on any crawl. The flag rides the
+      // payload rather than the tool description because a dashboard reads the
+      // payload — see `RuleFired`.
+      return rule.kind === "metric" ? { ...counted, measuresOnly: true } : counted;
+    };
     return {
       rulesetVersion: RULESET_VERSION,
       rules: ordered.map((rule) => ({
@@ -1659,7 +1689,7 @@ export class ApiService {
         // The whole distinction, in one expression: unjudged is null for every
         // rule, and judged is a count for every rule — zero where the rule
         // wrote nothing, which is a measurement rather than a silence.
-        fired: judged ? (fired.get(rule.id) ?? { count: 0 }) : null,
+        fired: judged ? firedFor(rule) : null,
       })),
     };
   }
