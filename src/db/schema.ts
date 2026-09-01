@@ -531,6 +531,118 @@ export const structuredData = pgTable("structured_data", {
   index("sd_crawl_page").on(t.crawlId, t.pageId),
 ]);
 
+/**
+ * ONE ROW PER DISTINCT RESOURCE URL PER CRAWL — the images, stylesheets and
+ * scripts the crawled pages point at (P11-T1, migration 0013). The per-page
+ * fan-out lives next door in `page_resources`; this table is about FILES, and
+ * the split is what makes "one image referenced by 400 pages" one fetch and one
+ * row rather than 400 of each.
+ *
+ * The crawl path (`PageWriter`) writes `crawl_id` / `url` / `kind` and NOTHING
+ * ELSE: every other column is the resource fetch pass's (P11-T2), and until it
+ * has run they are all null. Dedup is this table's job and not the writer's —
+ * the unique index below plus `on conflict do nothing`, never a set of URLs in
+ * memory (hard rule 6).
+ */
+export const resources = pgTable("resources", {
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  // THE RESOURCE'S IDENTITY, and the decision behind the spelling (P11-T1):
+  // this is `normalizeUrl(raw, pageUrl)` output — absolute, http(s) only,
+  // fragment stripped, query params sorted, hostname lowercased — which is the
+  // SAME function the frontier keys `pages.url` by and the link extraction
+  // resolves against. One resolution semantics for everything this engine
+  // fetches, so a URL cannot mean one thing on the page side and another here.
+  //
+  // It is therefore BOTH the dedup key and the URL the fetch pass will request,
+  // which is why nothing further is folded into it. In particular the PATH KEEPS
+  // ITS CASE: `pages.url_normalised` lowercases because it is an analytic
+  // variant key that is never fetched, and a lowercased CDN path is a 404.
+  //
+  // There is deliberately NO second `url_normalised` column here. `pages` needs
+  // two spellings because its duplicate-URL checks group case/slash variants of
+  // one page; no rule asks that question of a resource, and a column nobody
+  // reads is a column that silently rots.
+  url: text("url").notNull(),
+  // image|css|js — `ResourceKind` in src/crawl/parse/page-analyzer.ts is the
+  // authority; this comment tracks it. Free text, no enum constraint, on the
+  // `crawls.status` precedent: adding a class is a code change, and every
+  // consumer is audited by hand when one is added. The class is the one the
+  // MARKUP declared (an `<img src>` is an image), never the served
+  // content-type — which the fetch pass records separately and which
+  // disagreeing with this is itself an audit finding.
+  kind: text("kind").notNull(),
+  // ok|client_error|server_error|fetch_error|refused|robots_denied — the page
+  // vocabulary plus the two a resource can earn (P11-T2).
+  //
+  // NULL MEANS "SEEN, NOT YET ASKED", and it is the null-vs-zero doctrine's
+  // newest citizen: the analyzer found this reference and no fetch has been
+  // attempted — because the pass has not run yet, was interrupted, or a cap
+  // stopped short of this row (in which case `fetch_reason` says so). It is NOT
+  // "the fetch failed", which is `fetch_error`, and it is NOT "the resource is
+  // fine", which is `ok`. Every rule that judges a resource must gate on this
+  // column being non-null: an unfetched resource is UNKNOWN, never broken
+  // (hard rules 1 and 7). The fetch pass reads the null as its work list, which
+  // is what makes an interrupted pass resumable by re-running it.
+  fetchClass: text("fetch_class"),
+  // Why, in the fetch layer's own words: the policy's refusal, the robots rule,
+  // `resource-cap` for a row a per-crawl cap stopped at. `pages.fetch_reason`'s
+  // twin, and null on a fetch that simply worked.
+  fetchReason: text("fetch_reason"),
+  statusCode: integer("status_code"),
+  contentType: text("content_type"),
+  // The transferred size in bytes, from `content-length` or from counting a
+  // discarded body; `bytes_source` says which, because a header is a claim and
+  // a count is a measurement and the weight rules quote both.
+  bytes: integer("bytes"),
+  // header|counted. Null while `bytes` is null — the pair moves together.
+  bytesSource: text("bytes_source"),
+  // The two cache headers verbatim, for the caching rule (P11-T3). Null after a
+  // successful fetch means the server sent none, which is the finding; null
+  // before one means nothing was asked, which is `fetch_class` null's business.
+  cacheControl: text("cache_control"),
+  expires: text("expires"),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }),
+  fetchMs: integer("fetch_ms"),
+}, (t) => [
+  // The dedup, and the upsert target. One row per URL per crawl: the writer
+  // inserts with `on conflict do nothing`, so the second page to reference an
+  // image adds an edge and no row.
+  uniqueIndex("resources_crawl_url").on(t.crawlId, t.url),
+]);
+
+/**
+ * WHICH PAGE REFERENCES WHICH RESOURCE — the per-page fan-out `resources`
+ * deliberately does not carry (P11-T1, migration 0013).
+ *
+ * Two pages sharing an image are two rows here and one row there. The edge is
+ * keyed by the resource's URL rather than by a surrogate id for the reason
+ * `PageWriter` mints its own `page_id`: the writer must be able to build a
+ * child row without reading anything back, and `(crawl_id, url)` already
+ * identifies the resource.
+ *
+ * NO FOREIGN KEY to `pages` or to `resources`, matching `links`, `hreflang` and
+ * `structured_data`, and for a concrete reason rather than by imitation: page
+ * ids are minted before the insert and a page row that loses the
+ * `(crawl_id, url)` conflict leaves children pointing at an id no row carries
+ * (see PageWriter's header), and the resource rows are inserted in a separate
+ * batch from the edges, so an FK would turn batch ordering into a hard failure.
+ * The cascade that matters — deleting a crawl — is the `crawl_id` FK, which
+ * both tables carry.
+ */
+export const pageResources = pgTable("page_resources", {
+  crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
+  pageId: text("page_id").notNull(),
+  // The `resources.url` spelling — normalizeUrl output, see that column.
+  resourceUrl: text("resource_url").notNull(),
+}, (t) => [
+  // "What does this page reference" (the per-page weight rollup) and "who
+  // references this file" (the referencing-page count the resource rules
+  // report), which are the only two directions anything asks. The `links`
+  // precedent: source index and target index, both.
+  index("page_resources_crawl_page").on(t.crawlId, t.pageId),
+  index("page_resources_crawl_resource").on(t.crawlId, t.resourceUrl),
+]);
+
 export const sitemapUrls = pgTable("sitemap_urls", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
   // The `<loc>` as the site published it, resolved to absolute and no further.

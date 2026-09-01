@@ -23,7 +23,10 @@ describe("schema", () => {
       where table_schema = 'public' order by table_name`);
     const names = res.rows.map((r) => r.table_name);
     for (const t of ["crawls","pages","links","hreflang","structured_data",
-                     "sitemap_urls","url_params","issues","metrics","frontier"]) {
+                     "sitemap_urls","url_params","issues","metrics","frontier",
+                     // P11-T1, migration 0013: the file table and its per-page
+                     // fan-out. Their own claims are in test/db/migration-0013.
+                     "resources","page_resources"]) {
       expect(names, `missing table ${t}`).toContain(t);
     }
   });

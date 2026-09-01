@@ -92,6 +92,13 @@
       "when": 1788037063360,
       "tag": "0012_fast_unus",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1788298404556,
+      "tag": "0013_light_red_ghost",
+      "breakpoints": true
     }
   ]
 }

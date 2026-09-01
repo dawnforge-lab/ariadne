@@ -7,7 +7,9 @@ import {
   crawls,
   hreflang,
   links,
+  pageResources,
   pages,
+  resources,
   structuredData,
 } from "../../src/db/schema.js";
 import { PageWriter } from "../../src/crawl/persist.js";
@@ -72,6 +74,12 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
         position: 2,
       },
     ],
+    // Two files every page in this suite references, so the resource path is
+    // exercised by every existing case as well as by its own.
+    resourceRefs: [
+      { url: `${SITE}/img/logo.png`, kind: "image" },
+      { url: `${SITE}/css/site.css`, kind: "css" },
+    ],
     relNext: `${SITE}/page/2`,
     relPrev: null,
     domSize: 120,
@@ -129,7 +137,13 @@ describe("PageWriter", () => {
   }
 
   async function countOf(
-    table: typeof pages | typeof links | typeof hreflang | typeof structuredData,
+    table:
+      | typeof pages
+      | typeof links
+      | typeof hreflang
+      | typeof structuredData
+      | typeof resources
+      | typeof pageResources,
     crawlId: string,
   ): Promise<number> {
     const rows = await db
@@ -630,6 +644,8 @@ describe("PageWriter", () => {
       links: 0,
       hreflang: 2,
       structuredData: 1,
+      resources: 2,
+      pageResources: 2,
       hreflangUnresolved: 0,
     });
   });
@@ -866,6 +882,208 @@ describe("PageWriter", () => {
     });
   });
 
+  /**
+   * P11-T1. The two tables are one fact split by cardinality: `resources` is
+   * about FILES (one row per distinct URL per crawl) and `page_resources` is
+   * about REFERENCES (one row per page per file). Everything below is a
+   * consequence of that split, and the last case is the one that would let the
+   * memory contract back in through the front door if it failed — the dedup has
+   * to be the database's, because the alternative is a per-crawl set of URLs in
+   * the writer (hard rule 6).
+   */
+  describe("resources", () => {
+    it("writes a row and an edge per referenced URL, unfetched", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/page-with-assets`;
+      const pageId = await writer.addPage(
+        item(url),
+        makeFetch(url),
+        makeAnalysis({
+          resourceRefs: [
+            { url: `${SITE}/img/hero.png`, kind: "image" },
+            { url: `${SITE}/css/theme.css`, kind: "css" },
+            { url: "https://cdn.other/app.js", kind: "js" },
+          ],
+        }),
+        { complete: true },
+      );
+      await writer.flush();
+
+      const rows = await db
+        .select({
+          url: resources.url,
+          kind: resources.kind,
+          fetchClass: resources.fetchClass,
+          fetchReason: resources.fetchReason,
+          statusCode: resources.statusCode,
+          bytes: resources.bytes,
+          bytesSource: resources.bytesSource,
+          contentType: resources.contentType,
+          cacheControl: resources.cacheControl,
+          expires: resources.expires,
+          fetchedAt: resources.fetchedAt,
+          fetchMs: resources.fetchMs,
+        })
+        .from(resources)
+        .where(eq(resources.crawlId, crawlId))
+        .orderBy(resources.url);
+      expect(rows).toEqual([
+        {
+          url: "https://cdn.other/app.js",
+          kind: "js",
+          // "SEEN, NOT YET ASKED" — the whole meaning of the null, and the
+          // reason no rule may call an unfetched resource broken. Every other
+          // fetch column is null with it: the pass writes them together.
+          fetchClass: null,
+          fetchReason: null,
+          statusCode: null,
+          bytes: null,
+          bytesSource: null,
+          contentType: null,
+          cacheControl: null,
+          expires: null,
+          fetchedAt: null,
+          fetchMs: null,
+        },
+        expect.objectContaining({ url: `${SITE}/css/theme.css`, kind: "css" }),
+        expect.objectContaining({ url: `${SITE}/img/hero.png`, kind: "image" }),
+      ]);
+
+      const edges = await db
+        .select({ pageId: pageResources.pageId, url: pageResources.resourceUrl })
+        .from(pageResources)
+        .where(eq(pageResources.crawlId, crawlId))
+        .orderBy(pageResources.resourceUrl);
+      expect(edges).toEqual([
+        { pageId, url: "https://cdn.other/app.js" },
+        { pageId, url: `${SITE}/css/theme.css` },
+        { pageId, url: `${SITE}/img/hero.png` },
+      ]);
+      expect(writer.stats().resources).toBe(3);
+      expect(writer.stats().pageResources).toBe(3);
+    });
+
+    /** THE SPLIT, stated as the test the brief asks for. */
+    it("gives two pages sharing an image ONE resource row and TWO edges", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId, { batchSize: 1 });
+      const shared = `${SITE}/img/shared.png`;
+      const ids: string[] = [];
+      for (const path of ["/a", "/b"]) {
+        ids.push(
+          await writer.addPage(
+            item(`${SITE}${path}`),
+            makeFetch(`${SITE}${path}`),
+            makeAnalysis({ resourceRefs: [{ url: shared, kind: "image" }] }),
+            { complete: true },
+          ),
+        );
+      }
+      await writer.flush();
+
+      expect(await countOf(resources, crawlId)).toBe(1);
+      const edges = await db
+        .select({ pageId: pageResources.pageId, url: pageResources.resourceUrl })
+        .from(pageResources)
+        .where(eq(pageResources.crawlId, crawlId));
+      expect(edges).toHaveLength(2);
+      expect(edges.map((e) => e.pageId).sort()).toEqual([...ids].sort());
+      expect(new Set(edges.map((e) => e.url))).toEqual(new Set([shared]));
+      // The counter counts ROWS WRITTEN, so the conflict-dropped second insert
+      // is not one — the same reading `stats().pages` already has.
+      expect(writer.stats().resources).toBe(1);
+      expect(writer.stats().pageResources).toBe(2);
+    });
+
+    /**
+     * The duplicate can also arrive INSIDE one insert, when both pages are in
+     * the same batch. `on conflict do nothing` absorbs that too; a plain insert
+     * would raise on the unique index and lose the whole batch.
+     */
+    it("absorbs a duplicate inside a single batch", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+      const shared = `${SITE}/img/batch.png`;
+      for (const path of ["/a", "/b", "/c"]) {
+        await writer.addPage(
+          item(`${SITE}${path}`),
+          makeFetch(`${SITE}${path}`),
+          makeAnalysis({ resourceRefs: [{ url: shared, kind: "image" }] }),
+          { complete: true },
+        );
+      }
+      await writer.flush();
+
+      expect(await countOf(resources, crawlId)).toBe(1);
+      expect(await countOf(pageResources, crawlId)).toBe(3);
+    });
+
+    it("writes nothing for a page with no analysis", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/404`;
+      await writer.addPage(
+        item(url),
+        makeFetch(url, { statusCode: 404, fetchClass: "client_error", body: null }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+      expect(await countOf(resources, crawlId)).toBe(0);
+      expect(await countOf(pageResources, crawlId)).toBe(0);
+    });
+
+    /**
+     * The memory contract, at the writer. A page with more refs than
+     * `batchSize` must push batches through the buffer rather than hold them —
+     * the property `links` is already held to, and resources sit in the same
+     * buffers on the same page.
+     */
+    it("never lets either buffer exceed batchSize for one asset-heavy page", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId, { batchSize: 100 });
+      const many = Array.from({ length: 250 }, (_, i) => ({
+        url: `${SITE}/i/${i}.png`,
+        kind: "image" as const,
+      }));
+      const url = `${SITE}/gallery`;
+      await writer.addPage(item(url), makeFetch(url), makeAnalysis({ resourceRefs: many }), {
+        complete: true,
+      });
+
+      // Two full batches of each went to the database inside addPage; the
+      // 50-row remainders are still buffered.
+      expect(await countOf(resources, crawlId)).toBe(200);
+      expect(await countOf(pageResources, crawlId)).toBe(200);
+      await writer.flush();
+      expect(await countOf(resources, crawlId)).toBe(250);
+      expect(await countOf(pageResources, crawlId)).toBe(250);
+    });
+
+    /** Deleting a crawl takes both tables with it, like every sibling. */
+    it("cascades from the crawl delete", async () => {
+      const id = `crawl_${randomUUID()}`;
+      await db.insert(crawls).values({
+        id,
+        siteUrl: SITE,
+        config: {},
+        rulesetVersion: "test",
+      });
+      const writer = new PageWriter(db, id);
+      const url = `${SITE}/doomed`;
+      await writer.addPage(item(url), makeFetch(url), makeAnalysis(), { complete: true });
+      await writer.flush();
+      expect(await countOf(resources, id)).toBe(2);
+      expect(await countOf(pageResources, id)).toBe(2);
+
+      await db.delete(crawls).where(eq(crawls.id, id));
+      expect(await countOf(resources, id)).toBe(0);
+      expect(await countOf(pageResources, id)).toBe(0);
+      expect(await countOf(pages, id)).toBe(0);
+    });
+  });
+
   it("flush is idempotent and reports what it wrote", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);
@@ -882,6 +1100,8 @@ describe("PageWriter", () => {
       links: 3,
       hreflang: 2,
       structuredData: 1,
+      resources: 2,
+      pageResources: 2,
       hreflangUnresolved: 0,
     });
   });

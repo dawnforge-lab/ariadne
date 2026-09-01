@@ -1360,7 +1360,15 @@ function toOutcome(result: FetchResult): BatchOutcome {
 }
 
 function emptyWriterStats(): PageWriterStats {
-  return { pages: 0, links: 0, hreflang: 0, structuredData: 0, hreflangUnresolved: 0 };
+  return {
+    pages: 0,
+    links: 0,
+    hreflang: 0,
+    structuredData: 0,
+    resources: 0,
+    pageResources: 0,
+    hreflangUnresolved: 0,
+  };
 }
 
 /**
