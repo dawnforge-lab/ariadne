@@ -27,6 +27,17 @@
  *   hreflang.* (all four)                       no hreflang declarations
  *   links.orphan                                linked from the hub
  *   pagination.*                                no rel=next, no rel=prev
+ *   resources.broken                            both its images are served, 200
+ *   images.oversized / legacy-format            both are small SVGs, not PNGs
+ *
+ * ONE RESOURCE FINDING IS PROVOKED BY THIS PAGE ALL THE SAME, and it is not a
+ * hole in the list above: `/img/control-outline.svg` is served with no
+ * `cache-control`, which `resources.uncached` reports ONCE FOR THE SITE with no
+ * page attached (test/fixtures/assets.ts says so where the header is left off).
+ * A site-scoped finding lands in the harness's `siteFindings` map rather than on
+ * any path, so this page's own set stays empty — which is the correct reading
+ * rather than a lucky one: a caching policy is the server's, and the control's
+ * silence is a claim about its markup.
  *
  * Every rule in the registry is now page-attached, so nothing reaches this page
  * except through its own markup and its own place in the link graph — which is

@@ -1998,10 +1998,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-47: Core Web Vitals — LCP, INP, CLS
 - **Priority**: High | **Requires**: DevTools
-- **Engine**: NOT MEASURED. The engine records response time per page (CHECK-50) and
-  nothing else about performance: it does not call PageSpeed, does not collect CrUX
-  field data and does not compute Core Web Vitals. This check is browser work in
-  full, and if no browser is available it is SKIP — never PASS.
+- **Engine**: NOT MEASURED. What the engine records about performance is response
+  time per page (CHECK-50) and, since the resource pass, how many bytes each page is
+  made of (CHECK-48 / CHECK-49) — no more than that: it does not call PageSpeed, does
+  not collect CrUX field data and does not compute Core Web Vitals. Page weight is an
+  input to LCP and not a measurement of it, so quoting `page.weight` here is context
+  and never a verdict. This check is browser work in full, and if no browser is
+  available it is SKIP — never PASS.
 - **DevTools**: Run Lighthouse audit on 3-5 key page types (homepage, product, collection, blog, search)
 - **Evaluate**:
   - Prefer CrUX field data (p75) if available; otherwise lab Lighthouse data
@@ -2010,7 +2013,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - Record: LCP, INP, CLS per page type
 
 ### CHECK-48: Render-blocking resources and JS bundle size
-- **Priority**: Medium | **Requires**: DevTools
+- **Priority**: Medium | **Requires**: Engine + DevTools
+- **Engine**: `metrics_get` with `metricId: "page.weight"` — the script-byte
+  distribution per page type, which is the BUNDLE SIZE half of this check, measured
+  by asking the server for every script the served HTML declares rather than by
+  reading one page in a browser. Read the row's `resourcesReferenced` and
+  `resourcesWeighed` before quoting any of it: a row that weighed a fraction of what
+  it referenced is a floor. The other half is NOT MEASURED and stays browser work —
+  whether a script blocks rendering (nothing stored says async, defer or where in the
+  document it sits) and how much of it goes unused (that needs coverage data from a
+  running browser). Scripts a page loads with JavaScript are outside the measurement
+  entirely, so on a client-rendered site the engine's number is a floor of a floor.
 - **DevTools**: Lighthouse audit — check "Eliminate render-blocking resources" and "Reduce unused JavaScript"
 - **Evaluate**:
   - WARN if render-blocking resources > 3 or unused JS > 50%
@@ -2018,10 +2031,20 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — `images.missing-dimensions`
-  (info) and `images.missing-alt` (info), page by page across the whole crawl.
-  `issue_urls` names the pages and the offending images. Image WEIGHT and FORMAT are
-  not measured (the crawler does not fetch image bytes) — those stay browser work.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — four findings now.
+  `images.missing-dimensions` (info) and `images.missing-alt` (info), page by page
+  across the whole crawl, with `issue_urls` naming the pages and the offending
+  images; and, since the resource pass, `images.oversized` (warning) for every image
+  over the 100,000 bytes this check's own WARN line names, and `images.legacy-format`
+  (info) for the heavy ones a server sent as PNG or JPEG. Both name the FILE and say
+  how many pages carry it, which is what turns "oversized image count" into a list of
+  jobs. `metrics_get` with `metricId: "page.weight"` gives the image-byte distribution
+  per template beside them. Two limits to state whenever these are quoted: the crawl
+  never decodes an image, so nothing here says whether one is over-compressed or
+  larger than the box it is displayed in; and only images named in the HTML the
+  server sent are weighed, so a client-rendered gallery is invisible to all of it.
+  RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
+  and nothing checks whether the set is sensible.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
 - **Evaluate**:
@@ -2033,8 +2056,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-50"` — `performance.slow-response`
   (info): pages whose response time crossed the threshold, with the measured time in
   the evidence. This is server response time over a whole crawl, which is a better
-  sample than one browser load — but it is response time only. Caching headers,
-  compression and protocol are not stored, so they stay browser work.
+  sample than one browser load. Beside it, `resources.uncached` (info) answers the
+  CACHING half for static files: one site-scoped finding counting the files the crawl
+  fetched that came back with neither a `Cache-Control` nor an `Expires` header, with
+  up to twenty of them named. Two headers is all that is stored, so a CDN's own edge
+  caching and ETag revalidation are invisible, and the finding says the response gave
+  no instruction rather than that the file is re-downloaded. The HTML documents' own
+  caching headers are not stored at all — this is about the images, stylesheets and
+  scripts. COMPRESSION and PROTOCOL are still NOT MEASURED and stay browser work.
 - **DevTools**: Check the homepage's network panel for TTFB and response headers
   (Cache-Control, Content-Encoding, protocol)
 - **Evaluate**:
@@ -2042,7 +2071,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - Record: TTFB values, compression method, caching policy, protocol
 
 ### CHECK-51: JavaScript errors and broken network requests
-- **Priority**: Medium | **Requires**: DevTools
+- **Priority**: Medium | **Requires**: Engine + DevTools
+- **Engine**: `issues_list` with `checkId: "CHECK-51"` — `resources.broken` (warning):
+  pages referencing an image, stylesheet or script the server answered with a 4xx or a
+  5xx, which is the "failed network requests" half of this check, seen across every
+  page of the crawl instead of the three a browser session opens. Each finding names
+  up to ten of the files with the status each returned and the server's reason beside
+  it — a 200 carrying a refusal reason is bot protection answering in place of the
+  file, not a healthy asset — and carries an `unknownResources` count for the
+  references the crawl could not decide about (never asked, refused by url-policy,
+  disallowed by robots, or a request that did not complete). None of those is a broken
+  file, and a high unknown count means the answer here is partial. JAVASCRIPT ERRORS
+  are NOT MEASURED: nothing in a crawl records a console, and requests a script makes
+  at runtime are not in the resource table either — both stay browser work.
 - **DevTools**:
   1. Navigate to homepage, product, collection
   2. Check console: `list_console_messages` — filter errors

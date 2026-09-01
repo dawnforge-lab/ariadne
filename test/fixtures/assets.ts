@@ -41,10 +41,36 @@ function svg(label: string): string {
 }
 
 /**
+ * The bytes of the fixture site's one heavy image (P11-T3).
+ *
+ * 120,000 of them, comfortably past `IMAGE_WEIGHT_WARN` (100,000), and an exact
+ * number rather than an approximate one so the harness can assert that the size
+ * this server declared is the size that reached the finding — through the HEAD,
+ * the fetch pass, the `resources` row and the rule.
+ */
+export const HEAVY_IMAGE_BYTES = 120_000;
+
+/**
+ * The heavy image's body: padding, and deliberately not a real PNG.
+ *
+ * Nothing in this engine decodes an image — metadata only, owner decision 2 —
+ * so what makes this fixture load-bearing is its `content-type` and its
+ * `content-length`, not its pixels. The body is also never transferred: the
+ * resource pass sends a HEAD, this server answers with the headers and no body,
+ * and the 120,000 bytes exist only to make the declared length true. Ordinary
+ * ASCII, so one character is one byte and the length is the number above.
+ */
+function padding(bytes: number): string {
+  const unit = "png-padding ";
+  return unit.repeat(Math.ceil(bytes / unit.length)).slice(0, bytes);
+}
+
+/**
  * The closed set the fixture site serves, one entry per path a fixture page
  * already references. Closed rather than a directory walk: a page that
  * references an asset nobody added here 404s, which is the honest answer and
- * the one the broken-resource rule (P11-T3) will need.
+ * the one the broken-resource rule (P11-T3) needs — `/authored11/broken-resource`
+ * points at `/img/p11-missing.png`, which is deliberately absent from this map.
  *
  * `/img/control-outline.svg` deliberately carries NO `cache-control`, which is
  * the uncached-resource finding P11-T3 reports, on a page whose own findings
@@ -67,6 +93,18 @@ const ASSETS = new Map<string, Asset>([
   [
     "/img/authored-no-dimensions.svg",
     { contentType: "image/svg+xml", body: svg("No dimensions"), cacheControl: "public, max-age=3600" },
+  ],
+  // The heavy one (P11-T3): past the 100,000-byte line AND served as a PNG, so
+  // the one file provokes both `images.oversized` and `images.legacy-format` on
+  // the single page that references it. Cached properly, so it says nothing
+  // about `resources.uncached` — one fixture, one signal.
+  [
+    "/img/p11-heavy-hero.png",
+    {
+      contentType: "image/png",
+      body: padding(HEAVY_IMAGE_BYTES),
+      cacheControl: "public, max-age=3600",
+    },
   ],
 ]);
 

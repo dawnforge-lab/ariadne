@@ -88,7 +88,16 @@ describe("buildRegistry", () => {
     // And Phase 10 Task 2's metric: the health rollup, which counts the pages
     // the run's own findings landed on rather than anything about the site.
     expect(ids).toContain("site.health");
-    expect(ids.length).toBe(86);
+    // And Phase 11 Task 3's six: the four that judge the files a page points
+    // at, the marker that reports a crawl which recorded none of them, and the
+    // page-weight table.
+    expect(ids).toContain("resources.broken");
+    expect(ids).toContain("images.oversized");
+    expect(ids).toContain("images.legacy-format");
+    expect(ids).toContain("resources.uncached");
+    expect(ids).toContain("resources.not-recorded");
+    expect(ids).toContain("page.weight");
+    expect(ids.length).toBe(92);
   });
 
   it("registers every kind the runner drives", () => {
@@ -348,15 +357,27 @@ describe("runRules against the database", () => {
     const summary = await runRules(db, mine, buildRegistry());
     expect(summary.pagesScanned).toBe(1);
 
-    // The one finding is about the CRAWL, not about the page: a synthetic crawl
-    // stores no `structured_data` rows, and `schema.none-on-site` reports a site
-    // that publishes no JSON-LD once, site-scoped. Named exactly rather than
-    // tolerated as a count, so a page rule that started firing on the clean page
-    // — the thing this test is about — still fails here.
+    // Both findings are about the CRAWL, not about the page, and both are
+    // site-scoped. A synthetic crawl stores no `structured_data` rows, so
+    // `schema.none-on-site` reports a site that publishes no JSON-LD; and it
+    // stores no `resources` rows either while `mkPage`'s clean row counts five
+    // images, which is exactly the shape `resources.not-recorded` exists to
+    // report — a crawl whose pages had images and whose resource records are
+    // missing (P11-T3). That it fires HERE is the marker working: rows inserted
+    // by hand are indistinguishable from a crawl written before migration 0013,
+    // and the alternative to saying so is a page-weight table that reports these
+    // pages as weighing their HTML and nothing else.
+    //
+    // Named exactly rather than tolerated as a count, so a page rule that
+    // started firing on the clean page — the thing this test is about — still
+    // fails here.
     const written = await db.select().from(issues).where(eq(issues.crawlId, mine));
-    expect(written.map((r) => r.ruleId)).toEqual(["schema.none-on-site"]);
-    expect(written[0]!.pageId).toBeNull();
-    expect(summary.findings).toBe(1);
+    expect(written.map((r) => r.ruleId).sort()).toEqual([
+      "resources.not-recorded",
+      "schema.none-on-site",
+    ]);
+    for (const row of written) expect(row.pageId, row.ruleId).toBeNull();
+    expect(summary.findings).toBe(2);
   });
 
   // The derivation phase. It is part of the run rather than a step a caller

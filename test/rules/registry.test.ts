@@ -120,6 +120,18 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.8.0: Phase 11. Five verdicts no page and no site could receive before —
+    // `resources.broken`, `images.oversized`, `images.legacy-format`,
+    // `resources.uncached` and the `resources.not-recorded` marker — plus the
+    // `page.weight` table beside them. They read `resources` and
+    // `page_resources`, which migration 0013 created and the resource fetch pass
+    // fills, so this is a change in what the ruleset SAYS about a site: a crawl
+    // re-judged at 0.8.0 gains findings it did not have, and a crawl from before
+    // 0013 gains the marker that says why it cannot. ONE BUMP PER PHASE, as
+    // below: T1 and T2 shipped the tables and the pass and changed no verdict,
+    // so the bump is T3's and the phase's other tasks verify rather than bump
+    // again.
+    //
     // 0.7.0: Phase 9. `structure.deep-page` reads `pages.click_depth` — clicks
     // from the home page along internal links — where it used to read discovery
     // depth, which records where the CRAWLER found a URL and puts every sitemap
@@ -152,7 +164,7 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. Phase 9's bump is
     // T2's, above; the phase's other tasks verify rather than bump again.
-    expect(RULESET_VERSION).toBe("0.7.0");
+    expect(RULESET_VERSION).toBe("0.8.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
