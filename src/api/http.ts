@@ -16,7 +16,11 @@
  * ## The routes
  *
  *   POST /crawls                       accept a crawl (allowlist + URL policy) -> 202
- *   GET  /crawls                       list crawls, newest first, paginated
+ *   GET  /crawls                       list crawls, newest first, paginated.
+ *                                      `?siteUrl=` narrows it to one site — the
+ *                                      apex/www family, any scheme, any port
+ *                                      (`listCrawls`) — which is the project
+ *                                      history a date picker is built on
  *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings
  *   POST /crawls/:id/fail              close a crawl nobody is working
  *   POST /crawls/:id/render            run the render pass. No body: the engine
@@ -47,6 +51,17 @@
  *                                      it measures rather than finds and writes
  *                                      no issues at all (see `RuleFired`)
  *   GET  /crawls/:id/export            write a dataset to disk, answer with the path
+ *   GET  /compare                      two crawls of one site, rule by rule:
+ *                                      counts on both sides plus new/resolved/
+ *                                      persisting. `comparable: false` with
+ *                                      `caveats` when the two were judged by
+ *                                      different rulesets or under different
+ *                                      finding caps — a statement, never a
+ *                                      refusal. Refused for two different sites
+ *                                      and for a crawl nobody judged
+ *   GET  /compare/urls                 the URLs behind one of those three counts,
+ *                                      paginated — the counts are on the summary
+ *                                      and the URLs are only here (obligation 1)
  *
  * ## What a caller can never be told
  *
@@ -216,10 +231,11 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls"],
-      query: PAGINATION_PARAMS,
+      query: ["siteUrl", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listCrawls({
+          ...optionalString(ctx.query, "siteUrl"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),
@@ -354,6 +370,43 @@ function buildRoutes(): Route[] {
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.rulesCatalog({ ...optionalString(ctx.query, "crawlId") }),
+      }),
+    },
+    // THE OTHER TWO ROUTES THAT ARE NOT UNDER A CRAWL, and for a stronger
+    // reason than the catalog's: a comparison belongs to TWO crawls and neither
+    // owns it. `/crawls/:base/compare/:head` would make one of them the subject
+    // and hide the other in a trailing segment; both ids are query parameters
+    // here because both are equal halves of the question. They are REQUIRED —
+    // `requiredString` refuses a missing one by name, rather than letting
+    // `assertCrawl` answer "no such crawl ''", which names the wrong problem.
+    {
+      method: "GET",
+      pattern: ["compare"],
+      query: ["baseCrawlId", "headCrawlId"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.compareCrawls(
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+        ),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["compare", "urls"],
+      query: ["baseCrawlId", "headCrawlId", "ruleId", "set", ...PAGINATION_PARAMS],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listCompareUrls(
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+          requiredString(ctx.query, "ruleId"),
+          requiredString(ctx.query, "set"),
+          {
+            ...optionalNumber(ctx.query, "limit"),
+            ...optionalString(ctx.query, "cursor"),
+          },
+        ),
       }),
     },
     {
@@ -559,6 +612,23 @@ function optionalNumber(query: URLSearchParams, name: string): Record<string, nu
 function optionalString(query: URLSearchParams, name: string): Record<string, string> {
   const raw = query.get(name);
   return raw === null ? {} : { [name]: raw };
+}
+
+/**
+ * A query parameter the route cannot answer without — absent OR empty is a 400
+ * naming it.
+ *
+ * Empty counts as absent on purpose. `?baseCrawlId=` is a caller who built the
+ * URL from a variable that was not set, and passing `""` down would produce a
+ * 404 about a crawl called nothing — a refusal that names the wrong problem and
+ * sends them looking for a missing crawl instead of a missing value.
+ */
+function requiredString(query: URLSearchParams, name: string): string {
+  const raw = query.get(name);
+  if (raw === null || raw === "") {
+    throw new ServiceError("VALIDATION", `this route requires a non-empty '${name}' parameter`);
+  }
+  return raw;
 }
 
 /**

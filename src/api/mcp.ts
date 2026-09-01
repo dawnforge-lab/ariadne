@@ -1,5 +1,5 @@
 /**
- * The MCP transport: thirteen tools over the same service layer the HTTP routes
+ * The MCP transport: fifteen tools over the same service layer the HTTP routes
  * use.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
@@ -68,6 +68,7 @@ import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
 import {
   ApiService,
+  COMPARE_SETS,
   EXPORT_DATASETS,
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
@@ -107,6 +108,8 @@ export const TOOL_NAMES = [
   "pages_query",
   "export_crawl",
   "rules_catalog",
+  "crawl_compare",
+  "compare_urls",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -156,6 +159,13 @@ The order of operations is fixed by what the evidence means:
                    rules_catalog reads the checklist itself — every rule and,
                    with a crawlId, whether it fired on that crawl (including the
                    ones that found nothing, which no findings listing can name).
+  6. crawl_compare compares two judged crawls of ONE site and says what appeared,
+                   what went away and what is still there; compare_urls lists the
+                   URLs behind any of those counts. crawl_list with a siteUrl is
+                   how you find the pair. Read the comparison's 'comparable' flag
+                   and its caveats before quoting a change: two crawls judged by
+                   different rulesets, or under different finding caps, produce
+                   different counts for reasons that are not the site.
 
 An empty findings or metrics answer is only 'nothing found' on a crawl that was
 judged. crawl_status's rulesRunAt is the check: a timestamp means a rules pass
@@ -308,10 +318,27 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Every crawl this engine holds, newest first: {crawlId, siteUrl, status, " +
         "startedAt, finishedAt, pagesCrawled, renderPassCount}.\n\n" +
         "Use it to find the crawl id of work someone else started, or to check " +
-        "whether a site has been crawled recently before crawling it again. " +
+        "whether a site has been crawled recently before crawling it again.\n\n" +
+        "siteUrl narrows it to ONE SITE — this is the history of a site, which is " +
+        "what you need before crawl_compare. The match is on the HOST and treats " +
+        "the apex and www spellings as one site, ignoring the scheme and the port, " +
+        "exactly as a crawl does: siteUrl 'https://example.com/' finds a crawl " +
+        "seeded as 'http://www.example.com/'. The path is ignored — any URL on the " +
+        "site will do. A siteUrl that is not an http(s) URL is refused by name " +
+        "rather than treated as no filter.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor to continue.`,
-      inputSchema: z.strictObject({ limit: limitField(), cursor: cursorField() }),
+      inputSchema: z.strictObject({
+        siteUrl: z
+          .string()
+          .describe(
+            "Only crawls of this site. Any http(s) URL on it; the host's apex and www " +
+              "spellings, and both schemes, all count as the same site.",
+          )
+          .optional(),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
     },
     async (args) => run("crawl_list", () => service.listCrawls(defined(args))),
   );
@@ -775,6 +802,121 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("crawl_compare"),
+    {
+      title: "What changed between two crawls of one site",
+      description:
+        "Two crawls of the SAME site, rule by rule: what appeared, what went away, " +
+        "and what is still there. Answers {base, head, comparable, caveats, rules}.\n\n" +
+        "base and head each carry {crawlId, siteUrl, rulesRunAt, rulesetVersions, " +
+        "findingCap, findingsCount}. rulesetVersions is read off the FINDINGS' own " +
+        "stamp, not off the crawl row — a crawl made under one ruleset and judged " +
+        "later under another is stamped with the one that judged it — and it is a " +
+        "list because a crawl can hold rows from more than one. It is empty for a " +
+        "judged crawl that wrote no findings.\n\n" +
+        "Each row of rules is {ruleId, severity, category, checkIds, title, " +
+        "baseCount, headCount, baseUrls, headUrls, new, resolved, persisting, " +
+        "baseTruncated, headTruncated}, ordered by severity then rule id — the " +
+        "order issues_list uses. Every rule with findings in EITHER crawl appears; " +
+        "there is no cursor, because the list is bounded by the ruleset rather than " +
+        "by the site.\n\n" +
+        "WHAT COUNTS AS THE SAME FINDING IN TWO CRAWLS: the pair (rule, page URL). " +
+        "Nothing else survives a re-crawl — a finding's internal key is often a hash " +
+        "of the CONTENT it found, which changes the moment the site edits a word, so " +
+        "diffing on it would report an unchanged problem as one fixed and one new. " +
+        "The consequence is that a rule which can fire more than once on a page " +
+        "COLLAPSES TO PER-URL PRESENCE here: on the reference site " +
+        "content.near-duplicate wrote 16,789 findings across 281 URLs, and this tool " +
+        "sees 281 things. That is why every row carries both numbers — baseCount and " +
+        "headCount are the finding ROWS (the numbers issues_list reports), baseUrls " +
+        "and headUrls are the distinct URLs the diff is actually over — and why the " +
+        "arithmetic that always holds is stated in URLs: headUrls = new + " +
+        "persisting, and baseUrls = resolved + persisting. A site-wide finding has " +
+        "no page URL and compares by rule presence alone; it appears in the " +
+        "drill-down as url null.\n\n" +
+        "READ comparable BEFORE READING A CHANGE. It is false when the engine can " +
+        "see that the two sides' numbers were produced under different conditions, " +
+        "and every reason is in caveats as {code, message}:\n" +
+        "  ruleset-mismatch    — the two were judged by different rulesets. A rule " +
+        "can change what it looks for and how severely it reports it, so a count " +
+        "that moved may be the ruleset moving rather than the site.\n" +
+        "  ruleset-unrecorded  — a side wrote no findings, so nothing records which " +
+        "ruleset judged it.\n" +
+        "  ruleset-mixed       — a side holds findings from more than one ruleset " +
+        "version, so no single version describes it.\n" +
+        "  finding-cap-differs — the two ran under different finding caps. A listing " +
+        "rule stops writing rows at its cap, so a count that moved may be the cap " +
+        "moving rather than the site; baseTruncated / headTruncated say which rules " +
+        "were actually cut on which side.\n" +
+        "  severity-changed    — a rule is recorded at different severities on the " +
+        "two sides. The row reports the HEAD severity, which is the current reading.\n" +
+        "This is a STATEMENT, NOT A REFUSAL: the counts are returned either way, and " +
+        "it is for you to decide whether to quote a change. comparable true is the " +
+        "weaker claim it sounds — it says the stamps agree, not that the numbers " +
+        "mean the same thing; engine behaviour has changed under one version before.\n\n" +
+        "REFUSED, each by name: two crawls of different sites (never a cross-site " +
+        "diff); the same crawl given twice; and a crawl that has never been judged " +
+        "(rulesRunAt null) — findings sitting in an unjudged crawl belong to a pass " +
+        "that did not complete, and diffing them would report the other crawl's " +
+        "whole findings list as new.\n\n" +
+        "The URLs are NOT here. Use compare_urls for the list behind any count.",
+      inputSchema: z.strictObject({
+        baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
+        headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
+      }),
+    },
+    async ({ baseCrawlId, headCrawlId }) =>
+      run("crawl_compare", () => service.compareCrawls(baseCrawlId, headCrawlId)),
+  );
+
+  server.registerTool(
+    named("compare_urls"),
+    {
+      title: "The URLs behind one comparison count",
+      description:
+        "One rule's URLs in one of crawl_compare's three sets: {url}. This is the " +
+        "drill-down — crawl_compare gives you 'links.orphan: 43 new' in one small " +
+        "object, and this gives you the 43 URLs when you want them.\n\n" +
+        `set is one of: ${COMPARE_SETS.join(", ")}. new is URLs the head crawl has ` +
+        "and the base did not; resolved is URLs the base had and the head does not; " +
+        "persisting is URLs both carry. The counts come from crawl_compare and the " +
+        "sets here are the same sets, so a set walked to its end has exactly as many " +
+        "URLs as the count said.\n\n" +
+        "url is null for a site-wide finding — a fact about the crawl rather than " +
+        "about a page, which compares by whether the rule fired at all.\n\n" +
+        "A rule that fires more than once on a page appears ONCE per URL here, for " +
+        "the reason crawl_compare's description sets out: the page URL is the only " +
+        "identity a finding keeps across two crawls.\n\n" +
+        "The same refusals as crawl_compare, in the same order — different sites, " +
+        "the same crawl twice, a crawl nobody judged — plus a ruleId this ruleset " +
+        "does not define, and a metric rule (which measures rather than finds and " +
+        "writes no findings to compare).\n\n" +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}. Pass nextCursor back as cursor, with the SAME ` +
+        "baseCrawlId, headCrawlId, ruleId and set, until nextCursor is null.",
+      inputSchema: z.strictObject({
+        baseCrawlId: compareIdField("base", "the earlier crawl — what the site was"),
+        headCrawlId: compareIdField("head", "the later crawl — what the site is now"),
+        ruleId: z
+          .string()
+          .describe("The rule whose URLs you want, e.g. 'links.orphan'. It must be a rule that finds."),
+        set: z
+          .string()
+          .describe(
+            `Which set: ${COMPARE_SETS.join(" (head only), ")} — new (head only), ` +
+              "resolved (base only), persisting (both).",
+          ),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ baseCrawlId, headCrawlId, ruleId, set, ...rest }) =>
+      run("compare_urls", () =>
+        service.listCompareUrls(baseCrawlId, headCrawlId, ruleId, set, defined(rest)),
+      ),
+  );
+
+  server.registerTool(
     named("export_crawl"),
     {
       title: "Export a dataset to a file",
@@ -940,6 +1082,21 @@ function crawlIdField() {
   return z
     .string()
     .describe("The crawl id, as crawl_start returned it or crawl_list reported it.");
+}
+
+/**
+ * One side of a comparison. Named rather than reusing `crawlIdField` because
+ * WHICH SIDE a crawl is on is the whole meaning of the answer — `new` and
+ * `resolved` swap places if the two are handed over the wrong way round — and a
+ * field description is where an agent finds that out.
+ */
+function compareIdField(side: "base" | "head", role: string) {
+  return z
+    .string()
+    .describe(
+      `The ${side} crawl's id: ${role}. Both crawls must be of the same site and ` +
+        "both must have been judged (crawl_rules run over them).",
+    );
 }
 
 function limitField() {

@@ -248,8 +248,15 @@ export function getOrigin(url: string): string {
  * system resolver about it puts a made-up name on the wire (and, if some
  * wildcard DNS answers, a real address on the other end of a fetch). A site
  * addressed by IP gets its one spelling per scheme.
+ *
+ * EXPORTED because the API's site filter and its cross-site refusal ask exactly
+ * this question — "are these two spellings the same site?" — and the answer must
+ * be the crawler's own. `hostProbeStarts` (and through it `checkAddedHosts`)
+ * treats the apex and the `www` twin as one site; a listing filter or a compare
+ * guard that decided that separately would be a second definition of a site,
+ * and the two would drift. See `sameHostFamily` in src/api/service.ts.
  */
-function hostnameSpellings(hostname: string): string[] {
+export function hostnameSpellings(hostname: string): string[] {
   // URL.hostname brackets IPv6 (`[::1]`), which net.isIP does not recognise.
   const literal = hostname.replace(/^\[|\]$/g, "");
   if (isIP(literal) !== 0) return [hostname];

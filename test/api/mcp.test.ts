@@ -99,6 +99,17 @@ let surfaceCrawlId = "";
  * judged and one that has not, and `seededCrawlId` above is the unjudged half.
  */
 let catalogCrawlId = "";
+/**
+ * The comparison pair: two judged crawls of one site, differing in the ruleset
+ * their findings are stamped with, so ONE call exercises the counts, the
+ * `comparable: false` answer and the caveat that explains it — the shape the
+ * three lavishalice crawls are actually in.
+ */
+let cmpBaseId = "";
+let cmpHeadId = "";
+/** A crawl of another site: the cross-site refusal, and the site filter's control. */
+let cmpOtherId = "";
+const CMP_SITE = "http://mcp-compare.example";
 
 /** The robots.txt `surfaceCrawlId` read, as the discovery evidence stores it. */
 const SEEDED_ROBOTS = "User-agent: *\nDisallow: /cart\nCrawl-delay: 3\n";
@@ -172,10 +183,12 @@ async function seedCrawl(row: {
   discovery?: unknown;
   /** Stamp `rules_run_at`: the only thing that says a rules pass completed. */
   judged?: boolean;
+  /** Defaults to `SEEDED_SITE`; only the compare fixtures move it. */
+  siteUrl?: string;
 }): Promise<string> {
   await db.insert(crawls).values({
     id: row.id,
-    siteUrl: `${SEEDED_SITE}/`,
+    siteUrl: row.siteUrl ?? `${SEEDED_SITE}/`,
     config: row.config ?? { siteUrl: `${SEEDED_SITE}/` },
     rulesetVersion: "0.0.0-test",
     status: row.status,
@@ -229,6 +242,8 @@ async function seedIssue(
     pageUrl: string | null;
     dedupeKey: string;
     evidence?: Record<string, unknown>;
+    /** The stamp a comparison reads to decide whether two sides agree. */
+    rulesetVersion?: string;
   },
 ): Promise<void> {
   await db.insert(issues).values({
@@ -236,7 +251,7 @@ async function seedIssue(
     ruleId: row.ruleId,
     pageId: row.pageId ?? null,
     severity: row.severity,
-    rulesetVersion: "0.0.0-test",
+    rulesetVersion: row.rulesetVersion ?? "0.0.0-test",
     dedupeKey: row.dedupeKey,
     details: { pageUrl: row.pageUrl, ...(row.evidence ?? {}) },
   });
@@ -430,6 +445,43 @@ beforeAll(async () => {
     });
   }
 
+  // The comparison pair. Base: three missing titles and two orphans, judged at
+  // 0.9.0-test. Head: one title resolved, one new, one still there, the orphans
+  // gone, and a rule that fired twice on ONE page — judged at 0.8.0-test, so the
+  // answer must carry the counts AND the mismatch caveat.
+  cmpBaseId = await seedCrawl({ id: `crawl_mcp_cmp_base_${Date.now()}`, status: "finished", judged: true });
+  cmpHeadId = await seedCrawl({ id: `crawl_mcp_cmp_head_${Date.now()}`, status: "finished", judged: true });
+  cmpOtherId = await seedCrawl({
+    id: `crawl_mcp_cmp_other_${Date.now()}`,
+    status: "finished",
+    judged: true,
+    siteUrl: `${CMP_SITE}/`,
+  });
+  for (const slug of ["a", "b", "c"]) {
+    await seedIssue(cmpBaseId, {
+      ruleId: "title.missing", severity: "warning", pageUrl: `${SEEDED_SITE}/${slug}`,
+      dedupeKey: `${SEEDED_SITE}/${slug}`, rulesetVersion: "0.9.0-test",
+    });
+  }
+  for (let i = 1; i <= 3; i += 1) {
+    await seedIssue(cmpBaseId, {
+      ruleId: "links.orphan", severity: "warning", pageUrl: `${SEEDED_SITE}/o${i}`,
+      dedupeKey: `${SEEDED_SITE}/o${i}`, rulesetVersion: "0.9.0-test",
+    });
+  }
+  for (const slug of ["b", "c", "d"]) {
+    await seedIssue(cmpHeadId, {
+      ruleId: "title.missing", severity: "warning", pageUrl: `${SEEDED_SITE}/${slug}`,
+      dedupeKey: `${SEEDED_SITE}/${slug}`, rulesetVersion: "0.8.0-test",
+    });
+  }
+  for (let i = 1; i <= 2; i += 1) {
+    await seedIssue(cmpHeadId, {
+      ruleId: "content.exact-duplicate", severity: "warning", pageUrl: `${SEEDED_SITE}/dup`,
+      dedupeKey: `content-hash-${i}`, rulesetVersion: "0.8.0-test",
+    });
+  }
+
   await db.insert(metrics).values([
     { crawlId: seededCrawlId, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: seededCrawlId, metricId: "content.metrics-by-type", scope: "page_type", scopeValue: "product", value: { words: 800 } },
@@ -458,20 +510,25 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the thirteen tools of the agent surface, each described", async () => {
+  it("advertises exactly the fifteen tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
-        "crawl_list", "crawl_mark_failed", "crawl_render", "crawl_rules", "crawl_start",
-        "crawl_status", "export_crawl", "issue_urls", "issues_list", "metrics_get",
-        "pages_query", "robots_get", "rules_catalog",
+        "compare_urls", "crawl_compare", "crawl_list", "crawl_mark_failed", "crawl_render",
+        "crawl_rules", "crawl_start", "crawl_status", "export_crawl", "issue_urls",
+        "issues_list", "metrics_get", "pages_query", "robots_get", "rules_catalog",
       ].sort(),
     );
     for (const tool of listed.tools) {
       expect(tool.description ?? "", `${tool.name} has no description`).not.toBe("");
       // The pagination contract is on every tool that paginates, because an
       // agent reads one tool's description, not the server's instructions.
-      if (tool.name.endsWith("_list") || tool.name === "pages_query" || tool.name === "issue_urls") {
+      if (
+        tool.name.endsWith("_list") ||
+        tool.name === "pages_query" ||
+        tool.name === "issue_urls" ||
+        tool.name === "compare_urls"
+      ) {
         expect(tool.description, `${tool.name} does not state the pagination contract`)
           .toContain("nextCursor");
       }
@@ -1146,6 +1203,151 @@ describe("rules_catalog", () => {
     expect(text).toContain("0 on EVERY judged");
     // And the honest size, so an agent can decide before spending the context.
     expect(text).toMatch(/\d+KB/);
+  });
+});
+
+/**
+ * The cross-crawl diff over MCP: the same service call the HTTP surface makes,
+ * so what is tested HERE is the tool — that both halves exist, that their
+ * schemas are closed, that a refusal arrives as a tool error, and that the
+ * descriptions say the two things the shape cannot say for itself: what counts
+ * as the same finding across two crawls, and what `comparable: false` means.
+ *
+ * The set arithmetic itself is pinned in test/api/query.test.ts against a larger
+ * fixture; duplicating it here would be two copies of one assertion.
+ */
+describe("crawl_compare / compare_urls", () => {
+  async function description(name: string): Promise<string> {
+    const listed = await client.listTools();
+    return listed.tools.find((t) => t.name === name)?.description ?? "";
+  }
+
+  function ruleRow(body: Record<string, unknown>, ruleId: string): Record<string, unknown> {
+    const rows = body["rules"] as Record<string, unknown>[];
+    const row = rows.find((r) => r["ruleId"] === ruleId);
+    if (row === undefined) throw new Error(`no row for ${ruleId} in ${JSON.stringify(rows)}`);
+    return row;
+  }
+
+  it("answers the counts and the caveat when the two rulesets differ", async () => {
+    const body = await ok("crawl_compare", { baseCrawlId: cmpBaseId, headCrawlId: cmpHeadId });
+    expect(body["comparable"]).toBe(false);
+    expect((body["caveats"] as { code: string }[]).map((c) => c.code)).toContain("ruleset-mismatch");
+    expect(body["base"]).toMatchObject({ rulesetVersions: ["0.9.0-test"], findingsCount: 6 });
+    expect(body["head"]).toMatchObject({ rulesetVersions: ["0.8.0-test"], findingsCount: 5 });
+
+    // The counts arrived anyway — the mismatch is a statement, not a refusal.
+    expect(ruleRow(body, "title.missing")).toMatchObject({
+      baseCount: 3, headCount: 3, new: 1, resolved: 1, persisting: 2,
+    });
+    // Two rows, one page, one URL: the per-URL collapse, over the transport.
+    expect(ruleRow(body, "content.exact-duplicate")).toMatchObject({
+      headCount: 2, headUrls: 1, new: 1,
+    });
+  });
+
+  it("hands back the URLs behind a count, paginated to a null cursor", async () => {
+    const args = {
+      baseCrawlId: cmpBaseId, headCrawlId: cmpHeadId, ruleId: "links.orphan", set: "resolved",
+    };
+    // Walked one row at a time to the end, because "the cursor terminates" and
+    // "the walk is the whole set" are the two halves of the pagination contract
+    // and neither is visible from a single page.
+    const walked: unknown[] = [];
+    let cursor: string | null = null;
+    for (let hop = 0; hop < 10; hop += 1) {
+      const page: Record<string, unknown> = await ok("compare_urls", {
+        ...args, limit: 1, ...(cursor === null ? {} : { cursor }),
+      });
+      walked.push(...items(page).map((row) => row["url"]));
+      const next = page["nextCursor"];
+      if (next === null) break;
+      cursor = String(next);
+    }
+    expect(walked).toEqual([1, 2, 3].map((i) => `${SEEDED_SITE}/o${i}`));
+
+    // And the walk is exactly what the summary said it would be.
+    const summary = await ok("crawl_compare", { baseCrawlId: cmpBaseId, headCrawlId: cmpHeadId });
+    expect(walked).toHaveLength(Number(ruleRow(summary, "links.orphan")["resolved"]));
+  });
+
+  it("refuses a cross-site pair and an unjudged crawl as tool errors", async () => {
+    const cross = await call("crawl_compare", { baseCrawlId: cmpBaseId, headCrawlId: cmpOtherId });
+    expect(cross.isError).toBe(true);
+    expect(String(cross.body["error"])).toContain("different sites");
+
+    // `seededCrawlId` has findings and no marker — the unjudged shape.
+    const unjudged = await call("crawl_compare", { baseCrawlId: cmpBaseId, headCrawlId: seededCrawlId });
+    expect(unjudged.isError).toBe(true);
+    expect(String(unjudged.body["error"])).toContain(seededCrawlId);
+  });
+
+  it("narrows crawl_list to one site, matching the apex and www spellings", async () => {
+    const body = await ok("crawl_list", { siteUrl: `http://www.mcp-compare.example/`, limit: 50 });
+    expect(items(body).map((row) => row["crawlId"])).toEqual([cmpOtherId]);
+
+    const bad = await call("crawl_list", { siteUrl: "mcp-compare.example" });
+    expect(bad.isError).toBe(true);
+    expect(String(bad.body["error"])).toContain("siteUrl");
+  });
+
+  // THE DESCRIPTION PIN, in the house shape: every field the live answer
+  // actually carries has to be named, so a shape that grows cannot leave the
+  // sentence an agent reads describing the old one.
+  it("names every field it answers with, and both caveat codes it produced", async () => {
+    const text = await description("crawl_compare");
+    const body = await ok("crawl_compare", { baseCrawlId: cmpBaseId, headCrawlId: cmpHeadId });
+
+    const fields = new Set<string>(Object.keys(body));
+    for (const key of ["base", "head"] as const) {
+      for (const field of Object.keys(body[key] as Record<string, unknown>)) fields.add(field);
+    }
+    for (const row of body["rules"] as Record<string, unknown>[]) {
+      for (const field of Object.keys(row)) fields.add(field);
+    }
+    for (const caveat of body["caveats"] as Record<string, unknown>[]) {
+      for (const field of Object.keys(caveat)) fields.add(field);
+    }
+    // The live answer really did carry the URL denominators and the truncation
+    // flags, so these are in the set because rows reported them.
+    for (const field of ["baseUrls", "headUrls", "baseTruncated", "persisting"]) {
+      expect(fields.has(field), `the live answer did not carry ${field}`).toBe(true);
+    }
+    for (const field of fields) {
+      expect(text, `crawl_compare's description does not name '${field}'`).toContain(field);
+    }
+
+    // EVERY CAVEAT CODE, whether or not this fixture produced it: a code a UI
+    // must switch on and cannot find in the description is an unrenderable
+    // state.
+    for (const code of [
+      "ruleset-mismatch", "ruleset-unrecorded", "ruleset-mixed",
+      "finding-cap-differs", "severity-changed",
+    ]) {
+      expect(text, `crawl_compare's description does not name '${code}'`).toContain(code);
+    }
+  });
+
+  // THE FIELD-NAME LOOP IS NOT ENOUGH ON ITS OWN — it is satisfied by ordinary
+  // English. These pin the two claims the shape cannot make for itself.
+  it("states the identity rule and what comparable does not promise", async () => {
+    const text = await description("crawl_compare");
+    // What "the same finding" means across two crawls, and what it costs.
+    expect(text).toContain("(rule, page URL)");
+    expect(text).toContain("COLLAPSES TO PER-URL PRESENCE");
+    expect(text).toContain("headUrls = new + persisting");
+    // A site-wide finding has no URL and says so.
+    expect(text).toContain("url null");
+    // `comparable: false` is a statement, not a refusal; `true` is not a promise.
+    expect(text).toContain("STATEMENT, NOT A REFUSAL");
+    expect(text).toContain("comparable true is the weaker claim");
+    // And the three refusals, named where an agent will read them.
+    expect(text).toContain("different sites");
+    expect(text).toContain("never been judged");
+
+    const urls = await description("compare_urls");
+    for (const set of ["new", "resolved", "persisting"]) expect(urls).toContain(set);
+    expect(urls).toContain("url is null");
   });
 });
 
