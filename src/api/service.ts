@@ -51,6 +51,7 @@ import { once } from "node:events";
 import { createWriteStream } from "node:fs";
 import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
+import { PassThrough, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, isNotNull, sql, type SQL } from "drizzle-orm";
@@ -78,19 +79,30 @@ import {
   type RenderPassSummary,
 } from "../crawl/render/run-render.js";
 import { resolveRenderConfig } from "../crawl/render/select.js";
-import { hostProbeStarts, normalizeUrl } from "../crawl/parse/url-utils.js";
+import { hostProbeStarts, hostnameSpellings, normalizeUrl } from "../crawl/parse/url-utils.js";
 import { isUrlAllowed } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import {
   METRIC_SCOPES,
   type AnyRule,
+  type RuleCategory,
   type Severity,
 } from "../rules/registry/types.js";
 import { UNTYPED } from "../rules/metric/cohort.js";
 import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence.js";
 import { runRules, type RunSummary } from "../rules/run.js";
 import { isHostAllowed, type ServiceConfig } from "./config.js";
+import {
+  CSV_VIEWS,
+  CSV_VIEW_DEFS,
+  EXPORT_FORMATS,
+  csvFilename,
+  csvRecord,
+  type CsvViewContext,
+  type CsvViewName,
+  type ExportFormat,
+} from "./csv.js";
 
 /**
  * The four ways a request can be refused for a reason the caller can act on.
@@ -757,6 +769,98 @@ function truncationOf(raw: unknown, ruleId: string): IssueTruncation {
 }
 
 /**
+ * One rule's fired state on ONE crawl — the field that makes the catalog a
+ * report rather than a list.
+ *
+ * `count` is the rows the rule wrote for that crawl, and **zero is a real
+ * value**: on a judged crawl it says the rule ran over this site and found
+ * nothing. The state that is NOT a count is `null` on the rule's `fired` field,
+ * which says no rules pass has completed — see `CatalogRule.fired`.
+ *
+ * `atLeast` is present, and always `true`, when the rule CAPPED its listing:
+ * `count` is then a floor rather than the number of cases, so a UI must render
+ * it as "3 or more" and never as "3". It is read off the same truncation note
+ * `listIssues` reads (`truncationNote` / `truncationOf`) rather than derived a
+ * second time — one note, two surfaces, no chance of them disagreeing about
+ * whether a number is exact.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CARRY is the magnitude itself. `issues_list`
+ * owns that, because there it is one row of a triage view a reader is already
+ * looking at; here it would be a second, subtly different number on every row
+ * of a checklist. The flag says "this count is not the whole story"; the tool that
+ * tells the rest of the story is named in the description.
+ *
+ * ## `measuresOnly`, and the claim it stops the catalog making
+ *
+ * Present, and always `true`, on a rule whose `kind` is `metric`. A metric rule
+ * **measures rather than finds: it writes no issues** — the same sentence
+ * `findingRule` refuses `issues_list` and `issue_urls` with when a caller names
+ * one — so its `count` is 0 on every judged crawl, structurally, whatever the
+ * site is like.
+ *
+ * Without the flag the catalog would state in a payload exactly what that route
+ * refuses to state at all: `{count: 0}`, in the identical shape a genuine clean
+ * check uses. A dashboard would render "passed" against a rule that never had a
+ * verdict to give. Saying so only in the MCP tool description is not enough —
+ * that is the one transport a UI author does not read — so the discriminator is
+ * on the payload, where every consumer sees it. The numbers such a rule DID
+ * produce are in the metrics listing.
+ */
+export interface RuleFired {
+  count: number;
+  atLeast?: true;
+  measuresOnly?: true;
+}
+
+/**
+ * One rule as the catalog renders it: its identity, its copy, and — when a
+ * crawl was named — what it found there.
+ *
+ * The copy is the CURRENT ruleset's, joined live from the registry exactly as
+ * `IssueGroup`'s is. Nothing here is stored, so a rule whose explanation is
+ * rewritten is rewritten on every surface at once.
+ */
+export interface CatalogRule {
+  id: string;
+  kind: AnyRule["kind"];
+  severity: Severity;
+  category: RuleCategory;
+  checkIds: string[];
+  title: string;
+  explanation: string;
+  howToFix: string;
+  /**
+   * THREE STATES, AND THEY ARE THREE DIFFERENT SENTENCES.
+   *
+   *  - **absent** — no crawl was named. This is the checklist skeleton: what
+   *    the engine CAN look for, before anybody has looked.
+   *  - **null** — a crawl was named and it has never been judged
+   *    (`crawls.rules_run_at` is null). Nothing is known about this rule on
+   *    this site.
+   *  - **`{count}`** — a crawl was named and a rules pass completed over it.
+   *    `count: 0` is then a measurement: this rule looked and found nothing.
+   *
+   * Collapsing the last two — answering 0 for a crawl nobody judged — would
+   * paint a clean dashboard for a site nobody has examined, which is hard rule
+   * 7's failure in its UI-facing form.
+   */
+  fired?: RuleFired | null;
+}
+
+/** The whole ruleset, as `GET /rules` and `rules_catalog` answer it. */
+export interface RulesCatalog {
+  /**
+   * The ruleset the COPY in this answer comes from — always the engine's
+   * current one, including when a crawl is named. A crawl judged under an older
+   * ruleset is described by today's rules; where it holds rows for a rule that
+   * no longer exists, the catalog refuses rather than dropping the count (see
+   * `firedByRule`).
+   */
+  rulesetVersion: string;
+  rules: CatalogRule[];
+}
+
+/**
  * One finding, at URL level: the sf-action-plan tab feed.
  *
  * `evidence` is the stored `details_jsonb` verbatim — what the rule wrote,
@@ -769,6 +873,147 @@ export interface IssueUrl {
   /** Null for a site-wide finding: a fact about the crawl, not about a page. */
   url: string | null;
   evidence: Record<string, unknown>;
+}
+
+/**
+ * The three sets a cross-crawl diff partitions a rule's URLs into.
+ *
+ * Exported because it is the `set` argument's vocabulary on both transports and
+ * the refusal that names the accepted values reads it, so there is one list.
+ */
+export const COMPARE_SETS = ["new", "resolved", "persisting"] as const;
+export type CompareSet = (typeof COMPARE_SETS)[number];
+
+/** One side of a comparison: which crawl, judged when, under what. */
+export interface CompareSide {
+  crawlId: string;
+  siteUrl: string;
+  /** Never null on a side that got this far — an unjudged crawl is refused. */
+  rulesRunAt: string;
+  /**
+   * The ruleset versions STAMPED ON THIS CRAWL'S FINDINGS, sorted — not the
+   * `crawls.ruleset_version` column.
+   *
+   * The two genuinely disagree in the reference data: `crawl_02ff6f7a`'s crawl
+   * row says `0.6.0` (the ruleset at CRAWL time) while every one of its 17,659
+   * findings says `0.7.0` (the ruleset that JUDGED it, months later). A
+   * comparison is about the findings, so the findings' own stamp is the honest
+   * source and the crawl row's is not read here at all.
+   *
+   * Empty when the crawl wrote no findings: there is then no record of which
+   * ruleset judged it, which is a fact about the evidence rather than a version
+   * to compare — see the `ruleset-unrecorded` caveat.
+   *
+   * `[""]` is the OTHER shape of the same absence: `issues.ruleset_version`
+   * defaults to the empty string for rows written before the stamp existed, and
+   * that is not a version either. `rulesetCaveat` treats both as unrecorded, so
+   * two unstamped crawls can never come back `comparable: true` on the strength
+   * of `"" === ""`.
+   */
+  rulesetVersions: string[];
+  /**
+   * The listing cap this crawl's rules ran under — 200 when nobody chose, null
+   * for an uncapped (billed) run. Two crawls with different caps produce
+   * different counts on the SAME site under the SAME ruleset, so it is on the
+   * side rather than left to be inferred from a count that moved.
+   */
+  findingCap: number | null;
+  /** `issues` rows in this crawl — the number the per-rule counts sum to. */
+  findingsCount: number;
+}
+
+/**
+ * One thing the engine knows about this comparison that the numbers do not say.
+ *
+ * A code and a sentence, not a sentence alone: a dashboard greys a column on the
+ * code and an agent quotes the message, and neither should have to parse the
+ * other's half.
+ */
+export interface CompareCaveat {
+  code:
+    | "ruleset-mismatch"
+    | "ruleset-unrecorded"
+    | "ruleset-mixed"
+    | "finding-cap-differs"
+    | "severity-changed";
+  message: string;
+}
+
+/** One rule's change between two crawls of one site. */
+export interface CompareRule {
+  ruleId: string;
+  /**
+   * The severity the HEAD crawl's rows carry — the current reading — falling
+   * back to the base's for a rule that fired only in the base. A severity that
+   * MOVED between the two is reported here at its head value and named in a
+   * `severity-changed` caveat; it is never averaged or silently preferred.
+   */
+  severity: string;
+  category: string;
+  checkIds: string[];
+  title: string;
+  /** `issues` ROWS, the number `issues_list` reports for this rule. */
+  baseCount: number;
+  headCount: number;
+  /**
+   * DISTINCT URLS, which is what the diff is over. `baseCount` and `baseUrls`
+   * differ for every rule that can fire more than once on a page —
+   * `content.near-duplicate` wrote 16,789 rows across 281 URLs on the reference
+   * crawl — and the two invariants a consumer may rely on are stated in terms of
+   * the URL counts: `headUrls == new + persisting` and
+   * `baseUrls == resolved + persisting`.
+   */
+  baseUrls: number;
+  headUrls: number;
+  /** URLs the head has and the base did not. */
+  new: number;
+  /** URLs the base had and the head does not. */
+  resolved: number;
+  /** URLs both crawls carry for this rule. */
+  persisting: number;
+  /**
+   * Whether that side's rule CAPPED its listing (the `truncated` note
+   * `issues_list` reports). A capped side's absent URLs are absent because the
+   * rule stopped writing, not because the site was fixed, so a `new`/`resolved`
+   * count beside a true here is not a change in the site.
+   */
+  baseTruncated: boolean;
+  headTruncated: boolean;
+}
+
+/** Two crawls of one site, rule by rule. */
+export interface CrawlComparison {
+  base: CompareSide;
+  head: CompareSide;
+  /**
+   * Whether anything the engine can check says the two sides' counts were
+   * produced under different conditions. False when the ruleset versions differ
+   * (or cannot be read) or the finding caps differ; every reason is in
+   * `caveats`. It is NOT a refusal — the counts are returned either way.
+   *
+   * True is the weaker claim it sounds: it says the two stamps agree, not that
+   * the numbers mean the same thing. Engine behaviour has changed under one
+   * version before — see the NOT ROW-COMPARABLE box in docs/gates/phase-8.md
+   * §7.2, where commit `9fdaafa` changed what a `page_type` value means with
+   * `RULESET_VERSION` held at 0.6.0.
+   */
+  comparable: boolean;
+  caveats: CompareCaveat[];
+  /**
+   * Every rule with findings in either crawl, ordered by severity then rule id
+   * — `issues_list`'s order, so a UI puts the same rule in the same place twice.
+   *
+   * NOT PAGINATED, for `rulesCatalog`'s reason: the list is bounded by the
+   * ruleset (86 rules), not by the crawl, and it carries no copy blob — a
+   * comparison of the reference crawls is 22 rows.
+   */
+  rules: CompareRule[];
+}
+
+/** One URL in one of a comparison's three sets. */
+export interface CompareUrl {
+  /** Null for a site-wide finding, which compares by rule presence alone. */
+  url: string | null;
 }
 
 /** One metric row, with the registry's copy joined — the quotable table. */
@@ -847,6 +1092,45 @@ export interface ExportResult {
   bytes: number;
 }
 
+/**
+ * What a CSV export answers with. A DIFFERENT SHAPE from `ExportResult`, and
+ * deliberately: the JSONL answer is a contract callers already parse, and
+ * growing a `format` key onto it would change a response nobody asked to
+ * change. The two are told apart by their own keys — `dataset` on one, `format`
+ * and `view` on the other.
+ */
+export interface CsvExportResult {
+  format: "csv";
+  view: CsvViewName;
+  /** Present only on `issue_urls`, which is a view of ONE rule. */
+  ruleId?: string;
+  path: string;
+  /** DATA rows. The header is always written and is never counted here. */
+  rows: number;
+  bytes: number;
+}
+
+/** A prepared CSV stream: validated, not yet read. */
+export interface CsvStream {
+  view: CsvViewName;
+  ruleId: string | null;
+  /** Deterministic per (crawl, view, rule) — what a browser saves it as. */
+  filename: string;
+  /**
+   * The file, record by record, header first.
+   *
+   * ONE YIELD IS ONE RECORD, never one line: a cell holding a newline is quoted
+   * and spans two lines while remaining one row. That is why the row count is
+   * yields minus the header and not a line count.
+   */
+  records(): AsyncGenerator<string>;
+}
+
+/** What the two halves of `export_crawl` were asked for, after validation. */
+type ExportRequest =
+  | { format: "jsonl.gz"; dataset: ExportDataset }
+  | { format: "csv"; view: CsvViewName; ruleId: string | null };
+
 /** Sample URLs carried on an issue group. Five is a sample; more is a slice. */
 export const ISSUE_SAMPLE_URLS = 5;
 
@@ -872,6 +1156,89 @@ export const EXPORT_BATCH = 500;
  * getting a null rank that a keyset comparison would silently skip.
  */
 const SEVERITY_RANK = sql`case i.severity when 'critical' then 0 when 'warning' then 1 when 'info' then 2 else 3 end`;
+
+/**
+ * The same order as `SEVERITY_RANK`, in JavaScript — for the one listing that
+ * is sorted in memory because its rows are the registry rather than a table
+ * (`rulesCatalog`).
+ *
+ * A `Record<Severity, number>` and not a lookup with a default: `Severity` is
+ * closed, so a fourth severity would fail to compile here instead of silently
+ * sorting somewhere. That is the property `SEVERITY_RANK`'s `else 3` buys in
+ * SQL, where the value arrives from a row this process did not write.
+ */
+const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
+
+/**
+ * `SEVERITY_ORDER` for a severity that came off a ROW rather than out of the
+ * registry — the same `else 3` `SEVERITY_RANK` uses, and for the same reason: a
+ * value this ruleset cannot produce sorts last and stays visible rather than
+ * being dropped or crashing the sort.
+ */
+function severityRank(severity: string): number {
+  return severity in SEVERITY_ORDER ? SEVERITY_ORDER[severity as Severity] : 3;
+}
+
+/**
+ * `crawls.site_url`'s hostname, in SQL.
+ *
+ * Every row this engine writes went through `normalizeUrl`, so `site_url` is
+ * `scheme://host[:port]/path` with the host already lowercased — but the pattern
+ * is written to survive a row we did not write: it accepts (and discards) a
+ * userinfo section and it keeps an IPv6 literal's brackets, which is the
+ * spelling `URL.hostname` and therefore `hostnameSpellings` both use. A
+ * `site_url` the pattern cannot read yields null, which matches no family and so
+ * hides the row from a site filter rather than offering it to the wrong site.
+ */
+const CRAWL_HOSTNAME = sql`substring(lower(${crawls.siteUrl}) from '^[a-z][a-z0-9+.-]*://(?:[^@/]*@)?(\\[[^\\]]*\\]|[^:/?#]*)')`;
+
+/**
+ * The hostnames that ARE this site, for a caller-supplied URL — the crawler's
+ * own list, never a second definition of it.
+ *
+ * Refuses anything that is not an http(s) URL by name. `normalizeUrl` is the
+ * parse and the scheme check in one (it returns null for both), which is the
+ * same step `startCrawl` takes on a seed.
+ */
+function siteFamily(siteUrl: string): string[] {
+  const normalised = normalizeUrl(siteUrl.trim());
+  if (normalised === null) {
+    throw new ServiceError("VALIDATION", `siteUrl is not an http(s) URL: ${clip(siteUrl)}`);
+  }
+  return hostnameSpellings(new URL(normalised).hostname);
+}
+
+/**
+ * Whether two site URLs name the same site, by the engine's one definition of
+ * "the same site": the apex and its `www` twin, any scheme, any port.
+ *
+ * The comparison is `spellings(a) ∋ host(b)` rather than an equality of apexes,
+ * so it keeps answering correctly if `hostnameSpellings` ever learns a third
+ * spelling.
+ */
+function sameHostFamily(a: string, b: string): boolean {
+  return hostnameSpellings(new URL(a).hostname).includes(new URL(b).hostname);
+}
+
+/**
+ * A rule's truncation note for one crawl, as a scalar subquery — read
+ * RULE-WIDE, correlated against whatever the enclosing query calls `i`.
+ *
+ * ONE EXPRESSION, TWO READERS. `listIssues` lifts the note onto a group and
+ * `rulesCatalog` reduces it to "this count is a floor"; both must agree about
+ * WHICH note belongs to a rule, or the triage view and the checklist would
+ * disagree about whether the same number is exact. The rule-wide scoping (no
+ * severity or page-type predicate) is deliberate and is argued in `listIssues`:
+ * no filter may be able to hide a truncation.
+ */
+function truncationNote(crawlId: string): SQL {
+  return sql`(select i2.details_jsonb->'truncated'
+                from issues i2
+               where i2.crawl_id = ${crawlId}
+                 and i2.rule_id = i.rule_id
+                 and i2.details_jsonb->'truncated' is not null
+               limit 1)`;
+}
 
 /** The filters `GET /crawls/:id/issues` accepts. Every one is validated. */
 export interface IssueQuery {
@@ -1075,10 +1442,47 @@ export class ApiService {
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
   }
 
-  /** Newest first, `(started_at, id)` descending — a total order, so a cursor is exact. */
-  async listCrawls(opts: { limit?: number; cursor?: string } = {}): Promise<Page<CrawlListItem>> {
+  /**
+   * Newest first, `(started_at, id)` descending — a total order, so a cursor is
+   * exact.
+   *
+   * ## The `siteUrl` filter, and why it matches a FAMILY
+   *
+   * This is the project history a dashboard's date picker is built on: "every
+   * crawl of this site, newest first". A caller holding `https://example.com/`
+   * must find the crawl that was seeded as `http://www.example.com/`, because
+   * the engine considers those one site everywhere else — `hostProbeStarts`
+   * probes all four spellings as one crawl, and `checkAddedHosts` refuses to
+   * treat any of them as an added host. A filter that matched the stored string
+   * would answer "no crawls" for a site crawled last week, which is the silent
+   * wrong answer hard rule 7 exists to stop.
+   *
+   * So the match is on the HOSTNAME, through `hostnameSpellings` — the crawler's
+   * own definition of a site's spellings, imported rather than restated — and it
+   * ignores the scheme and the port for the same reason `checkAddedHosts` does:
+   * its verdict is about the host, not the URL. The hostname is extracted from
+   * `crawls.site_url` in SQL rather than in JavaScript, because the alternative
+   * is reading the whole table to filter it (rule 3's posture, applied to a
+   * table that is small today and is one row per crawl per tenant tomorrow).
+   *
+   * A `siteUrl` that is not an http(s) URL is refused by name. It is not read as
+   * "no filter": an unfiltered listing returned to a caller who mistyped their
+   * host is another tenant's crawl list arriving as an answer.
+   */
+  async listCrawls(
+    opts: { siteUrl?: string; limit?: number; cursor?: string } = {},
+  ): Promise<Page<CrawlListItem>> {
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCrawlCursor(opts.cursor);
+    const where: SQL[] = [];
+    if (opts.siteUrl !== undefined) {
+      where.push(sql`${CRAWL_HOSTNAME} = any(${sql.param(siteFamily(opts.siteUrl))}::text[])`);
+    }
+    if (cursor !== null) {
+      where.push(
+        sql`(${crawls.startedAt}, ${crawls.id}) < (${cursor.startedAt}::timestamptz, ${cursor.id}::text)`,
+      );
+    }
 
     const rows = await this.db
       .select({
@@ -1100,11 +1504,7 @@ export class ApiService {
         renderPassCount: crawls.renderPassCount,
       })
       .from(crawls)
-      .where(
-        cursor === null
-          ? undefined
-          : sql`(${crawls.startedAt}, ${crawls.id}) < (${cursor.startedAt}::timestamptz, ${cursor.id}::text)`,
-      )
+      .where(where.length === 0 ? undefined : sql.join(where, sql` and `))
       .orderBy(desc(crawls.startedAt), desc(crawls.id))
       .limit(limit + 1);
 
@@ -1490,6 +1890,151 @@ export class ApiService {
   }
 
   /**
+   * The whole ruleset as a catalog — and, when a crawl is named, what each rule
+   * found on it. `GET /rules` and `rules_catalog`.
+   *
+   * This is the checklist a dashboard renders. `listIssues` answers "what is
+   * wrong with this site" and therefore names only the rules that fired;
+   * a UI has to draw the OTHER rows too — the checks that passed, and the
+   * checks that exist at all before any crawl has been run. Those rows cannot
+   * be reconstructed from a findings listing, because an absence there has no
+   * name.
+   *
+   * ## Not paginated, and that is not an oversight
+   *
+   * Obligation 1 forbids a full export inline. This is not one: it is a CLOSED
+   * resource whose size is the ruleset's, not the crawl's. It does not grow
+   * with pages, findings or links — the three things that make an export an
+   * export — and it is the same rows on a 5-page site and a 50k-page one. A
+   * cursor over it would make every consumer loop to assemble a checklist they
+   * need whole in order to draw anything at all. The listings that DO scale
+   * with the data are all paginated, and none of them is this.
+   *
+   * BOUNDED IS NOT THE SAME AS SMALL, and the tool description says so rather
+   * than letting a caller find out: every rule's full client-facing copy is
+   * tens of kilobytes in one answer (about 80KB at ruleset 0.7.0 — roughly
+   * 20k tokens for an agent deciding whether to spend the context on it).
+   *
+   * ## One walk, one query
+   *
+   * The registry is walked in memory (it is built once, at construction) and
+   * joined against a SINGLE grouped count over `issues`. Never a count per
+   * rule: that would be one round trip per rule for one dashboard paint, and it
+   * would let the counts come from as many different snapshots.
+   *
+   * Sorted by severity then id — the order `listIssues` returns its groups in —
+   * so a UI that renders both puts the same rule in the same place twice.
+   */
+  async rulesCatalog(opts: { crawlId?: string } = {}): Promise<RulesCatalog> {
+    const ordered = [...this.registry.all()].sort(
+      (a, b) =>
+        SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.id.localeCompare(b.id),
+    );
+    const copy = (rule: AnyRule): CatalogRule => ({
+      id: rule.id,
+      kind: rule.kind,
+      severity: rule.severity,
+      category: rule.category,
+      checkIds: [...rule.checkIds],
+      title: rule.title,
+      explanation: rule.explanation,
+      howToFix: rule.howToFix,
+    });
+
+    // NO CRAWL, NO `fired` KEY AT ALL. Not `null`, which means "this crawl was
+    // never judged" — a claim about a crawl nobody named would be an answer to
+    // a question nobody asked.
+    if (opts.crawlId === undefined) {
+      return { rulesetVersion: RULESET_VERSION, rules: ordered.map(copy) };
+    }
+
+    const { judged, fired } = await this.firedByRule(opts.crawlId);
+    const firedFor = (rule: AnyRule): RuleFired => {
+      const counted = fired.get(rule.id) ?? { count: 0 };
+      // A metric rule's zero is structural, not a verdict: it measures rather
+      // than finds, so it writes no issues on any crawl. The flag rides the
+      // payload rather than the tool description because a dashboard reads the
+      // payload — see `RuleFired`.
+      return rule.kind === "metric" ? { ...counted, measuresOnly: true } : counted;
+    };
+    return {
+      rulesetVersion: RULESET_VERSION,
+      rules: ordered.map((rule) => ({
+        ...copy(rule),
+        // The whole distinction, in one expression: unjudged is null for every
+        // rule, and judged is a count for every rule — zero where the rule
+        // wrote nothing, which is a measurement rather than a silence.
+        fired: judged ? firedFor(rule) : null,
+      })),
+    };
+  }
+
+  /**
+   * One crawl's judged-state and its findings-per-rule, from ONE statement.
+   *
+   * The marker and the counts ride together for the reason `crawlRowWithCounts`
+   * spells out: `runRules` clears `rules_run_at` and deletes the crawl's issues
+   * in a single transaction, so two reads on two pool connections could compose
+   * `{judged: true, counts: none}` — a state that never existed, and precisely
+   * the one a dashboard would paint as a clean site. A `left join lateral`
+   * keeps them in one snapshot and still answers for a crawl with no findings
+   * at all (one row, `rule_id` null).
+   *
+   * A rule id the current ruleset does not define is a refusal, not a dropped
+   * row (`ruleFor`, the same 409 `listIssues` raises). Silently skipping it
+   * would leave the catalog's counts no longer summing to `findingsCount`, with
+   * nothing on the wire saying why.
+   */
+  private async firedByRule(
+    crawlId: string,
+  ): Promise<{ judged: boolean; fired: Map<string, RuleFired> }> {
+    const result = await this.db.execute<{
+      judged: boolean;
+      rule_id: string | null;
+      n: number | null;
+      truncation: unknown;
+    }>(sql`
+      select c.rules_run_at is not null as judged,
+             g.rule_id,
+             g.n,
+             g.truncation
+        from crawls c
+        left join lateral (
+          select i.rule_id,
+                 count(*)::int as n,
+                 ${truncationNote(crawlId)} as truncation
+            from issues i
+           where i.crawl_id = c.id
+           group by i.rule_id
+        ) g on true
+       where c.id = ${crawlId}`);
+
+    const rows = result.rows;
+    const first = rows[0];
+    if (first === undefined) {
+      throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+    }
+
+    const fired = new Map<string, RuleFired>();
+    for (const row of rows) {
+      // The left join's own row for a crawl that holds no findings.
+      if (row.rule_id === null) continue;
+      this.ruleFor(row.rule_id, crawlId, "issues");
+      if (typeof row.n !== "number") {
+        throw new Error(
+          `firedByRule: rule '${row.rule_id}' counted as ${typeof row.n}, not a number`,
+        );
+      }
+      const note = truncationOf(row.truncation, row.rule_id);
+      fired.set(
+        row.rule_id,
+        note.truncated === true ? { count: row.n, atLeast: true } : { count: row.n },
+      );
+    }
+    return { judged: first.judged === true, fired };
+  }
+
+  /**
    * The crawl's findings, grouped by rule: the triage view.
    *
    * GROUPED BY (rule, severity) rather than by rule alone, and the pair is the
@@ -1573,12 +2118,7 @@ export class ApiService {
                         order by i.details_jsonb->>'pageUrl')
                 filter (where i.details_jsonb->>'pageUrl' is not null)
              )[1:${sql.raw(String(ISSUE_SAMPLE_URLS))}] as sample_urls,
-             (select i2.details_jsonb->'truncated'
-                from issues i2
-               where i2.crawl_id = ${crawlId}
-                 and i2.rule_id = i.rule_id
-                 and i2.details_jsonb->'truncated' is not null
-               limit 1) as truncation
+             ${truncationNote(crawlId)} as truncation
       from issues i
       where ${sql.join(where, sql` and `)}
       group by i.rule_id, i.severity
@@ -1670,6 +2210,231 @@ export class ApiService {
       items,
       nextCursor: last === undefined ? null : encodeCursor(last.url_key, last.dedupe_key),
     };
+  }
+
+  /**
+   * Two crawls of one site, rule by rule: what appeared, what went away, what
+   * is still there. `GET /compare` and `crawl_compare`.
+   *
+   * ## Identity: `(rule_id, url)`, and why it is not `dedupe_key`
+   *
+   * `dedupe_key` is the column the `issues_dedupe` unique index is built on, so
+   * it is tempting to read it as "which finding this is". It is not, and the
+   * reference data says so in four different shapes. The key is whatever a rule
+   * chose to make its findings distinct WITHIN ONE CRAWL, and the ruleset uses
+   * it four ways:
+   *
+   *  1. **The page URL** — most rules (`links.orphan`, `title.too-long`,
+   *     `meta-description.missing`, `links.broken-internal`, …).
+   *  2. **A CONTENT HASH** — `title.duplicate`, `meta-description.duplicate`,
+   *     `h1.duplicate-text` key on a hash of the duplicated VALUE;
+   *     `content.exact-duplicate` and `content.near-duplicate` key on a content
+   *     hash or a hash of a URL PAIR.
+   *  3. **A COMPOSITE naming a second URL or a code** —
+   *     `hreflang.missing-return-link` is `<pageUrl>→<member>`, the hreflang
+   *     cluster rules are `<pageUrl>#<code>`.
+   *  4. **The literal string `"site"`** — every rule whose finding is about the
+   *     crawl rather than a page (`sitemap.missing`, `robots.missing`,
+   *     `schema.none-on-site`).
+   *
+   * Only shape 1 is stable across crawls in the way a diff needs. Shape 2 moves
+   * the moment the site edits the text: a page whose title is still duplicated,
+   * with a word changed, hashes differently — and a `dedupe_key` diff would
+   * report that as one finding resolved and one new, which is the opposite of
+   * what happened. Shape 3 is stable only while BOTH endpoints are, so one
+   * removed page invents a resolution on every page that pointed at it. Shape 4
+   * is a constant and would compare correctly, which is the exception that
+   * proves the rule rather than a reason to use the column.
+   *
+   * The page URL is the one identity every finding shares and the only one that
+   * means the same thing in two crawls, so the join is `(rule_id, pageUrl)` —
+   * read from `details_jsonb->>'pageUrl'`, which `runRules` writes onto every
+   * row from the finding's own `pageUrl` (src/rules/run.ts).
+   *
+   * **What that costs, stated rather than discovered.** A rule that fires more
+   * than once on a page COLLAPSES TO PER-URL PRESENCE. On the reference crawl
+   * `content.near-duplicate` wrote 16,789 findings across 281 URLs; this
+   * comparison sees 281 things, and a page that went from two near-duplicate
+   * partners to fifty is `persisting`, not `new`. That is why `baseCount` and
+   * `headCount` (rows — the numbers `issues_list` reports) travel beside
+   * `baseUrls` and `headUrls` (the diff's own denominators), and why the two
+   * invariants are stated on the URL counts:
+   * `headUrls == new + persisting` and `baseUrls == resolved + persisting`.
+   *
+   * A SITE-LEVEL finding has no page URL. It compares by RULE PRESENCE — the
+   * key is the empty string, which no URL can be (`listIssueUrls`' precedent) —
+   * and it surfaces in the drill-down as `url: null`.
+   *
+   * ## The refusals, in the order they are checked
+   *
+   *  1. **Either crawl unknown** — 404 naming it.
+   *  2. **The same crawl twice** — a diff of a crawl against itself is every
+   *     rule `persisting` and every delta zero, which a dashboard would paint as
+   *     "nothing changed on this site". It is a caller mistake with a
+   *     plausible-looking answer, so it is refused rather than answered.
+   *  3. **Different sites** — 400 naming both hosts. Before the judged check, on
+   *     purpose: a caller who names another tenant's crawl must not learn from
+   *     the refusal whether that crawl has been judged (obligation 6).
+   *  4. **Either crawl unjudged** — 400 naming which. `rulesRunAt` null means no
+   *     complete rules pass is on record, so an empty side is "nobody looked",
+   *     and diffing it would report every finding on the other side as new or
+   *     resolved. The reference crawl `crawl_2af4daf1` is exactly this: 1,314
+   *     findings in the table and `rules_run_at` null.
+   *
+   * A RULESET MISMATCH IS NOT A REFUSAL. It is `comparable: false` with a caveat
+   * naming both versions, and the counts are returned — the engine states what
+   * it knows and the consumer decides whether to draw the Change column. Nor is
+   * a finding-cap mismatch, which gets its own caveat and also clears
+   * `comparable`: on the reference pair the base was capped at 200 per listing
+   * and the head was uncapped, and `links.orphan` moves 200 → 243 for that
+   * reason alone.
+   *
+   * ## One snapshot
+   *
+   * Both statements run inside one `repeatable read, read only` transaction.
+   * `runRules` clears `rules_run_at` and deletes the crawl's issues in a single
+   * transaction (src/rules/run.ts), so a re-judge landing between the crawl-row
+   * read and the aggregate would compose a comparison neither state ever had:
+   * "judged, and every finding resolved". This is `crawlRowWithCounts`' argument
+   * where the two facts cannot be put in one statement.
+   */
+  async compareCrawls(baseCrawlId: string, headCrawlId: string): Promise<CrawlComparison> {
+    return await this.db.transaction(
+      async (tx) => {
+        const { base, head } = await comparePair(tx, baseCrawlId, headCrawlId);
+        const rows = await compareRuleRows(tx, baseCrawlId, headCrawlId);
+
+        const caveats: CompareCaveat[] = [];
+        const rules: CompareRule[] = [];
+        let baseFindings = 0;
+        let headFindings = 0;
+        for (const row of rows) {
+          const rule = this.ruleFor(row.rule_id, row.base_n > 0 ? baseCrawlId : headCrawlId, "issues");
+          const baseSevs = row.base_sevs ?? [];
+          const headSevs = row.head_sevs ?? [];
+          const worst = (list: string[]): string =>
+            [...list].sort((a, b) => severityRank(a) - severityRank(b))[0] ?? rule.severity;
+          // The head's reading is the current one. A rule that fired only in the
+          // base has no head reading, and its own is what there is.
+          const severity = headSevs.length > 0 ? worst(headSevs) : worst(baseSevs);
+          if (baseSevs.length > 0 && headSevs.length > 0 && !sameSet(baseSevs, headSevs)) {
+            caveats.push({
+              code: "severity-changed",
+              message:
+                `rule '${row.rule_id}' is recorded at ${[...baseSevs].sort().join("/")} in ` +
+                `${baseCrawlId} and ${[...headSevs].sort().join("/")} in ${headCrawlId}: the ` +
+                `row reports the head severity (${severity}), and a severity column charted ` +
+                `across the two crawls is charting a ruleset change rather than the site`,
+            });
+          }
+          baseFindings += row.base_n;
+          headFindings += row.head_n;
+          rules.push({
+            ruleId: row.rule_id,
+            severity,
+            category: rule.category,
+            checkIds: [...rule.checkIds],
+            title: rule.title,
+            baseCount: row.base_n,
+            headCount: row.head_n,
+            baseUrls: row.base_u,
+            headUrls: row.head_u,
+            new: row.added,
+            resolved: row.removed,
+            persisting: row.kept,
+            baseTruncated: row.base_trunc,
+            headTruncated: row.head_trunc,
+          });
+        }
+        rules.sort(
+          (a, b) => severityRank(a.severity) - severityRank(b.severity) || a.ruleId.localeCompare(b.ruleId),
+        );
+
+        const baseSide: CompareSide = { ...base, rulesetVersions: versionsOf(rows, "base"), findingsCount: baseFindings };
+        const headSide: CompareSide = { ...head, rulesetVersions: versionsOf(rows, "head"), findingsCount: headFindings };
+        // BOTH CHECKS RUN, ALWAYS. `&&` would short-circuit, and the pair that
+        // most needs both sentences is exactly the one where the first fails:
+        // the reference pair is judged by two rulesets AND under two finding
+        // caps, and a reader told only about the ruleset would attribute
+        // `links.orphan` 200 → 243 to a ruleset change. The caveats are the
+        // answer; `comparable` is only their conjunction.
+        const rulesetAgrees = rulesetCaveat(baseSide, headSide, caveats);
+        const capsAgree = capCaveat(baseSide, headSide, caveats);
+        const comparable = rulesetAgrees && capsAgree;
+        // Severity caveats are appended above, inside the rule walk; sorting the
+        // list puts the whole-comparison ones first whatever order they were
+        // found in, so a reader meets the reason `comparable` is false before the
+        // per-rule notes.
+        caveats.sort((a, b) => CAVEAT_ORDER.indexOf(a.code) - CAVEAT_ORDER.indexOf(b.code));
+        return { base: baseSide, head: headSide, comparable, caveats, rules };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  /**
+   * One rule's URLs in one of a comparison's three sets — the drill-down behind
+   * the counts. `GET /compare/urls` and `compare_urls`.
+   *
+   * The counts are on the summary and the URLs are only here, which is
+   * obligation 1's shape: a chat agent gets `new: 243` in one small object and
+   * asks for the list when it wants the list.
+   *
+   * **The set arithmetic is SQL's** (rule 3). `except` and `intersect` over two
+   * `select distinct`s that each ride the `issues_crawl_rule` index; the keyset
+   * predicate goes INSIDE the left-hand select, where it is a filter on the
+   * ordering column rather than a filter on the result of a set operation, so
+   * the plan stays a bounded scan of one rule's rows and this process never
+   * holds more than a page.
+   *
+   * Ordered by the URL key, which is a total order (the two sets are sets of
+   * distinct keys), so the cursor is exact rather than approximately right. The
+   * empty-string key sorts first and comes back as `url: null` — the site-level
+   * finding, which compares by rule presence.
+   */
+  async listCompareUrls(
+    baseCrawlId: string,
+    headCrawlId: string,
+    ruleId: string,
+    set: string,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<Page<CompareUrl>> {
+    this.findingRule("ruleId", ruleId);
+    const which = parseCompareSet(set);
+    const limit = parseLimit(opts.limit);
+    const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 1)[0];
+
+    return await this.db.transaction(
+      async (tx) => {
+        await comparePair(tx, baseCrawlId, headCrawlId);
+        // Which side leads the set operation IS the definition of the set:
+        // `new` and `persisting` are questions about the head's URLs, `resolved`
+        // is a question about the base's. The keyset predicate rides the leading
+        // select for that reason — it is the side whose rows are being ordered.
+        const lead = which === "resolved" ? baseCrawlId : headCrawlId;
+        const other = which === "resolved" ? headCrawlId : baseCrawlId;
+        const operator = which === "persisting" ? sql`intersect` : sql`except`;
+        const result = await tx.execute<{ k: string }>(sql`
+          select k from (
+            (select distinct coalesce(i.details_jsonb->>'pageUrl', '') as k
+               from issues i
+              where i.crawl_id = ${lead} and i.rule_id = ${ruleId}
+                ${cursor === null ? sql`` : sql`and coalesce(i.details_jsonb->>'pageUrl', '') > ${cursor}`})
+            ${operator}
+            (select distinct coalesce(i.details_jsonb->>'pageUrl', '') as k
+               from issues i
+              where i.crawl_id = ${other} and i.rule_id = ${ruleId})
+          ) s
+          order by k asc
+          limit ${limit + 1}`);
+
+        const rows = result.rows;
+        const items = rows.slice(0, limit).map((row) => ({ url: row.k === "" ? null : row.k }));
+        const last = rows.length > limit ? rows[limit - 1] : undefined;
+        return { items, nextCursor: last === undefined ? null : encodeCursor(last.k) };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
   }
 
   /**
@@ -1863,59 +2628,209 @@ export class ApiService {
    * export standing: a truncated `.jsonl.gz` is a file a pipeline would read as
    * a short crawl. The error surfaces either way.
    */
-  async exportCrawl(crawlId: string, opts: { dataset?: string } = {}): Promise<ExportResult> {
+  async exportCrawl(
+    crawlId: string,
+    opts: { dataset?: string; format?: string; view?: string; ruleId?: string } = {},
+  ): Promise<ExportResult | CsvExportResult> {
     await this.assertCrawl(crawlId);
-    const dataset = parseDataset(opts.dataset);
+    const request = parseExportRequest(opts, (field, id) => this.findingRule(field, id));
 
+    if (request.format === "csv") {
+      const stream = await this.csvStream(crawlId, request.view, request.ruleId);
+      const { written, bytes, path } = await this.writeExport(
+        stream.filename,
+        new PassThrough(),
+        stream.records(),
+      );
+      return {
+        format: "csv",
+        view: stream.view,
+        ...(stream.ruleId === null ? {} : { ruleId: stream.ruleId }),
+        path,
+        // The header is written and is not a row. `written` counts records.
+        rows: written - 1,
+        bytes,
+      };
+    }
+
+    const { dataset } = request;
+    const { written, bytes, path } = await this.writeExport(
+      `${slug(crawlId)}-${dataset}.jsonl.gz`,
+      createGzip(),
+      this.jsonlRecords(crawlId, dataset),
+    );
+    return { dataset, path, rows: written, bytes };
+  }
+
+  /** The JSONL dataset as text records — one JSON object per line, as it always was. */
+  private async *jsonlRecords(crawlId: string, dataset: ExportDataset): AsyncGenerator<string> {
+    for await (const row of this.exportRows(crawlId, dataset)) yield `${JSON.stringify(row)}\n`;
+  }
+
+  /**
+   * Write a stream of records into the export directory, atomically.
+   *
+   * The `sink` is what the records are written through — `createGzip()` for the
+   * JSONL datasets, a `PassThrough` for CSV, which is the whole difference
+   * between the two formats at this level. Everything else (the name check, the
+   * temp file, the backpressure, the rename) is one implementation because the
+   * failure it defends against is one failure.
+   */
+  private async writeExport(
+    filename: string,
+    sink: Duplex,
+    records: AsyncIterable<string>,
+  ): Promise<{ written: number; bytes: number; path: string }> {
     await mkdir(this.exportDir, { recursive: true });
     // The crawl id reaches this from the request path, so it is slugged before
     // it becomes a filename and the result is checked to be inside the export
     // directory. A caller names a crawl, never a path.
-    const file = joinPath(this.exportDir, `${slug(crawlId)}-${dataset}.jsonl.gz`);
+    const file = joinPath(this.exportDir, filename);
     if (!resolvePath(file).startsWith(this.exportDir + pathSep)) {
       throw new Error(`export: refusing to write outside the export directory (${file})`);
     }
     const temp = `${file}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
 
-    const gzip = createGzip();
     // THE HANDLER IS ATTACHED AT CREATION, and that placement is the whole
     // point. The write side fails on its own schedule — ENOSPC, a directory
     // removed underneath us, EACCES on open — and control spends most of this
-    // method parked in `exportRows`' database awaits. A `pipeline()` promise
-    // whose rejection has no handler AT THE MOMENT IT REJECTS is an unhandled
-    // rejection, and an unhandled rejection ends the process in Node 22: a full
-    // disk would take the API server down with it. Catching here turns that
-    // into a value, which the loop below checks and re-throws as its own error
-    // (the same reasoning as the queue runner's catch in `pump`).
+    // method parked in the row generator's database awaits. A `pipeline()`
+    // promise whose rejection has no handler AT THE MOMENT IT REJECTS is an
+    // unhandled rejection, and an unhandled rejection ends the process in Node
+    // 22: a full disk would take the API server down with it. Catching here
+    // turns that into a value, which the loop below checks and re-throws as its
+    // own error (the same reasoning as the queue runner's catch in `pump`).
     let writeError: unknown = null;
-    const written = pipeline(gzip, createWriteStream(temp)).catch((error: unknown) => {
+    const written = pipeline(sink, createWriteStream(temp)).catch((error: unknown) => {
       writeError = error;
     });
 
-    let rows = 0;
+    let count = 0;
     try {
-      for await (const row of this.exportRows(crawlId, dataset)) {
+      for await (const record of records) {
         if (writeError !== null) throw writeError;
-        // Backpressure honoured: gzip's buffer says when to wait, so a slow
+        // Backpressure honoured: the sink's buffer says when to wait, so a slow
         // disk slows the reader rather than filling memory with pending writes.
-        if (!gzip.write(`${JSON.stringify(row)}\n`)) await once(gzip, "drain");
-        rows += 1;
+        if (!sink.write(record)) await once(sink, "drain");
+        count += 1;
       }
-      gzip.end();
+      sink.end();
       await written;
       if (writeError !== null) throw writeError;
       // The rename is the publish step: everything above wrote a temp file
       // nobody was reading.
       await rename(temp, file);
     } catch (error) {
-      gzip.destroy();
+      sink.destroy();
       await written;
       await unlink(temp).catch(() => undefined);
       throw error;
     }
 
     const { size } = await stat(file);
-    return { dataset, path: file, rows, bytes: size };
+    return { written: count, bytes: size, path: file };
+  }
+
+  /**
+   * A CSV view of a crawl, validated and ready to stream — the HTTP transport's
+   * half of `export_crawl`.
+   *
+   * NOT A FILE. The dashboard's "Bulk export" block is a download: Talos proxies
+   * these bytes straight to a browser, so the response body IS the file and
+   * nothing is written to this server's disk. The MCP transport, whose caller
+   * has no browser, gets the file-writing half (`exportCrawl` with
+   * `format: "csv"`) — same rows, same writer, one place they are decided.
+   *
+   * Everything that can be refused is refused HERE, before a byte is streamed:
+   * once the 200 and the `text/csv` header are on the wire there is no status
+   * code left to change, and a half-written file that a client reads as a
+   * complete export is exactly the silent failure hard rule 7 forbids. That
+   * includes the refusal that is NOT about the request — a crawl holding
+   * findings for a rule this ruleset has retired (see `assertViewAnswerable`).
+   */
+  async prepareCsvExport(
+    crawlId: string,
+    opts: { dataset?: string; format?: string; view?: string; ruleId?: string } = {},
+  ): Promise<CsvStream> {
+    await this.assertCrawl(crawlId);
+    const request = parseExportRequest(
+      { ...opts, format: opts.format ?? "csv" },
+      (field, id) => this.findingRule(field, id),
+    );
+    if (request.format !== "csv") {
+      throw new ServiceError(
+        "VALIDATION",
+        `this route streams CSV; format '${request.format}' writes a file — ask for it ` +
+          "without format=csv and read the path it answers with",
+      );
+    }
+    return this.csvStream(crawlId, request.view, request.ruleId);
+  }
+
+  /**
+   * The one refusal a CSV view can hit that the REQUEST does not contain: a
+   * stored finding whose rule this ruleset no longer defines.
+   *
+   * `issues` joins every row's copy out of the registry at read time, exactly as
+   * `issues_list` does, and `ruleFor` refuses a row it cannot join rather than
+   * writing blank titles into a client's spreadsheet. Left to fire inside the
+   * generator, that refusal arrives AFTER the header — a 200 and a torn socket,
+   * where every JSON surface answers the same crawl a clean 409 telling the
+   * caller to re-run the rules. So the rule ids are asked for first: one
+   * `select distinct rule_id`, which rides the `issues_crawl_rule` index and
+   * costs milliseconds against the 17,659-finding reference crawl, and the same
+   * `ruleFor` that would have thrown later throws now, before a byte.
+   *
+   * `issue_urls` needs none of this — `parseExportRequest` has already put its
+   * one rule through `findingRule`. The other four views never touch the
+   * registry at all.
+   */
+  private async assertViewAnswerable(crawlId: string, view: CsvViewName): Promise<void> {
+    if (view !== "issues") return;
+    const result = await this.db.execute<{ rule_id: string }>(
+      sql`select distinct i.rule_id from issues i where i.crawl_id = ${crawlId}`,
+    );
+    for (const row of result.rows) this.ruleFor(row.rule_id, crawlId, "issues");
+  }
+
+  /** The prepared stream itself. The validation is the caller's; this reads rows. */
+  private async csvStream(
+    crawlId: string,
+    view: CsvViewName,
+    ruleId: string | null,
+  ): Promise<CsvStream> {
+    await this.assertViewAnswerable(crawlId, view);
+    const def = CSV_VIEW_DEFS[view];
+    const ctx: CsvViewContext = {
+      rule: (id) => this.ruleFor(id, crawlId, "issues"),
+      evidence: (value, id) => asEvidence(value, crawlId, id),
+    };
+    const db = this.db;
+    return {
+      view,
+      ruleId,
+      filename: csvFilename(slug(crawlId), view, ruleId === null ? null : slug(ruleId)),
+      async *records(): AsyncGenerator<string> {
+        // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
+        // that cannot say what it failed to contain, and a reader would have to
+        // guess whether the export ran at all.
+        yield csvRecord(def.header);
+        let cursor: readonly string[] = def.start;
+        for (;;) {
+          const result = await db.execute<Record<string, unknown>>(
+            def.query(crawlId, cursor, EXPORT_BATCH, ruleId),
+          );
+          if (result.rows.length === 0) return;
+          // Read a batch, write it, let it go: RAM is O(EXPORT_BATCH) and never
+          // O(rows), which is hard rule 3 for the links-derived views and hard
+          // rule 6 for the rest. Nothing here accumulates.
+          for (const row of result.rows) yield csvRecord(def.cells(row, ctx));
+          const last = result.rows[result.rows.length - 1];
+          if (last === undefined) return;
+          cursor = def.next(last);
+        }
+      },
+    };
   }
 
   /**
@@ -2933,6 +3848,411 @@ function configFindingCap(config: unknown, crawlId: string): number | null {
   }
 }
 
+// ------------------------------------------------------- the cross-crawl diff
+
+/**
+ * The reader `compareCrawls` and `listCompareUrls` share — a transaction handle,
+ * not the pool, because both run every statement of one answer in one snapshot.
+ */
+type Reader = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** The order the caveats are presented in: the whole comparison, then the rules. */
+const CAVEAT_ORDER: CompareCaveat["code"][] = [
+  "ruleset-mismatch",
+  "ruleset-unrecorded",
+  "ruleset-mixed",
+  "finding-cap-differs",
+  "severity-changed",
+];
+
+/** `set`, validated against the one list both transports advertise. */
+function parseCompareSet(value: string): CompareSet {
+  const found = COMPARE_SETS.find((s) => s === value);
+  if (found === undefined) {
+    throw new ServiceError(
+      "VALIDATION",
+      `set '${clip(value)}' is not one of: ${COMPARE_SETS.join(", ")}`,
+    );
+  }
+  return found;
+}
+
+/** Two lists of severities, compared as sets. */
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+/**
+ * Both crawls' comparison-relevant facts, and every refusal that depends on
+ * them — the shared pre-flight of `compareCrawls` and `listCompareUrls`.
+ *
+ * ONE STATEMENT for both rows so the two sides are read in one snapshot, and
+ * inside the caller's transaction so the aggregate that follows is in it too.
+ * The refusal ORDER is argued in `compareCrawls`' header; it is stated here as
+ * code because both entry points must refuse identically — a drill-down that
+ * answered a cross-site question the summary refuses would be the whole guard
+ * with a hole in it.
+ */
+async function comparePair(
+  reader: Reader,
+  baseCrawlId: string,
+  headCrawlId: string,
+): Promise<{ base: Omit<CompareSide, "rulesetVersions" | "findingsCount">; head: Omit<CompareSide, "rulesetVersions" | "findingsCount"> }> {
+  if (baseCrawlId === headCrawlId) {
+    throw new ServiceError(
+      "VALIDATION",
+      `baseCrawlId and headCrawlId both name '${clip(baseCrawlId)}': a crawl compared with ` +
+        `itself reports every rule as persisting and every change as zero, which is not a ` +
+        `fact about the site`,
+    );
+  }
+
+  const result = await reader.execute<{
+    id: string;
+    site_url: string;
+    rules_run_at: string | null;
+    config_jsonb: unknown;
+  // `rules_run_at` IS FORMATTED IN SQL, not parsed here. `execute` is the raw
+  // driver path: drizzle's own column mapping — what turns a `timestamptz` into
+  // a `Date` on a `select()` — is not in it, so the value arrives as Postgres'
+  // text spelling, a space where ISO-8601 wants a T. This produces the exact
+  // string `getCrawl` answers with, from the database rather than reconstructed
+  // from a format JavaScript only mostly parses. `to_char` of null is null, so
+  // the column still answers the judged question.
+  }>(sql`
+    select id,
+           site_url,
+           to_char(rules_run_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as rules_run_at,
+           config_jsonb
+      from crawls
+     where id in (${baseCrawlId}, ${headCrawlId})`);
+  const rows = new Map(result.rows.map((row) => [row.id, row]));
+  const missing = [baseCrawlId, headCrawlId].filter((id) => !rows.has(id));
+  if (missing.length > 0) {
+    throw new ServiceError(
+      "NOT_FOUND",
+      `no such crawl${missing.length > 1 ? "s" : ""} ${missing.map((id) => `'${clip(id)}'`).join(" and ")}`,
+    );
+  }
+  const baseRow = rows.get(baseCrawlId);
+  const headRow = rows.get(headCrawlId);
+  if (baseRow === undefined || headRow === undefined) {
+    throw new Error("comparePair: a row present in the map is absent from it");
+  }
+
+  // BEFORE the judged check. A caller who names a crawl of another site must
+  // learn only that it is another site (obligation 6).
+  //
+  // A `site_url` that is not a URL is a 409 rather than a 500, by `getRobots`'
+  // argument: every row this engine writes went through `normalizeUrl`, so it is
+  // a row we did not write, and that is a state of the row rather than a fault
+  // in the request. It must NEVER be read as "these are different sites" — that
+  // would refuse a legitimate comparison for a reason nobody could act on.
+  let baseHost: string;
+  let headHost: string;
+  try {
+    baseHost = new URL(baseRow.site_url).hostname;
+    headHost = new URL(headRow.site_url).hostname;
+  } catch {
+    throw new ServiceError(
+      "CONFLICT",
+      `one of crawls '${clip(baseCrawlId)}' and '${clip(headCrawlId)}' has a site URL that ` +
+        `is not a URL, so whether they are the same site cannot be decided`,
+    );
+  }
+  if (!sameHostFamily(baseRow.site_url, headRow.site_url)) {
+    throw new ServiceError(
+      "VALIDATION",
+      `crawls of different sites cannot be compared: '${clip(baseCrawlId)}' crawled ` +
+        `'${baseHost}' and '${clip(headCrawlId)}' crawled '${headHost}'`,
+    );
+  }
+
+  const unjudged = [
+    ...(baseRow.rules_run_at === null ? [baseCrawlId] : []),
+    ...(headRow.rules_run_at === null ? [headCrawlId] : []),
+  ];
+  if (unjudged.length > 0) {
+    throw new ServiceError(
+      "VALIDATION",
+      `${unjudged.map((id) => `'${clip(id)}'`).join(" and ")} ` +
+        `${unjudged.length > 1 ? "have" : "has"} never been judged (rulesRunAt is null), so ` +
+        `there is nothing to compare — run the rules over ` +
+        `${unjudged.length > 1 ? "them" : "it"} first. Findings already in the table belong ` +
+        `to a pass that did not complete`,
+    );
+  }
+
+  const side = (
+    row: { id: string; site_url: string; rules_run_at: string | null },
+    config: unknown,
+  ): Omit<CompareSide, "rulesetVersions" | "findingsCount"> => {
+    if (row.rules_run_at === null) throw new Error("comparePair: an unjudged side survived");
+    return {
+      crawlId: row.id,
+      siteUrl: row.site_url,
+      rulesRunAt: row.rules_run_at,
+      findingCap: configFindingCap(config, row.id),
+    };
+  };
+  return { base: side(baseRow, baseRow.config_jsonb), head: side(headRow, headRow.config_jsonb) };
+}
+
+/** One row of the comparison, straight out of the one statement that builds it. */
+interface CompareRuleRow extends Record<string, unknown> {
+  rule_id: string;
+  base_n: number;
+  head_n: number;
+  base_u: number;
+  head_u: number;
+  base_sevs: string[] | null;
+  head_sevs: string[] | null;
+  base_versions: string[] | null;
+  head_versions: string[] | null;
+  base_trunc: boolean;
+  head_trunc: boolean;
+  added: number;
+  removed: number;
+  kept: number;
+}
+
+/**
+ * The whole comparison, as one statement — the set arithmetic included.
+ *
+ * RULE 3 IN ITS SHARPEST FORM. The alternative shape is two `select` statements
+ * of URLs and a `Set` difference in JavaScript, which is O(findings) in this
+ * process's memory: 17,659 rows on the reference crawl and unbounded on a 50k
+ * gate crawl. Every set here is built and differenced by Postgres, and what
+ * crosses into this process is one row per rule — at most the ruleset's 86.
+ *
+ * The `materialized` CTEs are the reason the whole thing is one pass per crawl:
+ * each side's rows are read once, and everything derived from them (row count,
+ * distinct-URL count, severity set, ruleset set, truncation flag) reads that one
+ * materialisation instead of re-scanning `issues`. Without the keyword Postgres
+ * is free to inline a CTE and scan the table again per reference.
+ *
+ * The `full join` is on `(rule_id, k)` and is what makes the three sets one
+ * pass: a null on the base side is a URL only the head has (`new`), a null on
+ * the head side is one only the base had (`resolved`), and a row with both is
+ * `persisting`. The nulls are the JOIN's own — a site-level finding's key is the
+ * empty string, never null — which is why the coalesce is inside the CTEs.
+ *
+ * ## Why each side's aggregate is three small groupings joined, not one
+ *
+ * The obvious spelling is one `group by rule_id` over the side's rows carrying
+ * `count(*)`, `count(distinct k)` and two `array_agg(distinct …)`. It is 3.4×
+ * slower on the reference pair and it scales worse, both for one reason: a
+ * `distinct` aggregate makes Postgres sort the WHOLE side by `(rule_id, k)`
+ * before it can group, so the 17,659-row head became a `GroupAggregate` over a
+ * 2,725kB quicksort — **112 ms of a 143 ms query**. Split as below, the row
+ * count and the truncation flag are a hash aggregate over the raw rows, the URL
+ * count is a hash aggregate over the already-distinct key set, and the two
+ * `distinct` aggregates run over `…stamp` — at most a handful of rows per rule —
+ * so nothing sorts the big side at all. Measured: **143 ms → 41.8 ms**, and the
+ * sort that went away is the term that would have spilled to disk on a 50k-page
+ * crawl's findings table rather than merely costing milliseconds.
+ *
+ * `u` is computed from the key set rather than derived as `kept + added`, even
+ * though the two are equal by construction. That equality is the invariant the
+ * transport tests assert (`headUrls == new + persisting`), and an invariant
+ * whose two sides come from one expression checks nothing.
+ */
+async function compareRuleRows(
+  reader: Reader,
+  baseCrawlId: string,
+  headCrawlId: string,
+): Promise<CompareRuleRow[]> {
+  /** One side: its rows, its key set, its distinct stamps, and the aggregate. */
+  const side = (prefix: string, crawlId: string): SQL => {
+    const raw = sql.raw(`${prefix}raw`);
+    const keys = sql.raw(`${prefix}k`);
+    const stamp = sql.raw(`${prefix}stamp`);
+    return sql`
+      ${raw} as materialized (
+        select i.rule_id,
+               i.severity,
+               i.ruleset_version,
+               coalesce(i.details_jsonb->>'pageUrl', '') as k,
+               (i.details_jsonb->'truncated' is not null) as trunc
+          from issues i
+         where i.crawl_id = ${crawlId}),
+      ${keys} as (select distinct rule_id, k from ${raw}),
+      ${stamp} as (select distinct rule_id, severity, ruleset_version from ${raw}),
+      ${sql.raw(prefix)} as (
+        select counts.rule_id, counts.n, counts.trunc, urls.u, stamps.sevs, stamps.versions
+          from (select rule_id, count(*)::int as n, bool_or(trunc) as trunc
+                  from ${raw} group by rule_id) counts
+          join (select rule_id, count(*)::int as u
+                  from ${keys} group by rule_id) urls using (rule_id)
+          join (select rule_id,
+                       array_agg(distinct severity) as sevs,
+                       array_agg(distinct ruleset_version) as versions
+                  from ${stamp} group by rule_id) stamps using (rule_id))`;
+  };
+
+  const result = await reader.execute<CompareRuleRow>(sql`
+    with ${side("b", baseCrawlId)},
+         ${side("h", headCrawlId)},
+         d as (
+           select coalesce(bk.rule_id, hk.rule_id) as rule_id,
+                  count(*) filter (where bk.k is null)::int as added,
+                  count(*) filter (where hk.k is null)::int as removed,
+                  count(*) filter (where bk.k is not null and hk.k is not null)::int as kept
+             from bk full join hk on bk.rule_id = hk.rule_id and bk.k = hk.k
+            group by 1),
+         ids as (select rule_id from b union select rule_id from h)
+    select ids.rule_id,
+           coalesce(b.n, 0) as base_n,
+           coalesce(h.n, 0) as head_n,
+           coalesce(b.u, 0) as base_u,
+           coalesce(h.u, 0) as head_u,
+           b.sevs as base_sevs,
+           h.sevs as head_sevs,
+           b.versions as base_versions,
+           h.versions as head_versions,
+           coalesce(b.trunc, false) as base_trunc,
+           coalesce(h.trunc, false) as head_trunc,
+           coalesce(d.added, 0) as added,
+           coalesce(d.removed, 0) as removed,
+           coalesce(d.kept, 0) as kept
+      from ids
+      left join b on b.rule_id = ids.rule_id
+      left join h on h.rule_id = ids.rule_id
+      left join d on d.rule_id = ids.rule_id`);
+  return result.rows;
+}
+
+/**
+ * The ruleset versions one side's findings are stamped with, sorted and
+ * deduplicated across the rules.
+ *
+ * The FINDINGS' stamp, never `crawls.ruleset_version`: the crawl column records
+ * the ruleset at CRAWL time and the rows record the ruleset that judged them,
+ * and on the reference data they differ by a whole version (a 0.6.0 crawl
+ * re-judged at 0.7.0). An empty list is a judged crawl that wrote no findings —
+ * nothing to read the version off.
+ */
+function versionsOf(rows: readonly CompareRuleRow[], side: "base" | "head"): string[] {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    for (const version of (side === "base" ? row.base_versions : row.head_versions) ?? []) {
+      seen.add(version);
+    }
+  }
+  return [...seen].sort();
+}
+
+/** How a version list reads in a caveat, empty strings included. */
+function versionList(versions: readonly string[]): string {
+  return versions.map((v) => (v === "" ? "(unstamped)" : v)).join(", ");
+}
+
+/**
+ * The ruleset half of `comparable`, with its caveat. Returns whether the two
+ * sides agree.
+ *
+ * Three ways to disagree, each named separately because each is a different
+ * thing for a consumer to do about it: the versions differ (the counts are of
+ * different questions), one side has no version at all (nothing to check), or
+ * one side holds findings from more than one ruleset (a crawl judged across a
+ * change, including the `""` rows written before the stamp existed).
+ *
+ * ## `""` IS NOT A VERSION, and this is the subtle one
+ *
+ * `issues.ruleset_version` defaults to the empty string, which schema.ts calls
+ * "written before the stamp existed" — deliberately NOT backfilled, because a
+ * version number nobody can check is a claim rather than a record. Two such
+ * sides would compare `"" === ""` and come out `comparable: true` with no
+ * caveat at all: the strongest possible answer, produced from the total absence
+ * of evidence. It is the same shape of error as reading `findingsCount: 0` on
+ * an unjudged crawl as "this site is clean" (hard rule 7), and it is worse here
+ * because two unstamped crawls are exactly what an OLD pair looks like.
+ *
+ * So an unstamped side is `ruleset-unrecorded`, alongside the side that wrote
+ * no findings at all: in both cases nothing on any row says which rules ran,
+ * and the honest answer is that there is nothing to check rather than that the
+ * check passed. The caveat names WHICH of the two it is per side, because the
+ * remedy differs — a crawl with no findings may simply be clean, while an
+ * unstamped one is old and wants re-judging.
+ */
+function rulesetCaveat(base: CompareSide, head: CompareSide, caveats: CompareCaveat[]): boolean {
+  const mixed = [base, head].filter((side) => side.rulesetVersions.length > 1);
+  if (mixed.length > 0) {
+    for (const side of mixed) {
+      caveats.push({
+        code: "ruleset-mixed",
+        message:
+          `'${side.crawlId}' holds findings stamped with more than one ruleset version ` +
+          `(${versionList(side.rulesetVersions)}), so no single version describes what judged ` +
+          `it: re-run the rules over it before reading a change`,
+      });
+    }
+    return false;
+  }
+  // Two ways for a side to record no version: it wrote no rows, or its rows
+  // carry the pre-stamp empty string. `every` rather than `[0] === ""` so the
+  // predicate stays true if the `mixed` guard above is ever loosened.
+  const unrecorded = [base, head].filter(
+    (side) => side.rulesetVersions.length === 0 || side.rulesetVersions.every((v) => v === ""),
+  );
+  if (unrecorded.length > 0) {
+    const why = (side: CompareSide): string =>
+      side.rulesetVersions.length === 0
+        ? `'${side.crawlId}' wrote no findings`
+        : `'${side.crawlId}' holds findings written before the ruleset stamp existed ` +
+          `(${versionList(side.rulesetVersions)})`;
+    caveats.push({
+      code: "ruleset-unrecorded",
+      message:
+        `${unrecorded.map(why).join(", and ")}, so the ruleset that judged ` +
+        `${unrecorded.length > 1 ? "them" : "it"} is not recorded on any row and cannot be ` +
+        `checked against the other side: re-run the rules before reading a change`,
+    });
+    return false;
+  }
+  const baseVersion = base.rulesetVersions[0] ?? "";
+  const headVersion = head.rulesetVersions[0] ?? "";
+  if (baseVersion !== headVersion) {
+    // The message states the row-comparability claim in its own words and cites
+    // NOTHING OF OURS. It shipped citing `docs/gates/phase-8.md §7.2` — the
+    // precedent that argument comes from, and still cited in `CrawlComparison`'s
+    // own documentation above — but a caveat is a PAYLOAD string: a Talos
+    // dashboard renders it to a tenant who has no such file, cannot read it, and
+    // learns from it only that this engine keeps documents somewhere (Talos
+    // obligation 6, the Phase 10 tenant-safety sweep). The reference belongs in
+    // the code, where the reader can follow it.
+    caveats.push({
+      code: "ruleset-mismatch",
+      message:
+        `these crawls were judged by different rulesets: '${base.crawlId}' at ` +
+        `${versionList([baseVersion])} and '${head.crawlId}' at ${versionList([headVersion])}. ` +
+        `A rule can change what it looks for, what it calls a finding and how severely it ` +
+        `reports one between versions, so a count that moved may be the ruleset moving rather ` +
+        `than the site. These rows are not row-comparable: read each side as its own report ` +
+        `rather than subtracting one from the other`,
+    });
+    return false;
+  }
+  return true;
+}
+
+/** The finding-cap half of `comparable`, with its caveat. */
+function capCaveat(base: CompareSide, head: CompareSide, caveats: CompareCaveat[]): boolean {
+  if (base.findingCap === head.findingCap) return true;
+  const say = (cap: number | null): string => (cap === null ? "uncapped" : `capped at ${cap}`);
+  caveats.push({
+    code: "finding-cap-differs",
+    message:
+      `these crawls were judged under different finding caps: '${base.crawlId}' ${say(base.findingCap)} ` +
+      `and '${head.crawlId}' ${say(head.findingCap)}. A listing rule stops writing rows at its ` +
+      `cap, so a count that moved may be the cap moving rather than the site — the per-rule ` +
+      `baseTruncated and headTruncated flags say which rules were actually cut`,
+  });
+  return false;
+}
+
 /**
  * Map a `runRenderPass` throw onto a service refusal.
  *
@@ -3075,6 +4395,93 @@ function parseSeverity(value: string): string {
     );
   }
   return value;
+}
+
+/**
+ * What an export was asked for — the two formats' vocabularies, kept apart.
+ *
+ * `dataset` belongs to `jsonl.gz` and `view` belongs to `csv`, and mixing them
+ * is refused rather than resolved. A caller who wrote `format=csv&dataset=pages`
+ * was thinking of one thing and asking for another; answering the half we
+ * understood would hand them a file that is not the one they meant, with a 200
+ * on it. The same argument as `checkQuery`'s unknown-parameter refusal.
+ *
+ * The rule id is validated through `findingRule`, so the two refusals that
+ * matter arrive in the caller's words: a rule this ruleset does not define, and
+ * a METRIC rule, which writes no findings at all — a header with no rows under
+ * it would read as "this rule found nothing".
+ */
+function parseExportRequest(
+  opts: { dataset?: string; format?: string; view?: string; ruleId?: string },
+  findingRule: (field: string, id: string) => AnyRule,
+): ExportRequest {
+  const format = parseFormat(opts.format);
+
+  if (format === "jsonl.gz") {
+    for (const [field, value] of [
+      ["view", opts.view],
+      ["ruleId", opts.ruleId],
+    ] as const) {
+      if (value !== undefined) {
+        throw new ServiceError(
+          "VALIDATION",
+          `'${field}' belongs to the CSV export: ask for format=csv, or drop it and ` +
+            `name a dataset (one of: ${EXPORT_DATASETS.join(", ")})`,
+        );
+      }
+    }
+    return { format, dataset: parseDataset(opts.dataset) };
+  }
+
+  if (opts.dataset !== undefined) {
+    throw new ServiceError(
+      "VALIDATION",
+      "'dataset' belongs to the jsonl.gz export; the CSV export takes a 'view' " +
+        `(one of: ${CSV_VIEWS.join(", ")})`,
+    );
+  }
+
+  const view = parseCsvView(opts.view);
+  const needsRuleId = CSV_VIEW_DEFS[view].needsRuleId;
+  if (needsRuleId && (opts.ruleId === undefined || opts.ruleId === "")) {
+    throw new ServiceError(
+      "VALIDATION",
+      `view '${view}' is one rule's findings and needs a 'ruleId' — issues_list names ` +
+        "the rules this crawl has findings for",
+    );
+  }
+  if (!needsRuleId && opts.ruleId !== undefined) {
+    throw new ServiceError(
+      "VALIDATION",
+      `'ruleId' narrows the issue_urls view; view '${view}' is not about one rule`,
+    );
+  }
+  if (opts.ruleId !== undefined) findingRule("ruleId", opts.ruleId);
+  return { format, view, ruleId: opts.ruleId ?? null };
+}
+
+/** The export format, defaulting to the one that shipped first. */
+function parseFormat(value: string | undefined): ExportFormat {
+  if (value === undefined) return "jsonl.gz";
+  if (!(EXPORT_FORMATS as readonly string[]).includes(value)) {
+    throw new ServiceError(
+      "VALIDATION",
+      `format '${clip(value)}' is not an export format (one of: ${EXPORT_FORMATS.join(", ")})`,
+    );
+  }
+  return value as ExportFormat;
+}
+
+/** The CSV view, defaulting to the one an audit is usually after. */
+function parseCsvView(value: string | undefined): CsvViewName {
+  if (value === undefined) return "issues";
+  if (!(CSV_VIEWS as readonly string[]).includes(value)) {
+    throw new ServiceError(
+      "VALIDATION",
+      `view '${clip(value)}' is not an export view (one of: ${CSV_VIEWS.join(", ")})`,
+    );
+  }
+  return value as CsvViewName;
 }
 
 /** The export dataset, defaulting to the one an audit is usually after. */

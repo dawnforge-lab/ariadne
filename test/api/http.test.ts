@@ -131,25 +131,54 @@ interface Rig {
 }
 
 /**
+ * A database method that works for a while and then does not.
+ *
+ * `failAfter: 1` lets the first call through to the REAL database and throws on
+ * every one after it. An unconditional thrower cannot reach a failure that
+ * happens after the response headers are on the wire — it fails before there is
+ * a response at all — and that failure is the entire rule-7 argument for the
+ * streaming CSV route. This is the only way to stand where it stands.
+ */
+interface FlakyMethod {
+  failAfter: number;
+  throws: () => never;
+}
+
+/**
  * A server whose database fails in one named way.
  *
- * The two things this file has to prove about failure — that a broken queue
- * runner does not take the process down, and that an unexpected throw becomes a
- * 500 with a correlation id and nothing else — both need an error the API
- * cannot produce on its own. A `Proxy` over the real `Db` supplies exactly one:
- * every method is forwarded and bound to the real handle except the one named
- * here, which throws. Nothing is stubbed, nothing is mocked, and the code under
- * test is the real path.
+ * The things this file has to prove about failure — that a broken queue runner
+ * does not take the process down, that an unexpected throw becomes a 500 with a
+ * correlation id and nothing else, and that a failure PAST the headers tears
+ * the response rather than truncating it — all need an error the API cannot
+ * produce on its own. A `Proxy` over the real `Db` supplies exactly one: every
+ * method is forwarded and bound to the real handle except the one named here,
+ * which throws either always (`broken`) or after N successful calls (`flaky`).
+ * Nothing is stubbed, nothing is mocked, and the code under test is the real
+ * path.
  */
-async function riggedServer(broken: Record<string, () => never>): Promise<Rig> {
+async function riggedServer(
+  broken: Record<string, () => never>,
+  flaky: Record<string, FlakyMethod> = {},
+): Promise<Rig> {
   const log: string[] = [];
+  const calls = new Map<string, number>();
   const rigged = new Proxy(db, {
     get(target, prop) {
       if (typeof prop === "string" && prop in broken) return broken[prop];
       const value = Reflect.get(target, prop) as unknown;
-      return typeof value === "function"
-        ? (value as (...args: unknown[]) => unknown).bind(target)
-        : value;
+      const bound =
+        typeof value === "function"
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value;
+      const rig = typeof prop === "string" ? flaky[prop] : undefined;
+      if (rig === undefined || typeof bound !== "function") return bound;
+      const name = prop as string;
+      return (...args: unknown[]) => {
+        const nth = (calls.get(name) ?? 0) + 1;
+        calls.set(name, nth);
+        return nth > rig.failAfter ? rig.throws() : bound(...args);
+      };
     },
   }) as Db;
 
@@ -1316,6 +1345,92 @@ describe("GET /crawls", () => {
 });
 
 describe("failure containment", () => {
+  // THE ONE FAILURE THAT HAPPENS AFTER THE HEADERS, and the whole rule-7
+  // argument for the streaming export route.
+  //
+  // Once `200 text/csv` is on the wire there is no status left to send, so a
+  // database that dies half way through the rows leaves two choices: end the
+  // response, which hands the client a SHORT CSV that parses cleanly and reads
+  // as the whole export — a client concluding their site has fewer broken links
+  // than it does — or destroy the connection, which every HTTP client reports as
+  // a transport error. The route destroys.
+  //
+  // Untested, that is one `res.end()` away from silently becoming the first
+  // behaviour with the suite still green, which is why this test exists and why
+  // `riggedServer` grew a `flaky` mode to reach it: the first `execute` returns
+  // the real rows and the one after it throws, which is a failure that can only
+  // occur once the header and a row are already written.
+  it("tears the response when a CSV export fails mid-stream, rather than truncating the file", async () => {
+    const crawlId = await seedCrawl({ status: "finished" });
+    for (const slug of ["a", "b", "c"]) {
+      await db.insert(pages).values({
+        id: `${crawlId}_${slug}`,
+        crawlId,
+        url: `http://seeded.example/${slug}`,
+        urlNormalised: `http://seeded.example/${slug}`,
+        statusCode: 200,
+        fetchClass: "ok",
+        depth: 1,
+        discoveredVia: "link",
+        rendered: false,
+      });
+    }
+
+    const rig = await riggedServer(
+      {},
+      {
+        execute: {
+          // One batch of rows comes back for real; the loop's next round trip —
+          // the one that would have ended the file — does not.
+          failAfter: 1,
+          throws: () => {
+            throw new Error("database is unavailable (test rig)");
+          },
+        },
+      },
+    );
+
+    try {
+      const res = await fetch(
+        `${rig.base}/crawls/${crawlId}/export?format=csv&view=internal_urls`,
+        { headers: { authorization: `Bearer ${TOKEN}` } },
+      );
+      // The status and the headers are real: they were sent before anything
+      // failed, which is precisely the situation under test.
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+      // No length, so a truncated body is detectable at all.
+      expect(res.headers.get("content-length")).toBeNull();
+
+      let body: string | null = null;
+      let transportError: unknown = null;
+      try {
+        body = await res.text();
+      } catch (error) {
+        transportError = error;
+      }
+
+      // THE ASSERTION THAT MATTERS: the client cannot read this as a complete
+      // response. `res.end()` in place of `res.destroy()` would deliver a
+      // four-line CSV here — header plus three pages — that every parser in the
+      // world would accept as the export.
+      expect(
+        transportError,
+        `the client received a complete-looking CSV: ${JSON.stringify(body)}`,
+      ).not.toBeNull();
+      expect(body).toBeNull();
+
+      // And the failure is not silent on our side either: a correlation id in
+      // the log, the stack with it, and nothing about either on the wire.
+      const line = rig.log.find((l) => l.includes("csv export failed mid-stream"));
+      expect(line, "the export tore the socket and said nothing").toBeDefined();
+      expect(line).toContain("internal_urls");
+      expect(line).toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
+    } finally {
+      await rig.api.close();
+    }
+  });
+
   it("survives a queue runner that cannot even record its own failure", async () => {
     // The queue's promise is held by nobody until `close()`. `runQueued` catches
     // the crawl's errors, but its catch writes to the database — so a database

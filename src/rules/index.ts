@@ -1,6 +1,7 @@
 import { Registry } from "./registry/registry.js";
 import { contentMetrics } from "./metric/content-metrics.js";
 import { crawlMetrics } from "./metric/crawl-metrics.js";
+import { healthMetrics } from "./metric/health-metrics.js";
 import { hreflangMetrics } from "./metric/hreflang-metrics.js";
 import { linkMetrics } from "./metric/link-metrics.js";
 import { renderMetrics } from "./metric/render-metrics.js";
@@ -72,6 +73,12 @@ export function buildRegistry(): Registry {
     ...urlMetrics,
     ...crawlMetrics,
     ...renderMetrics,
+    // The health rollup, last among the metrics because it is the only one that
+    // measures the RUN rather than the site: it counts the findings the rules
+    // above it have just written. The runner drives the metric phase after both
+    // finding phases, so those rows are complete by the time it counts them —
+    // the same phase-order coupling `redirect.volume` documents.
+    ...healthMetrics,
   ]) {
     r.register(rule);
   }

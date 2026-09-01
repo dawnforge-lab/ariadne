@@ -302,9 +302,11 @@ Two rules about proportion:
 - **A pass is one clause, not a section.** Grouped at the top of its section:
   "Passing: CHECK-14, CHECK-16, CHECK-22." A report that spends a paragraph on
   each thing that is fine buries the things that are not.
-- **URL lists belong in the action plan, not here.** Quote the count, quote up to
-  five example URLs, and point at the spreadsheet. A report that lists 400 URLs
-  has become a worse version of the deliverable that is designed for it.
+- **URL lists do not belong here.** Quote the count, quote up to five example
+  URLs, and point at where the full list lives: the web surface's exports, or
+  the on-request action-plan workbook if the client asked for one. A report
+  that lists 400 URLs has become a worse version of the surfaces designed for
+  them.
 
 ## Step 5 — the checks nobody could answer
 
@@ -380,7 +382,9 @@ rather than the engine's measurement.
 - The caveats from `crawl.caveats` are all in "What this audit covers".
 
 Then, in the conversation: the coverage counts, the three or four problems in
-plain language, the P1 list, and the file's path. Offer the action plan next —
-the `ariadne-action-plan` skill turns the same findings file into the URL-level
-spreadsheet the developers work from, and the two deliverables are meant to ship
-together.
+plain language, the P1 list, and the file's path. The report is where a
+standard audit ends. Mention, without pushing it, that the URL-level
+spreadsheet exists on request — the `ariadne-action-plan` skill turns the same
+findings file into a developer handoff workbook — but it is an on-request
+deliverable, not a routine second half: the standing per-issue, per-URL view
+of a crawl is the web surface's job (owner decision, 2026-09-01).

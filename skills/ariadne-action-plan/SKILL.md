@@ -13,6 +13,14 @@ description: >
 
 # Ariadne — the action plan
 
+**Status: on-request deliverable, not part of the default audit output** (owner
+decision, 2026-09-01). A standard audit ends at the findings file and the
+report; the standing prioritised, per-issue view of a crawl is the web
+surface's job (issues split by severity band, URL drill-downs, spreadsheet
+exports — the Talos integration). Build this workbook only when someone asks
+for a spreadsheet handoff in so many words — the trigger phrases above — not as
+a routine follow-on.
+
 The report argues. This one assigns. Every row here is a URL somebody opens and a
 change somebody makes, so the spreadsheet's whole job is to be complete, ordered,
 and honest about what it left out.

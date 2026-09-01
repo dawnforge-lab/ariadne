@@ -19,7 +19,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/loop.js";
@@ -673,6 +673,91 @@ describe("the fixture site end to end", () => {
     ]);
   });
 
+  /**
+   * NO RULE'S EVIDENCE MAY CARRY A `pageUrl` KEY.
+   *
+   * `runRules` writes a finding's details as `{pageUrl: f.pageUrl, ...f.evidence}`
+   * (src/rules/run.ts). The spread is LAST, so a rule that happened to name a
+   * field `pageUrl` inside its evidence would silently overwrite the page the
+   * finding was filed against — and `pageUrl` is not decoration: P10-T3's
+   * cross-crawl compare joins on `(rule_id, details_jsonb->>'pageUrl')`, so an
+   * override would move a finding onto another URL in every diff, quietly and
+   * for ever. Nothing else in the codebase would notice: the row is well formed,
+   * the count is right, and the URL is a URL.
+   *
+   * ## Why this is a runtime check and not a source scan
+   *
+   * A source scan is the tempting version — it would cover every rule whether or
+   * not it fires — and it does not survive contact with the ruleset. Of the 41
+   * `evidence:` sites in `src/rules/`, forty are object literals a brace-match
+   * could read, and the forty-first is `evidence: evidenceOf(row)` in
+   * sitemap.ts, where `evidenceOf` is a PARAMETER and the real literals are
+   * arrow functions passed in from the rule definitions below it. Following that
+   * statically is writing a resolver, and a guard whose own correctness needs a
+   * guard is not a guard. So this asserts the OBSERVABLE consequence over a real
+   * judged crawl instead.
+   *
+   * ## What that covers, stated rather than implied
+   *
+   * The fixture site is built to trip rules, and the count of distinct rules
+   * that actually fired is asserted below rather than described — so this test
+   * says how much of the ruleset it speaks for, and a fixture change that
+   * narrowed the run would fail here rather than quietly weakening the guard.
+   *
+   * Two gaps, both named where they sit: a rule that fires on NO fixture page is
+   * not covered at all, and a finding with no `page_id` has no `pages` row to be
+   * checked against (see the second assertion).
+   */
+  it("never lets a rule's evidence overwrite the page URL a finding was filed against", async () => {
+    // THE OVERRIDE, in the only form it can take: a finding whose stored
+    // `pageUrl` is not the URL of the page it names. `is distinct from` rather
+    // than `<>` so a null on either side counts as a mismatch instead of
+    // dropping out of the comparison.
+    const moved = await db.execute<{ rule_id: string; page_url: string; evidence_url: string }>(sql`
+      select i.rule_id, p.url as page_url, i.details_jsonb->>'pageUrl' as evidence_url
+        from issues i
+        join pages p on p.id = i.page_id
+       where i.crawl_id = ${summary.crawlId}
+         and i.details_jsonb->>'pageUrl' is distinct from p.url`);
+    expect(moved.rows).toEqual([]);
+
+    // A `page_id`-LESS FINDING IS NOT THE SAME AS A SITE-SCOPED ONE, and this
+    // test asserted otherwise until the fixture said no. `host.http-serves-200`,
+    // `host.legacy-host-reachable`, `robots.blocks-sitemap-urls` and
+    // `sitemap.uncrawled` all name a real URL with a null `page_id`: a host
+    // variant that was probed but never crawled, or a URL robots.txt kept out of
+    // the frontier. There is no `pages` row to check them against, so there is no
+    // independent source of truth for their `pageUrl` and no assertion here that
+    // would be sound. THAT IS THE HOLE IN THIS GUARD, named rather than papered
+    // over — and it is small, because the shape a mistake takes is a value that
+    // is not a URL at all, which the next assertion does catch.
+    const notAUrl = await db.execute<{ rule_id: string; url: string }>(sql`
+      select i.rule_id, i.details_jsonb->>'pageUrl' as url
+        from issues i
+       where i.crawl_id = ${summary.crawlId}
+         and i.details_jsonb->>'pageUrl' is not null
+         and i.details_jsonb->>'pageUrl' !~ '^https?://'`);
+    expect(notAUrl.rows).toEqual([]);
+
+    // And the key is PRESENT on every row, null or not: `issue_urls` and the
+    // compare both read it, and an absent key and a null one are the same
+    // `->>` result but not the same fact.
+    const keyless = await db.execute<{ rule_id: string }>(sql`
+      select distinct i.rule_id from issues i
+       where i.crawl_id = ${summary.crawlId}
+         and not (i.details_jsonb ? 'pageUrl')`);
+    expect(keyless.rows).toEqual([]);
+
+    // HOW MUCH OF THE RULESET THIS SPEAKS FOR. Derived from the run, not
+    // written down: the assertion is that the fixture site exercises a
+    // substantial share of the ruleset, so a fixture change that stopped
+    // tripping rules fails here instead of leaving the guard nominally green
+    // over almost nothing.
+    const fired = await db.execute<{ n: number }>(sql`
+      select count(distinct rule_id)::int as n from issues where crawl_id = ${summary.crawlId}`);
+    expect(Number(fired.rows[0]?.n ?? 0)).toBeGreaterThanOrEqual(20);
+  });
+
   it("the sitemap's deliberate mistakes land on the URLs that carry them", () => {
     // One entry per fault, each on the page the entry names — the join is
     // `sitemap_urls.url = pages.url` and these three assertions are what proves
@@ -1207,6 +1292,10 @@ describe("the fixture site end to end", () => {
     // P7-T4 makes it twelve — ten that always emit a site row, since
     // `structure.click-depth-distribution` reads a column the derivation phase
     // fills on every run and answers over the same cohort as the rest.
+    //
+    // P10-T2 makes it thirteen. `site.health` always emits its site row: it
+    // counts the crawl's own findings over the auditable pages, and a crawl
+    // with neither still has a census to state.
     expect([...metricsById.keys()].sort()).toEqual([
       "content.metrics-by-type",
       "content.template-similarity",
@@ -1216,6 +1305,7 @@ describe("the fixture site end to end", () => {
       "inlinks.sources-by-type",
       "redirect.volume",
       "render.coverage",
+      "site.health",
       "sitemap.structure",
       "structure.click-depth-distribution",
       "structure.depth-distribution",
@@ -1612,6 +1702,63 @@ describe("the fixture site end to end", () => {
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
     expect(crawlRow?.count).toBe(68);
+  });
+
+  it("the health rollup agrees with a page-by-page recount (P10-T2)", () => {
+    // P10-T2's rollup, over the same crawl and derived a DIFFERENT WAY: the
+    // metric answers in one grouped SQL statement, and this recomputes it by
+    // walking the harness's own maps in JavaScript — page by page, rule by
+    // rule, severity from the registry. Two independent derivations of one set
+    // of numbers is the point: a copy of the SQL would agree with the SQL
+    // whatever either of them said.
+    //
+    // The rules the harness's fixture site provokes are many and the numbers
+    // move with the fixtures, so what is pinned here is the AGREEMENT plus the
+    // properties that must hold on any crawl — the buckets partition the
+    // census, and the census plus the pages left out is the whole crawl.
+    const severityOf = new Map(registry.all().map((rule) => [rule.id, rule.severity]));
+    const RANK = { critical: 1, warning: 2, info: 3 } as const;
+    let critical = 0;
+    let warningOnly = 0;
+    let infoOnly = 0;
+    let clean = 0;
+    let auditable = 0;
+    for (const [path, page] of pageByPath) {
+      if (page.fetchClass !== "ok" || page.statusCode !== 200) continue;
+      auditable += 1;
+      let worst = 4;
+      for (const ruleId of issuesByPath.get(path) ?? []) {
+        const severity = severityOf.get(ruleId);
+        if (severity === undefined) throw new Error(`no registry rule '${ruleId}'`);
+        worst = Math.min(worst, RANK[severity]);
+      }
+      if (worst === 1) critical += 1;
+      else if (worst === 2) warningOnly += 1;
+      else if (worst === 3) infoOnly += 1;
+      else clean += 1;
+    }
+    expect(auditable).toBeGreaterThan(0);
+    expect(critical + warningOnly + infoOnly + clean).toBe(auditable);
+    // The ratio, rounded THE WAY POSTGRES ROUNDS IT. `round(numeric, 4)` is
+    // half-away-from-zero on the exact decimal; `toFixed(4)` rounds a binary
+    // float, so at an exact .00005 boundary the two can disagree and a future
+    // fixture change would surface as a mystery flake rather than as a fault.
+    // Integer arithmetic reaches the boundary exactly:
+    // `floor(clean·10^4/auditable + 1/2)` written with no division at all, as
+    // `floor((2·clean·10^4 + auditable) / (2·auditable))`.
+    const cleanRatio =
+      Math.floor((2 * clean * 10_000 + auditable) / (2 * auditable)) / 10_000;
+    expect(siteMetric("site.health")).toEqual({
+      urlsTotal: auditable,
+      urlsWithCritical: critical,
+      urlsWithWarningOnly: warningOnly,
+      urlsWithInfoOnly: infoOnly,
+      urlsClean: clean,
+      cleanRatio,
+      // 82 pages crawled, and the census is the auditable ones: the rest are
+      // this fixture site's redirects, its 404s, its 5xx and its non-HTML.
+      pagesNotAuditable: 82 - auditable,
+    });
   });
 
   it("each render rule fires on exactly the fixture built for it", () => {

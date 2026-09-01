@@ -16,7 +16,11 @@
  * ## The routes
  *
  *   POST /crawls                       accept a crawl (allowlist + URL policy) -> 202
- *   GET  /crawls                       list crawls, newest first, paginated
+ *   GET  /crawls                       list crawls, newest first, paginated.
+ *                                      `?siteUrl=` narrows it to one site — the
+ *                                      apex/www family, any scheme, any port
+ *                                      (`listCrawls`) — which is the project
+ *                                      history a date picker is built on
  *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings
  *   POST /crawls/:id/fail              close a crawl nobody is working
  *   POST /crawls/:id/render            run the render pass. No body: the engine
@@ -34,7 +38,41 @@
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
- *   GET  /crawls/:id/export            write a dataset to disk, answer with the path
+ *   GET  /rules                        the rule catalog: every rule with its
+ *                                      client-facing copy. `?crawlId=` joins
+ *                                      one crawl's fired state onto it —
+ *                                      `{count}` on a judged crawl (0 is a real
+ *                                      value) and `null` on one nobody judged.
+ *                                      `atLeast: true` beside a count means the
+ *                                      rule capped its listing, so the count is
+ *                                      a floor and the magnitude is on the
+ *                                      issues route. `measuresOnly: true` marks
+ *                                      a metric rule, whose 0 is structural —
+ *                                      it measures rather than finds and writes
+ *                                      no issues at all (see `RuleFired`)
+ *   GET  /crawls/:id/export            write a dataset to disk, answer with the
+ *                                      path. `?format=csv&view=` STREAMS instead:
+ *                                      `text/csv`, chunked, one of six spreadsheet
+ *                                      views (issues, issue_urls, internal_urls,
+ *                                      links_to_4xx, anchor_texts, redirects),
+ *                                      read through a keyset cursor so the
+ *                                      35k-row link views cost O(batch) at both
+ *                                      ends. This is the download behind a
+ *                                      dashboard's bulk-export block: the bytes
+ *                                      are the file, nothing is written here,
+ *                                      and every refusal happens before the
+ *                                      first of them (see `sendCsv`)
+ *   GET  /compare                      two crawls of one site, rule by rule:
+ *                                      counts on both sides plus new/resolved/
+ *                                      persisting. `comparable: false` with
+ *                                      `caveats` when the two were judged by
+ *                                      different rulesets or under different
+ *                                      finding caps — a statement, never a
+ *                                      refusal. Refused for two different sites
+ *                                      and for a crawl nobody judged
+ *   GET  /compare/urls                 the URLs behind one of those three counts,
+ *                                      paginated — the counts are on the summary
+ *                                      and the URLs are only here (obligation 1)
  *
  * ## What a caller can never be told
  *
@@ -47,6 +85,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
@@ -56,6 +95,7 @@ import {
   ServiceError,
   parseRenderCrawlInput,
   parseStartCrawlInput,
+  type CsvStream,
   type ServiceErrorCode,
 } from "./service.js";
 
@@ -114,10 +154,21 @@ interface RequestCtx {
   body: unknown;
 }
 
-interface Reply {
-  status: number;
-  body: unknown;
-}
+/**
+ * What a handler answers with: a JSON value, or a CSV stream.
+ *
+ * The second exists because one route on this surface does not fit "serialise a
+ * value and send it". A bulk export is a download — Talos proxies these bytes
+ * to a browser — and the whole point of the view is that the file is never in
+ * memory at either end (hard rule 3). A `csv` reply hands this file a validated,
+ * unread stream; `sendCsv` writes it record by record with backpressure.
+ *
+ * The csv arm carries NO status, and the absence is the point: a stream that
+ * reached this file has already been validated, so its status is 200 and there
+ * is no second value for a handler to pass and this file to ignore. Everything
+ * that could have been another status was refused before the stream existed.
+ */
+type Reply = { status: number; body: unknown } | { csv: CsvStream };
 
 interface Route {
   method: string;
@@ -204,10 +255,11 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls"],
-      query: PAGINATION_PARAMS,
+      query: ["siteUrl", ...PAGINATION_PARAMS],
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listCrawls({
+          ...optionalString(ctx.query, "siteUrl"),
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),
@@ -330,6 +382,57 @@ function buildRoutes(): Route[] {
         }),
       }),
     },
+    // THE ONE ROUTE THAT IS NOT UNDER A CRAWL. The catalog is a property of the
+    // ruleset, and a crawl is an optional projection onto it — which is why
+    // `crawlId` is a query parameter here rather than a path segment: without
+    // one there is a complete, useful answer (the checklist skeleton), and a
+    // path that required an id would have no way to ask for it.
+    {
+      method: "GET",
+      pattern: ["rules"],
+      query: ["crawlId"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.rulesCatalog({ ...optionalString(ctx.query, "crawlId") }),
+      }),
+    },
+    // THE OTHER TWO ROUTES THAT ARE NOT UNDER A CRAWL, and for a stronger
+    // reason than the catalog's: a comparison belongs to TWO crawls and neither
+    // owns it. `/crawls/:base/compare/:head` would make one of them the subject
+    // and hide the other in a trailing segment; both ids are query parameters
+    // here because both are equal halves of the question. They are REQUIRED —
+    // `requiredString` refuses a missing one by name, rather than letting
+    // `assertCrawl` answer "no such crawl ''", which names the wrong problem.
+    {
+      method: "GET",
+      pattern: ["compare"],
+      query: ["baseCrawlId", "headCrawlId"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.compareCrawls(
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+        ),
+      }),
+    },
+    {
+      method: "GET",
+      pattern: ["compare", "urls"],
+      query: ["baseCrawlId", "headCrawlId", "ruleId", "set", ...PAGINATION_PARAMS],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listCompareUrls(
+          requiredString(ctx.query, "baseCrawlId"),
+          requiredString(ctx.query, "headCrawlId"),
+          requiredString(ctx.query, "ruleId"),
+          requiredString(ctx.query, "set"),
+          {
+            ...optionalNumber(ctx.query, "limit"),
+            ...optionalString(ctx.query, "cursor"),
+          },
+        ),
+      }),
+    },
     {
       method: "GET",
       pattern: ["crawls", id, "robots"],
@@ -342,13 +445,24 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "export"],
-      query: ["dataset"],
-      handler: async (service, ctx) => ({
-        status: 200,
-        body: await service.exportCrawl(param(ctx, "id"), {
+      query: ["dataset", "format", "view", "ruleId"],
+      handler: async (service, ctx) => {
+        const opts = {
           ...optionalString(ctx.query, "dataset"),
-        }),
-      }),
+          ...optionalString(ctx.query, "format"),
+          ...optionalString(ctx.query, "view"),
+          ...optionalString(ctx.query, "ruleId"),
+        };
+        // `format=csv` STREAMS; every other format writes a file and answers
+        // with its path. The branch is on the caller's word rather than on a
+        // service verdict because the two answers have different response
+        // shapes — and a format this server does not know still reaches the
+        // service, which is what refuses it by name.
+        if (ctx.query.get("format") === "csv") {
+          return { csv: await service.prepareCsvExport(param(ctx, "id"), opts) };
+        }
+        return { status: 200, body: await service.exportCrawl(param(ctx, "id"), opts) };
+      },
     },
   ];
 }
@@ -445,7 +559,8 @@ async function handle(
       query: url.searchParams,
       body,
     });
-    sendJson(res, reply.status, reply.body);
+    if ("csv" in reply) await sendCsv(res, reply.csv, log);
+    else sendJson(res, reply.status, reply.body);
   } catch (error) {
     if (error instanceof ServiceError) {
       sendJson(res, STATUS_FOR[error.code], { error: error.message });
@@ -536,6 +651,23 @@ function optionalString(query: URLSearchParams, name: string): Record<string, st
 }
 
 /**
+ * A query parameter the route cannot answer without — absent OR empty is a 400
+ * naming it.
+ *
+ * Empty counts as absent on purpose. `?baseCrawlId=` is a caller who built the
+ * URL from a variable that was not set, and passing `""` down would produce a
+ * 404 about a crawl called nothing — a refusal that names the wrong problem and
+ * sends them looking for a missing crawl instead of a missing value.
+ */
+function requiredString(query: URLSearchParams, name: string): string {
+  const raw = query.get(name);
+  if (raw === null || raw === "") {
+    throw new ServiceError("VALIDATION", `this route requires a non-empty '${name}' parameter`);
+  }
+  return raw;
+}
+
+/**
  * A boolean query parameter, spelled `true` or `false` and nothing else.
  *
  * NOT truthiness. `indexable=1`, `indexable=yes` and `indexable=no` would all
@@ -595,6 +727,48 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     return JSON.parse(text);
   } catch {
     throw new BadJson();
+  }
+}
+
+/**
+ * Stream a CSV export: `text/csv`, record by record, no Content-Length.
+ *
+ * NO CONTENT-LENGTH, and that absence is the contract rather than an omission.
+ * A length is a number the server can only know by having produced the whole
+ * file first, which for a 35,145-row anchor view is precisely the buffer hard
+ * rule 3 forbids. Chunked transfer lets the first records reach the client
+ * while the database is still being read, which is what makes the memory cost
+ * O(batch) end to end rather than only inside this process.
+ *
+ * ## When it fails mid-file
+ *
+ * The status line is long gone by then, so there is no 500 left to send. The
+ * connection is DESTROYED instead: a client sees a truncated chunked response —
+ * an error to every HTTP client there is — rather than a file that ends early
+ * and looks complete. A short CSV read as the whole export is exactly the
+ * silent failure hard rule 7 exists to prevent, and it would be a client
+ * concluding their site has fewer broken links than it does. The detail goes to
+ * the log, as a 500's would (Talos obligation 6).
+ */
+async function sendCsv(res: ServerResponse, csv: CsvStream, log: (line: string) => void): Promise<void> {
+  res.writeHead(200, {
+    "content-type": "text/csv; charset=utf-8",
+    // The filename is built from the crawl id and the view — the caller's own
+    // words — and carries no path: an export is saved as what it is.
+    "content-disposition": `attachment; filename="${csv.filename}"`,
+    "cache-control": "no-store",
+  });
+  try {
+    for await (const record of csv.records()) {
+      // Backpressure: a slow client slows the database reader instead of
+      // filling this process with pending writes.
+      if (!res.write(record)) await once(res, "drain");
+    }
+    res.end();
+  } catch (error) {
+    const correlationId = randomUUID();
+    log(`api: csv export failed mid-stream ${correlationId} ${csv.view} — ${stackOf(error)}`);
+    res.destroy();
   }
 }
 

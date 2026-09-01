@@ -145,15 +145,34 @@ describe("checklist coverage", () => {
   // whether this was a MOVE: same rule id, same CHECK-31, same severity, same
   // category. A coverage number that moved here would mean the rule was deleted
   // rather than relocated.
-  it("pins the ruleset split the gate doc reports: 85 rules = 26 page + 47 query + 12 metric", () => {
+  // Phase 10 Task 2 adds one METRIC and no findings: `site.health`, the rollup
+  // Talos draws its gauge from. It counts pages by the worst severity of the
+  // findings the run just wrote, so it adds ROWS and changes no verdict — which
+  // is why RULESET_VERSION stays at 0.7.0 (the Phase 8 T1 argument).
+  //
+  //   metric  12 + 1 = 13
+  //   total   85 + 1 = 86
+  //
+  // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE, and here that is a disclosure
+  // rather than a reassurance: `site.health` carries CHECK-32, which THREE rules
+  // already claim — `links.orphan`, `links.orphan-skipped` (the not-measured
+  // marker beside it) and `structure.depth-distribution` — because the checklist
+  // has NO check for a site-wide judgement rollup, and its Evaluation Principle 2
+  // says a crawl summary answers no check at all. The id is a filing decision (a
+  // partition of the page census, where the depth distribution lives), stated as
+  // one in the rule's module header and in the metric's own client-facing copy,
+  // and not a claim that this metric answers the orphan check. The review ruled
+  // it an EXPLICITLY TEMPORARY bridge: the eventual home is an owner-designed
+  // check about the engine's coverage, and the checklist is untouched this phase.
+  it("pins the ruleset split the gate doc reports: 86 rules = 26 page + 47 query + 13 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(85);
+    expect(registry.all()).toHaveLength(86);
     expect(registry.byKind("page")).toHaveLength(26);
     expect(registry.byKind("query")).toHaveLength(47);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
-    // the render pass's coverage.
-    expect(registry.byKind("metric")).toHaveLength(12);
+    // the render pass's coverage, plus the health rollup.
+    expect(registry.byKind("metric")).toHaveLength(13);
   });
 
   // The moved claim, asserted rather than only argued. Both directions: the
