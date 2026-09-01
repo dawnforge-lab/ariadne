@@ -77,6 +77,10 @@ import { analyzePage } from "./parse/page-analyzer.js";
 import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
+import {
+  fetchCrawlResources,
+  type ResourcePassSummary,
+} from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
 
 /**
@@ -157,6 +161,20 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * (`storedFindingCap`, src/rules/query/crawl-evidence.ts).
    */
   findingCap?: number | null;
+  /**
+   * The resource fetch pass's two budgets: distinct files this crawl may ask
+   * about, and distinct hosts it may ask. Absent is
+   * `RESOURCE_DEFAULTS` (10_000 and 20) — the module that spends them owns the
+   * numbers and the reasoning behind them, exactly as the render pass owns its
+   * three.
+   *
+   * They are CRAWL config rather than arguments to the pass because the pass is
+   * part of a crawl and a resume must run it the way the first attempt was told
+   * to. A cap is never silent: rows beyond it keep their null `fetch_class` and
+   * carry `fetch_reason: 'resource-cap'` (hard rule 7).
+   */
+  maxResources?: number;
+  maxResourceHosts?: number;
 }
 
 /**
@@ -277,6 +295,14 @@ export interface CrawlSummary {
    * `pagesRetyped: 0`, and the two must not be read as the same thing.
    */
   pageTemplates: PageTemplateInference | null;
+  /**
+   * What the resource fetch pass did, or null when it did not run — a crawl
+   * that failed before it had pages, or one that was cancelled (an abort means
+   * stop asking servers for things, and the pass is all asking). Null is not
+   * "no resources": that is a summary whose `seen` is 0, and the two must not
+   * be read as the same thing.
+   */
+  resources: ResourcePassSummary | null;
   /** Why the crawl ended, when that needs saying. Null on a clean finish. */
   note: string | null;
 }
@@ -557,6 +583,8 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     renderMaxPages: raw["renderMaxPages"],
     renderSamplePerType: raw["renderSamplePerType"],
     findingCap: raw["findingCap"],
+    maxResources: raw["maxResources"],
+    maxResourceHosts: raw["maxResourceHosts"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -587,6 +615,11 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     "renderBudgetPct",
     "renderMaxPages",
     "renderSamplePerType",
+    // The resource budgets, on the same terms: a stored `maxResources: "500"`
+    // must not resume as a NaN cap that stops the pass at the first row and
+    // reports it as a cap the operator asked for.
+    "maxResources",
+    "maxResourceHosts",
   ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "number") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
@@ -691,6 +724,21 @@ export function validateCrawlConfig(config: CrawlConfig): void {
         `${String(config.findingCap)}`,
     );
   }
+  // The resource budgets, checked here for the render budget's reason below: a
+  // `maxResources: 0` is a pass that asks about nothing and marks every row
+  // `resource-cap`, which reads like a decision somebody took. If that is the
+  // intent it has to be said in a way nobody can mistake for a typo, and this
+  // is not it.
+  for (const [field, value] of [
+    ["maxResources", config.maxResources],
+    ["maxResourceHosts", config.maxResourceHosts],
+  ] as const) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+      throw new RangeError(
+        `CrawlConfig.${field} must be an integer ≥ 1, got ${String(value)}`,
+      );
+    }
+  }
   // The render budget, checked by the module that will spend it. A nonsense
   // budget stops the crawl at line one rather than after the last page, where
   // the render pass would have been the one to find out.
@@ -784,7 +832,19 @@ async function runToCompletion(
       skipped: `not probed: ${note}`,
     });
     await closeCrawl(db, crawlId, "failed", crawled);
-    return summarise(db, crawlId, "failed", crawled, emptyWriterStats(), discovery, null, note);
+    return summarise(
+      db,
+      crawlId,
+      "failed",
+      crawled,
+      emptyWriterStats(),
+      discovery,
+      null,
+      // The resource pass never ran: this crawl was refused before it had a
+      // page, let alone a page's references.
+      null,
+      note,
+    );
   }
 
   const writer = new PageWriter(db, crawlId);
@@ -1138,6 +1198,62 @@ async function runToCompletion(
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
 
+  // INSERTION 3b — the crawl asks about the files its pages point at.
+  //
+  // Numbered 3b rather than 5 because the markers are positional and INSERTION
+  // 4 is cited by name elsewhere (docs/superpowers/plans/2026-08-29-phase-9-
+  // schema-truth.md): this pass sits between the 404 probe and the template
+  // inference, so it takes a name that says so instead of renaming theirs.
+  //
+  // WHY HERE, between the probe and the template inference, and not at either
+  // of the two obvious alternatives:
+  //
+  //  - AFTER THE PAGE CRAWL, because the reference set is only complete once
+  //    the last page has been parsed and written. A pass that ran alongside the
+  //    loop would ask about a moving target: it would either re-query the work
+  //    list forever or miss the files the last pages introduced, and both are
+  //    silent incompleteness. Running it here also means every resource request
+  //    is issued when no page fetch is competing for the same host's queue,
+  //    which is what keeps the arithmetic in that module's header honest.
+  //  - BEFORE `inferPageTemplates` and before `closeCrawl`, because a crawl's
+  //    wall time is what an operator budgets and what `crawl_status` reports.
+  //    A pass that ran after the row was closed would be work happening on
+  //    somebody's server while the record said the crawl had finished, and a
+  //    reader who saw `finished` would be seeing a crawl whose resource rows
+  //    were still filling in. It sits after the 404 probe for the same reason
+  //    the probe sits after the loop: the probe is one more request to the
+  //    ORIGIN, and it belongs with the page phase it reasons about.
+  //
+  // Skipped on an abort, exactly as the probe is: the caller asked us to stop,
+  // and every row this pass would write is a request to somebody's server. The
+  // nulls it leaves are the resume's work list, unchanged.
+  //
+  // NOT CONTAINED the way the probe is, and for the inference's reason: this
+  // pass classifies every site-side failure into a row (a 404 image, a dead CDN,
+  // a robots.txt that refuses us), so anything it throws is OUR defect or a
+  // failed write — and there is no column in which to write "the resource rows
+  // are missing because the writer broke". It propagates, `execute` closes the
+  // row `failed`, and the operator finds out (hard rule 7).
+  const resourcePass = aborted
+    ? null
+    : await fetchCrawlResources(db, crawlId, {
+        siteUrl: config.siteUrl,
+        userAgent: config.userAgent,
+        // THE SAME GATE the pages were fetched through — not a new one. A host
+        // that earned 8s of spacing by refusing the page crawl is still at 8s
+        // when we ask it about its images (hard rule 9).
+        gate,
+        // Already read by `discover`; the pass re-reads nobody's robots.txt but
+        // a third-party asset host's.
+        originRobots: discovery.robots,
+        maxConcurrency: config.maxConcurrency,
+        maxResources: config.maxResources,
+        maxResourceHosts: config.maxResourceHosts,
+        timeoutMs: FETCH_TIMEOUT_MS,
+        allowPrivate,
+        signal,
+      });
+
   // INSERTION 4 — the crawl types its own population, now that it has one.
   //
   // WHY HERE AND NOWHERE ELSE. `page_type` is written per URL as each page is
@@ -1188,6 +1304,7 @@ async function runToCompletion(
     writer.stats(),
     discovery,
     pageTemplates,
+    resourcePass,
     aborted
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
@@ -1434,6 +1551,7 @@ async function summarise(
   writerStats: PageWriterStats,
   discovery: DiscoveryResult,
   pageTemplates: PageTemplateInference | null,
+  resources: ResourcePassSummary | null,
   note: string | null,
 ): Promise<CrawlSummary> {
   return {
@@ -1448,6 +1566,7 @@ async function summarise(
       truncation: discovery.truncation,
     },
     pageTemplates,
+    resources,
     note,
   };
 }

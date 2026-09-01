@@ -12,10 +12,12 @@
  *
  *  1. a crawled page's references land as `resources` rows, one per distinct
  *     URL, with the kind the MARKUP declared;
- *  2. every one of them is UNFETCHED — `fetch_class` null, "seen, not yet
- *     asked" — because no fetch pass exists yet (P11-T2 is the fetcher), and a
- *     null here is what tells a later rule that a resource is unknown rather
- *     than fine or broken;
+ *  2. the fetch columns are the FETCH PASS's, and by the end of a crawl it has
+ *     filled them (P11-T2). The claim this case made while T1 stood alone — that
+ *     every row is still null, "seen, not yet asked" — is now the writer's
+ *     claim rather than the crawl's, and it is pinned on the writer in
+ *     test/crawl/persist.test.ts. What a null still means has not moved: a
+ *     resource nobody asked about is unknown, never fine and never broken;
  *  3. two pages sharing an image produce ONE resource row and TWO edges, which
  *     is the entire reason the fan-out is a separate table;
  *  4. a resource is NOT a crawl target: the frontier is unchanged by them, so
@@ -136,7 +138,17 @@ describe("0013 — resources", () => {
     expect(urls).not.toContain(`${base}/assets/a-960.png`);
   });
 
-  it("leaves every row unfetched — fetch_class null is 'seen, not yet asked'", async () => {
+  it("hands the fetch columns to the resource pass, which fills them", async () => {
+    // T1 asserted these were still null after a crawl, because nothing fetched
+    // yet. A crawl now runs the resource fetch pass before it closes its row
+    // (P11-T2, loop.ts INSERTION 3b), so the END STATE of a crawl is
+    // asked-and-answered. The null that means "seen, not yet asked" is the
+    // state between the page writer and the pass, and it is pinned where it
+    // belongs — on the writer itself, in test/crawl/persist.test.ts.
+    //
+    // This server serves pages and no assets, so every reference is a 404. That
+    // is the honest answer for these rows and the one the broken-resource rule
+    // (P11-T3) will read — and it is emphatically not a null.
     const rows = await db
       .select({
         url: resources.url,
@@ -149,10 +161,11 @@ describe("0013 — resources", () => {
       .where(eq(resources.crawlId, crawlId));
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
-      expect(row.fetchClass, row.url).toBeNull();
-      expect(row.statusCode, row.url).toBeNull();
+      expect(row.fetchClass, row.url).toBe("client_error");
+      expect(row.statusCode, row.url).toBe(404);
+      // A resource we could not have is a resource with no weight to report.
       expect(row.bytes, row.url).toBeNull();
-      expect(row.fetchedAt, row.url).toBeNull();
+      expect(row.fetchedAt, row.url).not.toBeNull();
     }
   });
 

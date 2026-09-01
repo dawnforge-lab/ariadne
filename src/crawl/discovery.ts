@@ -525,7 +525,21 @@ function classifyRobotsFailure(doc: DocResult): "absent" | "unreachable" | "retr
   return "retry";
 }
 
-async function fetchRobots(
+/**
+ * Read one origin's robots.txt and turn it into rules.
+ *
+ * EXPORTED for the resource fetch pass (src/crawl/resources/fetch-resources.ts).
+ * A crawl's pages all live on one origin, so `discover` calls this once and the
+ * result rides on the crawl; a crawl's RESOURCES do not — an asset host is
+ * somebody else's server, with rules of its own that no earlier phase could have
+ * read. That pass calls this once per third-party host and caches the answer for
+ * the crawl (bounded by its host cap), which is the same contract this function
+ * has always had: one origin in, one `RobotsInfo` out, up to three requests, and
+ * an unreachable robots.txt is a complete disallow rather than permission (RFC
+ * 9309 §2.3.1.4). Nothing about it is specific to the origin being crawled, and
+ * a second implementation of it would be a second reading of the protocol.
+ */
+export async function fetchRobots(
   siteUrl: string,
   opts: DiscoveryOpts,
   unreachableMode: "disallow" | "allow",

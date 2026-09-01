@@ -111,6 +111,12 @@ export interface Fixture {
  * that starts this site must call `startOffsiteHost()` first. Nothing here
  * enforces that; the handler does, by throwing rather than serving a redirect
  * to nowhere (see test/fixtures/pages/render-p5.ts).
+ *
+ * A THIRD origin joined it in P11-T2: `startAssetHost()` (test/fixtures/
+ * assets.ts), the CDN the hub carries one image from, which the resource fetch
+ * pass has to open a queue for and read a robots.txt from. The hub reads it on
+ * every request and throws the same way. Both must be running before
+ * `startFixtureApp`.
  */
 export function allFixtures(): Fixture[] {
   return [

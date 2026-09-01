@@ -28,7 +28,15 @@ import { runRenderPass, type RenderPassSummary } from "../../src/crawl/render/ru
 import { RENDER_DEFAULTS } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, hreflang, issues, metrics, pages, sitemapUrls } from "../../src/db/schema.js";
+import {
+  crawls,
+  hreflang,
+  issues,
+  metrics,
+  pages,
+  resources,
+  sitemapUrls,
+} from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { THIN_WORDS } from "../../src/rules/page/on-page.js";
 import { SOFT_404_WORDS } from "../../src/rules/query/content.js";
@@ -37,6 +45,7 @@ import type { Registry } from "../../src/rules/registry/registry.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { allFixtures } from "./fixture.js";
 import { startFixtureApp, type FixtureApp } from "./app.js";
+import { startAssetHost, type AssetHost } from "./assets.js";
 import {
   DUP_H1,
   DUP_META,
@@ -212,6 +221,8 @@ let db: Db;
 let app: FixtureApp;
 /** The second origin `/render/js-redirect-offsite` sends the browser to. */
 let offsite: OffsiteHost;
+/** The third origin: the CDN the hub carries one image from (P11-T2). */
+let assetHost: AssetHost;
 let summary: CrawlSummary;
 let render: RenderPassSummary;
 /**
@@ -343,6 +354,9 @@ beforeAll(async () => {
   // request and throws if it is not up, rather than serving a page that
   // redirects nowhere (see test/fixtures/pages/render-p5.ts).
   offsite = await startOffsiteHost();
+  // Before the app for the same reason: the hub reads this origin on every
+  // request and throws if it is not up (see test/fixtures/assets.ts).
+  assetHost = await startAssetHost();
   app = await startFixtureApp(allFixtures());
 
   const config: CrawlConfig = {
@@ -458,6 +472,7 @@ afterAll(async () => {
   await closeFetchAgents();
   if (app !== undefined) await app.close();
   if (offsite !== undefined) await offsite.close();
+  if (assetHost !== undefined) await assetHost.close();
 });
 
 describe("the fixture site end to end", () => {
@@ -2058,5 +2073,93 @@ describe("the fixture site end to end", () => {
         `${id} is exempted from coverage but is not a registered rule`,
       ).toContain(id);
     }
+  });
+});
+
+/**
+ * The resource fetch pass, end to end (P11-T2).
+ *
+ * Its own suite (test/crawl/fetch-resources.test.ts) drives every branch against
+ * servers built to provoke them; what belongs HERE is the claim that the pass is
+ * wired into a real crawl of a real site, and that the two origins of the
+ * fixture world are asked about their files the way their pages were asked about
+ * themselves.
+ */
+describe("the resource fetch pass ran on the fixture crawl", () => {
+  it("asked about every file the pages point at, on both origins", async () => {
+    const pass = summary.resources;
+    if (pass === null) throw new Error("the crawl reported no resource pass");
+
+    expect(pass.seen).toBeGreaterThan(0);
+    expect(pass.cappedByResources).toBe(false);
+    expect(pass.cappedByHosts).toBe(false);
+    // Nothing left unasked: a cap or an abort would show here, and the null
+    // fetch_class of an unasked row is exactly what the rules must not read as
+    // a verdict.
+    expect(pass.skipped).toBe(0);
+    // The site's own origin and the CDN the hub's badge lives on. The legacy
+    // spelling (`localhost:port`) is never a resource host: no markup points at
+    // it, and the host probe is not this pass's business.
+    expect(pass.hosts).toBe(2);
+
+    const rows = await db
+      .select()
+      .from(resources)
+      .where(eq(resources.crawlId, summary.crawlId));
+    expect(rows.length).toBe(pass.seen);
+    expect(rows.every((row) => row.fetchClass !== null)).toBe(true);
+  });
+
+  it("recorded the third-party badge, its host's robots.txt read exactly once", async () => {
+    const badge = (
+      await db
+        .select()
+        .from(resources)
+        .where(
+          and(
+            eq(resources.crawlId, summary.crawlId),
+            eq(resources.url, `${assetHost.base}/cdn/hub-badge.svg`),
+          ),
+        )
+    )[0];
+    if (badge === undefined) throw new Error("the hub's third-party badge has no resources row");
+
+    expect(badge.fetchClass).toBe("ok");
+    expect(badge.statusCode).toBe(200);
+    expect(badge.kind).toBe("image");
+    expect(badge.contentType).toContain("image/svg+xml");
+    // A server that says how big a file is is believed, and the row says the
+    // number is a claim rather than a measurement.
+    expect(badge.bytesSource).toBe("header");
+    expect(badge.bytes).toBeGreaterThan(0);
+    expect(badge.cacheControl).toBe("public, max-age=31536000, immutable");
+
+    // One robots.txt for the host, one HEAD for the file — a third-party host
+    // is a guest's host, and the pass spends exactly what it must there.
+    expect(assetHost.hits.filter((hit) => hit.endsWith("/robots.txt")).length).toBe(1);
+    expect(assetHost.hits).toContain("HEAD /cdn/hub-badge.svg");
+    expect(assetHost.hits.filter((hit) => hit.startsWith("GET /cdn/"))).toEqual([]);
+  });
+
+  it("records the absence of a cache header as an absence, not as a zero", async () => {
+    const uncached = (
+      await db
+        .select()
+        .from(resources)
+        .where(
+          and(
+            eq(resources.crawlId, summary.crawlId),
+            eq(resources.url, `${app.base}/img/control-outline.svg`),
+          ),
+        )
+    )[0];
+    if (uncached === undefined) throw new Error("/img/control-outline.svg has no resources row");
+
+    expect(uncached.fetchClass).toBe("ok");
+    // The server sent none. After a successful fetch that null is the finding
+    // P11-T3 reports, and it is a different null from the one an unfetched row
+    // carries — which is why `fetch_class` is what a rule gates on.
+    expect(uncached.cacheControl).toBeNull();
+    expect(uncached.expires).toBeNull();
   });
 });
