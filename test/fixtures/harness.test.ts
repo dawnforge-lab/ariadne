@@ -19,7 +19,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/loop.js";
@@ -671,6 +671,91 @@ describe("the fixture site end to end", () => {
         failureCount: 1,
       },
     ]);
+  });
+
+  /**
+   * NO RULE'S EVIDENCE MAY CARRY A `pageUrl` KEY.
+   *
+   * `runRules` writes a finding's details as `{pageUrl: f.pageUrl, ...f.evidence}`
+   * (src/rules/run.ts). The spread is LAST, so a rule that happened to name a
+   * field `pageUrl` inside its evidence would silently overwrite the page the
+   * finding was filed against — and `pageUrl` is not decoration: P10-T3's
+   * cross-crawl compare joins on `(rule_id, details_jsonb->>'pageUrl')`, so an
+   * override would move a finding onto another URL in every diff, quietly and
+   * for ever. Nothing else in the codebase would notice: the row is well formed,
+   * the count is right, and the URL is a URL.
+   *
+   * ## Why this is a runtime check and not a source scan
+   *
+   * A source scan is the tempting version — it would cover every rule whether or
+   * not it fires — and it does not survive contact with the ruleset. Of the 41
+   * `evidence:` sites in `src/rules/`, forty are object literals a brace-match
+   * could read, and the forty-first is `evidence: evidenceOf(row)` in
+   * sitemap.ts, where `evidenceOf` is a PARAMETER and the real literals are
+   * arrow functions passed in from the rule definitions below it. Following that
+   * statically is writing a resolver, and a guard whose own correctness needs a
+   * guard is not a guard. So this asserts the OBSERVABLE consequence over a real
+   * judged crawl instead.
+   *
+   * ## What that covers, stated rather than implied
+   *
+   * The fixture site is built to trip rules, and the count of distinct rules
+   * that actually fired is asserted below rather than described — so this test
+   * says how much of the ruleset it speaks for, and a fixture change that
+   * narrowed the run would fail here rather than quietly weakening the guard.
+   *
+   * Two gaps, both named where they sit: a rule that fires on NO fixture page is
+   * not covered at all, and a finding with no `page_id` has no `pages` row to be
+   * checked against (see the second assertion).
+   */
+  it("never lets a rule's evidence overwrite the page URL a finding was filed against", async () => {
+    // THE OVERRIDE, in the only form it can take: a finding whose stored
+    // `pageUrl` is not the URL of the page it names. `is distinct from` rather
+    // than `<>` so a null on either side counts as a mismatch instead of
+    // dropping out of the comparison.
+    const moved = await db.execute<{ rule_id: string; page_url: string; evidence_url: string }>(sql`
+      select i.rule_id, p.url as page_url, i.details_jsonb->>'pageUrl' as evidence_url
+        from issues i
+        join pages p on p.id = i.page_id
+       where i.crawl_id = ${summary.crawlId}
+         and i.details_jsonb->>'pageUrl' is distinct from p.url`);
+    expect(moved.rows).toEqual([]);
+
+    // A `page_id`-LESS FINDING IS NOT THE SAME AS A SITE-SCOPED ONE, and this
+    // test asserted otherwise until the fixture said no. `host.http-serves-200`,
+    // `host.legacy-host-reachable`, `robots.blocks-sitemap-urls` and
+    // `sitemap.uncrawled` all name a real URL with a null `page_id`: a host
+    // variant that was probed but never crawled, or a URL robots.txt kept out of
+    // the frontier. There is no `pages` row to check them against, so there is no
+    // independent source of truth for their `pageUrl` and no assertion here that
+    // would be sound. THAT IS THE HOLE IN THIS GUARD, named rather than papered
+    // over — and it is small, because the shape a mistake takes is a value that
+    // is not a URL at all, which the next assertion does catch.
+    const notAUrl = await db.execute<{ rule_id: string; url: string }>(sql`
+      select i.rule_id, i.details_jsonb->>'pageUrl' as url
+        from issues i
+       where i.crawl_id = ${summary.crawlId}
+         and i.details_jsonb->>'pageUrl' is not null
+         and i.details_jsonb->>'pageUrl' !~ '^https?://'`);
+    expect(notAUrl.rows).toEqual([]);
+
+    // And the key is PRESENT on every row, null or not: `issue_urls` and the
+    // compare both read it, and an absent key and a null one are the same
+    // `->>` result but not the same fact.
+    const keyless = await db.execute<{ rule_id: string }>(sql`
+      select distinct i.rule_id from issues i
+       where i.crawl_id = ${summary.crawlId}
+         and not (i.details_jsonb ? 'pageUrl')`);
+    expect(keyless.rows).toEqual([]);
+
+    // HOW MUCH OF THE RULESET THIS SPEAKS FOR. Derived from the run, not
+    // written down: the assertion is that the fixture site exercises a
+    // substantial share of the ruleset, so a fixture change that stopped
+    // tripping rules fails here instead of leaving the guard nominally green
+    // over almost nothing.
+    const fired = await db.execute<{ n: number }>(sql`
+      select count(distinct rule_id)::int as n from issues where crawl_id = ${summary.crawlId}`);
+    expect(Number(fired.rows[0]?.n ?? 0)).toBeGreaterThanOrEqual(20);
   });
 
   it("the sitemap's deliberate mistakes land on the URLs that carry them", () => {

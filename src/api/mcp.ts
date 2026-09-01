@@ -820,6 +820,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "order issues_list uses. Every rule with findings in EITHER crawl appears; " +
         "there is no cursor, because the list is bounded by the ruleset rather than " +
         "by the site.\n\n" +
+        "WHERE A ROW'S FIELDS COME FROM, because the two halves differ. severity is " +
+        "read off the ROWS — the head crawl's, which is the current reading, or the " +
+        "base's for a rule that fired only there — so it is a fact about what was " +
+        "recorded. category, checkIds and title are the CURRENT ruleset's copy, " +
+        "joined at read time, exactly as issues_list and rules_catalog join it. On a " +
+        "comparison across two rulesets that asymmetry is visible: both sides are " +
+        "labelled with today's copy even where the older side's rule was titled or " +
+        "filed differently when it ran. The counts are each crawl's own; the words " +
+        "beside them are today's.\n\n" +
         "WHAT COUNTS AS THE SAME FINDING IN TWO CRAWLS: the pair (rule, page URL). " +
         "Nothing else survives a re-crawl — a finding's internal key is often a hash " +
         "of the CONTENT it found, which changes the moment the site edits a word, so " +
@@ -840,8 +849,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "  ruleset-mismatch    — the two were judged by different rulesets. A rule " +
         "can change what it looks for and how severely it reports it, so a count " +
         "that moved may be the ruleset moving rather than the site.\n" +
-        "  ruleset-unrecorded  — a side wrote no findings, so nothing records which " +
-        "ruleset judged it.\n" +
+        "  ruleset-unrecorded  — a side records no ruleset at all: it wrote no " +
+        "findings, or its findings predate the version stamp and carry an empty one. " +
+        "Nothing says which rules ran, so there is nothing to check — never read " +
+        "this as agreement.\n" +
         "  ruleset-mixed       — a side holds findings from more than one ruleset " +
         "version, so no single version describes it.\n" +
         "  finding-cap-differs — the two ran under different finding caps. A listing " +
@@ -903,8 +914,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         set: z
           .string()
           .describe(
-            `Which set: ${COMPARE_SETS.join(" (head only), ")} — new (head only), ` +
-              "resolved (base only), persisting (both).",
+            // THE SEPARATOR IS A PLAIN COMMA, and it is load-bearing. It used to
+            // be " (head only), ", which pasted that parenthetical after EVERY
+            // set name — rendering "resolved (head only)", which is backwards in
+            // the one field where swapping base and head inverts the answer. The
+            // list of names and the gloss of what each means are two different
+            // sentences and are written as two.
+            `Which set: ${COMPARE_SETS.join(", ")}. new is URLs only the HEAD crawl has, ` +
+              "resolved is URLs only the BASE crawl had, persisting is URLs both carry.",
           ),
         limit: limitField(),
         cursor: cursorField(),

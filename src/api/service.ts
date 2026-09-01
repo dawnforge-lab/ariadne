@@ -892,6 +892,12 @@ export interface CompareSide {
    * Empty when the crawl wrote no findings: there is then no record of which
    * ruleset judged it, which is a fact about the evidence rather than a version
    * to compare — see the `ruleset-unrecorded` caveat.
+   *
+   * `[""]` is the OTHER shape of the same absence: `issues.ruleset_version`
+   * defaults to the empty string for rows written before the stamp existed, and
+   * that is not a version either. `rulesetCaveat` treats both as unrecorded, so
+   * two unstamped crawls can never come back `comparable: true` on the strength
+   * of `"" === ""`.
    */
   rulesetVersions: string[];
   /**
@@ -3952,6 +3958,24 @@ function versionList(versions: readonly string[]): string {
  * different questions), one side has no version at all (nothing to check), or
  * one side holds findings from more than one ruleset (a crawl judged across a
  * change, including the `""` rows written before the stamp existed).
+ *
+ * ## `""` IS NOT A VERSION, and this is the subtle one
+ *
+ * `issues.ruleset_version` defaults to the empty string, which schema.ts calls
+ * "written before the stamp existed" — deliberately NOT backfilled, because a
+ * version number nobody can check is a claim rather than a record. Two such
+ * sides would compare `"" === ""` and come out `comparable: true` with no
+ * caveat at all: the strongest possible answer, produced from the total absence
+ * of evidence. It is the same shape of error as reading `findingsCount: 0` on
+ * an unjudged crawl as "this site is clean" (hard rule 7), and it is worse here
+ * because two unstamped crawls are exactly what an OLD pair looks like.
+ *
+ * So an unstamped side is `ruleset-unrecorded`, alongside the side that wrote
+ * no findings at all: in both cases nothing on any row says which rules ran,
+ * and the honest answer is that there is nothing to check rather than that the
+ * check passed. The caveat names WHICH of the two it is per side, because the
+ * remedy differs — a crawl with no findings may simply be clean, while an
+ * unstamped one is old and wants re-judging.
  */
 function rulesetCaveat(base: CompareSide, head: CompareSide, caveats: CompareCaveat[]): boolean {
   const mixed = [base, head].filter((side) => side.rulesetVersions.length > 1);
@@ -3967,14 +3991,24 @@ function rulesetCaveat(base: CompareSide, head: CompareSide, caveats: CompareCav
     }
     return false;
   }
-  const unrecorded = [base, head].filter((side) => side.rulesetVersions.length === 0);
+  // Two ways for a side to record no version: it wrote no rows, or its rows
+  // carry the pre-stamp empty string. `every` rather than `[0] === ""` so the
+  // predicate stays true if the `mixed` guard above is ever loosened.
+  const unrecorded = [base, head].filter(
+    (side) => side.rulesetVersions.length === 0 || side.rulesetVersions.every((v) => v === ""),
+  );
   if (unrecorded.length > 0) {
+    const why = (side: CompareSide): string =>
+      side.rulesetVersions.length === 0
+        ? `'${side.crawlId}' wrote no findings`
+        : `'${side.crawlId}' holds findings written before the ruleset stamp existed ` +
+          `(${versionList(side.rulesetVersions)})`;
     caveats.push({
       code: "ruleset-unrecorded",
       message:
-        `${unrecorded.map((s) => `'${s.crawlId}'`).join(" and ")} wrote no findings, so the ` +
-        `ruleset that judged ${unrecorded.length > 1 ? "them" : "it"} is not recorded on any ` +
-        `row and cannot be checked against the other side`,
+        `${unrecorded.map(why).join(", and ")}, so the ruleset that judged ` +
+        `${unrecorded.length > 1 ? "them" : "it"} is not recorded on any row and cannot be ` +
+        `checked against the other side: re-run the rules before reading a change`,
     });
     return false;
   }

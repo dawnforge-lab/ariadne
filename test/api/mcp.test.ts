@@ -40,7 +40,15 @@ import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { loadMcpConfig } from "../../src/api/config.js";
-import { MIN_PER_HOST_DELAY_MS, START_CRAWL_FIELDS } from "../../src/api/service.js";
+import {
+  COMPARE_SETS,
+  EXPORT_DATASETS,
+  MIN_PER_HOST_DELAY_MS,
+  START_CRAWL_FIELDS,
+} from "../../src/api/service.js";
+import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
+import { DISCOVERED_VIA } from "../../src/crawl/frontier.js";
+import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
@@ -550,6 +558,46 @@ describe("the tool surface", () => {
       expect(schema.additionalProperties, `${tool.name} accepts unknown arguments`).toBe(false);
       for (const [field, spec] of Object.entries(schema.properties ?? {})) {
         expect(spec.description ?? "", `${tool.name}.${field} is undescribed`).not.toBe("");
+      }
+    }
+  });
+
+  // THE SECOND SURFACE AN AGENT READS, and until this test it was unpinned.
+  //
+  // The tool description gets a `declaredFields` pin; a FIELD description got
+  // only "is not empty" — and that is how `compare_urls.set` shipped with
+  // "resolved (head only)" in it, rendered by a join() separator that pasted one
+  // set's parenthetical after every name. Non-empty it certainly was.
+  //
+  // A field description cannot be checked for truth in general. What CAN be
+  // checked is that a field which enumerates a closed vocabulary names every
+  // member of it — the drift this catches is a value added to the server's list
+  // and never mentioned to the agent, which reads as "that value is not
+  // accepted". The direction claims that broke here are pinned as claims, in the
+  // compare block, because only a pinned sentence can catch an inverted one.
+  it("names every member of the closed vocabulary each field enumerates", async () => {
+    const listed = await client.listTools();
+    const fieldDescription = (tool: string, field: string): string => {
+      const schema = listed.tools.find((t) => t.name === tool)?.inputSchema as {
+        properties?: Record<string, { description?: string }>;
+      };
+      const found = schema?.properties?.[field]?.description;
+      if (found === undefined) throw new Error(`${tool}.${field} has no description`);
+      return found;
+    };
+
+    const enumerated: [string, string, readonly string[]][] = [
+      ["compare_urls", "set", COMPARE_SETS],
+      ["export_crawl", "dataset", EXPORT_DATASETS],
+      ["metrics_get", "scope", METRIC_SCOPES],
+      ["pages_query", "fetchClass", FETCH_CLASSES],
+      ["pages_query", "discoveredVia", DISCOVERED_VIA],
+    ];
+    for (const [tool, field, vocabulary] of enumerated) {
+      const text = fieldDescription(tool, field);
+      expect(vocabulary.length).toBeGreaterThan(0);
+      for (const value of vocabulary) {
+        expect(text, `${tool}.${field} does not name '${value}'`).toContain(value);
       }
     }
   });
@@ -1348,6 +1396,41 @@ describe("crawl_compare / compare_urls", () => {
     const urls = await description("compare_urls");
     for (const set of ["new", "resolved", "persisting"]) expect(urls).toContain(set);
     expect(urls).toContain("url is null");
+  });
+
+  // WHERE EACH FIELD OF A ROW COMES FROM. severity is read off the rows and
+  // category/checkIds/title are the CURRENT ruleset's copy — an asymmetry that
+  // is invisible in the payload and matters most on the comparison across two
+  // rulesets, which is what this tool is for.
+  it("says which of a row's fields are the crawl's and which are today's copy", async () => {
+    const text = await description("crawl_compare");
+    expect(text).toContain("severity is");
+    expect(text).toContain("read off the ROWS");
+    expect(text).toContain("CURRENT ruleset's copy");
+    for (const field of ["category", "checkIds", "title"]) expect(text).toContain(field);
+    expect(text).toContain("today's");
+  });
+
+  // THE FIELD DESCRIPTION THAT INVERTS THE ANSWER IF IT IS WRONG.
+  //
+  // `set` is the one argument where swapping two words swaps what the tool
+  // means, and it shipped saying "resolved (head only)" — a `join()` separator
+  // pasting one set's parenthetical after every name. The generic sweep above
+  // cannot see that (every name WAS present); only pinning the claim can.
+  it("tells an agent which side each set belongs to, in the right direction", async () => {
+    const listed = await client.listTools();
+    const schema = listed.tools.find((t) => t.name === "compare_urls")?.inputSchema as {
+      properties?: Record<string, { description?: string }>;
+    };
+    const text = schema?.properties?.["set"]?.description ?? "";
+
+    expect(text).toContain("new is URLs only the HEAD crawl has");
+    expect(text).toContain("resolved is URLs only the BASE crawl had");
+    expect(text).toContain("persisting is URLs both carry");
+    // And the shape of the bug itself, so the join() artefact cannot come back
+    // in any spelling that attaches a side to the wrong set.
+    expect(text).not.toMatch(/resolved[^.]{0,20}\bhead\b/i);
+    expect(text).not.toMatch(/\bnew\b[^.]{0,20}\bbase\b/i);
   });
 });
 

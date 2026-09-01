@@ -85,6 +85,21 @@ let cmpOther = "";
 let cmpWww = "";
 /** Same site as the pair, never judged: `rules_run_at` null with rows in the table. */
 let cmpUnjudged = "";
+/**
+ * Same site, same cap, findings from TWO ruleset versions — a crawl judged
+ * across a change, or half re-judged. No single version describes it.
+ */
+let cmpMixed = "";
+/**
+ * TWO judged crawls whose findings carry the pre-stamp empty ruleset version.
+ *
+ * The pair exists because `"" === ""` is the one way two sides can *agree* on
+ * having recorded nothing at all. Before the guard they came back
+ * `comparable: true` with no caveat — the strongest answer the surface has,
+ * produced from the total absence of evidence.
+ */
+let cmpUnstampedA = "";
+let cmpUnstampedB = "";
 
 /** The ruleset the comparison pair's findings are stamped with. */
 const CMP_RULESET = "0.9.0-test";
@@ -396,6 +411,9 @@ beforeAll(async () => {
   cmpOther = `crawl_cmp_other_${stamp}`;
   cmpWww = `crawl_cmp_www_${stamp}`;
   cmpUnjudged = `crawl_cmp_unjudged_${stamp}`;
+  cmpMixed = `crawl_cmp_mixed_${stamp}`;
+  cmpUnstampedA = `crawl_cmp_unstamped_a_${stamp}`;
+  cmpUnstampedB = `crawl_cmp_unstamped_b_${stamp}`;
 
   // `findingCap: null` on both halves of the pair, so the ONLY caveat the clean
   // comparison could raise is one this fixture did not put there.
@@ -411,6 +429,9 @@ beforeAll(async () => {
   // Rows in the table and no marker: the shape a rules pass that died part-way
   // leaves behind, and the shape the reference crawl `crawl_2af4daf1` is in.
   await seedCrawl(cmpUnjudged, { config: uncapped });
+  for (const id of [cmpMixed, cmpUnstampedA, cmpUnstampedB]) {
+    await seedCrawl(id, { judged: true, config: uncapped });
+  }
 
   const cmpIssue = (
     crawlId: string,
@@ -468,6 +489,21 @@ beforeAll(async () => {
   // is nothing there".
   await cmpIssue(cmpUnjudged, "title.missing", "warning", "a");
 
+  // MIXED. One crawl, two ruleset versions on its rows — the state a crawl is in
+  // when a judgement was made across a ruleset change, or half re-run. Uncapped
+  // like the pair, so the mixed caveat is the only one that can fire.
+  for (const slug of ["a", "b"]) await cmpIssue(cmpMixed, "title.missing", "warning", slug);
+  await cmpIssue(cmpMixed, "links.orphan", "warning", "o1", {
+    rulesetVersion: CMP_OLD_RULESET,
+  });
+
+  // UNSTAMPED. `issues.ruleset_version` defaults to the empty string for rows
+  // written before the stamp existed (schema.ts), and the empty string is not a
+  // version — two of these agree on nothing.
+  for (const id of [cmpUnstampedA, cmpUnstampedB]) {
+    await cmpIssue(id, "title.missing", "warning", "a", { rulesetVersion: "" });
+  }
+
   await db.insert(metrics).values([
     { crawlId: crawlA, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: crawlA, metricId: "inlinks.distribution", scope: "site", scopeValue: "", value: { median: 4 } },
@@ -497,6 +533,7 @@ afterAll(async () => {
   for (const id of [
     crawlA, crawlB, crawlC, crawlD, crawlE,
     cmpBase, cmpHead, cmpOld, cmpCapped, cmpOther, cmpWww, cmpUnjudged,
+    cmpMixed, cmpUnstampedA, cmpUnstampedB,
   ]) {
     await db.delete(crawls).where(eq(crawls.id, id));
   }
@@ -1754,6 +1791,72 @@ describe("GET /compare", () => {
     expect(res.body["comparable"]).toBe(false);
     expect(caveatCodes(res)).toContain("ruleset-mismatch");
     expect(caveatCodes(res)).toContain("finding-cap-differs");
+  });
+
+  // A crawl judged across a ruleset change, or half re-judged: no single version
+  // describes what looked at it, so there is nothing to compare the other side
+  // against — and saying which version it "is" would be picking one arbitrarily.
+  it("names a side holding findings from more than one ruleset", async () => {
+    const res = await compare(cmpBase, cmpMixed);
+    expect(res.status).toBe(200);
+    expect(res.body["comparable"]).toBe(false);
+    expect(caveatCodes(res)).toEqual(["ruleset-mixed"]);
+
+    const caveat = (res.body["caveats"] as { message: string }[])[0];
+    expect(caveat?.message).toContain(cmpMixed);
+    // Both versions named: a caveat that says "more than one" without saying
+    // which is a caveat nobody can act on.
+    expect(caveat?.message).toContain(CMP_RULESET);
+    expect(caveat?.message).toContain(CMP_OLD_RULESET);
+    // The side that is fine is NOT accused.
+    expect(caveat?.message).not.toContain(cmpBase);
+
+    // The counts still came, as they do for every caveat.
+    expect(res.body["head"]).toMatchObject({
+      rulesetVersions: [CMP_OLD_RULESET, CMP_RULESET].sort(),
+    });
+  });
+
+  // THE EMPTY STRING IS NOT A VERSION, and two of them are not agreement.
+  //
+  // `issues.ruleset_version` defaults to "" for rows written before the stamp
+  // existed — deliberately not backfilled, because a version nobody can check is
+  // a claim rather than a record. Comparing two such crawls used to reduce to
+  // `"" === ""` and answer `comparable: true` with an empty caveat list: the
+  // strongest answer this surface has, from the total absence of evidence. It is
+  // `findingsCount: 0` on an unjudged crawl read as "the site is clean", one
+  // field over.
+  it("refuses to read two unstamped sides as agreement", async () => {
+    const res = await compare(cmpUnstampedA, cmpUnstampedB);
+    expect(res.status).toBe(200);
+    expect(res.body["comparable"]).toBe(false);
+    expect(caveatCodes(res)).toEqual(["ruleset-unrecorded"]);
+
+    const caveat = (res.body["caveats"] as { message: string }[])[0];
+    // BOTH sides named, and named as unstamped rather than as empty — these
+    // crawls do hold findings, so "wrote no findings" would be false of them.
+    expect(caveat?.message).toContain(cmpUnstampedA);
+    expect(caveat?.message).toContain(cmpUnstampedB);
+    expect(caveat?.message).toContain("before the ruleset stamp existed");
+    expect(caveat?.message).not.toContain("wrote no findings");
+    // And the spelling that makes an empty version readable in a sentence.
+    expect(caveat?.message).toContain("(unstamped)");
+
+    // The counts are still there — this is a caveat, not a refusal.
+    expect(res.body["base"]).toMatchObject({ rulesetVersions: [""], findingsCount: 1 });
+    expect((res.body["rules"] as unknown[]).length).toBe(1);
+  });
+
+  it("raises the same caveat when only one side is unstamped", async () => {
+    const res = await compare(cmpBase, cmpUnstampedA);
+    expect(res.status).toBe(200);
+    expect(res.body["comparable"]).toBe(false);
+    // NOT ruleset-mismatch: "0.9.0-test vs (unstamped)" would report a version
+    // change between a version and a non-answer.
+    expect(caveatCodes(res)).toEqual(["ruleset-unrecorded"]);
+    const caveat = (res.body["caveats"] as { message: string }[])[0];
+    expect(caveat?.message).toContain(cmpUnstampedA);
+    expect(caveat?.message).not.toContain(cmpBase);
   });
 
   it("says so when a judged side wrote no findings at all", async () => {
