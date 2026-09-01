@@ -380,7 +380,9 @@ rather than the engine's measurement.
 - The caveats from `crawl.caveats` are all in "What this audit covers".
 
 Then, in the conversation: the coverage counts, the three or four problems in
-plain language, the P1 list, and the file's path. Offer the action plan next —
-the `ariadne-action-plan` skill turns the same findings file into the URL-level
-spreadsheet the developers work from, and the two deliverables are meant to ship
-together.
+plain language, the P1 list, and the file's path. The report is where a
+standard audit ends. Mention, without pushing it, that the URL-level
+spreadsheet exists on request — the `ariadne-action-plan` skill turns the same
+findings file into a developer handoff workbook — but it is an on-request
+deliverable, not a routine second half: the standing per-issue, per-URL view
+of a crawl is the web surface's job (owner decision, 2026-09-01).
