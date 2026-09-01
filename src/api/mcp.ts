@@ -66,6 +66,7 @@ import { FETCH_CLASSES } from "../crawl/fetch-page.js";
 import { DISCOVERED_VIA } from "../crawl/frontier.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
+import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
 import {
   ApiService,
   COMPARE_SETS,
@@ -936,22 +937,72 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   server.registerTool(
     named("export_crawl"),
     {
-      title: "Export a dataset to a file",
+      title: "Export a dataset or a spreadsheet view to a file",
       description:
-        "Write one dataset of a crawl to a gzipped JSONL file on the server and " +
-        "answer with {dataset, path, rows, bytes} — the path and the count, never " +
-        "the contents. A 50k-row findings dump is not something to read into a " +
-        "context window; this is how you hand the whole thing to a human or a " +
-        "pipeline instead.\n\n" +
-        `dataset is one of: ${EXPORT_DATASETS.join(", ")} (default issues). The ` +
-        "file is named for the (crawl, dataset) pair and a re-export replaces it " +
-        "rather than piling up copies. The server chooses the directory; there is " +
-        "no way to name a destination.",
+        "Write one view of a crawl to a FILE on the server and answer with the path " +
+        "and the row count — never the contents. A 50k-row findings dump is not " +
+        "something to read into a context window; this is how you hand the whole " +
+        "thing to a human or a pipeline instead.\n\n" +
+        "TWO FORMATS, TWO VOCABULARIES.\n" +
+        `  format=jsonl.gz (the default) writes a gzipped JSONL file of one DATASET: ` +
+        `${EXPORT_DATASETS.join(", ")} (default issues) — one JSON object per line, ` +
+        "evidence intact. Answers {dataset, path, rows, bytes}.\n" +
+        `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
+        "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
+        "the other five refuse one. Answers {format, view, path, rows, bytes}.\n" +
+        "'dataset' is the first format's word and 'view' is the second's; asking " +
+        "with both is refused rather than resolved.\n\n" +
+        "WHAT THE CSV LOOKS LIKE, because a human opens it and you are the one who " +
+        "can warn them. RFC 4180, UTF-8, CRLF line endings, and a header row " +
+        "ALWAYS — including for a view with no rows. 'rows' counts DATA rows; the " +
+        "header is not one of them, so it compares directly against findingsCount. " +
+        "A list inside a cell (checkIds, a redirect chain, an evidence array) is " +
+        "joined with '|'. An empty cell means the engine has no value there — " +
+        "never zero, never false.\n" +
+        "The evidence column is the finding's evidence FLATTENED to a deterministic " +
+        "summary rather than a JSON blob: sorted key=value pairs joined with '; ', " +
+        "dotted paths for nested objects (truncated.total=222), indices for arrays " +
+        "of objects, long values clipped with '…' and the remainder counted as " +
+        "'+N more'. The whole evidence stays on issues_list and issue_urls.\n" +
+        "Cells beginning '=', '+', '-' or '@' are written with a leading apostrophe. " +
+        "A crawled page's title is attacker-controlled text and these files open in " +
+        "Excel at somebody's desk; the apostrophe is what stops a title being " +
+        "executed as a formula. It is part of the cell, not a defect.\n\n" +
+        "The same CSV rows are streamed as text/csv over the HTTP transport " +
+        "(GET /crawls/:id/export?format=csv&view=...), which is what a dashboard's " +
+        "download button reads. Here they go to a file, because a stdio client has " +
+        "nowhere to stream to. The file is named for the crawl, the format and the " +
+        "view, and a re-export replaces it rather than piling up copies. The server " +
+        "chooses the directory; there is no way to name a destination.",
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
+        format: z
+          .string()
+          .describe(
+            `Which file to write: ${EXPORT_FORMATS.join(" or ")}. Defaults to jsonl.gz, ` +
+              "which takes a dataset; csv takes a view.",
+          )
+          .optional(),
         dataset: z
           .string()
-          .describe(`Which dataset to write: ${EXPORT_DATASETS.join(", ")}. Defaults to issues.`)
+          .describe(
+            `Which dataset the jsonl.gz format writes: ${EXPORT_DATASETS.join(", ")}. ` +
+              "Defaults to issues. Not accepted with format=csv.",
+          )
+          .optional(),
+        view: z
+          .string()
+          .describe(
+            `Which spreadsheet the csv format writes: ${CSV_VIEWS.join(", ")}. Defaults ` +
+              "to issues. Requires format=csv.",
+          )
+          .optional(),
+        ruleId: z
+          .string()
+          .describe(
+            "The rule whose findings the issue_urls view writes, e.g. 'links.orphan'. " +
+              "Required for that view and refused for every other one.",
+          )
           .optional(),
       }),
     },

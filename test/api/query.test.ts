@@ -24,8 +24,9 @@ import { eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
+import { crawls, issues, links, metrics, pages } from "../../src/db/schema.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
+import { CSV_VIEWS, CSV_VIEW_DEFS, csvRecord } from "../../src/api/csv.js";
 import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
@@ -62,6 +63,12 @@ let crawlD = "";
  * vocabularies. Its own crawl so the listings above keep their exact rows.
  */
 let crawlE = "";
+/**
+ * The CSV fixture: hostile titles, hostile anchors, a redirect chain, a redirect
+ * loop, a 3xx with no usable target, one broken internal link, and 1,200 filler
+ * links so the links-derived views cross the export batch more than twice.
+ */
+let crawlF = "";
 
 /**
  * The comparison fixtures — six crawls whose only job is to make one cross-crawl
@@ -116,6 +123,15 @@ interface Res {
   body: Record<string, unknown>;
 }
 
+/** A title a spreadsheet would execute. It is a page's own text, so it can be. */
+const HOSTILE_TITLE = "=SUM(1+1)";
+/** A title carrying all three characters RFC 4180 makes a quoting question. */
+const QUOTED_TITLE = 'He said "hi", then\nleft';
+/** An anchor text carrying the classic CSV-injection payload. */
+const HOSTILE_ANCHOR = `=cmd|' /C calc'!A0`;
+/** How many filler links the CSV fixture carries, past the four real ones. */
+const FILLER_LINKS = 1200;
+
 async function call(path: string, opts: { token?: string | null } = {}): Promise<Res> {
   const headers: Record<string, string> = {};
   const token = opts.token === undefined ? `Bearer ${TOKEN}` : opts.token;
@@ -123,6 +139,100 @@ async function call(path: string, opts: { token?: string | null } = {}): Promise
   const res = await fetch(`${base}${path}`, { headers });
   const text = await res.text();
   return { status: res.status, body: text === "" ? {} : (JSON.parse(text) as Record<string, unknown>) };
+}
+
+interface CsvRes {
+  status: number;
+  headers: Headers;
+  text: string;
+  /** The parsed records, header row included. */
+  records: string[][];
+  /** How many body chunks the client actually read off the socket. */
+  chunks: number;
+}
+
+/**
+ * Fetch a CSV export and PARSE it.
+ *
+ * Parsed rather than string-matched on purpose: an assertion against
+ * `text.includes(...)` would pass on a file no spreadsheet can open. This
+ * parser is a deliberately independent RFC 4180 reader — quotes doubled inside
+ * quotes, records ended by CRLF outside them — so a writer that emitted, say,
+ * an unbalanced quote would come back here as a mis-parsed row rather than as a
+ * substring that happens to be present.
+ *
+ * The chunk count is read as it arrives, which is what makes the streaming
+ * claim checkable: a response materialised into one buffer server-side arrives
+ * as one chunk however long it is.
+ */
+async function callCsv(path: string): Promise<CsvRes> {
+  const res = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const reader = res.body?.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let chunks = 0;
+  if (reader !== undefined) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks += 1;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  }
+  return { status: res.status, headers: res.headers, text, records: parseCsv(text), chunks };
+}
+
+function parseCsv(text: string): string[][] {
+  const records: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          cell += '"';
+          i += 2;
+          continue;
+        }
+        quoted = false;
+        i += 1;
+        continue;
+      }
+      cell += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' && cell === "") {
+      quoted = true;
+      i += 1;
+      continue;
+    }
+    if (ch === ",") {
+      row.push(cell);
+      cell = "";
+      i += 1;
+      continue;
+    }
+    if (ch === "\r" && text[i + 1] === "\n") {
+      row.push(cell);
+      records.push(row);
+      row = [];
+      cell = "";
+      i += 2;
+      continue;
+    }
+    cell += ch;
+    i += 1;
+  }
+  if (cell !== "" || row.length > 0) {
+    row.push(cell);
+    records.push(row);
+  }
+  return records;
 }
 
 function items(res: Res): Record<string, unknown>[] {
@@ -187,6 +297,12 @@ interface SeedPage {
   /** Defaults to the depth's usual origin: the seed at 0, a link below it. */
   discoveredVia?: string;
   renderableWordCount?: number | null;
+  /** Defaults to `title of <slug>`; the CSV fixtures write hostile ones. */
+  title?: string;
+  /** A redirect target, as the server spelled it and as the frontier keys it. */
+  redirectUrl?: string;
+  redirectUrlNormalised?: string;
+  clickDepth?: number | null;
 }
 
 async function seedPage(crawlId: string, p: SeedPage): Promise<string> {
@@ -207,9 +323,14 @@ async function seedPage(crawlId: string, p: SeedPage): Promise<string> {
       ? {}
       : { renderableWordCount: p.renderableWordCount }),
     rendered: p.rendered,
-    title: `title of ${p.slug}`,
+    title: p.title ?? `title of ${p.slug}`,
     metaDescription: `description of ${p.slug}`,
     ...(p.contentHash === undefined ? {} : { contentHash: p.contentHash }),
+    ...(p.redirectUrl === undefined ? {} : { redirectUrl: p.redirectUrl }),
+    ...(p.redirectUrlNormalised === undefined
+      ? {}
+      : { redirectUrlNormalised: p.redirectUrlNormalised }),
+    ...(p.clickDepth === undefined ? {} : { clickDepth: p.clickDepth }),
   });
   return id;
 }
@@ -504,6 +625,101 @@ beforeAll(async () => {
     await cmpIssue(id, "title.missing", "warning", "a", { rulesetVersion: "" });
   }
 
+  // ----------------------------------------------------------- the CSV fixture
+  crawlF = `crawl_query_f_${stamp}`;
+  await seedCrawl(crawlF, { judged: true });
+
+  const csvHome = await seedPage(crawlF, {
+    slug: "csv-home", pageType: "home", statusCode: 200, isIndexable: true, rendered: false,
+    depth: 0, wordCount: 500, clickDepth: 0,
+  });
+  // The two hostile titles. Both are a page's OWN text — whatever the site put
+  // in its <title> — which is exactly why the guard and the quoting exist.
+  await seedPage(crawlF, {
+    slug: "csv-formula", pageType: "product", statusCode: 200, isIndexable: true,
+    rendered: false, depth: 1, wordCount: 300, clickDepth: 1, title: HOSTILE_TITLE,
+  });
+  await seedPage(crawlF, {
+    slug: "csv-quoted", pageType: "product", statusCode: 200, isIndexable: true,
+    rendered: false, depth: 1, wordCount: 300, clickDepth: 1, title: QUOTED_TITLE,
+  });
+  // A 4xx target, with no click depth: nothing reaches it as a page.
+  await seedPage(crawlF, {
+    slug: "csv-gone", pageType: null, statusCode: 404, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchClass: "client_error",
+  });
+  // A two-hop chain: r1 -> r2 -> end.
+  await seedPage(crawlF, {
+    slug: "csv-r1", pageType: null, statusCode: 301, isIndexable: false, rendered: false,
+    depth: 1, wordCount: null, fetchClass: "redirect",
+    redirectUrl: `${SITE}/csv-r2`, redirectUrlNormalised: `${SITE}/csv-r2`,
+  });
+  await seedPage(crawlF, {
+    slug: "csv-r2", pageType: null, statusCode: 302, isIndexable: false, rendered: false,
+    depth: 2, wordCount: null, fetchClass: "redirect",
+    redirectUrl: `${SITE}/csv-end`, redirectUrlNormalised: `${SITE}/csv-end`,
+  });
+  await seedPage(crawlF, {
+    slug: "csv-end", pageType: "product", statusCode: 200, isIndexable: true, rendered: false,
+    depth: 3, wordCount: 400, clickDepth: 2,
+  });
+  // A loop with no way out, and a 3xx whose Location the engine could not use.
+  await seedPage(crawlF, {
+    slug: "csv-loop-a", pageType: null, statusCode: 301, isIndexable: false, rendered: false,
+    depth: 1, wordCount: null, fetchClass: "redirect",
+    redirectUrl: `${SITE}/csv-loop-b`, redirectUrlNormalised: `${SITE}/csv-loop-b`,
+  });
+  await seedPage(crawlF, {
+    slug: "csv-loop-b", pageType: null, statusCode: 301, isIndexable: false, rendered: false,
+    depth: 2, wordCount: null, fetchClass: "redirect",
+    redirectUrl: `${SITE}/csv-loop-a`, redirectUrlNormalised: `${SITE}/csv-loop-a`,
+  });
+  await seedPage(crawlF, {
+    slug: "csv-dead", pageType: null, statusCode: 302, isIndexable: false, rendered: false,
+    depth: 1, wordCount: null, fetchClass: "redirect",
+  });
+
+  await db.insert(links).values([
+    {
+      crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-gone`,
+      targetPageId: null, anchor: "Broken, right?", rel: null, isInternal: true, position: 0,
+    },
+    {
+      crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-end`,
+      targetPageId: null, anchor: HOSTILE_ANCHOR, rel: null, isInternal: true, position: 1,
+    },
+    {
+      crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-r1`,
+      targetPageId: null, anchor: null, rel: null, isInternal: true, position: 2,
+    },
+    {
+      crawlId: crawlF, sourcePageId: csvHome, targetUrl: "https://external.example/",
+      targetPageId: null, anchor: "external", rel: null, isInternal: false, position: 3,
+    },
+    ...Array.from({ length: FILLER_LINKS }, (_, i) => ({
+      crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-quoted`,
+      targetPageId: null, anchor: `anchor ${i}`, rel: null, isInternal: true, position: 4 + i,
+    })),
+  ]);
+
+  await seedIssue(crawlF, {
+    ruleId: "title.missing", severity: "warning", pageId: null,
+    pageUrl: `${SITE}/csv-formula`, dedupeKey: `${SITE}/csv-formula`,
+  });
+  await seedIssue(crawlF, {
+    ruleId: "redirect.chain", severity: "warning", pageId: null,
+    pageUrl: `${SITE}/csv-r1`, dedupeKey: `${SITE}/csv-r1`,
+    evidence: {
+      chain: [`${SITE}/csv-r1`, `${SITE}/csv-r2`, `${SITE}/csv-end`],
+      length: 2, finalStatus: 200, chainTruncated: false,
+    },
+  });
+  await seedIssue(crawlF, {
+    ruleId: "links.orphan", severity: "warning", pageId: null,
+    pageUrl: `${SITE}/csv-quoted`, dedupeKey: `${SITE}/csv-quoted`,
+    evidence: { inSitemap: false, discoveredVia: "sitemap", note: "n".repeat(400) },
+  });
+
   await db.insert(metrics).values([
     { crawlId: crawlA, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: crawlA, metricId: "inlinks.distribution", scope: "site", scopeValue: "", value: { median: 4 } },
@@ -531,7 +747,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await api.close();
   for (const id of [
-    crawlA, crawlB, crawlC, crawlD, crawlE,
+    crawlA, crawlB, crawlC, crawlD, crawlE, crawlF,
     cmpBase, cmpHead, cmpOld, cmpCapped, cmpOther, cmpWww, cmpUnjudged,
     cmpMixed, cmpUnstampedA, cmpUnstampedB,
   ]) {
@@ -1524,6 +1740,322 @@ describe("GET /crawls/:id/export", () => {
     expect(after.status).toBe(200);
     expect(after.body["rows"]).toBe(4);
     expect(readdirSync(exportDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+});
+
+/**
+ * The CSV half of the export surface: six views, streamed as `text/csv`.
+ *
+ * These are the files the dashboard's "Bulk export" block hands a human, and
+ * the properties under test are the ones a human's spreadsheet will decide:
+ * the file parses, its header is always there, a page's own text can never
+ * become a formula, and the row count equals the source the view claims to be.
+ *
+ * The rows themselves are read through an independent RFC 4180 parser
+ * (`parseCsv`), so an assertion here is about a file a spreadsheet can open and
+ * not about a substring that happens to be present.
+ */
+describe("GET /crawls/:id/export?format=csv", () => {
+  const registry = buildRegistry();
+  const rules = new Map(registry.all().map((rule) => [rule.id, rule]));
+
+  /** Everything but the header row. */
+  function rows(res: CsvRes): string[][] {
+    return res.records.slice(1);
+  }
+
+  function column(res: CsvRes, name: string): string[] {
+    const index = (res.records[0] ?? []).indexOf(name);
+    if (index === -1) throw new Error(`no '${name}' column in ${JSON.stringify(res.records[0])}`);
+    return rows(res).map((row) => row[index] ?? "");
+  }
+
+  function rowWhere(res: CsvRes, name: string, value: string): string[] {
+    const index = (res.records[0] ?? []).indexOf(name);
+    const found = rows(res).find((row) => row[index] === value);
+    if (found === undefined) throw new Error(`no row with ${name}=${value}`);
+    return found;
+  }
+
+  it("answers text/csv, unbuffered, with a filename a browser can save", async () => {
+    const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    expect(res.headers.get("content-disposition")).toContain(`${crawlF}-anchor_texts.csv`);
+    // NO CONTENT-LENGTH. A length would mean the server knew the size before it
+    // wrote a byte, which it can only know by holding the whole file — the one
+    // thing hard rule 3 forbids for a links-derived view.
+    expect(res.headers.get("content-length")).toBeNull();
+  });
+
+  // THE STREAMING CLAIM, MEASURED AT THE CLIENT. A response built in memory and
+  // then written arrives as one chunk however large it is; this file is 1,204
+  // rows and comes back in several, which means rows were on the wire while the
+  // database was still being read.
+  it("starts the response before the last row is read", async () => {
+    const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
+    expect(res.chunks).toBeGreaterThan(1);
+    expect(res.records[0]).toEqual(["source", "target", "text"]);
+  });
+
+  it("writes each view's header, always, and the row a caller came for", async () => {
+    const issuesCsv = await callCsv(`/crawls/${crawlF}/export?format=csv&view=issues`);
+    expect(issuesCsv.records[0]).toEqual([
+      "ruleId", "severity", "category", "checkIds", "url", "title", "evidence",
+    ]);
+    const chain = rowWhere(issuesCsv, "ruleId", "redirect.chain");
+    const chainRule = rules.get("redirect.chain");
+    expect(chain[1]).toBe("warning");
+    expect(chain[2]).toBe(chainRule?.category);
+    expect(chain[3]).toBe(chainRule?.checkIds.join("|"));
+    expect(chain[4]).toBe(`${SITE}/csv-r1`);
+    expect(chain[5]).toBe(chainRule?.title);
+    // The evidence is FLATTENED, deterministically and in sorted key order —
+    // never the raw JSON blob, which is what a cell cannot hold usefully.
+    expect(chain[6]).toBe(
+      `chain=${SITE}/csv-r1|${SITE}/csv-r2|${SITE}/csv-end; ` +
+        "chainTruncated=false; finalStatus=200; length=2",
+    );
+    expect(chain[6]).not.toContain("{");
+
+    const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
+    expect(internal.records[0]).toEqual([
+      "url", "status", "fetchClass", "indexable", "clickDepth", "pageType", "title",
+    ]);
+    expect(rowWhere(internal, "url", `${SITE}/csv-end`)).toEqual([
+      `${SITE}/csv-end`, "200", "ok", "true", "2", "product", "title of csv-end",
+    ]);
+    // An empty cell is "the engine has no value", never a zero: this page has
+    // no click depth because nothing links to it.
+    expect(rowWhere(internal, "url", `${SITE}/csv-gone`)).toEqual([
+      `${SITE}/csv-gone`, "404", "client_error", "", "", "", "title of csv-gone",
+    ]);
+
+    const broken = await callCsv(`/crawls/${crawlF}/export?format=csv&view=links_to_4xx`);
+    expect(broken.records[0]).toEqual(["source", "target", "status", "anchorText"]);
+    expect(rows(broken)).toEqual([
+      [`${SITE}/csv-home`, `${SITE}/csv-gone`, "404", "Broken, right?"],
+    ]);
+
+    const anchors = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
+    expect(rowWhere(anchors, "target", `${SITE}/csv-r1`)).toEqual([
+      `${SITE}/csv-home`, `${SITE}/csv-r1`, "",
+    ]);
+
+    const issueUrls = await callCsv(
+      `/crawls/${crawlF}/export?format=csv&view=issue_urls&ruleId=links.orphan`,
+    );
+    expect(issueUrls.records[0]).toEqual(["ruleId", "url", "evidence"]);
+    expect(rows(issueUrls)).toHaveLength(1);
+    expect(issueUrls.records[1]?.[1]).toBe(`${SITE}/csv-quoted`);
+    // The long value is clipped and SAYS it was; the full evidence stays on
+    // issue_urls' JSON answer.
+    expect(issueUrls.records[1]?.[2]).toContain("discoveredVia=sitemap");
+    expect(issueUrls.records[1]?.[2]).toContain("…");
+  });
+
+  it("walks a redirect path per redirecting page, and says what it could not resolve", async () => {
+    const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=redirects`);
+    expect(res.records[0]).toEqual(["source", "chain", "target", "hops"]);
+    expect(rows(res)).toHaveLength(5);
+
+    expect(rowWhere(res, "source", `${SITE}/csv-r1`)).toEqual([
+      `${SITE}/csv-r1`,
+      `${SITE}/csv-r1|${SITE}/csv-r2|${SITE}/csv-end`,
+      `${SITE}/csv-end`,
+      "2",
+    ]);
+    // Per REDIRECTING PAGE, not per chain head: the middle hop has its own row,
+    // because that is the URL somebody puts in a rewrite rule.
+    expect(rowWhere(res, "source", `${SITE}/csv-r2`)).toEqual([
+      `${SITE}/csv-r2`, `${SITE}/csv-r2|${SITE}/csv-end`, `${SITE}/csv-end`, "1",
+    ]);
+    // A loop is visible as a chain that comes back to a URL it already visited.
+    expect(rowWhere(res, "source", `${SITE}/csv-loop-a`)).toEqual([
+      `${SITE}/csv-loop-a`,
+      `${SITE}/csv-loop-a|${SITE}/csv-loop-b|${SITE}/csv-loop-a`,
+      `${SITE}/csv-loop-a`,
+      "2",
+    ]);
+    // A 3xx with no usable Location: an empty target is "this engine does not
+    // know where this goes", which is the truth and not a guess.
+    expect(rowWhere(res, "source", `${SITE}/csv-dead`)).toEqual([
+      `${SITE}/csv-dead`, `${SITE}/csv-dead`, "", "0",
+    ]);
+  });
+
+  // THE GUARD IS THE POINT OF THE WHOLE FILE. A crawled title is attacker text
+  // and this file opens in Excel at a client's desk.
+  it("never lets a crawled string become a formula", async () => {
+    const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
+    // The PARSED cell still reads as the site wrote it, plus the apostrophe
+    // that stops the spreadsheet evaluating it.
+    expect(rowWhere(internal, "url", `${SITE}/csv-formula`)[6]).toBe(`'${HOSTILE_TITLE}`);
+    // And the raw bytes carry no unguarded formula opener at the start of a cell.
+    expect(internal.text).toContain(`,'${HOSTILE_TITLE}`);
+    expect(internal.text).not.toContain(`,${HOSTILE_TITLE}`);
+
+    const anchors = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
+    expect(rowWhere(anchors, "target", `${SITE}/csv-end`)[2]).toBe(`'${HOSTILE_ANCHOR}`);
+  });
+
+  it("quotes a cell holding a comma, a quote or a newline, and stays parseable", async () => {
+    const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
+    // One RECORD, spanning two lines, holding the title verbatim: the parser
+    // round-trips it, which is the property a spreadsheet needs.
+    expect(rowWhere(internal, "url", `${SITE}/csv-quoted`)[6]).toBe(QUOTED_TITLE);
+    expect(internal.text).toContain(`"He said ""hi"", then\nleft"`);
+    // Every record has the same width, which a mis-quoted newline would break.
+    for (const row of internal.records) expect(row).toHaveLength(7);
+  });
+
+  // ROW COUNTS EQUAL THE SOURCE. A view that silently dropped rows — a keyset
+  // that skipped a batch boundary, a join that lost a row — is a file a client
+  // reads as "these are all of them".
+  it("exports exactly as many rows as the source holds", async () => {
+    const status = await call(`/crawls/${crawlF}`);
+    const findingsCount = Number(status.body["findingsCount"]);
+    expect(findingsCount).toBe(3);
+
+    const issuesCsv = await callCsv(`/crawls/${crawlF}/export?format=csv&view=issues`);
+    expect(rows(issuesCsv)).toHaveLength(findingsCount);
+
+    const linkCount = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from links where crawl_id = ${crawlF}`,
+    );
+    const anchors = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
+    expect(rows(anchors)).toHaveLength(linkCount.rows[0]?.n ?? -1);
+    expect(rows(anchors)).toHaveLength(FILLER_LINKS + 4);
+
+    const pageCount = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from pages where crawl_id = ${crawlF}`,
+    );
+    const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
+    expect(rows(internal)).toHaveLength(pageCount.rows[0]?.n ?? -1);
+
+    // No duplicates across the batch boundaries either: 1,204 links is three
+    // batches, and a keyset that compared on the wrong column would repeat a
+    // page of rows rather than lose one.
+    // 1,200 distinct fillers plus the four real anchors, one of which is the
+    // empty cell an image link leaves behind.
+    expect(new Set(column(anchors, "text")).size).toBe(FILLER_LINKS + 4);
+  });
+
+  // THE KEYSET, WALKED. Reading a view one row at a time must produce exactly
+  // the file a full-batch read produces: same rows, same order, nothing skipped
+  // at a boundary and nothing repeated. This is the memory contract's
+  // behavioural half — `test/api/csv.test.ts` pins the SQL that makes it true.
+  it("reads every view through a cursor that can be walked one row at a time", async () => {
+    const ctx = {
+      rule: (ruleId: string) => {
+        const rule = rules.get(ruleId);
+        if (rule === undefined) throw new Error(`no rule ${ruleId}`);
+        return rule;
+      },
+      evidence: (value: unknown) => value as Record<string, unknown>,
+    };
+
+    for (const view of CSV_VIEWS) {
+      const def = CSV_VIEW_DEFS[view];
+      const ruleId = def.needsRuleId ? "links.orphan" : null;
+      let cursor = [...def.start];
+      const walked: string[][] = [];
+      for (let hop = 0; hop < 2000; hop += 1) {
+        const batch = await db.execute<Record<string, unknown>>(
+          def.query(crawlF, cursor, 1, ruleId),
+        );
+        const row = batch.rows[0];
+        if (row === undefined) break;
+        // Through the SAME writer the export uses, then back through the
+        // parser: this test is about the cursor — which rows, in which order —
+        // and not about the escaping, which the unit suite pins on its own.
+        walked.push(parseCsv(csvRecord(def.cells(row, ctx)))[0] ?? []);
+        cursor = def.next(row);
+      }
+
+      const query = ruleId === null ? "" : `&ruleId=${ruleId}`;
+      const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=${view}${query}`);
+      expect(walked, `${view} walks to a different file one row at a time`).toEqual(rows(res));
+      expect(walked.length, `${view} walked no rows`).toBeGreaterThan(0);
+    }
+  }, 30_000);
+
+  it("refuses a view, a format or a rule it cannot answer, naming what it took", async () => {
+    const badView = await call(`/crawls/${crawlF}/export?format=csv&view=everything`);
+    expect(badView.status).toBe(400);
+    expect(String(badView.body["error"])).toContain("anchor_texts");
+
+    const badFormat = await call(`/crawls/${crawlF}/export?format=xlsx`);
+    expect(badFormat.status).toBe(400);
+    expect(String(badFormat.body["error"])).toContain("csv");
+
+    // The two vocabularies do not mix: `dataset` is the JSONL half's word and
+    // `view` is the CSV half's, and a caller who used both was thinking of one
+    // thing and asking for another.
+    const mixed = await call(`/crawls/${crawlF}/export?format=csv&dataset=issues`);
+    expect(mixed.status).toBe(400);
+    expect(String(mixed.body["error"])).toContain("dataset");
+
+    const viewOnJsonl = await call(`/crawls/${crawlF}/export?view=issues`);
+    expect(viewOnJsonl.status).toBe(400);
+    expect(String(viewOnJsonl.body["error"])).toContain("format=csv");
+
+    const noRule = await call(`/crawls/${crawlF}/export?format=csv&view=issue_urls`);
+    expect(noRule.status).toBe(400);
+    expect(String(noRule.body["error"])).toContain("ruleId");
+
+    const strayRule = await call(
+      `/crawls/${crawlF}/export?format=csv&view=issues&ruleId=title.missing`,
+    );
+    expect(strayRule.status).toBe(400);
+    expect(String(strayRule.body["error"])).toContain("issue_urls");
+
+    const unknownRule = await call(
+      `/crawls/${crawlF}/export?format=csv&view=issue_urls&ruleId=no.such.rule`,
+    );
+    expect(unknownRule.status).toBe(400);
+    expect(String(unknownRule.body["error"])).toContain("no.such.rule");
+
+    // A metric rule writes no findings at all: answering with a header and no
+    // rows would read as 'this rule found nothing'.
+    const metricRule = await call(
+      `/crawls/${crawlF}/export?format=csv&view=issue_urls&ruleId=redirect.volume`,
+    );
+    expect(metricRule.status).toBe(400);
+    expect(String(metricRule.body["error"])).toContain("measures");
+
+    expect((await call("/crawls/crawl_missing/export?format=csv&view=issues")).status).toBe(404);
+  });
+
+  it("leaves the JSONL default exactly as it was", async () => {
+    const implicit = await call(`/crawls/${crawlF}/export`);
+    const explicit = await call(`/crawls/${crawlF}/export?format=jsonl.gz`);
+    expect(implicit.status).toBe(200);
+    expect(implicit.body).toEqual({
+      dataset: "issues",
+      path: join(exportDir, `${crawlF}-issues.jsonl.gz`),
+      rows: 3,
+      bytes: implicit.body["bytes"],
+    });
+    expect(explicit.body).toEqual(implicit.body);
+    // No `format` key on the JSONL answer: the shape a caller already parses is
+    // untouched by this task.
+    expect(Object.keys(implicit.body).sort()).toEqual(["bytes", "dataset", "path", "rows"]);
+  });
+
+  // The route only ever reaches the streaming half with format=csv, so this is
+  // asked of the service directly: a caller that streams a format which writes
+  // a file is told, rather than being handed the CSV it did not ask for.
+  it("refuses to stream a format that writes a file", async () => {
+    await expect(
+      api.service.prepareCsvExport(crawlF, { format: "jsonl.gz" }),
+    ).rejects.toThrow(/writes a file/);
+  });
+
+  it("writes a header even for a view with no rows, so an empty file still says what it is", async () => {
+    const res = await callCsv(`/crawls/${crawlA}/export?format=csv&view=links_to_4xx`);
+    expect(res.status).toBe(200);
+    expect(res.records).toEqual([["source", "target", "status", "anchorText"]]);
   });
 });
 

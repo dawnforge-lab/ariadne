@@ -51,6 +51,7 @@ import { once } from "node:events";
 import { createWriteStream } from "node:fs";
 import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import { join as joinPath, resolve as resolvePath, sep as pathSep } from "node:path";
+import { PassThrough, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import { and, asc, desc, eq, getTableColumns, gt, isNotNull, sql, type SQL } from "drizzle-orm";
@@ -92,6 +93,16 @@ import { UNTYPED } from "../rules/metric/cohort.js";
 import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence.js";
 import { runRules, type RunSummary } from "../rules/run.js";
 import { isHostAllowed, type ServiceConfig } from "./config.js";
+import {
+  CSV_VIEWS,
+  CSV_VIEW_DEFS,
+  EXPORT_FORMATS,
+  csvFilename,
+  csvRecord,
+  type CsvViewContext,
+  type CsvViewName,
+  type ExportFormat,
+} from "./csv.js";
 
 /**
  * The four ways a request can be refused for a reason the caller can act on.
@@ -1080,6 +1091,45 @@ export interface ExportResult {
   /** Size of the gzipped file on disk. */
   bytes: number;
 }
+
+/**
+ * What a CSV export answers with. A DIFFERENT SHAPE from `ExportResult`, and
+ * deliberately: the JSONL answer is a contract callers already parse, and
+ * growing a `format` key onto it would change a response nobody asked to
+ * change. The two are told apart by their own keys — `dataset` on one, `format`
+ * and `view` on the other.
+ */
+export interface CsvExportResult {
+  format: "csv";
+  view: CsvViewName;
+  /** Present only on `issue_urls`, which is a view of ONE rule. */
+  ruleId?: string;
+  path: string;
+  /** DATA rows. The header is always written and is never counted here. */
+  rows: number;
+  bytes: number;
+}
+
+/** A prepared CSV stream: validated, not yet read. */
+export interface CsvStream {
+  view: CsvViewName;
+  ruleId: string | null;
+  /** Deterministic per (crawl, view, rule) — what a browser saves it as. */
+  filename: string;
+  /**
+   * The file, record by record, header first.
+   *
+   * ONE YIELD IS ONE RECORD, never one line: a cell holding a newline is quoted
+   * and spans two lines while remaining one row. That is why the row count is
+   * yields minus the header and not a line count.
+   */
+  records(): AsyncGenerator<string>;
+}
+
+/** What the two halves of `export_crawl` were asked for, after validation. */
+type ExportRequest =
+  | { format: "jsonl.gz"; dataset: ExportDataset }
+  | { format: "csv"; view: CsvViewName; ruleId: string | null };
 
 /** Sample URLs carried on an issue group. Five is a sample; more is a slice. */
 export const ISSUE_SAMPLE_URLS = 5;
@@ -2578,59 +2628,176 @@ export class ApiService {
    * export standing: a truncated `.jsonl.gz` is a file a pipeline would read as
    * a short crawl. The error surfaces either way.
    */
-  async exportCrawl(crawlId: string, opts: { dataset?: string } = {}): Promise<ExportResult> {
+  async exportCrawl(
+    crawlId: string,
+    opts: { dataset?: string; format?: string; view?: string; ruleId?: string } = {},
+  ): Promise<ExportResult | CsvExportResult> {
     await this.assertCrawl(crawlId);
-    const dataset = parseDataset(opts.dataset);
+    const request = parseExportRequest(opts, (field, id) => this.findingRule(field, id));
 
+    if (request.format === "csv") {
+      const stream = this.csvStream(crawlId, request.view, request.ruleId);
+      const { written, bytes, path } = await this.writeExport(
+        stream.filename,
+        new PassThrough(),
+        stream.records(),
+      );
+      return {
+        format: "csv",
+        view: stream.view,
+        ...(stream.ruleId === null ? {} : { ruleId: stream.ruleId }),
+        path,
+        // The header is written and is not a row. `written` counts records.
+        rows: written - 1,
+        bytes,
+      };
+    }
+
+    const { dataset } = request;
+    const { written, bytes, path } = await this.writeExport(
+      `${slug(crawlId)}-${dataset}.jsonl.gz`,
+      createGzip(),
+      this.jsonlRecords(crawlId, dataset),
+    );
+    return { dataset, path, rows: written, bytes };
+  }
+
+  /** The JSONL dataset as text records — one JSON object per line, as it always was. */
+  private async *jsonlRecords(crawlId: string, dataset: ExportDataset): AsyncGenerator<string> {
+    for await (const row of this.exportRows(crawlId, dataset)) yield `${JSON.stringify(row)}\n`;
+  }
+
+  /**
+   * Write a stream of records into the export directory, atomically.
+   *
+   * The `sink` is what the records are written through — `createGzip()` for the
+   * JSONL datasets, a `PassThrough` for CSV, which is the whole difference
+   * between the two formats at this level. Everything else (the name check, the
+   * temp file, the backpressure, the rename) is one implementation because the
+   * failure it defends against is one failure.
+   */
+  private async writeExport(
+    filename: string,
+    sink: Duplex,
+    records: AsyncIterable<string>,
+  ): Promise<{ written: number; bytes: number; path: string }> {
     await mkdir(this.exportDir, { recursive: true });
     // The crawl id reaches this from the request path, so it is slugged before
     // it becomes a filename and the result is checked to be inside the export
     // directory. A caller names a crawl, never a path.
-    const file = joinPath(this.exportDir, `${slug(crawlId)}-${dataset}.jsonl.gz`);
+    const file = joinPath(this.exportDir, filename);
     if (!resolvePath(file).startsWith(this.exportDir + pathSep)) {
       throw new Error(`export: refusing to write outside the export directory (${file})`);
     }
     const temp = `${file}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
 
-    const gzip = createGzip();
     // THE HANDLER IS ATTACHED AT CREATION, and that placement is the whole
     // point. The write side fails on its own schedule — ENOSPC, a directory
     // removed underneath us, EACCES on open — and control spends most of this
-    // method parked in `exportRows`' database awaits. A `pipeline()` promise
-    // whose rejection has no handler AT THE MOMENT IT REJECTS is an unhandled
-    // rejection, and an unhandled rejection ends the process in Node 22: a full
-    // disk would take the API server down with it. Catching here turns that
-    // into a value, which the loop below checks and re-throws as its own error
-    // (the same reasoning as the queue runner's catch in `pump`).
+    // method parked in the row generator's database awaits. A `pipeline()`
+    // promise whose rejection has no handler AT THE MOMENT IT REJECTS is an
+    // unhandled rejection, and an unhandled rejection ends the process in Node
+    // 22: a full disk would take the API server down with it. Catching here
+    // turns that into a value, which the loop below checks and re-throws as its
+    // own error (the same reasoning as the queue runner's catch in `pump`).
     let writeError: unknown = null;
-    const written = pipeline(gzip, createWriteStream(temp)).catch((error: unknown) => {
+    const written = pipeline(sink, createWriteStream(temp)).catch((error: unknown) => {
       writeError = error;
     });
 
-    let rows = 0;
+    let count = 0;
     try {
-      for await (const row of this.exportRows(crawlId, dataset)) {
+      for await (const record of records) {
         if (writeError !== null) throw writeError;
-        // Backpressure honoured: gzip's buffer says when to wait, so a slow
+        // Backpressure honoured: the sink's buffer says when to wait, so a slow
         // disk slows the reader rather than filling memory with pending writes.
-        if (!gzip.write(`${JSON.stringify(row)}\n`)) await once(gzip, "drain");
-        rows += 1;
+        if (!sink.write(record)) await once(sink, "drain");
+        count += 1;
       }
-      gzip.end();
+      sink.end();
       await written;
       if (writeError !== null) throw writeError;
       // The rename is the publish step: everything above wrote a temp file
       // nobody was reading.
       await rename(temp, file);
     } catch (error) {
-      gzip.destroy();
+      sink.destroy();
       await written;
       await unlink(temp).catch(() => undefined);
       throw error;
     }
 
     const { size } = await stat(file);
-    return { dataset, path: file, rows, bytes: size };
+    return { written: count, bytes: size, path: file };
+  }
+
+  /**
+   * A CSV view of a crawl, validated and ready to stream — the HTTP transport's
+   * half of `export_crawl`.
+   *
+   * NOT A FILE. The dashboard's "Bulk export" block is a download: Talos proxies
+   * these bytes straight to a browser, so the response body IS the file and
+   * nothing is written to this server's disk. The MCP transport, whose caller
+   * has no browser, gets the file-writing half (`exportCrawl` with
+   * `format: "csv"`) — same rows, same writer, one place they are decided.
+   *
+   * Everything that can be refused is refused HERE, before a byte is streamed:
+   * once the 200 and the `text/csv` header are on the wire there is no status
+   * code left to change, and a half-written file that a client reads as a
+   * complete export is exactly the silent failure hard rule 7 forbids.
+   */
+  async prepareCsvExport(
+    crawlId: string,
+    opts: { dataset?: string; format?: string; view?: string; ruleId?: string } = {},
+  ): Promise<CsvStream> {
+    await this.assertCrawl(crawlId);
+    const request = parseExportRequest(
+      { ...opts, format: opts.format ?? "csv" },
+      (field, id) => this.findingRule(field, id),
+    );
+    if (request.format !== "csv") {
+      throw new ServiceError(
+        "VALIDATION",
+        `this route streams CSV; format '${request.format}' writes a file — ask for it ` +
+          "without format=csv and read the path it answers with",
+      );
+    }
+    return this.csvStream(crawlId, request.view, request.ruleId);
+  }
+
+  /** The prepared stream itself. The validation is the caller's; this reads rows. */
+  private csvStream(crawlId: string, view: CsvViewName, ruleId: string | null): CsvStream {
+    const def = CSV_VIEW_DEFS[view];
+    const ctx: CsvViewContext = {
+      rule: (id) => this.ruleFor(id, crawlId, "issues"),
+      evidence: (value, id) => asEvidence(value, crawlId, id),
+    };
+    const db = this.db;
+    return {
+      view,
+      ruleId,
+      filename: csvFilename(slug(crawlId), view, ruleId === null ? null : slug(ruleId)),
+      async *records(): AsyncGenerator<string> {
+        // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
+        // that cannot say what it failed to contain, and a reader would have to
+        // guess whether the export ran at all.
+        yield csvRecord(def.header);
+        let cursor: readonly string[] = def.start;
+        for (;;) {
+          const result = await db.execute<Record<string, unknown>>(
+            def.query(crawlId, cursor, EXPORT_BATCH, ruleId),
+          );
+          if (result.rows.length === 0) return;
+          // Read a batch, write it, let it go: RAM is O(EXPORT_BATCH) and never
+          // O(rows), which is hard rule 3 for the links-derived views and hard
+          // rule 6 for the rest. Nothing here accumulates.
+          for (const row of result.rows) yield csvRecord(def.cells(row, ctx));
+          const last = result.rows[result.rows.length - 1];
+          if (last === undefined) return;
+          cursor = def.next(last);
+        }
+      },
+    };
   }
 
   /**
@@ -4187,6 +4354,93 @@ function parseSeverity(value: string): string {
     );
   }
   return value;
+}
+
+/**
+ * What an export was asked for — the two formats' vocabularies, kept apart.
+ *
+ * `dataset` belongs to `jsonl.gz` and `view` belongs to `csv`, and mixing them
+ * is refused rather than resolved. A caller who wrote `format=csv&dataset=pages`
+ * was thinking of one thing and asking for another; answering the half we
+ * understood would hand them a file that is not the one they meant, with a 200
+ * on it. The same argument as `checkQuery`'s unknown-parameter refusal.
+ *
+ * The rule id is validated through `findingRule`, so the two refusals that
+ * matter arrive in the caller's words: a rule this ruleset does not define, and
+ * a METRIC rule, which writes no findings at all — a header with no rows under
+ * it would read as "this rule found nothing".
+ */
+function parseExportRequest(
+  opts: { dataset?: string; format?: string; view?: string; ruleId?: string },
+  findingRule: (field: string, id: string) => AnyRule,
+): ExportRequest {
+  const format = parseFormat(opts.format);
+
+  if (format === "jsonl.gz") {
+    for (const [field, value] of [
+      ["view", opts.view],
+      ["ruleId", opts.ruleId],
+    ] as const) {
+      if (value !== undefined) {
+        throw new ServiceError(
+          "VALIDATION",
+          `'${field}' belongs to the CSV export: ask for format=csv, or drop it and ` +
+            `name a dataset (one of: ${EXPORT_DATASETS.join(", ")})`,
+        );
+      }
+    }
+    return { format, dataset: parseDataset(opts.dataset) };
+  }
+
+  if (opts.dataset !== undefined) {
+    throw new ServiceError(
+      "VALIDATION",
+      "'dataset' belongs to the jsonl.gz export; the CSV export takes a 'view' " +
+        `(one of: ${CSV_VIEWS.join(", ")})`,
+    );
+  }
+
+  const view = parseCsvView(opts.view);
+  const needsRuleId = CSV_VIEW_DEFS[view].needsRuleId;
+  if (needsRuleId && (opts.ruleId === undefined || opts.ruleId === "")) {
+    throw new ServiceError(
+      "VALIDATION",
+      `view '${view}' is one rule's findings and needs a 'ruleId' — issues_list names ` +
+        "the rules this crawl has findings for",
+    );
+  }
+  if (!needsRuleId && opts.ruleId !== undefined) {
+    throw new ServiceError(
+      "VALIDATION",
+      `'ruleId' narrows the issue_urls view; view '${view}' is not about one rule`,
+    );
+  }
+  if (opts.ruleId !== undefined) findingRule("ruleId", opts.ruleId);
+  return { format, view, ruleId: opts.ruleId ?? null };
+}
+
+/** The export format, defaulting to the one that shipped first. */
+function parseFormat(value: string | undefined): ExportFormat {
+  if (value === undefined) return "jsonl.gz";
+  if (!(EXPORT_FORMATS as readonly string[]).includes(value)) {
+    throw new ServiceError(
+      "VALIDATION",
+      `format '${clip(value)}' is not an export format (one of: ${EXPORT_FORMATS.join(", ")})`,
+    );
+  }
+  return value as ExportFormat;
+}
+
+/** The CSV view, defaulting to the one an audit is usually after. */
+function parseCsvView(value: string | undefined): CsvViewName {
+  if (value === undefined) return "issues";
+  if (!(CSV_VIEWS as readonly string[]).includes(value)) {
+    throw new ServiceError(
+      "VALIDATION",
+      `view '${clip(value)}' is not an export view (one of: ${CSV_VIEWS.join(", ")})`,
+    );
+  }
+  return value as CsvViewName;
 }
 
 /** The export dataset, defaulting to the one an audit is usually after. */

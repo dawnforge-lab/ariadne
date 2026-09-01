@@ -27,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -40,6 +40,7 @@ import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { loadMcpConfig } from "../../src/api/config.js";
+import { CSV_VIEWS, EXPORT_FORMATS } from "../../src/api/csv.js";
 import {
   COMPARE_SETS,
   EXPORT_DATASETS,
@@ -589,6 +590,8 @@ describe("the tool surface", () => {
     const enumerated: [string, string, readonly string[]][] = [
       ["compare_urls", "set", COMPARE_SETS],
       ["export_crawl", "dataset", EXPORT_DATASETS],
+      ["export_crawl", "format", EXPORT_FORMATS],
+      ["export_crawl", "view", CSV_VIEWS],
       ["metrics_get", "scope", METRIC_SCOPES],
       ["pages_query", "fetchClass", FETCH_CLASSES],
       ["pages_query", "discoveredVia", DISCOVERED_VIA],
@@ -648,6 +651,29 @@ describe("the tool surface", () => {
     const status = listed.tools.find((t) => t.name === "crawl_status")?.description ?? "";
     for (const field of ["rulesRunAt", "findingsCount", "pagesScanned", "legacyHosts", "sitemapUrls"]) {
       expect(status, `crawl_status does not name ${field}`).toContain(field);
+    }
+  });
+
+  // THE CSV FILE IS OPENED BY A HUMAN, and the agent that produced it is the
+  // one who has to warn them. Four claims about a file nobody can inspect from
+  // inside a chat, pinned as claims: what the row count counts, what the
+  // evidence column is, why some cells start with an apostrophe, and that the
+  // file is on the server rather than in the answer.
+  it("describes the shape of the CSV it writes, not just that it writes one", async () => {
+    const listed = await client.listTools();
+    const description = listed.tools.find((t) => t.name === "export_crawl")?.description ?? "";
+    for (const claim of [
+      "header",
+      "key=value",
+      "apostrophe",
+      "text/csv",
+    ]) {
+      expect(description, `export_crawl does not say '${claim}'`).toContain(claim);
+    }
+    // Every view is named in the tool's own text, not only in the field schema:
+    // an agent choosing a view reads the description first.
+    for (const view of CSV_VIEWS) {
+      expect(description, `export_crawl does not name the ${view} view`).toContain(view);
     }
   });
 
@@ -1634,6 +1660,88 @@ describe("export_crawl", () => {
     const answer = await call("export_crawl", { crawlId: seededCrawlId, dataset: "everything" });
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("everything");
+  });
+});
+
+/**
+ * The CSV half of the same tool.
+ *
+ * An MCP client has no browser to stream a download into, so it gets what the
+ * JSONL half gives it: a file under the server's export directory, and a path
+ * and a count in the answer. The HTTP transport streams the identical rows —
+ * `test/api/query.test.ts` owns the content and the injection guard; this file
+ * owns the file-writing contract and what the tool TELLS an agent.
+ */
+describe("export_crawl — the CSV views", () => {
+  function read(body: Record<string, unknown>): string {
+    return readFileSync(String(body["path"]), "utf8");
+  }
+
+  it("writes a CSV under the export directory and answers with the path and the row count", async () => {
+    const body = await ok("export_crawl", { crawlId: seededCrawlId, format: "csv" });
+    expect(body["format"]).toBe("csv");
+    expect(body["view"]).toBe("issues");
+    expect(String(body["path"]).startsWith(exportDir)).toBe(true);
+    expect(String(body["path"]).endsWith("-issues.csv")).toBe(true);
+    // The same five findings the JSONL export writes, and the header is not one
+    // of them: a row count that included it would be off by one everywhere a
+    // caller compared it against findingsCount.
+    expect(body["rows"]).toBe(5);
+    const text = read(body);
+    expect(text.split("\r\n")[0]).toBe("ruleId,severity,category,checkIds,url,title,evidence");
+    expect(text.trimEnd().split("\r\n")).toHaveLength(6);
+    // A path and a count, never the contents (the JSONL half's contract).
+    expect(JSON.stringify(body)).not.toContain("links.orphan");
+  });
+
+  it("names the rule in the file it writes for one rule's findings", async () => {
+    const body = await ok("export_crawl", {
+      crawlId: seededCrawlId, format: "csv", view: "issue_urls", ruleId: "links.orphan",
+    });
+    expect(body["ruleId"]).toBe("links.orphan");
+    expect(body["rows"]).toBe(3);
+    expect(String(body["path"])).toContain("issue_urls-links.orphan");
+    expect(read(body).split("\r\n")[0]).toBe("ruleId,url,evidence");
+  });
+
+  it("writes the links-derived views of a real crawl", async () => {
+    const anchors = await ok("export_crawl", {
+      crawlId: liveCrawlId, format: "csv", view: "anchor_texts",
+    });
+    expect(Number(anchors["rows"])).toBeGreaterThan(0);
+    expect(read(anchors).split("\r\n")[0]).toBe("source,target,text");
+
+    const pagesCsv = await ok("export_crawl", {
+      crawlId: liveCrawlId, format: "csv", view: "internal_urls",
+    });
+    expect(read(pagesCsv).split("\r\n")[0]).toBe(
+      "url,status,fetchClass,indexable,clickDepth,pageType,title",
+    );
+  });
+
+  it("keeps the two formats' vocabularies apart, and says which word belongs where", async () => {
+    const badView = await call("export_crawl", {
+      crawlId: seededCrawlId, format: "csv", view: "everything",
+    });
+    expect(badView.isError).toBe(true);
+    expect(String(badView.body["error"])).toContain("everything");
+
+    const mixed = await call("export_crawl", {
+      crawlId: seededCrawlId, format: "csv", dataset: "pages",
+    });
+    expect(mixed.isError).toBe(true);
+    expect(String(mixed.body["error"])).toContain("dataset");
+
+    // A view without the format is a caller who thinks they asked for CSV.
+    const viewOnly = await call("export_crawl", { crawlId: seededCrawlId, view: "anchor_texts" });
+    expect(viewOnly.isError).toBe(true);
+    expect(String(viewOnly.body["error"])).toContain("format=csv");
+
+    const noRule = await call("export_crawl", {
+      crawlId: seededCrawlId, format: "csv", view: "issue_urls",
+    });
+    expect(noRule.isError).toBe(true);
+    expect(String(noRule.body["error"])).toContain("ruleId");
   });
 });
 
