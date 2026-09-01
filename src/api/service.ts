@@ -85,6 +85,7 @@ import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import {
   METRIC_SCOPES,
   type AnyRule,
+  type RuleCategory,
   type Severity,
 } from "../rules/registry/types.js";
 import { UNTYPED } from "../rules/metric/cohort.js";
@@ -757,6 +758,81 @@ function truncationOf(raw: unknown, ruleId: string): IssueTruncation {
 }
 
 /**
+ * One rule's fired state on ONE crawl — the field that makes the catalog a
+ * report rather than a list.
+ *
+ * `count` is the rows the rule wrote for that crawl, and **zero is a real
+ * value**: on a judged crawl it says the rule ran over this site and found
+ * nothing. The state that is NOT a count is `null` on the rule's `fired` field,
+ * which says no rules pass has completed — see `CatalogRule.fired`.
+ *
+ * `atLeast` is present, and always `true`, when the rule CAPPED its listing:
+ * `count` is then a floor rather than the number of cases, so a UI must render
+ * it as "3 or more" and never as "3". It is read off the same truncation note
+ * `listIssues` reads (`truncationNote` / `truncationOf`) rather than derived a
+ * second time — one note, two surfaces, no chance of them disagreeing about
+ * whether a number is exact.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CARRY is the magnitude itself. `issues_list`
+ * owns that, because there it is one row of a triage view a reader is already
+ * looking at; here it would be a second, subtly different number on every row
+ * of a checklist. The flag says "this count is not the whole story"; the tool that
+ * tells the rest of the story is named in the description.
+ */
+export interface RuleFired {
+  count: number;
+  atLeast?: true;
+}
+
+/**
+ * One rule as the catalog renders it: its identity, its copy, and — when a
+ * crawl was named — what it found there.
+ *
+ * The copy is the CURRENT ruleset's, joined live from the registry exactly as
+ * `IssueGroup`'s is. Nothing here is stored, so a rule whose explanation is
+ * rewritten is rewritten on every surface at once.
+ */
+export interface CatalogRule {
+  id: string;
+  kind: AnyRule["kind"];
+  severity: Severity;
+  category: RuleCategory;
+  checkIds: string[];
+  title: string;
+  explanation: string;
+  howToFix: string;
+  /**
+   * THREE STATES, AND THEY ARE THREE DIFFERENT SENTENCES.
+   *
+   *  - **absent** — no crawl was named. This is the checklist skeleton: what
+   *    the engine CAN look for, before anybody has looked.
+   *  - **null** — a crawl was named and it has never been judged
+   *    (`crawls.rules_run_at` is null). Nothing is known about this rule on
+   *    this site.
+   *  - **`{count}`** — a crawl was named and a rules pass completed over it.
+   *    `count: 0` is then a measurement: this rule looked and found nothing.
+   *
+   * Collapsing the last two — answering 0 for a crawl nobody judged — would
+   * paint a clean dashboard for a site nobody has examined, which is hard rule
+   * 7's failure in its UI-facing form.
+   */
+  fired?: RuleFired | null;
+}
+
+/** The whole ruleset, as `GET /rules` and `rules_catalog` answer it. */
+export interface RulesCatalog {
+  /**
+   * The ruleset the COPY in this answer comes from — always the engine's
+   * current one, including when a crawl is named. A crawl judged under an older
+   * ruleset is described by today's rules; where it holds rows for a rule that
+   * no longer exists, the catalog refuses rather than dropping the count (see
+   * `firedByRule`).
+   */
+  rulesetVersion: string;
+  rules: CatalogRule[];
+}
+
+/**
  * One finding, at URL level: the sf-action-plan tab feed.
  *
  * `evidence` is the stored `details_jsonb` verbatim — what the rule wrote,
@@ -872,6 +948,38 @@ export const EXPORT_BATCH = 500;
  * getting a null rank that a keyset comparison would silently skip.
  */
 const SEVERITY_RANK = sql`case i.severity when 'critical' then 0 when 'warning' then 1 when 'info' then 2 else 3 end`;
+
+/**
+ * The same order as `SEVERITY_RANK`, in JavaScript — for the one listing that
+ * is sorted in memory because its rows are the registry rather than a table
+ * (`rulesCatalog`).
+ *
+ * A `Record<Severity, number>` and not a lookup with a default: `Severity` is
+ * closed, so a fourth severity would fail to compile here instead of silently
+ * sorting somewhere. That is the property `SEVERITY_RANK`'s `else 3` buys in
+ * SQL, where the value arrives from a row this process did not write.
+ */
+const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
+
+/**
+ * A rule's truncation note for one crawl, as a scalar subquery — read
+ * RULE-WIDE, correlated against whatever the enclosing query calls `i`.
+ *
+ * ONE EXPRESSION, TWO READERS. `listIssues` lifts the note onto a group and
+ * `rulesCatalog` reduces it to "this count is a floor"; both must agree about
+ * WHICH note belongs to a rule, or the triage view and the checklist would
+ * disagree about whether the same number is exact. The rule-wide scoping (no
+ * severity or page-type predicate) is deliberate and is argued in `listIssues`:
+ * no filter may be able to hide a truncation.
+ */
+function truncationNote(crawlId: string): SQL {
+  return sql`(select i2.details_jsonb->'truncated'
+                from issues i2
+               where i2.crawl_id = ${crawlId}
+                 and i2.rule_id = i.rule_id
+                 and i2.details_jsonb->'truncated' is not null
+               limit 1)`;
+}
 
 /** The filters `GET /crawls/:id/issues` accepts. Every one is validated. */
 export interface IssueQuery {
@@ -1490,6 +1598,138 @@ export class ApiService {
   }
 
   /**
+   * The whole ruleset as a catalog — and, when a crawl is named, what each rule
+   * found on it. `GET /rules` and `rules_catalog`.
+   *
+   * This is the checklist a dashboard renders. `listIssues` answers "what is
+   * wrong with this site" and therefore names only the rules that fired;
+   * a UI has to draw the OTHER rows too — the checks that passed, and the
+   * checks that exist at all before any crawl has been run. Those rows cannot
+   * be reconstructed from a findings listing, because an absence there has no
+   * name.
+   *
+   * ## Not paginated, and that is not an oversight
+   *
+   * Obligation 1 forbids a full export inline. This is not one: it is a CLOSED
+   * resource whose size is the ruleset's, not the crawl's. It does not grow
+   * with pages, findings or links — the three things that make an export an
+   * export — and it is the same few dozen rows on a 5-page site and a 50k-page
+   * one. A cursor over it would make every consumer loop to assemble a
+   * checklist they need whole in order to draw anything at all. The listings
+   * that DO scale with the data are all paginated, and none of them is this.
+   *
+   * ## One walk, one query
+   *
+   * The registry is walked in memory (it is built once, at construction) and
+   * joined against a SINGLE grouped count over `issues`. Never a count per
+   * rule: that would be one round trip per rule for one dashboard paint, and it
+   * would let the counts come from as many different snapshots.
+   *
+   * Sorted by severity then id — the order `listIssues` returns its groups in —
+   * so a UI that renders both puts the same rule in the same place twice.
+   */
+  async rulesCatalog(opts: { crawlId?: string } = {}): Promise<RulesCatalog> {
+    const ordered = [...this.registry.all()].sort(
+      (a, b) =>
+        SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.id.localeCompare(b.id),
+    );
+    const copy = (rule: AnyRule): CatalogRule => ({
+      id: rule.id,
+      kind: rule.kind,
+      severity: rule.severity,
+      category: rule.category,
+      checkIds: [...rule.checkIds],
+      title: rule.title,
+      explanation: rule.explanation,
+      howToFix: rule.howToFix,
+    });
+
+    // NO CRAWL, NO `fired` KEY AT ALL. Not `null`, which means "this crawl was
+    // never judged" — a claim about a crawl nobody named would be an answer to
+    // a question nobody asked.
+    if (opts.crawlId === undefined) {
+      return { rulesetVersion: RULESET_VERSION, rules: ordered.map(copy) };
+    }
+
+    const { judged, fired } = await this.firedByRule(opts.crawlId);
+    return {
+      rulesetVersion: RULESET_VERSION,
+      rules: ordered.map((rule) => ({
+        ...copy(rule),
+        // The whole distinction, in one expression: unjudged is null for every
+        // rule, and judged is a count for every rule — zero where the rule
+        // wrote nothing, which is a measurement rather than a silence.
+        fired: judged ? (fired.get(rule.id) ?? { count: 0 }) : null,
+      })),
+    };
+  }
+
+  /**
+   * One crawl's judged-state and its findings-per-rule, from ONE statement.
+   *
+   * The marker and the counts ride together for the reason `crawlRowWithCounts`
+   * spells out: `runRules` clears `rules_run_at` and deletes the crawl's issues
+   * in a single transaction, so two reads on two pool connections could compose
+   * `{judged: true, counts: none}` — a state that never existed, and precisely
+   * the one a dashboard would paint as a clean site. A `left join lateral`
+   * keeps them in one snapshot and still answers for a crawl with no findings
+   * at all (one row, `rule_id` null).
+   *
+   * A rule id the current ruleset does not define is a refusal, not a dropped
+   * row (`ruleFor`, the same 409 `listIssues` raises). Silently skipping it
+   * would leave the catalog's counts no longer summing to `findingsCount`, with
+   * nothing on the wire saying why.
+   */
+  private async firedByRule(
+    crawlId: string,
+  ): Promise<{ judged: boolean; fired: Map<string, RuleFired> }> {
+    const result = await this.db.execute<{
+      judged: boolean;
+      rule_id: string | null;
+      n: number | null;
+      truncation: unknown;
+    }>(sql`
+      select c.rules_run_at is not null as judged,
+             g.rule_id,
+             g.n,
+             g.truncation
+        from crawls c
+        left join lateral (
+          select i.rule_id,
+                 count(*)::int as n,
+                 ${truncationNote(crawlId)} as truncation
+            from issues i
+           where i.crawl_id = c.id
+           group by i.rule_id
+        ) g on true
+       where c.id = ${crawlId}`);
+
+    const rows = result.rows;
+    const first = rows[0];
+    if (first === undefined) {
+      throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
+    }
+
+    const fired = new Map<string, RuleFired>();
+    for (const row of rows) {
+      // The left join's own row for a crawl that holds no findings.
+      if (row.rule_id === null) continue;
+      this.ruleFor(row.rule_id, crawlId, "issues");
+      if (typeof row.n !== "number") {
+        throw new Error(
+          `firedByRule: rule '${row.rule_id}' counted as ${typeof row.n}, not a number`,
+        );
+      }
+      const note = truncationOf(row.truncation, row.rule_id);
+      fired.set(
+        row.rule_id,
+        note.truncated === true ? { count: row.n, atLeast: true } : { count: row.n },
+      );
+    }
+    return { judged: first.judged === true, fired };
+  }
+
+  /**
    * The crawl's findings, grouped by rule: the triage view.
    *
    * GROUPED BY (rule, severity) rather than by rule alone, and the pair is the
@@ -1573,12 +1813,7 @@ export class ApiService {
                         order by i.details_jsonb->>'pageUrl')
                 filter (where i.details_jsonb->>'pageUrl' is not null)
              )[1:${sql.raw(String(ISSUE_SAMPLE_URLS))}] as sample_urls,
-             (select i2.details_jsonb->'truncated'
-                from issues i2
-               where i2.crawl_id = ${crawlId}
-                 and i2.rule_id = i.rule_id
-                 and i2.details_jsonb->'truncated' is not null
-               limit 1) as truncation
+             ${truncationNote(crawlId)} as truncation
       from issues i
       where ${sql.join(where, sql` and `)}
       group by i.rule_id, i.severity

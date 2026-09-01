@@ -34,6 +34,11 @@
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
+ *   GET  /rules                        the rule catalog: every rule with its
+ *                                      client-facing copy. `?crawlId=` joins
+ *                                      one crawl's fired state onto it —
+ *                                      `{count}` on a judged crawl (0 is a real
+ *                                      value) and `null` on one nobody judged
  *   GET  /crawls/:id/export            write a dataset to disk, answer with the path
  *
  * ## What a caller can never be told
@@ -328,6 +333,20 @@ function buildRoutes(): Route[] {
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),
+      }),
+    },
+    // THE ONE ROUTE THAT IS NOT UNDER A CRAWL. The catalog is a property of the
+    // ruleset, and a crawl is an optional projection onto it — which is why
+    // `crawlId` is a query parameter here rather than a path segment: without
+    // one there is a complete, useful answer (the checklist skeleton), and a
+    // path that required an id would have no way to ask for it.
+    {
+      method: "GET",
+      pattern: ["rules"],
+      query: ["crawlId"],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.rulesCatalog({ ...optionalString(ctx.query, "crawlId") }),
       }),
     },
     {

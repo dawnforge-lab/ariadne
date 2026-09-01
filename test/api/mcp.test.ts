@@ -41,6 +41,8 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { loadMcpConfig } from "../../src/api/config.js";
 import { MIN_PER_HOST_DELAY_MS, START_CRAWL_FIELDS } from "../../src/api/service.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
 const SEEDED_SITE = "http://mcp-query.example";
 
@@ -90,6 +92,13 @@ let seededCrawlId = "";
  * vocabularies. Its own crawl, so the listings above keep their exact rows.
  */
 let surfaceCrawlId = "";
+/**
+ * A JUDGED crawl — `rules_run_at` stamped — with known findings. It is the
+ * catalog's fired-state fixture: everything about `rules_catalog` that is not
+ * about the registry is about the difference between a crawl that has been
+ * judged and one that has not, and `seededCrawlId` above is the unjudged half.
+ */
+let catalogCrawlId = "";
 
 /** The robots.txt `surfaceCrawlId` read, as the discovery evidence stores it. */
 const SEEDED_ROBOTS = "User-agent: *\nDisallow: /cart\nCrawl-delay: 3\n";
@@ -161,6 +170,8 @@ async function seedCrawl(row: {
   status: string;
   config?: Record<string, unknown>;
   discovery?: unknown;
+  /** Stamp `rules_run_at`: the only thing that says a rules pass completed. */
+  judged?: boolean;
 }): Promise<string> {
   await db.insert(crawls).values({
     id: row.id,
@@ -169,6 +180,7 @@ async function seedCrawl(row: {
     rulesetVersion: "0.0.0-test",
     status: row.status,
     ...(row.discovery === undefined ? {} : { discovery: row.discovery }),
+    ...(row.judged === true ? { rulesRunAt: new Date("2026-08-30T09:00:00.000Z") } : {}),
   });
   createdCrawls.push(row.id);
   return row.id;
@@ -397,6 +409,27 @@ beforeAll(async () => {
     discoveredVia: "sitemap", renderableWordCount: 200,
   });
 
+  // The judged crawl: the same kind of rows, plus the marker. Its `title.missing`
+  // is exact and its `links.orphan` was capped, so the catalog has both a
+  // trustworthy count and a floor to report — and `http.server-error`, which
+  // wrote nothing here, is the real clean.
+  catalogCrawlId = await seedCrawl({
+    id: `crawl_mcp_catalog_${Date.now()}`,
+    status: "finished",
+    judged: true,
+  });
+  await seedIssue(catalogCrawlId, {
+    ruleId: "title.missing", severity: "warning", pageUrl: `${SEEDED_SITE}/t1`,
+    dedupeKey: `${SEEDED_SITE}/t1`,
+  });
+  for (let i = 1; i <= 3; i += 1) {
+    await seedIssue(catalogCrawlId, {
+      ruleId: "links.orphan", severity: "warning", pageUrl: `${SEEDED_SITE}/c${i}`,
+      dedupeKey: `${SEEDED_SITE}/c${i}`,
+      evidence: i === 3 ? { truncated: { reported: 3, total: 222 } } : {},
+    });
+  }
+
   await db.insert(metrics).values([
     { crawlId: seededCrawlId, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: seededCrawlId, metricId: "content.metrics-by-type", scope: "page_type", scopeValue: "product", value: { words: 800 } },
@@ -425,13 +458,13 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the twelve tools of the agent surface, each described", async () => {
+  it("advertises exactly the thirteen tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "crawl_list", "crawl_mark_failed", "crawl_render", "crawl_rules", "crawl_start",
         "crawl_status", "export_crawl", "issue_urls", "issues_list", "metrics_get",
-        "pages_query", "robots_get",
+        "pages_query", "robots_get", "rules_catalog",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -968,6 +1001,112 @@ describe("issues_list / issue_urls", () => {
     const answer = await call("issue_urls", { crawlId: seededCrawlId, ruleId: "not.a.rule" });
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("not.a.rule");
+  });
+});
+
+/**
+ * The rule catalog over MCP: the same answer the HTTP surface gives, because it
+ * is the same service call. What is tested HERE and nowhere else is the tool —
+ * that it exists, that its schema is closed, and that its description tells a
+ * reader the one thing the shape cannot say for itself: what a null means.
+ *
+ * The counts are derived from `buildRegistry()`, never written down. See the
+ * same note in test/api/query.test.ts.
+ */
+describe("rules_catalog", () => {
+  const registry = buildRegistry();
+
+  function rulesOf(body: Record<string, unknown>): Record<string, unknown>[] {
+    const value = body["rules"];
+    if (!Array.isArray(value)) throw new Error(`no rules in ${JSON.stringify(body)}`);
+    return value as Record<string, unknown>[];
+  }
+
+  async function description(): Promise<string> {
+    const listed = await client.listTools();
+    return listed.tools.find((t) => t.name === "rules_catalog")?.description ?? "";
+  }
+
+  it("answers the whole ruleset with its copy, and no fired state", async () => {
+    const body = await ok("rules_catalog");
+    expect(body["rulesetVersion"]).toBe(RULESET_VERSION);
+    const rules = rulesOf(body);
+    expect(rules).toHaveLength(registry.all().length);
+    for (const kind of ["page", "query", "metric"] as const) {
+      expect(rules.filter((r) => r["kind"] === kind), `${kind} rules`).toHaveLength(
+        registry.byKind(kind).length,
+      );
+    }
+    for (const rule of rules) {
+      for (const field of ["title", "explanation", "howToFix"] as const) {
+        expect(String(rule[field] ?? ""), `${String(rule["id"])} has no ${field}`).not.toBe("");
+      }
+      expect((rule["checkIds"] as string[]).length).toBeGreaterThan(0);
+      expect(rule).not.toHaveProperty("fired");
+    }
+  });
+
+  it("joins a judged crawl's fired state, zero included, summing to findingsCount", async () => {
+    const rules = rulesOf(await ok("rules_catalog", { crawlId: catalogCrawlId }));
+    const byId = new Map(rules.map((r) => [String(r["id"]), r]));
+    expect(byId.get("title.missing")?.["fired"]).toEqual({ count: 1 });
+    expect(byId.get("http.server-error")?.["fired"]).toEqual({ count: 0 });
+    // A capped rule's count is a floor and says so.
+    expect(byId.get("links.orphan")?.["fired"]).toEqual({ count: 3, atLeast: true });
+
+    const total = rules.reduce(
+      (n, rule) => n + Number((rule["fired"] as Record<string, unknown>)["count"]),
+      0,
+    );
+    const detail = await ok("crawl_status", { crawlId: catalogCrawlId });
+    expect(detail["findingsCount"]).toBe(total);
+    expect(total).toBe(4);
+  });
+
+  it("answers fired null on a crawl nobody has judged, rows or no rows", async () => {
+    const detail = await ok("crawl_status", { crawlId: seededCrawlId });
+    expect(detail["rulesRunAt"]).toBeNull();
+    expect(Number(detail["findingsCount"])).toBeGreaterThan(0);
+
+    const rules = rulesOf(await ok("rules_catalog", { crawlId: seededCrawlId }));
+    expect(rules).toHaveLength(registry.all().length);
+    for (const rule of rules) {
+      expect(rule["fired"], `${String(rule["id"])} counted an unjudged crawl`).toBeNull();
+    }
+  });
+
+  it("refuses a crawl id nothing knows", async () => {
+    const answer = await call("rules_catalog", { crawlId: "crawl_missing" });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("no such crawl");
+  });
+
+  // THE DESCRIPTION PIN. An unfenced description rots: the shape changes and
+  // the sentence an agent (or a UI author) reads keeps describing the old one.
+  it("names every field it actually answers with, and states null-vs-zero", async () => {
+    const text = await description();
+    const rules = rulesOf(await ok("rules_catalog", { crawlId: catalogCrawlId }));
+    const fields = new Set<string>(["rulesetVersion", "rules"]);
+    for (const rule of rules) {
+      for (const key of Object.keys(rule)) fields.add(key);
+      const fired = rule["fired"];
+      if (fired !== null && typeof fired === "object") {
+        for (const key of Object.keys(fired)) fields.add(key);
+      }
+    }
+    // The live answer carries both truncation states, so `atLeast` is in here
+    // because a rule actually reported it — not because it was listed by hand.
+    expect(fields.has("atLeast")).toBe(true);
+    for (const field of fields) {
+      expect(text, `rules_catalog's description does not name '${field}'`).toContain(field);
+    }
+
+    // And the distinction the shape cannot make on its own: null is "never
+    // been judged", zero is "ran and found nothing", and the field that tells
+    // them apart is named so a reader can go and check it.
+    expect(text).toContain("never been judged");
+    expect(text).toContain("found nothing");
+    expect(text).toContain("rulesRunAt");
   });
 });
 

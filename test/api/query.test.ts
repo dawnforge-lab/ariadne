@@ -27,6 +27,8 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const SITE = "http://query.example";
@@ -103,7 +105,7 @@ async function walk(path: string, limit = 1): Promise<Record<string, unknown>[]>
 
 async function seedCrawl(
   id: string,
-  opts: { config?: Record<string, unknown>; discovery?: unknown } = {},
+  opts: { config?: Record<string, unknown>; discovery?: unknown; judged?: boolean } = {},
 ): Promise<void> {
   await db.insert(crawls).values({
     id,
@@ -112,6 +114,11 @@ async function seedCrawl(
     rulesetVersion: "0.0.0-test",
     status: "finished",
     ...(opts.discovery === undefined ? {} : { discovery: opts.discovery }),
+    // `judged` stamps `rules_run_at`, which is the ONLY thing that says a rules
+    // pass completed over this crawl. The seeded rows below are written by hand
+    // either way; the marker is what makes an empty rule "ran and found
+    // nothing" rather than "nobody has looked".
+    ...(opts.judged === true ? { rulesRunAt: new Date("2026-08-30T09:00:00.000Z") } : {}),
   });
 }
 
@@ -189,7 +196,13 @@ beforeAll(async () => {
   crawlC = `crawl_query_c_${stamp}`;
   crawlD = `crawl_query_d_${stamp}`;
   crawlE = `crawl_query_e_${stamp}`;
-  for (const id of [crawlA, crawlB, crawlC, crawlD]) await seedCrawl(id);
+  for (const id of [crawlA, crawlD]) await seedCrawl(id);
+  // JUDGED, and the two of them for different reasons. crawlB is the catalog's
+  // fired-state fixture: a completed pass is what makes a rule with no rows a
+  // real clean rather than an unasked question. crawlC is judged so that its
+  // rows for a retired rule id are reached at all — an unjudged crawl answers
+  // `fired: null` without ever reading a count.
+  for (const id of [crawlB, crawlC]) await seedCrawl(id, { judged: true });
 
   // The surface-exposure crawl. Its config carries the two legacy domains the
   // crawl was told about (CHECK-15's evidence is unreadable without them), and
@@ -1030,6 +1043,182 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     const res = await call(`/crawls/${crawlE}`);
     expect(res.body["rulesRunAt"]).toBe(stamped.toISOString());
     await db.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlE));
+  });
+});
+
+/**
+ * The rule catalog: the checklist a dashboard renders before it has a finding
+ * to show, and the same checklist with one crawl's fired state joined onto it.
+ *
+ * EVERY EXPECTATION ABOUT HOW MANY RULES THERE ARE IS DERIVED FROM
+ * `buildRegistry()`, never written as a number. The registry is what the
+ * endpoint walks, so a hardcoded 85 here would be a second, staler statement of
+ * the ruleset's size that the next rule to be added would have to be taught
+ * about. `test/rules/coverage.test.ts` owns the exact-count pins; this file
+ * owns the SHAPE and the SEMANTICS.
+ */
+describe("GET /rules", () => {
+  const registry = buildRegistry();
+
+  function rulesOf(res: Res): Record<string, unknown>[] {
+    const value = res.body["rules"];
+    if (!Array.isArray(value)) throw new Error(`no rules in ${JSON.stringify(res.body)}`);
+    return value as Record<string, unknown>[];
+  }
+
+  function byId(res: Res): Map<string, Record<string, unknown>> {
+    return new Map(rulesOf(res).map((rule) => [String(rule["id"]), rule]));
+  }
+
+  it("answers the whole ruleset with its client-facing copy and no fired state", async () => {
+    const res = await call("/rules");
+    expect(res.status).toBe(200);
+    expect(res.body["rulesetVersion"]).toBe(RULESET_VERSION);
+
+    const rules = rulesOf(res);
+    expect(rules).toHaveLength(registry.all().length);
+    expect(rules.map((r) => String(r["id"])).sort()).toEqual(
+      registry.all().map((r) => r.id).sort(),
+    );
+    for (const kind of ["page", "query", "metric"] as const) {
+      expect(rules.filter((r) => r["kind"] === kind), `${kind} rules`).toHaveLength(
+        registry.byKind(kind).length,
+      );
+    }
+
+    for (const rule of rules) {
+      const id = String(rule["id"]);
+      // The copy is the whole point of the skeleton: a checklist rendered with
+      // blank rows is a checklist nobody can read.
+      for (const field of ["title", "explanation", "howToFix", "category"] as const) {
+        expect(String(rule[field] ?? ""), `${id} has no ${field}`).not.toBe("");
+      }
+      expect(["critical", "warning", "info"]).toContain(rule["severity"]);
+      expect(["page", "query", "metric"]).toContain(rule["kind"]);
+      expect(Array.isArray(rule["checkIds"])).toBe(true);
+      expect((rule["checkIds"] as string[]).length, `${id} claims no check`).toBeGreaterThan(0);
+      // ABSENT, not null: nobody named a crawl, so there is no fired state to
+      // report — which is a different sentence from "this crawl was never
+      // judged" (null) and from "this rule found nothing" ({count: 0}).
+      expect(rule, `${id} carries a fired state nobody asked for`).not.toHaveProperty("fired");
+    }
+  });
+
+  it("orders the catalog the way issues_list orders its groups", async () => {
+    const rules = rulesOf(await call("/rules"));
+    const rank: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+    const keys = rules.map((r) => [rank[String(r["severity"])] ?? 9, String(r["id"])] as const);
+    const sorted = [...keys].sort((a, b) => a[0] - b[0] || a[1].localeCompare(b[1]));
+    expect(keys).toEqual(sorted);
+  });
+
+  it("joins a judged crawl's fired state, and counts a clean rule as zero", async () => {
+    const res = await call(`/rules?crawlId=${crawlB}`);
+    expect(res.status).toBe(200);
+    const rules = byId(res);
+    expect(rules.size).toBe(registry.all().length);
+
+    // A rule that fired carries its exact row count…
+    expect(rules.get("title.missing")?.["fired"]).toEqual({ count: 1 });
+    // …and a rule that did not fire carries a zero, which on a JUDGED crawl is
+    // a real measurement: the rule ran over this site and found nothing.
+    expect(rules.get("http.server-error")?.["fired"]).toEqual({ count: 0 });
+
+    // The counts are the crawl's whole findings table, redistributed: they sum
+    // to the number crawl_status reports, so a dashboard can render the
+    // checklist and the total from one answer without them disagreeing.
+    const total = [...rules.values()].reduce(
+      (n, rule) => n + Number((rule["fired"] as Record<string, unknown>)["count"]),
+      0,
+    );
+    const detail = await call(`/crawls/${crawlB}`);
+    expect(detail.body["findingsCount"]).toBe(total);
+    expect(total).toBeGreaterThan(0);
+  });
+
+  it("says fired null on a crawl nobody has judged, however many rows it holds", async () => {
+    // crawlA's issues table is full — seeded, never judged. THE DISTINCTION IS
+    // THE POINT: null is "never measured", {count: 0} is "measured, clean", and
+    // no code path may blur them.
+    const rows = await db.select().from(issues).where(eq(issues.crawlId, crawlA));
+    expect(rows.length).toBeGreaterThan(0);
+    const detail = await call(`/crawls/${crawlA}`);
+    expect(detail.body["rulesRunAt"]).toBeNull();
+
+    const rules = rulesOf(await call(`/rules?crawlId=${crawlA}`));
+    expect(rules).toHaveLength(registry.all().length);
+    for (const rule of rules) {
+      expect(rule, `${String(rule["id"])} lost its fired key`).toHaveProperty("fired");
+      expect(rule["fired"], `${String(rule["id"])} reported a count on an unjudged crawl`).toBeNull();
+    }
+  });
+
+  it("marks a capped rule's count as a floor, agreeing with issues_list", async () => {
+    const rules = byId(await call(`/rules?crawlId=${crawlB}`));
+    // Both truncation shapes a rule can honestly write reduce to the same claim
+    // here: the count is what the rule LISTED, not how many cases exist.
+    expect(rules.get("links.orphan")?.["fired"]).toEqual({ count: 3, atLeast: true });
+    expect(rules.get("content.near-duplicate")?.["fired"]).toEqual({ count: 2, atLeast: true });
+    // An uncapped rule says nothing: no flag means the count IS the number.
+    expect(rules.get("title.missing")?.["fired"]).not.toHaveProperty("atLeast");
+
+    // And the flag is read off the same note issues_list reads, which is where
+    // the magnitude itself lives.
+    const groups = items(await call(`/crawls/${crawlB}/issues`));
+    const orphan = groups.find((g) => g["ruleId"] === "links.orphan");
+    expect(orphan?.["count"]).toBe(3);
+    expect(orphan?.["truncated"]).toBe(true);
+    expect(orphan?.["total"]).toBe(222);
+  });
+
+  it("404s a crawl id nothing knows rather than answering the skeleton", async () => {
+    const res = await call("/rules?crawlId=crawl_nope");
+    expect(res.status).toBe(404);
+    expect(String(res.body["error"])).toContain("crawl_nope");
+  });
+
+  it("400s a query parameter this route does not take", async () => {
+    const res = await call("/rules?category=links");
+    expect(res.status).toBe(400);
+    expect(String(res.body["error"])).toContain("category");
+  });
+
+  it("409s a crawl holding rows for a rule this ruleset no longer defines", async () => {
+    // The same refusal issues_list makes, for the same reason: the count would
+    // otherwise be silently dropped from the catalog and the totals would stop
+    // adding up, with nothing saying why.
+    const res = await call(`/rules?crawlId=${crawlC}`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("retired.rule");
+  });
+
+  it("reads the marker and the counts from one statement, and groups once", async () => {
+    const pool = db.$pool as unknown as { query: (...args: unknown[]) => unknown };
+    const original = pool.query.bind(pool);
+    const statements: string[] = [];
+    pool.query = (...args: unknown[]) => {
+      const first = args[0];
+      statements.push(
+        typeof first === "string" ? first : String((first as { text?: unknown })?.text ?? ""),
+      );
+      return original(...args);
+    };
+    let res: Res;
+    try {
+      res = await call(`/rules?crawlId=${crawlB}`);
+    } finally {
+      pool.query = original;
+    }
+    expect(res.status).toBe(200);
+
+    // ONE statement touches `issues` — one grouped count for the whole catalog,
+    // never a query per rule (85 round trips for one dashboard paint) — and it
+    // is the one that reads the marker, so "judged" and "how many" describe the
+    // same instant (the crawl-detail read makes the same argument).
+    const touchingIssues = statements.filter((sql) => /\bissues\b/.test(sql));
+    expect(touchingIssues).toHaveLength(1);
+    expect(touchingIssues[0]).toMatch(/rules_run_at/);
+    expect(touchingIssues[0]).toMatch(/group by/i);
   });
 });
 

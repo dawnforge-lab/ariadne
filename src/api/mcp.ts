@@ -1,5 +1,5 @@
 /**
- * The MCP transport: twelve tools over the same service layer the HTTP routes
+ * The MCP transport: thirteen tools over the same service layer the HTTP routes
  * use.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
@@ -106,6 +106,7 @@ export const TOOL_NAMES = [
   "metrics_get",
   "pages_query",
   "export_crawl",
+  "rules_catalog",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -152,6 +153,9 @@ The order of operations is fixed by what the evidence means:
                    findings. Refused while the crawl is still moving.
   5. issues_list / issue_urls / metrics_get / pages_query read the results.
                    robots_get reads the robots.txt the crawl obeyed.
+                   rules_catalog reads the checklist itself — every rule and,
+                   with a crawlId, whether it fired on that crawl (including the
+                   ones that found nothing, which no findings listing can name).
 
 An empty findings or metrics answer is only 'nothing found' on a crawl that was
 judged. crawl_status's rulesRunAt is the check: a timestamp means a rules pass
@@ -706,6 +710,61 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("robots_get", () => service.getRobots(crawlId)),
+  );
+
+  server.registerTool(
+    named("rules_catalog"),
+    {
+      title: "Every rule this engine can apply",
+      description:
+        "The whole ruleset, with the client-facing copy each rule would report " +
+        "with: {rulesetVersion, rules: [{id, kind, severity, category, checkIds, " +
+        "title, explanation, howToFix}]}. kind is page | query | metric, severity " +
+        "is critical | warning | info, and checkIds trace each rule to the audit " +
+        "checklist. Ordered by severity then rule id — the order issues_list " +
+        "returns its groups in.\n\n" +
+        "This is the CHECKLIST: what the engine looks for, including the checks a " +
+        "site passed and the checks nobody has run yet. issues_list can only name " +
+        "the rules that found something, so it cannot answer 'what else was " +
+        "examined'. Use this to render or walk the full list; use issues_list for " +
+        "the findings themselves.\n\n" +
+        "WITH crawlId, every rule additionally carries `fired`, and it has THREE " +
+        "states that mean three different things:\n" +
+        "  fired absent      — no crawlId was given. Nobody has looked; this is " +
+        "the bare checklist.\n" +
+        "  fired: null       — the crawl exists and has never been judged: no rules " +
+        "pass has completed over it (crawl_status's rulesRunAt is null). Nothing " +
+        "is known about this rule on this site. Run crawl_rules first.\n" +
+        "  fired: {count: N} — a rules pass completed, and this rule wrote N " +
+        "findings. count: 0 is a real measurement: the rule ran and found nothing " +
+        "on this site.\n" +
+        "NEVER READ A NULL AS A ZERO. One is a clean check; the other is a " +
+        "question nobody has asked yet.\n\n" +
+        "fired.atLeast: true beside the count means the rule CAPPED its listing, " +
+        "so count is a floor rather than the number of cases — report it as 'N or " +
+        "more' and read the exact magnitude (truncated + total | atLeast) off " +
+        "issues_list, which owns it. No atLeast means count is the whole number.\n\n" +
+        "METRIC RULES MEASURE RATHER THAN FAULT, so a rule with kind 'metric' " +
+        "writes no findings and reports count 0 on every judged crawl. That zero " +
+        "is not a verdict about the site; its numbers are in metrics_get.\n\n" +
+        "The copy is always the CURRENT ruleset's (rulesetVersion says which), " +
+        "including when the named crawl was judged by an older one. A crawl " +
+        "holding findings for a rule this ruleset no longer defines is refused " +
+        "rather than answered with a count missing from the list — re-run " +
+        "crawl_rules over it.\n\n" +
+        "Not paginated: the ruleset is a fixed, small list that does not grow " +
+        "with the size of a crawl.",
+      inputSchema: z.strictObject({
+        crawlId: z
+          .string()
+          .describe(
+            "Join this crawl's fired state onto every rule. Omit for the bare " +
+              "checklist — the rules and their copy, with no `fired` field at all.",
+          )
+          .optional(),
+      }),
+    },
+    async (args) => run("rules_catalog", () => service.rulesCatalog(defined(args))),
   );
 
   server.registerTool(
