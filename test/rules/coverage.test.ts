@@ -131,11 +131,25 @@ describe("checklist coverage", () => {
   // and now the new metric), and the metric that gave it up takes CHECK-32,
   // which `links.orphan` already claims. Claims are a set union, so both edges
   // are invisible in the totals — which is exactly why they are written here.
-  it("pins the ruleset split the gate doc reports: 85 rules = 27 page + 46 query + 12 metric", () => {
+  // Phase 9 Task 2 MOVES one rule between kinds and adds none.
+  // `structure.deep-page` becomes a query rule, because the depth it reports is
+  // `pages.click_depth` and a derivation writes that column AFTER the page
+  // cursor has run — so as a page rule it read last run's value, or null, and
+  // passed on every first judgement (hard rule 1).
+  //
+  //   page    27 - 1 = 26
+  //   query   46 + 1 = 47
+  //   total   85 + 0 = 85
+  //
+  // The claimed-check arithmetic below does not move, and that is the test of
+  // whether this was a MOVE: same rule id, same CHECK-31, same severity, same
+  // category. A coverage number that moved here would mean the rule was deleted
+  // rather than relocated.
+  it("pins the ruleset split the gate doc reports: 85 rules = 26 page + 47 query + 12 metric", () => {
     const registry = buildRegistry();
     expect(registry.all()).toHaveLength(85);
-    expect(registry.byKind("page")).toHaveLength(27);
-    expect(registry.byKind("query")).toHaveLength(46);
+    expect(registry.byKind("page")).toHaveLength(26);
+    expect(registry.byKind("query")).toHaveLength(47);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage.
@@ -150,8 +164,10 @@ describe("checklist coverage", () => {
     const byId = new Map(buildRegistry().all().map((r) => [r.id, r.checkIds]));
     expect(byId.get("structure.click-depth-distribution")).toEqual(["CHECK-31"]);
     expect(byId.get("structure.depth-distribution")).not.toContain("CHECK-31");
-    // And CHECK-31 never went unclaimed on the way: the page rule that names
-    // individual deep pages has claimed it since Phase 3.
+    // And CHECK-31 never went unclaimed on the way: the rule that names
+    // individual deep pages has claimed it since Phase 3 — as a page rule then,
+    // as a query rule over `click_depth` since Phase 9, with the claim carried
+    // across the move.
     expect(byId.get("structure.deep-page")).toContain("CHECK-31");
   });
 

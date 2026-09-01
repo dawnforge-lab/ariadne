@@ -120,6 +120,15 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.7.0: Phase 9. `structure.deep-page` reads `pages.click_depth` — clicks
+    // from the home page along internal links — where it used to read discovery
+    // depth, which records where the CRAWLER found a URL and puts every sitemap
+    // entry at the top. On a sitemapped site the old reading kept the rule
+    // silent through two real audits (docs/gates/phase-8.md §15 item 1), so a
+    // crawl re-judged under 0.7.0 can gain CHECK-31 findings it did not have,
+    // and their evidence key moved with the column: `{clickDepth, threshold}`
+    // where 0.6.0 wrote `{depth, threshold}`.
+    //
     // 0.6.0: Phase 8. `content.csr-dependent` compares two readings by ONE
     // instrument — the analyzer's `renderable_word_count` against the same
     // function's count over the serialised post-JavaScript DOM — where it used
@@ -141,9 +150,9 @@ describe("check universe", () => {
     //
     // ONE BUMP PER PHASE, not one per task: a version identifies the ruleset a
     // stored finding was produced by, and two numbers inside one phase would
-    // claim a difference between rules that shipped together. T1 bumped; this
-    // task verifies rather than bumping again.
-    expect(RULESET_VERSION).toBe("0.6.0");
+    // claim a difference between rules that shipped together. Phase 9's bump is
+    // T2's, above; the phase's other tasks verify rather than bump again.
+    expect(RULESET_VERSION).toBe("0.7.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

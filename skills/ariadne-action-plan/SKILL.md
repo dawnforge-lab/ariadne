@@ -45,11 +45,13 @@ remediation prose over a rule you have not read.
    whose crawl was never judged holds passes that assert nothing and a work plan
    built on them is a work plan built on silence.
 
-   **`crawl.rulesRunAt` is the whole of that test.** `crawl.rulesRun` — the
-   `crawl_rules` summary's scalars — is null whenever the audit read a crawl
-   somebody else judged, with the reason in `crawl.caveats`, and that is a correct
-   file rather than a broken one. Do not stop on it, and do not run `crawl_rules`
-   yourself to fill it: re-judging the crawl underneath a finished audit is how the
+   **`crawl.rulesRunAt` is the whole of that test.** `crawl.rulesRun` — the run's
+   three scalars — is filled for any judged crawl, including one somebody else
+   judged, so on a current file it is there beside the marker. A null `rulesRun`
+   under a timestamped `rulesRunAt` is an OLDER findings file, written before those
+   numbers were readable without a run, and it is a correct file rather than a
+   broken one. Do not stop on it either way, and do not run `crawl_rules` yourself
+   to fill it: re-judging the crawl underneath a finished audit is how the
    spreadsheet stops matching the report it ships with.
 2. **A reachable server holding the same crawl.** MCP preferred
    (`npm run mcp:serve`), HTTP as the fallback (the `ariadne-crawl` skill has the

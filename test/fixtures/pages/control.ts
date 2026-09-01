@@ -23,7 +23,7 @@
  *   mobile.viewport-missing                     viewport meta present
  *   images.missing-alt / missing-dimensions     every img has alt, width, height
  *   performance.slow-response                   answered immediately
- *   structure.deep-page                         linked from the hub, depth 1
+ *   structure.deep-page                         linked from the hub, one click deep
  *   hreflang.* (all four)                       no hreflang declarations
  *   links.orphan                                linked from the hub
  *   pagination.*                                no rel=next, no rel=prev

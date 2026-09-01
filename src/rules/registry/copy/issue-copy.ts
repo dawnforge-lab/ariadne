@@ -499,9 +499,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "structure.deep-page": {
     title: "Page is deep in the site structure",
     explanation:
-      "This indexable page sits more than 5 links deep from where the crawl started. Depth is one of the ways crawlers and readers judge importance: deep pages get crawled less often, receive less internal link equity, and are harder to browse to. Pages excluded from the index are not reported here — their depth costs nothing.",
+      "Following internal links from the home page, the shortest route to this indexable page is more than 5 links deep. Depth is one of the ways crawlers and readers judge importance: deep pages get crawled less often, receive less internal link equity, and are harder to browse to. Being listed in the sitemap does not shorten that route. Pages excluded from the index are not reported here — their depth costs nothing — and a page with no link path at all is reported as an orphan instead.",
     howToFix:
-      "Link to the page from higher-level pages — a hub, a category, or navigation — so the path to it is shorter. If it is not important enough to link from higher up, the honest answer may be to consolidate or remove it.",
+      "Link to the page from shallower hub pages — a category, a landing page, or navigation — so that fewer clicks from the home page reach it. If it is not important enough to link from higher up, the honest answer may be to consolidate or remove it.",
   },
 
   // -------------------------------------------------------------------- url

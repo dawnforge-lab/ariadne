@@ -508,7 +508,7 @@ describe("the tool surface", () => {
     }
     // And the tool that answers it names the three fields it gained.
     const status = listed.tools.find((t) => t.name === "crawl_status")?.description ?? "";
-    for (const field of ["rulesRunAt", "findingsCount", "legacyHosts", "sitemapUrls"]) {
+    for (const field of ["rulesRunAt", "findingsCount", "pagesScanned", "legacyHosts", "sitemapUrls"]) {
       expect(status, `crawl_status does not name ${field}`).toContain(field);
     }
   });
@@ -592,6 +592,7 @@ describe("crawl_start", () => {
     });
     expect(answer.isError ?? false).toBe(false);
     const crawlId = String(answer.body["crawlId"]);
+    createdCrawls.push(crawlId);
     expect(crawlId).toMatch(/^crawl_/);
     // The agent that set it must be able to read it back: the cap lives on the
     // crawl row and `crawl_rules` has no argument to restate it, so this is the
@@ -820,9 +821,32 @@ describe("crawl_rules", () => {
   it("judges the finished crawl, answers with the run summary, and marks it judged", async () => {
     const before = await ok("crawl_status", { crawlId: liveCrawlId });
     expect(before["rulesRunAt"]).toBeNull();
+    // Unjudged, and it still reports the pages a run would scan: the field
+    // describes the crawl.
+    expect(Number(before["pagesScanned"])).toBeGreaterThanOrEqual(3);
 
     const summary = await ok("crawl_rules", { crawlId: liveCrawlId });
     expect(Number(summary["pagesScanned"])).toBeGreaterThanOrEqual(3);
+
+    // THE DESCRIPTION IS PINNED TO THE ANSWER THIS CALL JUST RETURNED, because
+    // an unpinned description is how a lie survives: this tool's said the
+    // summary carries an `elapsedMs` — Phase 6 divergence D-4, fixed where the
+    // crawl skill's fenced block is compared field for field and missed here,
+    // where nothing compared anything — and it named four of the six fields
+    // that are actually returned. Asserted against `Object.keys` of the real
+    // summary rather than a restated list, so a seventh field cannot be added
+    // to `RunSummary` and left undocumented.
+    const rules = (await client.listTools()).tools.find((t) => t.name === "crawl_rules");
+    const rulesDescription = rules?.description ?? "";
+    expect(Object.keys(summary).sort()).toEqual([
+      "byMetric", "byRule", "derived", "findings", "metrics", "pagesScanned",
+    ]);
+    for (const field of Object.keys(summary)) {
+      expect(rulesDescription, `crawl_rules does not name ${field}`).toContain(field);
+    }
+    // And the field it does NOT return is named nowhere in the description —
+    // not even to deny it, because a denial is a string an agent can misread.
+    expect(rulesDescription).not.toContain("elapsedMs");
     expect(typeof summary["findings"]).toBe("number");
     expect(typeof summary["byRule"]).toBe("object");
     expect(typeof summary["byMetric"]).toBe("object");
@@ -833,6 +857,16 @@ describe("crawl_rules", () => {
     const after = await ok("crawl_status", { crawlId: liveCrawlId });
     expect(Number.isNaN(Date.parse(String(after["rulesRunAt"])))).toBe(false);
     expect(after["findingsCount"]).toBe(summary["findings"]);
+
+    // AND THE PAGE COUNT IS THE RUN'S OWN, THROUGH THE TRANSPORT. The audit
+    // skill fills `crawl.rulesRun.pagesScanned` from crawl_status for a crawl
+    // somebody else judged, so this equality is the thing that entitles it to:
+    // the run counted its cursor's iterations, the status counts the rows that
+    // cursor walked, and they are one number rather than two that usually agree.
+    expect(after["pagesScanned"]).toBe(summary["pagesScanned"]);
+    // Before and after the judgement, unchanged — `pages` rows are immutable
+    // once the crawl has stopped, which is what makes the derivation sound.
+    expect(before["pagesScanned"]).toBe(after["pagesScanned"]);
   }, 90_000);
 
   it("refuses a crawl that has not stopped moving", async () => {

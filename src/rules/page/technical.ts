@@ -8,14 +8,18 @@ import type { PageRule } from "../registry/types.js";
  */
 /** Time to first byte, in ms, above which the response is reported as slow. */
 export const SLOW_MS = 1500;
-/** Click depth from the seed above which the page is reported as buried. */
-export const DEEP_DEPTH = 5;
 
 /**
- * All five report under one heading. `RuleCategory` is the report's grouping,
- * not a per-rule label: a "mobile" or a "structure" category with one rule in
- * it is a section of one, and the client-facing question these five answer is
- * the same one — how the page is built and served.
+ * All four report under one heading. `RuleCategory` is the report's grouping,
+ * not a per-rule label: a "mobile" category with one rule in it is a section of
+ * one, and the client-facing question these four answer is the same one — how
+ * the page is built and served.
+ *
+ * `structure.deep-page` used to be the fifth. It left for src/rules/query/
+ * link-graph.ts in Phase 9, keeping the category so the report is unchanged:
+ * the depth it reports is `pages.click_depth`, which a derivation writes AFTER
+ * the page cursor has run, so a page rule could only ever read last run's value
+ * or null.
  */
 const CATEGORY = "technical";
 
@@ -23,7 +27,7 @@ const CATEGORY = "technical";
  * The bonus technical rules: signals the analyzer already extracts that trace
  * to checklist items outside the 47 crawl-derived checks. Each one states a
  * fact about the page — an absent tag, a count, a measured number — and leaves
- * the judgement to the agent, which is why four of the five are `info`.
+ * the judgement to the agent, which is why three of the four are `info`.
  */
 export const technicalRules: PageRule[] = [
   // Fires only on the absence of the tag. Nothing here inspects the contents of
@@ -61,19 +65,6 @@ export const technicalRules: PageRule[] = [
   pageRule("performance.slow-response", ["CHECK-50"], CATEGORY, "info", (p, self) =>
     isAuditable(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
       ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: SLOW_MS })]
-      : [],
-  ),
-
-  // Depth is the shortest path the crawl actually took from its seed, so it is
-  // relative to where the crawl started rather than to the site's home page.
-  //
-  // Indexable pages only: click depth is about how much crawl attention and
-  // internal link equity a page gets, and a page that is not going in the index
-  // is not competing for either. Burying a noindex page is not a fault, so
-  // reporting it would be asking for a fix that should not be made.
-  pageRule("structure.deep-page", ["CHECK-31"], CATEGORY, "info", (p, self) =>
-    isAuditable(p) && p.isIndexable === true && p.depth > DEEP_DEPTH
-      ? [finding(self, p, { depth: p.depth, threshold: DEEP_DEPTH })]
       : [],
   ),
 ];

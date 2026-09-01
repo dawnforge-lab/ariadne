@@ -781,27 +781,34 @@ broken there.
   `count: 0` and the `args` that were asked, so the reader can re-run the query.
 - **`args` reproduces the call.** The point is that anybody can repeat it and get the
   same answer.
-- **`crawl.rulesRun`** copies the `crawl_rules` summary's scalars — `pagesScanned`,
-  `findings`, `metrics` — **when this audit ran that pass**. The surface returns no
-  `elapsedMs`; do not invent one, and do not leave a null in its place.
+- **`crawl.rulesRun`** carries three scalars — `pagesScanned`, `findings`,
+  `metrics` — and **you fill them for any judged crawl, whether or not you ran the
+  pass.** The surface returns no `elapsedMs`; do not invent one, and do not leave a
+  null in its place.
 
-  **It is `null` when you audited a crawl somebody else judged, and that is the
-  correct value, not a hole.** Phase 1 says a judged crawl is auditable by whoever
-  finds it, and re-running `crawl_rules` to fill this field would re-judge shared
-  state to satisfy a schema — the wrong trade every time. The summary is the only
-  route to `pagesScanned`; it is not on `crawl_status`. So:
+  Where each one comes from when you did NOT run `crawl_rules` yourself:
 
-  write `"rulesRun": null` and put ONE line in `crawl.caveats` that names the marker
-  as the proof of judgement — *"rulesRun is null: this audit did not run the rules
-  pass; the crawl's own marker is the proof it was judged (`rulesRunAt`
-  2026-08-28T21:55:35.006Z, `findingsCount` 1326), and the 21 fired rules' counts
-  from the `issues_list` sweep sum to exactly 1326."*
+  - `pagesScanned` — `crawl_status`'s field of the same name. It is the crawl's page
+    count, which is exactly what the rules pass scans, so it is the same number the
+    summary would have reported.
+  - `findings` — `crawl_status`'s `findingsCount`, the live count of the crawl's
+    issue rows.
+  - `metrics` — the number of rows your `metrics_get` sweep returned. You read every
+    metric anyway; count what came back.
 
-  The caveat is required with the null, and it names the marker pair as the
-  judgement proof plus whatever cross-check you have (the rules' counts against
-  `findingsCount` is the cheap one, and it is free once the sweep is done).
-  `crawl.rulesRunAt` is what a downstream skill actually gates on; this field is a
-  breakdown, and a breakdown you did not produce is absent rather than invented.
+  When you DID run the pass, copy the summary's own three and expect them to agree
+  with those fields — a disagreement is a finding about the engine, not a rounding
+  difference, and it belongs in `crawl.caveats`.
+
+  **Re-running `crawl_rules` to fill this field is still forbidden.** Phase 1 says a
+  judged crawl is auditable by whoever finds it, and re-judging shared state to
+  satisfy a schema is the wrong trade — which is the whole reason the three numbers
+  are readable without a run.
+
+  `"rulesRun": null` survives for ONE case: a crawl whose `rulesRunAt` is null, where
+  there is no judgement to describe. Write the null and put one line in
+  `crawl.caveats` saying so. That crawl is the refusal case anyway — a findings file
+  whose passes rest on an unjudged crawl asserts nothing.
 - **`crawl.rulesRunAt` and `crawl.findingsCount`** are copied from `crawl_status`, and
   they are what every PASS on an empty listing rests on. A findings file whose
   `rulesRunAt` is null is a file whose passes assert nothing — the report and the

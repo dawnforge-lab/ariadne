@@ -239,7 +239,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
-        "legacyHosts, sitemapUrls, findingCap, rulesRunAt and findingsCount.\n\n" +
+        "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount and " +
+        "pagesScanned.\n\n" +
         "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
         "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
         "complete pass is on record — never judged, being judged right now, or " +
@@ -248,6 +249,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "null is 'nobody has looked', and findingsCount 0 with a timestamp is " +
         "'looked, found nothing'. findingsCount is the live number of issue rows, " +
         "which is what issues_list's groups sum to.\n\n" +
+        "pagesScanned is how many pages a rules run over this crawl reads — the " +
+        "crawl's page rows, which is exactly what crawl_rules counts as its own " +
+        "pagesScanned. It describes the CRAWL, so it is answered on a crawl " +
+        "nobody has judged too, and it is the denominator a finding count is " +
+        "written against ('1,326 findings over 551 pages'). Read it from here " +
+        "rather than re-running crawl_rules on a crawl somebody else judged: " +
+        "re-judging shared state to learn a number is the wrong trade.\n\n" +
         "legacyHosts echoes the domains this crawl was told the site used to live " +
         "on (empty when none were named) — the host-probe findings about legacy " +
         "redirects mean nothing without it: no finding on an empty list is 'the " +
@@ -359,8 +367,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "Judge a finished crawl: run every rule in the registry over it and write " +
         "the findings and metrics. Answers the run summary — {pagesScanned, " +
-        "findings, byRule, byMetric, elapsedMs} — not the findings themselves; " +
-        "read those with issues_list and metrics_get.\n\n" +
+        "findings, byRule, derived, metrics, byMetric} — not the findings " +
+        "themselves; read those with issues_list and metrics_get. Those six are " +
+        "the whole summary; it carries no timing field, so time the call " +
+        "yourself if you want the duration.\n\n" +
+        "pagesScanned here is the crawl's page count, and crawl_status answers " +
+        "the same number without judging anything — so a crawl somebody else " +
+        "judged does not need a second pass to be described.\n\n" +
         "Refused while the crawl is 'queued' or 'running': findings about a site " +
         "that is still being fetched change under the reader (an 'orphan' page is " +
         "only orphaned because the page linking to it has not been fetched yet). " +

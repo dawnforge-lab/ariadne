@@ -531,6 +531,42 @@ export interface CrawlDetail extends CrawlListItem {
    * a listing. Read with `rulesRunAt`, never alone.
    */
   findingsCount: number;
+  /**
+   * How many pages a rules run over this crawl scans: the `pages` rows it
+   * holds, counted live.
+   *
+   * IT DESCRIBES THE CRAWL, NOT A RUN. A crawl nobody has judged reports its
+   * page count like any other — the field says how many pages a judgement
+   * *would* scan, and `rulesRunAt` remains the only thing that says whether one
+   * happened. That is what makes it usable: the audit skill fills
+   * `crawl.rulesRun.pagesScanned` from here for a crawl somebody else judged,
+   * instead of re-running the rules over shared state to learn a number the
+   * database already holds.
+   *
+   * DERIVED, NOT STORED, and the derivation is an equality rather than an
+   * approximation. `runRules` counts one `pagesScanned` per iteration of its
+   * page cursor, and that cursor selects from `pages` on `crawl_id` alone —
+   * no status filter, no type filter, no cap (src/rules/run.ts, the
+   * `PAGE_BATCH` keyset loop). The `pages` row SET is fixed once the crawl
+   * has stopped — later passes UPDATE rows in place (the renderer,
+   * `deriveClickDepth`, the template retype) but none inserts or deletes
+   * one, and a count sees only the set. So `count(*) where crawl_id = …` IS the
+   * number that run reported, not an estimate of it, and the config doctrine
+   * applies: do not store what the tables already say.
+   *
+   * **THE EQUALITY IS THE GROUND, AND IT IS BREAKABLE.** Should the page cursor
+   * ever gain a filter — judge only the indexable pages, skip the redirects —
+   * this count and the run's would part company, and every report that quotes
+   * one as the other would be wrong without anything failing. The change that
+   * adds such a filter owes this field either a matching predicate or a rename.
+   *
+   * Not `pagesCrawled`, which sits beside it: that is the crawl loop's own
+   * counter, closed out from the frontier's `done + renderPending` rows. It
+   * answers "what did the crawl fetch"; this answers "what will the rules
+   * read". They agree on every crawl in the dev database, and they are still
+   * different facts read off different tables.
+   */
+  pagesScanned: number;
 }
 
 /**
@@ -1093,11 +1129,13 @@ export class ApiService {
   /**
    * One crawl, in full.
    *
-   * `rulesRunAt` AND `findingsCount` COME OUT OF ONE STATEMENT, and that is a
-   * correctness requirement rather than a saved round trip. The two describe
-   * each other: the marker says whether a judgement is on record, the count
-   * says what it produced, and the tool descriptions tell an agent to read
-   * `findingsCount: 0` beside a timestamp as "looked, found nothing".
+   * `rulesRunAt`, `findingsCount` AND `pagesScanned` COME OUT OF ONE STATEMENT,
+   * and that is a correctness requirement rather than a saved round trip. The
+   * three describe each other: the marker says whether a judgement is on
+   * record, the findings count says what it produced, the page count says over
+   * how much, and the tool descriptions tell an agent to read
+   * `findingsCount: 0` beside a timestamp as "looked, found nothing" — over
+   * `pagesScanned` pages.
    *
    * Read on two pool connections they would be two SNAPSHOTS, and `runRules`'
    * opening transaction clears the marker and deletes the crawl's issues
@@ -1105,9 +1143,16 @@ export class ApiService {
    * commit and a `count(*)` landing just after would compose
    * `{rulesRunAt: <the previous run's stamp>, findingsCount: 0}` — a sentence
    * neither of the two states ever said, and precisely the one an agent is
-   * told means the site is clean. The count is therefore a scalar subquery on
+   * told means the site is clean. The counts are therefore scalar subqueries on
    * the crawl-row select: one statement, one snapshot, no pair that never
    * existed.
+   *
+   * `pagesScanned` JOINS THAT STATEMENT rather than becoming a second read, for
+   * the same reason and not for the round trip. It is the denominator every
+   * report writes the findings count against ("1,326 findings over 551 pages"),
+   * and a resumed crawl adds `pages` rows — so a page count read on its own
+   * connection could be paired with a marker from before the resume, and the
+   * two numbers would then describe different crawls of the same site.
    *
    * The genuinely mid-run shape — `{rulesRunAt: null, findingsCount: <partial>}`
    * — is left exactly as it is. It is honest and documented: no complete pass
@@ -1118,7 +1163,7 @@ export class ApiService {
    * as one number, and none of them is interpreted through another.
    */
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
-    const { row, findingsCount } = await this.crawlRowWithFindings(crawlId);
+    const { row, findingsCount, pagesScanned } = await this.crawlRowWithCounts(crawlId);
     const [counts, liveLeases, blockedPages] = await Promise.all([
       frontierCounts(this.db, crawlId),
       this.liveLeaseCount(crawlId),
@@ -1144,6 +1189,7 @@ export class ApiService {
       findingCap: configFindingCap(row.config, crawlId),
       rulesRunAt: row.rulesRunAt === null ? null : row.rulesRunAt.toISOString(),
       findingsCount,
+      pagesScanned,
     };
   }
 
@@ -2609,25 +2655,50 @@ export class ApiService {
   }
 
   /**
-   * The crawl row and its findings count, from ONE statement and therefore one
-   * snapshot of the database.
+   * The crawl row and the two counts read beside it, from ONE statement and
+   * therefore one snapshot of the database.
    *
-   * The subquery is what makes `rulesRunAt` and `findingsCount` describe the
-   * same instant — see `getCrawl` for what a two-snapshot read would compose
-   * out of a rules run's opening transaction. `count(*)` over
-   * `issues (crawl_id)` is an index-only scan; the pairing is what this costs
-   * a round trip for, and it costs nothing else.
+   * The subqueries are what make `rulesRunAt`, `findingsCount` and
+   * `pagesScanned` describe the same instant — see `getCrawl` for what a
+   * two-snapshot read would compose out of a rules run's opening transaction.
+   * `count(*)` over `issues (crawl_id)` and over `pages (crawl_id)` are both
+   * index-only scans; the pairing is what this costs a round trip for, and it
+   * costs nothing else.
+   *
+   * BOTH SUBQUERIES ARE BUILT, NOT WRITTEN, and that is the fix for a live
+   * defect rather than a style preference. A column interpolated into a `sql`
+   * template inside the select list of a single-table select renders
+   * UNQUALIFIED (a `where` clause and a joined query's projection both qualify
+   * it — this one case does not), so
+   * `` sql`… from ${pages} where ${pages.crawlId} = ${crawls.id}` `` came out as
+   * `where "crawl_id" = "id"` — and Postgres resolves BOTH names in the inner
+   * scope, against `pages.id`, so the correlated subquery correlated with
+   * nothing and counted 0 on every crawl. The findings count written the same
+   * way is right only by accident: `issues` has no `id` column, so `"id"` has
+   * nothing to bind to inside and falls out to `crawls.id`. Add an `id` to
+   * `issues` and every judged crawl would start reporting `findingsCount: 0` —
+   * silently, and reading as "the site is clean". `eq()` inside a select
+   * builder renders `"pages"."crawl_id" = "crawls"."id"`, which says what it
+   * means and keeps the compile-error-on-rename the schema objects are here
+   * for.
    */
-  private async crawlRowWithFindings(
+  private async crawlRowWithCounts(
     crawlId: string,
-  ): Promise<{ row: typeof crawls.$inferSelect; findingsCount: number }> {
+  ): Promise<{ row: typeof crawls.$inferSelect; findingsCount: number; pagesScanned: number }> {
+    const findingRows = this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(issues)
+      .where(eq(issues.crawlId, crawls.id));
+    const pageRows = this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(pages)
+      .where(eq(pages.crawlId, crawls.id));
+
     const rows = await this.db
       .select({
         ...getTableColumns(crawls),
-        // Through the schema objects rather than raw table text, so a rename of
-        // the table or the column is a compile error here rather than a 500 the
-        // first time somebody polls a crawl.
-        findingsCount: sql<number>`(select count(*)::int from ${issues} where ${issues.crawlId} = ${crawls.id})`,
+        findingsCount: sql<number>`(${findingRows})`,
+        pagesScanned: sql<number>`(${pageRows})`,
       })
       .from(crawls)
       .where(eq(crawls.id, crawlId))
@@ -2636,11 +2707,14 @@ export class ApiService {
     if (row === undefined) {
       throw new ServiceError("NOT_FOUND", `no such crawl '${clip(crawlId)}'`);
     }
-    const { findingsCount, ...rest } = row;
+    const { findingsCount, pagesScanned, ...rest } = row;
     if (typeof findingsCount !== "number") {
-      throw new Error(`crawlRowWithFindings: count came back as ${typeof findingsCount}, not a number`);
+      throw new Error(`crawlRowWithCounts: findingsCount came back as ${typeof findingsCount}, not a number`);
     }
-    return { row: rest, findingsCount };
+    if (typeof pagesScanned !== "number") {
+      throw new Error(`crawlRowWithCounts: pagesScanned came back as ${typeof pagesScanned}, not a number`);
+    }
+    return { row: rest, findingsCount, pagesScanned };
   }
 
   /**

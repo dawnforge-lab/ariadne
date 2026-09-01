@@ -24,11 +24,12 @@
  *    **One thing recomputation cannot see, and it governs the rest of that
  *    side**: whether the automatic decision was the one that ran. Since Phase 8
  *    a caller may NAME the pages worth a browser, and a named list is an input
- *    no `pages` column records — so the render pass writes it to the crawl's
- *    config beside the three knobs this rule already reads from there
- *    (`RENDER_URLS_KEY`; the argument for that placement is in
- *    src/crawl/render/run-render.ts). `selectionMode` is that record, and in
- *    the explicit case the four automatic numbers are null rather than zero.
+ *    no `pages` column records — so the render pass writes it to
+ *    `crawls.render_urls_jsonb`, its own column since migration 0012 (through
+ *    Phase 8 it was a key inside `config_jsonb`; `recordRenderSelection`,
+ *    src/crawl/render/run-render.ts, carries the history). `selectionMode` is
+ *    that record, and in the explicit case the four automatic numbers are null
+ *    rather than zero.
  *  - the EVIDENCE side (`pages*`, `renderFailures`) — what is actually on the
  *    page rows now: how many say `rendered`, and how many carry a
  *    `render_error`.
@@ -55,7 +56,6 @@
 import { eq, sql } from "drizzle-orm";
 
 import {
-  RENDER_URLS_KEY,
   renderSelectionStats,
   type RenderSelectionConfig,
 } from "../../crawl/render/select.js";
@@ -90,7 +90,7 @@ interface StoredRenderInputs {
    * The URL list the last render pass was given, or null for the automatic
    * selection — including the null a crawl that has never been rendered by a
    * Phase 8 pass gets, where automatic is the only decision that can have
-   * happened. See `RENDER_URLS_KEY`.
+   * happened. See `crawls.render_urls_jsonb` (src/db/schema.ts).
    */
   renderUrls: string[] | null;
 }
@@ -101,7 +101,7 @@ async function readRenderConfig(
   ruleId: string,
 ): Promise<StoredRenderInputs> {
   const rows = await db
-    .select({ config: crawls.config })
+    .select({ config: crawls.config, renderUrls: crawls.renderUrlsJsonb })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
@@ -128,16 +128,17 @@ async function readRenderConfig(
     cfg[key] = value;
   }
 
-  // The fourth input, validated on the same terms and for a sharper reason: a
-  // shape this rule cannot read would otherwise be reported as "the automatic
-  // selection", which is a claim about how the pages were chosen and would be
-  // false. Absent is not malformed — see `StoredRenderInputs.renderUrls`.
-  const named = stored[RENDER_URLS_KEY];
+  // The fourth input — its own column since migration 0012, and validated on
+  // the same terms as the three above for a sharper reason: a shape this rule
+  // cannot read would otherwise be reported as "the automatic selection", which
+  // is a claim about how the pages were chosen and would be false. NULL is not
+  // malformed — see `StoredRenderInputs.renderUrls`.
+  const named: unknown = row.renderUrls;
   let renderUrls: string[] | null = null;
-  if (named !== undefined && named !== null) {
+  if (named !== null) {
     if (!Array.isArray(named) || named.some((entry) => typeof entry !== "string")) {
       throw new Error(
-        `${ruleId}: crawl '${crawlId}' config.${RENDER_URLS_KEY} is neither null nor an ` +
+        `${ruleId}: crawl '${crawlId}' render_urls_jsonb is neither null nor an ` +
           "array of strings — the render selection this metric describes cannot be " +
           "reproduced from it",
       );

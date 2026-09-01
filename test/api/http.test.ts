@@ -1029,14 +1029,18 @@ describe("POST /crawls/:id/render with a named list", () => {
     // And the record the coverage metric reads long afterwards: without it,
     // `render.coverage` would recompute the automatic decision and describe a
     // selection that never happened.
+    //
+    // MIGRATION 0012 MOVED THIS PIN: through Phase 8 the record was a
+    // `renderUrls` key the pass patched into `config_jsonb`; it is now
+    // `crawls.render_urls_jsonb`, and the crawl's stored config is untouched by
+    // the render pass — which is the second half of what is asserted here,
+    // because `storableConfig` is the only writer of that blob again.
     const [row] = await db
-      .select({ config: crawls.config })
+      .select({ config: crawls.config, renderUrls: crawls.renderUrlsJsonb })
       .from(crawls)
       .where(eq(crawls.id, namedCrawlId));
-    expect((row!.config as Record<string, unknown>)["renderUrls"]).toEqual([
-      `${site}/a`,
-      `${site}/b`,
-    ]);
+    expect(row!.renderUrls).toEqual([`${site}/a`, `${site}/b`]);
+    expect(Object.keys(row!.config as Record<string, unknown>)).not.toContain("renderUrls");
   }, 60_000);
 
   it("400s a URL this crawl never fetched, naming it, rather than fetching it", async () => {
@@ -1114,6 +1118,9 @@ describe("POST /crawls/:id/rules", () => {
     // Before: this crawl has never been judged, and the surface says so.
     const before = await call("GET", `/crawls/${fixtureCrawlId}`);
     expect(before.body["rulesRunAt"]).toBeNull();
+    // Never judged, and the page count is already there: `pagesScanned`
+    // describes the crawl's `pages` rows, not a run over them.
+    expect(Number(before.body["pagesScanned"])).toBeGreaterThanOrEqual(3);
 
     const res = await call("POST", `/crawls/${fixtureCrawlId}/rules`);
     expect(res.status).toBe(200);
@@ -1137,6 +1144,11 @@ describe("POST /crawls/:id/rules", () => {
     expect(Number.isNaN(Date.parse(String(stamp)))).toBe(false);
     expect(Date.parse(String(stamp))).toBeGreaterThan(Date.parse(String(fixtureFinal["startedAt"])));
     expect(after.body["findingsCount"]).toBe(res.body["findings"]);
+    // The same equality for the page count: the run counts its cursor's
+    // iterations, the detail counts the rows the cursor walked, and the crawl's
+    // `pages` rows did not move in between.
+    expect(after.body["pagesScanned"]).toBe(res.body["pagesScanned"]);
+    expect(before.body["pagesScanned"]).toBe(res.body["pagesScanned"]);
   }, 60_000);
 
   // A rules run REWRITES the crawl's issues — it deletes them at the top and

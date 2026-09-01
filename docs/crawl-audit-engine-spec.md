@@ -305,7 +305,7 @@ client-supplied legacy hosts, record the chains, done.
 | 30 Case and trailing-slash normalisation | group by `url_normalised` having >1 distinct `url` | query | SN |
 
 ### 9. Internal linking
-| 31 Crawl depth to key pages | `structure.deep-page` + depth distribution by page type | page + metric | OS |
+| 31 Crawl depth to key pages | `structure.deep-page` (click depth, so a query rule: the derivation writes the column after the page cursor) + click-depth distribution by page type | query + metric | OS |
 | 32 Orphan pages | anti-join `links` on target, gated on crawl completeness | query | OS |
 | 33 Unique inlinks distribution | min/median/mean/max, bottom 20, top 20, by page type | metric | NEW |
 | 33b Product discovery source | inlink sources grouped by source page type | metric | NEW |

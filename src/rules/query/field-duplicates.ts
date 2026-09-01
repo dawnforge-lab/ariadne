@@ -94,6 +94,15 @@ const H1_SKIPPED: RuleIdentity = { id: "h1.duplicate-skipped", severity: "info" 
  * rule family's decision to make, and a shared constant would make one file's
  * widening silently the other's. The two agree today, and each says so where a
  * reader can check it.
+ *
+ * SINCE MIGRATION 0012 THIS TEXT IS ALSO AN INDEX PREDICATE. The three partial
+ * indexes `pages_dupe_title`, `pages_dupe_meta_description` and
+ * `pages_dupe_h1_text` (src/db/schema.ts, beside the simhash bands) are built
+ * `where fetch_class = 'ok' and status_code = 200 and is_indexable = true and
+ * <field> is not null`, and Postgres uses a partial index only when it can
+ * prove the query's WHERE implies the index's. Widen this cohort without
+ * widening those and the planner stops using them — a slow query, not an
+ * error. Change one, change the other, and re-check with EXPLAIN.
  */
 const INDEXABLE = (alias: string): SQL =>
   sql.raw(

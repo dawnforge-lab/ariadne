@@ -1,16 +1,13 @@
 import { describe, expect, it } from "vitest";
-import {
-  DEEP_DEPTH,
-  SLOW_MS,
-  technicalRules,
-} from "../../src/rules/page/technical.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import { SLOW_MS, technicalRules } from "../../src/rules/page/technical.js";
 import { expectSilentOnNonOkFetches, mkPage, ruleLookup } from "./mk-page.js";
 
 const rule = ruleLookup(technicalRules, "technicalRules");
 
 /**
- * One page shape that fires all five technical rules on a 200: no viewport, an
- * image short of both attributes, a slow first byte and a page buried deep.
+ * One page shape that fires all four technical rules on a 200: no viewport, an
+ * image short of both attributes, and a slow first byte.
  */
 const BROKEN_TECHNICALS = [
   {
@@ -18,19 +15,24 @@ const BROKEN_TECHNICALS = [
     imagesMissingDimensions: 2,
     imagesMissingAlt: 1,
     responseTimeMs: 4000,
-    depth: 9,
   },
 ];
 
+/**
+ * `structure.deep-page` was the fifth rule here and its pins moved with it, to
+ * test/rules/link-graph-query.test.ts (Phase 9). It is a QUERY rule now: the
+ * depth it reports is `pages.click_depth`, written by a derivation that runs
+ * after the page cursor, so the page rule could only ever read last run's value
+ * — or null, and pass, on a crawl's first judgement.
+ */
 describe("technicalRules metadata", () => {
-  it("defines exactly the five technical rules of the Phase 2 table", () => {
+  it("defines exactly the four technical page rules", () => {
     expect(technicalRules.map((r) => r.id).sort()).toEqual(
       [
         "mobile.viewport-missing",
         "images.missing-dimensions",
         "images.missing-alt",
         "performance.slow-response",
-        "structure.deep-page",
       ].sort(),
     );
   });
@@ -41,7 +43,6 @@ describe("technicalRules metadata", () => {
       "images.missing-dimensions": ["CHECK-49"],
       "images.missing-alt": ["CHECK-49"],
       "performance.slow-response": ["CHECK-50"],
-      "structure.deep-page": ["CHECK-31"],
     });
   });
 
@@ -51,7 +52,6 @@ describe("technicalRules metadata", () => {
       "images.missing-dimensions": "info",
       "images.missing-alt": "info",
       "performance.slow-response": "info",
-      "structure.deep-page": "info",
     });
   });
 
@@ -165,41 +165,22 @@ describe("performance.slow-response", () => {
   });
 });
 
-describe("structure.deep-page", () => {
-  it("fires on a page deeper than the threshold and reports both numbers", () => {
-    const f = rule("structure.deep-page").run(mkPage({ depth: 11 }));
-    expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("info");
-    expect(f[0]!.evidence).toEqual({ depth: 11, threshold: DEEP_DEPTH });
-  });
-
-  it("boundary: depth 6 fires, depth 5 does not", () => {
-    expect(DEEP_DEPTH).toBe(5);
-    expect(rule("structure.deep-page").run(mkPage({ depth: DEEP_DEPTH + 1 }))).toHaveLength(1);
-    expect(rule("structure.deep-page").run(mkPage({ depth: DEEP_DEPTH }))).toHaveLength(0);
-  });
-
-  it("is silent on the seed and the shallow pages under it", () => {
-    for (const depth of [0, 1, 2, 3, 4]) {
-      expect(rule("structure.deep-page").run(mkPage({ depth })), `depth ${depth}`)
-        .toHaveLength(0);
+// No page rule reads `depth` any more, and that is asserted rather than left to
+// the id list above: discovery depth records where the CRAWLER found a URL —
+// every sitemap entry is enqueued as a seed — so a rule judging the site on it
+// is judging the crawl. The rule that used to is now a query rule over
+// `click_depth`, with its pins in test/rules/link-graph-query.test.ts.
+//
+// EVERY page rule in the registry, not just this file's four: the claim is about
+// the kind, so a depth-reading rule added under any other module fails here too.
+describe("the depth a page rule may read", () => {
+  it("is none: no page rule in the registry fires on discovery depth alone", () => {
+    const pageRules = buildRegistry().byKind("page");
+    // The set is not empty, so the loop below is an assertion rather than a
+    // vacuous pass over nothing.
+    expect(pageRules.length).toBeGreaterThan(0);
+    for (const r of pageRules) {
+      expect(r.run(mkPage({ depth: 11 })), r.id).toHaveLength(0);
     }
-  });
-
-  // The depth of a page that is not going in the index is not a finding: a
-  // buried noindex page is exactly where a buried noindex page belongs, and
-  // reporting it would be a fix request nobody should action.
-  it("is silent on a deep page that is not indexable", () => {
-    expect(
-      rule("structure.deep-page").run(mkPage({ depth: 11, isIndexable: false })),
-    ).toHaveLength(0);
-    expect(
-      rule("structure.deep-page").run(mkPage({ depth: 11, isIndexable: null })),
-    ).toHaveLength(0);
-    // …and still fires on the indexable page at the same depth, so the silence
-    // above is the indexability guard rather than a rule that stopped working.
-    expect(
-      rule("structure.deep-page").run(mkPage({ depth: 11, isIndexable: true })),
-    ).toHaveLength(1);
   });
 });

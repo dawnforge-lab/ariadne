@@ -104,20 +104,6 @@ export const RENDER_DEFAULTS = {
 } as const;
 
 /**
- * The key an explicit render pass's URL list is kept under, inside the crawl's
- * own `config_jsonb`.
- *
- * Spelled once, here, for its two users: `recordRenderSelection` writes it at
- * the moment the selection is made (src/crawl/render/run-render.ts, whose
- * docblock carries the whole argument for the placement), and `render.coverage`
- * reads it to say which of the two decisions this crawl's render set came from
- * (src/rules/metric/render-metrics.ts). It lives in THIS module rather than in
- * the render driver so the rule layer can import it without importing a
- * browser.
- */
-export const RENDER_URLS_KEY = "renderUrls";
-
-/**
  * The four suspicion thresholds, named because two of them are also quoted in
  * the phase-5 gate document and one is a byte count nobody should have to
  * decode twice (51200 = 50KB, 25600 = 25KB).

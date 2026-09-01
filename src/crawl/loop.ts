@@ -499,12 +499,12 @@ export async function resumeCrawl(
  * (src/api/service.ts), and it must strip the flag by the same authority rather
  * than by a second copy of the rule that could drift from this one.
  *
- * config_jsonb has a SECOND writer since P8-T2: the render pass records its
- * requested URL list under RENDER_URLS_KEY (src/crawl/render/run-render.ts)
- * hours after this insert. A whole-config rewrite (e.g. on resume) would
- * silently erase that record and turn an explicit render pass into a reported
- * "auto" — never `.set({config: storableConfig(...)})` an existing row; patch
- * keys individually. (Backlog: a dedicated column at the next open migration.)
+ * Migration 0012 gave the render pass's requested URL list its own column
+ * (`crawls.render_urls_jsonb`) and backfilled the key out, so this function is
+ * once again the ONLY writer of config_jsonb and the row holds exactly what it
+ * returns. The second-writer amendment this docblock carried through Phase 8 —
+ * and the "patch keys individually" rule it imposed — is retired; the history
+ * is in docs/gates/phase-8.md §12 and §15.
  */
 export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
   const { allowPrivate: _allowPrivate, ...rest } = config;
@@ -530,10 +530,13 @@ export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPri
  * delay than the crawl it belongs to (rule 9). Its messages name the crawl
  * rather than a function, because two callers now raise them.
  *
- * The closed field set below is load-bearing beyond validation: config_jsonb
- * also carries the render pass's RENDER_URLS_KEY record (see storableConfig's
- * note), and ignoring unknown keys here is what keeps that record from leaking
- * into a later pass's CrawlConfig.
+ * The closed field set below is load-bearing beyond validation. It carried the
+ * render pass's `renderUrls` record through Phase 8; migration 0012 moved that
+ * record to `crawls.render_urls_jsonb` (history in docs/gates/phase-8.md §12
+ * and §15), and what the closed set now guarantees is that a row still holding
+ * the legacy key — written before 0012 by a process that has since been
+ * replaced, or edited by hand — cannot leak it into a later pass's
+ * `CrawlConfig`.
  */
 export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig {
   if (typeof value !== "object" || value === null) {
@@ -1167,6 +1170,13 @@ async function runToCompletion(
   // is no column in which to write "the types are the parse-time ones". It
   // propagates, `execute` closes the row `failed`, and the operator finds out
   // (hard rule 7) rather than reading singleton cohorts that look deliberate.
+  //
+  // Since migration 0012 the pass also stamps `template_inference_jsonb` with
+  // what it did, in the same transaction as the retype it describes — so the
+  // 196 -> 13 fact is a column on this row rather than a log line this process
+  // prints and forgets. The write is `inferPageTemplates`' because the
+  // transaction is (see `recordInference`), and it lands BEFORE `closeCrawl`:
+  // a reader who sees `finished` sees the marker too.
   const pageTemplates = await inferPageTemplates(db, crawlId);
 
   await closeCrawl(db, crawlId, status, pagesCrawled);
