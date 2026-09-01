@@ -827,5 +827,5 @@ broken there.
 - The counts in `coverage` add up.
 
 Then say, in the conversation: the crawl's shape, the top few problems in plain
-language, and where the findings file is. The report and action-plan skills take it
-from there.
+language, and where the findings file is. The report skill takes it from there;
+the action-plan workbook exists only on request (see its own status paragraph).

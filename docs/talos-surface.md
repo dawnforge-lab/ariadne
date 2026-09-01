@@ -71,10 +71,10 @@ Two properties make the double-transport claim below cheap to trust:
 
 | Situation | HTTP | MCP |
 |---|---|---|
-| Bad argument, bad value, unknown filter | 400 `{error}` | tool error `{error}` |
+| Bad argument, bad value, unknown filter, compare of an unjudged crawl (§7.5) | 400 `{error}` | tool error `{error}` |
 | Allowlist / URL policy refusal | 403 `{error}` | tool error `{error}` |
 | No such crawl / rule / route | 404 `{error}` | tool error `{error}` |
-| The row's own state forbids it (unjudged, still running, retired rule id, unreadable stored evidence) | 409 `{error}` | tool error `{error}` |
+| The row's own state forbids it (still running, retired rule id, unreadable stored evidence) | 409 `{error}` | tool error `{error}` |
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
@@ -282,6 +282,16 @@ listing returns every crawl the engine holds, including other tenants'
 An empty answer and a zero are different sentences, and Ariadne spells them
 differently everywhere. A dashboard that collapses them paints a clean site over
 one nobody has examined.
+
+The doctrine has three spellings on this surface, and this section carries the
+first two: the catalog's `fired: null` (§5.1), the metrics' absent family
+(§5.2), and the compare's outright 400 for an unjudged crawl (§7.5) — three
+faces of one rule, keyed by the same marker (`rulesRunAt`). The converse
+matters just as much: `issues_list`, `metrics_get` and the exports serve
+whatever rows exist even on a crawl whose judgement never completed — a
+partial pass's rows are real rows, and **only `rulesRunAt` says whether they
+are a finished judgement**. Read the marker before quoting any count as the
+site's.
 
 ### 5.1 `rules_catalog` — three states of `fired`
 

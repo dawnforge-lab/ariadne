@@ -1913,6 +1913,11 @@ describe("the two transports answer with one shape", () => {
   }
 
   it("answers the same JSON for the same question, route by tool", async () => {
+    // This pair list is hand-enumerated, like the internals sweep's path list
+    // (query.test.ts): a NEW read tool must be added here or it ships with no
+    // cross-transport guarantee, and the count pin below is what makes a
+    // silently deleted pair fail rather than shrink the loop.
+    expect(pairs()).toHaveLength(12);
     for (const pair of pairs()) {
       const viaTool = await ok(pair.tool, pair.args);
       const viaHttp = await get(pair.path);

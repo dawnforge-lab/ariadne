@@ -134,9 +134,11 @@ The third state is the absent key (§1.1). Refusals: an unknown crawl id is
 argument.
 
 **Pinned:** `test/api/query.test.ts:1451`, `:1493`, `:1517`, `:1543`, `:1560`,
-`:1599`; `test/api/mcp.test.ts:1167`, `:1249`. No test hardcodes 85 or 86 — the
-counts are derived from `buildRegistry()`, which is why Task 2's new rule
-changed no Task 1 test.
+`:1599`; `test/api/mcp.test.ts:1167`, `:1249`. No **catalog** test hardcodes 85
+or 86 — the catalog's counts are derived from `buildRegistry()`, which is why
+Task 2's new rule changed no Task 1 test. (The coverage suite's exact pins —
+`test/rules/coverage.test.ts:169` — deliberately DO hardcode the totals; that
+is their job, and Task 2 moved them honestly.)
 
 **ITEM 1: PASS.**
 
@@ -154,6 +156,13 @@ single grouped statement, nothing written:
 | `crawl_02ff6f7a` | 0.7.0 | 443 | 0 | 400 | 32 | 11 | **0.0248** | 108 |
 | `crawl_3f3ab847` | 0.5.0 | 443 | 0 | 313 | 99 | 31 | 0.0700 | 108 |
 | `crawl_2af4daf1` | 0.4.0 (unjudged) | 443 | 0 | 299 | 109 | 35 | 0.0790 | 108 |
+
+⚠ The `crawl_2af4daf1` row is computed over an **unjudged** crawl's 1,314
+partial rows — exactly the reading §1.3's doctrine forbids a consumer to
+present as the site's. It stands here as a read-only measurement of what the
+rule computes over whatever rows exist, never as that crawl's health; a
+consumer sees no such row, because `metrics_get` on that crawl answers an
+absent family (§2.2).
 
 ```
 443 + 108 = 551 = select count(*) from pages where crawl_id = 'crawl_02ff6f7a…'
@@ -736,7 +745,9 @@ data.
 | `5f6be5c` | `fix(api):` the refusal moves before the header; the tear pinned against `end()` |
 | `f029f38` | `docs:` the contract document, the tenant-safety sweep and its two standing guards |
 
-plus the commit carrying this file.
+| `aa264a9` | `fix(docs):` the render-pass premise corrected in three places; the §4.2 sample re-taken live | 
+
+plus `550fd6b` (this file) and the final-review wave commit that follows it.
 
 ## Leftovers
 
