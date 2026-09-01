@@ -85,7 +85,10 @@ describe("buildRegistry", () => {
     // measures the crawl's own discovery depth.
     expect(ids).toContain("structure.click-depth-distribution");
     expect(ids).toContain("structure.depth-distribution");
-    expect(ids.length).toBe(85);
+    // And Phase 10 Task 2's metric: the health rollup, which counts the pages
+    // the run's own findings landed on rather than anything about the site.
+    expect(ids).toContain("site.health");
+    expect(ids.length).toBe(86);
   });
 
   it("registers every kind the runner drives", () => {

@@ -195,12 +195,22 @@ const PHASE_7_RULE_IDS = [
   "structure.click-depth-distribution",
 ];
 
+/**
+ * Phase 10's metric: the health rollup Talos draws a gauge from. Same contract
+ * as every list above, and it joins the metric-copy contracts below — a table
+ * of counts must read as a measurement rather than as a verdict, which for this
+ * one is the whole point (the engine emits the ingredients; the consumer draws
+ * the gauge).
+ */
+const PHASE_10_METRIC_IDS = ["site.health"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
   ...PHASE_4_METRIC_IDS,
   ...PHASE_5_RULE_IDS,
   ...PHASE_7_RULE_IDS,
+  ...PHASE_10_METRIC_IDS,
 ];
 
 describe("issue copy", () => {
@@ -836,11 +846,60 @@ describe("issue copy", () => {
     expect(text, "the explicit case's nulls").toMatch(/empty rather than zero/i);
   });
 
+  // The metric-copy column contract for Phase 10's rollup, plus the two things
+  // its copy has to say that no other metric's does.
+  it("site.health names every column, and says the ratio is of reported findings", () => {
+    const c = ISSUE_COPY["site.health"]!;
+    const text = c.explanation;
+    expect(text, "urlsTotal").toMatch(/how many auditable pages there are/i);
+    expect(text, "the census definition").toMatch(/fetched successfully that answered 200/i);
+    expect(text, "urlsWithCritical").toMatch(/how many pages carry a critical finding/i);
+    expect(text, "urlsWithWarningOnly").toMatch(/how many carry a warning and no critical/i);
+    expect(text, "urlsWithInfoOnly").toMatch(/how many carry only informational findings/i);
+    expect(text, "urlsClean").toMatch(/how many carry no finding of any severity/i);
+    expect(text, "cleanRatio").toMatch(/clean ratio.*divided by the auditable pages/is);
+    expect(text, "four decimal places").toMatch(/four decimal places/i);
+    expect(text, "the empty census").toMatch(/empty rather than zero or one/i);
+    expect(text, "pagesNotAuditable").toMatch(/how many pages the crawl fetched that this census leaves out/i);
+    // Counted once, at the worst severity — the property the whole table rests
+    // on, and the one a reader will otherwise assume the other way round.
+    expect(text, "counted once at the worst severity").toMatch(
+      /each page appearing in exactly one of them, at the WORST severity it carries/,
+    );
+    // A finding that names no page is about the site, and belongs in no bucket.
+    expect(text, "site-level findings").toMatch(/appear in none of these counts/i);
+    // THE CAP CAVEAT. A capped run's ratio is a floor of knowledge, and the copy
+    // is the only place a reader of the number meets that fact.
+    expect(text, "reported findings").toMatch(/THE RATIO IS OF REPORTED FINDINGS/);
+    expect(text, "the floor").toMatch(/floor of what is known rather than a fact about the site/i);
+  });
+
+  // Obligation 6, as a test: Ariadne emits the ingredients and the ratio; Talos
+  // owns the gauge. A grade, a label or a threshold in this copy would be the
+  // engine passing the judgement it exists to leave to its consumer — and copy
+  // is where one would arrive first, since the row itself is just numbers.
+  it("site.health grades nothing: no score, no label, no threshold", () => {
+    const c = ISSUE_COPY["site.health"]!;
+    // The copy SAYS so first — a reader of the row meets the division of labour
+    // where the numbers are, not only in a design document.
+    const disclaimer =
+      "There is no grade here, no label and no threshold: what counts as healthy " +
+      "belongs to whoever reads it, and this table gives them the numbers to decide with.";
+    expect(c.explanation).toContain(disclaimer);
+
+    // And then it does so. The disclaimer is removed before the search, because
+    // it is the one sentence that must name the things nothing else may do.
+    const whole = `${c.title} ${c.explanation.replace(disclaimer, "")} ${c.howToFix}`;
+    const judgement =
+      /health score|site score|grade|out of 100|score of|\bA\+|excellent|poor health|good health|healthy site|unhealthy|above \d+%|below \d+%|more than \d+% of pages|threshold/i;
+    expect(whole).not.toMatch(judgement);
+  });
+
   // A metric states what was counted; it does not accuse the site of anything.
   // "Fix" language in a table's copy would turn a distribution into a fault
   // list, and the numbers at the bottom of a distribution are frequently fine.
   it("the metric copy describes a measurement rather than a defect", () => {
-    for (const id of [...PHASE_4_METRIC_IDS, ...PHASE_5_METRIC_IDS]) {
+    for (const id of [...PHASE_4_METRIC_IDS, ...PHASE_5_METRIC_IDS, ...PHASE_10_METRIC_IDS]) {
       const c = ISSUE_COPY[id]!;
       const asFault =
         /this (?:is a|indicates a) (?:problem|fault|error)|must be fixed|you must fix|is broken|penalis|penaliz/i;

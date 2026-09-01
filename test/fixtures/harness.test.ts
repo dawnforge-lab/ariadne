@@ -1207,6 +1207,10 @@ describe("the fixture site end to end", () => {
     // P7-T4 makes it twelve — ten that always emit a site row, since
     // `structure.click-depth-distribution` reads a column the derivation phase
     // fills on every run and answers over the same cohort as the rest.
+    //
+    // P10-T2 makes it thirteen. `site.health` always emits its site row: it
+    // counts the crawl's own findings over the auditable pages, and a crawl
+    // with neither still has a census to state.
     expect([...metricsById.keys()].sort()).toEqual([
       "content.metrics-by-type",
       "content.template-similarity",
@@ -1216,6 +1220,7 @@ describe("the fixture site end to end", () => {
       "inlinks.sources-by-type",
       "redirect.volume",
       "render.coverage",
+      "site.health",
       "sitemap.structure",
       "structure.click-depth-distribution",
       "structure.depth-distribution",
@@ -1612,6 +1617,54 @@ describe("the fixture site end to end", () => {
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
     expect(crawlRow?.count).toBe(68);
+  });
+
+  it("the health rollup agrees with a page-by-page recount (P10-T2)", () => {
+    // P10-T2's rollup, over the same crawl and derived a DIFFERENT WAY: the
+    // metric answers in one grouped SQL statement, and this recomputes it by
+    // walking the harness's own maps in JavaScript — page by page, rule by
+    // rule, severity from the registry. Two independent derivations of one set
+    // of numbers is the point: a copy of the SQL would agree with the SQL
+    // whatever either of them said.
+    //
+    // The rules the harness's fixture site provokes are many and the numbers
+    // move with the fixtures, so what is pinned here is the AGREEMENT plus the
+    // properties that must hold on any crawl — the buckets partition the
+    // census, and the census plus the pages left out is the whole crawl.
+    const severityOf = new Map(registry.all().map((rule) => [rule.id, rule.severity]));
+    const RANK = { critical: 1, warning: 2, info: 3 } as const;
+    let critical = 0;
+    let warningOnly = 0;
+    let infoOnly = 0;
+    let clean = 0;
+    let auditable = 0;
+    for (const [path, page] of pageByPath) {
+      if (page.fetchClass !== "ok" || page.statusCode !== 200) continue;
+      auditable += 1;
+      let worst = 4;
+      for (const ruleId of issuesByPath.get(path) ?? []) {
+        const severity = severityOf.get(ruleId);
+        if (severity === undefined) throw new Error(`no registry rule '${ruleId}'`);
+        worst = Math.min(worst, RANK[severity]);
+      }
+      if (worst === 1) critical += 1;
+      else if (worst === 2) warningOnly += 1;
+      else if (worst === 3) infoOnly += 1;
+      else clean += 1;
+    }
+    expect(auditable).toBeGreaterThan(0);
+    expect(critical + warningOnly + infoOnly + clean).toBe(auditable);
+    expect(siteMetric("site.health")).toEqual({
+      urlsTotal: auditable,
+      urlsWithCritical: critical,
+      urlsWithWarningOnly: warningOnly,
+      urlsWithInfoOnly: infoOnly,
+      urlsClean: clean,
+      cleanRatio: Number((clean / auditable).toFixed(4)),
+      // 82 pages crawled, and the census is the auditable ones: the rest are
+      // this fixture site's redirects, its 404s, its 5xx and its non-HTML.
+      pagesNotAuditable: 82 - auditable,
+    });
   });
 
   it("each render rule fires on exactly the fixture built for it", () => {
