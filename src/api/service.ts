@@ -2636,7 +2636,7 @@ export class ApiService {
     const request = parseExportRequest(opts, (field, id) => this.findingRule(field, id));
 
     if (request.format === "csv") {
-      const stream = this.csvStream(crawlId, request.view, request.ruleId);
+      const stream = await this.csvStream(crawlId, request.view, request.ruleId);
       const { written, bytes, path } = await this.writeExport(
         stream.filename,
         new PassThrough(),
@@ -2744,7 +2744,9 @@ export class ApiService {
    * Everything that can be refused is refused HERE, before a byte is streamed:
    * once the 200 and the `text/csv` header are on the wire there is no status
    * code left to change, and a half-written file that a client reads as a
-   * complete export is exactly the silent failure hard rule 7 forbids.
+   * complete export is exactly the silent failure hard rule 7 forbids. That
+   * includes the refusal that is NOT about the request — a crawl holding
+   * findings for a rule this ruleset has retired (see `assertViewAnswerable`).
    */
   async prepareCsvExport(
     crawlId: string,
@@ -2765,8 +2767,39 @@ export class ApiService {
     return this.csvStream(crawlId, request.view, request.ruleId);
   }
 
+  /**
+   * The one refusal a CSV view can hit that the REQUEST does not contain: a
+   * stored finding whose rule this ruleset no longer defines.
+   *
+   * `issues` joins every row's copy out of the registry at read time, exactly as
+   * `issues_list` does, and `ruleFor` refuses a row it cannot join rather than
+   * writing blank titles into a client's spreadsheet. Left to fire inside the
+   * generator, that refusal arrives AFTER the header — a 200 and a torn socket,
+   * where every JSON surface answers the same crawl a clean 409 telling the
+   * caller to re-run the rules. So the rule ids are asked for first: one
+   * `select distinct rule_id`, which rides the `issues_crawl_rule` index and
+   * costs milliseconds against the 17,659-finding reference crawl, and the same
+   * `ruleFor` that would have thrown later throws now, before a byte.
+   *
+   * `issue_urls` needs none of this — `parseExportRequest` has already put its
+   * one rule through `findingRule`. The other four views never touch the
+   * registry at all.
+   */
+  private async assertViewAnswerable(crawlId: string, view: CsvViewName): Promise<void> {
+    if (view !== "issues") return;
+    const result = await this.db.execute<{ rule_id: string }>(
+      sql`select distinct i.rule_id from issues i where i.crawl_id = ${crawlId}`,
+    );
+    for (const row of result.rows) this.ruleFor(row.rule_id, crawlId, "issues");
+  }
+
   /** The prepared stream itself. The validation is the caller's; this reads rows. */
-  private csvStream(crawlId: string, view: CsvViewName, ruleId: string | null): CsvStream {
+  private async csvStream(
+    crawlId: string,
+    view: CsvViewName,
+    ruleId: string | null,
+  ): Promise<CsvStream> {
+    await this.assertViewAnswerable(crawlId, view);
     const def = CSV_VIEW_DEFS[view];
     const ctx: CsvViewContext = {
       rule: (id) => this.ruleFor(id, crawlId, "issues"),

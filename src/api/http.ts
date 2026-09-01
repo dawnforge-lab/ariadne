@@ -57,7 +57,11 @@
  *                                      links_to_4xx, anchor_texts, redirects),
  *                                      read through a keyset cursor so the
  *                                      35k-row link views cost O(batch) at both
- *                                      ends. This is the dashboard's download
+ *                                      ends. This is the download behind a
+ *                                      dashboard's bulk-export block: the bytes
+ *                                      are the file, nothing is written here,
+ *                                      and every refusal happens before the
+ *                                      first of them (see `sendCsv`)
  *   GET  /compare                      two crawls of one site, rule by rule:
  *                                      counts on both sides plus new/resolved/
  *                                      persisting. `comparable: false` with
@@ -158,8 +162,13 @@ interface RequestCtx {
  * to a browser — and the whole point of the view is that the file is never in
  * memory at either end (hard rule 3). A `csv` reply hands this file a validated,
  * unread stream; `sendCsv` writes it record by record with backpressure.
+ *
+ * The csv arm carries NO status, and the absence is the point: a stream that
+ * reached this file has already been validated, so its status is 200 and there
+ * is no second value for a handler to pass and this file to ignore. Everything
+ * that could have been another status was refused before the stream existed.
  */
-type Reply = { status: number; body: unknown } | { status: number; csv: CsvStream };
+type Reply = { status: number; body: unknown } | { csv: CsvStream };
 
 interface Route {
   method: string;
@@ -450,7 +459,7 @@ function buildRoutes(): Route[] {
         // shapes — and a format this server does not know still reaches the
         // service, which is what refuses it by name.
         if (ctx.query.get("format") === "csv") {
-          return { status: 200, csv: await service.prepareCsvExport(param(ctx, "id"), opts) };
+          return { csv: await service.prepareCsvExport(param(ctx, "id"), opts) };
         }
         return { status: 200, body: await service.exportCrawl(param(ctx, "id"), opts) };
       },

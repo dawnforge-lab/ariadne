@@ -2043,6 +2043,31 @@ describe("GET /crawls/:id/export?format=csv", () => {
     expect(Object.keys(implicit.body).sort()).toEqual(["bytes", "dataset", "path", "rows"]);
   });
 
+  // THE REFUSAL THAT IS NOT ABOUT THE REQUEST, and the one that could only
+  // arrive too late. `crawlC` holds findings for a rule id this ruleset no
+  // longer defines; the issues view joins every row's copy out of the registry,
+  // and `ruleFor` refuses a row it cannot join rather than writing blank titles
+  // into a client's spreadsheet. Left to fire inside the generator that refusal
+  // lands AFTER the header — a 200 and a torn socket, where every JSON surface
+  // answers this same crawl a clean 409.
+  it("refuses a crawl holding a retired rule's findings BEFORE the header, not mid-stream", async () => {
+    const res = await callCsv(`/crawls/${crawlC}/export?format=csv&view=issues`);
+    expect(res.status).toBe(409);
+    // A JSON refusal, which means no CSV headers were ever sent.
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(res.text).toContain("retired.rule");
+    expect(res.text).toContain("re-run the rules");
+    // The same crawl, the same sentence, on the surface that already had it.
+    const issues = await call(`/crawls/${crawlC}/issues`);
+    expect(issues.status).toBe(409);
+
+    // And the views that never touch the registry still answer for that crawl:
+    // the refusal is about the findings, not about the crawl.
+    const pagesCsv = await callCsv(`/crawls/${crawlC}/export?format=csv&view=internal_urls`);
+    expect(pagesCsv.status).toBe(200);
+    expect(pagesCsv.records[0]?.[0]).toBe("url");
+  });
+
   // The route only ever reaches the streaming half with format=csv, so this is
   // asked of the service directly: a caller that streams a format which writes
   // a file is told, rather than being handed the CSV it did not ask for.

@@ -46,6 +46,17 @@ describe("csvCell — the injection guard", () => {
     expect(csvCell("")).toBe("");
   });
 
+  // THE CAMOUFLAGED VARIANT. A leading space is not a defence: readers that
+  // strip whitespace from an unquoted field then evaluate what was behind it,
+  // so the guard looks past the whitespace and keeps the original bytes.
+  it("finds a leader hiding behind leading whitespace, and preserves the cell", () => {
+    expect(csvCell(" =SUM(1+1)")).toBe("' =SUM(1+1)");
+    expect(csvCell("\t@import")).toBe("'\t@import");
+    // Whitespace with nothing behind it is not an attack and is left alone.
+    expect(csvCell("   ")).toBe("   ");
+    expect(csvCell(" hello")).toBe(" hello");
+  });
+
   it("guards BEFORE it quotes, so a comma cannot hide a formula", () => {
     // The order matters: quote-then-guard would look at `"` and find nothing.
     expect(csvCell("=1,2")).toBe(`"'=1,2"`);
@@ -171,19 +182,55 @@ describe("the view definitions", () => {
   // result set; only the query text says otherwise.
   it("bounds every view's read and orders it, so a cursor can walk it", () => {
     for (const view of CSV_VIEWS) {
+      const def = CSV_VIEW_DEFS[view];
       const text = rendered(view);
       expect(text, `${view} reads without a limit`).toMatch(/\blimit\b/i);
       expect(text, `${view} reads without an order`).toMatch(/\border by\b/i);
-      expect(text, `${view} has no keyset comparison`).toContain(">");
+
+      // NOT `toContain(">")`, which a `<>` or a stray `->>` would satisfy while
+      // the cursor did nothing. What is asserted is the comparison itself: a
+      // ROW comparison for a compound keyset, and a comparison of the named
+      // column against a parameter for a single one.
+      const [first] = def.keyset;
+      if (def.keyset.length > 1) {
+        expect(text, `${view} has no row-comparison keyset predicate`).toMatch(/\)\s*>\s*\(/);
+      } else {
+        expect(text, `${view} does not compare ${String(first)} against a cursor`).toMatch(
+          new RegExp(`\\b${String(first)}\\s*>\\s*\\$`),
+        );
+      }
+      // And every column the keyset claims to be made of is really in the query.
+      for (const column of def.keyset) {
+        expect(text, `${view}'s keyset names ${column}, which its SQL never reads`).toContain(
+          column,
+        );
+      }
     }
   });
 
-  it("starts every view at a cursor that sorts before every real row", () => {
+  it("starts every view at a cursor no real row can equal", () => {
+    for (const view of CSV_VIEWS) {
+      for (const part of CSV_VIEW_DEFS[view].start) {
+        // The empty string is the minimum of text ordering, so no `url`,
+        // `rule_id` or `dedupe_key` sorts at or before it; the one numeric part
+        // is a `position`, a non-negative index within its page, so a negative
+        // start is below every row. Either way the first batch cannot skip a
+        // row by starting past it.
+        expect(
+          part === "" || Number(part) < 0,
+          `${view} starts its cursor at a value a real row could hold: '${part}'`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("parameterises the crawl id rather than interpolating it into the SQL", () => {
     for (const view of CSV_VIEWS) {
       const { params } = new PgDialect().sqlToQuery(
         CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
       );
       expect(params, `${view} does not parameterise its crawl id`).toContain("crawl_x");
+      expect(rendered(view), `${view} interpolates its crawl id`).not.toContain("crawl_x");
     }
   });
 

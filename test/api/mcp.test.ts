@@ -667,6 +667,11 @@ describe("the tool surface", () => {
       "key=value",
       "apostrophe",
       "text/csv",
+      // The two views whose name is wider than their contents. An agent that
+      // quotes links_to_4xx as "the broken links" or counts redirects rows as
+      // chains has misreported the site from a file that is itself correct.
+      "INTERNAL links only",
+      "one row per REDIRECTING PAGE",
     ]) {
       expect(description, `export_crawl does not say '${claim}'`).toContain(claim);
     }

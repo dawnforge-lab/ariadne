@@ -27,6 +27,21 @@
  * because a zero-row CSV with no header is a file that says nothing about what
  * it failed to contain.
  *
+ * **No byte-order mark**, and since the paragraph above justifies this file by
+ * the Excel desk, the trade is stated rather than left silent. A UTF-8 BOM is
+ * what makes double-clicking a CSV in a pre-2016 Excel on a non-UTF-8 Windows
+ * locale render `é` rather than `Ã©`; without one those versions read the file
+ * in the system codepage. Against that: a BOM is not part of RFC 4180 and
+ * strict parsers hand it to the caller as three bytes glued to the first header
+ * cell, so `pandas.read_csv` without `encoding="utf-8-sig"`, a `csv.DictReader`
+ * and every `cut -d,` in a pipeline see a first column that is not called
+ * `ruleId`. These files are read by pipelines and by a proxying dashboard at
+ * least as often as they are double-clicked, the HTTP transport states
+ * `charset=utf-8` on the wire where a browser and Talos both honour it, and
+ * modern Excel detects UTF-8 unaided. So: no BOM, and a client on an old Excel
+ * imports rather than double-clicks. Revisit this the day a real client's file
+ * comes back mangled, not before.
+ *
  * **Every view is a keyset cursor.** Hard rule 3: the links table is never
  * loaded into memory, and `anchor_texts` is 35,145 rows on the reference crawl.
  * Each view builds a bounded, ordered query whose predicate compares against
@@ -84,9 +99,26 @@ const FORMULA_LEADERS = ["=", "+", "-", "@"];
  *
  * The order is the whole point and is tested. Quoting first and guarding after
  * would inspect a `"` and find no formula leader behind it.
+ *
+ * ## The leader is looked for PAST any leading whitespace
+ *
+ * A leading space is not a defence, it is camouflage: several readers —
+ * LibreOffice's CSV import among them — strip whitespace from an unquoted field
+ * and then evaluate what was behind it, so `" =SUM(1+1)"` is the same attack
+ * with one character in front of it. The decision is therefore made on the
+ * trimmed value while the ORIGINAL is what gets written, because the cell is
+ * evidence and this file does not edit a site's own text.
+ *
+ * Doing it here rather than relying on the values being trimmed already is
+ * deliberate. The page analyzer does collapse and trim a title today, so the
+ * variant is unreachable through that column as things stand — which is exactly
+ * the kind of guarantee that belongs to another module, has no test pointing at
+ * this one, and changes without anybody thinking about spreadsheets. The guard
+ * holds on its own.
  */
 export function csvCell(value: string): string {
-  const guarded = FORMULA_LEADERS.includes(value.slice(0, 1)) ? `'${value}` : value;
+  const leader = value.replace(/^\s+/, "").slice(0, 1);
+  const guarded = FORMULA_LEADERS.includes(leader) ? `'${value}` : value;
   return /["\r\n,]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded;
 }
 
@@ -260,11 +292,6 @@ function defineCsvView<Row extends Record<string, unknown>>(view: {
 /** A nullable column as a cell: empty means the engine has no value (see header). */
 function orEmpty(value: string | number | boolean | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
-}
-
-/** A text column that must be a string, or the empty cell. */
-function text(value: unknown): string {
-  return typeof value === "string" ? value : "";
 }
 
 const ISSUE_HEADER = ["ruleId", "severity", "category", "checkIds", "url", "title", "evidence"];
@@ -544,9 +571,4 @@ export function csvFilename(crawlSlug: string, view: CsvViewName, ruleSlug: stri
   return ruleSlug === null
     ? `${crawlSlug}-${view}.csv`
     : `${crawlSlug}-${view}-${ruleSlug}.csv`;
-}
-
-/** The header text, as a view's first record. */
-export function csvHeader(view: CsvViewName): string {
-  return csvRecord(CSV_VIEW_DEFS[view].header);
 }

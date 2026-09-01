@@ -964,6 +964,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "dotted paths for nested objects (truncated.total=222), indices for arrays " +
         "of objects, long values clipped with '…' and the remainder counted as " +
         "'+N more'. The whole evidence stays on issues_list and issue_urls.\n" +
+        "TWO VIEWS MEAN SOMETHING NARROWER THAN THEIR NAME, and quoting either " +
+        "one wrongly misreports the site. links_to_4xx is INTERNAL links only: " +
+        "the status comes from the target's own crawled page row, and an external " +
+        "target is never fetched, so an external 4xx is ABSENT from this file " +
+        "rather than clean. redirects is one row per REDIRECTING PAGE, not per " +
+        "chain: a -> b -> c is two rows and the destination appears in both, so " +
+        "the row count is how many URLs redirect and never how many chains there " +
+        "are.\n" +
         "Cells beginning '=', '+', '-' or '@' are written with a leading apostrophe. " +
         "A crawled page's title is attacker-controlled text and these files open in " +
         "Excel at somebody's desk; the apostrophe is what stops a title being " +
