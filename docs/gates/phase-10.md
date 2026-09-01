@@ -719,10 +719,15 @@ service, Node 22, a cached `npx playwright install --with-deps chromium` keyed
 on the locked Playwright version, then `npm ci` → `npx tsc --noEmit` →
 `npm run db:migrate` → `npm test`, on push to `main` and every pull request.
 
-**PR #9 will be opened against `main` on the owner's word**, on the Phase 7, 8
-and 9 precedent (push, PR, the CI run linked into this section, merge on the
-owner's word). *This section is a placeholder until that run exists; the gate
-above stands on the local measurements.*
+**PR #9 opened against `main` on the owner's word**
+(https://github.com/dawnforge-lab/ariadne/pull/9), on the Phase 7, 8 and 9
+precedent — with the owner's standing instruction this phase to merge on
+green. **First CI run: GREEN, first try** —
+https://github.com/dawnforge-lab/ariadne/actions/runs/33539630469 (4m10s,
+1568/1568 across 65 files, on a fresh database where migrations 0000–0012
+apply from nothing and the three-crawl reference data does not exist — so the
+suite's fixture-built compare/catalog/health/CSV coverage carried the whole
+weight, which is what it is for).
 
 The gate itself is not part of CI and cannot be — it reads a third party's crawl
 data.
