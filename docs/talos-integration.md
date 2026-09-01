@@ -16,6 +16,15 @@ absorbing the other.
 
 No code is shared in either direction. The seam is a network API.
 
+**The seam itself is written down.** `docs/talos-surface.md` is the contract
+Talos codes against as of Phase 10: every tool and route, the response shapes
+(regenerated from a live server and cited to the test that pins each one), the
+pagination and refusal conventions, the null-versus-zero semantics at both the
+catalog and the metric surface, the comparison's `comparable` rule, the CSV
+views, the politeness knobs a Talos-driven crawl sets, and the explicit list of
+what Ariadne will not do. This file stays the WHY and the obligations; that one
+is the WHAT. A change to the API surface, auth or politeness updates both.
+
 ## Why this exists from Talos's point of view
 
 Talos's SEO agent (contract §F22, commit `d55ca41` + hardening `e012ea5`) has a
@@ -79,6 +88,12 @@ crawler inside Talos. The intended shape:
 
 ## Cross-references
 
+- The surface contract: `docs/talos-surface.md` (Phase 10). Its §9 records the
+  one obligation that is NOT met yet — there is no tenancy isolation on crawl
+  listing: `crawl_list` without a `siteUrl` returns every crawl this engine
+  holds, other tenants' site URLs included, to any caller with the token.
+  Obligation 3 (the crawl row as the isolation unit) holds for every per-crawl
+  read; the listing is not scoped, and today's mitigation is deployment.
 - Talos repo pointer to this project: `docs/talos/crawler-engine.md` in the
   talos repo (`github.com/dawnforge-lab/talos`, local `/home/eugen-dev/Workflows/talos`).
 - Talos deep history: serena memory `talos-rewrite-status` in the talos

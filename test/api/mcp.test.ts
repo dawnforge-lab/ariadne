@@ -39,6 +39,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
+import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { loadMcpConfig } from "../../src/api/config.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "../../src/api/csv.js";
 import {
@@ -1747,6 +1748,260 @@ describe("export_crawl — the CSV views", () => {
     });
     expect(noRule.isError).toBe(true);
     expect(String(noRule.body["error"])).toContain("ruleId");
+  });
+});
+
+/**
+ * ONE SURFACE, TWO TRANSPORTS — asserted rather than assumed.
+ *
+ * Both transports call the same `ApiService`, so the claim that a tool and its
+ * route answer with the same shape has always been an argument about the code
+ * rather than a property anybody checked. `docs/talos-surface.md` states it as a
+ * contract to Talos — every shape in that document is written once and claimed
+ * for both — and a contract nothing tests is a sentence.
+ *
+ * WHAT WOULD BREAK IT is not a service change (both would move together) but a
+ * transport that shapes an answer on its way out: an HTTP route that wraps a
+ * listing, an MCP handler that adds a field, a route that hands the service a
+ * different default. Each of those is invisible in the other transport's own
+ * suite, which is why this compares the two REAL answers over the wire rather
+ * than two calls into the service.
+ *
+ * Both servers are built over the same database handle and the same export
+ * directory, so the only difference between the two answers can be the
+ * transport itself.
+ */
+describe("the two transports answer with one shape", () => {
+  const TOKEN = "cross-transport-token-0123456789abcdef";
+  let http: ApiServer;
+  let httpBase = "";
+
+  beforeAll(async () => {
+    http = createApiServer({
+      db,
+      config: {
+        token: TOKEN,
+        allowedDomains: ["127.0.0.1"],
+        exportDir,
+        renderDir,
+        log: (line) => serverLog.push(line),
+      },
+    });
+    const address = await http.listen(0, "127.0.0.1");
+    httpBase = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterAll(async () => {
+    await http.close();
+  });
+
+  async function get(path: string): Promise<{ status: number; text: string; body: unknown }> {
+    const res = await fetch(`${httpBase}${path}`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = null;
+    }
+    return { status: res.status, text, body };
+  }
+
+  /**
+   * One question, asked twice. The route and the tool are written out in full
+   * rather than derived from each other: a mapping that generated the path from
+   * the tool name would pass even if both were wrong in the same way.
+   */
+  interface Pair {
+    tool: string;
+    args: Record<string, unknown>;
+    path: string;
+    /** A property of the answer that must be true, so equality is not equality of nothing. */
+    substantial: (body: Record<string, unknown>) => boolean;
+  }
+
+  function pairs(): Pair[] {
+    const rows = (body: Record<string, unknown>): unknown[] =>
+      Array.isArray(body["items"]) ? (body["items"] as unknown[]) : [];
+    return [
+      {
+        tool: "rules_catalog",
+        args: {},
+        path: "/rules",
+        substantial: (b) => (b["rules"] as unknown[]).length > 50,
+      },
+      {
+        tool: "rules_catalog",
+        args: { crawlId: catalogCrawlId },
+        path: `/rules?crawlId=${catalogCrawlId}`,
+        // The judged projection: some rule fired, and the fired state is on the row.
+        substantial: (b) =>
+          (b["rules"] as Record<string, unknown>[]).some(
+            (r) => ((r["fired"] as { count?: number } | null)?.count ?? 0) > 0,
+          ),
+      },
+      {
+        tool: "rules_catalog",
+        args: { crawlId: seededCrawlId },
+        path: `/rules?crawlId=${seededCrawlId}`,
+        // The unjudged projection: fired is null on every row, on both transports.
+        substantial: (b) =>
+          (b["rules"] as Record<string, unknown>[]).every((r) => r["fired"] === null),
+      },
+      {
+        tool: "crawl_status",
+        args: { crawlId: seededCrawlId },
+        path: `/crawls/${seededCrawlId}`,
+        substantial: (b) => b["crawlId"] === seededCrawlId,
+      },
+      {
+        tool: "crawl_list",
+        args: { siteUrl: `http://www.mcp-compare.example/`, limit: 50 },
+        path: `/crawls?siteUrl=${encodeURIComponent("http://www.mcp-compare.example/")}&limit=50`,
+        substantial: (b) => rows(b).length > 0,
+      },
+      {
+        tool: "issues_list",
+        args: { crawlId: seededCrawlId },
+        path: `/crawls/${seededCrawlId}/issues`,
+        substantial: (b) => rows(b).length > 0,
+      },
+      {
+        tool: "issue_urls",
+        args: { crawlId: seededCrawlId, ruleId: "links.orphan" },
+        path: `/crawls/${seededCrawlId}/issues/links.orphan/urls`,
+        substantial: (b) => rows(b).length > 0,
+      },
+      {
+        tool: "metrics_get",
+        args: { crawlId: seededCrawlId },
+        path: `/crawls/${seededCrawlId}/metrics`,
+        substantial: (b) => rows(b).length > 0,
+      },
+      {
+        tool: "pages_query",
+        args: { crawlId: surfaceCrawlId },
+        path: `/crawls/${surfaceCrawlId}/pages`,
+        substantial: (b) => rows(b).length > 0,
+      },
+      {
+        tool: "robots_get",
+        args: { crawlId: surfaceCrawlId },
+        path: `/crawls/${surfaceCrawlId}/robots`,
+        substantial: (b) => typeof b["raw"] === "string",
+      },
+      {
+        tool: "crawl_compare",
+        args: { baseCrawlId: cmpBaseId, headCrawlId: cmpHeadId },
+        path: `/compare?baseCrawlId=${cmpBaseId}&headCrawlId=${cmpHeadId}`,
+        substantial: (b) =>
+          (b["rules"] as unknown[]).length > 0 && (b["caveats"] as unknown[]).length > 0,
+      },
+      {
+        tool: "compare_urls",
+        args: {
+          baseCrawlId: cmpBaseId, headCrawlId: cmpHeadId, ruleId: "title.missing", set: "new",
+        },
+        path:
+          `/compare/urls?baseCrawlId=${cmpBaseId}&headCrawlId=${cmpHeadId}` +
+          `&ruleId=title.missing&set=new`,
+        substantial: (b) => rows(b).length > 0,
+      },
+    ];
+  }
+
+  it("answers the same JSON for the same question, route by tool", async () => {
+    for (const pair of pairs()) {
+      const viaTool = await ok(pair.tool, pair.args);
+      const viaHttp = await get(pair.path);
+      expect(viaHttp.status, `${pair.path} did not answer 200`).toBe(200);
+      // NOT a shape comparison: the whole value, keys and numbers alike. A
+      // transport that renamed a field, dropped one, or answered a different
+      // default page size fails here.
+      expect(viaHttp.body, `${pair.tool} and ${pair.path} disagree`).toEqual(viaTool);
+      expect(
+        pair.substantial(viaTool),
+        `${pair.tool} answered something too empty to compare`,
+      ).toBe(true);
+    }
+  });
+
+  it("refuses in the same words, whichever transport asked", async () => {
+    // The refusal sentence is the service's, so both transports must carry it
+    // verbatim — an agent and a dashboard reading different explanations of the
+    // same 'no' is the same defect as two different answers.
+    const cases: { tool: string; args: Record<string, unknown>; path: string; status: number }[] = [
+      {
+        tool: "rules_catalog",
+        args: { crawlId: "crawl_nothing_knows_this" },
+        path: "/rules?crawlId=crawl_nothing_knows_this",
+        status: 404,
+      },
+      {
+        tool: "crawl_compare",
+        args: { baseCrawlId: cmpBaseId, headCrawlId: cmpOtherId },
+        path: `/compare?baseCrawlId=${cmpBaseId}&headCrawlId=${cmpOtherId}`,
+        status: 400,
+      },
+      {
+        tool: "crawl_compare",
+        args: { baseCrawlId: cmpBaseId, headCrawlId: seededCrawlId },
+        path: `/compare?baseCrawlId=${cmpBaseId}&headCrawlId=${seededCrawlId}`,
+        status: 400,
+      },
+      {
+        tool: "compare_urls",
+        args: {
+          baseCrawlId: cmpBaseId, headCrawlId: cmpHeadId, ruleId: "title.missing", set: "moved",
+        },
+        path:
+          `/compare/urls?baseCrawlId=${cmpBaseId}&headCrawlId=${cmpHeadId}` +
+          `&ruleId=title.missing&set=moved`,
+        status: 400,
+      },
+      {
+        tool: "export_crawl",
+        args: { crawlId: seededCrawlId, format: "csv", view: "everything" },
+        path: `/crawls/${seededCrawlId}/export?format=csv&view=everything`,
+        status: 400,
+      },
+    ];
+
+    for (const c of cases) {
+      const viaTool = await call(c.tool, c.args);
+      const viaHttp = await get(c.path);
+      expect(viaTool.isError, `${c.tool} did not refuse`).toBe(true);
+      expect(viaHttp.status, `${c.path} did not answer ${c.status}`).toBe(c.status);
+      expect(viaHttp.body).toEqual({ error: viaTool.body["error"] });
+      // And neither spelling of the refusal carries anything from inside the
+      // process (obligation 6): no stack frame, no path, no directory.
+      for (const text of [viaTool.text, viaHttp.text]) {
+        expect(text).not.toContain("    at ");
+        expect(text).not.toContain(exportDir);
+        expect(text).not.toContain("node_modules");
+      }
+    }
+  });
+
+  it("streams the bytes the other transport writes to a file", async () => {
+    // The one place the two transports genuinely differ — an MCP client has no
+    // download to stream into, so it gets a file — and the difference must be
+    // where the bytes GO and nothing else.
+    const written = await ok("export_crawl", {
+      crawlId: seededCrawlId, format: "csv", view: "issues",
+    });
+    const file = readFileSync(String(written["path"]), "utf8");
+    const streamed = await get(`/crawls/${seededCrawlId}/export?format=csv&view=issues`);
+
+    expect(streamed.status).toBe(200);
+    expect(streamed.text).toBe(file);
+    // Not vacuously equal: a header and the crawl's five findings.
+    expect(file.trimEnd().split("\r\n")).toHaveLength(6);
+    // The MCP answer says where the file is; the HTTP answer IS the file.
+    expect(Object.keys(written).sort()).toEqual(["bytes", "format", "path", "rows", "view"]);
+    expect(streamed.body).toBeNull();
   });
 });
 

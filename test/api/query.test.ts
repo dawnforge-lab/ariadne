@@ -2291,8 +2291,12 @@ describe("GET /compare", () => {
     // saying which is a caveat nobody can act on.
     expect(caveat?.message).toContain(CMP_RULESET);
     expect(caveat?.message).toContain(CMP_OLD_RULESET);
-    // And the precedent, cited so a reader can go and read what it cost last time.
-    expect(caveat?.message).toContain("phase-8");
+    // And the claim the precedent taught us, IN THE MESSAGE'S OWN WORDS. It
+    // used to cite `docs/gates/phase-8.md §7.2` by name; a caveat is a payload
+    // string a tenant-facing dashboard renders, so the citation moved into the
+    // code and the meaning stayed here (the Phase 10 tenant-safety sweep).
+    expect(caveat?.message).toContain("not row-comparable");
+    expect(caveat?.message).toMatch(/read each side as its own report/);
 
     // The counts came anyway.
     expect(ruleRow(res, "title.missing")).toMatchObject({ baseCount: 3, headCount: 2 });
@@ -2597,6 +2601,84 @@ describe("GET /compare/urls", () => {
       `/compare/urls?baseCrawlId=${cmpBase}&headCrawlId=crawl_nope&ruleId=title.missing&set=new`,
     );
     expect(missing.status).toBe(404);
+  });
+});
+
+/**
+ * THE TENANT-SAFETY SWEEP, AS A TEST (Talos obligation 6, Phase 10 Task 5).
+ *
+ * The sweep itself is a grep over the surfaces this phase added, and a grep is
+ * a thing somebody did once. What is asserted here is the property the grep was
+ * looking for, over the LIVE answers: nothing an Ariadne response carries names
+ * anything inside the process — no filesystem path, no repository document, no
+ * connection string, no stack frame.
+ *
+ * It covers answers AND refusals, because a refusal is the response most likely
+ * to be built from a caught error, and it covers the CSV bytes because a
+ * spreadsheet is a response too. It found one real thing when it was written:
+ * the `ruleset-mismatch` caveat cited `docs/gates/phase-8.md §7.2` at the
+ * tenant — see `rulesetCaveat`.
+ */
+describe("nothing inside the process reaches a caller", () => {
+  /** Markers that would mean an internal detail escaped into a payload. */
+  function internals(text: string): string[] {
+    const found: string[] = [];
+    const patterns: [string, RegExp][] = [
+      ["a stack frame", /\n\s+at /],
+      ["an absolute path", /(^|[^\w])\/(home|usr|srv|var|tmp|root)\//],
+      ["this export directory", new RegExp(exportDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))],
+      ["a node_modules path", /node_modules/],
+      ["a source file", /\bsrc\/[\w./-]+\.(ts|js)\b/],
+      ["a repository document", /\b(docs|skills)\/[\w./-]+\.md\b/],
+      ["a database URL", /postgres(ql)?:\/\//],
+      ["a private host", /\b(localhost|127\.0\.0\.1|::1)\b/],
+    ];
+    for (const [what, pattern] of patterns) if (pattern.test(text)) found.push(what);
+    return found;
+  }
+
+  it("carries no path, no document and no stack in any answer this phase added", async () => {
+    const answers: [string, string][] = [];
+    const record = async (path: string): Promise<void> => {
+      const res = await call(path);
+      answers.push([path, JSON.stringify(res.body)]);
+    };
+
+    // The four new surfaces, in both their answering and their refusing states.
+    await record("/rules");
+    await record(`/rules?crawlId=${crawlB}`);
+    await record(`/rules?crawlId=${crawlA}`);
+    await record("/rules?crawlId=crawl_nope");
+    await record(`/rules?crawlId=${crawlC}`); // 409: a retired rule id
+    await record(`/crawls?siteUrl=${encodeURIComponent(OTHER_SITE)}`);
+    await record("/crawls?siteUrl=not-a-url");
+    await record(`/compare?baseCrawlId=${cmpBase}&headCrawlId=${cmpOld}`);
+    await record(`/compare?baseCrawlId=${cmpBase}&headCrawlId=${cmpOther}`);
+    await record(`/compare?baseCrawlId=${cmpBase}&headCrawlId=${cmpUnjudged}`);
+    await record(`/compare?baseCrawlId=${cmpBase}&headCrawlId=${cmpBase}`);
+    await record(
+      `/compare/urls?baseCrawlId=${cmpBase}&headCrawlId=${cmpHead}&ruleId=title.missing&set=new`,
+    );
+    await record(
+      `/compare/urls?baseCrawlId=${cmpBase}&headCrawlId=${cmpHead}&ruleId=title.missing&set=moved`,
+    );
+    await record(`/crawls/${crawlF}/export?format=csv&view=everything`);
+
+    // Not vacuous: the sweep only means something if the answers are real.
+    expect(answers).toHaveLength(14);
+    for (const [path, text] of answers) {
+      expect(text.length, `${path} answered nothing`).toBeGreaterThan(2);
+      expect(internals(text), `${path} leaked`).toEqual([]);
+    }
+  });
+
+  it("holds for the CSV bytes, which are a response like any other", async () => {
+    for (const view of ["issues", "internal_urls", "anchor_texts", "redirects"] as const) {
+      const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=${view}`);
+      expect(res.status).toBe(200);
+      expect(res.records.length, `${view} exported nothing`).toBeGreaterThan(1);
+      expect(internals(res.text), `${view} leaked`).toEqual([]);
+    }
   });
 });
 

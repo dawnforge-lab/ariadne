@@ -4215,6 +4215,14 @@ function rulesetCaveat(base: CompareSide, head: CompareSide, caveats: CompareCav
   const baseVersion = base.rulesetVersions[0] ?? "";
   const headVersion = head.rulesetVersions[0] ?? "";
   if (baseVersion !== headVersion) {
+    // The message states the row-comparability claim in its own words and cites
+    // NOTHING OF OURS. It shipped citing `docs/gates/phase-8.md §7.2` — the
+    // precedent that argument comes from, and still cited in `CrawlComparison`'s
+    // own documentation above — but a caveat is a PAYLOAD string: a Talos
+    // dashboard renders it to a tenant who has no such file, cannot read it, and
+    // learns from it only that this engine keeps documents somewhere (Talos
+    // obligation 6, the Phase 10 tenant-safety sweep). The reference belongs in
+    // the code, where the reader can follow it.
     caveats.push({
       code: "ruleset-mismatch",
       message:
@@ -4222,8 +4230,8 @@ function rulesetCaveat(base: CompareSide, head: CompareSide, caveats: CompareCav
         `${versionList([baseVersion])} and '${head.crawlId}' at ${versionList([headVersion])}. ` +
         `A rule can change what it looks for, what it calls a finding and how severely it ` +
         `reports one between versions, so a count that moved may be the ruleset moving rather ` +
-        `than the site. The rows are NOT row-comparable in the sense docs/gates/phase-8.md ` +
-        `§7.2 sets out; read each side as its own report`,
+        `than the site. These rows are not row-comparable: read each side as its own report ` +
+        `rather than subtracting one from the other`,
     });
     return false;
   }
