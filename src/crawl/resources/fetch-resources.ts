@@ -32,12 +32,34 @@
  * retry discipline). Its own `Crawl-delay`, if it declares one, RAISES that
  * floor for that host alone (`HostGate.raiseHostFloor`).
  *
- * The adaptive half carries over too, because the gate carries over: this pass
- * is handed the SAME `HostGate` instance the page loop used, so a host that
- * earned 8s of spacing by answering 429 to the page crawl is still at 8s when we
- * ask it about its images, and a 429 on a resource escalates it further. That is
- * why the gate is a parameter and not something built here (hard rule 9, and
- * the yellow.com.mt incident in docs/talos-integration.md).
+ * ## Which adaptive halves carry over, and how — they are not one thing
+ *
+ * The politeness machinery has two independent halves (see ../politeness.ts),
+ * and each reaches this pass by its own route. Saying "the adaptive half
+ * carries over" would be one word short of true:
+ *
+ *  - **The spacing half carries itself.** This pass is handed the SAME
+ *    `HostGate` INSTANCE the page loop used, so every ratchet that host earned
+ *    is already in it: a host at 8s for answering 429 to the page crawl is at 8s
+ *    when we ask about its images, and a 429 on an image escalates it further,
+ *    into the same state a later resume would read. That is why the gate is a
+ *    parameter and not something built here.
+ *  - **The concurrency half is threaded, because it cannot carry itself.**
+ *    `CrawlWindow` is the loop's, its adapted size lives in that object, and
+ *    this pass runs its own worker pool. So the loop passes
+ *    `min(window.size(), maxConcurrency)` as `maxConcurrency` (loop.ts,
+ *    INSERTION 3b): a site that pushed the window from 4 down to 1 during the
+ *    page crawl gets ONE resource worker, not four. Nothing in the per-host
+ *    letter of the law would have required that — spacing already serialises a
+ *    single host — but a struggling origin that just told us to slow down must
+ *    not have us open four sockets to it the moment the pages are done (rule 9,
+ *    and the yellow.com.mt incident in docs/talos-integration.md).
+ *
+ * What does NOT carry is the window's continued adaptation: this pass does not
+ * grow or shrink the number it was given. It is a bounded epilogue over a known
+ * work list, and a second adaptive controller reacting to HEAD latencies would
+ * be a second policy arguing with the gate's. Back-pressure during the pass is
+ * the gate's job, and it does escalate.
  *
  * ## Where the walls are
  *
@@ -67,6 +89,13 @@
  * a crash costs the rows that were never asked and re-asks nothing that was.
  * That also makes a capped run resumable with a bigger budget: a `resource-cap`
  * row is still null, so a later run picks it up and overwrites the reason.
+ *
+ * An ABORT is the same shape, deliberately. `signal` is checked before every
+ * request — not once per batch, which at a 30s spacing would be minutes of
+ * asking after the caller said stop — and the rows it leaves get NO reason,
+ * because nothing decided anything about them. The summary says `aborted: true`
+ * so the crawl loop can close its row `cancelled` rather than reporting a
+ * finished crawl with a silently incomplete resource census (hard rule 7).
  */
 import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { request } from "undici";
@@ -137,6 +166,14 @@ export const RESOURCE_CAP_REASON = "resource-cap";
  * handful of CDNs. Twenty is generous for that and small enough that a page
  * injecting a hundred tracking domains cannot turn one crawl into a hundred
  * conversations with servers nobody asked us to talk to.
+ *
+ * WHAT `maxResources` COUNTS IS ROWS CONSIDERED, NOT FILES ASKED ABOUT: a row
+ * the URL policy refused and a row robots.txt denied both spend a unit of the
+ * budget without a request being made. That is the honest meaning for a budget
+ * whose job is to bound the pass — a site that fills its markup with refused
+ * URLs must not be able to make the pass walk past the cap for free — and it is
+ * why the cap is not a promise about how many requests were issued. That number
+ * is `ResourcePassSummary.requests`.
  */
 export const RESOURCE_DEFAULTS = {
   maxResources: 10_000,
@@ -183,11 +220,26 @@ export interface ResourcePassOpts {
   gate: HostGate;
   /** The crawl origin's robots.txt, already read by `discover`. */
   originRobots: RobotsInfo;
-  /** Workers across hosts. Per-host order is the gate's business, not this. */
+  /**
+   * Workers across hosts. Per-host order is the gate's business, not this.
+   *
+   * The crawl loop passes `min(window.size(), config.maxConcurrency)` — the
+   * SETTLED window, not the configured ceiling — so an origin that shrank the
+   * page crawl's concurrency keeps it shrunk for its resources. See the module
+   * header on which halves of the politeness machinery carry and how.
+   */
   maxConcurrency: number;
   maxResources?: number;
   maxResourceHosts?: number;
   timeoutMs?: number;
+  /**
+   * Ceiling on a counted GET's body, default `MAX_COUNTED_BYTES`. An option
+   * rather than a constant only so the suite can provoke the truncation branch
+   * without streaming 16MiB through a fixture server; production has no reason
+   * to move it, and moving it changes what `bytes` means on a very large file
+   * (see the constant).
+   */
+  maxCountedBytes?: number;
   /**
    * TEST ONLY. Threaded to url-policy and the connect guard so the suite can
    * ask a 127.0.0.1 fixture server about its own images. Never wire this to
@@ -223,6 +275,15 @@ export interface ResourcePassSummary {
   requests: number;
   cappedByResources: boolean;
   cappedByHosts: boolean;
+  /**
+   * The caller's signal fired and the pass stopped early. Distinct from the two
+   * cap flags in the way it has to be: a cap is a budget the operator set and
+   * the rows it stopped at SAY SO (`fetch_reason: 'resource-cap'`), while an
+   * abort decided nothing about anything — its rows carry no reason, and the
+   * crawl that ran this pass must close `cancelled` rather than `finished`
+   * (hard rule 7; the loop reads this).
+   */
+  aborted: boolean;
 }
 
 /** One row of the work list. */
@@ -302,7 +363,24 @@ export async function fetchCrawlResources(
   }
 
   const allowPrivate = opts.allowPrivate === true;
+  const maxCountedBytes = opts.maxCountedBytes ?? MAX_COUNTED_BYTES;
+  positiveInt("maxCountedBytes", maxCountedBytes);
   const gate = opts.gate;
+  /**
+   * The census, KEYED BY `URL.host` (name plus port) — the gate's key, so a
+   * host's spacing and its place in this map are the same host.
+   *
+   * The robots decision inside each record is ORIGIN-aware while the key is
+   * not, and the one place that matters is a site served over both schemes:
+   * `http://x/` and `https://x/` share a key, so whichever spelling arrives
+   * first decides which `RobotsInfo` the other inherits. That is deliberate and
+   * it is the FRONTIER's notion of a site, not a shortcut — `isSameOrigin`
+   * admits an http→https upgrade as one origin and `RobotsInfo.isAllowed`
+   * rewrites a same-site spelling onto the origin robots.txt was read from
+   * (`onRulesOrigin`, ../discovery.ts), precisely so a second spelling cannot
+   * be a way around a `Disallow`. A resource host reached under two schemes is
+   * one host with one set of rules here for the same reason a page host is.
+   */
   const hosts = new Map<string, HostRecord>();
 
   let fetched = 0;
@@ -423,12 +501,30 @@ export async function fetchCrawlResources(
         fetchMs: verdict.fetchClass === null ? null : Date.now() - started,
       });
 
+    /**
+     * The row's reason: what happened, and — when the chain moved — where it
+     * ended up. Built by joining the parts that exist rather than by
+     * concatenation, because most of the time one of them is empty: an `ok` row
+     * after a redirect has only the second half, and an `ok` row with no
+     * redirect has neither and takes a null reason.
+     */
     const note = (reason: string): string =>
-      redirectedTo === null
-        ? reason
-        : `${reason}; followed ${hops} redirect${hops === 1 ? "" : "s"} to ${redirectedTo}`;
+      [
+        reason,
+        redirectedTo === null
+          ? ""
+          : `followed ${hops} redirect${hops === 1 ? "" : "s"} to ${redirectedTo}`,
+      ]
+        .filter((part) => part !== "")
+        .join("; ");
 
     for (;;) {
+      // The caller's stop, honoured per REQUEST rather than per batch. At a 30s
+      // spacing a batch of 200 is well over an hour, and "we stopped asking"
+      // has to mean the next request, not the next batch (hard rule 7). The row
+      // is left exactly as it was: null, no reason, nothing decided.
+      if (opts.signal?.aborted === true) return;
+
       if (spent >= MAX_ROW_REQUESTS) {
         failed += 1;
         return done(
@@ -474,6 +570,7 @@ export async function fetchCrawlResources(
         allowPrivate,
         timeoutMs,
         count: method === "GET",
+        maxCountedBytes,
       });
       spent += 1;
       requests += 1;
@@ -583,7 +680,7 @@ export async function fetchCrawlResources(
       }
       fetched += 1;
       const truncatedNote = attempt.countTruncated
-        ? `body exceeded the ${MAX_COUNTED_BYTES}-byte counting cap; bytes is a floor`
+        ? `body exceeded the ${maxCountedBytes}-byte counting cap; bytes is a floor`
         : "";
       const reason = note(truncatedNote);
       return done({
@@ -594,6 +691,13 @@ export async function fetchCrawlResources(
         // A counted body is a measurement and a `content-length` is a claim;
         // when we have both we keep the measurement, and the column says which
         // it was so a weight number can be read for what it is.
+        //
+        // A HEAD that LIES about `content-length` — a real thing on badly
+        // configured origins — is therefore believed, and deliberately: the only
+        // way to catch it is to GET every file and compare, which doubles the
+        // requests this crawl makes at somebody's server to improve a number
+        // nobody has yet asked to be exact (rule 9). `bytes_source: 'header'`
+        // is what keeps that legible: the row does not claim to have measured.
         bytes,
         bytesSource: counted === null ? "header" : "counted",
         cacheControl,
@@ -605,12 +709,11 @@ export async function fetchCrawlResources(
 
   // ---- the work list, cursor-paged so nothing accumulates (hard rule 6) ----
   let cursor: string | null = null;
-  let aborted = false;
   for (;;) {
-    if (opts.signal?.aborted === true) {
-      aborted = true;
-      break;
-    }
+    // The batch-level check. `processOne` makes the same one before every
+    // request, so this is the outer loop noticing what a worker already acted
+    // on rather than the first place a stop is honoured.
+    if (opts.signal?.aborted === true) break;
     const batch = await workList(db, crawlId, cursor, WORK_BATCH);
     if (batch.length === 0) break;
     cursor = batch[batch.length - 1]!.url;
@@ -635,11 +738,17 @@ export async function fetchCrawlResources(
     if (cappedByResources) break;
   }
 
+  // Read once, at the end, and returned: the signal may have fired inside a
+  // worker (which stops asking immediately) rather than at a batch boundary,
+  // and the caller has to be able to tell "the pass finished" from "the pass was
+  // stopped" — the crawl loop closes its row `cancelled` on this (hard rule 7).
+  const aborted = opts.signal?.aborted === true;
+
   if (cappedByResources) {
     // Loud, not silent: every row the cap stopped short of says so, in one
     // statement rather than one per row. An ABORT deliberately marks nothing —
-    // those rows were not capped, they were interrupted, and their null already
-    // means "seen, not yet asked".
+    // those rows were not capped, they were interrupted, nothing was decided
+    // about them, and their null already means "seen, not yet asked".
     await db
       .update(resources)
       .set({ fetchReason: RESOURCE_CAP_REASON })
@@ -651,20 +760,20 @@ export async function fetchCrawlResources(
         ),
       );
   }
-  if (aborted) {
-    // Nothing to write — but the caller must not read `skipped` as a cap.
-    // `CrawlSummary.note` carries the abort; this is the pass's half of it.
-  }
 
   return {
     seen: await countRows(db, crawlId, false),
     fetched,
     failed,
+    // Rows still unfetched, whatever left them so — a cap, or this abort. The
+    // two are told apart by the flags beside it and by the rows themselves:
+    // a capped row carries a reason, an interrupted one carries nothing.
     skipped: await countRows(db, crawlId, true),
     hosts: hosts.size,
     requests,
     cappedByResources,
     cappedByHosts,
+    aborted,
   };
 }
 
@@ -802,6 +911,8 @@ interface RequestOpts {
   timeoutMs: number;
   /** Stream the body into a counter and discard it. GET only. */
   count: boolean;
+  /** The counter's ceiling. See MAX_COUNTED_BYTES. */
+  maxCountedBytes: number;
 }
 
 /**
@@ -852,7 +963,7 @@ async function requestResource(
         // The whole of what we do with a resource body: add its length and drop
         // it. Nothing is concatenated, nothing is decoded (hard rule 6).
         bytes += (chunk as Buffer).length;
-        if (bytes > MAX_COUNTED_BYTES) {
+        if (bytes > opts.maxCountedBytes) {
           countTruncated = true;
           response.body.destroy();
           break;

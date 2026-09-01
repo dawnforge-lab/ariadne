@@ -68,12 +68,47 @@ const BIG_BYTES = 2 * 1024 * 1024 + 7;
  */
 let crawlHostImage = "";
 
+/**
+ * Requests in flight across EVERY fixture server, and the high-water mark. The
+ * pass's worker count is not observable from a row, so the servers count it:
+ * `/slow.png` holds its response open, and two hosts holding one each at the
+ * same moment is a pass running two workers.
+ */
+let inFlight = 0;
+let maxInFlight = 0;
+
+/** How long `/slow.png` holds a response open. */
+const SLOW_MS = 60;
+
+/**
+ * Called with the path of every request the ORIGIN asset server answers. The
+ * abort cases use it to fire a signal from inside the pass, which is the only
+ * way to cancel at a known moment rather than at a hoped-for one.
+ */
+let onAssetHit: ((path: string) => void) | null = null;
+
+/** `/slow.png`, on any of the servers: held open, counted, then answered. */
+function serveSlow(req: IncomingMessage, res: ServerResponse): void {
+  inFlight += 1;
+  maxInFlight = Math.max(maxInFlight, inFlight);
+  setTimeout(() => {
+    inFlight -= 1;
+    const body = Buffer.alloc(64, 5);
+    res.writeHead(200, {
+      "content-type": "image/png",
+      "content-length": String(body.length),
+    });
+    res.end(req.method === "HEAD" ? undefined : body);
+  }, SLOW_MS);
+}
+
 async function startAssetServer(): Promise<AssetServer> {
   const hits: Hit[] = [];
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     hits.push({ method: req.method ?? "?", path, at: Date.now() });
     const head = req.method === "HEAD";
+    onAssetHit?.(path);
 
     if (path === "/robots.txt") {
       res.writeHead(200, { "content-type": "text/plain" });
@@ -170,6 +205,65 @@ async function startAssetServer(): Promise<AssetServer> {
       res.end();
       return;
     }
+    if (path === "/slow.png") {
+      serveSlow(req, res);
+      return;
+    }
+    if (path === "/window" || path === "/abort") {
+      // Two pages for the two wiring cases. `/window` sends the crawl at a pair
+      // of 503s (which collapse the concurrency window) and points at a slow
+      // asset on each of two hosts; `/abort` points at two assets on this one.
+      const refs =
+        path === "/window"
+          ? `<a href="/boom-a">a</a><a href="/boom-b">b</a>` +
+            `<img src="/slow.png" alt="s" width="10" height="10">` +
+            `<img src="${plain.base}/slow.png" alt="t" width="10" height="10">`
+          : `<img src="/abort-1.png" alt="1" width="10" height="10">` +
+            `<img src="/abort-2.png" alt="2" width="10" height="10">`;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        `<!doctype html><html lang="en"><head><title>t</title></head>` +
+          `<body><h1>t</h1>${refs}</body></html>`,
+      );
+      return;
+    }
+    if (path === "/boom-a" || path === "/boom-b") {
+      // A bare 503: back-pressure to the window, and not enough of a streak to
+      // escalate the host's spacing (see HostGate.report).
+      res.writeHead(503, { "content-type": "text/html; charset=utf-8" });
+      res.end(head ? undefined : "<!doctype html><title>503</title><p>later</p>");
+      return;
+    }
+    if (path === "/abort-1.png" || path === "/abort-2.png") {
+      const body = Buffer.alloc(12, 9);
+      res.writeHead(200, {
+        "content-type": "image/png",
+        "content-length": String(body.length),
+      });
+      res.end(head ? undefined : body);
+      return;
+    }
+    // A chain of servers that refuse HEAD and answer GET with a redirect: two
+    // requests per URL, so the per-row request budget runs out before the
+    // redirect cap does.
+    const loop405 = /^\/loop405-(\d+)\.png$/.exec(path);
+    if (loop405 !== null) {
+      if (head) {
+        res.writeHead(405, { allow: "GET" });
+        res.end();
+        return;
+      }
+      res.writeHead(302, { location: `/loop405-${Number(loop405[1]) + 1}.png` });
+      res.end();
+      return;
+    }
+    // A plain redirect chain, deeper than MAX_RESOURCE_REDIRECTS.
+    const chain = /^\/chain-(\d+)\.png$/.exec(path);
+    if (chain !== null) {
+      res.writeHead(302, { location: `/chain-${Number(chain[1]) + 1}.png` });
+      res.end();
+      return;
+    }
     if (path === "/hop-to-metadata.png") {
       // The hop a page cannot see and the policy must: an ordinary-looking
       // asset URL whose Location points at the metadata service.
@@ -207,6 +301,10 @@ async function startThirdPartyHost(robotsBody: string): Promise<AssetServer> {
     if (path === "/robots.txt") {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end(robotsBody);
+      return;
+    }
+    if (path === "/slow.png") {
+      serveSlow(req, res);
       return;
     }
     const body = Buffer.alloc(99, 1);
@@ -357,6 +455,9 @@ beforeEach(() => {
   third.hits.length = 0;
   plain.hits.length = 0;
   dead.hits.length = 0;
+  inFlight = 0;
+  maxInFlight = 0;
+  onAssetHit = null;
 });
 
 // ---------------------------------------------------------------------------
@@ -483,6 +584,51 @@ describe("HEAD first, and exactly one GET when it must", () => {
     expect(row.bytesSource).toBe("counted");
   });
 
+  it("stops counting at the byte ceiling and says the number is a floor", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [{ url: `${assets.base}/big.png` }]);
+
+    // The production ceiling is 16MiB and streaming that through a fixture
+    // server to prove one branch would be the only slow test in the file.
+    await runPass(crawlId, assets.base, { maxCountedBytes: 4096 });
+
+    const row = await rowFor(crawlId, `${assets.base}/big.png`);
+    expect(row.fetchClass).toBe("ok");
+    expect(row.bytesSource).toBe("counted");
+    // Whatever had arrived when the socket was destroyed: at least the ceiling,
+    // nowhere near the file.
+    expect(row.bytes).toBeGreaterThan(4096);
+    expect(row.bytes).toBeLessThan(BIG_BYTES);
+    expect(row.fetchReason).toBe("body exceeded the 4096-byte counting cap; bytes is a floor");
+  });
+
+  it("spends a bounded number of requests on one row, however the server behaves", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [{ url: `${assets.base}/loop405-1.png`, kind: "js" }]);
+
+    await runPass(crawlId, assets.base);
+
+    const row = await rowFor(crawlId, `${assets.base}/loop405-1.png`);
+    expect(row.fetchClass).toBe("fetch_error");
+    expect(row.fetchReason).toContain("7-request budget");
+    // Two requests per URL (a refused HEAD and a redirecting GET), stopped at
+    // seven — three-and-a-half URLs, not an unbounded conversation.
+    expect(assets.hits.filter((hit) => hit.path.startsWith("/loop405-")).length).toBe(7);
+  });
+
+  it("gives up on a redirect chain deeper than the hop limit", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [{ url: `${assets.base}/chain-1.png` }]);
+
+    await runPass(crawlId, assets.base);
+
+    const row = await rowFor(crawlId, `${assets.base}/chain-1.png`);
+    expect(row.fetchClass).toBe("fetch_error");
+    expect(row.fetchReason).toContain("more than 5 redirects");
+    // Six HEADs: the hop that exceeded the limit is counted, not taken.
+    expect(assets.hits.filter((hit) => hit.path.startsWith("/chain-")).length).toBe(6);
+  });
+
   it("classifies a 404 and a 500 with the page vocabulary", async () => {
     const crawlId = await seedCrawl(assets.base);
     await seedResources(crawlId, [
@@ -511,7 +657,10 @@ describe("HEAD first, and exactly one GET when it must", () => {
     const row = await rowFor(crawlId, `${assets.base}/hop.png`);
     expect(row.fetchClass).toBe("ok");
     expect(row.bytes).toBe(1234);
-    expect(row.fetchReason).toContain("/a.png");
+    // The EXACT string, not a substring: a reason built by concatenating an
+    // empty first half is how a row ends up saying "; followed 1 redirect…",
+    // which reads like a message with its first clause lost.
+    expect(row.fetchReason).toBe(`followed 1 redirect to ${assets.base}/a.png`);
     expect(hitsFor(assets, "/hop.png").map((hit) => hit.method)).toEqual(["HEAD"]);
     expect(hitsFor(assets, "/a.png").map((hit) => hit.method)).toEqual(["HEAD"]);
   });
@@ -586,6 +735,34 @@ describe("per-host spacing, shared with the page crawl", () => {
     // 10ms. The site's number wins on the site's host, and only there.
     expect(gate.spacingMs(third.host)).toBe(1000);
     expect(gate.spacingMs(assets.host)).toBe(10);
+  });
+});
+
+describe("the worker count it was given is the worker count it runs", () => {
+  it("holds one request open at a time when told one", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [
+      { url: `${assets.base}/slow.png` },
+      { url: `${plain.base}/slow.png` },
+    ]);
+
+    await runPass(crawlId, assets.base, { maxConcurrency: 1 });
+
+    // Two different hosts, so per-host spacing serialises nothing here: one in
+    // flight at a time is the WORKER count and nothing else.
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("runs both hosts at once when told more", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [
+      { url: `${assets.base}/slow.png` },
+      { url: `${plain.base}/slow.png` },
+    ]);
+
+    await runPass(crawlId, assets.base, { maxConcurrency: 4 });
+
+    expect(maxInFlight).toBe(2);
   });
 });
 
@@ -800,6 +977,46 @@ describe("the pass is resumable, and asks only nulls", () => {
 });
 
 // ---------------------------------------------------------------------------
+// An abort stops the asking, and says so
+// ---------------------------------------------------------------------------
+
+describe("a cancel stops the pass where it stands", () => {
+  it("stops asking within one row, and decides nothing about the rest", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [
+      { url: `${assets.base}/abort-1.png` },
+      { url: `${assets.base}/abort-2.png` },
+    ]);
+
+    const controller = new AbortController();
+    // Fired from inside the pass, by the server answering the first resource:
+    // the only way to cancel at a known moment rather than a hoped-for one.
+    onAssetHit = (path) => {
+      if (path === "/abort-1.png") controller.abort();
+    };
+
+    const summary = await runPass(crawlId, assets.base, {
+      maxConcurrency: 1,
+      signal: controller.signal,
+    });
+
+    expect(summary.aborted).toBe(true);
+    expect(summary.fetched).toBe(1);
+    expect(summary.skipped).toBe(1);
+    // The next row was never asked — not at the next batch boundary, which at a
+    // real crawl's spacing would be an hour of asking after the caller stopped.
+    expect(hitsFor(assets, "/abort-2.png")).toEqual([]);
+
+    const untouched = await rowFor(crawlId, `${assets.base}/abort-2.png`);
+    expect(untouched.fetchClass).toBeNull();
+    // And NO reason: a cap decided something about the row it stopped at, an
+    // abort decided nothing at all.
+    expect(untouched.fetchReason).toBeNull();
+    expect(summary.cappedByResources).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The crawl loop's wiring: after the pages, before the row closes
 // ---------------------------------------------------------------------------
 
@@ -843,6 +1060,70 @@ describe("the crawl runs the pass itself", () => {
       expect(row.fetchedAt).not.toBeNull();
       expect(row.fetchedAt!.getTime()).toBeLessThanOrEqual(finishedAt.getTime());
     }
+  });
+
+  it("hands the pass the window the page crawl settled at, not the ceiling", async () => {
+    const summary = await runCrawl(db, {
+      // Two 503 pages behind this one: enough back-pressure to halve a window
+      // of 2 down to 1 before the pass starts.
+      siteUrl: `${assets.base}/window`,
+      maxPages: 5,
+      maxDepth: 1,
+      userAgent: "AriadneBot-resource-test",
+      perHostDelayMs: 0,
+      maxConcurrency: 2,
+      probeHosts: false,
+      allowPrivate: true,
+    });
+
+    expect(summary.status).toBe("finished");
+    const pass = summary.resources;
+    if (pass === null) throw new Error("the crawl reported no resource pass");
+    // One slow asset on each of two hosts, so a two-worker pass would overlap
+    // them and a one-worker pass cannot.
+    expect(pass.seen).toBe(2);
+    expect(pass.hosts).toBe(2);
+    // THE CLAIM: the collapsed window bounds the pass. Passing
+    // `config.maxConcurrency` here instead would read 2 — a site that just
+    // asked us to slow down getting its full concurrency back for its images.
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("closes the crawl cancelled when the signal fires inside the pass", async () => {
+    const controller = new AbortController();
+    onAssetHit = (path) => {
+      if (path === "/abort-1.png") controller.abort();
+    };
+
+    const summary = await runCrawl(
+      db,
+      {
+        siteUrl: `${assets.base}/abort`,
+        maxPages: 5,
+        maxDepth: 1,
+        userAgent: "AriadneBot-resource-test",
+        perHostDelayMs: 0,
+        maxConcurrency: 1,
+        probeHosts: false,
+        allowPrivate: true,
+      },
+      controller.signal,
+    );
+
+    // The pages were all fetched and the abort arrived during the resource
+    // pass. A crawl that closed `finished` on a flag computed before the pass
+    // would be claiming a resource census it does not have.
+    expect(summary.status).toBe("cancelled");
+    expect(summary.resources?.aborted).toBe(true);
+    expect(summary.note).toContain("aborted by the caller");
+    expect(hitsFor(assets, "/abort-2.png")).toEqual([]);
+
+    const row = (await db.select().from(crawls).where(eq(crawls.id, summary.crawlId)))[0];
+    expect(row?.status).toBe("cancelled");
+    // The row it never reached is the resume's work list: null, no reason.
+    const untouched = await rowFor(summary.crawlId, `${assets.base}/abort-2.png`);
+    expect(untouched.fetchClass).toBeNull();
+    expect(untouched.fetchReason).toBeNull();
   });
 
   it("does not ask a single server anything once the crawl is cancelled", async () => {

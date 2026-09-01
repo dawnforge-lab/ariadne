@@ -1180,7 +1180,6 @@ async function runToCompletion(
   // The one thing not on offer is log-and-continue. If the skip cannot be
   // recorded either, the crawl has lost its ability to say what it knows, and
   // both errors go into the same aggregation the loop and the shutdown use.
-  const status = aborted ? "cancelled" : "finished";
   try {
     await probeKnownMissing(db, crawlId, config, discovery, gate, {
       allowPrivate,
@@ -1228,6 +1227,14 @@ async function runToCompletion(
   // and every row this pass would write is a request to somebody's server. The
   // nulls it leaves are the resume's work list, unchanged.
   //
+  // AN ABORT THAT ARRIVES *DURING* THE PASS is the other half of that, and it
+  // is why `status` is computed below this line rather than above the probe: the
+  // pass stops asking within one row and returns `aborted: true`, and a crawl
+  // that closed `finished` on the strength of a flag computed before the pass
+  // ran would be reporting a complete resource census it does not have (hard
+  // rule 7). The rows it left are null with no reason, which is exactly what a
+  // resume picks up.
+  //
   // NOT CONTAINED the way the probe is, and for the inference's reason: this
   // pass classifies every site-side failure into a row (a 404 image, a dead CDN,
   // a robots.txt that refuses us), so anything it throws is OUR defect or a
@@ -1246,13 +1253,27 @@ async function runToCompletion(
         // Already read by `discover`; the pass re-reads nobody's robots.txt but
         // a third-party asset host's.
         originRobots: discovery.robots,
-        maxConcurrency: config.maxConcurrency,
+        // THE SETTLED WINDOW, not the configured ceiling. The gate carries its
+        // own state because the pass is handed the gate itself; the window
+        // cannot, because the pass runs its own worker pool — so the number it
+        // adapted to is threaded here by hand. A site that answered 503s until
+        // the window collapsed 4 -> 1 gets one resource worker, not four. Per-host
+        // spacing alone would not have delivered that (it serialises ONE host,
+        // and resources routinely span several), and "the origin just told us to
+        // slow down" is not a statement about one host's queue (rule 9).
+        maxConcurrency: Math.min(window.size(), config.maxConcurrency),
         maxResources: config.maxResources,
         maxResourceHosts: config.maxResourceHosts,
         timeoutMs: FETCH_TIMEOUT_MS,
         allowPrivate,
         signal,
       });
+
+  // The pass stops asking the moment the signal fires, so a crawl that was
+  // cancelled inside it must say `cancelled` — with the note, and with the
+  // frontier's own account of what is left.
+  if (resourcePass?.aborted === true || signal?.aborted === true) aborted = true;
+  const status = aborted ? "cancelled" : "finished";
 
   // INSERTION 4 — the crawl types its own population, now that it has one.
   //
