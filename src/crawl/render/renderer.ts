@@ -610,6 +610,15 @@ export class PageRenderer {
         title: analysis.title,
         h1Count: analysis.headingCounts[0],
         canonical: analysis.canonicalHtml,
+        // `analysis.resourceRefs` IS PRODUCED HERE AND DELIBERATELY DROPPED
+        // (P11-T1). The `resources` table holds the SERVED HTML's references;
+        // an asset a client-rendered page injects at runtime appears in this
+        // analysis and in no table, so on a CSR site the resource census is a
+        // floor rather than the page's real asset list. That is a scoping
+        // decision, not an oversight — a post-JS reference is a different fact
+        // from a served one and deserves its own column before it is stored —
+        // and it is written down in both places so a reader of either finds it
+        // (see the `resources` docblock in src/db/schema.ts).
         htmlPath,
         // `offSite` first: when the page tried to leave and we stopped it, the
         // URL it asked for is the redirect — `page.url()` is still where it

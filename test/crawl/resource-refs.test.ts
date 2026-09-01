@@ -150,6 +150,28 @@ describe("resource refs — what is NOT a resource", () => {
   it("takes a stylesheet link only when it carries an href", () => {
     expect(refs(doc("", `<link rel="stylesheet">`))).toEqual([]);
   });
+
+  /**
+   * An ALTERNATE stylesheet (`rel="alternate stylesheet"`, the user-selectable
+   * theme mechanism) is not loaded on render: a browser parses the link and
+   * fetches nothing until a reader picks that style. Fetching it here would
+   * spend a client's politeness budget — a request against their server, a slot
+   * in their host queue — on a file no page load asks for, and would then weigh
+   * a page by bytes no visitor downloads. The token list is order-free, so both
+   * spellings are dropped.
+   */
+  it("drops an alternate stylesheet and keeps the plain one", () => {
+    expect(
+      refs(
+        doc(
+          "",
+          `<link rel="stylesheet" href="/css/site.css">
+           <link rel="alternate stylesheet" href="/css/hi-contrast.css" title="High contrast">
+           <link rel="stylesheet alternate" href="/css/sepia.css" title="Sepia">`,
+        ),
+      ),
+    ).toEqual([{ url: "https://ex.com/css/site.css", kind: "css" }]);
+  });
 });
 
 describe("resource refs — srcset is read to its FIRST candidate only", () => {

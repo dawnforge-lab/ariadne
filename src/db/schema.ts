@@ -543,6 +543,15 @@ export const structuredData = pgTable("structured_data", {
  * has run they are all null. Dedup is this table's job and not the writer's —
  * the unique index below plus `on conflict do nothing`, never a set of URLs in
  * memory (hard rule 6).
+ *
+ * THESE ARE THE SERVED HTML'S REFERENCES, and the qualification is not a
+ * footnote. The render pass runs the same analyzer over the post-JavaScript DOM
+ * and its resource refs are DELIBERATELY DISCARDED (P11-T1), so assets a
+ * client-rendered site injects at runtime are not in this table. On such a site
+ * an empty result here means "the server sent no references", which is a
+ * different sentence from "this page loads no assets" — and a rule that read the
+ * two as one would be a rule that always passes (hard rule 1). Any consumer
+ * reporting resource coverage says which of the two it is looking at.
  */
 export const resources = pgTable("resources", {
   crawlId: text("crawl_id").notNull().references(() => crawls.id, { onDelete: "cascade" }),
@@ -619,6 +628,17 @@ export const resources = pgTable("resources", {
  * `PageWriter` mints its own `page_id`: the writer must be able to build a
  * child row without reading anything back, and `(crawl_id, url)` already
  * identifies the resource.
+ *
+ * ONE CAVEAT THE WEIGHT NUMBERS INHERIT, and it belongs here because this table
+ * is what a rollup joins through. An `<img>` carrying BOTH `src` and `srcset`
+ * contributes both URLs (the fallback and the first rendition — two real files,
+ * and 0013 carries no column saying which a given client would pick), so on a
+ * responsive site the edges over-count what any ONE browser downloads, roughly
+ * two-fold on such images. A page-weight sum over these edges is therefore a
+ * CEILING, and P11-T3's `page.weight` metric must say so in its copy — the upper
+ * bound stated alongside the `atLeast` floor that unfetched resources impose.
+ * Two honest bounds around a number nobody can measure exactly from markup, not
+ * one number pretending to be the answer.
  *
  * NO FOREIGN KEY to `pages` or to `resources`, matching `links`, `hreflang` and
  * `structured_data`, and for a concrete reason rather than by imitation: page

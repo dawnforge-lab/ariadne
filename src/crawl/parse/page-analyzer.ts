@@ -174,10 +174,15 @@
  *   `<link rel=stylesheet href>`.
  * NOT: inline `style` `url()`, `@import` inside a `<style>` body (both need CSS
  * parsing, which this file does not do and the phase stores no bodies for),
- * `preload` / `prefetch` / `preconnect` hints, favicons, fonts, and `<source>`
+ * `preload` / `prefetch` / `preconnect` hints, favicons, fonts, `<source>`
  * inside `<video>` / `<audio>` (media is out of the owner's scope for this
- * phase). Every URL on this list is one a polite fetcher will later request from
- * somebody's server, so widening it is a decision, never a tidy-up.
+ * phase), and — the one exclusion that is about POLITENESS rather than scope —
+ * an ALTERNATE stylesheet (`rel="alternate stylesheet"`, in either token order).
+ * A browser fetches one of those only if a reader selects that style, so asking
+ * for it would spend a request against a client's server on a file no page load
+ * requests, and would weigh the page by bytes no visitor downloads. Every URL on
+ * this list is one a polite fetcher will later request from somebody's server,
+ * so widening it is a decision, never a tidy-up.
  *
  * Four rules the refs follow, each with its reason:
  *  - **Resolution is `normalizeUrl`**, the same function the link extraction
@@ -507,9 +512,15 @@ const MAX_EXTRACTED_LINKS = 2_000;
 /**
  * The same cap on the same reasoning for `resourceRefs`, which sits in a persist
  * batch exactly as the links do. A gallery page with more than this many
- * distinct assets loses the tail of the list; `imagesTotal` beside it does not
- * saturate, so the page still says how many images it really had and the pair
- * makes the truncation visible instead of silent.
+ * distinct assets loses the tail of the list.
+ *
+ * THE TRUNCATION IS ONLY VISIBLE FOR IMAGES, and the limit is worth stating
+ * plainly: `imagesTotal` does not saturate, so an image list cut short can be
+ * spotted against it — but CSS and JS have NO counter beside them, so a page
+ * whose stylesheets and scripts fall past the cap loses them silently. Nothing
+ * in this file can fix that (a second counter would be a new column), so the
+ * cap-exceeded signal is CARRIED TO P11-T4, which owns `crawl_status` and can
+ * report it once for the crawl instead of once per page.
  *
  * Exported so the suite pins the constant rather than a copy of its value
  * (the SOFT_404_PHRASES precedent).
@@ -866,8 +877,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // A stylesheet, matched as a token (`rel="preload stylesheet"` is one) and
     // only with an href — a `<link rel=stylesheet>` naming no file references
     // no resource. `icon`, `preload`, `prefetch` and `preconnect` are NOT on
-    // the list: see the module header's closed list.
-    if (tokens.includes("stylesheet")) addResource(href, "css");
+    // the list, and neither is an ALTERNATE stylesheet: see the module header's
+    // closed list for both, and for why the alternate is a politeness question
+    // rather than a taxonomy one.
+    if (tokens.includes("stylesheet") && !tokens.includes("alternate")) {
+      addResource(href, "css");
+    }
     if (tokens.includes("amphtml")) hasAmp = true;
     if (tokens.includes("next") && relNext === undefined) relNext = href ?? null;
     if (tokens.includes("prev") && relPrev === undefined) relPrev = href ?? null;

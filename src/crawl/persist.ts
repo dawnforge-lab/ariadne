@@ -23,7 +23,8 @@
  *
  * KNOW WHAT THAT COSTS, because the fix above sharpened it. A kill between the
  * `pages` commit and the child inserts leaves up to `batchSize - 1` `links`,
- * `hreflang` and `structured_data` rows unwritten for pages the frontier now
+ * `hreflang`, `structured_data`, `resources` and `page_resources` rows
+ * unwritten for pages the frontier now
  * marks `done` — and unlike the page rows, they are UNRECOVERABLE: the URL is
  * finished, so no resume re-fetches it, and a page with no link rows reads
  * exactly like a page that genuinely had no links. The rules cannot tell the
@@ -43,8 +44,10 @@
  *    holding a 2000-row one.
  *  - The transient per-call arrays. `addPage` materialises the row objects for
  *    one page before pushing them, so a call peaks at that page's row count,
- *    which the analyzer's own caps bound (links 2000, hreflang 200,
- *    structured data 50). Across the crawl loop that is
+ *    which the analyzer's own caps bound (links 2000, resource refs 2000 —
+ *    which materialise TWICE, once as `resources` rows and once as
+ *    `page_resources` edges — hreflang 200, structured data 50). Across the
+ *    crawl loop that is
  *    O(concurrency × analyzer caps), not O(URLs) — lazy generators would drop
  *    the constant but buy nothing real at this scale.
  * Nothing here is keyed by URL or by page, so the writer's footprint never
