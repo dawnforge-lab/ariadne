@@ -154,13 +154,16 @@ describe("checklist coverage", () => {
   //   total   85 + 1 = 86
   //
   // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE, and here that is a disclosure
-  // rather than a reassurance: `site.health` carries CHECK-32, which
-  // `links.orphan` and `structure.depth-distribution` already claim, because the
-  // checklist has NO check for a site-wide judgement rollup — its Evaluation
-  // Principle 2 says a crawl summary answers no check at all. The id is a filing
-  // decision (a partition of the page census, where the depth distribution
-  // lives), stated as one in the rule's module header, and not a claim that this
-  // metric answers the orphan check.
+  // rather than a reassurance: `site.health` carries CHECK-32, which THREE rules
+  // already claim — `links.orphan`, `links.orphan-skipped` (the not-measured
+  // marker beside it) and `structure.depth-distribution` — because the checklist
+  // has NO check for a site-wide judgement rollup, and its Evaluation Principle 2
+  // says a crawl summary answers no check at all. The id is a filing decision (a
+  // partition of the page census, where the depth distribution lives), stated as
+  // one in the rule's module header and in the metric's own client-facing copy,
+  // and not a claim that this metric answers the orphan check. The review ruled
+  // it an EXPLICITLY TEMPORARY bridge: the eventual home is an owner-designed
+  // check about the engine's coverage, and the checklist is untouched this phase.
   it("pins the ruleset split the gate doc reports: 86 rules = 26 page + 47 query + 13 metric", () => {
     const registry = buildRegistry();
     expect(registry.all()).toHaveLength(86);

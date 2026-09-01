@@ -1654,13 +1654,22 @@ describe("the fixture site end to end", () => {
     }
     expect(auditable).toBeGreaterThan(0);
     expect(critical + warningOnly + infoOnly + clean).toBe(auditable);
+    // The ratio, rounded THE WAY POSTGRES ROUNDS IT. `round(numeric, 4)` is
+    // half-away-from-zero on the exact decimal; `toFixed(4)` rounds a binary
+    // float, so at an exact .00005 boundary the two can disagree and a future
+    // fixture change would surface as a mystery flake rather than as a fault.
+    // Integer arithmetic reaches the boundary exactly:
+    // `floor(clean·10^4/auditable + 1/2)` written with no division at all, as
+    // `floor((2·clean·10^4 + auditable) / (2·auditable))`.
+    const cleanRatio =
+      Math.floor((2 * clean * 10_000 + auditable) / (2 * auditable)) / 10_000;
     expect(siteMetric("site.health")).toEqual({
       urlsTotal: auditable,
       urlsWithCritical: critical,
       urlsWithWarningOnly: warningOnly,
       urlsWithInfoOnly: infoOnly,
       urlsClean: clean,
-      cleanRatio: Number((clean / auditable).toFixed(4)),
+      cleanRatio,
       // 82 pages crawled, and the census is the auditable ones: the rest are
       // this fixture site's redirects, its 404s, its 5xx and its non-HTML.
       pagesNotAuditable: 82 - auditable,

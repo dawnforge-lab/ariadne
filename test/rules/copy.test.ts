@@ -852,7 +852,9 @@ describe("issue copy", () => {
     const c = ISSUE_COPY["site.health"]!;
     const text = c.explanation;
     expect(text, "urlsTotal").toMatch(/how many auditable pages there are/i);
-    expect(text, "the census definition").toMatch(/fetched successfully that answered 200/i);
+    // The census stated as the PREDICATE it is — `fetch_class = 'ok' and
+    // status_code = 200`, which for this crawler means an HTML body it read.
+    expect(text, "the census definition").toMatch(/fetched OK that answered 200 with HTML/i);
     expect(text, "urlsWithCritical").toMatch(/how many pages carry a critical finding/i);
     expect(text, "urlsWithWarningOnly").toMatch(/how many carry a warning and no critical/i);
     expect(text, "urlsWithInfoOnly").toMatch(/how many carry only informational findings/i);
@@ -872,6 +874,54 @@ describe("issue copy", () => {
     // is the only place a reader of the number meets that fact.
     expect(text, "reported findings").toMatch(/THE RATIO IS OF REPORTED FINDINGS/);
     expect(text, "the floor").toMatch(/floor of what is known rather than a fact about the site/i);
+  });
+
+  // The remainder is a SHAPE, not a catalogue. The predicate excludes more than
+  // the three things it is natural to list — a 200 that was not HTML and any
+  // other 2xx are outside it too, and the first of those is counted by no other
+  // table at all, so a closed-looking list here would send a reader looking for
+  // those pages somewhere they are not.
+  it("site.health's remainder is open-ended and names the case nothing else counts", () => {
+    const text = ISSUE_COPY["site.health"]!.explanation;
+    expect(text, "open-ended").toMatch(/leaves out — everything else:/);
+    expect(text, "non-HTML 200s").toMatch(/responses that were not HTML such as a PDF or an image/i);
+    expect(text, "any other 2xx").toMatch(/any other status that is not 200/i);
+    // And the honest limit of "they are counted elsewhere".
+    expect(text, "not all covered elsewhere").toMatch(
+      /a 200 that was not HTML is counted by neither/i,
+    );
+  });
+
+  // The ratio's precision, which stops describing the ends of the scale as a
+  // crawl grows: at 50,000 pages one clean page rounds to 0.0000 and one page
+  // with a finding rounds to 1.0000. Rounding four decimal places is right for
+  // the column; what the copy has to add is which number to trust.
+  it("site.health says the counts are the authority, not the ratio", () => {
+    const text = ISSUE_COPY["site.health"]!.explanation;
+    expect(text, "the authority").toMatch(/THE FOUR COUNTS ARE THE AUTHORITY AND THE RATIO IS A CONVENIENCE/);
+    expect(text, "the 0.0000 end").toMatch(/one clean page in fifty thousand rounds to 0\.0000/i);
+    expect(text, "the 1.0000 end").toMatch(
+      /one page carrying a finding in fifty thousand rounds to 1\.0000/i,
+    );
+    expect(text, "what to do instead").toMatch(
+      /Work any percentage out from the counts rather than from the ratio/i,
+    );
+  });
+
+  // THE CHECK ID DISCLAIMER, and the reason it is in the CLIENT-FACING copy
+  // rather than only in the rule's module header: `metrics_get` and
+  // `rules_catalog` both export `checkIds: ["CHECK-32"]` with no caveat, so a
+  // dashboard grouping rules by check would otherwise render this table inside
+  // "Orphan pages" as that check's verdict. The explanation is the one string
+  // that travels with the id to every consumer.
+  it("site.health tells its consumer the check id is a filing, not an answer", () => {
+    const text = ISSUE_COPY["site.health"]!.explanation;
+    expect(text, "the disclaimer").toMatch(
+      /THE CHECK ID THIS TABLE CARRIES SAYS WHERE IT IS FILED, NOT WHAT IT ANSWERS/,
+    );
+    expect(text, "answers no check").toMatch(/answers no checklist check on its own/i);
+    // And what a UI should do with it, since the UI is the consumer that groups.
+    expect(text, "context, not verdict").toMatch(/as context beside that check rather than as its verdict/i);
   });
 
   // Obligation 6, as a test: Ariadne emits the ingredients and the ratio; Talos

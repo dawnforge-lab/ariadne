@@ -42,8 +42,15 @@
  * not change in this phase — owner decision 5) or to weaken `defineRule`'s
  * one-check-minimum (which would put a hole in rule 10's guard for every future
  * rule, and would break the `rules_catalog` contract that every rule carries at
- * least one check id). Both were rejected, the reasoning is in the Phase 10 T2
- * report, and the reviewer owns the ruling.
+ * least one check id). Both were rejected.
+ *
+ * **THE CHECK-32 CLAIM IS EXPLICITLY TEMPORARY** (Phase 10 T2 review ruling,
+ * ledgered with a Phase 11 handoff). It is a bridge, not a resting place: the
+ * eventual home is a checklist check the OWNER designs, about the engine's own
+ * coverage of the site rather than about site health, and the checklist stays
+ * untouched this phase. When that check exists this claim moves to it in one
+ * line — the id is stated in exactly two places, here and the `metricRule` call
+ * at the foot of this file, and pinned by this rule's metadata test.
  *
  * ## The census, and what is outside it
  *
@@ -56,16 +63,25 @@
  * attached to pages the denominator had never heard of, and four buckets that
  * do not partition anything.
  *
- * It is also not the crawl's page count. A redirect, a 404, a 5xx or a
- * connection failure is not a page the ruleset can judge as CONTENT, and the
- * findings those pages do carry belong to the status rules and to
- * `redirect.volume`. They are excluded from every bucket here — and
- * `pagesNotAuditable` is the column that says how many, so the exclusion is a
- * number a reader can see rather than a silence they have to infer
- * (`urlsTotal + pagesNotAuditable` is the crawl's page count). On the Phase 10
- * reference crawl that is 443 auditable pages and 108 outside, carrying 97
- * findings between them: without the column, a health row of 443 would look
- * like the whole crawl.
+ * It is also not the crawl's page count, and the remainder is OPEN-ENDED rather
+ * than a list. The predicate is positive — fetched OK, answered 200, which for
+ * this crawler means an HTML body it could read — so what falls outside it is
+ * EVERYTHING ELSE: redirects, 4xx and 5xx, requests that failed or were blocked,
+ * and 200s that were not HTML (`non_html`, `too_large`, `unsupported_encoding`)
+ * or were another 2xx entirely. Enumerating "a redirect, a 404, a 5xx" as though
+ * that were the whole remainder is the mistake this paragraph exists to stop: it
+ * is the shape of the predicate, not a catalogue.
+ *
+ * Those pages are excluded from every bucket here, and `pagesNotAuditable` is
+ * the column that says how many, so the exclusion is a number a reader can see
+ * rather than a silence they have to infer (`urlsTotal + pagesNotAuditable` is
+ * the crawl's page count). **The other tables do not cover the remainder
+ * either**: `redirect.volume` counts the redirects and the status rules judge
+ * the error responses, but a 200 that was not HTML is counted by NEITHER — the
+ * reference crawl has exactly one such row — which is the second reason this
+ * column is on the row rather than left to a reader's arithmetic. On that crawl
+ * it is 443 auditable pages and 108 outside, carrying 97 findings between them:
+ * without the column, a health row of 443 would look like the whole crawl.
  *
  * ## The ratio is over REPORTED findings
  *
