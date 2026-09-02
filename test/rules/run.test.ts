@@ -97,7 +97,10 @@ describe("buildRegistry", () => {
     expect(ids).toContain("resources.uncached");
     expect(ids).toContain("resources.not-recorded");
     expect(ids).toContain("page.weight");
-    expect(ids.length).toBe(92);
+    // And Phase 12 Task 2's sibling marker: the crawl that recorded its files
+    // and asked about none of them, which used to meet no finding at all.
+    expect(ids).toContain("resources.not-fetched");
+    expect(ids.length).toBe(93);
   });
 
   it("registers every kind the runner drives", () => {

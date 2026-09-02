@@ -202,11 +202,31 @@ describe("checklist coverage", () => {
   // CHECK-50's "caching headers … not stored" and CHECK-47's "nothing else about
   // performance" were made false by these rules and are gone, and CHECK-48 and
   // CHECK-51 gained Engine lines naming the halves the engine now answers.
-  it("pins the ruleset split the gate doc reports: 92 rules = 26 page + 52 query + 14 metric", () => {
+  // Phase 12 Task 2 adds ONE query rule: `resources.not-fetched`, the sibling
+  // marker the Phase 11 gate ledgered (§10.3). It reports the case
+  // `resources.not-recorded` deliberately excludes — the rows exist and not one
+  // of them was ever put to a server — and the two are mutually exclusive by
+  // construction (`resourcesSeen == 0` against `resourcesSeen > 0`).
+  //
+  //   query   52 + 1 = 53
+  //   total   92 + 1 = 93
+  //
+  // Query-kind for the family's reason: the question is about a TABLE. It is a
+  // NEW verdict rather than a widened old one, which is what makes it additive
+  // and what puts the ruleset bump (0.8.0 -> 0.9.0) in this task rather than
+  // making it a change to a rule a stored finding already carries.
+  //
+  // THE CLAIMED-CHECK ARITHMETIC BELOW DOES NOT MOVE, for the reason P11-T3's
+  // did not: CHECK-48, CHECK-49, CHECK-50 and CHECK-51 are section-12 checks,
+  // outside the build plan's 47, and all four were already claimed by the rules
+  // this marker stands in for. The claim is a set union — a check explained more
+  // completely does not appear as a new claim — which is exactly why the pin
+  // below asserts the marker's four ids directly.
+  it("pins the ruleset split the gate doc reports: 93 rules = 26 page + 53 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(92);
+    expect(registry.all()).toHaveLength(93);
     expect(registry.byKind("page")).toHaveLength(26);
-    expect(registry.byKind("query")).toHaveLength(52);
+    expect(registry.byKind("query")).toHaveLength(53);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -233,6 +253,15 @@ describe("checklist coverage", () => {
     // The marker claims every check whose silence it explains, `page.weight`'s
     // included — the `content.thin-skipped` contract.
     expect(byId.get("resources.not-recorded")).toEqual([
+      "CHECK-48",
+      "CHECK-49",
+      "CHECK-50",
+      "CHECK-51",
+    ]);
+    // And its sibling claims the same four (P12-T2): the silence it explains is
+    // the same silence, so a marker claiming fewer would leave a check whose
+    // reader never meets it.
+    expect(byId.get("resources.not-fetched")).toEqual([
       "CHECK-48",
       "CHECK-49",
       "CHECK-50",

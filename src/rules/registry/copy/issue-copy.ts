@@ -566,6 +566,17 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Re-crawl the site. The references are read while each page is being parsed and the files are asked about afterwards, so neither can be recovered from what was stored, and any crawl from this version of the engine onwards records both.",
   },
+  "resources.not-fetched": {
+    // Accuracy: this reports a CRAWL, never a site — and, unlike its sibling,
+    // never a gap in what was recorded. The census exists and is real; what is
+    // missing is the asking. Copy that read as "no resources were found" would
+    // describe the opposite crawl.
+    title: "The site's files were listed but never asked about",
+    explanation:
+      "This crawl recorded every image, stylesheet and script the pages it read point at — everything named in the HTML the server sent, which is a real census and the only one a crawl can take — and it requested none of them. So nothing here says whether any of those files is missing, oversized, in a dated format, or served without caching instructions, and the page-weight table beside these checks counts each page's HTML and nothing else. The finding says which of two things happened: the crawl was started with the resource fetch turned off (fetchResources: false), which is a decision an operator takes — a client who asked us not to touch their servers, or a re-crawl that only needed the page census; or the fetch pass sent no request at all, which is a crawl interrupted before it started asking. It also says how many files were recorded and how many of them went unasked, which on this crawl are the same number, and how many pages were read. Either way the silence of the resource checks is a limit of this crawl rather than a clean bill of health for the site.",
+    howToFix:
+      "Re-run the crawl with the resource fetch left on — it is on by default — or resume the interrupted one, which asks about the files it never reached. Nothing about the files can be recovered from what is stored: the census records which URLs the pages point at, not what a server would say about them.",
+  },
 
   // -------------------------------------------------------------------- url
   "url.normalisation-variants": {

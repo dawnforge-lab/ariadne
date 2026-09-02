@@ -250,6 +250,13 @@ const PHASE_11_RULE_IDS = [
 /** The metric ids of the list above — what the metric-copy contracts apply to. */
 const PHASE_11_METRIC_IDS = ["page.weight"];
 
+/**
+ * Phase 12's rule: the sibling marker. Same contract as every list above, and
+ * the same obligation as the family it joins — it speaks about the CRAWL, and
+ * its copy must not read as a fact about the site.
+ */
+const PHASE_12_RULE_IDS = ["resources.not-fetched"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -258,6 +265,7 @@ const ALL_RULE_IDS = [
   ...PHASE_7_RULE_IDS,
   ...PHASE_10_METRIC_IDS,
   ...PHASE_11_RULE_IDS,
+  ...PHASE_12_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -1182,6 +1190,31 @@ describe("issue copy", () => {
       /a site whose files are all healthy and a crawl that never looked/i,
     );
     expect(c.howToFix).toMatch(/re-crawl/i);
+  });
+
+  // The sibling marker (P12-T2). Its copy has one job the other marker's does
+  // not: the census EXISTS here, and a reader who takes this for "no files were
+  // found" has the wrong crawl in mind. So it must say both halves — recorded,
+  // and not asked about — and it must name which of the two reasons applies,
+  // because the remedy differs (re-crawl with the pass on; or finish the crawl).
+  it("resources.not-fetched says the files were recorded AND unasked, and names both reasons", () => {
+    const c = ISSUE_COPY["resources.not-fetched"]!;
+    expect(c.title.toLowerCase()).toContain("never asked about");
+    expect(c.explanation, "the census is real").toMatch(/recorded every image, stylesheet and script/i);
+    expect(c.explanation, "and nothing was asked").toMatch(/requested none of them/i);
+    expect(c.explanation, "the operator's switch").toContain("fetchResources: false");
+    expect(c.explanation, "the interrupted pass").toMatch(/interrupted before it started asking/i);
+    expect(c.explanation, "what the silence is not").toMatch(
+      /rather than a clean bill of health/i,
+    );
+    // The page-weight consequence, which is the one a reader would otherwise
+    // read as a light site.
+    expect(c.explanation, "page.weight beside it").toMatch(/HTML and nothing else/i);
+    expect(c.howToFix).toMatch(/re-run the crawl|resume/i);
+    // NEVER the other marker's sentence: this crawl recorded plenty.
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
+      /recorded no (?:files|resources)|no resource records|found no files/i,
+    );
   });
 
   // The metric-copy column contract, for Phase 11's table. Its shape is five

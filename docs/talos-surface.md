@@ -131,10 +131,11 @@ validator before the handler runs (`test/api/mcp.test.ts:734` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (92 rows) rather than by the crawl. The catalog is
-~98 KB (100,645 bytes, measured 2026-09-02) because it carries every rule's full
-copy — the tool description says so, and points an agent that only wants what
-fired at `issues_list` instead.
+bounded by the **ruleset** (93 rows) rather than by the crawl. The catalog is
+~98 KB (100,645 bytes, measured 2026-09-02 over the 92 rows of ruleset 0.8.0;
+`resources.not-fetched` adds its own copy to that) because it carries every
+rule's full copy — the tool description says so, and points an agent that only
+wants what fired at `issues_list` instead.
 
 **Timestamps** are ISO-8601 UTC strings. **Ids** are `crawl_<uuid>`; a caller
 never constructs one.
@@ -527,12 +528,21 @@ rows cannot say it and only the config can.
 1. **A silent resource rule is not a clean site.** `resources.broken`,
    `images.oversized`, `images.legacy-format` and `resources.uncached` all gate
    on a non-null class, so on a crawl that asked about nothing every one of them
-   is silent. `resources.not-recorded` (info) is the NOT MEASURED marker that
-   fires when the crawl holds no resource rows AT ALL — but it deliberately does
-   not fire when the rows exist and are merely unasked, because in that case the
-   crawl DID record what it saw. That case is legible on `crawl_status` instead:
-   `fetchResources: false`, or `skipped` equal to `seen`. **Read the coverage
-   block before quoting any resource finding, or the absence of one.**
+   is silent. TWO NOT MEASURED markers cover that silence, and no crawl can carry
+   both. `resources.not-recorded` (info) fires when the crawl holds no resource
+   rows AT ALL; it deliberately does not fire when the rows exist and are merely
+   unasked, because in that case the crawl DID record what it saw. That second
+   case is `resources.not-fetched` (info), the sibling added in Phase 12
+   (ruleset 0.9.0): the rows exist, not one of them was put to a server, and the
+   finding's evidence says which of the two reasons applies — `reason:
+   "fetch-off"` for an operator's `fetchResources: false`, `reason:
+   "pass-not-run"` for a pass that sent no request at all — beside
+   `resourcesSeen` and `resourcesSkipped`, which are equal. A PARTIAL pass gets
+   neither marker: something was measured, and the judging rules report it with
+   their `unknownResources` counts. Both cases are also legible on
+   `crawl_status`: `fetchResources: false`, or `skipped` equal to `seen`.
+   **Read the coverage block before quoting any resource finding, or the absence
+   of one.**
 2. **`fetch_class` null is per FILE, so a page's weight can be a floor.** The
    `page.weight` metric flags `atLeast: true` on any row that references a file
    nobody weighed, and reports the referenced-and-weighed pair beside it.
@@ -676,17 +686,17 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:898` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:931` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:946` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:972` "tells
+`test/rules/copy.test.ts:906` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:939` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:954` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:980` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:999` "grades nothing: no score, no label, no threshold";
-`test/rules/coverage.test.ts:247` "site.health is filed under the
+`test/rules/copy.test.ts:1007` "grades nothing: no score, no label, no threshold";
+`test/rules/coverage.test.ts:276` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:1770` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:1779` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -968,7 +978,7 @@ Three postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (0.8.0) stamps **judgement**: bump it when a rule's verdict or
+`RULESET_VERSION` (0.9.0) stamps **judgement**: bump it when a rule's verdict or
 copy changes. Adding a rule or a metric family adds rows without changing a
 verdict — `metrics` rows carry no version column at all — which is the argument
 Phase 10 held 0.7.0 on.
@@ -982,6 +992,19 @@ phase ships as one change and the version is what a consumer compares crawls by
 (§7.2): two stamps inside it would make `crawl_compare` raise
 `ruleset-mismatch` between crawls that differ by nothing a consumer cares
 about.
+
+**Phase 12 bumped to 0.9.0, once, on two grounds.** First, a FINDING a crawl
+could not receive before: `resources.not-fetched`, the sibling marker of §5.3.
+That is not the Phase 10 case above — a metric adds rows to a table with no
+version column at all, while a finding rule stamps this constant onto every row
+it writes, and a crawl re-judged at 0.9.0 carries a marker it did not carry at
+0.8.0. It is ADDITIVE all the same, which is the distinction the Phase 11 gate
+drew (§10.3): a new id firing where nothing fired, never a widened condition on a
+rule already stamped into stored findings. Second, the `resources.broken` and
+`resources.uncached` explanations, which now name the `robots_unreachable` class
+— copy is served from the catalogue stamped with this constant, so that ground
+would have earned the bump on its own, exactly as `site.health`'s did in
+Phase 11.
 
 Three consequences a consumer must plan for:
 

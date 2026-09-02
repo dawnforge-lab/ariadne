@@ -23,6 +23,25 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.9.0: Phase 12, on two grounds — and BOTH are named because this constant
+// stamps more than a verdict. The paragraph above is the contract: a finding is
+// traced to the ruleset that produced it, and `rules_catalog` serves the COPY
+// stamped with this same constant, so text a client reads is part of what a
+// version identifies.
+//
+//  1. `resources.not-fetched` (T2). A marker a crawl could not receive before: a
+//     crawl that recorded every file its pages point at and asked about none of
+//     them — `fetchResources: false`, or a pass interrupted before its first
+//     request — met no finding at all, and a re-judge at 0.9.0 gives it one. It
+//     is ADDITIVE by construction: the sibling the Phase 11 gate ruled on
+//     (docs/gates/phase-11.md §10.3), never a widened `resources.not-recorded`,
+//     whose condition moving would have been a verdict change on a rule that
+//     already exists.
+//  2. `resources.broken` and `resources.uncached`'s explanations (T1). Both now
+//     name the `robots_unreachable` class the fetch pass writes, in the
+//     unknown-bucket sentence a client reads. The verdicts did not move; what
+//     the ruleset SAYS did.
+//
 // 0.8.0: Phase 11. Five verdicts a page or a site could not receive before —
 // `resources.broken`, `images.oversized`, `images.legacy-format`,
 // `resources.uncached` and the `resources.not-recorded` marker — plus the
@@ -33,7 +52,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.8.0";
+export const RULESET_VERSION = "0.9.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

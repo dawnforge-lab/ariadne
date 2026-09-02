@@ -305,8 +305,11 @@ answered from, and its verdict is the confidence interval around all of them.
 - **The markers are part of this check, not a footnote.** `issues_list` with no
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
-  `host.probe-skipped`, `resources.not-recorded`. Each one is the engine saying a
-  check below could not be answered on this crawl. List them here, and mark the
+  `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`. Each one
+  is the engine saying a check below could not be answered on this crawl. The last
+  two are siblings and never both appear: `resources.not-recorded` means the crawl
+  holds NO resource records, `resources.not-fetched` means it recorded them all and
+  asked the site about none of them. List them here, and mark the
   checks they claim SKIP rather than PASS when you reach them.
 - **Evaluate**:
   - FAIL if `rulesRunAt` is null — nothing below this line is answerable, and the
@@ -2128,11 +2131,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   running browser). Scripts a page loads with JavaScript are outside the measurement
   entirely, so on a client-rendered site the engine's number is a floor of a floor.
   **Call `issues_list` with `checkId: "CHECK-48"` before quoting the table**, and read
-  its answer first: the one finding it can return is `resources.not-recorded` (info),
-  the marker that fires when a crawl holds no resource records at all. When it is
-  there the `page.weight` row above is a table of HTML sizes and nothing else — a
-  light-looking site that was never measured — and this check is NOT MEASURED on that
-  crawl rather than passed. The remedy is a re-crawl, and the marker says so.
+  its answer first: the two findings it can return are the resource family's NOT
+  MEASURED markers, and exactly one of them can be present. `resources.not-recorded`
+  (info) fires when the crawl holds no resource records at all; `resources.not-fetched`
+  (info) fires when it recorded every file the pages point at and asked the site about
+  none of them — its evidence says which of the two reasons applies, the operator's
+  `fetchResources: false` or a pass that never sent a request. Either way the
+  `page.weight` row above is a table of HTML sizes and nothing else — a light-looking
+  site that was never measured — and this check is NOT MEASURED on that crawl rather
+  than passed. The remedy is a re-crawl, and each marker says so.
 - **DevTools**: Lighthouse audit — check "Eliminate render-blocking resources" and "Reduce unused JavaScript"
 - **Evaluate**:
   - WARN if render-blocking resources > 3 or unused JS > 50%
@@ -2140,8 +2147,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — five rule ids can come back,
-  four of them findings about the site and one about the crawl.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — six rule ids can come back,
+  four of them findings about the site and two about the crawl.
   `images.missing-dimensions` (info) and `images.missing-alt` (info), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
   images; and, since the resource pass, `images.oversized` (warning) for every image
@@ -2154,13 +2161,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   larger than the box it is displayed in; and only images named in the HTML the
   server sent are weighed, so a client-rendered gallery is invisible to all of it.
   RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
-  and nothing checks whether the set is sensible. The fifth id is
-  `resources.not-recorded` (info), the NOT MEASURED marker for the whole resource
-  family: when it is present the crawl recorded no files at all, so the silence of
-  `images.oversized` and `images.legacy-format` says the crawl never asked rather than
-  that the images are fine — the weight and format halves of this check are then NOT
-  MEASURED and a re-crawl is what answers them. The two older findings are unaffected
-  by it; they read the page's markup, not the files.
+  and nothing checks whether the set is sensible. The last two ids are the resource
+  family's NOT MEASURED markers, and only one of them can be present:
+  `resources.not-recorded` (info), which means the crawl recorded no files at all, and
+  `resources.not-fetched` (info), which means it recorded them and asked about none.
+  When either is there the silence of `images.oversized` and `images.legacy-format`
+  says the crawl never asked rather than that the images are fine — the weight and
+  format halves of this check are then NOT MEASURED and a re-crawl is what answers
+  them. The two older findings are unaffected by either; they read the page's markup,
+  not the files.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
 - **Evaluate**:
@@ -2179,11 +2188,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   caching and ETag revalidation are invisible, and the finding says the response gave
   no instruction rather than that the file is re-downloaded. The HTML documents' own
   caching headers are not stored at all — this is about the images, stylesheets and
-  scripts. `resources.not-recorded` (info) can come back from the same call: it is the
-  NOT MEASURED marker for the resource family, and when it is present this crawl asked
-  for no files, so a quiet `resources.uncached` says nothing about the site's caching
-  and the answer is a re-crawl. COMPRESSION and PROTOCOL are still NOT MEASURED and
-  stay browser work.
+  scripts. Either of the resource family's two NOT MEASURED markers can come back from
+  the same call — `resources.not-recorded` (info) when the crawl holds no resource
+  records, `resources.not-fetched` (info) when it holds them all and asked about none
+  — and when one is present this crawl fetched no files at all, so a quiet
+  `resources.uncached` says nothing about the site's caching and the answer is a
+  re-crawl. COMPRESSION and PROTOCOL are still NOT MEASURED and stay browser work.
 - **DevTools**: Check the homepage's network panel for TTFB and response headers
   (Cache-Control, Content-Encoding, protocol)
 - **Evaluate**:
@@ -2208,10 +2218,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   when the unknown count is high, read those before writing anything: a wall of
   `robotsUnreachable` is a host that was down during our window, not a decision
   anybody made about this site. The same call can
-  return `resources.not-recorded` (info), the NOT MEASURED marker for the resource
-  family: when it is present the crawl holds no resource records, so no broken file
-  could have been found and the network half of this check is NOT MEASURED rather than
-  clean — re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
+  return either of the family's NOT MEASURED markers, never both:
+  `resources.not-recorded` (info) when the crawl holds no resource records, and
+  `resources.not-fetched` (info) when it recorded every file and asked the site about
+  none of them — `fetchResources: false`, or a pass interrupted before its first
+  request, which its evidence names. When one is present no broken file could have
+  been found and the network half of this check is NOT MEASURED rather than clean —
+  re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
   holds: nothing in a crawl records a console, and requests a script makes at runtime
   are not in the resource table either — both stay browser work.
 - **DevTools**:
@@ -2566,6 +2579,7 @@ every crawl, so the settings below are about SIZE and REACH, not about coverage.
 | `maxPages` | 500 | A cap the crawl hits leaves the frontier undrained, which makes CHECK-32 SKIP (`links.orphan-skipped`) and every "% of pages" figure a floor. Size it to the site. |
 | `maxDepth` | unset | Truncating depth truncates CHECK-31's distribution and orphans everything past the cut. |
 | `probeHosts` | on | Off means CHECK-14 and CHECK-15 are SKIP (`host.probe-skipped`) — the probe is the only evidence there is. |
+| `fetchResources` | on | Off means the crawl records which files each page points at and asks the site about none of them, so CHECK-48, CHECK-49, CHECK-50 and CHECK-51 are SKIP (`resources.not-fetched`) and `page.weight` counts HTML alone. Turn it off only when the site's owner asked us not to touch their assets. |
 | `legacyHosts` | none | The only way CHECK-15 can report a legacy host still serving content. Each entry must be on the operator's allowlist in its own right. |
 | `renderBudgetPct` / `renderMaxPages` / `renderSamplePerType` | see the tool description | The render pass's sample. CHECK-01, CHECK-02, CHECK-34 and the JS-redirect half of CHECK-10 are measured over the pages it reaches and no others. |
 | `perHostDelayMs` / `maxConcurrency` | polite defaults | Politeness, not throughput. Leave them alone unless the site's owner has asked for something specific; robots.txt's own `crawl-delay` wins when it is longer. |

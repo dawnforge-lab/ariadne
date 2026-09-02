@@ -396,7 +396,8 @@ An audit that copies an older findings file forward will under-report all five:
   `crawl_status`'s `resources` block before quoting or not quoting any of them**
   (CHECK-83): on a crawl started with `fetchResources: false`, or one written before
   the tables existed, every one of those rules is silent because nothing was measured,
-  and `resources.not-recorded` (info) is the marker for the second case. What stays
+  and each case has its own marker — `resources.not-fetched` (info) for the first,
+  `resources.not-recorded` (info) for the second, never both on one crawl. What stays
   unmeasured is stated at each check: no image is decoded, only the SERVED HTML's
   references are seen, and fonts, media and favicons are out of scope.
 

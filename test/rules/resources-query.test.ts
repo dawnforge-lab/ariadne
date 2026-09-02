@@ -24,6 +24,7 @@ import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
 import {
   BROKEN_SAMPLE_RESOURCES,
   IMAGE_WEIGHT_WARN,
+  NOT_FETCHED_REASON,
   OVERSIZED_SAMPLE_PAGES,
   resourceRules,
   UNCACHED_SAMPLE_RESOURCES,
@@ -51,11 +52,12 @@ function caps(listing: number | null): RuleCaps {
 }
 
 describe("resourceRules metadata", () => {
-  it("defines exactly the five resource rules of the Phase 11 table", () => {
+  it("defines the five Phase 11 rules and P12-T2's sibling marker", () => {
     expect(resourceRules.map((r) => r.id).sort()).toEqual([
       "images.legacy-format",
       "images.oversized",
       "resources.broken",
+      "resources.not-fetched",
       "resources.not-recorded",
       "resources.uncached",
     ]);
@@ -74,6 +76,13 @@ describe("resourceRules metadata", () => {
       "resources.uncached": [["CHECK-50"], "info", "technical"],
       // The marker claims every check whose silence it explains.
       "resources.not-recorded": [
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+        "info",
+        "technical",
+      ],
+      // Its sibling claims the same four, for the same reason: the silence it
+      // explains is the same silence.
+      "resources.not-fetched": [
         ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
         "info",
         "technical",
@@ -700,21 +709,23 @@ describe("resourceRules against the database", () => {
 
     // THE OFF-SWITCH BOUNDARY (P11-T4), asserted so it is a decision rather
     // than a discovery. A crawl started with `fetchResources: false` records
-    // every reference and asks about none of them, so the rows exist, the
+    // every reference and asks about none of them, so the rows exist, THIS
     // marker's condition (`resourcesSeen == 0`) is false, and it stays silent —
-    // while the four judging rules above are silent too, because every row is
+    // while the four judging rules are silent too, because every row is
     // unfetched and an unfetched resource is unknown rather than fine.
     //
-    // That combination — four quiet rules and no marker — is deliberate and it
-    // is NOT a rule that always passes. The reason it is safe is that the fact
-    // lives one surface over, where the auditor is told to look first: the rows
-    // carry `fetch_reason: 'resource-fetch-off'`, `crawl_status` echoes
-    // `fetchResources: false` beside `resources.skipped == seen`, and CHECK-83
-    // is answered before any check these rules claim. Widening the marker to
-    // cover this case would change when a rule fires, which is a verdict change
-    // and a ruleset bump; it is written up in the T4 report as the alternative
-    // that was weighed and left to the owner.
-    it("stays silent when the operator turned the pass off, because the rows exist", async () => {
+    // **THE WINDOW THIS TEST PINNED IS CLOSED (P12-T2).** What it used to pin
+    // was four quiet rules and NO marker at all, safe only because the fact
+    // lived one surface over — `fetch_reason: 'resource-fetch-off'` on the
+    // rows, `crawl_status` echoing `fetchResources: false` beside
+    // `resources.skipped == seen`, and CHECK-83 answered before any check these
+    // rules claim. The gate doc (phase-11.md §10.3) ruled that a reader should
+    // not have to change surfaces to learn it, and that widening THIS marker
+    // would be a verdict change: the answer is a SIBLING, and it is
+    // `resources.not-fetched`. So the silence below is now only this rule's,
+    // and the crawl does get a marker — asserted here rather than only in the
+    // sibling's own describe, because "which of the two speaks" is the boundary.
+    it("stays silent when the operator turned the pass off — its sibling speaks", async () => {
       const { crawlId } = await seed(
         [{ path: "/a", imagesTotal: 3 }],
         [{ url: "/img/a.png", on: ["/a"], fetchClass: null, fetchReason: RESOURCE_OFF_REASON }],
@@ -729,6 +740,10 @@ describe("resourceRules against the database", () => {
       ]) {
         expect(await run(id, crawlId), id).toEqual([]);
       }
+      // The window: one marker, and it is the one whose fact this crawl is.
+      const sibling = await run("resources.not-fetched", crawlId);
+      expect(sibling).toHaveLength(1);
+      expect(sibling[0]!.evidence.reason).toBe(NOT_FETCHED_REASON.off);
     });
 
     it("is silent on a crawl whose pages genuinely reference nothing", async () => {
@@ -740,6 +755,157 @@ describe("resourceRules against the database", () => {
     });
   });
 
+  /**
+   * THE SIBLING MARKER (P12-T2): the crawl saw the files and asked about none.
+   *
+   * Every case here seeds rows whose `fetch_class` is null, because that is the
+   * whole population this rule speaks about — a row with a class is a row
+   * somebody decided something about, and one of those anywhere in the crawl is
+   * enough to make this a PARTIAL pass, which the judging rules report with
+   * their unknown counts and this marker deliberately leaves alone.
+   */
+  describe("resources.not-fetched", () => {
+    const ID = "resources.not-fetched";
+
+    /** A row the pass never asked about: no class, no status, no headers. */
+    function unasked(url: string, on: string[], fetchReason: string | null): ResourceSpec {
+      return {
+        url,
+        on,
+        fetchClass: null,
+        fetchReason,
+        statusCode: null,
+        contentType: null,
+        bytes: null,
+        bytesSource: null,
+        cacheControl: null,
+      };
+    }
+
+    it("reports the operator's off switch, with the reason and the two counts", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 3 }, { path: "/b" }],
+        [
+          unasked("/img/a.png", ["/a"], RESOURCE_OFF_REASON),
+          unasked("/css/site.css", ["/a", "/b"], RESOURCE_OFF_REASON),
+        ],
+      );
+      const findings = await run(ID, crawlId);
+      expect(findings).toHaveLength(1);
+      const f = findings[0]!;
+      expect(f.pageId).toBeNull();
+      expect(f.pageUrl).toBeNull();
+      expect(f.severity).toBe("info");
+      expect(f.dedupeKey).toBe("site");
+      expect(f.evidence).toMatchObject({
+        reason: NOT_FETCHED_REASON.off,
+        // Seen and skipped are EQUAL, and that equality is the finding: the
+        // census is real and nothing in it was asked about.
+        resourcesSeen: 2,
+        resourcesSkipped: 2,
+        pagesCrawled: 2,
+      });
+      // The sentence a client reads has to name the switch, not just the count.
+      expect(String(f.evidence.notAsked)).toContain("fetchResources");
+    });
+
+    it("reports a pass that never asked at all as the other reason", async () => {
+      // No reason on the rows: nothing decided anything about them. A crawl
+      // interrupted before the pass sent its first request, or one whose pass
+      // never ran, on a database that has migration 0013's tables.
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 1 }],
+        [unasked("/img/a.png", ["/a"], null), unasked("/js/app.js", ["/a"], null)],
+      );
+      const findings = await run(ID, crawlId);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.evidence).toMatchObject({
+        reason: NOT_FETCHED_REASON.notRun,
+        resourcesSeen: 2,
+        resourcesSkipped: 2,
+      });
+      expect(String(findings[0]!.evidence.notAsked)).toMatch(/interrupted|never ran/i);
+    });
+
+    it("is silent as soon as one row was decided, however many were not", async () => {
+      // A PARTIAL pass. One file was asked about; the rest were not. The
+      // judging rules answer such a crawl with their `unknownResources` counts
+      // beside their verdicts, so the reader is not left reading a silence —
+      // and a marker here would be reporting "nothing was measured" over a
+      // measurement.
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 3 }],
+        [
+          { url: "/img/asked.svg", on: ["/a"] },
+          unasked("/img/b.png", ["/a"], null),
+          unasked("/img/c.png", ["/a"], RESOURCE_OFF_REASON),
+        ],
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent on a normal completed pass", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 1 }],
+        [{ url: "/img/a.svg", on: ["/a"] }],
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent on a crawl that recorded no resources at all", async () => {
+      // Not this rule's fact. `resources.not-recorded` owns it, and the
+      // exclusivity below is what proves the two cannot both speak.
+      const { crawlId } = await seed([{ path: "/a", imagesTotal: 2 }], []);
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("refuses to guess when the unfetched rows disagree about why", async () => {
+      // No row was decided, and the rows give two different reasons for it.
+      // No crawl of ours writes that shape — `markResourcesNotAsked` stamps
+      // EVERY undecided row, and a cap only stamps after the pass asked about
+      // something — so the honest answer is a loud error rather than a reason
+      // picked out of two (hard rule 7).
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 2 }],
+        [
+          unasked("/img/a.png", ["/a"], RESOURCE_OFF_REASON),
+          unasked("/img/b.png", ["/a"], null),
+        ],
+      );
+      await expect(run(ID, crawlId)).rejects.toThrow(/disagree|unfetched rows/i);
+    });
+  });
+
+  describe("the two markers are mutually exclusive by construction", () => {
+    it("the off-switch crawl gets the sibling, the pre-0013 crawl gets the original", async () => {
+      // ONE test, both conditions, because the exclusivity is the property:
+      // `resources.not-recorded` needs `resourcesSeen == 0` and
+      // `resources.not-fetched` needs `resourcesSeen > 0`. No crawl can satisfy
+      // both, and this is what says so if either condition is ever loosened.
+      const off = await seed(
+        [{ path: "/a", imagesTotal: 3 }],
+        [
+          {
+            url: "/img/a.png",
+            on: ["/a"],
+            fetchClass: null,
+            fetchReason: RESOURCE_OFF_REASON,
+            statusCode: null,
+            bytes: null,
+            cacheControl: null,
+          },
+        ],
+      );
+      const preTables = await seed([{ path: "/a", imagesTotal: 3 }], []);
+
+      expect(await run("resources.not-fetched", off.crawlId)).toHaveLength(1);
+      expect(await run("resources.not-recorded", off.crawlId)).toEqual([]);
+
+      expect(await run("resources.not-fetched", preTables.crawlId)).toEqual([]);
+      expect(await run("resources.not-recorded", preTables.crawlId)).toHaveLength(1);
+    });
+  });
+
   describe("the whole family on a crawl that recorded nothing", () => {
     it("every judging rule is silent, and the marker is the one that speaks", async () => {
       const { crawlId } = await seed([{ path: "/a", imagesTotal: 2 }], []);
@@ -748,6 +914,9 @@ describe("resourceRules against the database", () => {
         "images.oversized",
         "images.legacy-format",
         "resources.uncached",
+        // The sibling too: it reports rows that were not asked about, and this
+        // crawl has no rows.
+        "resources.not-fetched",
       ]) {
         expect(await run(id, crawlId), id).toEqual([]);
       }

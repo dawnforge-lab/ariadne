@@ -614,11 +614,19 @@ describe("the skills name only identifiers the engine has", () => {
   // is on the list for the same reason as the rest — its silence is not a pass).
   //
   // SCOPE, stated because the list being hand-written has a second consequence
-  // (P11-T4, M-6): a SEVENTH marker is not dragged into anything by adding it to
-  // the registry. It has to be written into this list to be checked at all, AND
-  // into CHECK-83's own NOT MEASURED family — which is likewise six ids typed
-  // out, derived from no registry query. Nothing here notices a marker that is
+  // (P11-T4, M-6): a marker is not dragged into anything by adding it to the
+  // registry. It has to be written into this list to be checked at all, AND into
+  // CHECK-83's own NOT MEASURED family — which is likewise a hand-typed list of
+  // ids, derived from no registry query. Nothing here notices a marker that is
   // in neither. Adding a marker is therefore three edits, not one.
+  //
+  // **P12-T2 PAID THAT COST, and it is recorded rather than glossed:** the
+  // seventh marker (`resources.not-fetched`) took exactly the three edits this
+  // paragraph predicted — the rule, the entry below, and CHECK-83's family list
+  // — and only the second of them is enforced by anything. The prediction
+  // holding is not an argument that the arrangement is right; it is the evidence
+  // for deriving both lists from the registry when a check-shaped `marker: true`
+  // flag is worth its own phase.
   it("every NOT MEASURED marker is named in the checklist entry of each check it claims", () => {
     const MARKERS: Record<string, string> = {
       "content.thin-skipped": "the page the corrected thin-content floor cannot judge",
@@ -627,6 +635,7 @@ describe("the skills name only identifiers the engine has", () => {
       "robots.check-skipped": "a robots.txt the crawl could not read",
       "host.probe-skipped": "a crawl started with host probing off",
       "resources.not-recorded": "a crawl that recorded no resources (P11-T3)",
+      "resources.not-fetched": "a crawl that recorded its resources and asked about none (P12-T2)",
     };
     const text = readFileSync(CHECKLIST, "utf8");
     // `### CHECK-NN: …` to the next `### `, which is one check's whole entry.

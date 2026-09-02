@@ -330,9 +330,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "fetchResources says whether this crawl asked at all: true is the default and " +
         "false is an operator's decision, echoed here so it can be confirmed. false " +
         "beside fetched 0 is 'nobody asked'; true beside fetched 0 is a pass that has " +
-        "not run or could not finish. On a crawl older than the resource tables every " +
-        "number here is 0, which is not 'this site references no files' — the " +
-        "resources.not-recorded finding is what says so.\n\n" +
+        "not run or could not finish. Both of those carry the resources.not-fetched " +
+        "finding, whose evidence names which. On a crawl older than the resource " +
+        "tables every number here is 0, which is not 'this site references no files' " +
+        "— the resources.not-recorded finding is what says so.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +

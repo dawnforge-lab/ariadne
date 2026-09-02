@@ -684,7 +684,10 @@ export interface CrawlDetail extends CrawlListItem {
    * On a crawl written before migration 0013 every number here is 0, which is
    * not "this site references no files": that case is what the
    * `resources.not-recorded` finding exists to say, and `rulesRunAt` is what
-   * says whether it could have been written.
+   * says whether it could have been written. A crawl that recorded its files and
+   * asked about none of them — `seen` above zero with `skipped` equal to it —
+   * has the sibling marker `resources.not-fetched` instead (P12-T2), so a reader
+   * of the findings alone is not left to infer either case from a silence.
    */
   resources: {
     /**
