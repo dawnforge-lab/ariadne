@@ -586,6 +586,57 @@ describe("the skills name only identifiers the engine has", () => {
     expect(failures("checklist id")).toEqual([]);
   });
 
+  // THE OTHER DIRECTION, for the one class of rule whose whole purpose is to be
+  // read: a NOT MEASURED marker reports that a check COULD NOT BE ANSWERED on
+  // this crawl, and an agent that never meets it reads the silence of the rules
+  // it stands in for as a clean site. So a marker must be named in the checklist
+  // entry of every check it claims — which is where the auditor is looking when
+  // the silence would otherwise mislead them.
+  //
+  // The guard exists because P11-T3 shipped a marker that claimed four checks
+  // and appeared in none of their entries; the three older markers all did, and
+  // this is what keeps that from being luck. The list is explicit, with the
+  // reason each id is on it, on the `AGENT_CHECK_EVIDENCE` precedent: "which
+  // rules are markers" is a judgement about intent that no naming convention
+  // settles (`host.probe-skipped` reports a crawl OPTION, not missing data, and
+  // is on the list for the same reason as the rest — its silence is not a pass).
+  it("every NOT MEASURED marker is named in the checklist entry of each check it claims", () => {
+    const MARKERS: Record<string, string> = {
+      "content.thin-skipped": "the page the corrected thin-content floor cannot judge",
+      "h1.duplicate-skipped": "a crawl that stored no heading text",
+      "links.orphan-skipped": "an incomplete crawl, whose orphans cannot be trusted",
+      "robots.check-skipped": "a robots.txt the crawl could not read",
+      "host.probe-skipped": "a crawl started with host probing off",
+      "resources.not-recorded": "a crawl that recorded no resources (P11-T3)",
+    };
+    const text = readFileSync(CHECKLIST, "utf8");
+    // `### CHECK-NN: …` to the next `### `, which is one check's whole entry.
+    const sections = new Map<string, string>();
+    const headings = [...text.matchAll(/^###\s+(CHECK-\d+[a-z]?):/gm)];
+    headings.forEach((heading, i) => {
+      const start = heading.index ?? 0;
+      const end = i + 1 < headings.length ? (headings[i + 1]!.index ?? text.length) : text.length;
+      sections.set(heading[1]!, text.slice(start, end));
+    });
+
+    const byId = new Map(buildRegistry().all().map((rule) => [rule.id, rule]));
+    const missing: string[] = [];
+    for (const [ruleId, why] of Object.entries(MARKERS)) {
+      const rule = byId.get(ruleId);
+      if (rule === undefined) throw new Error(`identifier-guard: no rule '${ruleId}' — ${why}`);
+      for (const checkId of rule.checkIds) {
+        const section = sections.get(checkId);
+        if (section === undefined) throw new Error(`identifier-guard: no ${checkId} entry`);
+        if (!section.includes(ruleId)) missing.push(`${checkId} does not name ${ruleId}`);
+      }
+    }
+    expect(
+      missing,
+      "a marker an auditor never meets is a silence they will read as a pass — name it " +
+        "in the entry of every check it claims, or drop the claim",
+    ).toEqual([]);
+  });
+
   it("names findings-file paths the audit skill's own shape carries", () => {
     expect(failures("findings-file path")).toEqual([]);
   });

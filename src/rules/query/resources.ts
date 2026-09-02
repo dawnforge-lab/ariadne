@@ -166,6 +166,15 @@ const bareContentType = sql`btrim(lower(split_part(r.content_type, ';', 1)))`;
  * The `count(*) over ()` sits after the grouping and before the limit, so it
  * counts PAGES — the unit of the finding — and survives the cap.
  *
+ * THE JOIN TO `pages` IS AN INNER JOIN, and that is the opposite choice from
+ * `heavyImageFindings` below, deliberately. An edge whose `page_id` matches no
+ * `pages` row — the lost-conflict case `page_resources`' header describes — has
+ * nowhere to go here: this finding IS about a page, so a row with no page would
+ * be an accusation naming nobody, carrying a `dedupeKey` built from a URL that
+ * does not exist. The file findings are about a FILE and merely borrow a page to
+ * point at, so they keep theirs with a `left join lateral` and report the file
+ * with a null page beside it. Same table, two directions, two answers.
+ *
  * `unknownResources` is the honesty half. It counts the page's references the
  * pass could not decide about, so a finding of "2 broken" on a page with 40
  * unknowns is legible as the partial answer it is.
@@ -421,9 +430,19 @@ async function uncachedFindings(self: RuleIdentity, db: Db, crawlId: string): Pr
  * THE CONDITION IS EVIDENCE OF A GAP, NOT AN ABSENCE OF ASSETS. It fires only
  * when the crawl holds no resource row AND at least one page counted an image
  * with the analyzer's own `images_total` — a counter every crawl since Phase 2
- * writes. A site whose served HTML genuinely references nothing (a fully
- * client-rendered page, say) produces no images_total either, and gets no
+ * writes. A site whose served HTML declares no FETCHABLE references (a fully
+ * client-rendered page, say) produces no `images_total` either and gets no
  * marker: this rule reports a hole in OUR evidence, never a fact about the site.
+ *
+ * "Fetchable" is the exact word and not a hedge. `images_total` counts every
+ * `<img>` element, while the extraction drops the refs nothing can be asked for
+ * — `data:` URIs, `javascript:`, fragment-only — so a page built entirely from
+ * inline data URIs, with no external stylesheet or script beside them, counts
+ * images and contributes no resource row. On a whole site of such pages this
+ * marker fires and is RIGHT to: the resource rules are silent there, and
+ * "nothing was measured" is what a reader needs to be told before reading their
+ * silence. What the marker never does is mistake a site with no assets at all
+ * for a crawl that failed to look — that site counts no images either.
  */
 async function notRecordedFindings(
   self: RuleIdentity,

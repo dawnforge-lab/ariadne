@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, it } from "vitest";
 import { copyFor, ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
 import {
@@ -41,7 +43,12 @@ import {
 } from "../../src/rules/metric/crawl-metrics.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
-import { IMAGE_WEIGHT_WARN } from "../../src/rules/query/resources.js";
+import {
+  BROKEN_SAMPLE_RESOURCES,
+  IMAGE_WEIGHT_WARN,
+  OVERSIZED_SAMPLE_PAGES,
+  UNCACHED_SAMPLE_RESOURCES,
+} from "../../src/rules/query/resources.js";
 
 /**
  * The content copy spells its distance out in words, so the threshold pin below
@@ -54,6 +61,21 @@ const NUMBER_WORDS: Record<number, string> = {
   3: "three",
   4: "four",
   5: "five",
+};
+
+/**
+ * The same mechanism for the list caps, which are spelled in words too — the
+ * link metrics' copy already says "twenty" and "twenty-five" where the rule says
+ * 20 and 25, and P11's resource copy says "ten" and "twenty".
+ *
+ * A second map rather than entries in the one above, because the two are read at
+ * different scales and an unmapped value must fail rather than pass: a cap of 15
+ * has no word here and the lookup returns undefined, which no `toContain` will
+ * match.
+ */
+const CAP_WORDS: Record<number, string> = {
+  10: "ten",
+  20: "twenty",
 };
 
 /**
@@ -983,6 +1005,52 @@ describe("issue copy", () => {
     // And that it is the CHECKLIST's number rather than one we picked, which is
     // the sentence that stops it drifting on somebody's aesthetic preference.
     expect(ISSUE_COPY["images.oversized"]!.explanation).toMatch(/100KB line the audit checklist/i);
+  });
+
+  // The three SAMPLE CAPS the resource copy words, pinned against the rules'
+  // own constants exactly as the threshold above is — the change-one-change-both
+  // contract this family's module header invokes, honoured for all four of its
+  // constants rather than only for the one that decides a verdict.
+  //
+  // A capped sample read as a complete list is the misreading these numbers
+  // exist to prevent, so the copy has to say how long the list is; a copy saying
+  // "ten" over a rule that lists twenty is the same defect as an unstated cap.
+  //
+  // THE CHECKLIST RIDES THESE PINS TOO. `skills/ariadne-audit/checklist.md`
+  // quotes the same two numbers in CHECK-50 and CHECK-51, in prose an agent
+  // reads and repeats to a client, and it is the living authority (hard rule 10)
+  // rather than a copy of the copy — so it is asserted here against the same
+  // constants. Change a cap and this test names every place that has to move.
+  it("quotes the sample caps the resource rules actually apply", async () => {
+    expect(BROKEN_SAMPLE_RESOURCES).toBe(10);
+    expect(OVERSIZED_SAMPLE_PAGES).toBe(10);
+    expect(UNCACHED_SAMPLE_RESOURCES).toBe(20);
+
+    const broken = CAP_WORDS[BROKEN_SAMPLE_RESOURCES];
+    const pages = CAP_WORDS[OVERSIZED_SAMPLE_PAGES];
+    const uncached = CAP_WORDS[UNCACHED_SAMPLE_RESOURCES];
+    expect(ISSUE_COPY["resources.broken"]!.explanation, "the broken-file sample").toContain(
+      `lists up to ${broken} of them`,
+    );
+    expect(ISSUE_COPY["images.oversized"]!.explanation, "the referencing-page sample").toContain(
+      `up to ${pages} of those pages`,
+    );
+    expect(ISSUE_COPY["resources.uncached"]!.explanation, "the uncached sample").toContain(
+      `lists up to ${uncached} of the ones with no header`,
+    );
+
+    // Whitespace-collapsed before matching: the checklist is prose wrapped at
+    // 80 columns, and a sentence that moves across a line break is not a change
+    // to what it says. The NUMBER is what this pins.
+    const checklist = (
+      await readFile(new URL("../../skills/ariadne-audit/checklist.md", import.meta.url), "utf8")
+    ).replace(/\s+/g, " ");
+    expect(checklist, "CHECK-51 quotes the broken-file sample").toContain(
+      `names up to ${broken} of the files`,
+    );
+    expect(checklist, "CHECK-50 quotes the uncached sample").toContain(
+      `up to ${uncached} of them named`,
+    );
   });
 
   // THE BOUNDARY THE WHOLE FAMILY RESTS ON, in the client-facing text rather

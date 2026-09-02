@@ -2024,6 +2024,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   document it sits) and how much of it goes unused (that needs coverage data from a
   running browser). Scripts a page loads with JavaScript are outside the measurement
   entirely, so on a client-rendered site the engine's number is a floor of a floor.
+  **Call `issues_list` with `checkId: "CHECK-48"` before quoting the table**, and read
+  its answer first: the one finding it can return is `resources.not-recorded` (info),
+  the marker that fires when a crawl holds no resource records at all. When it is
+  there the `page.weight` row above is a table of HTML sizes and nothing else — a
+  light-looking site that was never measured — and this check is NOT MEASURED on that
+  crawl rather than passed. The remedy is a re-crawl, and the marker says so.
 - **DevTools**: Lighthouse audit — check "Eliminate render-blocking resources" and "Reduce unused JavaScript"
 - **Evaluate**:
   - WARN if render-blocking resources > 3 or unused JS > 50%
@@ -2031,7 +2037,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — four findings now.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — five rule ids can come back,
+  four of them findings about the site and one about the crawl.
   `images.missing-dimensions` (info) and `images.missing-alt` (info), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
   images; and, since the resource pass, `images.oversized` (warning) for every image
@@ -2044,7 +2051,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   larger than the box it is displayed in; and only images named in the HTML the
   server sent are weighed, so a client-rendered gallery is invisible to all of it.
   RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
-  and nothing checks whether the set is sensible.
+  and nothing checks whether the set is sensible. The fifth id is
+  `resources.not-recorded` (info), the NOT MEASURED marker for the whole resource
+  family: when it is present the crawl recorded no files at all, so the silence of
+  `images.oversized` and `images.legacy-format` says the crawl never asked rather than
+  that the images are fine — the weight and format halves of this check are then NOT
+  MEASURED and a re-crawl is what answers them. The two older findings are unaffected
+  by it; they read the page's markup, not the files.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
 - **Evaluate**:
@@ -2063,7 +2076,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   caching and ETag revalidation are invisible, and the finding says the response gave
   no instruction rather than that the file is re-downloaded. The HTML documents' own
   caching headers are not stored at all — this is about the images, stylesheets and
-  scripts. COMPRESSION and PROTOCOL are still NOT MEASURED and stay browser work.
+  scripts. `resources.not-recorded` (info) can come back from the same call: it is the
+  NOT MEASURED marker for the resource family, and when it is present this crawl asked
+  for no files, so a quiet `resources.uncached` says nothing about the site's caching
+  and the answer is a re-crawl. COMPRESSION and PROTOCOL are still NOT MEASURED and
+  stay browser work.
 - **DevTools**: Check the homepage's network panel for TTFB and response headers
   (Cache-Control, Content-Encoding, protocol)
 - **Evaluate**:
@@ -2081,9 +2098,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   file, not a healthy asset — and carries an `unknownResources` count for the
   references the crawl could not decide about (never asked, refused by url-policy,
   disallowed by robots, or a request that did not complete). None of those is a broken
-  file, and a high unknown count means the answer here is partial. JAVASCRIPT ERRORS
-  are NOT MEASURED: nothing in a crawl records a console, and requests a script makes
-  at runtime are not in the resource table either — both stay browser work.
+  file, and a high unknown count means the answer here is partial. The same call can
+  return `resources.not-recorded` (info), the NOT MEASURED marker for the resource
+  family: when it is present the crawl holds no resource records, so no broken file
+  could have been found and the network half of this check is NOT MEASURED rather than
+  clean — re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
+  holds: nothing in a crawl records a console, and requests a script makes at runtime
+  are not in the resource table either — both stay browser work.
 - **DevTools**:
   1. Navigate to homepage, product, collection
   2. Check console: `list_console_messages` — filter errors
@@ -2269,6 +2290,14 @@ Skip this section if site is not on Shopify.
 
 ### CHECK-69: Theme bloat and app-injected scripts
 - **Priority**: Medium | **Requires**: DevTools + Visual
+- **Engine** (CONTEXT ONLY — no rule claims this check): `metrics_get` with
+  `metricId: "page.weight"` carries a script-byte distribution per page type, which is
+  a FLOOR on declared JavaScript: it counts the scripts the served HTML names and
+  weighs the ones the crawl got an answer for. The app-injected scripts this check is
+  about are precisely the ones outside that boundary — a script a tag manager or a
+  storefront app adds at runtime is invisible to the crawl — so the number is a
+  starting point for the browser work below and never an answer to it. Quote it as
+  "at least this much JS before any app loads", or not at all.
 - **DevTools**:
   1. Navigate to homepage
   2. Count scripts via Network tab, identify third-party app scripts

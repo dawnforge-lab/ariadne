@@ -39,10 +39,15 @@
  * rather than a lucky one: a caching policy is the server's, and the control's
  * silence is a claim about its markup.
  *
- * Every rule in the registry is now page-attached, so nothing reaches this page
- * except through its own markup and its own place in the link graph — which is
- * what makes "fires nothing" a claim about the page rather than about how the
- * harness maps findings.
+ * Every rule that can attach a finding TO A PAGE reaches this one only through
+ * its own markup, its own place in the link graph, and — since P11-T3 — the
+ * files that markup points at. That is what makes "fires nothing" a claim about
+ * the page rather than about how the harness maps findings. The sentence used to
+ * read "every rule in the registry is now page-attached", which was true when it
+ * was written and is not now: the site-scoped rules above it exist, and one of
+ * them is provoked by this very page's markup without landing on it. The
+ * distinction is the paragraph above, and it is the reason this page's empty set
+ * still means what it says.
  *
  * If a new rule lands and this page starts firing it, the fix is to add the
  * missing signal HERE, in one place, rather than to loosen the rule.
