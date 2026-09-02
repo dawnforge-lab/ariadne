@@ -1,8 +1,28 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 13 (ruleset 0.10.0, migrations 0000–0015,
+**Status:** the contract as of Phase 14 (ruleset 0.11.0, migrations 0000–0015,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
+
+**What Phase 14 changed here**, so a reader of the Phase 13 version knows where
+to look: **one shape was added and no served field changed.**
+`resources.partial-unknown` is a fourth resource-coverage marker (info) — the
+last of the family, for a PARTIAL pass where some recorded rows are still `null`
+(never asked about) and the rest a decided unknown class (`refused`,
+`robots_denied`, `robots_unreachable`, `fetch_error`), with no `ok` row and no
+broken row, so the four judging rules write nothing and the silence would
+otherwise go unexplained (§5.3). It closes the window `docs/gates/phase-13.md`
+§8 pointer 1 named — the same class the all-unknown window was, one layer in.
+The four markers — `resources.not-recorded` (`seen == 0`),
+`resources.not-fetched` (every row unfetched), `resources.all-unknown` (every
+row a decided unknown), `resources.partial-unknown` (the mix of null and
+decided-unknown) — are mutually exclusive by construction and together partition
+the "no `ok`, no broken, silent" space over `seen > 0` exactly, so no crawl
+carries more than one. The ruleset moved to **0.11.0** for it (§11). Everything
+else in Phase 14 was internal and never reached the seam: the per-host resume
+now earns its spacing on two real gate hosts rather than a synthetic seed — the
+same resume machinery §4.1a already documents, with no served field added,
+removed, or retyped — and the phase closed the last of the engine-side ledger.
 
 **What Phase 13 changed here**, so a reader of the Phase 12 version knows where
 to look: **one shape was added and no served field changed.**
