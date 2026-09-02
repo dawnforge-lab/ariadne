@@ -271,6 +271,12 @@ false` (T4's off switch) is the answer when a census of the pages is all that is
 wanted, and it is why that switch was owed. Four honest ways to shorten the pass
 are design questions rather than tuning, and they are Phase 12's (§14).
 
+**Owner ruling (2026-09-02, at integration):** the default STAYS `true`. Full
+picture by default — the Phase 8 stance for billed audits, extended to
+resources; the operator or Talos turns it off per crawl when speed is what is
+wanted, and CHECK-83 keeps an off crawl legible. Decided with this measured
+cost on the table, not before it.
+
 ---
 
 ## 4. The resource census, and what it found
