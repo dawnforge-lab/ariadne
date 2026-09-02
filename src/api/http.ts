@@ -23,6 +23,10 @@
  *                                      history a date picker is built on
  *   GET  /crawls/:id                   one crawl: status, counts, frontier, timings
  *   POST /crawls/:id/fail              close a crawl nobody is working
+ *   POST /crawls/:id/resume            continue a crawl that stopped with work
+ *                                      still owed — the same crawl, the same id,
+ *                                      queued again. Answers `crawl_start`'s
+ *                                      `{crawlId, status, queuePosition}` -> 202
  *   POST /crawls/:id/render            run the render pass. No body: the engine
  *                                      selects. `{"urls": [...]}`: those pages
  *                                      instead, replacing the automatic
@@ -281,6 +285,17 @@ function buildRoutes(): Route[] {
       handler: async (service, ctx) => {
         noBody(ctx);
         return { status: 200, body: await service.markCrawlFailed(param(ctx, "id")) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["crawls", id, "resume"],
+      query: [],
+      // 202, not 200, and for `POST /crawls`'s reason: the crawl is ACCEPTED
+      // here and runs later. A 200 would say the work is done.
+      handler: async (service, ctx) => {
+        noBody(ctx);
+        return { status: 202, body: await service.resumeCrawl(param(ctx, "id")) };
       },
     },
     {

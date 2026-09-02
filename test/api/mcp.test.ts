@@ -37,7 +37,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
-  crawls, issues, metrics, pageResources, pages, resources,
+  crawls, frontier, issues, metrics, pageResources, pages, resources,
 } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -75,6 +75,18 @@ function html(title: string, body: string): string {
 let db: Db;
 let siteServer: Server;
 let site: string;
+/**
+ * A site with enough SLOW referenced files to be killed in the middle of its
+ * resource pass — the P11 harness-kill (docs/gates/phase-11.md §5) made
+ * deliberate. Three pages carrying `RESUME_ASSETS` images between them, each
+ * image answered after `ASSET_DELAY_MS`, so the pass takes seconds and a test
+ * that stops the server after the FIRST file lands leaves the rest genuinely
+ * unasked: null `fetch_class`, no reason, which is the resume's work list.
+ */
+let resumeServer: Server;
+let resumeSite: string;
+const RESUME_ASSETS = 24;
+const ASSET_DELAY_MS = 120;
 let exportDir: string;
 /**
  * Where every server in this file keeps the render pass's serialised
@@ -345,6 +357,46 @@ beforeAll(async () => {
   const address = siteServer.address();
   site = `http://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
 
+  // The resumable site. Its images are the only slow thing about it, and they
+  // are slow on purpose: the pass has to still be running when the test stops
+  // the server.
+  resumeServer = createServer((req, res) => {
+    const path = req.url ?? "/";
+    if (path === "/robots.txt") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("User-agent: *\nAllow: /\n");
+      return;
+    }
+    if (path.startsWith("/img/")) {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "image/png", "content-length": "8" });
+        res.end("PNGSTUB0");
+      }, ASSET_DELAY_MS);
+      return;
+    }
+    const imgs = (from: number, count: number): string =>
+      Array.from({ length: count }, (_, i) => `<img src="/img/${from + i}.png" alt="x">`).join("");
+    const per = RESUME_ASSETS / 3;
+    const bodies: Record<string, string> = {
+      "/": html("home", `<a href="/a">a</a><a href="/b">b</a>${imgs(0, per)}`),
+      "/a": html("page a", `<a href="/b">b</a><p>words for the analyzer</p>${imgs(per, per)}`),
+      "/b": html("page b", `<p>the third page</p>${imgs(per * 2, per)}`),
+    };
+    const body = bodies[path];
+    if (body === undefined) {
+      res.writeHead(404, { "content-type": "text/html" });
+      res.end(html("not found", "<p>gone</p>"));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(body);
+  });
+  await new Promise<void>((r) => resumeServer.listen(0, "127.0.0.1", r));
+  const resumeAddress = resumeServer.address();
+  resumeSite = `http://127.0.0.1:${
+    typeof resumeAddress === "object" && resumeAddress !== null ? resumeAddress.port : 0
+  }`;
+
   mcp = createMcpServer({
     db,
     config: {
@@ -557,18 +609,20 @@ afterAll(async () => {
   await closeDb(db);
   await closeFetchAgents();
   await new Promise<void>((r) => siteServer.close(() => r()));
+  await new Promise<void>((r) => resumeServer.close(() => r()));
   rmSync(exportDir, { recursive: true, force: true });
   rmSync(renderDir, { recursive: true, force: true });
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the fifteen tools of the agent surface, each described", async () => {
+  it("advertises exactly the sixteen tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "compare_urls", "crawl_compare", "crawl_list", "crawl_mark_failed", "crawl_render",
-        "crawl_rules", "crawl_start", "crawl_status", "export_crawl", "issue_urls",
-        "issues_list", "metrics_get", "pages_query", "robots_get", "rules_catalog",
+        "crawl_resume", "crawl_rules", "crawl_start", "crawl_status", "export_crawl",
+        "issue_urls", "issues_list", "metrics_get", "pages_query", "robots_get",
+        "rules_catalog",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -1235,6 +1289,201 @@ describe("crawl_mark_failed", () => {
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("'finished'");
   });
+});
+
+/**
+ * `crawl_resume` — the move the Phase 11 gate crawl needed and did not have.
+ *
+ * The crown test here does the thing the gate did by accident: it runs a real
+ * crawl of a real (fixture) site, stops the server in the middle of the resource
+ * pass, and finishes the crawl over the wire. The equality against a never-killed
+ * control is asserted in test/api/http.test.ts, which owns the same fixture
+ * shape; this file's job is that the TOOL reaches the same place.
+ */
+describe("crawl_resume", () => {
+  /**
+   * A second server on the same database, so a crawl can be started on one
+   * process and killed with it — which is exactly what happened to the gate
+   * crawl — and then resumed by a process that never held it.
+   */
+  async function killableServer(): Promise<{ mcp: AriadneMcpServer; client: Client }> {
+    const server = createMcpServer({
+      db,
+      config: {
+        allowedDomains: ["127.0.0.1"],
+        crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+        exportDir,
+        renderDir,
+        log: (line) => serverLog.push(line),
+      },
+    });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "ariadne-test-killable", version: "0.0.1" });
+    await server.connect(serverSide);
+    await c.connect(clientSide);
+    return { mcp: server, client: c };
+  }
+
+  /**
+   * A crawl row on an ALLOWLISTED host with a config a resume can actually
+   * read.
+   *
+   * The file's other seeded crawls are on `mcp-query.example`, which is not on
+   * this server's allowlist and carries a config with none of the five required
+   * fields — so every one of them is refused by check (1) or the config read,
+   * long before the guard a lease or an empty frontier is supposed to trip. A
+   * refusal test that cannot reach its own refusal proves nothing.
+   */
+  async function seedResumable(suffix: string, status: string): Promise<string> {
+    const id = `crawl_mcp_resume_${suffix}_${Date.now()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${resumeSite}/`,
+      config: {
+        siteUrl: `${resumeSite}/`,
+        maxPages: 10,
+        maxDepth: 3,
+        userAgent: "AriadneBot/0.1 (mcp-test)",
+        perHostDelayMs: 0,
+        maxConcurrency: 2,
+        probeHosts: false,
+      },
+      rulesetVersion: "0.0.0-test",
+      status,
+    });
+    createdCrawls.push(id);
+    return id;
+  }
+
+  /** Poll until the predicate holds, or say what never happened. */
+  async function until(
+    what: string,
+    predicate: (detail: Record<string, unknown>) => boolean,
+    crawlId: string,
+    deadlineMs = 30_000,
+  ): Promise<Record<string, unknown>> {
+    const stop = Date.now() + deadlineMs;
+    for (;;) {
+      const detail = await ok("crawl_status", { crawlId });
+      if (predicate(detail)) return detail;
+      if (Date.now() > stop) throw new Error(`never happened: ${what}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  function resources(
+    detail: Record<string, unknown>,
+  ): { seen: number; fetched: number; skipped: number } {
+    return detail["resources"] as { seen: number; fetched: number; skipped: number };
+  }
+
+  it("finishes a crawl a server was killed in the middle of, and keeps its earned spacing", async () => {
+    const { mcp: killable, client: killableClient } = await killableServer();
+    const accepted = await callWith(killableClient, "crawl_start", {
+      siteUrl: `${resumeSite}/`,
+      maxPages: 10,
+    });
+    expect(accepted.isError).toBe(false);
+    const crawlId = String(accepted.body["crawlId"]);
+    createdCrawls.push(crawlId);
+
+    // Wait until the resource pass is demonstrably running — one file weighed,
+    // twenty-three still to ask about — and then take the server away. This is
+    // the harness kill of docs/gates/phase-11.md §5, on purpose this time.
+    const midPass = await until(
+      "the resource pass had weighed a file",
+      (d) => resources(d).fetched >= 1,
+      crawlId,
+    );
+    expect(resources(midPass).seen).toBe(RESUME_ASSETS);
+    expect(resources(midPass).fetched).toBeLessThan(RESUME_ASSETS);
+    await killableClient.close();
+    await killable.close();
+
+    // What the kill left: the graceful abort path, which decides NOTHING about
+    // the rows it did not reach. That is the property the resume rests on.
+    const killed = await ok("crawl_status", { crawlId });
+    expect(killed["status"]).toBe("cancelled");
+    expect(resources(killed).skipped).toBeGreaterThan(0);
+
+    // The spacing the crawl "earned" — written straight to the column because
+    // the fixture site never blocks, and the column is the only thing a resume
+    // can read the ratchet out of (rule 9).
+    await db.update(crawls).set({ hostSpacingMs: 50 }).where(eq(crawls.id, crawlId));
+
+    const resumed = await ok("crawl_resume", { crawlId });
+    // crawl_start's answer, because it is the same crawl continuing.
+    expect(resumed).toEqual({ crawlId, status: "queued", queuePosition: 0 });
+
+    const final = await settle(crawlId, 60_000);
+    expect(final["status"]).toBe("finished");
+    expect(final["frontier"]).toMatchObject({ pending: 0, leased: 0 });
+    // Every file the crawl saw was asked about — the 786 rows the gate crawl
+    // needed a database script for.
+    expect(resources(final).seen).toBe(RESUME_ASSETS);
+    expect(resources(final).fetched).toBe(RESUME_ASSETS);
+    expect(resources(final).skipped).toBe(0);
+    // And the politeness the crawl earned survived the kill: the resumed run
+    // paced at the ratchet, and did not overwrite it with the configured floor.
+    expect(final["hostSpacingMs"]).toBeGreaterThanOrEqual(50);
+  }, 120_000);
+
+  it("refuses a crawl id nobody has", async () => {
+    const answer = await call("crawl_resume", { crawlId: "crawl_no_such_thing" });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("no such crawl");
+  });
+
+  it("refuses a crawl a live worker still holds a lease on", async () => {
+    const id = await seedResumable("leased", "running");
+    await db.insert(frontier).values({
+      crawlId: id,
+      url: `${resumeSite}/leased`,
+      state: "leased",
+      depth: 0,
+      discoveredVia: "seed",
+      leaseId: "another_worker",
+      leasedUntil: new Date(Date.now() + 60_000),
+    });
+    const answer = await call("crawl_resume", { crawlId: id });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("unexpired lease(s)");
+    // The refusal is about a WORKER, not about the status: the row still says
+    // running, and nothing was queued.
+    expect((await ok("crawl_status", { crawlId: id }))["status"]).toBe("running");
+  });
+
+  it("refuses a settled crawl with nothing owed, naming everything it counted", async () => {
+    const id = await seedResumable("done", "finished");
+    const answer = await call("crawl_resume", { crawlId: id });
+    expect(answer.isError).toBe(true);
+    const error = String(answer.body["error"]);
+    expect(error).toContain("nothing left to resume");
+    expect(error).toContain("pending frontier row(s)");
+    expect(error).toContain("lease has expired");
+    expect(error).toContain("resource row(s) still unasked");
+  });
+
+  it("refuses a crawl whose site has left the allowlist, naming the host", async () => {
+    // The empty-allowlist server: the read-only posture, which must refuse a
+    // resume for the same reason it refuses a start. A crawl accepted earlier is
+    // not standing permission (Talos obligation 2, hard rule 5).
+    const answer = await callWith(closedClient, "crawl_resume", { crawlId: liveCrawlId });
+    expect(answer.isError).toBe(true);
+    const error = String(answer.body["error"]);
+    expect(error).toContain("127.0.0.1");
+    expect(error).toContain("allowlist");
+  });
+
+  it("refuses to put a second worker on a crawl this server is already holding", async () => {
+    const accepted = await ok("crawl_start", { siteUrl: `${resumeSite}/`, maxPages: 10 });
+    const crawlId = String(accepted["crawlId"]);
+    createdCrawls.push(crawlId);
+    const answer = await call("crawl_resume", { crawlId });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("already held by this server");
+    await settle(crawlId, 60_000);
+  }, 120_000);
 });
 
 describe("issues_list / issue_urls", () => {

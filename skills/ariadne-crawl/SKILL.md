@@ -66,6 +66,7 @@ same JSON:
 | `crawl_list` | `GET /crawls` |
 | `crawl_render` | `POST /crawls/:id/render` |
 | `crawl_rules` | `POST /crawls/:id/rules` |
+| `crawl_resume` | `POST /crawls/:id/resume` |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` |
 | `issues_list` | `GET /crawls/:id/issues` |
 | `issue_urls` | `GET /crawls/:id/issues/:ruleId/urls` |
@@ -239,8 +240,9 @@ What the fields mean when you are waiting:
   momentarily holds none, which is exactly the window an impatient caller looks in.
 - **`queuePosition`** — a number only while THIS server holds the crawl, null
   otherwise. `status: "queued"` with `queuePosition: null` is the one genuinely broken
-  state: the server that accepted the crawl is gone and nobody will run it. Re-submit
-  it, or retire it with `crawl_mark_failed`.
+  state: the server that accepted the crawl is gone and nobody will run it. Hand it to
+  `crawl_resume`, which picks up the same crawl, or retire it with
+  `crawl_mark_failed`.
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
 - **`renderPassCount`** — despite the name, it is **how many pages the last render
@@ -527,20 +529,43 @@ upgrading the engine rather than re-crawling the site.
 ## Step 5 — when things go wrong
 
 **`status: "failed"`** — the crawl ended badly, and the frontier and pages rows are
-whatever it had reached. It is a terminal state; nothing resumes it from this
-surface. Read `frontier.failed` and the crawl's pages before deciding whether to
-re-crawl: a crawl that failed at page 4,000 of 5,000 may still be worth auditing with
-the gap stated.
+whatever it had reached. Read `frontier.failed` and the crawl's pages before deciding
+what to do: a crawl that failed at page 4,000 of 5,000 is usually worth **resuming**
+(`crawl_resume` — see below), and is worth auditing with the gap stated if the
+failure will just recur.
 
 **`status: "cancelled"`** — the server was shut down while this crawl was running,
-and it recorded itself on the way out rather than being killed. Same disposition as
-`failed`: no resume tool on this surface, so start a new crawl when you need one.
+and it recorded itself on the way out rather than being killed. This is the most
+resumable state there is: an abort decides nothing about the work it did not reach,
+so `crawl_resume` picks up exactly the URLs and files nobody has asked about yet.
+
+**`crawl_resume` — finish a crawl instead of re-running it.** It takes a crawlId and
+answers `{crawlId, status, queuePosition}` just as `crawl_start` does, because it IS
+the same crawl: same id, same row, same pages, nothing re-fetched. Poll
+`crawl_status` from there as usual.
+
+Use it whenever a crawl stopped with work owed — a server restarted mid-crawl, a
+worker died, a cancel somebody regrets. It re-reads robots.txt, re-walks the sitemap
+and re-runs the host probe first (a crawl resumed hours later honours the rules as
+they are NOW), which costs the site a dozen paced requests, and it keeps whatever
+`hostSpacingMs` the crawl earned — a site that pushed back is not asked to teach the
+lesson twice.
+
+It is refused when: there is no such crawl; this server is already holding it; the
+crawl still holds an unexpired lease (a worker is on it — **wait**, a dead worker's
+leases expire on their own); the crawl is terminal with nothing owed, in which case
+the refusal names what it counted (pending frontier rows, expired leases, unasked
+resource rows) so you can see it looked; or the site's host has left the server's
+allowlist, which is policy and not a fault. Pages sitting in `frontier.renderPending`
+are not resumable work — that is `crawl_render`'s.
 
 **A crawl nobody is working on** — `queued` with `queuePosition: null`, or `running`
-with no lease activity long after the server that held it died. `crawl_mark_failed`
-closes it: `queued` or `running` becomes `failed`.
+with no lease activity long after the server that held it died. Two moves, and
+`crawl_resume` is usually the better one: it continues the crawl and keeps the pages
+already fetched. `crawl_mark_failed` retires it instead: `queued` or `running`
+becomes `failed`, and the pages stay as evidence of a crawl nobody will finish.
 
-It is refused when:
+`crawl_mark_failed` is refused when:
 - the crawl is already terminal — nothing to close;
 - THIS server is holding it (running it, or holding it in its queue) — it is alive,
   you are just impatient;

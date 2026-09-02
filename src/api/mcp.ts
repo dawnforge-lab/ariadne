@@ -1,5 +1,5 @@
 /**
- * The MCP transport: fifteen tools over the same service layer the HTTP routes
+ * The MCP transport: sixteen tools over the same service layer the HTTP routes
  * use.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
@@ -100,6 +100,7 @@ export const TOOL_NAMES = [
   "crawl_status",
   "crawl_list",
   "crawl_mark_failed",
+  "crawl_resume",
   "crawl_render",
   "crawl_rules",
   "robots_get",
@@ -149,6 +150,9 @@ The order of operations is fixed by what the evidence means:
   1. crawl_start   accepts a crawl and returns a crawl id immediately. It is
                    queued, not finished; one crawl runs at a time per server.
   2. crawl_status  polls it. Poll until status is no longer 'queued'/'running'.
+                   A crawl that stopped with work still owed — a server shut
+                   down mid-run, a cancel somebody regrets — is continued with
+                   crawl_resume, which is the same crawl and not a new one.
   3. crawl_render  (optional) re-fetches some pages in a real browser, so
                    client-side-rendered content is measured rather than guessed.
                    Either the engine picks them or you name them with 'urls'.
@@ -340,7 +344,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "number only while THIS server holds the crawl (null otherwise), and " +
         "liveLeases counts unexpired worker leases. A 'queued' crawl with " +
         "queuePosition null was accepted by a server process that is now gone — " +
-        "nobody will run it; re-submit it, or retire it with crawl_mark_failed.\n\n" +
+        "nobody will run it; hand it to crawl_resume, which continues the same " +
+        "crawl, or retire it with crawl_mark_failed. The same pair answers a " +
+        "'running' row with liveLeases 0 long after its server died, and a " +
+        "terminal crawl that stopped with work owed: crawl_resume finishes it, " +
+        "crawl_mark_failed closes it.\n\n" +
         "blockedPages counts pages a WAF or rate limiter answered instead of the " +
         "site (401/403/429/challenge). hostSpacingMs is how far the engine has " +
         "already backed off in response: the widest per-host gap it is enforcing, " +
@@ -392,6 +400,40 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async (args) => run("crawl_list", () => service.listCrawls(defined(args))),
+  );
+
+  server.registerTool(
+    named("crawl_resume"),
+    {
+      title: "Resume an interrupted crawl",
+      description:
+        "Continue a crawl that stopped with work still owed — a server that was " +
+        "shut down mid-crawl, a worker that died, or a crawl somebody cancelled " +
+        "and now wants finished. It is THE SAME CRAWL: same crawlId, same row, " +
+        "same frontier, and pages already on record are never fetched again. " +
+        "Answers {crawlId, status, queuePosition} exactly as crawl_start does, " +
+        "with status 'queued' — the work is accepted here and runs later.\n\n" +
+        "POLL crawl_status FOR WHAT IT FOUND. This tool reports nothing about the " +
+        "resumed run, and that is deliberate: a resumed pass's own summary counts " +
+        "what THAT run did, while crawl_status counts what the CRAWL holds. On the " +
+        "Phase 11 gate crawl the two read 784 and 1,995 resources — both true, and " +
+        "only the second one describes the site. The database is the truth.\n\n" +
+        "WHAT IT COSTS THE SITE. A resume re-reads robots.txt, re-walks the " +
+        "sitemap and re-runs the host probe, because a crawl resumed hours later " +
+        "must honour the rules as they are now — roughly a dozen paced requests " +
+        "before it picks up where it left off. It also keeps the politeness the " +
+        "crawl earned: a host that pushed the spacing to 8s is still crawled at 8s, " +
+        "never back at the configured floor.\n\n" +
+        "REFUSED, and each refusal says which: no such crawl; this server is " +
+        "already holding it; the crawl still holds an unexpired lease (a worker is " +
+        "on it — wait, a dead worker's leases expire on their own); a terminal " +
+        "crawl with nothing owed, naming what was counted (pending frontier rows, " +
+        "expired leases, unasked resource rows); or the site's host is no longer on " +
+        "this server's crawl allowlist, which is policy and not a fault. Pages " +
+        "waiting on the render pass are NOT resumable work — that is crawl_render.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),
   );
 
   server.registerTool(
@@ -478,7 +520,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "still holds an unexpired lease — a live crawl between batches " +
         "momentarily holds none, which is exactly the window an impatient caller " +
         "would look in. If it is refused because a lease is live, wait: a dead " +
-        "worker's leases expire on their own.",
+        "worker's leases expire on their own.\n\n" +
+        "It is also not the only move on an abandoned crawl. crawl_resume takes " +
+        "the same rows and CONTINUES them instead of retiring them, and it is the " +
+        "better answer whenever the pages already fetched are worth keeping.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_mark_failed", () => service.markCrawlFailed(crawlId)),

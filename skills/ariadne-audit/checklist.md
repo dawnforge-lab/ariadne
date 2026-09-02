@@ -2537,10 +2537,10 @@ and each check names the call that answers it. What follows is the shape of thos
 calls, so a check's one-line **Engine** entry is enough.
 
 The tools are the MCP surface (`crawl_start`, `crawl_status`, `crawl_list`,
-`crawl_render`, `crawl_rules`, `crawl_mark_failed`, `robots_get`, `issues_list`,
-`issue_urls`, `metrics_get`, `pages_query`, `export_crawl`). The HTTP API exposes the
-same service — `GET /crawls/:id/issues`, `/metrics`, `/pages`, `/robots`,
-`/issues/:ruleId/urls`, `/export` — and answers the same JSON, so an operator running
+`crawl_resume`, `crawl_render`, `crawl_rules`, `crawl_mark_failed`, `robots_get`,
+`issues_list`, `issue_urls`, `metrics_get`, `pages_query`, `export_crawl`). The HTTP
+API exposes the same service — `GET /crawls/:id/issues`, `/metrics`, `/pages`,
+`/robots`, `/issues/:ruleId/urls`, `/export` — and answers the same JSON, so an operator running
 `npm run api:serve` instead of `npm run mcp:serve` changes the transport and nothing
 else.
 

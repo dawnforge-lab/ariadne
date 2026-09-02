@@ -26,7 +26,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, pages } from "../../src/db/schema.js";
+import { crawls, frontier, pages, resources } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
@@ -56,6 +56,21 @@ let site: string;
 /** The same site bound on every interface, so `www.localhost` reaches it. */
 let namedServer: Server;
 let named: string;
+/**
+ * The resumable site: three pages carrying `RESUME_ASSETS` images between them,
+ * each image answered after `ASSET_DELAY_MS`.
+ *
+ * It exists so a crawl can be stopped IN THE MIDDLE OF ITS RESOURCE PASS, which
+ * is what happened to the Phase 11 gate crawl by accident (docs/gates/phase-11.md
+ * §5): 786 files left with a null `fetch_class` and no reason, which is the
+ * shape "nobody has asked yet" takes. The main fixture site above references no
+ * files at all, so a kill against it could only ever leave frontier work — half
+ * the thing a resume has to be able to finish.
+ */
+let resumeServer: Server;
+let resumeSite: string;
+const RESUME_ASSETS = 24;
+const ASSET_DELAY_MS = 120;
 
 /** The server under test: allowlist with an exact host and a wildcard. */
 let api: ApiServer;
@@ -223,6 +238,8 @@ async function seedCrawl(row: {
   status: string;
   siteUrl?: string;
   discovery?: unknown;
+  /** Stored on the config, for the paths that read the operator's off switch. */
+  fetchResources?: boolean;
 }): Promise<string> {
   const id = `crawl_seed_${createdCrawls.length}_${Date.now()}`;
   await db.insert(crawls).values({
@@ -235,6 +252,7 @@ async function seedCrawl(row: {
       userAgent: "AriadneBot/0.1 (test)",
       perHostDelayMs: 0,
       maxConcurrency: 2,
+      ...(row.fetchResources === undefined ? {} : { fetchResources: row.fetchResources }),
     },
     rulesetVersion: "0.0.0-test",
     status: row.status,
@@ -316,6 +334,43 @@ beforeAll(async () => {
   const namedAddr = namedServer.address();
   named = `http://localhost:${typeof namedAddr === "object" && namedAddr !== null ? namedAddr.port : 0}`;
 
+  resumeServer = createServer((req, res) => {
+    const path = req.url ?? "/";
+    if (path === "/robots.txt") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("User-agent: *\nAllow: /\n");
+      return;
+    }
+    if (path.startsWith("/img/")) {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "image/png", "content-length": "8" });
+        res.end("PNGSTUB0");
+      }, ASSET_DELAY_MS);
+      return;
+    }
+    const imgs = (from: number, count: number): string =>
+      Array.from({ length: count }, (_, i) => `<img src="/img/${from + i}.png" alt="x">`).join("");
+    const per = RESUME_ASSETS / 3;
+    const bodies: Record<string, string> = {
+      "/": html("home", `<a href="/a">a</a><a href="/b">b</a>${imgs(0, per)}`),
+      "/a": html("page a", `<a href="/b">b</a><p>words for the analyzer</p>${imgs(per, per)}`),
+      "/b": html("page b", `<p>the third page</p>${imgs(per * 2, per)}`),
+    };
+    const body = bodies[path];
+    if (body === undefined) {
+      res.writeHead(404, { "content-type": "text/html" });
+      res.end(html("not found", "<p>gone</p>"));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(body);
+  });
+  await new Promise<void>((r) => resumeServer.listen(0, "127.0.0.1", r));
+  const resumeAddr = resumeServer.address();
+  resumeSite = `http://127.0.0.1:${
+    typeof resumeAddr === "object" && resumeAddr !== null ? resumeAddr.port : 0
+  }`;
+
   renderDir = await mkdtemp(join(tmpdir(), "ariadne-http-renders-"));
   api = createApiServer({
     db,
@@ -367,6 +422,7 @@ afterAll(async () => {
   await rm(renderDir, { recursive: true, force: true });
   await new Promise<void>((r) => siteServer.close(() => r()));
   await new Promise<void>((r) => namedServer.close(() => r()));
+  await new Promise<void>((r) => resumeServer.close(() => r()));
 });
 
 describe("authentication", () => {
@@ -988,6 +1044,252 @@ describe("POST /crawls/:id/fail", () => {
   it("404s an unknown crawl", async () => {
     const res = await call("POST", "/crawls/crawl_missing/fail");
     expect(res.status).toBe(404);
+  });
+});
+
+/**
+ * `POST /crawls/:id/resume` — the operator move the Phase 11 gate crawl needed.
+ *
+ * The gate's session harness stopped the API server 40 minutes into a resource
+ * pass. The engine did the right thing (the row closed `cancelled`, 786 files
+ * left honestly unasked) and the surface then had no way to finish them: it took
+ * a script with a database handle, which a Talos-driven deployment does not have
+ * (docs/gates/phase-11.md §5). Everything below is that gap, closed.
+ */
+describe("POST /crawls/:id/resume", () => {
+  /**
+   * A second API server on the same database — the process that gets killed.
+   *
+   * A resume must work when the process that ran the crawl is GONE, which is the
+   * only case that ever mattered, and it cannot be demonstrated by a server that
+   * is still up: `close()` on the server holding a crawl is the abort path, and
+   * the server doing the resuming has to be a different one.
+   */
+  async function spareServer(): Promise<ApiServer & { base: string }> {
+    const spare = createApiServer({
+      db,
+      config: {
+        token: TOKEN,
+        allowedDomains: ["127.0.0.1"],
+        crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+        renderDir,
+        log: (line) => serverLog.push(line),
+      },
+    });
+    const bound = await spare.listen(0);
+    return Object.assign(spare, { base: `http://127.0.0.1:${bound.port}` });
+  }
+
+  function resourcesOf(body: Record<string, unknown>): {
+    seen: number;
+    fetched: number;
+    skipped: number;
+  } {
+    return body["resources"] as { seen: number; fetched: number; skipped: number };
+  }
+
+  /** Poll a crawl through the surface until the predicate holds. */
+  async function until(
+    what: string,
+    crawlId: string,
+    predicate: (body: Record<string, unknown>) => boolean,
+    deadlineMs = 30_000,
+  ): Promise<Record<string, unknown>> {
+    const stop = Date.now() + deadlineMs;
+    for (;;) {
+      const res = await call("GET", `/crawls/${crawlId}`);
+      if (res.status !== 200) throw new Error(`until: GET returned ${res.status}`);
+      if (predicate(res.body)) return res.body;
+      if (Date.now() > stop) throw new Error(`never happened: ${what}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  /** Crawl, judge, and report the three totals a crawl is worth comparing by. */
+  async function totals(crawlId: string): Promise<{
+    pagesCrawled: number;
+    pages: number;
+    resources: { seen: number; fetched: number; skipped: number };
+    findings: number;
+  }> {
+    const rules = await call("POST", `/crawls/${crawlId}/rules`);
+    if (rules.status !== 200) throw new Error(`rules refused: ${JSON.stringify(rules.body)}`);
+    const detail = await call("GET", `/crawls/${crawlId}`);
+    const pageRows = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    return {
+      pagesCrawled: detail.body["pagesCrawled"] as number,
+      pages: pageRows.length,
+      resources: resourcesOf(detail.body),
+      findings: detail.body["findingsCount"] as number,
+    };
+  }
+
+  // THE CROWN TEST OF THIS TASK, and the strongest one the phase can run without
+  // touching a client site: two crawls of one fixture site, one of them killed
+  // in the middle of its resource pass and finished over the wire, are asked
+  // whether they ended up in the same place. Pages, resource census and findings
+  // after judging all have to agree — a resume that quietly re-fetched, or
+  // quietly skipped, would move one of the three.
+  it("a killed crawl resumed over the wire reaches the totals of a control that was never killed", async () => {
+    // The control: the same site, crawled once, never interrupted.
+    const control = await startCrawl({ siteUrl: `${resumeSite}/`, maxPages: 10 });
+    expect(control.status).toBe(202);
+    const controlId = String(control.body["crawlId"]);
+    const controlFinal = await settle(controlId, 60_000);
+    expect(controlFinal["status"]).toBe("finished");
+
+    // The killed crawl, on a server that will not survive its own pass.
+    const spare = await spareServer();
+    const started = await call("POST", "/crawls", {
+      base: spare.base,
+      body: { siteUrl: `${resumeSite}/`, maxPages: 10 },
+    });
+    expect(started.status).toBe(202);
+    const killedId = String(started.body["crawlId"]);
+    createdCrawls.push(killedId);
+
+    const midPass = await until(
+      "the resource pass had weighed a file",
+      killedId,
+      (body) => resourcesOf(body).fetched >= 1,
+    );
+    expect(resourcesOf(midPass).seen).toBe(RESUME_ASSETS);
+    expect(resourcesOf(midPass).fetched).toBeLessThan(RESUME_ASSETS);
+    await spare.close();
+
+    const killed = await call("GET", `/crawls/${killedId}`);
+    expect(killed.body["status"]).toBe("cancelled");
+    // The nulls an abort leaves are not a failure state: they are the questions
+    // nobody has answered yet, and they are the resume's work list.
+    expect(resourcesOf(killed.body).skipped).toBeGreaterThan(0);
+
+    // The politeness this crawl "earned" before it died. The fixture site never
+    // blocks, so the ratchet is written to the column directly — the column IS
+    // the only record of it, which is exactly why a resume that discarded it
+    // would be invisible as well as rude (rule 9).
+    await db.update(crawls).set({ hostSpacingMs: 50 }).where(eq(crawls.id, killedId));
+
+    // A DIFFERENT SERVER finishes it, which is the whole point.
+    const resumed = await call("POST", `/crawls/${killedId}/resume`);
+    expect(resumed.status).toBe(202);
+    expect(resumed.body).toEqual({ crawlId: killedId, status: "queued", queuePosition: 0 });
+
+    const final = await settle(killedId, 90_000);
+    expect(final["status"]).toBe("finished");
+    // The earned spacing survived the kill AND the resume: the run paced at the
+    // ratchet and wrote back a number no smaller than the one it read.
+    expect(final["hostSpacingMs"]).toBeGreaterThanOrEqual(50);
+
+    const a = await totals(controlId);
+    const b = await totals(killedId);
+    expect(b).toEqual(a);
+    // Named as well as compared, so a failure says which number moved and a
+    // reader can see the comparison was not of three zeroes.
+    expect(a.pages).toBe(3);
+    expect(a.resources.seen).toBe(RESUME_ASSETS);
+    expect(a.resources.fetched).toBe(RESUME_ASSETS);
+    expect(a.resources.skipped).toBe(0);
+    expect(a.findings).toBeGreaterThan(0);
+  }, 180_000);
+
+  it("404s a crawl id nobody has", async () => {
+    const res = await call("POST", "/crawls/crawl_missing/resume");
+    expect(res.status).toBe(404);
+    expect(String(res.body["error"])).toContain("no such crawl");
+  });
+
+  it("409s a crawl a live worker still holds a lease on", async () => {
+    const id = await seedCrawl({ status: "running", siteUrl: `${resumeSite}/` });
+    await seedLease(id, { state: "leased", expiresInMs: 60_000, url: `${resumeSite}/leased` });
+
+    const res = await call("POST", `/crawls/${id}/resume`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("unexpired lease(s)");
+    // Nothing was queued and nothing was rewritten: the row is as it was.
+    expect((await call("GET", `/crawls/${id}`)).body["status"]).toBe("running");
+  });
+
+  it("409s a settled crawl with nothing owed, naming every place it looked", async () => {
+    const id = await seedCrawl({ status: "finished", siteUrl: `${resumeSite}/` });
+    const res = await call("POST", `/crawls/${id}/resume`);
+    expect(res.status).toBe(409);
+    const error = String(res.body["error"]);
+    expect(error).toContain("'finished'");
+    expect(error).toContain("0 pending frontier row(s)");
+    expect(error).toContain("0 whose lease has expired");
+    expect(error).toContain("0 resource row(s) still unasked");
+  });
+
+  // A crawl whose operator turned the resource pass OFF has null `fetch_class`
+  // rows too, and they are a DECISION rather than owed work — a resume would not
+  // ask about them, so counting them would accept a resume for work that
+  // provably will not happen.
+  it("does not read an off switch as resumable work, and says which it is", async () => {
+    const id = await seedCrawl({
+      status: "finished",
+      siteUrl: `${resumeSite}/`,
+      fetchResources: false,
+    });
+    await db.insert(resources).values({
+      crawlId: id,
+      url: `${resumeSite}/img/0.png`,
+      kind: "image",
+      fetchClass: null,
+      fetchReason: "resource-fetch-off",
+    });
+    const res = await call("POST", `/crawls/${id}/resume`);
+    expect(res.status).toBe(409);
+    const error = String(res.body["error"]);
+    expect(error).toContain("0 resource row(s) still unasked");
+    expect(error).toContain("fetchResources: false");
+  });
+
+  // Pages waiting on the render pass LOOK like unfinished work and are not: the
+  // crawl loop never leases them. The refusal names them and points at the tool
+  // that owns them, so nobody goes hunting for a defect.
+  it("names render_pending rows as the render pass's work, not a resume's", async () => {
+    const id = await seedCrawl({ status: "finished", siteUrl: `${resumeSite}/` });
+    await seedLease(id, {
+      state: "render_pending",
+      expiresInMs: -60_000,
+      url: `${resumeSite}/awaiting-render`,
+    });
+    const res = await call("POST", `/crawls/${id}/resume`);
+    expect(res.status).toBe(409);
+    const error = String(res.body["error"]);
+    expect(error).toContain("render_pending");
+    expect(error).toContain("crawl_render");
+  });
+
+  // A crawl accepted last month is not standing permission to fetch today
+  // (hard rule 5, Talos obligation 2). The allowlist is re-checked against the
+  // STORED site, because the caller names nothing but an id.
+  it("403s a crawl whose site has left this server's allowlist, naming the host", async () => {
+    const res = await call("POST", `/crawls/${fixtureCrawlId}/resume`, { base: closedBase });
+    expect(res.status).toBe(403);
+    const error = String(res.body["error"]);
+    expect(error).toContain("127.0.0.1");
+    expect(error).toContain("allowlist");
+  });
+
+  it("409s a crawl this server is already holding, rather than doubling its workers", async () => {
+    const started = await startCrawl({ siteUrl: `${resumeSite}/`, maxPages: 10 });
+    const id = String(started.body["crawlId"]);
+    const res = await call("POST", `/crawls/${id}/resume`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("already held by this server");
+    await settle(id, 60_000);
+  }, 120_000);
+
+  it("refuses a body nobody asked for rather than ignoring it", async () => {
+    const id = await seedCrawl({ status: "finished", siteUrl: `${resumeSite}/` });
+    const res = await call("POST", `/crawls/${id}/resume`, { body: { reclaimLeases: true } });
+    expect(res.status).toBe(400);
+  });
+
+  it("checks the token like every other route", async () => {
+    const res = await call("POST", `/crawls/${fixtureCrawlId}/resume`, { token: null });
+    expect(res.status).toBe(401);
   });
 });
 
