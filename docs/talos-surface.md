@@ -1053,8 +1053,8 @@ byte for byte, as it writes it".
   over the 153 rows the dev table held when it was measured. **Do not read the
   dev table's row count as an operator's number**: it grew from 139 to 1,585
   across Phase 11 alone, and the growth is the SUITE, not a user — every full run
-  leaves its fixture crawls behind (`127.0.0.1:<port>`, `runner.example`), about
-  140 rows a run, against four real `lavishalice.com` crawls in the whole table.
+  leaves its fixture crawls behind (`127.0.0.1:<port>`, `runner.example`), **31
+  rows a run**, against four real `lavishalice.com` crawls in the whole table.
   At a hundred thousand crawls the filter wants an expression index on the
   hostname; at this size it is still a scan of a small table.
 - The comparison's identity collapses multi-finding rules to per-URL presence

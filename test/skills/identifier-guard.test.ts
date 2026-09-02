@@ -987,7 +987,10 @@ function where(citation: Citation): string {
 
 /** The block the citation's line opens, or null if the line opens none. */
 function anchorOf(citation: Citation): Block | null {
-  if (citation.line === null) return null;
+  // The same existence guard its two callers carry: a citation to a file that is
+  // not there has already failed the first test loudly and by name, and reading
+  // it here would replace that message with an ENOENT stack from a helper.
+  if (citation.line === null || !existsSync(join(ROOT, citation.file))) return null;
   return blocksFor(citation.file).find((block) => block.line === citation.line) ?? null;
 }
 

@@ -123,18 +123,23 @@ frontier ran dry. The first window is partial (the crawl started 27 s into it) a
 the last reads 32 because the frontier emptied inside it with pages already in
 flight.
 
-### 2.2 The resource half: 30 requests per minute, sixty-two minutes running
+### 2.2 The resource half: 30 requests per minute, sixty-six minutes of asking
 
 The pass records `fetched_at` per row, so this is off the crawl's own rows rather
 than off the poller. Grouping the origin's 1,931 rows into one-minute buckets:
+
+**66 buckets, not 69, and the denominator is worth stating first:** the origin's
+rows span 02:07 to 03:15, and `02:46`, `02:47` and `02:48` hold no rows at all —
+they are the outage (§5), so they are absent from the grouping rather than
+counted as zeroes.
 
 **62 of the 66 buckets hold exactly 30 rows.** The four that do not are named
 rather than rounded away: `02:07` (22 — the pass's first minute on this host),
 `02:45` (17 — the minute the server was stopped, §5), `03:14` (22) and `03:15`
 (10 — the pass's last, partial minute). The 03:14 dip is the tail of the run,
 where the last four third-party hosts were being worked beside the origin and the
-two workers were split across queues. One request every two seconds, for an hour,
-without a single exception in between.
+two workers were split across queues. Outside those four named minutes: one
+request every two seconds, for an hour, without a single exception.
 
 Per host, from the same column — the gap between one host's consecutive
 completions:
@@ -145,7 +150,13 @@ completions:
 | `cdn.shopify.com` | 57 | 02:04:54 | 02:07:12 | **2,001 ms** | 6,024 ms | 6,043 ms |
 | nine other hosts | 1 each | — | — | n/a | n/a | n/a |
 
-\* excluding the 208 s outage gap, which §5 explains.
+\* excluding the outage gap, which §5 explains. **The two outage numbers in this
+document are both right and measure different things:** the origin's largest
+row-to-row gap is **208.5 s** (last row before the stop 02:45:32.499Z → first row
+after 02:49:01.027Z), which contains §3's **196.7 s** of downtime (the crawl row
+closing 02:45:32.549Z → the resume starting 02:48:49.204Z) plus the ~12 s the
+resumed run spent re-reading robots.txt and six sitemap documents before it asked
+about a file again.
 
 **Read the gap distribution correctly, and this is the one number in this
 document that needs a caveat.** `fetched_at` is when a row COMPLETED, not when it
@@ -405,7 +416,9 @@ one it fixed; it is on the list at §14.
 
 ### 6.4 The delta, attributed
 
-Nine checks moved. **Every one is attributable, and to one of three causes.**
+**Seven checks moved verdict or severity**; CHECK-83 is new rather than moved,
+and CHECK-51 stayed SKIP with its evidence transformed. Nine rows, seven moves —
+and **every one is attributable, to one of three causes.**
 
 | check | audit 4 | audit 5 | cause |
 |---|---|---|---|
@@ -724,8 +737,9 @@ Every figure in the first three rows matches what the Phase 8 and Phase 10 gate
 documents recorded. The gate crawl is a fourth row and it stays in the dev
 database. Four `lavishalice.com` crawls in a table that ended this phase holding
 **1,585** rows, up from 139 at its start — the rest are fixtures the suite leaves
-behind, about 140 a full run, which is a fact about the suite and not about any
-operator (`talos-surface.md` §13).
+behind, **31 per full run** (measured twice by this task's reviewer, and the same
+rate divides across targeted single-file runs). A fact about the suite, not about
+any operator (`talos-surface.md` §13).
 
 Commits, in order:
 

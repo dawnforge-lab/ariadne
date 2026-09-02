@@ -611,6 +611,12 @@ export const resources = pgTable("resources", {
   cacheControl: text("cache_control"),
   expires: text("expires"),
   fetchedAt: timestamp("fetched_at", { withTimezone: true }),
+  // NOT A RESPONSE TIME. Measured from the top of the row's work, which is
+  // before `gate.acquire`, so it carries the row's wait for its host's turn as
+  // well as the request: on a spacing-dominated crawl this reads as roughly the
+  // per-host delay, not as what the server took (P11 gate §2.2 measured p50
+  // 3,990 ms at a 2,000 ms spacing). `pages.response_time_ms` is the other
+  // shape — the request alone.
   fetchMs: integer("fetch_ms"),
 }, (t) => [
   // The dedup, and the upsert target. One row per URL per crawl: the writer
