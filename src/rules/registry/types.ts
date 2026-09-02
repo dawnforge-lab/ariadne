@@ -83,6 +83,31 @@ interface RuleMeta {
   explanation: string;      // client-facing
   howToFix: string;         // client-facing
   rulesetVersion: string;
+  /**
+   * Present ONLY on a NOT MEASURED marker — a rule whose whole purpose is to be
+   * read, because it reports that a check below COULD NOT BE ANSWERED on this
+   * crawl (`content.thin-skipped`, `resources.not-fetched`, `host.probe-skipped`
+   * and their siblings). An agent that never meets the marker reads the silence
+   * of the rules it stands in for as a clean site, so the marker has to be named
+   * in the checklist entry of every check it claims AND in CHECK-83's NOT
+   * MEASURED family list.
+   *
+   * The FLAG IS THE SINGLE SOURCE OF TRUTH for "which rules are markers": the
+   * value is the short note describing the crawl condition whose silence the
+   * marker explains, migrated from the hand-written map in
+   * test/skills/identifier-guard.test.ts that this field replaced. The identifier
+   * guard derives its marker set from `marker !== undefined` over the registry
+   * and checks both checklist obligations against it, so adding a marker is ONE
+   * edit — this flag on its definition — and a flagged rule the checklist forgets,
+   * or a checklist entry that names a rule nobody flagged, is a red test rather
+   * than a silent divergence. Absent (undefined) on every ordinary rule; a
+   * present-but-empty string is refused by `defineRule` — a flag with no reason
+   * is the drift the field exists to prevent.
+   *
+   * NOT a verdict and NOT client copy: it never reaches a finding, a metric or
+   * the ruleset version. It is registry metadata the guard reads.
+   */
+  marker?: string;
 }
 
 export interface PageRule extends RuleMeta {

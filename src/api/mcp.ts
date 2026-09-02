@@ -64,6 +64,7 @@ import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { FETCH_CLASSES } from "../crawl/fetch-page.js";
 import { DISCOVERED_VIA } from "../crawl/frontier.js";
+import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
@@ -340,9 +341,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "resources.not-fetched finding covers only the crawls where NOT ONE file was " +
         "decided (skipped equal to seen), and its evidence names which of those three " +
         "it was. A pass that asked and got only non-ok answers — fetched 0 with " +
-        "failed above 0 — carries NO marker: rows were decided, so nothing fires, and " +
-        "this block is the only discriminator for the silence of the resource rules. " +
-        "On a crawl older than the resource " +
+        "failed above 0 — is the resources.all-unknown finding's case: every row was " +
+        "DECIDED into an unknown class (refused, robots_denied, robots_unreachable, " +
+        "fetch_error), so the four judging rules fire nothing and this marker reports " +
+        "the per-class census with its dominant class named. The three markers are " +
+        "mutually exclusive, and this block stays the discriminator each puts a name " +
+        "to. On a crawl older than the resource " +
         "tables every number here is 0, which is not 'this site references no files' " +
         "— the resources.not-recorded finding is what says so.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
@@ -771,7 +775,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
         "rendered'. Check whether a pass ran before reading anything into a " +
         "rendered filter: render.coverage's renderPassEvidence answers it " +
-        "('none' means no pass left a trace), while crawl_status's " +
+        `('${RENDER_PASS_EVIDENCE.none}' means no pass left a trace), while crawl_status's ` +
         "renderPassCount is only the LAST pass's rendered-page count — its 0 is " +
         "also what a crawl nobody rendered reports.\n\n" +
         "Filters:\n" +

@@ -577,6 +577,20 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Re-run the crawl with the resource fetch left on — it is on by default — or resume the interrupted one, which asks about the files it never reached. Nothing about the files can be recovered from what is stored: the census records which URLs the pages point at, not what a server would say about them.",
   },
+  "resources.all-unknown": {
+    // Accuracy: this reports a CRAWL, never a site — the third marker, and the
+    // one whose silence is loudest to misread as clean. The crawl DID ask (or
+    // try): every file reached a verdict and not one verdict was usable, because
+    // each landed in one of the four classes that mean "we do not know" rather
+    // than an answer about the file. A broken file (a 4xx/5xx) is NOT one of
+    // them — that is a usable verdict `resources.broken` reports — so a crawl
+    // carrying even one broken row is outside this marker.
+    title: "Every file the crawl asked about answered nothing usable",
+    explanation:
+      "The checks about images, stylesheets and scripts — broken files, image weight, image format, caching headers, and the page-weight table beside them — read what a server said about each file the pages point at. This crawl asked about, or tried to reach, every file it recorded and not one of them came back with a usable answer: each landed in one of four states that all mean we do not know, rather than a verdict about the file. Our own policy refused the request (a reserved address or a scheme we do not follow); the site's robots.txt disallowed it; the host could not tell us its robots rules at all, because its robots.txt was unreachable while the crawl ran, which we treat as a complete disallow; or the request never completed — a timeout, a DNS failure, a connection reset. The finding gives the census: how many files were seen, how many fell into each of those four states, and which state was the largest. Because not one file came back healthy, the broken-file, image-weight, image-format and caching checks all found nothing to judge and the page-weight table counts each page's HTML and nothing else — a site that looks light and clean and was in truth never measured. This is a limit of this crawl's evidence, not a clean bill of health for the site: a wall of unreachable-robots results is usually a third party's CDN briefly down, and a wall of refusals or robots disallows is a decision rather than a fault. Only files named in the HTML the server sent are asked about at all, so assets a script loads later are outside this entirely.",
+    howToFix:
+      "Re-run the crawl, ideally after reading which state dominated the census. A wall of unreachable-robots or failed requests usually means a CDN or a bot-protection layer was blocking our crawler during the window, and the same URLs may answer normally to a browser or on a later crawl — the same allowlist question a blocked page raises. Where our own policy refused them, the references point somewhere we will not follow, which is a fact about the references rather than a fault to fix. Where a robots.txt disallowed them, that is the site's instruction and honouring it is deliberate. Nothing about the files can be recovered from what is stored: the census records the class each file landed in, not what a healthy fetch would have said.",
+  },
 
   // -------------------------------------------------------------------- url
   "url.normalisation-variants": {

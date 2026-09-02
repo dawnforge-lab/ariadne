@@ -26,6 +26,7 @@ import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/l
 import { renderedHtmlFilename } from "../../src/crawl/render/renderer.js";
 import { runRenderPass, type RenderPassSummary } from "../../src/crawl/render/run-render.js";
 import { RENDER_DEFAULTS } from "../../src/crawl/render/select.js";
+import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -196,6 +197,17 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // in test/rules/resources-query.test.ts, along with the boundary against the
   // marker above it.
   "resources.not-fetched",
+  // P13-T2's third and last marker, unprovokable here for the same
+  // by-construction reason as its two siblings. It fires only when EVERY
+  // resource row is a decided unknown class — refused, robots_denied,
+  // robots_unreachable, fetch_error — with no `ok`, no broken and no unasked
+  // row. This harness serves five real images (one weighed at 404), so the
+  // census is dominated by `ok` and carries a `client_error`, and the marker's
+  // condition (every row a decided unknown) is false by construction. Its
+  // firing, its silence on partial/broken/unasked crawls, and the three-way
+  // boundary against both siblings are covered directly in
+  // test/rules/resources-query.test.ts.
+  "resources.all-unknown",
   "h1.duplicate-skipped",
   "host.duplicate-host-200",
   "host.probe-skipped",
@@ -1727,7 +1739,7 @@ describe("the fixture site end to end", () => {
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 70` below is evidence enough on its own
       // here; the field matters on the crawls where there is none.
-      renderPassEvidence: "ran",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
       // P8-T2. The harness renders the AUTOMATIC selection — it names no URLs —
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.

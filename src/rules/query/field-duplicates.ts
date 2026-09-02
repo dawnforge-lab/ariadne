@@ -433,6 +433,7 @@ export const fieldDuplicateRules: QueryRule[] = [
     severity: H1_SKIPPED.severity,
     ...copyFor(H1_SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a crawl that stored no heading text",
     run: async (db, crawlId): Promise<Finding[]> => {
       const coverage = await h1Coverage(db, crawlId, H1_SKIPPED.id);
       const skipped = h1TextUnavailable(coverage);

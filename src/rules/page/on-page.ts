@@ -161,13 +161,19 @@ export const onPageRules: PageRule[] = [
    * and stores null in BOTH columns, which is not a skipped check — it is a
    * page with no text evidence, which `content.thin` was always silent about.
    */
-  pageRule("content.thin-skipped", ["CHECK-40", "CHECK-13"], CONTENT, "info", (p, self) =>
-    isAuditable(p) &&
-    p.isIndexable === true &&
-    p.wordCount !== null &&
-    p.renderableWordCount === null
-      ? [finding(self, p, { wordCount: p.wordCount, threshold: THIN_WORDS })]
-      : [],
+  pageRule(
+    "content.thin-skipped",
+    ["CHECK-40", "CHECK-13"],
+    CONTENT,
+    "info",
+    (p, self) =>
+      isAuditable(p) &&
+      p.isIndexable === true &&
+      p.wordCount !== null &&
+      p.renderableWordCount === null
+        ? [finding(self, p, { wordCount: p.wordCount, threshold: THIN_WORDS })]
+        : [],
+    "the page the corrected thin-content floor cannot judge",
   ),
 
   pageRule("content.placeholder", ["CHECK-40"], CONTENT, "warning", (p, self) =>

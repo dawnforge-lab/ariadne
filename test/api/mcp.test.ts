@@ -53,6 +53,7 @@ import {
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
 import { DISCOVERED_VIA } from "../../src/crawl/frontier.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
+import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
@@ -1083,15 +1084,15 @@ describe("crawl_status / crawl_list", () => {
     // And the off switch's echo, with both readings of a zero spelled out.
     expect(text).toContain("fetchResources");
     expect(text).toContain("false beside fetched 0");
-    // The marker's BOUNDARY, not just its existence. `resources.not-fetched`
-    // fires only where no row was decided at all (resources.ts:695), so a
-    // description that hands "true beside fetched 0" to the marker is wrong on
-    // the two shapes this phase documented: an interrupted pass that asked, and
-    // the all-unknown crawl of talos-surface.md §5.3 — the window the phase
-    // stated rather than closed. Pinned so the polling tool cannot quietly go
-    // back to asserting it away.
+    // The markers' BOUNDARIES, not just their existence. `resources.not-fetched`
+    // fires only where no row was decided at all (skipped equal to seen), so a
+    // description that hands "true beside fetched 0" to it is wrong on an
+    // interrupted pass that asked. The all-unknown crawl (fetched 0 with failed
+    // above 0) is the SEPARATE case `resources.all-unknown` now covers (P13-T2,
+    // talos-surface.md §5.3): every row decided into an unknown class. Pinned so
+    // the polling tool cannot quietly hand either boundary to the wrong marker.
     expect(text).toContain("NOT ONE file was decided");
-    expect(text).toContain("carries NO marker");
+    expect(text).toContain("resources.all-unknown finding's case");
 
     const listed = await client.listTools();
     const schema = listed.tools.find((t) => t.name === "crawl_start")?.inputSchema as {
@@ -1303,7 +1304,7 @@ describe("crawl_rules", () => {
     };
 
     const rendered = await coverage(liveCrawlId);
-    expect(rendered["renderPassEvidence"]).toBe("ran");
+    expect(rendered["renderPassEvidence"]).toBe(RENDER_PASS_EVIDENCE.ran);
     expect(Number(rendered["pagesRendered"])).toBeGreaterThan(0);
 
     const id = await seedCrawl({
@@ -1326,7 +1327,7 @@ describe("crawl_rules", () => {
     const unrendered = await coverage(id);
     // The pair that was missing: nothing ran, and the selection numbers are
     // still answered — as the plan they are, not as a history.
-    expect(unrendered["renderPassEvidence"]).toBe("none");
+    expect(unrendered["renderPassEvidence"]).toBe(RENDER_PASS_EVIDENCE.none);
     expect(unrendered["pagesRendered"]).toBe(0);
     expect(unrendered["selectionMode"]).toBe("auto");
     expect(Number(unrendered["selectionSelected"])).toBeGreaterThan(0);

@@ -169,6 +169,16 @@ const isUnknownClass = sql`(r.fetch_class is null
   or r.fetch_class = any(${sql.param([...UNKNOWN_CLASSES])}::text[]))`;
 
 /**
+ * `fetch_class` is one of the four DECIDED unknowns — null is deliberately NOT
+ * one of them. `isUnknownClass` above folds null in because a null row is an
+ * unknown to a judging rule's honesty count; `resources.all-unknown` needs the
+ * opposite cut. A null row is a row nobody asked about (the `not-fetched`
+ * marker's population), and this marker fires only when the crawl DID reach a
+ * verdict on every file. So it counts the four classes and never the null.
+ */
+const isDecidedUnknownClass = sql`r.fetch_class = any(${sql.param([...UNKNOWN_CLASSES])}::text[])`;
+
+/**
  * The content types `images.legacy-format` speaks about: the two raster formats
  * that predate WebP and AVIF and that a modern encoder reliably beats.
  *
@@ -638,7 +648,7 @@ const NOT_ASKED_SENTENCE: Record<(typeof NOT_FETCHED_REASON)[keyof typeof NOT_FE
  * three touching every undecided row or none, so the rule throws with the counts
  * rather than picking one (hard rule 7).
  *
- * ## THE WINDOW THIS MARKER DOES NOT CLOSE (review I-1)
+ * ## THE WINDOW THIS MARKER DOES NOT CLOSE — NOW CLOSED BY THE THIRD SIBLING (P13-T2)
  *
  * A crawl whose every resource landed in an UNKNOWN CLASS — `refused`,
  * `robots_denied`, `robots_unreachable`, `fetch_error` — has decided rows, so
@@ -648,13 +658,16 @@ const NOT_ASKED_SENTENCE: Record<(typeof NOT_FETCHED_REASON)[keyof typeof NOT_FE
  * finding was written: six rules quiet, no marker, exactly the shape
  * phase-11.md §10.3 refused to accept as "legible one surface over".
  *
- * It IS legible one surface over — `crawl_status.resources` carries `failed`,
+ * It was legible one surface over — `crawl_status.resources` carries `failed`,
  * `robotsDenied`, `robotsUnreachable` and `fetch_error`'s share of `failed`, and
- * CHECK-83 is answered first — and that is not the same as a reader meeting a
- * marker. **Ledgered to Phase 13 as an owner-promotable pointer**: a third
- * sibling on this model, fired by "no `ok` row on a crawl that has decided
- * rows". It is not this task's work, and it is stated here and in the four
- * checklist entries rather than left for the next reader to rediscover.
+ * CHECK-83 is answered first — but that was never the same as a reader meeting a
+ * marker. **`resources.all-unknown` below is that marker**, the third and last
+ * sibling on this model, fired by "every row a decided unknown class on a crawl
+ * that has rows". Phase 12 ledgered it as an owner-promotable pointer
+ * (phase-12.md §10.1) because closing it meant another rule and another ruleset
+ * bump; Phase 13 spent that bump (0.9.0 → 0.10.0). The window is closed, and the
+ * five places that stated it open — this docblock, `talos-surface.md` §5.3, and
+ * the CHECK-83/48/49/50/51 entries in the checklist — now name the marker.
  */
 async function notFetchedFindings(
   self: RuleIdentity,
@@ -737,6 +750,131 @@ async function notFetchedFindings(
   ];
 }
 
+/**
+ * THE THIRD AND LAST MARKER (P13-T2): the crawl asked, and got nothing usable.
+ *
+ * The two markers above report a crawl that never learned anything about its
+ * files — `resources.not-recorded` because it holds no resource rows,
+ * `resources.not-fetched` because the rows are there and not one was put to a
+ * server. This one reports the case both of them deliberately exclude: the rows
+ * are there, EVERY one of them was put to a server (or refused before we asked,
+ * or blocked, or timed out), and not one came back usable. Every row landed in
+ * one of the four unknown classes — `refused`, `robots_denied`,
+ * `robots_unreachable`, `fetch_error` — so the four judging rules find nothing
+ * to report and `page.weight` counts each page's HTML alone, exactly as on a
+ * crawl with no rows. A reader meeting no marker reads a light, clean site (hard
+ * rules 1 and 7); this marker is what stands between them and that misreading.
+ *
+ * ## WHY A THIRD SIBLING, AND WHY THE BUMP
+ *
+ * Phase 12 stated this window and left it open on purpose (phase-12.md §10.1):
+ * closing it means another marker, which means another rule and another ruleset
+ * bump, and Phase 12's bump was spent. It is additive by the same argument the
+ * other two markers are — a crawl gains a finding it could not receive before,
+ * no existing verdict moves — which is the 0.9.0 → 0.10.0 bump this task makes.
+ * `host.probe-skipped` is still the house precedent: a marker whose silence is
+ * not a pass.
+ *
+ * ## MUTUALLY EXCLUSIVE WITH BOTH SIBLINGS, BY CONSTRUCTION
+ *
+ * The arithmetic is the whole proof and one test drives all three boundaries:
+ *
+ *  - `resources.not-recorded` needs `resourcesSeen == 0`; this needs
+ *    `resourcesSeen > 0`.
+ *  - `resources.not-fetched` needs every row UNFETCHED (`null == seen`); this
+ *    needs every row DECIDED into an unknown class (`unknownDecided == seen`,
+ *    and a null row is not a decided unknown). A row is null or non-null, never
+ *    both, so no crawl satisfies both conditions with `seen > 0`.
+ *
+ * ## WHAT IT DOES NOT FIRE ON, each for its own reason
+ *
+ *  - **A crawl with even one `ok` row** — PARTIAL coverage. Something was
+ *    measured, so the judging rules answer with their `unknownResources` counts
+ *    beside their verdicts, and a marker saying "nothing came back usable" would
+ *    be false. This is the same boundary the not-fetched marker draws around a
+ *    partial pass.
+ *  - **A crawl with even one BROKEN row** (`client_error` / `server_error`). A
+ *    4xx/5xx is a usable verdict — `resources.broken` reports it — so the
+ *    silence this marker explains is not present. `isDecidedUnknownClass`
+ *    excludes broken, so a broken row makes `unknownDecided < seen` and the rule
+ *    stays silent while `resources.broken` speaks. The window §10.1 named the
+ *    four unknown classes precisely because a broken row is not one of them.
+ *  - **A crawl with even one UNASKED row** (`fetch_class` null). That crawl is
+ *    the not-fetched marker's, or a partial pass; a null row is not a decided
+ *    verdict, so `unknownDecided < seen`.
+ *
+ * ## THE EVIDENCE
+ *
+ * The per-class census — a count for each of the four unknown classes, every
+ * one named even at zero — and the dominant class, so a reader knows which
+ * sentence to read first. `crawl_status.resources` is the discriminator this
+ * finding puts a name to: `fetched` at zero with `failed` carrying the census.
+ * The dominant is picked by count with `UNKNOWN_CLASSES` order as the tie-break,
+ * so two runs over one crawl name the same one (the deterministic-cap lesson).
+ */
+async function allUnknownFindings(
+  self: RuleIdentity,
+  db: Db,
+  crawlId: string,
+): Promise<Finding[]> {
+  const result = await db.execute<{
+    resources_seen: number;
+    unknown_decided: number;
+    census: Record<string, number>;
+    pages_crawled: number;
+  }>(sql`
+    with census as (
+      select r.fetch_class as fetch_class, count(*)::int as n
+      from resources r
+      where r.crawl_id = ${crawlId}
+      group by r.fetch_class
+    )
+    select
+      (select coalesce(sum(n), 0)::int from census) as resources_seen,
+      (select coalesce(sum(n), 0)::int from census
+         where fetch_class = any(${sql.param([...UNKNOWN_CLASSES])}::text[])) as unknown_decided,
+      (select coalesce(jsonb_object_agg(fetch_class, n), '{}'::jsonb) from census
+         where fetch_class = any(${sql.param([...UNKNOWN_CLASSES])}::text[])) as census,
+      (select count(*)::int from pages p where p.crawl_id = ${crawlId}) as pages_crawled`);
+
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new Error(`${self.id}: crawl '${crawlId}' all-unknown census query returned no row`);
+  }
+  const seen = row.resources_seen;
+  // Nothing seen is `resources.not-recorded`'s fact; one row that is NOT a
+  // decided unknown — an `ok`, a broken 4xx/5xx, or a still-unasked null —
+  // means the silence this marker explains is not present, and one of the other
+  // rules speaks instead.
+  if (seen === 0 || row.unknown_decided !== seen) return [];
+
+  // Report every class, even at zero, so the shape of the evidence is stable
+  // across crawls and a reader is never left wondering whether a class was
+  // absent or omitted. Filled from the four names the fetch pass owns.
+  const census: Record<string, number> = {};
+  for (const cls of UNKNOWN_CLASSES) census[cls] = row.census[cls] ?? 0;
+  // Dominant by count, `UNKNOWN_CLASSES` order breaking a tie — deterministic,
+  // so the finding is byte-stable over re-runs of one crawl.
+  let dominantClass: ResourceFetchClass = UNKNOWN_CLASSES[0]!;
+  for (const cls of UNKNOWN_CLASSES) {
+    if (census[cls]! > census[dominantClass]!) dominantClass = cls;
+  }
+
+  return [
+    queryFinding(self, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        resourcesSeen: seen,
+        census,
+        dominantClass,
+        pagesCrawled: row.pages_crawled,
+      },
+      dedupeKey: "site",
+    }),
+  ];
+}
+
 const CATEGORY = "technical" as const;
 
 const BROKEN: RuleIdentity = { id: "resources.broken", severity: "warning" };
@@ -745,6 +883,7 @@ const LEGACY: RuleIdentity = { id: "images.legacy-format", severity: "info" };
 const UNCACHED: RuleIdentity = { id: "resources.uncached", severity: "info" };
 const NOT_RECORDED: RuleIdentity = { id: "resources.not-recorded", severity: "info" };
 const NOT_FETCHED: RuleIdentity = { id: "resources.not-fetched", severity: "info" };
+const ALL_UNKNOWN: RuleIdentity = { id: "resources.all-unknown", severity: "info" };
 
 export const resourceRules: QueryRule[] = [
   // A failed network request, which is what CHECK-51 asks for by name — see the
@@ -826,6 +965,7 @@ export const resourceRules: QueryRule[] = [
     severity: NOT_RECORDED.severity,
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a crawl that recorded no resources (P11-T3)",
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
   }),
 
@@ -841,6 +981,25 @@ export const resourceRules: QueryRule[] = [
     severity: NOT_FETCHED.severity,
     ...copyFor(NOT_FETCHED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a crawl that recorded its resources and asked about none (P12-T2)",
     run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
+  }),
+
+  // The third and last marker (P13-T2), claiming the same four checks as the two
+  // beside it and for the same reason: the silence it explains is the same
+  // silence — the four judging rules quiet and `page.weight` counting HTML
+  // alone. Which of the three speaks is decided by whether the crawl has rows
+  // (none / all-null / all-decided-unknown), and no crawl satisfies two. This
+  // one closes the window phase-12.md §10.1 stated and left open.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: ALL_UNKNOWN.id,
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+    category: CATEGORY,
+    severity: ALL_UNKNOWN.severity,
+    ...copyFor(ALL_UNKNOWN.id),
+    rulesetVersion: RULESET_VERSION,
+    marker: "a crawl whose every resource landed in an unknown class (P13-T2)",
+    run: (db, crawlId) => allUnknownFindings(ALL_UNKNOWN, db, crawlId),
   }),
 ];

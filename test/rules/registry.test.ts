@@ -80,6 +80,14 @@ describe("defineRule", () => {
     expect(() => defineRule({ ...validPageRule, kind: "cosmic" as never }))
       .toThrow(/bad kind 'cosmic'/);
   });
+  it("accepts a marker flag carrying a reason", () => {
+    const marked = { ...validPageRule, marker: "a crawl condition the check cannot judge" };
+    expect(defineRule(marked)).toBe(marked);
+  });
+  it("throws on a present-but-empty marker flag — a flag with no reason", () => {
+    expect(() => defineRule({ ...validPageRule, marker: "   " }))
+      .toThrow(/marker, when present, must be a non-empty reason string/);
+  });
   it("RuleDefinitionError is recognizable by name", () => {
     try {
       defineRule({ ...validPageRule, id: "BAD ID" });
@@ -120,6 +128,16 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.10.0: Phase 13 Task 2, on ONE ground. `resources.all-unknown` (T2), the
+    // third and last resource marker: a crawl whose every row landed in an
+    // unknown class (`refused`, `robots_denied`, `robots_unreachable`,
+    // `fetch_error`, and not one `ok`, broken or unasked row) met NO finding at
+    // all, and a re-judge at 0.10.0 gives it one. ADDITIVE like both siblings —
+    // a new verdict, no existing one moves — and it closes the window Phase 12
+    // stated and left open (docs/gates/phase-12.md §10.1), whose closure was
+    // defined as "another marker, another rule, another bump". No existing copy
+    // changed.
+    //
     // 0.9.0: Phase 12, on TWO grounds and both of them are the contract's own —
     // the version stamps what the ruleset SAYS, and `rules_catalog` serves the
     // copy stamped with this constant (registry.ts's own paragraph).
@@ -183,7 +201,7 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. Phase 9's bump is
     // T2's, above; the phase's other tasks verify rather than bump again.
-    expect(RULESET_VERSION).toBe("0.9.0");
+    expect(RULESET_VERSION).toBe("0.10.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

@@ -259,18 +259,20 @@ export interface HostGateOptions {
    *
    * ## Two things this is NOT, both of which a reader will otherwise assume
    *
-   * **IT IS NOT PER-HOST, AND ON A RESUME IT WIDENS.** `crawls.host_spacing_ms`
-   * is one number for the whole crawl — the WIDEST spacing any host reached
-   * (`maxSpacingMs`) — so re-entering it here applies that width to EVERY host
-   * the resumed run touches, including hosts that never pushed back. On a crawl
-   * whose CDN earned 8s while the origin stayed at 1s, the resumed run crawls
-   * the origin at 8s too. That is slower than it needs to be and it is the
-   * polite direction, which is why it is accepted rather than worked around:
-   * per-host fidelity does not exist to be preserved, because no column records
-   * it. A `crawl_host_spacing` table (host → earned ms) is the Phase 13
-   * candidate that would fix it; until then this widening is the honest cost of
-   * not forgetting. `maxDelayMs` still bounds it, so the worst case is the 30s
-   * cap and never more.
+   * **IT IS THE CRAWL-WIDE FALLBACK, NOT THE PER-HOST TRUTH.**
+   * `crawls.host_spacing_ms` is one number for the whole crawl — the WIDEST
+   * spacing any host reached (`maxSpacingMs`) — so re-entering it here applies
+   * that width to EVERY host the resumed run touches, including hosts that never
+   * pushed back. On a crawl whose CDN earned 8s while the origin stayed at 1s,
+   * this number alone would crawl the origin at 8s too. That is the polite
+   * direction, so it is not worked around; it is the FALLBACK. The per-host
+   * truth lives beside it in `crawls.host_spacing_jsonb` ({host: earnedMs},
+   * migration 0015), which `earnedSpacingByHost` carries: a host in that map
+   * re-enters ITS OWN earned spacing, and only a host the map does not name
+   * (a URL discovered on the continuation, or a pre-0015 row whose map is null)
+   * falls back to this crawl-wide number, then to the config floor. So the CDN
+   * resumes at 8s and the origin at 1s. `maxDelayMs` still bounds both, so the
+   * worst case is the 30s cap and never more.
    *
    * **THE COLUMN IS NOT ONLY EARNED.** The loop writes `maxSpacingMs()` once
    * before the first fetch, so a crawl that never escalated still stores
@@ -285,6 +287,29 @@ export interface HostGateOptions {
    * a new crawl, which has no column to read.
    */
   earnedSpacingMs?: number | null;
+  /**
+   * The PER-HOST spacing an earlier run of this crawl earned —
+   * `crawls.host_spacing_jsonb`, `{host: earnedMs}` — or null/absent for a crawl
+   * that has none (a fresh crawl, or a pre-0015 row that kept only the crawl-wide
+   * `earnedSpacingMs`).
+   *
+   * This is the fidelity `earnedSpacingMs` on its own cannot give (see its "IT IS
+   * THE CRAWL-WIDE FALLBACK" note): the crawl-wide number is the widest ANY host
+   * reached, so re-entering it alone widens every host to the worst host's
+   * spacing. A host named here re-enters ITS OWN earned number instead — folded
+   * into the same max as everything else, `max(config, robots, thisHostEarned)`
+   * capped at `maxDelayMs`, so the config floor, a robots `Crawl-delay` and the
+   * 30s cap all still win where they won. A host NOT named here keeps the
+   * crawl-wide fallback (`this.delayMs`), which is the polite direction for a
+   * host nobody has a per-host reading of yet.
+   *
+   * A host's earned value is always ≤ the crawl-wide widest (the widest is the
+   * max over hosts), so seeding it never exceeds `this.delayMs` and the lease
+   * high-water is unaffected. A value that is negative or non-finite is a defect
+   * in what wrote the column, and it throws rather than being clamped (hard rule
+   * 7), exactly as `earnedSpacingMs` does.
+   */
+  earnedSpacingByHost?: Record<string, number> | null;
 }
 
 /**
@@ -325,11 +350,34 @@ interface HostState {
 
 export class HostGate {
   private readonly delayMs: number;
+  /**
+   * The base for a host with no earned reading of its own: max(config, robots),
+   * capped, WITHOUT any earned term. `delayMs` folds the crawl-wide earned
+   * spacing on top of this; a host named in `earnedSpacingByHost` folds ITS OWN
+   * earned spacing on top of this instead. Kept separately so a per-host seed
+   * does not inherit the crawl-wide widest through `delayMs` — which is the
+   * whole point of the per-host map.
+   */
+  private readonly configuredFloorMs: number;
   private readonly maxDelayMs: number;
   /** host → everything the gate remembers about it. O(hosts touched). */
   private readonly hosts = new Map<string, HostState>();
   /** The widest spacing any host has reached. Read by the loop's lease sizing. */
   private highWaterMs: number;
+  /**
+   * Bumped every time ANY host's spacing changes — an escalation or a
+   * `raiseHostFloor` that actually moved a base. The loop watches it to persist
+   * the per-host map (`maxSpacingMsByHost`) whenever a host moves, not only when
+   * the crawl-wide widest does: a non-widest host that escalates from a value it
+   * was resumed at would otherwise never be re-written, and a hard kill before
+   * the close write would leave a resume re-entering that host BELOW what it
+   * earned — faster than the site allowed, a rule-9 hole (P13-T3 fix round 1).
+   * A plain counter, not the widest: seeding at construction does not bump it
+   * (the loop writes the seeded map once up front regardless), and a `Retry-After`
+   * push that moves only `nextAllowedAt` does not either — it changes no host's
+   * earned spacing, which is all the map records.
+   */
+  private spacingGen = 0;
 
   constructor(opts: HostGateOptions) {
     const maxDelayMs = opts.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
@@ -362,16 +410,42 @@ export class HostGate {
     // A site asking for a full minute between hits gets 30s: past the cap the
     // crawl stops being a crawl. Below it, the site's number always wins — and
     // so does the spacing an earlier run of this crawl earned from it.
+    //
+    // The floor (config + robots) is computed on its own because a per-host seed
+    // folds its OWN earned spacing onto it, not onto `delayMs` — which carries
+    // the crawl-wide widest and would drag every seeded host up to it.
+    this.maxDelayMs = maxDelayMs;
+    this.configuredFloorMs = Math.min(
+      maxDelayMs,
+      Math.max(opts.perHostDelayMs, (opts.robotsCrawlDelaySec ?? 0) * 1000),
+    );
     this.delayMs = Math.min(
       maxDelayMs,
-      Math.max(
-        opts.perHostDelayMs,
-        (opts.robotsCrawlDelaySec ?? 0) * 1000,
-        opts.earnedSpacingMs ?? 0,
-      ),
+      Math.max(this.configuredFloorMs, opts.earnedSpacingMs ?? 0),
     );
-    this.maxDelayMs = maxDelayMs;
     this.highWaterMs = this.delayMs;
+
+    // Seed the per-host earned spacings a resume carries back in, so each host
+    // re-enters ITS OWN number rather than the crawl-wide `delayMs`. Each is
+    // folded through the same max/cap as everything else. O(hosts the prior run
+    // touched), which is the order the gate already holds (hard rule 6).
+    for (const [host, earned] of Object.entries(opts.earnedSpacingByHost ?? {})) {
+      if (!(earned >= 0) || !Number.isFinite(earned)) {
+        throw new RangeError(
+          `HostGate: earnedSpacingByHost[${host}] must be ≥ 0, got ${earned}`,
+        );
+      }
+      const base = Math.min(maxDelayMs, Math.max(this.configuredFloorMs, earned));
+      this.hosts.set(host, {
+        nextAllowedAt: 0,
+        baseMs: base,
+        escalations: 0,
+        streak: 0,
+        streakUrl: null,
+        streakDistinct: false,
+      });
+      this.highWaterMs = Math.max(this.highWaterMs, base);
+    }
   }
 
   /**
@@ -423,6 +497,7 @@ export class HostGate {
     const raised = Math.min(this.maxDelayMs, Math.max(state.baseMs, delayMs));
     if (raised === state.baseMs) return;
     state.baseMs = raised;
+    this.spacingGen += 1;
     // A lease is sized against the widest spacing in force (see the loop's
     // leaseSecondsFor), so a base that moved has to move this too.
     this.highWaterMs = Math.max(this.highWaterMs, this.spacingMs(host));
@@ -435,6 +510,35 @@ export class HostGate {
    */
   maxSpacingMs(): number {
     return this.highWaterMs;
+  }
+
+  /**
+   * The current spacing of EVERY host the gate has touched, keyed by host —
+   * `crawls.host_spacing_jsonb`, written by the loop beside `maxSpacingMs()`.
+   *
+   * The per-host counterpart of `maxSpacingMs`: that returns the single widest
+   * number for lease sizing, this returns each host's own so a resume can
+   * re-enter each at ITS earned spacing rather than at the crawl-wide widest
+   * (`earnedSpacingByHost`). Because a host's spacing only ever rises within a
+   * crawl (escalations increment, `raiseHostFloor` is monotonic), the current
+   * spacing IS that host's high-water. O(hosts touched); the map is empty until
+   * the first host is seen, which is the honest "no host recorded yet".
+   */
+  maxSpacingMsByHost(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const host of this.hosts.keys()) out[host] = this.spacingMs(host);
+    return out;
+  }
+
+  /**
+   * A monotonic counter of how many times any host's earned spacing has moved
+   * (an escalation, or a `raiseHostFloor` that raised a base). The loop persists
+   * the per-host map whenever this changes, so a non-widest host's escalation is
+   * captured within a batch rather than only at the crawl-wide widest's next
+   * move (see `spacingGen`). Not a spacing itself — a change token.
+   */
+  spacingGeneration(): number {
+    return this.spacingGen;
   }
 
   /**
@@ -511,6 +615,7 @@ export class HostGate {
         state.streak >= ESCALATION_STREAK && state.streakDistinct;
       if (namedARate || hostWideStreak) {
         state.escalations += 1;
+        this.spacingGen += 1;
         const spacing = this.spacingMs(host);
         this.highWaterMs = Math.max(this.highWaterMs, spacing);
         this.pushSlot(host, spacing);

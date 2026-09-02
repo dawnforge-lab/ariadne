@@ -395,6 +395,7 @@ export const linkGraphRules: QueryRule[] = [
     severity: SKIPPED.severity,
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "an incomplete crawl, whose orphans cannot be trusted",
     run: async (db, crawlId): Promise<Finding[]> => {
       const state = await completeness(db, crawlId, SKIPPED.id);
       const skipped = skipReason(state);

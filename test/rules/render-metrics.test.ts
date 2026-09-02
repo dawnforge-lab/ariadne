@@ -16,7 +16,7 @@ import { RENDER_DEFAULTS, SUSPICION } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, links, pages } from "../../src/db/schema.js";
-import { renderMetrics } from "../../src/rules/metric/render-metrics.js";
+import { RENDER_PASS_EVIDENCE, renderMetrics } from "../../src/rules/metric/render-metrics.js";
 import {
   databaseUrl,
   dropCrawls,
@@ -42,6 +42,14 @@ describe("renderMetrics metadata", () => {
     expect(r.category).toBe("crawl");
     expect(r.title.length).toBeGreaterThan(5);
     expect(r.explanation.length).toBeGreaterThan(40);
+  });
+
+  // The two value strings ARE the wire contract — they cross to Talos and every
+  // other assertion in this file references the constant, so a silent value
+  // drift would ship green. This is the one place that pins the shape against
+  // hardcoded literals, restoring the net the literal→named refactor removed.
+  it("pins the render-pass evidence wire shape against hardcoded literals", () => {
+    expect(RENDER_PASS_EVIDENCE).toEqual({ ran: "ran", none: "none" });
   });
 });
 
@@ -208,7 +216,7 @@ describe("render.coverage against the database", () => {
       // P12-T4: one page rendered and one failed, so a pass demonstrably ran
       // over this crawl and the selection numbers below describe the decision
       // that produced them.
-      renderPassEvidence: "ran",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -253,7 +261,7 @@ describe("render.coverage against the database", () => {
       pagesCrawled: 6,
       // P12-T4: nothing on this crawl shows a pass ever ran, so the numbers
       // below are the selection a pass WOULD make and not one it made.
-      renderPassEvidence: "none",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.none,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -288,7 +296,7 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
-      renderPassEvidence: "none",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.none,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -314,7 +322,7 @@ describe("render.coverage against the database", () => {
       // either way: nothing to select, nothing selected. `none` is still the
       // honest answer — no pass left a trace here — and the row says so
       // rather than letting five zeroes stand for a decision.
-      renderPassEvidence: "none",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.none,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -359,7 +367,7 @@ describe("render.coverage against the database", () => {
       // P12-T4. A stored URL list is written by the pass itself, inside the
       // transaction that made the selection — so `explicit` is proof a pass
       // ran, and this pair can never read `explicit` beside `none`.
-      renderPassEvidence: "ran",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
       selectionMode: "explicit",
       // Null, not 1 — the budget the automatic decision would have had — and
       // not 0 either, which reads as "a budget of none".
@@ -394,7 +402,7 @@ describe("render.coverage against the database", () => {
       // P12-T4. Not one page of this crawl carries render evidence, and the
       // answer is still `ran`: the list on the crawl row was written by the
       // pass, so it is a record of a pass whatever came of it.
-      renderPassEvidence: "ran",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
     });
   });
 
@@ -451,7 +459,7 @@ describe("render.coverage against the database", () => {
       // A pass that rendered NOTHING is not a pass that did not run — the two
       // are what this field exists to separate, and `pagesRendered: 0` beside
       // `renderFailures: 1` is a pass that ran and got nothing.
-      renderPassEvidence: "ran",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
       pagesRendered: 0,
       renderFailures: 1,
     });
@@ -481,7 +489,7 @@ describe("render.coverage against the database", () => {
 
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toMatchObject({
-      renderPassEvidence: "ran",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
       pagesRendered: 0,
       renderFailures: 0,
     });
@@ -505,7 +513,7 @@ describe("render.coverage against the database", () => {
     await addPages(crawlId, SITE_PAGES);
 
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
-    expect(rows["site|"]).toMatchObject({ renderPassEvidence: "ran", pagesRendered: 0 });
+    expect(rows["site|"]).toMatchObject({ renderPassEvidence: RENDER_PASS_EVIDENCE.ran, pagesRendered: 0 });
   });
 
   /**
@@ -525,7 +533,7 @@ describe("render.coverage against the database", () => {
 
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toMatchObject({
-      renderPassEvidence: "none",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.none,
       selectionMode: "auto",
       selectionBudget: 1,
       selectionSuspects: 2,
@@ -551,7 +559,10 @@ describe("render.coverage against the database", () => {
       string,
       unknown
     >;
-    expect([row["selectionMode"], row["renderPassEvidence"]]).toEqual(["explicit", "ran"]);
+    expect([row["selectionMode"], row["renderPassEvidence"]]).toEqual([
+      "explicit",
+      RENDER_PASS_EVIDENCE.ran,
+    ]);
   });
 
   // A shape this rule cannot read stops it, for the same reason a non-numeric

@@ -195,6 +195,137 @@ describe("HostGate", () => {
     ).toThrow(RangeError);
   });
 
+  // --- the PER-HOST earned spacing a resumed crawl carries back in (P13-T3) ---
+
+  it("exports each touched host's high-water spacing as a map", () => {
+    // The gate GROWS this so a resume can re-enter each host at its own earned
+    // spacing rather than at the single crawl-wide widest. It reports the CURRENT
+    // spacing per host — which, since escalations only ever rise, is that host's
+    // high-water.
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    const throttle = (host: string, url: string) =>
+      g.report(host, { fetchClass: "blocked", statusCode: 429, retryAfterMs: null, url });
+
+    // A CDN pushes back three times (→ 8s); the origin never does (→ base 1s).
+    throttle("cdn.example", "https://cdn.example/a");
+    throttle("cdn.example", "https://cdn.example/b");
+    throttle("cdn.example", "https://cdn.example/c");
+    // Touch the origin so it enters the map at its base.
+    g.report("origin.example", { fetchClass: "ok", statusCode: 200, retryAfterMs: null, url: "https://origin.example/" });
+
+    expect(g.maxSpacingMsByHost()).toEqual({
+      "cdn.example": 8000,
+      "origin.example": 1000,
+    });
+    // A host nobody touched is not in the map — it has earned nothing.
+    expect(g.maxSpacingMsByHost()["other.example"]).toBeUndefined();
+  });
+
+  it("bumps a spacing generation when ANY host moves, so a non-widest host's write fires", () => {
+    // The loop persists the per-host map when this counter changes rather than
+    // when the crawl-wide widest does — otherwise a non-widest host that
+    // escalated could be left stale for a resume to re-enter too fast (rule 9).
+    const g = new HostGate({ perHostDelayMs: 100, robotsCrawlDelaySec: null });
+    const throttle = (host: string, url: string) =>
+      g.report(host, { fetchClass: "blocked", statusCode: 429, retryAfterMs: null, url });
+
+    // A wide host takes the crawl-wide widest first.
+    throttle("wide.example", "https://wide.example/a");
+    throttle("wide.example", "https://wide.example/b");
+    const widest = g.maxSpacingMs();
+    const genAfterWide = g.spacingGeneration();
+
+    // A DIFFERENT host escalates but stays below the widest: the widest does NOT
+    // move, yet the generation MUST — that is the write the fix depends on.
+    throttle("narrow.example", "https://narrow.example/a");
+    expect(g.maxSpacingMs()).toBe(widest); // widest unchanged
+    expect(g.spacingGeneration()).toBeGreaterThan(genAfterWide); // but a host moved
+
+    // A plain success moves nothing and does not bump the counter.
+    const genBefore = g.spacingGeneration();
+    g.report("narrow.example", { fetchClass: "ok", statusCode: 200, retryAfterMs: null, url: "https://narrow.example/ok" });
+    expect(g.spacingGeneration()).toBe(genBefore);
+
+    // raiseHostFloor that actually raises a base bumps it too; a no-op does not.
+    g.raiseHostFloor("narrow.example", 5000);
+    expect(g.spacingGeneration()).toBeGreaterThan(genBefore);
+    const genAfterRaise = g.spacingGeneration();
+    g.raiseHostFloor("narrow.example", 1); // below the current base — no-op
+    expect(g.spacingGeneration()).toBe(genAfterRaise);
+  });
+
+  it("re-enters each host at ITS OWN earned spacing, not the crawl-wide widest", () => {
+    // The whole point of the per-host map: a crawl whose CDN earned 8s while the
+    // origin stayed at 1s resumes the origin at 1s, NOT at 8s.
+    const g = new HostGate({
+      perHostDelayMs: 1000,
+      robotsCrawlDelaySec: null,
+      earnedSpacingByHost: { "cdn.example": 8000, "origin.example": 1000 },
+    });
+    expect(g.spacingMs("cdn.example")).toBe(8000);
+    expect(g.spacingMs("origin.example")).toBe(1000);
+  });
+
+  it("falls back to the crawl-wide earned spacing for a host not in the map", () => {
+    // A host the prior run never recorded (a URL discovered only on the
+    // continuation) has no per-host number, so it takes the crawl-wide widest —
+    // the polite direction — and then the config floor when there is no map at
+    // all (a pre-0015 row).
+    const mapped = new HostGate({
+      perHostDelayMs: 1000,
+      robotsCrawlDelaySec: null,
+      earnedSpacingMs: 8000,
+      earnedSpacingByHost: { "cdn.example": 8000 },
+    });
+    expect(mapped.spacingMs("cdn.example")).toBe(8000);
+    // Not in the map → the crawl-wide widest, exactly as before per-host existed.
+    expect(mapped.spacingMs("fresh.example")).toBe(8000);
+    expect(mapped.effectiveDelayMs()).toBe(8000);
+
+    // A pre-0015 row: null map, and the crawl-wide value carries every host.
+    const preNull = new HostGate({
+      perHostDelayMs: 1000,
+      robotsCrawlDelaySec: null,
+      earnedSpacingMs: 8000,
+      earnedSpacingByHost: null,
+    });
+    expect(preNull.spacingMs("anything.example")).toBe(8000);
+  });
+
+  it("keeps the fold pairings per host: config floor, robots, and the 30s cap all still win", () => {
+    // The T3-P12 fold survives the per-host path. Each host's base is
+    // max(config, robots, thisHostEarned), capped at 30s.
+    const g = new HostGate({
+      perHostDelayMs: 2000,
+      robotsCrawlDelaySec: 3,
+      earnedSpacingByHost: { "low.example": 500, "high.example": 90_000 },
+    });
+    // The config floor (2000) and robots (3000) both beat this host's tiny
+    // earned 500 — the widest wins, per host.
+    expect(g.spacingMs("low.example")).toBe(3000);
+    // The cap binds a per-host earned exactly as it binds the crawl-wide one.
+    expect(g.spacingMs("high.example")).toBe(30_000);
+  });
+
+  it("refuses a per-host earned spacing that is not a number of milliseconds", () => {
+    expect(
+      () =>
+        new HostGate({
+          perHostDelayMs: 100,
+          robotsCrawlDelaySec: null,
+          earnedSpacingByHost: { "a.example": -1 },
+        }),
+    ).toThrow(RangeError);
+    expect(
+      () =>
+        new HostGate({
+          perHostDelayMs: 100,
+          robotsCrawlDelaySec: null,
+          earnedSpacingByHost: { "a.example": Number.NaN },
+        }),
+    ).toThrow(RangeError);
+  });
+
   it("spaces two acquisitions of the same host by the delay", async () => {
     const g = new HostGate({ perHostDelayMs: 120, robotsCrawlDelaySec: null });
     const t0 = Date.now();

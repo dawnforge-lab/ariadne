@@ -74,6 +74,24 @@ import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { num } from "./cohort.js";
 
+/**
+ * `renderPassEvidence`'s closed vocabulary: `ran` when this crawl holds anything
+ * a render pass wrote, `none` when it holds nothing of the kind.
+ *
+ * Declared as a named constant on the `RESOURCE_FETCH_CLASSES` model
+ * (src/crawl/resources/fetch-resources.ts): this rule WRITES the value, so it
+ * owns the strings, and every reader — the metric's own tests, the `pages`
+ * filter hint in mcp.ts — names them through this object rather than spelling a
+ * bare `"ran"`/`"none"` a rename would leave silently matching nothing. The two
+ * value strings ARE the wire contract and are unchanged by this refactor; the
+ * constant is literal→named, not a wire change.
+ */
+export const RENDER_PASS_EVIDENCE = {
+  ran: "ran",
+  none: "none",
+} as const;
+export type RenderPassEvidence = (typeof RENDER_PASS_EVIDENCE)[keyof typeof RENDER_PASS_EVIDENCE];
+
 /** The three render knobs a `crawls` row may carry, in the order they are read. */
 const RENDER_CONFIG_KEYS = [
   "renderBudgetPct",
@@ -320,8 +338,8 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
           pagesRendered > 0 ||
           renderFailures > 0 ||
           renderPending > 0
-            ? "ran"
-            : "none",
+            ? RENDER_PASS_EVIDENCE.ran
+            : RENDER_PASS_EVIDENCE.none,
         selectionMode: selection === null ? "explicit" : "auto",
         selectionBudget: selection?.budget ?? null,
         selectionSuspects: selection?.suspects ?? null,
