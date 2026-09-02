@@ -798,11 +798,12 @@ Phase 12 pointers, in the order they will be met:
    pointer with what became of it is the same class of edit as `phase-8.md:825`,
    where item 7 was struck through and marked "CLOSED in the final-review fix
    wave", and no measured number above it moves.) The reasoning, recorded so the
-   next reader does not re-open it as an oversight: **a faster floor for HEAD-only asset requests is a change to our
-   politeness POSTURE, not a tuning knob** — it asks a site's server for more
-   requests per second than the crawl itself was willing to make, on the argument
-   that a HEAD is cheaper, which is our inference about their infrastructure and
-   not their statement about it (hard rule 9, and the yellow.com.mt incident in
+   next reader does not re-open it as an oversight: **a faster floor for
+   HEAD-only asset requests is a change to our politeness POSTURE, not a tuning
+   knob** — it asks a site's server for more requests per second than the crawl
+   itself was willing to make, on the argument that a HEAD is cheaper, which is
+   our inference about their infrastructure and not their statement about it
+   (hard rule 9, and the yellow.com.mt incident in
    `docs/talos-integration.md`). The 4.65× the pass costs was measured (§3),
    priced, and ACCEPTED as the price of asking politely. The second option —
    asking only about files some rule would judge — narrows the census to today's

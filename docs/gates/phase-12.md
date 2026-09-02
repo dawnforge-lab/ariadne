@@ -214,7 +214,10 @@ crawl** and asserts the two rows carry the two different classes.
 
 That pass leaves its crawl in the dev database, and one of the rows it left —
 two resource rows, one on each side of the split, which is the fourth case's own
-shape — reads like this through `ApiService.getCrawl`, read for this document:
+shape — reads like this through `ApiService.getCrawl`, read for this document.
+**That row is itself one of the 33 leftovers a full run leaves behind** (§11), so
+the cleanup sweep ledgered at §10.6 would take this citation's re-readability
+with it: the tests survive a sweep, this row does not.
 
 ```
 crawl_res_116d3b7d-cf71-478c-80d3-83bc2630eae5
@@ -239,6 +242,19 @@ partition test asserts the arithmetic and now also the subset relation:
 
 both green, both transports, each on a fixture carrying a file on each side of
 the split plus the zero-block case beside it.
+
+**The seam in this clause, stated rather than left for a reader to find.** Those
+two partition tests read their counts off **SEEDED** fixture rows —
+`test/api/query.test.ts:637-638` builds `crawlF` with `seedCrawl` and inserts the
+resource rows directly, and `mcp.test.ts`'s surface crawl is seeded the same way
+— while the half that proves the CLASSES are written correctly is the real pass
+in §2.1, on a different crawl. **No single automated test carries the chain from
+a real pass through to a served count**; the join above was made by hand, for
+this document, by reading `crawl_status` off a crawl §2.1's pass produced. That
+is enough for a gate and it is not enough for a suite. **Ledgered: one case that
+runs the real pass against the two robots hosts and then asserts the served
+`robotsDenied` / `robotsUnreachable` off that same crawl** — one test, and the
+clause stops resting on a hand-made join.
 
 ---
 
@@ -866,8 +882,9 @@ The two Phase 11 flakes are **still open**, and the sample is honestly small.
 Checked for this document, `gh run list --branch main --limit 20`:
 
 - **Every run on `main` in the repository's history is `success` — 12 of 12.**
-- **Since Phase 11 merged there has been exactly ONE run on `main`**: the merge
-  of PR #10, run `33612036039`, 3m47s, 2026-09-02T09:03:33Z, success.
+- **The only run on `main` carrying Phase 11 is its own merge run** — run
+  `33612036039`, 3m47s, 2026-09-02T09:03:33Z, success. Nothing has landed on
+  `main` since, so that run is the whole post-Phase-11 sample.
 - Neither watch item appeared in it.
 
 **One data point is not a sweep**, so the accurate sentence is: *the two Phase 11
