@@ -744,14 +744,20 @@ rows cannot say it and only the config can.
    `seen`. **Read the coverage block before quoting any resource finding, or the
    absence of one.**
 
-   **One window neither marker covers, and a consumer must not read as a clean
-   site:** a crawl where every file landed in an UNKNOWN class (`refused`,
-   `robots_denied`, `robots_unreachable`, `fetch_error`). Rows were decided, so
-   no marker fires; no row is `ok`, so the four judging rules write nothing and
-   the `unknownResources` counts that would explain the silence live on findings
-   that do not exist. The discriminator is this block: `fetched` at zero with
-   `failed` carrying the census. A third sibling marker for it is **ledgered to
-   Phase 13**.
+   **A third case, and since Phase 13 it has its own marker:** a crawl where
+   every file landed in an UNKNOWN class (`refused`, `robots_denied`,
+   `robots_unreachable`, `fetch_error`). Rows were decided, so neither
+   `resources.not-recorded` nor `resources.not-fetched` fires; no row is `ok`, so
+   the four judging rules write nothing and the `unknownResources` counts that
+   would explain the silence live on findings that do not exist. That silence is
+   what `resources.all-unknown` (info, ruleset 0.10.0) now reports: its evidence
+   carries a per-class `census` (a count for each of the four unknown classes)
+   and the `dominantClass`, beside `resourcesSeen` and `pagesCrawled`. The three
+   markers are mutually exclusive by construction — `seen == 0`, every row
+   unfetched, every row a decided unknown — so no crawl carries more than one.
+   The discriminator on this block is unchanged: `fetched` at zero with `failed`
+   carrying the census. **Read the coverage block before quoting any resource
+   finding, or the absence of one.**
 2. **`fetch_class` null is per FILE, so a page's weight can be a floor.** The
    `page.weight` metric flags `atLeast: true` on any row that references a file
    nobody weighed, and reports the referenced-and-weighed pair beside it.
@@ -895,17 +901,17 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:929` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:962` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:977` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:1003` "tells
+`test/rules/copy.test.ts:937` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:970` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:985` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1011` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1030` "grades nothing: no score, no label, no threshold";
-`test/rules/coverage.test.ts:276` "site.health is filed under the
+`test/rules/copy.test.ts:1038` "grades nothing: no score, no label, no threshold";
+`test/rules/coverage.test.ts:302` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:1784` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:1795` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

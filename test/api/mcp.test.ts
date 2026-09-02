@@ -1083,15 +1083,15 @@ describe("crawl_status / crawl_list", () => {
     // And the off switch's echo, with both readings of a zero spelled out.
     expect(text).toContain("fetchResources");
     expect(text).toContain("false beside fetched 0");
-    // The marker's BOUNDARY, not just its existence. `resources.not-fetched`
-    // fires only where no row was decided at all (resources.ts:695), so a
-    // description that hands "true beside fetched 0" to the marker is wrong on
-    // the two shapes this phase documented: an interrupted pass that asked, and
-    // the all-unknown crawl of talos-surface.md §5.3 — the window the phase
-    // stated rather than closed. Pinned so the polling tool cannot quietly go
-    // back to asserting it away.
+    // The markers' BOUNDARIES, not just their existence. `resources.not-fetched`
+    // fires only where no row was decided at all (skipped equal to seen), so a
+    // description that hands "true beside fetched 0" to it is wrong on an
+    // interrupted pass that asked. The all-unknown crawl (fetched 0 with failed
+    // above 0) is the SEPARATE case `resources.all-unknown` now covers (P13-T2,
+    // talos-surface.md §5.3): every row decided into an unknown class. Pinned so
+    // the polling tool cannot quietly hand either boundary to the wrong marker.
     expect(text).toContain("NOT ONE file was decided");
-    expect(text).toContain("carries NO marker");
+    expect(text).toContain("resources.all-unknown finding's case");
 
     const listed = await client.listTools();
     const schema = listed.tools.find((t) => t.name === "crawl_start")?.inputSchema as {

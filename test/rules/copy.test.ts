@@ -257,6 +257,13 @@ const PHASE_11_METRIC_IDS = ["page.weight"];
  */
 const PHASE_12_RULE_IDS = ["resources.not-fetched"];
 
+/**
+ * Phase 13's rule: the third and last resource marker. Same contract as every
+ * list above, and the same obligation as the family it joins — it speaks about
+ * the CRAWL, and its copy must not read as a fact about the site.
+ */
+const PHASE_13_RULE_IDS = ["resources.all-unknown"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -266,6 +273,7 @@ const ALL_RULE_IDS = [
   ...PHASE_10_METRIC_IDS,
   ...PHASE_11_RULE_IDS,
   ...PHASE_12_RULE_IDS,
+  ...PHASE_13_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -1241,6 +1249,32 @@ describe("issue copy", () => {
     // NEVER the other marker's sentence: this crawl recorded plenty.
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
       /recorded no (?:files|resources)|no resource records|found no files/i,
+    );
+  });
+
+  // The third marker (P13-T2). Its copy has the job neither sibling's does: the
+  // crawl DID ask, and got nothing usable, so the reader must not take the
+  // silence for a clean site. It has to say that this is a limit of the evidence
+  // rather than a bill of health, name the four unknown states, and — like both
+  // siblings — never read as a fault on the site.
+  it("resources.all-unknown says the crawl asked and got nothing usable, and names the four states", () => {
+    const c = ISSUE_COPY["resources.all-unknown"]!;
+    expect(c.explanation, "the crawl asked").toMatch(/asked about|tried to reach/i);
+    expect(c.explanation, "nothing usable came back").toMatch(/nothing.*usable|not one.*usable|no.*usable answer/i);
+    // The four states, each named: our policy, robots disallow, unreachable
+    // robots, a request that never completed.
+    expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
+    expect(c.explanation, "robots disallow").toMatch(/robots\.txt disallowed/i);
+    expect(c.explanation, "unreachable robots").toMatch(/robots\.txt was unreachable|could not tell us its robots/i);
+    expect(c.explanation, "a request that never completed").toMatch(/never completed|timeout|connection reset/i);
+    // The census and the consequence a reader would otherwise misread.
+    expect(c.explanation, "page.weight beside it").toMatch(/HTML and nothing else/i);
+    expect(c.explanation, "what the silence is not").toMatch(/rather than a clean bill of health|not a clean bill/i);
+    expect(c.howToFix).toMatch(/re-run the crawl/i);
+    // NEVER a fault on the site, and never the siblings' "recorded none" /
+    // "never asked" sentences: this crawl recorded plenty and asked about all.
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
+      /recorded no (?:files|resources)|no resource records|asked the site about none|never asked about/i,
     );
   });
 

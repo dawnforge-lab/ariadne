@@ -196,6 +196,17 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // in test/rules/resources-query.test.ts, along with the boundary against the
   // marker above it.
   "resources.not-fetched",
+  // P13-T2's third and last marker, unprovokable here for the same
+  // by-construction reason as its two siblings. It fires only when EVERY
+  // resource row is a decided unknown class — refused, robots_denied,
+  // robots_unreachable, fetch_error — with no `ok`, no broken and no unasked
+  // row. This harness serves five real images (one weighed at 404), so the
+  // census is dominated by `ok` and carries a `client_error`, and the marker's
+  // condition (every row a decided unknown) is false by construction. Its
+  // firing, its silence on partial/broken/unasked crawls, and the three-way
+  // boundary against both siblings are covered directly in
+  // test/rules/resources-query.test.ts.
+  "resources.all-unknown",
   "h1.duplicate-skipped",
   "host.duplicate-host-200",
   "host.probe-skipped",

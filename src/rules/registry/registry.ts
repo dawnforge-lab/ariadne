@@ -23,6 +23,20 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.10.0: Phase 13 Task 2, on ONE ground. `resources.all-unknown` (T2), the
+// third and last resource marker. A crawl whose every resource row landed in an
+// unknown class — `refused`, `robots_denied`, `robots_unreachable`,
+// `fetch_error`, and not one `ok` or broken or unasked row — met NO finding at
+// all: the four judging rules gate on an `ok` class and go quiet, the two
+// existing markers exclude it by construction (their conditions are `seen == 0`
+// and `null == seen`), and a re-judge at 0.10.0 gives that crawl a marker. It is
+// ADDITIVE by the same argument its two siblings are — a crawl gains a finding
+// it could not receive before, no existing verdict moves — which is why the bump
+// belongs here rather than being a change a stored finding already carries. It
+// closes the window Phase 12 stated and left open (docs/gates/phase-12.md
+// §10.1): the closure named "another marker, another rule, another bump", and
+// this is that bump. No copy of any existing rule changed.
+//
 // 0.9.0: Phase 12, on three grounds — and ALL are named because this constant
 // stamps more than a verdict. The paragraph above is the contract: a finding is
 // traced to the ruleset that produced it, and `rules_catalog` serves the COPY
@@ -63,7 +77,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.9.0";
+export const RULESET_VERSION = "0.10.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

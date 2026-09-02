@@ -222,11 +222,27 @@ describe("checklist coverage", () => {
   // this marker stands in for. The claim is a set union — a check explained more
   // completely does not appear as a new claim — which is exactly why the pin
   // below asserts the marker's four ids directly.
-  it("pins the ruleset split the gate doc reports: 93 rules = 26 page + 53 query + 14 metric", () => {
+  // Phase 13 Task 2 adds ONE query rule: `resources.all-unknown`, the third and
+  // last resource marker (§10.1's owner-promotable pointer). It reports the case
+  // BOTH existing markers exclude — every row decided into an unknown class, no
+  // `ok` and no unasked-null — so it is mutually exclusive with `not-recorded`
+  // (`seen == 0`) and `not-fetched` (`null == seen`) by construction, and a NEW
+  // verdict rather than a widened old one, which puts the ruleset bump
+  // (0.9.0 -> 0.10.0) in this task.
+  //
+  //   query   53 + 1 = 54
+  //   total   93 + 1 = 94
+  //
+  // THE CLAIMED-CHECK ARITHMETIC BELOW STILL DOES NOT MOVE, for the reason it
+  // did not for the two markers before it: CHECK-48/49/50/51 are section-12
+  // checks outside the build plan's 47, and all four were already claimed by the
+  // rules this marker stands in for. A check explained more completely is not a
+  // new claim.
+  it("pins the ruleset split the gate doc reports: 94 rules = 26 page + 54 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(93);
+    expect(registry.all()).toHaveLength(94);
     expect(registry.byKind("page")).toHaveLength(26);
-    expect(registry.byKind("query")).toHaveLength(53);
+    expect(registry.byKind("query")).toHaveLength(54);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -262,6 +278,16 @@ describe("checklist coverage", () => {
     // the same silence, so a marker claiming fewer would leave a check whose
     // reader never meets it.
     expect(byId.get("resources.not-fetched")).toEqual([
+      "CHECK-48",
+      "CHECK-49",
+      "CHECK-50",
+      "CHECK-51",
+    ]);
+    // The third marker (P13-T2) claims the same four again, for the same reason:
+    // on a crawl whose every row is a decided unknown class the same four
+    // judging rules go quiet, so the marker that explains their silence must be
+    // named in each of their entries.
+    expect(byId.get("resources.all-unknown")).toEqual([
       "CHECK-48",
       "CHECK-49",
       "CHECK-50",

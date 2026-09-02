@@ -629,6 +629,13 @@ describe("the skills name only identifiers the engine has", () => {
   // holding is not an argument that the arrangement is right; it is the evidence
   // for deriving both lists from the registry when a check-shaped `marker: true`
   // flag is worth its own phase.
+  //
+  // **P13-T2 PAID IT ONE LAST TIME, deliberately:** the eighth and last marker
+  // (`resources.all-unknown`) took the same three edits — the rule, the entry
+  // below, and CHECK-83's family list. Three phases have now paid the toll and
+  // predicted it correctly, which is exactly the standing evidence Phase 13's
+  // Task 4 converts: it derives both lists from a registry `marker: true` flag,
+  // and this hand-typed map goes away. Until then the entry is here by hand.
   it("every NOT MEASURED marker is named in the checklist entry of each check it claims", () => {
     const MARKERS: Record<string, string> = {
       "content.thin-skipped": "the page the corrected thin-content floor cannot judge",
@@ -638,6 +645,7 @@ describe("the skills name only identifiers the engine has", () => {
       "host.probe-skipped": "a crawl started with host probing off",
       "resources.not-recorded": "a crawl that recorded no resources (P11-T3)",
       "resources.not-fetched": "a crawl that recorded its resources and asked about none (P12-T2)",
+      "resources.all-unknown": "a crawl whose every resource landed in an unknown class (P13-T2)",
     };
     const text = readFileSync(CHECKLIST, "utf8");
     // `### CHECK-NN: …` to the next `### `, which is one check's whole entry.

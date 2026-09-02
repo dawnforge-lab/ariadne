@@ -340,9 +340,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "resources.not-fetched finding covers only the crawls where NOT ONE file was " +
         "decided (skipped equal to seen), and its evidence names which of those three " +
         "it was. A pass that asked and got only non-ok answers — fetched 0 with " +
-        "failed above 0 — carries NO marker: rows were decided, so nothing fires, and " +
-        "this block is the only discriminator for the silence of the resource rules. " +
-        "On a crawl older than the resource " +
+        "failed above 0 — is the resources.all-unknown finding's case: every row was " +
+        "DECIDED into an unknown class (refused, robots_denied, robots_unreachable, " +
+        "fetch_error), so the four judging rules fire nothing and this marker reports " +
+        "the per-class census with its dominant class named. The three markers are " +
+        "mutually exclusive, and this block stays the discriminator each puts a name " +
+        "to. On a crawl older than the resource " +
         "tables every number here is 0, which is not 'this site references no files' " +
         "— the resources.not-recorded finding is what says so.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +

@@ -100,7 +100,10 @@ describe("buildRegistry", () => {
     // And Phase 12 Task 2's sibling marker: the crawl that recorded its files
     // and asked about none of them, which used to meet no finding at all.
     expect(ids).toContain("resources.not-fetched");
-    expect(ids.length).toBe(93);
+    // And Phase 13 Task 2's third marker: the crawl whose every file landed in
+    // an unknown class, which likewise used to meet no finding at all.
+    expect(ids).toContain("resources.all-unknown");
+    expect(ids.length).toBe(94);
   });
 
   it("registers every kind the runner drives", () => {
