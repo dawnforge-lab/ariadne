@@ -792,12 +792,13 @@ Phase 12 pointers, in the order they will be met:
    it (a separate floor for HEAD-only asset requests, or asking only about the
    files some rule would judge) are design questions rather than tuning.
 
-   **DECIDED IN PHASE 12: NOT TAKEN, revisit on demand.** (Annotation added
-   2026-09-02 by P12-T4. This list is a forward ledger, not a measurement —
-   annotating a pointer with what became of it is the same class of edit as the
-   Phase 10 gate's item-7 strikethrough, and no measured number above it moves.)
-   The owner's reasoning, recorded so the next reader does not re-open it as an
-   oversight: **a faster floor for HEAD-only asset requests is a change to our
+   **PHASE 12: NOT TAKEN, revisit on demand** — proposed in the Phase 12 plan
+   and presented to the owner; unvetoed as of this annotation. (Added 2026-09-02
+   by P12-T4. This list is a forward ledger, not a measurement — annotating a
+   pointer with what became of it is the same class of edit as `phase-8.md:825`,
+   where item 7 was struck through and marked "CLOSED in the final-review fix
+   wave", and no measured number above it moves.) The reasoning, recorded so the
+   next reader does not re-open it as an oversight: **a faster floor for HEAD-only asset requests is a change to our
    politeness POSTURE, not a tuning knob** — it asks a site's server for more
    requests per second than the crawl itself was willing to make, on the argument
    that a HEAD is cheaper, which is our inference about their infrastructure and
@@ -823,7 +824,9 @@ Phase 12 pointers, in the order they will be met:
 7. **Tenancy on `crawl_list`** — unchanged since Phase 9, still the pre-tenancy
    posture, still stated in `talos-surface.md` §9.3.
 
-   **DECIDED IN PHASE 12: unchanged, and stated rather than closed.** Nothing in
+   **PHASE 12: unchanged, and stated rather than closed** — the plan's second
+   proposed decision, presented to the owner and unvetoed as of this
+   annotation. Nothing in
    this phase narrowed it and nothing in this phase widened it; the posture is a
    deployment fact (one tenant per deployment, `talos-surface.md` §9.3) and the
    phase that makes Ariadne multi-tenant is the phase that ends it. Recorded here

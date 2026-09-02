@@ -18,7 +18,15 @@ recorded its files and asked about none of them (§5.3), and the ruleset moved t
 **0.9.0** for it (§11); and `render.coverage` gained `renderPassEvidence`, which
 says whether a render pass ran at all — its selection numbers are recomputed, so
 until now a crawl nobody rendered answered them exactly like one that was
-(§4.5). No field was removed and no shape changed meaning.
+(§4.5). No field was removed and no field changed TYPE — but one value NARROWED,
+and a consumer comparing across the phase boundary has to know it:
+`robots_denied` used to hold both "the site's robots.txt forbade this file" and
+"we could not read the site's robots.txt", and from Phase 12 the second is
+`robots_unreachable`. `fetch_class` carries no ruleset stamp, so §11's
+comparability machinery says nothing about it: **a `robotsDenied` count from a
+Phase 11 crawl and one from a Phase 12 crawl are counts of different
+populations**, and no re-judge changes that — the class is written by the fetch
+pass, not by a rule.
 
 **What Phase 11 changed here**, kept for a reader coming from the Phase 10
 version: `crawl_start` gained `fetchResources`; `crawl_status` gained
@@ -63,10 +71,10 @@ right test is.
 No line number: a line of source declares no name a document can quote back, so
 a source citation with a line on it would resolve forever while drifting
 silently — the guard refuses one, and this paragraph cannot show you an example
-because writing one would fail the suite. What it checks instead is that the file exists and that an
-identifier the document quotes off it (`src/db/schema.ts`'s
-`crawls.resource_refs_capped_pages` comment) is actually in that file. The
-argument for the split is in the guard's own header.
+because writing one would fail the suite. What it checks instead is that the
+file exists and that an identifier the document quotes off it
+(`src/db/schema.ts`'s `crawls.resource_refs_capped_pages` comment) is actually
+in that file. The argument for the split is in the guard's own header.
 
 Two properties make the double-transport claim below cheap to trust:
 
@@ -877,13 +885,13 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:920` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:953` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:968` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:994` "tells
+`test/rules/copy.test.ts:929` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:962` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:977` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1003` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1021` "grades nothing: no score, no label, no threshold";
+`test/rules/copy.test.ts:1030` "grades nothing: no score, no label, no threshold";
 `test/rules/coverage.test.ts:276` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
@@ -1374,8 +1382,8 @@ byte for byte, as it writes it".
   dev table's row count as an operator's number**: it grew from 139 to 1,585
   across Phase 11 alone, and the growth is the SUITE, not a user — every full run
   leaves its fixture crawls behind (`127.0.0.1:<port>`, `runner.example`), **31
-  rows a run measured at Phase 11 and 192 at Phase 12** (this phase added
-  crawl-creating tests, and the sweep that would delete them is not written),
+  rows a run at Phase 11 and 33 now** — Phase 12's Task 1 added crawl-creating
+  tests and moved it by two; the sweep that would delete them is not written —
   against four real `lavishalice.com` crawls in the whole table.
   At a hundred thousand crawls the filter wants an expression index on the
   hostname; at this size it is still a scan of a small table.

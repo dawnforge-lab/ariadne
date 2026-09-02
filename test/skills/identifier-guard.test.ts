@@ -1159,11 +1159,15 @@ describe("the surface document cites the test it means", () => {
  *
  * ## What this document's `src/` references actually are
  *
- * All four are FILE references without line numbers, and they divide in two:
+ * They are FILE references without line numbers, of two kinds — and the kinds
+ * are what matters, not the count, which moves every time the document gains a
+ * sentence (it was four when this guard was written and five before the same
+ * commit landed). The floor is asserted at the bottom of this block rather than
+ * restated here.
  *
- *  - two are architectural ("`src/api/service.ts` holds every query, refusal and
+ *  - ARCHITECTURAL ("`src/api/service.ts` holds every query, refusal and
  *    vocabulary") — claims no grep can settle, and human review either way;
- *  - two are PINS, in a fixed form: "Pinned: `src/db/schema.ts`'s
+ *  - PINS, in a fixed form: "Pinned: `src/db/schema.ts`'s
  *    `resources.fetch_class` comment". That form names a file AND an identifier
  *    inside it, which is a checkable claim.
  *
@@ -1183,15 +1187,28 @@ describe("the surface document cites the test it means", () => {
  *     `resource_refs_capped_pages`), because the document names columns the way
  *     a reader thinks of them and the file spells them the way Postgres does.
  *
- * ## What it still cannot do
+ * ## What it still cannot do, stated rather than hidden
  *
- * The same limit the test guard states, one step weaker: it cannot read the
- * sentence. A pin naming a real identifier in a real file, beside a claim that
- * comment does not make, passes here. And a reference with no identifier beside
- * it is checked for existence only — the two architectural claims above are in
- * that class, deliberately, because inventing an attestation for them would mean
+ * **It cannot read the sentence** — the same limit the test guard states, one
+ * step weaker. A pin naming a real identifier in a real file, beside a claim
+ * that comment does not make, passes here. And a reference with no identifier
+ * beside it is checked for existence only: the architectural claims are in that
+ * class deliberately, because inventing an attestation for them would mean
  * quoting prose out of a source comment and pinning the document to somebody's
  * line wrapping.
+ *
+ * Two smaller limits of the checker itself, so nobody reads a green run as more
+ * than it is:
+ *
+ *  - **A reference that is both missing and line-numbered reports ONE problem,
+ *    not two.** The existence check `continue`s, because a line number on a file
+ *    that is not there is not the reader's next question — and the guard is
+ *    re-run after the first fix anyway.
+ *  - **A line number in PROSE passes.** "line 120 of `src/db/schema.ts`" carries
+ *    no colon, so the extractor does not see it as a citation. The rule this
+ *    enforces is about the citation FORM the document uses; a sentence that
+ *    spells a line number out in words is beyond what any regex here settles,
+ *    and is human review like every other prose claim.
  */
 
 interface SourceRef {
@@ -1290,7 +1307,12 @@ describe("the surface document's src/ references name what they claim", () => {
   });
 
   it("reads something: the source-reference extraction is not silently empty", () => {
-    expect(REFS.length).toBeGreaterThanOrEqual(4);
-    expect(REFS.filter((ref) => ref.identifier !== null).length).toBeGreaterThanOrEqual(2);
+    // The floor the header refuses to restate as a count. Both kinds have to be
+    // found, or a regex that stopped matching one of them turns the assertions
+    // above green over a document nobody checked.
+    const pins = REFS.filter((ref) => ref.identifier !== null);
+    expect(REFS.length).toBeGreaterThanOrEqual(5);
+    expect(pins.length).toBeGreaterThanOrEqual(3);
+    expect(REFS.length - pins.length, "the architectural references").toBeGreaterThanOrEqual(2);
   });
 });

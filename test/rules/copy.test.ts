@@ -893,8 +893,17 @@ describe("issue copy", () => {
     expect(text, "the projection, said as one").toMatch(
       /the selection a pass WOULD make if one were run now/,
     );
-    expect(text, "ran-and-rendered-nothing is not the same").toMatch(
-      /a pass that ran and rendered nothing is a different thing/i,
+    // P12-T4 fix round 1 (M-1). The copy said a pass that ran and rendered
+    // nothing "says so", and in one shape that is FALSE: an automatic pass that
+    // selected no pages leaves no trace and is reported as `none`. The copy
+    // states the underdetermined shape the way the module docblock and
+    // talos-surface.md §13 do, rather than claiming a separation the engine
+    // cannot make.
+    expect(text, "what the field does separate").toMatch(
+      /always told apart from one that never ran/i,
+    );
+    expect(text, "the shape it cannot separate").toMatch(
+      /cannot tell apart is a pass that chose no pages at all/i,
     );
     expect(text, "selectionMode").toMatch(/the selection mode, which says who chose the pages/i);
     expect(text, "selectionBudget").toMatch(/how many pages the render pass was allowed to open/i);
