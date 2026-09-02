@@ -1,8 +1,35 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 12 (ruleset 0.9.0, migrations 0000–0014,
+**Status:** the contract as of Phase 13 (ruleset 0.10.0, migrations 0000–0015,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
+
+**What Phase 13 changed here**, so a reader of the Phase 12 version knows where
+to look: **one shape was added and no served field changed.**
+`resources.all-unknown` is a new resource-coverage marker (info) — the third of
+the family, for a crawl where every recorded file landed in an UNKNOWN class
+(`refused`, `robots_denied`, `robots_unreachable`, `fetch_error`) so no row is
+`ok`, the four judging rules write nothing, and the silence would otherwise go
+unexplained (§5.3). It completes the marker family: the three markers —
+`resources.not-recorded` (`seen == 0`), `resources.not-fetched` (every row
+unfetched), `resources.all-unknown` (every row a decided unknown) — are mutually
+exclusive by construction, and the window Phase 12 stated open — an all-unknown
+crawl that carried no marker at all — is now closed. The ruleset moved to **0.10.0** for it
+(§11). Resume gained a per-host memory: `crawls.host_spacing_jsonb`
+(`{host: earnedMs}`, migration 0015) records each host's earned spacing so a
+resume re-enters each host at ITS OWN width rather than the crawl-wide widest,
+with `host_spacing_ms` staying as the fallback for a host the map does not name —
+a URL discovered only on the continuation, or a pre-0015 crawl whose map is null
+(§4.1a, §8). This is resume machinery, not a new surface field: `crawl_status`
+still serves the crawl-wide `hostSpacingMs`, and no served tool or route field
+was added, removed, or retyped. `renderPassEvidence`'s two values are unchanged —
+Phase 13 named them behind the wire (`RENDER_PASS_EVIDENCE.ran`/`.none`) and
+pinned the shape against hardcoded literals, but the strings a consumer reads
+(`"ran"`/`"none"`) are exactly what Phase 12 wrote (§4.5). Everything else in
+Phase 13 was internal and never reaches the seam: the dev-database test residue
+was swept back to the four reference crawls and the leak fixed at its source, and
+the registry's NOT-MEASURED marker set is now derived from a per-rule flag rather
+than a hand-written list.
 
 **What Phase 12 changed here**, so a reader of the Phase 11 version knows where
 to look: **`crawl_resume` is new** — the sixteenth tool and route, the way to
@@ -545,7 +572,7 @@ it before quoting any JavaScript finding. Pinned:
 `test/api/mcp.test.ts:1298` "says over the wire whether a render pass ran, not
 just how many pages it left", `test/api/http.test.ts:1715` "serves
 renderPassEvidence none beside the selection a pass would make",
-`test/rules/render-metrics.test.ts:520` "answers none on a crawl nobody
+`test/rules/render-metrics.test.ts:528` "answers none on a crawl nobody
 rendered, and still reports what a pass would choose".
 
 ### 4.6 `pages_query` → `{items: PageRow[], nextCursor}`

@@ -43,6 +43,14 @@ describe("renderMetrics metadata", () => {
     expect(r.title.length).toBeGreaterThan(5);
     expect(r.explanation.length).toBeGreaterThan(40);
   });
+
+  // The two value strings ARE the wire contract — they cross to Talos and every
+  // other assertion in this file references the constant, so a silent value
+  // drift would ship green. This is the one place that pins the shape against
+  // hardcoded literals, restoring the net the literal→named refactor removed.
+  it("pins the render-pass evidence wire shape against hardcoded literals", () => {
+    expect(RENDER_PASS_EVIDENCE).toEqual({ ran: "ran", none: "none" });
+  });
 });
 
 describe("render.coverage against the database", () => {
