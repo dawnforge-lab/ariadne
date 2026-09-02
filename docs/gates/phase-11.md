@@ -172,8 +172,8 @@ omitted because a reader who queries that column will find it.
 is measured from the top of the row's work, which is BEFORE `gate.acquire`, so it
 includes the row's wait for its host's turn: p50 3,990 ms on this crawl is
 queue time plus service time, not server latency. Do not quote it as a response
-time. (The column carries no docblock saying so; that is a documentation gap, not
-a defect, and it is listed in §14.)
+time. (The column's docblock says exactly this — added in the final-review fix
+wave, closing what this section first recorded as a gap.)
 
 ### 2.3 The third-party host census, with the robots outcomes split
 
@@ -224,7 +224,8 @@ across the whole crawl.
 **About 2,650 requests over 89 minutes.** The exactly-known parts: **557** page
 fetches, **1,995** resource rows answered for, and **34** second requests where a
 HEAD carried no `Content-Length` (§4) — 2,586. The rest is a small estimate and is
-marked as one: the resumed pass reported **805 requests for its 784 rows**, a 2.7%
+marked as one: the resumed pass reported **805 requests for its 786 rows** (784
+fetched + 2 robots-denied), a 2.4%
 overhead which on the whole pass is about 20 more; plus 11 robots.txt fetches (one
 per host), 6 sitemap documents, the host probe's four chains, and the same
 robots/sitemap/probe work again when the pass resumed (§5).
@@ -669,9 +670,10 @@ to be deliberate.
   MEASURED marker is three edits — the registry, the guard's `MARKERS` list, and
   CHECK-83's own family list — and nothing derives any of them from a query. The
   guard now says so in a comment beside the list (P11-T4's M-6, closed here).
-- **`resources.fetch_ms` includes the host-queue wait** (§2.2). The column carries
-  no comment saying so and it should; a reader who quotes its p50 as a server
-  response time is 2 s wrong per row.
+- **`resources.fetch_ms` includes the host-queue wait** (§2.2). CLOSED in the
+  final-review fix wave: the column's docblock now says so, naming
+  `pages.response_time_ms` as the other shape. A reader who quotes its p50 as a
+  server response time is 2 s wrong per row — the comment is what stops them.
 
 ---
 
@@ -779,8 +781,8 @@ Phase 12 pointers, in the order they will be met:
    operator must be told before they agree to it, and the honest ways to shorten
    it (a separate floor for HEAD-only asset requests, or asking only about the
    files some rule would judge) are design questions rather than tuning.
-6. **Two small honesty fixes**: a comment on `resources.fetch_ms` saying it
-   includes the queue wait (§10.4), and `render.coverage`'s selection fields on a
-   crawl that rendered nothing (§6.3).
+6. **One small honesty fix** (the `fetch_ms` comment landed in the final-review
+   fix wave — §10.4): `render.coverage`'s selection fields on a crawl that
+   rendered nothing (§6.3).
 7. **Tenancy on `crawl_list`** — unchanged since Phase 9, still the pre-tenancy
    posture, still stated in `talos-surface.md` §9.3.

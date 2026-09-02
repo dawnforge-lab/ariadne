@@ -1066,7 +1066,7 @@ byte for byte, as it writes it".
 
 - `docs/talos-integration.md` — why the seam exists, the six obligations, and
   what Talos must eventually do.
-- `docs/gates/phase-10.md` — the measurements behind the Phase 10 numbers in
-  this file. Phase 11's gate document is T5's and is not written yet; the Phase
-  11 numbers here name the test or the measurement they came from instead.
+- `docs/gates/phase-10.md` and `docs/gates/phase-11.md` — the measurements
+  behind this file's Phase 10 and Phase 11 numbers; each number here also names
+  the test or the measurement it came from directly.
 - `skills/ariadne-audit/checklist.md` — the checks the rules trace to.
