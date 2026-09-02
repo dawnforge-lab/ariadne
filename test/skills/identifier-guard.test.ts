@@ -1,13 +1,15 @@
 /**
- * TWO GUARDS OVER DOCUMENTATION NOTHING ELSE READS.
+ * THREE GUARDS OVER DOCUMENTATION NOTHING ELSE READS.
  *
  * The first (`the skills name only identifiers the engine has`) checks that
  * `skills/**` names identifiers the engine still has. The second (`the surface
- * document cites the test it means`, at the bottom of this file) checks that
- * `docs/talos-surface.md`'s `file:line` citations name the test whose title the
- * document quotes. They share this file because they are one discipline read
- * twice: a document nothing executes drifts silently, so something has to read
- * it.
+ * document cites the test it means`) checks that `docs/talos-surface.md`'s
+ * `file:line` citations name the test whose title the document quotes. The third
+ * (`the surface document's src/ references name what they claim`, at the bottom
+ * of this file) checks the same document's `src/` references for the different
+ * property those can carry — P12-T4 took that decision and states it there. They
+ * share this file because they are one discipline read three times: a document
+ * nothing executes drifts silently, so something has to read it.
  *
  * ---
  *
@@ -817,6 +819,15 @@ describe("the skills name only identifiers the engine has", () => {
  * keeps its evidence in. `talos-surface.md` is the opposite kind of document —
  * a living contract, rewritten every phase, read by somebody about to code
  * against it.
+ *
+ * ## Scope: `test/` citations only — `src/` is the third guard's
+ *
+ * This block reads `test/…` and nothing else, because the anchor-and-attest
+ * property it checks is a property of test files: only they carry declarations
+ * whose titles a document can quote. The same document's `src/` references are
+ * checked at the bottom of this file, for what a source reference CAN carry.
+ * That split is the decision, not an omission — the argument is in the third
+ * guard's own header.
  */
 
 const SURFACE_DOC = join(ROOT, "docs/talos-surface.md");
@@ -1124,5 +1135,162 @@ describe("the surface document cites the test it means", () => {
     expect(CITATIONS.length).toBeGreaterThan(60);
     expect(CITATIONS.filter((citation) => citation.line !== null).length).toBeGreaterThan(60);
     expect(blocksFor("test/api/query.test.ts").length).toBeGreaterThan(80);
+  });
+});
+
+// ============================================================================
+// THE THIRD GUARD: A `src/` REFERENCE IS CHECKED FOR WHAT IT CAN CARRY
+// ============================================================================
+
+/**
+ * THE DECISION P11-M-9 LEFT OPEN, taken here (P12-T4): the surface document
+ * cites `src/` as well as `test/`, and the guard above reads only `test/`.
+ * Widen it — but NOT to the same property, because `src/` cannot carry it.
+ *
+ * ## Why the anchor rule cannot simply be extended
+ *
+ * The test guard's whole design rests on one fact about test files: a citation
+ * can name a DECLARATION whose title the document quotes back. `src/` has no
+ * such thing. A line of `service.ts` opens no named block, its neighbours are
+ * indistinguishable from it, and the nearest equivalent — quoting the line's own
+ * text — would pin the document to code formatting, so a rewrapped argument
+ * list or a renamed local would fail a guard that is supposed to catch
+ * documents drifting from behaviour.
+ *
+ * ## What this document's `src/` references actually are
+ *
+ * All four are FILE references without line numbers, and they divide in two:
+ *
+ *  - two are architectural ("`src/api/service.ts` holds every query, refusal and
+ *    vocabulary") — claims no grep can settle, and human review either way;
+ *  - two are PINS, in a fixed form: "Pinned: `src/db/schema.ts`'s
+ *    `resources.fetch_class` comment". That form names a file AND an identifier
+ *    inside it, which is a checkable claim.
+ *
+ * ## So the three properties checked here
+ *
+ *  1. **Existence.** The file is there. A renamed or deleted module is the whole
+ *     rot mode a line-less reference has, and it is the one the test guard's
+ *     first assertion catches too.
+ *  2. **No line numbers.** A `src/file.ts:120` citation is REFUSED outright,
+ *     because nothing here can check it: it would resolve forever, drift
+ *     silently, and carry the confident look of a pin. Cite the file and name
+ *     the artefact in words — which is what the document already does, and this
+ *     is what keeps it that way.
+ *  3. **Attestation, where the document makes one.** An identifier quoted
+ *     immediately after the reference must appear in the file. The last dotted
+ *     segment is what is looked for (`crawls.resource_refs_capped_pages` →
+ *     `resource_refs_capped_pages`), because the document names columns the way
+ *     a reader thinks of them and the file spells them the way Postgres does.
+ *
+ * ## What it still cannot do
+ *
+ * The same limit the test guard states, one step weaker: it cannot read the
+ * sentence. A pin naming a real identifier in a real file, beside a claim that
+ * comment does not make, passes here. And a reference with no identifier beside
+ * it is checked for existence only — the two architectural claims above are in
+ * that class, deliberately, because inventing an attestation for them would mean
+ * quoting prose out of a source comment and pinning the document to somebody's
+ * line wrapping.
+ */
+
+interface SourceRef {
+  docLine: number;
+  file: string;
+  /** Present only where the document wrote one — which it must not. */
+  line: number | null;
+  /** The identifier quoted immediately after, if the document quotes one. */
+  identifier: string | null;
+}
+
+/**
+ * Every reference to a source file in the surface document.
+ *
+ * The attestation window is the same ADJACENT one the test citations use: the
+ * `'s` possessive and the backticked identifier that follows it, with no blank
+ * line in between, so an identifier in the next paragraph cannot be read as this
+ * reference's pin.
+ */
+function sourceRefsOf(text: string): SourceRef[] {
+  const out: SourceRef[] = [];
+  for (const match of text.matchAll(/(src\/[A-Za-z0-9/_.-]+\.ts)(?::(\d+))?/g)) {
+    const end = match.index + match[0].length;
+    const attestation = new RegExp(`^\`?${GAP}'s${GAP}\`([^\`]+)\``).exec(text.slice(end));
+    out.push({
+      docLine: text.slice(0, match.index).split("\n").length,
+      file: match[1]!,
+      line: match[2] === undefined ? null : Number(match[2]),
+      identifier: attestation?.[1] ?? null,
+    });
+  }
+  return out;
+}
+
+/** The three properties, as a list of failures a reader can act on. */
+function sourceRefProblems(refs: readonly SourceRef[]): string[] {
+  const problems: string[] = [];
+  for (const ref of refs) {
+    const where = `docs/talos-surface.md:${ref.docLine} → ${ref.file}`;
+    if (!existsSync(join(ROOT, ref.file))) {
+      problems.push(`${where} — no such file`);
+      continue;
+    }
+    if (ref.line !== null) {
+      problems.push(
+        `${where}:${ref.line} — a src/ reference may not carry a line number: no line of ` +
+          `source declares its own identity, so nothing can check that this one still means ` +
+          `what the sentence says. Cite the file and name the artefact.`,
+      );
+    }
+    if (ref.identifier === null) continue;
+    const needle = ref.identifier.split(".").at(-1)!;
+    if (!readFileSync(join(ROOT, ref.file), "utf8").includes(needle)) {
+      problems.push(`${where} — nothing in that file is called '${needle}'`);
+    }
+  }
+  return problems;
+}
+
+describe("the surface document's src/ references name what they claim", () => {
+  const REFS = sourceRefsOf(readFileSync(SURFACE_DOC, "utf8"));
+
+  it("names source files that exist, without line numbers, attesting what it pins", () => {
+    expect(
+      sourceRefProblems(REFS),
+      "a src/ reference is checked for existence and for the identifier it quotes — " +
+        "it cannot be anchored to a test's title, so it may not be anchored to a line",
+    ).toEqual([]);
+  });
+
+  it("fails a missing file, a line number and an identifier the file does not carry", () => {
+    // The guard tested on input of its own, because every assertion above is
+    // over a document that PASSES: without this, a broken extractor and a clean
+    // document look identical.
+    const problems = sourceRefProblems(
+      sourceRefsOf(
+        "Pinned: `src/db/nosuch.ts`'s `whatever` comment.\n" +
+          "See `src/db/schema.ts:120` for the column.\n" +
+          "Pinned: `src/db/schema.ts`'s `crawls.no_such_column` comment.\n",
+      ),
+    );
+    expect(problems).toHaveLength(3);
+    expect(problems[0]).toContain("no such file");
+    expect(problems[1]).toContain("may not carry a line number");
+    expect(problems[2]).toContain("no_such_column");
+  });
+
+  it("accepts the pin form the document actually uses", () => {
+    // The other half of the same insurance: a checker that failed everything
+    // would also make the assertion above pass.
+    expect(
+      sourceRefProblems(
+        sourceRefsOf("Pinned: `src/db/schema.ts`'s `crawls.resource_refs_capped_pages` comment."),
+      ),
+    ).toEqual([]);
+  });
+
+  it("reads something: the source-reference extraction is not silently empty", () => {
+    expect(REFS.length).toBeGreaterThanOrEqual(4);
+    expect(REFS.filter((ref) => ref.identifier !== null).length).toBeGreaterThanOrEqual(2);
   });
 });
