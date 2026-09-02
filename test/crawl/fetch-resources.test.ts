@@ -14,6 +14,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
+import { ApiService } from "../../src/api/service.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, resources } from "../../src/db/schema.js";
@@ -374,6 +375,19 @@ function allowAllRobots(): RobotsInfo {
   };
 }
 
+/**
+ * Every crawl row this file creates, deleted in `afterAll`.
+ *
+ * THE FILE OWNS ITS ROWS (P13-T1). Until this list existed, this was the ONLY
+ * file in the suite that created crawl rows and never deleted them, and it was
+ * the whole of the leak the Phase 12 gate measured at 33 rows a full run
+ * (`docs/gates/phase-12.md` §10.6, §11) — 28 seeded rows and 5 the crawl loop
+ * created, once each. Nothing here is deleted by matching a pattern: a teardown
+ * that swept `site_url like '127.0.0.1%'` would be a cleanup that decides for
+ * itself what belongs to it, which is the shape hard rule 7 forbids.
+ */
+const createdCrawls: string[] = [];
+
 async function seedCrawl(siteUrl: string): Promise<string> {
   const crawlId = `crawl_res_${randomUUID()}`;
   await db.insert(crawls).values({
@@ -383,7 +397,22 @@ async function seedCrawl(siteUrl: string): Promise<string> {
     rulesetVersion: "0.7.0",
     status: "finished",
   });
+  createdCrawls.push(crawlId);
   return crawlId;
+}
+
+/**
+ * `runCrawl`, with the row it creates tracked — the loop names its own crawl,
+ * so the id is only knowable from the summary it returns (the same wrapper
+ * `test/crawl/loop.test.ts` uses, for the same reason).
+ */
+async function crawl(
+  config: Parameters<typeof runCrawl>[1],
+  signal?: AbortSignal,
+): Promise<Awaited<ReturnType<typeof runCrawl>>> {
+  const summary = await runCrawl(db, config, signal);
+  createdCrawls.push(summary.crawlId);
+  return summary;
 }
 
 async function seedResources(
@@ -451,6 +480,9 @@ afterAll(async () => {
   await plain.close();
   await dead.close();
   await closeFetchAgents();
+  // Every child row cascades off the crawl id, so one delete per crawl is the
+  // whole teardown. Deleting by id and nothing else: see `createdCrawls`.
+  for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
   await closeDb(db);
 });
 
@@ -859,6 +891,75 @@ describe("robots.txt, per host, fetched once", () => {
     );
   });
 
+  /**
+   * THE CHAIN, END TO END (P13-T1, retiring `docs/gates/phase-12.md` §2.2's
+   * ledgered seam).
+   *
+   * Until this case, the two halves of the split were proved on two different
+   * crawls: the cases above show the PASS writes the two classes, and the
+   * partition tests in `test/api/query.test.ts` and `test/api/mcp.test.ts` show
+   * the SURFACE serves them — off rows a fixture inserted by hand. Nothing
+   * carried a real pass through to a served number, so the Phase 12 gate made
+   * that join itself, by reading `crawl_status` off a crawl §2.1's pass had
+   * produced and printing the block into the document. A join made by a human
+   * once is not a join the suite keeps making.
+   *
+   * So: one crawl, the real pass against the two robots hosts plus one file on
+   * each side of the `ok` / `failed` line, and then the served block read back
+   * through `ApiService.getCrawl` — which is exactly what the `crawl_status`
+   * tool and `GET /crawls/:id` return.
+   *
+   * The fourth resource is why the two robots counts are proved to be SUBSETS
+   * rather than the whole of `failed`: with only the two robots rows, `failed`
+   * and `robotsDenied + robotsUnreachable` are the same number and a surface
+   * that had confused the two would still pass.
+   */
+  it("serves the two robots counts off a crawl the real pass produced", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    const forbidden = `${third.base}/nope/secret.png`;
+    const unreachable = `${dead.base}/served.png`;
+    await seedResources(crawlId, [
+      { url: forbidden },
+      { url: unreachable },
+      { url: `${assets.base}/missing.png` },
+      { url: `${assets.base}/a.png` },
+    ]);
+
+    const summary = await runPass(crawlId, assets.base, { robotsRetryBackoffMs: 1 });
+    expect(summary.aborted).toBe(false);
+
+    const service = new ApiService(db, { allowedDomains: ["127.0.0.1"], log: () => {} });
+    try {
+      const detail = await service.getCrawl(crawlId);
+      const census = detail.resources;
+
+      // The two facts, side by side, on a crawl nothing seeded a `fetch_class`
+      // onto: every class in this block was written by the pass.
+      expect(census.robotsDenied).toBe(1);
+      expect(census.robotsUnreachable).toBe(1);
+
+      // The partition the block promises, on the same read.
+      expect(census.seen).toBe(4);
+      expect(census.fetched).toBe(1);
+      expect(census.failed).toBe(3);
+      expect(census.skipped).toBe(0);
+      expect(census.fetched + census.failed + census.skipped).toBe(census.seen);
+      expect(census.capped).toBe(false);
+
+      // Both robots counts live INSIDE `failed`, and do not exhaust it.
+      expect(census.robotsDenied + census.robotsUnreachable).toBeLessThan(census.failed);
+    } finally {
+      await service.close();
+    }
+
+    // And the rows underneath say the same thing, so a served number that
+    // stopped matching the database would fail here rather than drift.
+    expect((await rowFor(crawlId, forbidden)).fetchClass).toBe(RESOURCE_ROBOTS_DENIED_CLASS);
+    expect((await rowFor(crawlId, unreachable)).fetchClass).toBe(
+      RESOURCE_ROBOTS_UNREACHABLE_CLASS,
+    );
+  });
+
   // The vocabulary itself, pinned: `robots_unreachable` is a member, and the two
   // exported constants are the two spellings the readers outside this module
   // use. A rename that missed one would leave a reader's SQL comparing against a
@@ -1115,7 +1216,7 @@ describe("a cancel stops the pass where it stands", () => {
 
 describe("the crawl runs the pass itself", () => {
   it("fetches a crawled page's resources before the crawl row is closed", async () => {
-    const summary = await runCrawl(db, {
+    const summary = await crawl({
       siteUrl: assets.base,
       maxPages: 5,
       maxDepth: 2,
@@ -1156,7 +1257,7 @@ describe("the crawl runs the pass itself", () => {
   });
 
   it("hands the pass the window the page crawl settled at, not the ceiling", async () => {
-    const summary = await runCrawl(db, {
+    const summary = await crawl({
       // Two 503 pages behind this one: enough back-pressure to halve a window
       // of 2 down to 1 before the pass starts.
       siteUrl: `${assets.base}/window`,
@@ -1188,8 +1289,7 @@ describe("the crawl runs the pass itself", () => {
       if (path === "/abort-1.png") controller.abort();
     };
 
-    const summary = await runCrawl(
-      db,
+    const summary = await crawl(
       {
         siteUrl: `${assets.base}/abort`,
         maxPages: 5,
@@ -1225,7 +1325,7 @@ describe("the crawl runs the pass itself", () => {
   // interrupted one, and a reader of a silent `images.oversized` would have no
   // way to tell "nobody weighed anything" from "nothing is heavy".
   it("asks nobody anything when the operator turned resource fetching off", async () => {
-    const summary = await runCrawl(db, {
+    const summary = await crawl({
       siteUrl: assets.base,
       maxPages: 5,
       maxDepth: 2,
@@ -1261,8 +1361,7 @@ describe("the crawl runs the pass itself", () => {
   it("does not ask a single server anything once the crawl is cancelled", async () => {
     const controller = new AbortController();
     controller.abort();
-    const summary = await runCrawl(
-      db,
+    const summary = await crawl(
       {
         siteUrl: assets.base,
         maxPages: 5,

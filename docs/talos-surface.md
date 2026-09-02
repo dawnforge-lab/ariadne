@@ -482,9 +482,9 @@ fetchResources that is not a boolean"; over the agent transport,
 `test/api/mcp.test.ts:1022` "answers the resource census and whether the crawl
 asked for it" and `test/api/mcp.test.ts:1052` "tells an agent what the resource
 numbers mean, and what they do not". The robots split itself is
-`test/crawl/fetch-resources.test.ts:828` "classes an unreachable third-party
+`test/crawl/fetch-resources.test.ts:860` "classes an unreachable third-party
 robots.txt apart from a forbidding one" and
-`test/crawl/fetch-resources.test.ts:846` "keeps `robots_denied` for a file the
+`test/crawl/fetch-resources.test.ts:878` "keeps `robots_denied` for a file the
 robots file actually forbade". Shape regenerated live from `crawl_02ff6f7a`
 (2026-09-02, after migration 0014).
 
@@ -759,7 +759,7 @@ rows cannot say it and only the config can.
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
 this); `test/api/query.test.ts:2089` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
-`test/crawl/fetch-resources.test.ts:1227` "asks nobody anything when the operator
+`test/crawl/fetch-resources.test.ts:1327` "asks nobody anything when the operator
 turned resource fetching off".
 
 ### 5.4 `resourceRefsCappedPages` null — nobody counted
@@ -1390,11 +1390,19 @@ byte for byte, as it writes it".
 - No index on `crawls.site_url`: the site filter is a sequential scan — 1.1 ms
   over the 153 rows the dev table held when it was measured. **Do not read the
   dev table's row count as an operator's number**: it grew from 139 to 1,585
-  across Phase 11 alone, and the growth is the SUITE, not a user — every full run
-  leaves its fixture crawls behind (`127.0.0.1:<port>`, `runner.example`), **31
-  rows a run at Phase 11 and 33 now** — Phase 12's Task 1 added crawl-creating
-  tests and moved it by two; the sweep that would delete them is not written —
-  against four real `lavishalice.com` crawls in the whole table.
+  across Phase 11 alone, and the growth was the SUITE, not a user — every full
+  run left its fixture crawls behind (`127.0.0.1:<port>`, `runner.example`).
+  **31 rows a run at Phase 11, 33 at Phase 12, ZERO now** (P13-T1, measured
+  across two consecutive full runs). All 33 were ONE file —
+  `test/crawl/fetch-resources.test.ts`, the only crawl-creating file in the
+  suite that never deleted what it made: 28 rows it seeded and 5 the crawl loop
+  created for it. It now tracks and deletes them the way every other
+  crawl-creating file in the suite already did, and the historical residue was
+  swept once with a record: **3,110 crawl rows → 28**, 1,060 MB → 1,044 MB, the
+  four real `lavishalice.com` crawls verified byte-identical either side. The 24
+  rows still there are older `*.example` / `localhost` fixtures from tests that
+  had already stopped leaking, left because the sweep's authorised scope was the
+  two leaking host families and nothing else.
   At a hundred thousand crawls the filter wants an expression index on the
   hostname; at this size it is still a scan of a small table.
 - The comparison's identity collapses multi-finding rules to per-URL presence
