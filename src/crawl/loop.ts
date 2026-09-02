@@ -498,6 +498,16 @@ export async function runCrawl(
  * a caller resuming often enough for that to matter passes `probeHosts: false`
  * in `opts.config`, and the row then keeps whatever walk the earlier run
  * stored, untouched.
+ *
+ * THE POLITENESS STATE IS RE-ENTERED, not restarted. `crawls.host_spacing_ms`
+ * is the widest spacing this crawl's gate ever reached, and it is a finding
+ * rather than a setting — a host refused us and the engine backed off (rule 9).
+ * The continuation's gate is built with it (see `storedSpacingMs` and
+ * `HostGate.earnedSpacingMs`), so a crawl that earned 8s per host resumes at 8s
+ * whatever its stored `perHostDelayMs` says. Until P12-T3 it did not: the gate
+ * came up at the configured floor and the first `recordSpacing` wrote that floor
+ * back over the evidence, which made the regression invisible from
+ * `crawl_status` as well as rude to the site.
  */
 export async function resumeCrawl(
   db: Db,
@@ -806,6 +816,28 @@ async function execute(
   }
 }
 
+/**
+ * `crawls.host_spacing_ms` as the next run of this crawl must read it.
+ *
+ * A missing row is a defect rather than a null: `runToCompletion` is only ever
+ * reached through a crawl whose row this process just wrote or just read, so a
+ * row that is gone means something deleted it underneath the run, and a silent
+ * "no spacing earned" would be that deletion reported as a politeness fact
+ * (hard rule 7).
+ */
+async function storedSpacingMs(db: Db, crawlId: string): Promise<number | null> {
+  const rows = await db
+    .select({ hostSpacingMs: crawls.hostSpacingMs })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error(`crawl ${crawlId}: the crawls row is gone; cannot read its earned spacing`);
+  }
+  return row.hostSpacingMs;
+}
+
 async function runToCompletion(
   db: Db,
   crawlId: string,
@@ -880,9 +912,21 @@ async function runToCompletion(
     max: config.maxConcurrency,
     initial: Math.min(WINDOW_INITIAL, config.maxConcurrency),
   });
+  // THE SPACING AN EARLIER RUN OF THIS CRAWL EARNED, read back off the row.
+  //
+  // Null on every fresh crawl (nothing has written the column yet), so this
+  // changes nothing about `runCrawl`. On a resume it is the whole point: the
+  // column is a finding — a host refused us and the gate doubled its spacing —
+  // and a continuation that rebuilt the gate from `perHostDelayMs` alone would
+  // walk straight back into the pace that earned the refusal, then overwrite
+  // the evidence with the configured floor on the very first `recordSpacing`
+  // below. `HostGate` folds it into the same max as robots' `Crawl-delay`; see
+  // `earnedSpacingMs` there for why the policy lives in that module.
+  const earnedSpacingMs = await storedSpacingMs(db, crawlId);
   const gate = new HostGate({
     perHostDelayMs: config.perHostDelayMs,
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
+    earnedSpacingMs,
   });
 
   /**
