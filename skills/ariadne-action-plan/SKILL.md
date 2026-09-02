@@ -156,7 +156,7 @@ A candidate leaves here, and its reason is what the ledger records:
   under you or one an earlier stage mis-sorted, not a door 42 skipped checks walk
   through. The Summary's ledger sentence is over the checks that ENTERED 1a; say
   once, in the *Considered, not included* preamble, how many checks were SKIP and
-  that the report is where they are named, so a reader who counts 82 checks and 16
+  that the report is where they are named, so a reader who counts 83 checks and 16
   candidates is not left doing that arithmetic themselves.
 - **E2 — no `recommendation`.** This is a stop rather than an exclusion. A `FAIL`
   or `AGENT` that needs a fix and carries no fix text is a hole in the audit: go

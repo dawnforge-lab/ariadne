@@ -681,7 +681,7 @@ broken there.
   },
   "checklist": {
     "path": "skills/ariadne-audit/checklist.md",
-    "checksTotal": 82
+    "checksTotal": 83
   },
   "coverage": { "pass": 31, "fail": 24, "skip": 12, "agent": 15 },
   "checks": [
@@ -764,7 +764,10 @@ broken there.
 ### Field rules
 
 - **`checks` carries every check in the checklist, exactly once.** A check with no
-  entry is indistinguishable from a check nobody ran. 82 entries, always.
+  entry is indistinguishable from a check nobody ran. **83 entries** as the checklist
+  stands (Phase 11 added CHECK-83) — and the authority is the checklist's own `###`
+  headings, not this sentence: count them rather than trusting a number in a document
+  the file it describes can outgrow.
 - **`verdict`** is one of `PASS`, `FAIL`, `SKIP`, `AGENT`. The checklist's six
   statuses map onto them (see its Status Definitions table): WARN is a `FAIL` at a
   lower `severity`, N/A is a `SKIP` whose notes say why it does not apply, MANUAL is
