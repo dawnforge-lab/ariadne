@@ -26,9 +26,9 @@ The rest is the list, paid:
 | 2 | `robots_unreachable` as a class, and a served count | **shipped** (T1) — off `RobotsInfo.outcome`, never off the reason sentence |
 | 3 | the 0.9.0 sibling marker | **shipped** (T2) — `resources.not-fetched`, with three reasons rather than the two the ledger foresaw |
 | 4 | a way to resume a crawl over the wire | **shipped** (T3) — `crawl_resume`, both transports, six refusals |
-| 5 | the wall-time question | **PROPOSED, NOT TAKEN, unvetoed** — §7 |
+| 5 | the wall-time question | **NOT TAKEN — owner-ruled at integration** — §7 |
 | 6 | `render.coverage`'s selection fields on a crawl that rendered nothing | **shipped** (T4) — `renderPassEvidence` |
-| 7 | tenancy on `crawl_list` | **PROPOSED, unchanged, unvetoed** — §7 |
+| 7 | tenancy on `crawl_list` | **unchanged — owner-ruled at integration** — §7 |
 
 And three things the phase found while paying them, each of which is a defect
 class this repository has met before: a docblock that proved a shape impossible
@@ -826,7 +826,12 @@ claim the weaker thing, its report says so, and this table does not upgrade it.
 
 ---
 
-## 7. The two plan-proposed decisions — PROPOSED AND UNVETOED
+## 7. The two plan-proposed decisions — PROPOSED, AND RULED AT INTEGRATION
+
+**Ruling (owner, 2026-09-02, at Phase 12 integration): BOTH CONFIRMED.** The
+wall-time designs stay not-taken (revisit on demand) and the tenancy posture
+stays as stated. The section below is the record as it stood when the window
+was open; the annotations in `phase-11.md` §14 now carry the ruling.
 
 Two items on `phase-11.md` §14 are decisions rather than work, and their
 provenance matters more than their content.

@@ -793,7 +793,7 @@ Phase 12 pointers, in the order they will be met:
    files some rule would judge) are design questions rather than tuning.
 
    **PHASE 12: NOT TAKEN, revisit on demand** — proposed in the Phase 12 plan
-   and presented to the owner; unvetoed as of this annotation. (Added 2026-09-02
+   and presented to the owner; RULED CONFIRMED by the owner at Phase 12 integration, 2026-09-02. (Added
    by P12-T4. This list is a forward ledger, not a measurement — annotating a
    pointer with what became of it is the same class of edit as `phase-8.md:825`,
    where item 7 was struck through and marked "CLOSED in the final-review fix
@@ -826,7 +826,7 @@ Phase 12 pointers, in the order they will be met:
    posture, still stated in `talos-surface.md` §9.3.
 
    **PHASE 12: unchanged, and stated rather than closed** — the plan's second
-   proposed decision, presented to the owner and unvetoed as of this annotation.
+   proposed decision, presented to the owner and RULED CONFIRMED at Phase 12 integration, 2026-09-02.
    Nothing in this phase narrowed it and nothing in this phase widened it; the
    posture is a deployment fact (one tenant per deployment,
    `talos-surface.md` §9.3) and the phase that makes Ariadne multi-tenant is the
