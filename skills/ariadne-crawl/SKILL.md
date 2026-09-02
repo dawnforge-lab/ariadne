@@ -218,7 +218,8 @@ target is not something this skill can crawl.
  renderPassCount, rulesetVersion, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
- rulesRunAt, findingsCount, pagesScanned}
+ rulesRunAt, findingsCount, pagesScanned, fetchResources,
+ resources: {seen, fetched, failed, skipped, robotsDenied, capped}}
 ```
 
 What the fields mean when you are waiting:
@@ -252,6 +253,20 @@ What the fields mean when you are waiting:
   crawl's `perHostDelayMs` and only ever rises. Null means no crawl loop reported one
   (an old row, or a crawl that failed before it fetched anything) — which is not the
   same as `0`.
+- **`resources` and `fetchResources`** — what this crawl knows about the images,
+  stylesheets and scripts its pages point at, counted off the database rather than
+  reported by any one pass (a resumed pass asks only what is still unfetched, so its
+  own report would say it fetched nothing). `seen` is the distinct files the served
+  HTML references; `fetched` is the files a server answered about; `failed` is the
+  files it could not answer for — a 4xx, a request that failed, a URL our policy
+  refused, a file robots.txt put out of reach — and `skipped` is SEEN BUT NOT ASKED.
+  `fetched + failed + skipped = seen`, always. `capped: true` means a per-crawl
+  budget stopped the pass short. `robotsDenied` is the part of `failed` robots.txt
+  caused, and it needs care: an unreachable robots.txt is a complete disallow, so a
+  CDN that was down looks exactly like a CDN that forbids us — the `fetchReason` on
+  each row (the `resources` CSV view) is what says which. `fetchResources` is whether
+  the crawl asked at all: `false` is an operator's decision, and beside `fetched: 0`
+  it means nobody weighed anything rather than that nothing is heavy.
 - **`rulesRunAt` and `findingsCount`** — the judged marker, and the only pair that
   tells an empty findings listing from an unjudged crawl. `rulesRunAt` is when a rules
   pass last COMPLETED (null: none on record — never judged, being judged now, or a run

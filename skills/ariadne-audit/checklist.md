@@ -234,11 +234,94 @@ assess what a person would see".
 ## How to Use
 
 1. Crawl the site (see the `ariadne-crawl` skill), run the render pass, then run the rules
-2. Walk the checks below in order; for each **Engine** line, call the tool it names and quote the answer
-3. Run the DevTools checks in a browser for what the crawl cannot see
-4. Run the Visual checks for UX and content quality assessment
-5. Record a verdict + evidence for every check, including the ones that passed
-6. Output: the findings file (`SKILL.md`, Phase 4), which the report and action-plan skills read
+2. **Answer CHECK-83 first** — what the crawl covered, and what it could not. Every
+   verdict below is a verdict about the evidence that check describes
+3. Walk the checks below in order; for each **Engine** line, call the tool it names and quote the answer
+4. Run the DevTools checks in a browser for what the crawl cannot see
+5. Run the Visual checks for UX and content quality assessment
+6. Record a verdict + evidence for every check, including the ones that passed
+7. Output: the findings file (`SKILL.md`, Phase 4), which the report and action-plan skills read
+
+---
+
+## Engine Coverage
+
+One check, and it is the FIRST one answered — before Section 0, before the pre-crawl
+three, before anything that reads a finding. It is not about the site: it is about
+the evidence every other check is about to be answered from, and its verdict is the
+confidence interval around all of them.
+
+### CHECK-83: Engine coverage and evidence completeness
+- **Priority**: Critical | **Requires**: Engine
+- **Engine**: `crawl_status` for the crawl you are auditing, read in full, plus
+  `issues_list` for the NOT MEASURED markers. Five questions, in this order:
+  1. **Did the crawl finish, or stop?** `status` is `finished`, `cancelled` or
+     `failed`; `frontier.pending` and `frontier.leased` above zero on a closed crawl
+     mean URLs were left unfetched. A crawl that hit `maxPages` finishes with a
+     drained budget rather than a drained frontier, and `links.orphan-skipped`
+     (CHECK-32) is the finding that fires when it did. `blockedPages` beside
+     `hostSpacingMs` is the politeness pair: blocks with the spacing settled is a
+     crawl that found the site's rate, blocks still rising is a crawl that did not
+     see the whole site.
+  2. **Did the rules run, and when?** `rulesRunAt` is the only answer — null means
+     no complete pass is on record, and every empty listing below it is "nobody
+     looked" rather than "nothing found". `rulesetVersion` on the crawl row is the
+     ruleset at CRAWL time and is NOT necessarily the one that judged it; the
+     judging version is stamped on the findings and reported by `crawl_compare`.
+     `findingsCount` and `pagesScanned` are the pair every "N findings over M pages"
+     sentence in the report is built from.
+  3. **What was cut?** `findingCap` is what each listing rule was allowed to report:
+     200 when nobody chose, `null` for a billed audit. Under a cap, `issues_list`
+     groups carry `truncated` with `total` or `atLeast`, and a count is a floor
+     rather than a magnitude. Quote the note, never the bare count.
+  4. **How much was rendered?** `renderPassCount` is a boolean gate on whether a
+     render pass happened at all; `metrics_get` with `metricId: "render.coverage"`
+     is the real coverage — how the pages were chosen and how many seats the budget
+     bought. Every check that reads rendered evidence (CHECK-01, CHECK-02, CHECK-34,
+     the JS half of CHECK-10) is answered over that sample and no further.
+  5. **How much of the site's own weight was measured?** `crawl_status`'s
+     `resources` block: `seen` is the distinct files the served HTML points at,
+     `fetched` the files a server answered about, `failed` the ones it could not
+     answer for, and `skipped` the ones nobody asked about at all —
+     `fetched + failed + skipped = seen`, always. `fetchResources` says whether the
+     crawl asked in the first place: `false` is an operator's decision and makes
+     every resource check NOT MEASURED rather than clean. `capped: true` means a
+     per-crawl budget stopped the pass short. `robotsDenied` needs reading with
+     care — an unreachable robots.txt is a complete disallow, so a CDN that was
+     down looks exactly like a CDN that forbids us, and only each row's
+     `fetchReason` (the `resources` CSV view) says which.
+- **The markers are part of this check, not a footnote.** `issues_list` with no
+  filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
+  `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
+  `host.probe-skipped`, `resources.not-recorded`. Each one is the engine saying a
+  check below could not be answered on this crawl. List them here, and mark the
+  checks they claim SKIP rather than PASS when you reach them.
+- **Evaluate**:
+  - FAIL if `rulesRunAt` is null — nothing below this line is answerable, and the
+    audit stops until the rules have run
+  - FAIL if the crawl is `cancelled` or `failed`, or left URLs unfetched: the site
+    was not seen whole, and every "% of pages" figure is a floor
+  - WARN if the run was capped (`findingCap` set and any group `truncated`), if
+    `blockedPages` is non-zero, if `renderPassCount` is 0, or if resource coverage
+    is partial (`fetchResources: false`, `capped: true`, or `skipped` above zero)
+  - PASS only on a finished crawl, judged, uncapped or with no truncation note, with
+    a render pass and a complete resource census
+  - Record: crawl id, `status`, `rulesRunAt`, `rulesetVersion`, `findingsCount`,
+    `pagesScanned`, `findingCap` and which rules were truncated, `renderPassCount`
+    and the `render.coverage` numbers, the whole `resources` block with
+    `fetchResources` beside it, and every NOT MEASURED marker that fired
+- **Also NOT MEASURED, and stated here because nothing else states it**: the
+  analyzer records at most 2,000 resource references per page. A page above that
+  contributes its first 2,000 and the rest are dropped silently — nothing on any
+  surface counts them, deriving the number costs a scan of every reference the crawl
+  holds, and it is not on `crawl_status` for that reason. On a page with an enormous
+  gallery or script list, read the resource evidence as a floor.
+- **`site.health` is filed here** (`metrics_get` with `metricId: "site.health"`):
+  the partition of the crawl's auditable pages by the worst severity each carries,
+  plus the pages the census leaves out. It is a rollup of the audit's own findings —
+  a statement about how far the judgement reached, which is this check's subject —
+  and Evaluation Principle 2 still applies: it is context for the coverage answer
+  and never the verdict on any check below.
 
 ---
 

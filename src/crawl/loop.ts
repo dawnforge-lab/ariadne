@@ -79,6 +79,7 @@ import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
 import {
   fetchCrawlResources,
+  markResourcesNotAsked,
   type ResourcePassSummary,
 } from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
@@ -175,6 +176,28 @@ export interface CrawlConfig extends RenderSelectionConfig {
    */
   maxResources?: number;
   maxResourceHosts?: number;
+  /**
+   * Whether this crawl asks the site about the files its pages point at.
+   * Absent is TRUE — the pass runs, which is what every crawl since P11-T2 has
+   * done and what a complete audit needs.
+   *
+   * IT IS AN OFF SWITCH, NOT A BUDGET, and that is why it is a boolean rather
+   * than `maxResources: 0` (which `validateCrawlConfig` refuses on purpose: a
+   * zero cap reads like a typo and would mark every row `resource-cap`, a reason
+   * that says a budget ran out when no budget was ever spent). An operator who
+   * says no to the pass is making a decision about somebody's server — a client
+   * who asked us not to touch their CDN, a re-crawl that only needs the page
+   * census — and the record has to be able to say that plainly.
+   *
+   * WHAT FALSE DOES NOT TURN OFF: the analyzer's references. `PageWriter` still
+   * writes the `resources` rows and the `page_resources` edges, because reading
+   * markup costs nobody a request and "this site's HTML points at 812 distinct
+   * files" is evidence whether or not we asked about any of them. What false
+   * turns off is the asking — and every row it leaves unasked is stamped with
+   * `RESOURCE_OFF_REASON`, so a reader can tell the operator's decision from an
+   * interrupted pass, from a cap, and from a crawl written before 0013.
+   */
+  fetchResources?: boolean;
 }
 
 /**
@@ -585,6 +608,7 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     findingCap: raw["findingCap"],
     maxResources: raw["maxResources"],
     maxResourceHosts: raw["maxResourceHosts"],
+    fetchResources: raw["fetchResources"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -603,7 +627,11 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
   // The optional fields: absent is fine, present-and-wrong is not. A stored
   // `probeHosts: "false"` must not resume as "probe on" (it is truthy) or as
   // "probe off" (a guess) — it must stop.
-  for (const field of ["probeHosts"] as const) {
+  // `fetchResources` joins `probeHosts` here rather than defaulting on a
+  // non-boolean: a stored `"false"` is truthy, so a resume would turn the pass
+  // back ON for a client who asked us not to touch their servers, and a resume
+  // that guessed `false` would silently stop asking about a crawl that did.
+  for (const field of ["probeHosts", "fetchResources"] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a boolean`);
     }
@@ -1241,7 +1269,17 @@ async function runToCompletion(
   // failed write — and there is no column in which to write "the resource rows
   // are missing because the writer broke". It propagates, `execute` closes the
   // row `failed`, and the operator finds out (hard rule 7).
-  const resourcePass = aborted
+  //
+  // THE OPERATOR'S OFF SWITCH sits beside the abort and reads the same way from
+  // here — no pass, `resources: null` on the summary — and differently from
+  // everywhere else. An abort decided nothing about the rows it did not reach;
+  // `fetchResources: false` decided all of them, so the rows are stamped with
+  // the reason instead of being left blank (see `RESOURCE_OFF_REASON`). The
+  // check is `=== false` rather than falsy, because absent means ON.
+  if (config.fetchResources === false && !aborted) {
+    await markResourcesNotAsked(db, crawlId);
+  }
+  const resourcePass = aborted || config.fetchResources === false
     ? null
     : await fetchCrawlResources(db, crawlId, {
         siteUrl: config.siteUrl,

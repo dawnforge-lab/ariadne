@@ -955,20 +955,41 @@ describe("issue copy", () => {
     );
   });
 
-  // THE CHECK ID DISCLAIMER, and the reason it is in the CLIENT-FACING copy
-  // rather than only in the rule's module header: `metrics_get` and
-  // `rules_catalog` both export `checkIds: ["CHECK-32"]` with no caveat, so a
-  // dashboard grouping rules by check would otherwise render this table inside
-  // "Orphan pages" as that check's verdict. The explanation is the one string
-  // that travels with the id to every consumer.
-  it("site.health tells its consumer the check id is a filing, not an answer", () => {
+  // WHERE THIS TABLE BELONGS, in the CLIENT-FACING copy rather than only in the
+  // rule's module header: `metrics_get` and `rules_catalog` both export the
+  // `checkIds` with no caveat, so the explanation is the one string that travels
+  // with the id to every consumer that groups rules by check.
+  //
+  // It said something weaker for one phase. While the checklist had no check
+  // about the engine's own coverage, this row was FILED under CHECK-32 and the
+  // copy had to say so — a disclaimer that the id meant nothing, so that a
+  // dashboard would not render the table inside "Orphan pages" as that check's
+  // verdict. CHECK-83 exists now and this row is evidence for it, so the
+  // disclaimer is gone and the plain statement stands in its place: the two
+  // claims that survive it are that a verdict on another check may never be
+  // reached from here (Evaluation Principle 2) and that a UI shows it under
+  // coverage.
+  it("site.health tells its consumer which check it is evidence for, and what it still is not", () => {
     const text = ISSUE_COPY["site.health"]!.explanation;
-    expect(text, "the disclaimer").toMatch(
-      /THE CHECK ID THIS TABLE CARRIES SAYS WHERE IT IS FILED, NOT WHAT IT ANSWERS/,
+    expect(text, "the plain statement").toMatch(
+      /THE CHECK THIS TABLE CARRIES IS THE ONE IT IS ABOUT/,
     );
-    expect(text, "answers no check").toMatch(/answers no checklist check on its own/i);
+    expect(text, "the coverage check").toMatch(
+      /engine-coverage check the audit answers before any other/i,
+    );
+    // Principle 2, unweakened by the re-file: this is still a crawl summary.
+    expect(text, "no verdict from here").toMatch(
+      /no verdict on any other check may be reached from it/i,
+    );
     // And what a UI should do with it, since the UI is the consumer that groups.
-    expect(text, "context, not verdict").toMatch(/as context beside that check rather than as its verdict/i);
+    expect(text, "grouped under coverage").toMatch(
+      /show it under coverage rather than beside a finding about the site/i,
+    );
+    // THE OLD DISCLAIMER IS GONE, not merely superseded: a copy carrying both
+    // sentences would tell a reader the id means nothing and then tell them what
+    // it means.
+    expect(text, "the retired bridge disclaimer").not.toMatch(/WHERE IT IS FILED/);
+    expect(text, "the retired bridge disclaimer").not.toMatch(/answers no checklist check/i);
   });
 
   // Obligation 6, as a test: Ariadne emits the ingredients and the ratio; Talos

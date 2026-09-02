@@ -24,6 +24,7 @@ import type { RobotsInfo } from "../../src/crawl/discovery.js";
 import {
   fetchCrawlResources,
   RESOURCE_CAP_REASON,
+  RESOURCE_OFF_REASON,
   type ResourcePassSummary,
 } from "../../src/crawl/resources/fetch-resources.js";
 
@@ -1124,6 +1125,45 @@ describe("the crawl runs the pass itself", () => {
     const untouched = await rowFor(summary.crawlId, `${assets.base}/abort-2.png`);
     expect(untouched.fetchClass).toBeNull();
     expect(untouched.fetchReason).toBeNull();
+  });
+
+  // THE OPERATOR'S OFF SWITCH (P11-T4). Two claims, and the second is the one
+  // that makes the first legible: nothing is asked, AND the rows say who decided
+  // that. A pass that simply did not run leaves rows indistinguishable from an
+  // interrupted one, and a reader of a silent `images.oversized` would have no
+  // way to tell "nobody weighed anything" from "nothing is heavy".
+  it("asks nobody anything when the operator turned resource fetching off", async () => {
+    const summary = await runCrawl(db, {
+      siteUrl: assets.base,
+      maxPages: 5,
+      maxDepth: 2,
+      userAgent: "AriadneBot-resource-test",
+      perHostDelayMs: 0,
+      maxConcurrency: 2,
+      probeHosts: false,
+      allowPrivate: true,
+      fetchResources: false,
+    });
+
+    expect(summary.status).toBe("finished");
+    // Null is "no pass ran", exactly as on an abort. What the operator chose is
+    // on the crawl's config and on every row; the summary has no field for a
+    // pass that was never started.
+    expect(summary.resources).toBeNull();
+
+    // The analyzer's census is untouched: the references are still evidence,
+    // and recording them costs nobody a request.
+    const rows = await rowsOf(summary.crawlId);
+    expect(rows.map((row) => row.kind).sort()).toEqual(["css", "image", "image", "js"]);
+    expect(rows.every((row) => row.fetchClass === null)).toBe(true);
+    expect(rows.every((row) => row.fetchReason === RESOURCE_OFF_REASON)).toBe(true);
+
+    // And nothing reached a socket: not the origin's own files, not the third
+    // party's, not even a robots.txt on the asset host.
+    for (const path of ["/a.png", "/b.css", "/head-405.js"]) {
+      expect(hitsFor(assets, path), path).toEqual([]);
+    }
+    expect(hitsFor(plain, "/badge.png")).toEqual([]);
   });
 
   it("does not ask a single server anything once the crawl is cancelled", async () => {

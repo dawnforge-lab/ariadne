@@ -42,12 +42,14 @@ const rule = metricLookup(healthMetrics, "healthMetrics");
 const HEALTH = "site.health";
 
 describe("healthMetrics metadata", () => {
-  it("is one metric, filed under a check it does not claim to answer", () => {
+  it("is one metric, carrying the engine-coverage check it is evidence for", () => {
     expect(healthMetrics.map((r) => [r.id, r.checkIds, r.category, r.severity, r.kind])).toEqual([
-      // CHECK-32 is a FILING decision — the checklist has no check for a
-      // site-wide judgement rollup, and its Evaluation Principle 2 says a crawl
-      // summary answers no check at all. See the rule's module header.
-      [HEALTH, ["CHECK-32"], "crawl", "info", "metric"],
+      // CHECK-83 "Engine coverage and evidence completeness": how far the
+      // audit's own judgement reached over this site, which is that check's
+      // subject rather than a filing beside somebody else's. It carried CHECK-32
+      // for one phase as an explicitly temporary bridge, while the checklist had
+      // no coverage check to file it under; P11-T4 moved it, as ledgered.
+      [HEALTH, ["CHECK-83"], "crawl", "info", "metric"],
     ]);
     for (const r of healthMetrics) {
       expect(r.title.length).toBeGreaterThan(5);

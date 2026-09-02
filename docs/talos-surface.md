@@ -1,16 +1,26 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 10 (ruleset 0.7.0, migrations 0000–0012,
+**Status:** the contract as of Phase 11 (ruleset 0.8.0, migrations 0000–0013,
 15 MCP tools / 15 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
 
+**What Phase 11 changed here**, so a reader of the Phase 10 version knows where
+to look: `crawl_start` gained `fetchResources`; `crawl_status` gained
+`fetchResources` and a `resources` block (§4.2); `export_crawl` gained a
+`resources` CSV view (§12); the null-versus-zero doctrine gained a citizen whose
+marker is a column rather than `rulesRunAt` (§5.3); `site.health` re-filed from
+`CHECK-32` to `CHECK-83` (§6); and §10's "no resource fetching" entry is retired
+in favour of what is and is not fetched.
+
 ## How this document was produced, and how to trust it
 
-Every shape below was **regenerated from a live server** on 2026-09-01 — an MCP
-client over the SDK's in-memory transport, against the dev database's three
+Every shape below was **regenerated from a live server** — an MCP client over
+the SDK's in-memory transport, against the dev database's three
 `lavishalice.com` reference crawls and against the test fixtures — and then
 matched against the test that pins it. Nothing here was copied from a type
-declaration by hand.
+declaration by hand. The Phase 10 shapes were regenerated on 2026-09-01 and the
+Phase 11 additions (§4.2's `resources` block, §12's `resources` view) on
+2026-09-02.
 
 Each section names the tests that hold it. A shape claim in this file with no
 test beside it is a claim nobody is defending; if you find one, that is a
@@ -21,13 +31,14 @@ Two properties make the double-transport claim below cheap to trust:
 - **One service, two transports.** `src/api/service.ts` holds every query,
   refusal and vocabulary; `http.ts` and `mcp.ts` do routing and serialisation
   and nothing else.
-- **The equality is tested, not argued.** `test/api/mcp.test.ts:1915`
-  ("answers the same JSON for the same question, route by tool") calls twelve
+- **The equality is tested, not argued.** `test/api/mcp.test.ts:2024`
+  ("answers the same JSON for the same question, route by tool") calls thirteen
   (tool, route) pairs over the wire against one database and asserts the two
-  answers are `toEqual`. `test/api/mcp.test.ts:1931` does the same for five
+  answers are `toEqual`. `test/api/mcp.test.ts:2045` does the same for five
   refusals — the same sentence and the mapped status.
-  `test/api/mcp.test.ts:1988` asserts the CSV a route streams is
-  byte-identical to the file the tool writes.
+  `test/api/mcp.test.ts:2102` and `test/api/mcp.test.ts:2124` assert the CSV a
+  route streams is byte-identical to the file the tool writes, for the `issues`
+  and `resources` views.
 
   **What that equality does NOT cover**, stated so nobody reads more into it
   than it says: the four **command** tools — `crawl_start`, `crawl_mark_failed`,
@@ -58,14 +69,14 @@ Two properties make the double-transport claim below cheap to trust:
   missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:2086`). If Ariadne's MCP server is ever mounted on a
+  (`test/api/mcp.test.ts:2219`). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
 - **The domain allowlist binds both transports** (`ARIADNE_ALLOWED_DOMAINS`,
   exact host or `*.example.com`). An empty allowlist refuses every crawl
   trigger and still answers every query — the read-only posture a Talos
   deployment can run for reporting-only tenants
-  (`test/api/mcp.test.ts:790`, `test/api/http.test.ts:743`).
+  (`test/api/mcp.test.ts:826`, `test/api/http.test.ts:743`).
 
 ### Error bodies
 
@@ -78,7 +89,7 @@ Two properties make the double-transport claim below cheap to trust:
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2009`, `test/api/http.test.ts:1487`).
+nowhere else (`test/api/mcp.test.ts:2147`, `test/api/http.test.ts:1487`).
 
 ---
 
@@ -88,19 +99,19 @@ nowhere else (`test/api/mcp.test.ts:2009`, `test/api/http.test.ts:1487`).
 back as `cursor` **with the same filters**; `nextCursor: null` means the listing
 ended. `limit` defaults to 50 and is capped at 200 — a limit outside the
 contract is refused, never clamped (`PAGE_SIZE_DEFAULT` / `PAGE_SIZE_MAX`,
-`test/api/mcp.test.ts:887`).
+`test/api/mcp.test.ts:983`).
 
 **Closed vocabularies.** Every query parameter, body field and tool argument is
 on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
-(`test/api/query.test.ts:2691`). MCP argument typos are refused by the SDK's
-schema validator before the handler runs (`test/api/mcp.test.ts:686`).
+(`test/api/query.test.ts:2901`). MCP argument typos are refused by the SDK's
+schema validator before the handler runs (`test/api/mcp.test.ts:722`).
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (86 rows) rather than by the crawl. The catalog is
-~87 KB (≈21k tokens) because it carries every rule's full copy — the tool
-description says so, and points an agent that only wants what fired at
-`issues_list` instead.
+bounded by the **ruleset** (92 rows) rather than by the crawl. The catalog is
+~98 KB (100,645 bytes, measured 2026-09-02) because it carries every rule's full
+copy — the tool description says so, and points an agent that only wants what
+fired at `issues_list` instead.
 
 **Timestamps** are ISO-8601 UTC strings. **Ids** are `crawl_<uuid>`; a caller
 never constructs one.
@@ -138,7 +149,7 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 
 | MCP tool | HTTP | Arguments |
 |---|---|---|
-| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap` |
+| `crawl_start` | `POST /crawls` | `siteUrl` (required), `maxPages`, `maxDepth`, `userAgent`, `perHostDelayMs`, `maxConcurrency`, `probeHosts`, `legacyHosts[]`, `sitemapUrls[]`, `renderBudgetPct`, `renderMaxPages`, `renderSamplePerType`, `findingCap`, `fetchResources` |
 | `crawl_status` | `GET /crawls/:id` | — |
 | `crawl_list` | `GET /crawls` | `siteUrl`, `limit`, `cursor` |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` | — |
@@ -154,9 +165,9 @@ webhooks**: polling `crawl_status` is the contract until Talos asks otherwise.
 | `compare_urls` | `GET /compare/urls` | `baseCrawlId`, `headCrawlId`, `ruleId`, `set` (all required), `limit`, `cursor` |
 | `export_crawl` | `GET /crawls/:id/export` | `format` (`jsonl.gz` \| `csv`), `dataset` (jsonl.gz only), `view` + `ruleId` (csv only) |
 
-Pinned: the tool list and every schema — `test/api/mcp.test.ts:523`,
-`test/api/mcp.test.ts:548`, `test/api/mcp.test.ts:580`,
-`test/api/mcp.test.ts:609`. Each tool's field set is asserted against the service's own
+Pinned: the tool list and every schema — `test/api/mcp.test.ts:553`,
+`test/api/mcp.test.ts:578`, `test/api/mcp.test.ts:610`,
+`test/api/mcp.test.ts:639`. Each tool's field set is asserted against the service's own
 `START_CRAWL_FIELDS` / `RENDER_CRAWL_FIELDS` tables, so an HTTP field the agent
 surface cannot see fails the suite.
 
@@ -170,7 +181,7 @@ an unknown field (400, naming it).
 
 ### 4.2 `crawl_status` → the crawl in full
 
-The live answer for `crawl_02ff6f7a`, pasted as it came back (2026-09-01) —
+The live answer for `crawl_02ff6f7a`, pasted as it came back (2026-09-02) —
 nothing here is elided or tidied:
 
 ```json
@@ -183,7 +194,9 @@ nothing here is elided or tidied:
  "queuePosition":null,"liveLeases":0,"blockedPages":0,"hostSpacingMs":2000,
  "legacyHosts":[],"sitemapUrls":["https://lavishalice.com/sitemap.xml"],
  "findingCap":null,"rulesRunAt":"2026-09-01T08:51:55.386Z",
- "findingsCount":17659,"pagesScanned":551}
+ "findingsCount":17659,"pagesScanned":551,"fetchResources":true,
+ "resources":{"seen":0,"fetched":0,"failed":0,"skipped":0,
+              "robotsDenied":0,"capped":false}}
 ```
 
 Read as a Talos dashboard: `blockedPages` and `hostSpacingMs` are the
@@ -196,9 +209,52 @@ CRAWL time, which is not necessarily the one that judged it (§7):
 `renderPassCount: 14` pages were rendered under 0.6.0 and every finding on this
 crawl was written under 0.7.0.
 
-Pinned: `test/api/query.test.ts:1316` (the whole describe block — the marker,
-the live findings count, `pagesScanned`, the one-statement read); shape
-regenerated live from `crawl_02ff6f7a`.
+**The `resources` block, and the trap this paste happens to demonstrate.** This
+crawl ran before migration 0013, so every number is `0` and `fetchResources`
+resolves to `true` — nobody turned the pass off; there was no pass. **Six zeroes
+here are not "this site references no files."** The finding that says which it
+is, is `resources.not-recorded` (§5.3).
+
+- `seen` — distinct files the SERVED HTML points at, images, stylesheets and
+  scripts. Recorded even when `fetchResources` is false; a file a script injects
+  at runtime is not in it at all.
+- `fetched` — a server answered about the file.
+- `failed` — a server could not: a 4xx or 5xx, a request that failed, a URL our
+  own policy refused, a file robots.txt put out of reach. **A count of files that
+  could not be weighed, not a count of broken files** — `resources.broken` is the
+  rule that judges that.
+- `skipped` — **seen, not asked**: the pass has not run, was interrupted, hit a
+  cap, or was turned off. Each row carries a `fetchReason` saying which, on the
+  `resources` CSV view (§12).
+- `robotsDenied` — the part of `failed` robots.txt caused. **Read it carefully:**
+  an unreachable robots.txt is a complete disallow (RFC 9309 §2.3.1.4), so a CDN
+  that was down while the pass ran looks exactly like a CDN that forbids us. The
+  count deliberately does not parse the reason sentence to tell them apart; the
+  per-row `fetchReason` does.
+- `capped` — a per-crawl budget (`maxResources` / `maxResourceHosts`) stopped the
+  pass short of at least one file. **One flag for both caps**, because the row
+  records one reason whichever cap it was; the in-run split lives on the crawl
+  loop's own summary and never reaches the wire.
+
+`fetched + failed + skipped == seen`, on every crawl. The four are read in ONE
+statement so that stays true while a pass is writing rows underneath a poller.
+
+**`fetchResources` is the denominator for all of it** — resolved like
+`findingCap`, so an absent key reports the default `true`. `false` beside
+`fetched: 0` is an operator's decision (a client who asked us not to touch their
+CDN, a re-crawl that only needs the page census); `true` beside the same zero is
+a pass that has not run or could not finish. A stored value that is not a boolean
+is a **409**, never a guess: `"false"` is truthy.
+
+Pinned: `test/api/query.test.ts:1378` (the whole describe block — the marker,
+the live findings count, `pagesScanned`, the one-statement read),
+`test/api/query.test.ts:1491` (the census, partitioned),
+`test/api/query.test.ts:1523` (zeroes on a crawl with no rows),
+`test/api/query.test.ts:1534` (the resolved echo),
+`test/api/query.test.ts:1552` (the 409 on a non-boolean);
+`test/api/mcp.test.ts:909` and `test/api/mcp.test.ts:931` (the answer and its
+description, over the agent transport). Shape regenerated
+live from `crawl_02ff6f7a`.
 
 ### 4.3 `issues_list` → `{items: IssueGroup[], nextCursor}`
 
@@ -214,16 +270,16 @@ the rows the rule wrote — under a `pageType` filter it is legitimately smaller
 than the note's own `reported`. `sampleUrls` is at most 5 and is a sample, never
 a slice: `issue_urls` is the slice.
 
-Pinned: `test/api/query.test.ts:761`, `test/api/query.test.ts:904` (the capped
-shape), `test/api/mcp.test.ts:1065`, `test/api/mcp.test.ts:1080`.
+Pinned: `test/api/query.test.ts:823`, `test/api/query.test.ts:904` (the capped
+shape), `test/api/mcp.test.ts:1161`, `test/api/mcp.test.ts:1176`.
 
 ### 4.4 `issue_urls` → `{items: [{url, evidence}], nextCursor}`
 
 `url` is `null` for a site-wide finding. `evidence` is the rule's stored
 `details_jsonb` **verbatim** — it always carries the rule's own `pageUrl` key.
-Pinned: `test/api/query.test.ts:966`, `test/api/query.test.ts:982` (nothing
+Pinned: `test/api/query.test.ts:966`, `test/api/query.test.ts:1044` (nothing
 outside the projection),
-`test/api/query.test.ts:990` (the null url).
+`test/api/query.test.ts:1052` (the null url).
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
 
@@ -231,7 +287,7 @@ outside the projection),
 `value` is the metric's own object — its shape belongs to the metric, and the
 copy travels with it. Scopes: `site | page_type | rule`. See §6 for
 `site.health` and for the absent-family trap.
-Pinned: `test/api/query.test.ts:1024`, `test/api/mcp.test.ts:1469`.
+Pinned: `test/api/query.test.ts:1086`, `test/api/mcp.test.ts:1565`.
 
 ### 4.6 `pages_query` → `{items: PageRow[], nextCursor}`
 
@@ -245,8 +301,18 @@ Deliberately slim: `pages` has sixty columns and an endpoint that returned them
 would be an export in listing clothes (obligation 1). `clickDepth: null` means
 *unreachable*, never zero. `renderError` is why an **attempted** render produced
 nothing; null there is not "it worked".
-Pinned: `test/api/query.test.ts:1082`, `test/api/query.test.ts:1163`,
-`test/api/mcp.test.ts:1492`.
+
+**No per-page resource rollup here, and that is a decision rather than an
+omission** (P11-T4). A file count or a byte sum per page would be cheap enough to
+compute — the edge table is indexed by page — and it would still be wrong to put
+here: it is an aggregate of ANOTHER table on a listing whose whole discipline is
+one row per page of that page's own columns, and a bare number could not carry
+the two bounds every weight figure needs (the `src`+`srcset` ceiling, the
+unweighed-file floor). Per template it is `metrics_get` with
+`metricId: "page.weight"`, which states both; per file it is the `resources` CSV
+view (§12), which carries `referencingPages`.
+Pinned: `test/api/query.test.ts:1144`, `test/api/query.test.ts:1225`,
+`test/api/mcp.test.ts:1588`.
 
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
 
@@ -255,7 +321,7 @@ sitemapSources[], suppliedSitemaps[], userAgent}`. It is **stored evidence, neve
 a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
-Pinned: `test/api/query.test.ts:1211`, `test/api/mcp.test.ts:1570`.
+Pinned: `test/api/query.test.ts:1273`, `test/api/mcp.test.ts:1666`.
 
 ### 4.8 `crawl_list` → `{items: CrawlListItem[], nextCursor}`
 
@@ -268,8 +334,8 @@ seeded as `http://example.com/`. It is the engine's one definition of "the same
 site" (`hostnameSpellings`), the same one the cross-site compare refusal uses.
 A `siteUrl` that is not an http(s) URL is **refused by name and never read as
 "no filter"** — a dropped filter would answer with every crawl the engine holds.
-Pinned: `test/api/query.test.ts:2104`, `test/api/query.test.ts:2110`,
-`test/api/query.test.ts:2124`; `test/api/mcp.test.ts:1365`.
+Pinned: `test/api/query.test.ts:2304`, `test/api/query.test.ts:2310`,
+`test/api/query.test.ts:2324`; `test/api/mcp.test.ts:1461`.
 
 **Pre-tenancy posture, stated plainly (see §9).** Without `siteUrl`, this
 listing returns every crawl the engine holds, including other tenants'
@@ -283,10 +349,11 @@ An empty answer and a zero are different sentences, and Ariadne spells them
 differently everywhere. A dashboard that collapses them paints a clean site over
 one nobody has examined.
 
-The doctrine has three spellings on this surface, and this section carries the
-first two: the catalog's `fired: null` (§5.1), the metrics' absent family
-(§5.2), and the compare's outright 400 for an unjudged crawl (§7.5) — three
-faces of one rule, keyed by the same marker (`rulesRunAt`). The converse
+The doctrine has four spellings on this surface, and this section carries three
+of them: the catalog's `fired: null` (§5.1), the metrics' absent family (§5.2),
+the resources' `fetchClass` null (§5.3), and the compare's outright 400 for an
+unjudged crawl (§7.5). The first two and the fourth are faces of one rule, keyed
+by the same marker (`rulesRunAt`); the third is keyed by a column. The converse
 matters just as much: `issues_list`, `metrics_get` and the exports serve
 whatever rows exist even on a crawl whose judgement never completed — a
 partial pass's rows are real rows, and **only `rulesRunAt` says whether they
@@ -330,12 +397,12 @@ cap the two differ by construction, which is what `atLeast` is for. Quoting a
 catalog count to a client as "the number of orphans on this site" is the Phase 6
 D-1 incident recurring in a new place.
 
-Pinned: `test/api/query.test.ts:1451`, `test/api/query.test.ts:1493`,
-`test/api/query.test.ts:1517` (the metric zero),
-`test/api/query.test.ts:1543` (null on an unjudged crawl holding rows),
-`test/api/query.test.ts:1560` (the floor, agreeing
-with `issues_list`), `test/api/query.test.ts:1599` (marker and counts read in one statement);
-`test/api/mcp.test.ts:1167` and `test/api/mcp.test.ts:1249`.
+Pinned: `test/api/query.test.ts:1589`, `test/api/query.test.ts:1631`,
+`test/api/query.test.ts:1655` (the metric zero),
+`test/api/query.test.ts:1681` (null on an unjudged crawl holding rows),
+`test/api/query.test.ts:1698` (the floor, agreeing
+with `issues_list`), `test/api/query.test.ts:1737` (marker and counts read in one statement);
+`test/api/mcp.test.ts:1263` and `test/api/mcp.test.ts:1249`.
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
 
@@ -350,6 +417,45 @@ The rule for a consumer is the catalog's rule, one surface over: **read
 `rulesRunAt` first, then read absence as "not measured" and a number as a
 measurement.** A gauge drawn from an absent family is a gauge drawn from
 nothing.
+
+### 5.3 `fetchClass` null — seen, not asked
+
+The doctrine's newest citizen, and the first one whose marker is a COLUMN rather
+than `rulesRunAt`. A `resources` row with a null `fetch_class` — an empty
+`fetchClass` cell in the CSV, a unit of `crawl_status.resources.skipped` — means
+**the analyzer found this reference and nothing ever asked the server about it**.
+It is not "the fetch failed", which is `fetch_error`, and it is not "the file is
+fine", which is `ok`.
+
+Four different sentences live under that one null, and the row's `fetchReason`
+is what separates them:
+
+| `fetchReason` | what happened |
+|---|---|
+| `resource-cap` | a per-crawl budget stopped the pass short of this row |
+| `resource-fetch-off` | the crawl was started with `fetchResources: false` |
+| *(empty)* | the pass was interrupted, or has not run over this crawl at all |
+| *(empty, and no rows exist)* | the crawl predates migration 0013 |
+
+**Two consequences a consumer must plan for.**
+
+1. **A silent resource rule is not a clean site.** `resources.broken`,
+   `images.oversized`, `images.legacy-format` and `resources.uncached` all gate
+   on a non-null class, so on a crawl that asked about nothing every one of them
+   is silent. `resources.not-recorded` (info) is the NOT MEASURED marker that
+   fires when the crawl holds no resource rows AT ALL — but it deliberately does
+   not fire when the rows exist and are merely unasked, because in that case the
+   crawl DID record what it saw. That case is legible on `crawl_status` instead:
+   `fetchResources: false`, or `skipped` equal to `seen`. **Read the coverage
+   block before quoting any resource finding, or the absence of one.**
+2. **`fetch_class` null is per FILE, so a page's weight can be a floor.** The
+   `page.weight` metric flags `atLeast: true` on any row that references a file
+   nobody weighed, and reports the referenced-and-weighed pair beside it.
+
+Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
+this); `test/api/query.test.ts:2029` (all four spellings in the CSV);
+`test/crawl/fetch-resources.test.ts:1135` (the off switch stamps its rows and
+asks nobody anything).
 
 ---
 
@@ -398,29 +504,45 @@ One row per crawl, `scope: "site"`:
   serious was found": read it as "almost nothing here is eligible to be
   critical".
 
-**The check id is a filing, not an answer.** `site.health` carries `CHECK-32`
-because that is where the checklist keeps a partition of the page census — and
-the metric's own `explanation`, which travels to every consumer, says so: *"the
-check id this table carries says where it is filed, not what it answers"*.
-Anything grouping rules by check must show this table as **context beside**
-CHECK-32, never as its verdict. The filing is **explicitly temporary**: the
-eventual home is an owner-designed check about the engine's own coverage
-(Phase 11), and moving it is a one-line change.
+**The check id, and the bridge that is now retired.** `site.health` carries
+**`CHECK-83` "Engine coverage and evidence completeness"** — the check the audit
+answers first, and the check this table is about: how far the judgement reached
+over the pages the crawl could judge, and how many it could not judge at all.
+
+It carried `CHECK-32` for one phase. That was a **filing** decision, made
+because the checklist then had no coverage check and CHECK-32 was where a
+partition of the page census lived; the Phase 10 review ruled it explicitly
+temporary and ledgered the handoff, and Phase 11 discharged it. The metric's own
+`explanation` moved with it: where it used to disclaim the id entirely, it now
+says which check the row is evidence for — and keeps the sentence that has not
+changed, that **no verdict on any other check may be reached from a crawl
+summary** (the checklist's Evaluation Principle 2). Anything grouping rules by
+check should render this table under coverage, not beside a finding about the
+site.
+
+A crawl judged under 0.7.0 has rows written while the id was `CHECK-32`; copy
+and check ids are joined at read time, so such a crawl is described by today's
+filing (§7.3).
 
 **No grades, no labels, no thresholds** — here or anywhere else (§10). The row
 is ingredients; the judgement is the consumer's.
 
 Pinned: `test/rules/health-metrics.test.ts` (13 tests —
-`test/rules/health-metrics.test.ts:45` the filing disclaimer,
-`test/rules/health-metrics.test.ts:206` the partition,
-`test/rules/health-metrics.test.ts:237` the empty census,
-`test/rules/health-metrics.test.ts:258` site-level isolation,
-`test/rules/health-metrics.test.ts:280` the remainder,
-`test/rules/health-metrics.test.ts:444` the cap);
-`test/rules/copy.test.ts:851`, `test/rules/copy.test.ts:884`,
-`test/rules/copy.test.ts:899`, `test/rules/copy.test.ts:917`,
-`test/rules/copy.test.ts:931` (the copy contracts, including "grades nothing");
-`test/fixtures/harness.test.ts:1707` (an independent page-by-page recount in
+`test/rules/health-metrics.test.ts:45` the CHECK-83 claim,
+`test/rules/health-metrics.test.ts:208` the partition,
+`test/rules/health-metrics.test.ts:239` the empty census,
+`test/rules/health-metrics.test.ts:260` site-level isolation,
+`test/rules/health-metrics.test.ts:282` the remainder,
+`test/rules/health-metrics.test.ts:446` the cap);
+`test/rules/copy.test.ts:898`, `test/rules/copy.test.ts:931`,
+`test/rules/copy.test.ts:946`, `test/rules/copy.test.ts:972`,
+`test/rules/copy.test.ts:999` (the copy contracts — including the CHECK-83
+statement, the assertion that the retired filing disclaimer is GONE rather than
+merely superseded, and "grades nothing");
+`test/rules/coverage.test.ts:247` (the re-file in both directions: site.health
+carries CHECK-83, CHECK-32 keeps all three of its original claimants, and
+CHECK-83 is outside the crawl-derived universe);
+`test/fixtures/harness.test.ts:1770` (an independent page-by-page recount in
 JavaScript over the end-to-end fixture crawl).
 
 ---
@@ -574,10 +696,10 @@ reports every rule `persisting` and every change zero, which a dashboard would
 paint as "nothing changed on this site") and it is not an error state worth
 showing a user.
 
-Pinned: `test/api/query.test.ts:2173` onwards (31 tests: the arithmetic, the
+Pinned: `test/api/query.test.ts:2373` onwards (31 tests: the arithmetic, the
 per-URL collapse, every caveat, every refusal, and
-`test/api/query.test.ts:2587`, the drill-down making the summary's refusals);
-`test/api/mcp.test.ts:1312` and `test/api/mcp.test.ts:1452`.
+`test/api/query.test.ts:2787`, the drill-down making the summary's refusals);
+`test/api/mcp.test.ts:1408` and `test/api/mcp.test.ts:1548`.
 
 **Measured, not fixtured** (2026-09-01, `crawl_3f3ab847` → `crawl_02ff6f7a`):
 22 rules, `comparable: false` with both caveats, both invariants true on all 22
@@ -628,7 +750,7 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:2645` and `test/api/query.test.ts:2680`.
+  `test/api/query.test.ts:2645` and `test/api/query.test.ts:2888`.
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the
   two hostnames the caller asked about.
@@ -670,9 +792,17 @@ Three postures a Talos integrator should know about rather than discover:
   worth. It measures.
 - **No prioritisation beyond rule severity.** The priority split a dashboard
   renders is engine severity, which is a property of the rule, not of this site.
-- **No resource fetching until Phase 11.** Images, CSS and JS are not fetched,
-  so there is no image weight, no broken-resource finding and no page-weight
-  metric. An absent finding here means *not measured*.
+- **No resource fetching beyond images, CSS and JS.** Those three are fetched
+  since Phase 11 — HEAD first, metadata only, under the page crawl's own
+  politeness. Fonts, media, favicons and anything a stylesheet's own `@import`
+  or `url()` names are NOT, and neither is anything JavaScript injects at
+  runtime: only the SERVED HTML's references are seen at all. **No bodies are
+  stored and no image is decoded**, so nothing here says whether an image is
+  over-compressed or larger than the box it is displayed in.
+- **No resource fetching at all when the operator says so.** `fetchResources:
+  false` at `crawl_start` means the pass never runs; the references are still
+  recorded, every one of them stays unasked, and `crawl_status` says which
+  (§4.2, §5.3). An absent resource finding on such a crawl means *not measured*.
 - **No model names, no narrative, no recommendations beyond the rule's own
   `howToFix` copy.**
 - **No webhooks, no scheduling, no cron.** `crawl_status` polling is the
@@ -686,11 +816,18 @@ Three postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (0.7.0) stamps **judgement**: bump it when a rule's verdict or
+`RULESET_VERSION` (0.8.0) stamps **judgement**: bump it when a rule's verdict or
 copy changes. Adding a rule or a metric family adds rows without changing a
 verdict, and Phase 10 held 0.7.0 on exactly that argument — `metrics` rows carry
 no version column at all, so a bump would have been a claim about findings that
 did not move.
+
+**Phase 11 bumped once, to 0.8.0**, and the bump covers the whole phase: six new
+rules a page or a site could not receive a verdict from before, plus
+`site.health`'s re-filing and the copy change that came with it (§6). One bump
+per phase is the house rule — the version is what a consumer compares crawls by
+(§7.2), and two bumps inside one unreleased phase would be two version numbers
+describing the same change.
 
 Three consequences a consumer must plan for:
 
@@ -705,7 +842,7 @@ Three consequences a consumer must plan for:
 2. **A malformed truncation note is a 500, not a dropped field.** If a rule
    writes a note naming neither `total` nor `atLeast`, the issues surface fails
    loudly rather than answering with a bare `count` a reader would take as the
-   total (`test/api/query.test.ts:941`). Same family of decision as the 409: the
+   total (`test/api/query.test.ts:1003`). Same family of decision as the 409: the
    engine refuses to answer rather than answer wrongly.
 3. **Copy is always today's.** Every surface joins titles, explanations and
    `howToFix` from the current registry at read time; nothing is stored twice.
@@ -729,6 +866,7 @@ rows**; the header is always written and never counted.
 | `links_to_4xx` | source, target, status, anchorText | one internal link to a 4xx page | 99 rows |
 | `anchor_texts` | source, target, text | one link, internal or external | 35,145 rows / 4,664,393 B |
 | `redirects` | source, chain, target, hops | one **redirecting page** | 10 rows |
+| `resources` | url, kind, fetchClass, status, bytes, bytesSource, contentType, cacheControl, fetchReason, referencingPages | one **file** the served HTML points at | 0 rows (this crawl predates the pass) |
 
 Semantics a consumer must repeat to its own users:
 
@@ -739,6 +877,22 @@ Semantics a consumer must repeat to its own users:
 - **`redirects` is one row per redirecting page, not per chain.** `a → b → c` is
   two rows and `c` appears in both; `hops` counts from the row's own source. The
   row count is how many URLs redirect, never how many chains there are.
+- **`resources` is one row per FILE, off the SERVED HTML.** An image four
+  hundred pages carry is one row with `referencingPages: 400`, not four hundred
+  rows — the file is the unit of work, and the fix is made once. Two absences
+  follow, on exactly the `links_to_4xx` pattern: a file that JAVASCRIPT injects
+  at runtime was never in the served HTML and is **absent from this file rather
+  than clean**, so an empty export says "the server sent no references" and never
+  "this site loads no assets"; and fonts, media, favicons and anything a
+  stylesheet's own `@import` names are out of scope entirely.
+- **In `resources`, read `fetchClass` before `status`.** An empty `status` cell
+  has four meanings and only one of them is a fault: never asked, refused by our
+  own URL policy, put out of reach by robots.txt, or asked with no answer.
+  `fetchClass` is the discriminator (empty = seen, not asked — §5.3) and
+  `fetchReason` is the sentence. `bytesSource` rides beside `bytes` for the
+  smaller version of the same point: `header` is the server's claim and `counted`
+  is our measurement, and a weight built from both without saying so has two
+  provenances in one number.
 - **The `evidence` cell is a bounded summary, not the evidence.** It is
   flattened to `key=value; key=value` (dotted paths, sorted keys, `|` for a
   scalar list) and capped at 12 leaves / 120 chars per value / 500 chars per
@@ -749,7 +903,9 @@ Semantics a consumer must repeat to its own users:
 - **Formula injection is guarded uniformly:** a cell whose first non-whitespace
   character is `= + - @` is written with a leading apostrophe, before RFC 4180
   quoting. The trade is deliberate — a negative number would render `'-3`; no
-  column in these six views emits one.
+  column in these seven views emits one. It is not a text-column guard: a
+  `Cache-Control` header is the server's own string and lands in a cell exactly
+  as a page title does, which is what `test/api/query.test.ts:2065` asserts.
 - **No BOM**, `\r\n` line endings, RFC 4180 quoting. Excel on a non-UTF-8
   Windows locale may mangle accents on a double-click; every parser and pipeline
   reads the first header cell correctly, which is the trade that was chosen.
@@ -764,24 +920,45 @@ Semantics a consumer must repeat to its own users:
   first-touch allocation, which is why `issues` shows ~2–7 MB depending on
   ordering).
 
-Pinned: `test/api/csv.test.ts` (23 unit tests: the writer, the guard, the
-flattening, the SQL keyset pins); `test/api/query.test.ts:1801`,
-`test/api/query.test.ts:1889`
-(injection), `test/api/query.test.ts:1902` (quoting),
-`test/api/query.test.ts:1915` (row counts equal the sources),
-`test/api/query.test.ts:1948`
-(cursor walk), `test/api/query.test.ts:1983` (the refusal matrix),
-`test/api/query.test.ts:2053` (the retired-rule refusal
-before the header), `test/api/http.test.ts:1363` (the tear, distinguished from
-`end()`); `test/api/mcp.test.ts:663` and `test/api/mcp.test.ts:1681`.
+Pinned: `test/api/csv.test.ts` (25 unit tests: the writer, the guard, the
+flattening, the SQL keyset pins, and the seven-view vocabulary);
+`test/api/query.test.ts:1939` (every view's header and its rows),
+`test/api/query.test.ts:2029` (the resources view's four unfetched spellings),
+`test/api/query.test.ts:2065` (injection, including a hostile `Cache-Control`),
+`test/api/query.test.ts:2086` (quoting),
+`test/api/query.test.ts:2099` (row counts equal the sources — for `resources`,
+against BOTH of its tables: one row per file, and the referencing counts summing
+to the edge table), `test/api/query.test.ts:2148` (cursor walk, over every view),
+`test/api/query.test.ts:2183` (the refusal matrix),
+`test/api/query.test.ts:2253` (the retired-rule refusal before the header),
+`test/api/http.test.ts:1363` (the tear, distinguished from `end()`);
+`test/api/mcp.test.ts:693` (the description's claims) and
+`test/api/mcp.test.ts:2124` (the resources view, byte for byte across the two
+transports).
 
 ---
 
-## 13. Known limits, and what Phase 11 changes
+## 13. Known limits
 
-- No resource fetching (§10) — Phase 11, with its own plan and gate.
-- `site.health`'s `CHECK-32` filing is a temporary bridge; the eventual home is
-  an owner-designed check about engine coverage (§6).
+- Resource fetching covers images, CSS and JS only, from the SERVED HTML, and
+  stores metadata rather than bodies (§10). Nothing decodes an image, so no
+  surface says whether one is over-compressed or oversized for its box.
+- **The per-page reference cap is not counted anywhere.** The analyzer records at
+  most 2,000 resource references per page and drops the rest silently. Deriving
+  "how many pages hit it" costs a scan of every reference the crawl holds — 73 ms
+  over a 500,000-edge crawl, against a polling endpoint whose other reads are
+  ≤ 3 ms (measured 2026-09-02 on a synthetic crawl, since deleted) — so it is
+  deliberately NOT on `crawl_status`. On a page with an enormous gallery or
+  script list, read `resources.seen` as a floor. A counter would need a column,
+  and Phase 11's one schema event was migration 0013.
+- **`resources.uncached` reads two headers only** — `Cache-Control` and
+  `Expires`. No ETag, no `Age`, no `Last-Modified`, and no CDN edge policy. And
+  the HTML documents' OWN cache headers are not stored at all: `resources` covers
+  assets, `pages` has no such column.
+- `page.weight` is a range rather than a number, and both bounds are stated in
+  its copy: a CEILING (an `<img>` offering both `src` and `srcset` contributes
+  both files while a browser downloads one) and a FLOOR (any referenced file that
+  went unweighed adds nothing to the sum).
 - `urlsWithCritical` stays near-empty until a crawl renders a large share of its
   pages: two of the three `critical` rules judge only rendered pages, and the
   third fires outside the census (§6).
@@ -797,5 +974,7 @@ before the header), `test/api/http.test.ts:1363` (the tear, distinguished from
 
 - `docs/talos-integration.md` — why the seam exists, the six obligations, and
   what Talos must eventually do.
-- `docs/gates/phase-10.md` — the measurements behind every number in this file.
+- `docs/gates/phase-10.md` — the measurements behind the Phase 10 numbers in
+  this file. Phase 11's gate document is T5's and is not written yet; the Phase
+  11 numbers here name the test or the measurement they came from instead.
 - `skills/ariadne-audit/checklist.md` — the checks the rules trace to.

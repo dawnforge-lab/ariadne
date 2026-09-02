@@ -254,8 +254,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
-        "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount and " +
-        "pagesScanned.\n\n" +
+        "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount, " +
+        "pagesScanned, fetchResources and resources.\n\n" +
         "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
         "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
         "complete pass is on record — never judged, being judged right now, or " +
@@ -284,6 +284,32 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "uncapped for a billed audit, or the number that was set. It is here so a " +
         "caller that passed findingCap to crawl_start can confirm it took — the cap " +
         "lives on the crawl row and crawl_rules has no argument to restate it.\n\n" +
+        "resources is what this crawl knows about the images, stylesheets and " +
+        "scripts its pages reference, COUNTED OFF THE DATABASE rather than off any " +
+        "one pass's report — which matters because a resumed crawl's pass asks only " +
+        "the rows still unfetched and would honestly report fetching nothing. seen " +
+        "is every distinct file the pages point at; fetched is the files a server " +
+        "answered about; failed is the files it could not answer for (a 4xx or 5xx, " +
+        "a request that failed, a URL our own policy refused, a file robots.txt put " +
+        "out of reach) — a count of files that could not be WEIGHED, not a count of " +
+        "broken files, which is what the resources.broken finding judges. skipped is " +
+        "SEEN BUT NOT ASKED: the pass has not run, was interrupted, hit a cap, or was " +
+        "turned off. fetched + failed + skipped = seen, always.\n\n" +
+        "Two fields beside them say what a bare number would hide. robotsDenied is " +
+        "the part of failed that robots.txt put out of reach — READ IT CAREFULLY: an " +
+        "unreachable robots.txt is a complete disallow (RFC 9309), so a CDN that was " +
+        "down while the pass ran looks exactly like a CDN that forbids us. Which one " +
+        "it was is in each row's fetchReason, on the resources CSV view " +
+        "(export_crawl, format=csv, view=resources); this count does not read that " +
+        "sentence. capped is true when a per-crawl cap stopped the pass short of at " +
+        "least one file — one flag for both caps, because the row records one reason " +
+        "whichever cap it was.\n\n" +
+        "fetchResources says whether this crawl asked at all: true is the default and " +
+        "false is an operator's decision, echoed here so it can be confirmed. false " +
+        "beside fetched 0 is 'nobody asked'; true beside fetched 0 is a pass that has " +
+        "not run or could not finish. On a crawl older than the resource tables every " +
+        "number here is 0, which is not 'this site references no files' — the " +
+        "resources.not-recorded finding is what says so.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
@@ -964,14 +990,22 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "dotted paths for nested objects (truncated.total=222), indices for arrays " +
         "of objects, long values clipped with '…' and the remainder counted as " +
         "'+N more'. The whole evidence stays on issues_list and issue_urls.\n" +
-        "TWO VIEWS MEAN SOMETHING NARROWER THAN THEIR NAME, and quoting either " +
+        "THREE VIEWS MEAN SOMETHING NARROWER THAN THEIR NAME, and quoting any " +
         "one wrongly misreports the site. links_to_4xx is INTERNAL links only: " +
         "the status comes from the target's own crawled page row, and an external " +
         "target is never fetched, so an external 4xx is ABSENT from this file " +
         "rather than clean. redirects is one row per REDIRECTING PAGE, not per " +
         "chain: a -> b -> c is two rows and the destination appears in both, so " +
         "the row count is how many URLs redirect and never how many chains there " +
-        "are.\n" +
+        "are. resources is one row per FILE the SERVED HTML points at, not per " +
+        "reference and not per request a browser makes: an image on four hundred " +
+        "pages is one row with referencingPages 400, and a file a script injects " +
+        "at runtime is absent from this file rather than clean, so an empty export " +
+        "is 'the server sent no references' and never 'this site loads no assets'. " +
+        "Read its fetchClass column before its status: an empty status means the " +
+        "file was never asked about, refused by our own URL policy, put out of " +
+        "reach by robots.txt, or asked about with no answer — none of which is a " +
+        "broken file, and fetchReason is the sentence that says which.\n" +
         "Cells beginning '=', '+', '-' or '@' are written with a leading apostrophe. " +
         "A crawled page's title is attacker-controlled text and these files open in " +
         "Excel at somebody's desk; the apostrophe is what stops a title being " +
@@ -1149,6 +1183,23 @@ function crawlStartShape() {
           "100,000-pair scan ceiling that findingCap cannot lift (it is the engine's " +
           "memory contract), and a site that reaches it gets the usual 'at least' note " +
           "— which is itself the finding: that site has no distinct content.",
+      )
+      .optional(),
+    fetchResources: z
+      .boolean()
+      .describe(
+        "Whether the crawl asks the site about the files its pages point at — the " +
+          "images, stylesheets and scripts. Defaults to true, and true is what an " +
+          "audit wants: it is the only source of image weight, broken-resource and " +
+          "page-weight evidence. Pass false to crawl the pages and ask about no file " +
+          "at all — a client who asked us not to touch their CDN, or a re-crawl that " +
+          "only needs the page census. It does NOT stop the references being " +
+          "recorded: crawl_status still reports resources.seen, because reading " +
+          "markup costs the site nothing. What it stops is the asking, and every " +
+          "unasked row says the operator chose so, so a silent images.oversized on " +
+          "such a crawl reads as 'nothing was weighed' rather than 'nothing is " +
+          "heavy'. The pass runs under the same politeness the page crawl earned; " +
+          "turning it off is a decision about somebody's servers, not a speed knob.",
       )
       .optional(),
   };

@@ -159,17 +159,24 @@ describe("checklist coverage", () => {
   //   metric  12 + 1 = 13
   //   total   85 + 1 = 86
   //
-  // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE, and here that is a disclosure
-  // rather than a reassurance: `site.health` carries CHECK-32, which THREE rules
-  // already claim — `links.orphan`, `links.orphan-skipped` (the not-measured
-  // marker beside it) and `structure.depth-distribution` — because the checklist
-  // has NO check for a site-wide judgement rollup, and its Evaluation Principle 2
-  // says a crawl summary answers no check at all. The id is a filing decision (a
-  // partition of the page census, where the depth distribution lives), stated as
-  // one in the rule's module header and in the metric's own client-facing copy,
-  // and not a claim that this metric answers the orphan check. The review ruled
-  // it an EXPLICITLY TEMPORARY bridge: the eventual home is an owner-designed
-  // check about the engine's coverage, and the checklist is untouched this phase.
+  // THE CLAIMED-CHECK ARITHMETIC DID NOT MOVE, and here that was a disclosure
+  // rather than a reassurance: `site.health` shipped carrying CHECK-32, which
+  // THREE rules already claim — `links.orphan`, `links.orphan-skipped` and
+  // `structure.depth-distribution` — because the checklist then had NO check for
+  // a site-wide judgement rollup. The id was a FILING decision (a partition of
+  // the page census, where the depth distribution lives) and the review ruled it
+  // an EXPLICITLY TEMPORARY bridge, ledgered with a Phase 11 handoff.
+  //
+  // **P11-T4 discharged that ledger.** The checklist gained CHECK-83 "Engine
+  // coverage and evidence completeness" — the check the audit answers first —
+  // and `site.health` moved onto it. The arithmetic below still does not move,
+  // for two independent reasons worth separating: CHECK-32 keeps all three of
+  // its original claimants, so nothing was dropped from the claimed set; and
+  // CHECK-83 is OUTSIDE `CRAWL_CHECK_IDS` — the build plan's 47 are the
+  // crawl-derived range, and a check about the ENGINE's own coverage is not a
+  // check about the site, exactly as checklist section 12 is not. So it adds
+  // nothing to the pin either. Both directions are asserted below rather than
+  // left to this paragraph.
   // Phase 11 Task 3 adds five QUERY rules and one METRIC, all reading the
   // `resources` and `page_resources` tables migration 0013 created:
   //
@@ -231,6 +238,35 @@ describe("checklist coverage", () => {
       "CHECK-50",
       "CHECK-51",
     ]);
+  });
+
+  // THE OTHER MOVED CLAIM (P11-T4), asserted in every direction the paragraph
+  // above argues it in. A re-file that only changed the id would leave CHECK-32
+  // one claimant short, or leave the coverage check inside a universe it does not
+  // belong to, and neither is visible in any count.
+  it("site.health is filed under the engine-coverage check, and CHECK-32 lost no claimant", () => {
+    const registry = buildRegistry();
+    const byId = new Map(registry.all().map((r) => [r.id, r.checkIds]));
+    expect(byId.get("site.health")).toEqual(["CHECK-83"]);
+
+    // The bridge is gone: no rule of any kind files a crawl summary under the
+    // orphan check any more.
+    const orphanClaimants = registry
+      .all()
+      .filter((r) => r.checkIds.includes("CHECK-32"))
+      .map((r) => r.id)
+      .sort();
+    expect(orphanClaimants).toEqual([
+      "links.orphan",
+      "links.orphan-skipped",
+      "structure.depth-distribution",
+    ]);
+
+    // And CHECK-83 is outside the crawl-derived universe, so nothing about the
+    // 47 moved when it arrived — the section-12 precedent, asserted rather than
+    // assumed.
+    expect(CRAWL_CHECK_IDS).not.toContain("CHECK-83");
+    expect(AGENT_CHECKS).not.toContain("CHECK-83");
   });
 
   // The moved claim, asserted rather than only argued. Both directions: the

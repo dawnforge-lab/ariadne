@@ -36,7 +36,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, metrics, pages } from "../../src/db/schema.js";
+import {
+  crawls, issues, metrics, pageResources, pages, resources,
+} from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
@@ -429,10 +431,38 @@ beforeAll(async () => {
     slug: "blocked", pageType: null, statusCode: 429, indexable: null,
     fetchClass: "blocked", discoveredVia: "link",
   });
-  await seedPage(surfaceCrawlId, {
+  const surfaceHome = await seedPage(surfaceCrawlId, {
     slug: "only-in-sitemap", pageType: "product", statusCode: 200, indexable: true,
     discoveredVia: "sitemap", renderableWordCount: 200,
   });
+  // Three referenced files, one on each side of the coverage block's splits: a
+  // file the pass weighed, a file robots.txt put out of reach, and a file a cap
+  // never reached. Without them `crawl_status`'s resources block and the
+  // resources CSV view would be compared across the two transports as three
+  // zeroes and a header row — an equality of nothing.
+  await db.insert(resources).values([
+    {
+      crawlId: surfaceCrawlId, url: `${SEEDED_SITE}/theme.css`, kind: "css",
+      fetchClass: "ok", statusCode: 200, contentType: "text/css", bytes: 8_192,
+      bytesSource: "header", cacheControl: "public, max-age=31536000",
+      fetchedAt: new Date(), fetchMs: 11,
+    },
+    {
+      crawlId: surfaceCrawlId, url: "https://cdn.mcp-query.example/hero.png",
+      kind: "image", fetchClass: "robots_denied",
+      fetchReason: "robots.txt unreachable (503): complete disallow",
+      fetchedAt: new Date(),
+    },
+    {
+      crawlId: surfaceCrawlId, url: `${SEEDED_SITE}/app.js`, kind: "js",
+      fetchClass: null, fetchReason: "resource-cap",
+    },
+  ]);
+  await db.insert(pageResources).values([
+    { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: `${SEEDED_SITE}/theme.css` },
+    { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: "https://cdn.mcp-query.example/hero.png" },
+    { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: `${SEEDED_SITE}/app.js` },
+  ]);
 
   // The judged crawl: the same kind of rows, plus the marker. Its `title.missing`
   // is exact and its `links.orphan` was capped, so the catalog has both a
@@ -673,6 +703,12 @@ describe("the tool surface", () => {
       // chains has misreported the site from a file that is itself correct.
       "INTERNAL links only",
       "one row per REDIRECTING PAGE",
+      // The third of them, added with the resources view: one row per FILE, off
+      // the SERVED HTML, so an empty export is "the server sent no references"
+      // and an empty status is not a broken file.
+      "one row per FILE",
+      "the SERVED HTML points at",
+      "Read its fetchClass column before its status",
     ]) {
       expect(description, `export_crawl does not say '${claim}'`).toContain(claim);
     }
@@ -866,6 +902,66 @@ describe("crawl_status / crawl_list", () => {
     // A seeded row no crawl loop ever ran: null means "never reported", which
     // is a different fact from a spacing of 0.
     expect(detail["hostSpacingMs"]).toBeNull();
+  });
+
+  // THE RESOURCE COVERAGE BLOCK, over the agent transport. Both halves: the
+  // numbers, and the crawl-level echo that says whether anybody asked at all.
+  it("answers the resource census and whether the crawl asked for it", async () => {
+    const detail = await ok("crawl_status", { crawlId: surfaceCrawlId });
+    expect(detail["resources"]).toEqual({
+      seen: 3, fetched: 1, failed: 1, skipped: 1, robotsDenied: 1, capped: true,
+    });
+    // Nobody turned it off, so the resolved default is reported — which is what
+    // makes `fetched: 1` readable as a measurement rather than as a decision.
+    expect(detail["fetchResources"]).toBe(true);
+
+    // A crawl holding no resource rows answers the block all the same: zeroes
+    // are a measurement, and an absent block would leave "this crawl was written
+    // before the tables existed" indistinguishable from "this site has no files".
+    const bare = await ok("crawl_status", { crawlId: seededCrawlId });
+    expect(bare["resources"]).toEqual({
+      seen: 0, fetched: 0, failed: 0, skipped: 0, robotsDenied: 0, capped: false,
+    });
+  });
+
+  // THE DESCRIPTION, AT BOTH LAYERS. An agent reads the tool's description for
+  // what the answer means and the field's for what it may send, and a number
+  // whose meaning is only in this repository's source is a number that gets
+  // quoted wrongly to a client.
+  it("tells an agent what the resource numbers mean, and what they do not", async () => {
+    const listedStatus = await client.listTools();
+    const text = listedStatus.tools.find((t) => t.name === "crawl_status")?.description ?? "";
+    expect(text, "crawl_status has no description").not.toBe("");
+    for (const field of ["seen", "fetched", "failed", "skipped", "robotsDenied", "capped"]) {
+      expect(text, `crawl_status's description does not name '${field}'`).toContain(field);
+    }
+    // The arithmetic a consumer may rely on.
+    expect(text).toContain("fetched + failed + skipped = seen");
+    // Where the numbers come from, which is the T2 warning made public: a
+    // resumed pass reports fetching nothing and the DATABASE is the truth.
+    expect(text).toContain("COUNTED OFF THE DATABASE");
+    // The two readings a bare count would hide.
+    expect(text).toContain("SEEN BUT NOT ASKED");
+    expect(text).toContain("not a count of broken files");
+    // The robots trap: unreachable is a complete disallow, so the count cannot
+    // tell "they said no" from "we could not ask".
+    expect(text).toContain("unreachable robots.txt is a complete disallow");
+    expect(text).toContain("fetchReason");
+    // And the off switch's echo, with both readings of a zero spelled out.
+    expect(text).toContain("fetchResources");
+    expect(text).toContain("false beside fetched 0");
+
+    const listed = await client.listTools();
+    const schema = listed.tools.find((t) => t.name === "crawl_start")?.inputSchema as {
+      properties?: Record<string, { description?: string }>;
+    };
+    const field = schema?.properties?.["fetchResources"]?.description ?? "";
+    expect(field, "crawl_start does not describe fetchResources").not.toBe("");
+    // Defaults on, and the one thing turning it off does NOT do.
+    expect(field).toContain("Defaults to true");
+    expect(field).toContain("resources.seen");
+    // And the sentence that stops a silent rule being read as a clean site.
+    expect(field).toContain("nothing was weighed");
   });
 
   it("refuses a crawl id nothing knows", async () => {
@@ -1857,6 +1953,19 @@ describe("the two transports answer with one shape", () => {
         substantial: (b) => b["crawlId"] === seededCrawlId,
       },
       {
+        // The SAME tool on a crawl that carries resource rows. The pair above
+        // compares a crawl whose whole resources block is zeroes, which would
+        // let a transport drop or rename any of its six numbers and still
+        // agree; this one has a file on each side of every split it makes.
+        tool: "crawl_status",
+        args: { crawlId: surfaceCrawlId },
+        path: `/crawls/${surfaceCrawlId}`,
+        substantial: (b) => {
+          const r = b["resources"] as Record<string, number> | undefined;
+          return r !== undefined && r["seen"] === 3 && r["robotsDenied"] === 1;
+        },
+      },
+      {
         tool: "crawl_list",
         args: { siteUrl: `http://www.mcp-compare.example/`, limit: 50 },
         path: `/crawls?siteUrl=${encodeURIComponent("http://www.mcp-compare.example/")}&limit=50`,
@@ -1917,7 +2026,7 @@ describe("the two transports answer with one shape", () => {
     // (query.test.ts): a NEW read tool must be added here or it ships with no
     // cross-transport guarantee, and the count pin below is what makes a
     // silently deleted pair fail rather than shrink the loop.
-    expect(pairs()).toHaveLength(12);
+    expect(pairs()).toHaveLength(13);
     for (const pair of pairs()) {
       const viaTool = await ok(pair.tool, pair.args);
       const viaHttp = await get(pair.path);
@@ -2007,6 +2116,30 @@ describe("the two transports answer with one shape", () => {
     // The MCP answer says where the file is; the HTTP answer IS the file.
     expect(Object.keys(written).sort()).toEqual(["bytes", "format", "path", "rows", "view"]);
     expect(streamed.body).toBeNull();
+  });
+
+  // The same claim for the view P11-T4 added. A new view is a new pair of code
+  // paths — the tool's file writer and the route's chunked stream — and the one
+  // that ships wrong is the one nobody compared.
+  it("streams the resources view byte for byte, as it writes it", async () => {
+    const written = await ok("export_crawl", {
+      crawlId: surfaceCrawlId, format: "csv", view: "resources",
+    });
+    const file = readFileSync(String(written["path"]), "utf8");
+    const streamed = await get(`/crawls/${surfaceCrawlId}/export?format=csv&view=resources`);
+
+    expect(streamed.status).toBe(200);
+    expect(streamed.text).toBe(file);
+    // A header and the crawl's three files, with the empty cells that make an
+    // unfetched row readable rather than absent.
+    const lines = file.trimEnd().split("\r\n");
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe(
+      "url,kind,fetchClass,status,bytes,bytesSource,contentType,cacheControl," +
+        "fetchReason,referencingPages",
+    );
+    expect(written["rows"]).toBe(3);
+    expect(file).toContain(",resource-cap,1");
   });
 });
 

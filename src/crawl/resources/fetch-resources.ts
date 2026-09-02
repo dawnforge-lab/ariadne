@@ -154,6 +154,30 @@ export type ResourceFetchClass = (typeof RESOURCE_FETCH_CLASSES)[number];
 export const RESOURCE_CAP_REASON = "resource-cap";
 
 /**
+ * The reason a row carries when the OPERATOR turned the pass off
+ * (`CrawlConfig.fetchResources: false`, P11-T4).
+ *
+ * ## Why the rows exist at all, and why they are stamped
+ *
+ * Turning the pass off does not turn the ANALYZER off: the page parse still
+ * emits the references and `PageWriter` still records them, because that costs
+ * nobody a request and the census — how many distinct files this site's HTML
+ * points at — is real evidence in its own right. What is off is the asking.
+ *
+ * So the rows sit there with a null `fetch_class`, which on its own is
+ * indistinguishable from a pass that was interrupted, from a crawl that predates
+ * the pass, and from a cap that stopped short. Those are four different
+ * sentences about our evidence and a reader has to be able to tell them apart
+ * (hard rule 7), so the decision is written on every row it applies to — the
+ * same discipline `RESOURCE_CAP_REASON` follows, for the same reason.
+ *
+ * It is deliberately NOT a `fetch_class`: no fetch was attempted and no verdict
+ * was reached, so the null stands and the reason explains it. A rule that judges
+ * a resource still sees "unknown", which is exactly right.
+ */
+export const RESOURCE_OFF_REASON = "resource-fetch-off";
+
+/**
  * The budgets, and why they are these numbers.
  *
  * `maxResources` 10_000: a 3000-page site of the kind this engine is built for
@@ -775,6 +799,33 @@ export async function fetchCrawlResources(
     cappedByHosts,
     aborted,
   };
+}
+
+/**
+ * Write the operator's decision onto every row this crawl will not ask about —
+ * what runs INSTEAD of the pass when `CrawlConfig.fetchResources` is false.
+ *
+ * One statement, and it touches only rows nothing has decided anything about:
+ * `fetch_class is null and fetch_reason is null`. That makes it idempotent (a
+ * resume re-stamps nothing) and keeps it off a row a cap already claimed — a
+ * shape that cannot arise today, since a crawl configured with the pass off
+ * never ran one, and asserted by the predicate rather than by that argument.
+ *
+ * Returns how many rows it stamped, so the caller can say so.
+ */
+export async function markResourcesNotAsked(db: Db, crawlId: string): Promise<number> {
+  const stamped = await db
+    .update(resources)
+    .set({ fetchReason: RESOURCE_OFF_REASON })
+    .where(
+      and(
+        eq(resources.crawlId, crawlId),
+        isNull(resources.fetchClass),
+        isNull(resources.fetchReason),
+      ),
+    )
+    .returning({ url: resources.url });
+  return stamped.length;
 }
 
 /** A verdict with nothing to report but the reason. */

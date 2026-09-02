@@ -19,6 +19,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pageResources, pages, resources } from "../../src/db/schema.js";
+import { RESOURCE_OFF_REASON } from "../../src/crawl/resources/fetch-resources.js";
 import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
 import {
   BROKEN_SAMPLE_RESOURCES,
@@ -672,6 +673,39 @@ describe("resourceRules against the database", () => {
         [{ url: "/img/a.svg", on: ["/a"] }],
       );
       expect(await run("resources.not-recorded", crawlId)).toEqual([]);
+    });
+
+    // THE OFF-SWITCH BOUNDARY (P11-T4), asserted so it is a decision rather
+    // than a discovery. A crawl started with `fetchResources: false` records
+    // every reference and asks about none of them, so the rows exist, the
+    // marker's condition (`resourcesSeen == 0`) is false, and it stays silent —
+    // while the four judging rules above are silent too, because every row is
+    // unfetched and an unfetched resource is unknown rather than fine.
+    //
+    // That combination — four quiet rules and no marker — is deliberate and it
+    // is NOT a rule that always passes. The reason it is safe is that the fact
+    // lives one surface over, where the auditor is told to look first: the rows
+    // carry `fetch_reason: 'resource-fetch-off'`, `crawl_status` echoes
+    // `fetchResources: false` beside `resources.skipped == seen`, and CHECK-83
+    // is answered before any check these rules claim. Widening the marker to
+    // cover this case would change when a rule fires, which is a verdict change
+    // and a ruleset bump; it is written up in the T4 report as the alternative
+    // that was weighed and left to the owner.
+    it("stays silent when the operator turned the pass off, because the rows exist", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 3 }],
+        [{ url: "/img/a.png", on: ["/a"], fetchClass: null, fetchReason: RESOURCE_OFF_REASON }],
+      );
+      expect(await run("resources.not-recorded", crawlId)).toEqual([]);
+      // And the judging rules say nothing about a file nobody asked about.
+      for (const id of [
+        "resources.broken",
+        "images.oversized",
+        "images.legacy-format",
+        "resources.uncached",
+      ]) {
+        expect(await run(id, crawlId), id).toEqual([]);
+      }
     });
 
     it("is silent on a crawl whose pages genuinely reference nothing", async () => {

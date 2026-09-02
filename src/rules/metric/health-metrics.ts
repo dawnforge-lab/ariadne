@@ -20,37 +20,34 @@
  * would be the engine passing judgement, which is the agent's job in the audit
  * product and the UI's job in the Talos one.
  *
- * ## THE CHECKLIST CLAIM IS STRUCTURAL, NOT SEMANTIC — read this before
- * quoting `checkIds`
+ * ## THE CHECKLIST CLAIM — CHECK-83, and it is the check this row is about
  *
  * Hard rule 10 says a rule carries the checklist ids it answers, and
- * `defineRule` enforces at least one. **No check in
- * `skills/ariadne-audit/checklist.md` asks for a site-wide judgement rollup** —
- * the file was read end to end for this rule, all 81 checks, and the closest
- * thing to a statement about one is Evaluation Principle 2, which says the
- * opposite: "Never answer a check from a crawl summary. Use the source the
- * check names." This row IS a crawl summary. An auditor walking the checklist
- * should never reach a verdict from it.
+ * `defineRule` enforces at least one. This row is a rollup of the AUDIT'S OWN
+ * FINDINGS: how far the judgement reached across the pages the crawl could
+ * judge, and how many pages it could not judge at all. That is a statement about
+ * the engine's coverage of the site, which is exactly what CHECK-83 "Engine
+ * coverage and evidence completeness" asks for — the check the audit answers
+ * FIRST, because every later verdict is a verdict about the evidence CHECK-83
+ * describes.
  *
- * It is filed under CHECK-32 because that is where the checklist keeps a
- * PARTITION OF THE PAGE CENSUS: `structure.depth-distribution` sits there,
- * counting the same pages into depth buckets with one bucket (unreachable)
- * carrying the meaning, which is this row's shape exactly. That is a filing
- * decision and nothing more. **It is not a claim that this metric answers the
- * orphan check**, and an agent must not quote it as one. The alternatives were
- * to invent a checklist check for a dashboard feature (the audit product does
- * not change in this phase — owner decision 5) or to weaken `defineRule`'s
- * one-check-minimum (which would put a hole in rule 10's guard for every future
- * rule, and would break the `rules_catalog` contract that every rule carries at
- * least one check id). Both were rejected.
+ * Evaluation Principle 2 still binds, and the copy still says so: "Never answer
+ * a check from a crawl summary. Use the source the check names." A reader must
+ * not reach a verdict on CHECK-22 or CHECK-35 from this table. What is different
+ * from every other metric here is that CHECK-83's own subject IS the crawl
+ * summary, so this row is that check's evidence rather than a summary standing
+ * in for one.
  *
- * **THE CHECK-32 CLAIM IS EXPLICITLY TEMPORARY** (Phase 10 T2 review ruling,
- * ledgered with a Phase 11 handoff). It is a bridge, not a resting place: the
- * eventual home is a checklist check the OWNER designs, about the engine's own
- * coverage of the site rather than about site health, and the checklist stays
- * untouched this phase. When that check exists this claim moves to it in one
- * line — the id is stated in exactly two places, here and the `metricRule` call
- * at the foot of this file, and pinned by this rule's metadata test.
+ * **HISTORY, because the claim moved and a reader of an older crawl will meet
+ * the old one.** Phase 10 shipped this metric carrying CHECK-32 — a FILING
+ * decision, made because the checklist then had no check for a site-wide
+ * judgement rollup and CHECK-32 was where a partition of the page census lived
+ * (`structure.depth-distribution` sits there). The Phase 10 T2 review ruled that
+ * bridge explicitly temporary and ledgered the handoff; Phase 11 added CHECK-83
+ * and this claim moved to it, in one line, exactly as ledgered. A crawl judged
+ * under 0.7.0 has findings and metrics written when the id was CHECK-32; the
+ * copy is joined at read time, so such a crawl is DESCRIBED by today's filing
+ * (`docs/talos-surface.md` §7.3).
  *
  * ## The census, and what is outside it
  *
@@ -274,9 +271,10 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
 }
 
 export const healthMetrics: MetricRule[] = [
-  // CHECK-32 is a FILING decision, not an answer to the orphan check — see the
-  // module header, which states what no checklist check asks for.
-  metricRule("site.health", ["CHECK-32"], "crawl", async (db, crawlId, self) =>
+  // CHECK-83 is the check this table is ABOUT — see the module header. It was
+  // filed under CHECK-32 for one phase, as an explicitly temporary bridge, while
+  // no check existed for the engine's own coverage.
+  metricRule("site.health", ["CHECK-83"], "crawl", async (db, crawlId, self) =>
     siteHealth(db, crawlId, self),
   ),
 ];
