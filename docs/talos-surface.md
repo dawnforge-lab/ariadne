@@ -402,7 +402,7 @@ Pinned: `test/api/query.test.ts:1589`, `test/api/query.test.ts:1631`,
 `test/api/query.test.ts:1681` (null on an unjudged crawl holding rows),
 `test/api/query.test.ts:1698` (the floor, agreeing
 with `issues_list`), `test/api/query.test.ts:1737` (marker and counts read in one statement);
-`test/api/mcp.test.ts:1263` and `test/api/mcp.test.ts:1345`.
+`test/api/mcp.test.ts:1329` and `test/api/mcp.test.ts:1392`.
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
 
