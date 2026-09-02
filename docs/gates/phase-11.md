@@ -766,8 +766,12 @@ Commits, in order:
 
 ## 14. Integration, and what Phase 12 inherits
 
-**CI: _(PR #10, run link to be added when the branch is pushed on the owner's
-word)_** — the phase-8/9/10 pattern: this line carries the green run's link.
+**CI: GREEN, first try** — PR #10
+(https://github.com/dawnforge-lab/ariadne/pull/10), run
+https://github.com/dawnforge-lab/ariadne/actions/runs/33611269501 (3m44s,
+1,707/1,707 across 70 files). A fresh database: migration 0013 applied from
+nothing, the fixture-built resource pipeline carried the whole weight, and the
+two CI watch items (§11) did not appear.
 
 Phase 12 pointers, in the order they will be met:
 
