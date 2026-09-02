@@ -172,8 +172,10 @@ is untouched on every one.
 **The resume paths, proven.** Pinned:
 
 - `test/crawl/loop.test.ts:935` "resumes each host at its own earned spacing from
-  the per-host map" — the per-host resume, a CDN at its own width and the origin
-  at its own.
+  the per-host map" — the per-host resume: a single mapped host seeded from its
+  own recorded width rather than the crawl-wide value. (The multi-host divergence
+  the map exists for is driven at the gate level — the fixture crawl is
+  single-origin; see the synthetic-seed note in §8.3.)
 - `test/crawl/loop.test.ts:964` "falls back to the crawl-wide spacing when the
   per-host map is null (pre-0015)" — the null-map fallback.
 - `test/crawl/loop.test.ts:994` "re-persists a non-widest host's escalation
