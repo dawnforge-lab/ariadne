@@ -238,11 +238,25 @@ describe("checklist coverage", () => {
   // checks outside the build plan's 47, and all four were already claimed by the
   // rules this marker stands in for. A check explained more completely is not a
   // new claim.
-  it("pins the ruleset split the gate doc reports: 94 rules = 26 page + 54 query + 14 metric", () => {
+  // Phase 14 Task 1 adds ONE query rule: `resources.partial-unknown`, the fourth
+  // and last resource marker (phase-13.md §8 pointer 1). It reports the MIX the
+  // other three each exclude — some rows null, the rest a decided unknown class,
+  // no `ok` and no broken row — so it is mutually exclusive with `not-recorded`
+  // (`seen == 0`), `not-fetched` (`null == seen`) and `all-unknown`
+  // (`decidedUnknown == seen`) by construction, and a NEW verdict rather than a
+  // widened old one, which puts the ruleset bump (0.10.0 -> 0.11.0) in this task.
+  //
+  //   query   54 + 1 = 55
+  //   total   94 + 1 = 95
+  //
+  // THE CLAIMED-CHECK ARITHMETIC STILL DOES NOT MOVE: CHECK-48/49/50/51 are
+  // section-12 checks outside the build plan's 47, and all four were already
+  // claimed by the rules this marker stands in for.
+  it("pins the ruleset split the gate doc reports: 95 rules = 26 page + 55 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(94);
+    expect(registry.all()).toHaveLength(95);
     expect(registry.byKind("page")).toHaveLength(26);
-    expect(registry.byKind("query")).toHaveLength(54);
+    expect(registry.byKind("query")).toHaveLength(55);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -288,6 +302,16 @@ describe("checklist coverage", () => {
     // judging rules go quiet, so the marker that explains their silence must be
     // named in each of their entries.
     expect(byId.get("resources.all-unknown")).toEqual([
+      "CHECK-48",
+      "CHECK-49",
+      "CHECK-50",
+      "CHECK-51",
+    ]);
+    // The fourth marker (P14-T1) claims the same four again, for the same reason:
+    // on a partial pass whose decided rows are all unknown and the rest unasked
+    // the same four judging rules go quiet, so the marker that explains their
+    // silence must be named in each of their entries.
+    expect(byId.get("resources.partial-unknown")).toEqual([
       "CHECK-48",
       "CHECK-49",
       "CHECK-50",

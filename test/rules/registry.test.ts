@@ -128,6 +128,15 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.11.0: Phase 14 Task 1, on ONE ground. `resources.partial-unknown` (T1),
+    // the fourth and last resource marker: a crawl whose census is a MIX — some
+    // rows null, the rest a decided unknown class, and not one `ok` or broken
+    // row — met NO finding at all (the three existing markers each exclude it by
+    // construction), and a re-judge at 0.11.0 gives it one. ADDITIVE like all
+    // three siblings — a new verdict, no existing one moves — and it closes the
+    // window phase-13.md §8 pointer 1 named, one layer in from §10.1's. No
+    // existing copy changed.
+    //
     // 0.10.0: Phase 13 Task 2, on ONE ground. `resources.all-unknown` (T2), the
     // third and last resource marker: a crawl whose every row landed in an
     // unknown class (`refused`, `robots_denied`, `robots_unreachable`,
@@ -201,7 +210,7 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. Phase 9's bump is
     // T2's, above; the phase's other tasks verify rather than bump again.
-    expect(RULESET_VERSION).toBe("0.10.0");
+    expect(RULESET_VERSION).toBe("0.11.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
