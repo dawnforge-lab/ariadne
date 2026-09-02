@@ -1255,10 +1255,10 @@ Three postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (0.9.0) stamps **judgement**: bump it when a rule's verdict or
-copy changes. Adding a rule or a metric family adds rows without changing a
-verdict — `metrics` rows carry no version column at all — which is the argument
-Phase 10 held 0.7.0 on.
+`RULESET_VERSION` (**0.11.0** as of Phase 14) stamps **judgement**: bump it when
+a rule's verdict or copy changes. Adding a rule or a metric family adds rows
+without changing a verdict — `metrics` rows carry no version column at all —
+which is the argument Phase 10 held 0.7.0 on.
 
 **Phase 11 bumped to 0.8.0, once.** Two things in the phase each require it on
 the rule's own terms: six rules writing verdicts a page or a site could not
@@ -1287,6 +1287,16 @@ copy ground as the second, on the metric an auditor reads before quoting any
 JavaScript finding. One number covers all three — the phase ships as one change,
 and two stamps inside it would make `crawl_compare` raise `ruleset-mismatch`
 between crawls that differ by nothing a consumer cares about.
+
+**Phase 13 bumped to 0.10.0 and Phase 14 to 0.11.0, each once, each on the same
+additive ground.** `resources.all-unknown` (Phase 13) and
+`resources.partial-unknown` (Phase 14) are the third and fourth sibling markers
+of §5.3 — new ids firing where nothing fired, never a widened condition on a
+rule already stamped into stored findings, exactly the distinction Phase 12
+drew. Together they complete the marker family's partition of the silent space
+(a crawl whose resources yielded no judgeable answer now carries exactly one
+marker naming why, whatever the mix of unasked and unknown-answer rows). No
+other rule's verdict or copy moved in either phase.
 
 Three consequences a consumer must plan for:
 
