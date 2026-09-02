@@ -76,6 +76,7 @@ import {
   RESOURCE_CAP_REASON,
   RESOURCE_OK_CLASS,
   RESOURCE_ROBOTS_DENIED_CLASS,
+  RESOURCE_ROBOTS_UNREACHABLE_CLASS,
 } from "../crawl/resources/fetch-resources.js";
 // The robots vocabulary from the module that WRITES it, never a copy: a fourth
 // outcome added there must not turn every new crawl's stored evidence into a
@@ -608,6 +609,60 @@ export interface CrawlDetail extends CrawlListItem {
    */
   fetchResources: boolean;
   /**
+   * How many of this crawl's PAGES carried more resource REFERENCES than the
+   * analyzer's cap keeps (2,000 per page) — references turned away, counted
+   * instead of silent (migration 0014, P12-T1).
+   *
+   * REFERENCES, NOT FILES, and the distinction is not pedantry. Past the cap the
+   * analyzer stops resolving, so it cannot know whether a turned-away reference
+   * was a new URL or a repeat of one it already holds. A page whose 2,001st
+   * reference duplicates its first is counted here and lost no file at all. The
+   * field claims what the analyzer can see — a reference dropped unexamined —
+   * and nothing stronger.
+   *
+   * NULL IS NOT ZERO, and the difference is the whole reason the field exists.
+   * Null means nobody counted, which happens three ways: a crawl written before
+   * migration 0014; a crawl still running; and a crawl whose process died before
+   * its first close and was later resumed — the first run's pages went
+   * uncounted with the process that read them, so the null is PERMANENT on that
+   * crawl rather than something the resume repairs (see `closeCrawl`). Zero
+   * means the analyzer read every page of this crawl and none of them lost a
+   * reference — a measurement. A dashboard that renders the two the same way is
+   * telling an operator we checked when we did not (hard rule 7).
+   *
+   * IT IS NOT IN `resources` BELOW, deliberately, and the placement is the
+   * honest one on two counts. It counts PAGES and every number in that block
+   * counts FILES; and it is a value the crawl STAMPED at close, while that
+   * block is read live off the `resources` table in one statement. Filed among
+   * them it would make the block's own contract false.
+   *
+   * IT IS ALSO NOT A DENOMINATOR-SHARING PARTNER OF `pagesCrawled`. This counts
+   * the analyses the page writer was HANDED; `pagesCrawled` is the crawl loop's
+   * own count, closed out from the frontier's settled rows. On a crawl that
+   * analysed the same URL twice — a redirect target reached under its own row,
+   * whose second `pages` insert the `(crawl_id, url)` unique index drops — this
+   * number can legitimately exceed `pagesCrawled`. **Do not render
+   * `resourceRefsCappedPages / pagesCrawled` as a percentage**: the two are read
+   * off different sources and a ratio above 1 is not a bug in either.
+   *
+   * WHAT A NON-ZERO NUMBER MEANS FOR THE NUMBERS BESIDE IT: on those pages
+   * `resources.seen` MAY BE a floor. Some of the turned-away references would
+   * have been files this crawl never recorded, so counts derived from the census
+   * — broken files, uncached files, page weight — may be counts over a sample of
+   * that page's references rather than over all of them. Which it is, on which
+   * page, is not knowable from here: that is the price of taking the signal
+   * where the cap is enforced rather than resolving past it. It is a cap, not a
+   * fault: `imagesTotal` and its siblings stay exact and uncapped, and no
+   * page-level count moved.
+   *
+   * The count is carried rather than derived because Phase 11 measured the
+   * derivation: scanning `page_resources` for it costs 73 ms on a 500,000-edge
+   * crawl, against an endpoint whose other reads are ≤ 3 ms (phase-11.md
+   * §10.1). The analyzer flags the page, `PageWriter` counts the flagged pages
+   * and `closeCrawl` stamps the total.
+   */
+  resourceRefsCappedPages: number | null;
+  /**
    * What this crawl knows about the images, stylesheets and scripts its pages
    * reference — **read live off the `resources` table, never off a pass's
    * summary**.
@@ -619,14 +674,20 @@ export interface CrawlDetail extends CrawlListItem {
    * poller and an auditor are both asking, so these numbers are counted here
    * exactly as `findingsCount` and `blockedPages` are.
    *
-   * The four counts PARTITION the rows — `fetched + failed + skipped == seen` —
+   * THREE counts PARTITION the rows — `fetched + failed + skipped == seen` —
    * and they are read in ONE statement so that stays true of a crawl whose pass
-   * is running while somebody polls it.
+   * is running while somebody polls it. `robotsDenied` and `robotsUnreachable`
+   * are SUBSETS of `failed` and are not part of that arithmetic; the P12-T1
+   * split added a second subset and moved nothing, which is exactly why it
+   * could be additive.
    *
    * On a crawl written before migration 0013 every number here is 0, which is
    * not "this site references no files": that case is what the
    * `resources.not-recorded` finding exists to say, and `rulesRunAt` is what
-   * says whether it could have been written.
+   * says whether it could have been written. A crawl that recorded its files and
+   * asked about none of them — `seen` above zero with `skipped` equal to it —
+   * has the sibling marker `resources.not-fetched` instead (P12-T2), so a reader
+   * of the findings alone is not left to infer either case from a silence.
    */
   resources: {
     /**
@@ -655,21 +716,52 @@ export interface CrawlDetail extends CrawlListItem {
      */
     skipped: number;
     /**
-     * Files a host's robots.txt put out of reach, a subset of `failed`.
+     * Files a host's robots.txt FORBADE — it was read, and it said no. A subset
+     * of `failed`.
      *
-     * ON ITS OWN because it is the number most likely to be misread. An
-     * unreachable robots.txt is a COMPLETE DISALLOW (RFC 9309 §2.3.1.4), so a
-     * CDN that was down while the pass ran shows up here exactly as a CDN that
-     * forbids us — a wall of `robots_denied` that means "we could not ask"
-     * rather than "they said no". Which one it was is in each row's
-     * `fetchReason`, verbatim, on the resources CSV view; this count deliberately
-     * does not parse that sentence, because a count built by matching prose
-     * would go quietly wrong the day the sentence is reworded.
+     * ON ITS OWN because it is the number most likely to be misread, and until
+     * P12-T1 it carried a second meaning it could not signal. An unreachable
+     * robots.txt is a COMPLETE DISALLOW (RFC 9309 §2.3.1.4), so a CDN that was
+     * down while the pass ran behaved exactly like a CDN that forbids us and
+     * landed in the same count — a wall of `robots_denied` where half of it
+     * meant "we could not ask". That half is now `robotsUnreachable` beside
+     * this, split on `RobotsInfo.outcome` (a closed vocabulary the fetch pass
+     * holds at the deny site) and never on the reason sentence: a count built by
+     * matching prose goes quietly wrong the day somebody rewords an error
+     * message (docs/gates/phase-11.md §10.2).
+     *
+     * **A crawl that ran before P12-T1 has every robots refusal in this number**
+     * — the split is written going forward, and nothing rewrote history.
      */
     robotsDenied: number;
     /**
-     * True when a per-crawl cap stopped the pass short of at least one row
+     * Files whose host could not tell us its rules: robots.txt answered 5xx,
+     * timed out, failed at the network, or lived at a URL our own policy
+     * refused. Also a subset of `failed`, and also a complete disallow — we made
+     * no request for any of these — but a different fact from the count above.
+     *
+     * READ IT AS A FACT ABOUT OUR EVIDENCE, NOT AS THE SITE'S FAULT. A number
+     * here says a host was unreachable during the window this pass ran — often
+     * a third party's CDN and not the client's server at all, and often
+     * transient. It is the honest reason a file the site depends on carries no
+     * measurement.
+     *
+     * A LATER PASS DOES NOT RETRY THEM. The pass's work list is the null
+     * `fetch_class` column, and these rows have a class, so they are settled as
+     * far as it is concerned. A fresh crawl is what re-asks; that is the same
+     * treatment every other decided class gets, and the alternative — a class
+     * that means "decided" on Monday and "ask again" on Tuesday — is a row
+     * nobody can read.
+     */
+    robotsUnreachable: number;
+    /**
+     * True when a resource cap stopped the pass short of at least one row
      * (`maxResources` or `maxResourceHosts`).
+     *
+     * THE CAPS ARE BUDGETS PER RUN, not per crawl: `resumeCrawl` grants the
+     * whole budget again, so a crawl's lifetime total can exceed
+     * `maxResources` and this flag goes back to false once a later run weighs
+     * the rows the earlier one left capped.
      *
      * ONE FLAG FOR BOTH CAPS, deliberately: the row records a single reason
      * (`resource-cap`) whichever cap stopped it, so a surface reading the
@@ -1376,6 +1468,36 @@ interface QueueEntry {
   crawlId: string;
   /** The effective config, `allowPrivate` included — never the stored one. */
   config: CrawlConfig;
+  /**
+   * Whether this entry CONTINUES a crawl that has already run, rather than
+   * starting one that has not.
+   *
+   * The runner treats the two identically — `resumeCrawl` is what it has always
+   * called, because a queued crawl's frontier is empty and continuing an empty
+   * frontier is a fresh run — so this exists for the log line and nothing else.
+   * "crawl X starting" against a row with 4,000 pages already in it is the kind
+   * of small lie that costs an operator an hour.
+   */
+  resuming: boolean;
+}
+
+/**
+ * What a resume of one crawl would have to do — see `owedWork`, which is the
+ * only place these numbers are produced and the docblock that argues them.
+ */
+interface OwedWork {
+  /** Frontier rows never leased. */
+  pending: number;
+  /** Frontier rows a worker leased and did not come back for. */
+  expired: number;
+  /** `resources` rows with a null `fetch_class`, or 0 when the pass is off. */
+  resources: number;
+  /** Whether this crawl was configured with `fetchResources: false`. */
+  resourcesOff: boolean;
+  /** Crawled pages awaiting the render pass. NOT part of `total`. */
+  renderPending: number;
+  /** `pending + expired + resources`: what a continuation would consume. */
+  total: number;
 }
 
 interface RunningCrawl {
@@ -1538,7 +1660,7 @@ export class ApiService {
       status: "queued",
     });
 
-    const entry: QueueEntry = { crawlId, config: crawlConfig };
+    const entry: QueueEntry = { crawlId, config: crawlConfig, resuming: false };
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
@@ -1694,6 +1816,10 @@ export class ApiService {
       findingsCount,
       pagesScanned,
       fetchResources: configFetchResources(row.config, crawlId),
+      // Straight off the column, null included: this one is STAMPED evidence,
+      // not a count taken here, and the null is the honest answer for every
+      // crawl no 0014-aware loop ever closed.
+      resourceRefsCappedPages: row.resourceRefsCappedPages,
       resources: resourceCounts,
     };
   }
@@ -1723,10 +1849,18 @@ export class ApiService {
    * this reads is a constant this repository defines.
    *
    * The class names are the same discipline, and for the same reason: they are
-   * `RESOURCE_OK_CLASS` and `RESOURCE_ROBOTS_DENIED_CLASS`, imported and
-   * INTERPOLATED rather than typed out as `'ok'` and `'robots_denied'`. A bare
+   * `RESOURCE_OK_CLASS`, `RESOURCE_ROBOTS_DENIED_CLASS` and
+   * `RESOURCE_ROBOTS_UNREACHABLE_CLASS`, imported and INTERPOLATED rather than
+   * typed out as `'ok'`, `'robots_denied'` and `'robots_unreachable'`. A bare
    * literal here would typecheck for ever against a renamed vocabulary while
-   * `robotsDenied` quietly reported 0.
+   * the count it feeds quietly reported 0.
+   *
+   * THE PARTITION DID NOT MOVE when P12-T1 split the robots classes, and the
+   * shape of this statement is why: `failed` is every non-null class that is not
+   * `ok`, so a NEW class joins it without being named, and the two robots counts
+   * are `filter`s over the same rows rather than terms in the sum. A partition
+   * written as an explicit list of classes would have needed editing — and would
+   * have quietly dropped the new one until somebody did.
    */
   private async resourceCoverage(crawlId: string): Promise<CrawlDetail["resources"]> {
     const rows = await this.db.execute<{
@@ -1735,6 +1869,7 @@ export class ApiService {
       failed: number;
       skipped: number;
       robots_denied: number;
+      robots_unreachable: number;
       capped: boolean;
     }>(sql`
       select count(*)::int as seen,
@@ -1746,6 +1881,9 @@ export class ApiService {
              count(*) filter (
                where r.fetch_class = ${RESOURCE_ROBOTS_DENIED_CLASS}
              )::int as robots_denied,
+             count(*) filter (
+               where r.fetch_class = ${RESOURCE_ROBOTS_UNREACHABLE_CLASS}
+             )::int as robots_unreachable,
              count(*) filter (
                where r.fetch_class is null and r.fetch_reason = ${RESOURCE_CAP_REASON}
              ) > 0 as capped
@@ -1764,6 +1902,7 @@ export class ApiService {
       failed: row.failed,
       skipped: row.skipped,
       robotsDenied: row.robots_denied,
+      robotsUnreachable: row.robots_unreachable,
       capped: row.capped,
     };
   }
@@ -1885,6 +2024,353 @@ export class ApiService {
       // rather than overwritten. `getCrawl` below reports what actually stands.
       .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
     return this.getCrawl(crawlId);
+  }
+
+  /**
+   * Continue a crawl that stopped with work still owed —
+   * `POST /crawls/:id/resume` and `crawl_resume`.
+   *
+   * WHY THIS EXISTS. The engine has always been able to do it: the frontier IS
+   * the resume state, `resumeCrawl` in the crawl loop has continued crawls since
+   * Phase 1, and the API's own queue runner already calls it for every crawl it
+   * starts. What was missing was reachability. When the Phase 11 gate crawl's
+   * harness stopped the server 40 minutes into the resource pass, the row closed
+   * `cancelled` with 786 resource rows still unasked, and finishing them took a
+   * script with a database handle — for an operator driving this engine over the
+   * network there was no move at all (docs/gates/phase-11.md §5). This is that
+   * move.
+   *
+   * IT IS THE SAME CRAWL CONTINUING, and everything about the answer says so.
+   * The row is not replaced, the id does not change, the frontier is not
+   * re-seeded, and pages already on record are never re-fetched (the loop's own
+   * guarantee: a `done` row is a promise that the page is in the database). So
+   * the answer is `crawl_start`'s — `{crawlId, status: "queued", queuePosition}`
+   * — because a resume is accepted exactly the way a start is: put in this
+   * process's queue, run when the runner reaches it, polled through
+   * `crawl_status`. The row is moved to `queued` here for the same reason: a
+   * crawl this server is holding must be visible as held, and a `finished_at`
+   * left on a row that is queued again would be a contradiction, so it is
+   * cleared with it — and so is `rules_run_at`, for the sharper reason argued at
+   * the write itself: a judged-then-resumed crawl would otherwise carry a
+   * timestamp over a crawl that has since grown pages.
+   *
+   * WHAT THE CALLER MUST NOT READ THE ANSWER AS. Nothing here reports what the
+   * resumed run will find. `crawl_status` remains the truth about the crawl, and
+   * the reason is the one P11-T4 argued and the gate crawl then demonstrated:
+   * the resumed pass's own summary describes THE PROCESS ("784 resources
+   * fetched"), while the database describes THE CRAWL ("1,995 fetched across 11
+   * hosts"). Both are true, and a surface that rendered the summary would have
+   * told an auditor that 1,213 files were never asked about.
+   *
+   * ## The trust posture is `crawl_start`'s, re-applied to the STORED site
+   *
+   * A crawl accepted last month is not permission to fetch today. The allowlist
+   * and the URL policy are re-checked against `crawls.site_url` — the site as it
+   * was stored, never a site the caller names, because the caller names nothing
+   * but an id — and so are the two lists that add hosts to a run: `legacyHosts`
+   * (whose hosts the probe fetches before it has read anybody's robots.txt) and
+   * `sitemapUrls` (documents the walk fetches that no robots.txt pointed at).
+   * A resume re-runs discovery and the host probe, so those really are fetched
+   * again, and hard rule 5 is not satisfied by the check the first run passed.
+   * A site that has since left this server's allowlist does not resume, and the
+   * refusal names the host.
+   *
+   * The pacing is the crawl's own stored config, not this server's current
+   * defaults: continuing somebody's 2000ms crawl at a newer default's 250ms
+   * would be a politeness change nobody asked for (rule 9). `allowPrivate` is
+   * the one field re-asserted from this process, because it is deliberately
+   * never persisted (see `storableConfig`) — the same process-trust seam every
+   * other path uses.
+   *
+   * ## The refusals, and what each one is protecting
+   *
+   *  1. **No such crawl** — 404. There is nothing to continue.
+   *  2. **This server is holding it** — 409. `queuePosition` is the same
+   *     process-truth every crawl detail reports, and it also refuses a second
+   *     resume of a crawl already waiting in this queue.
+   *  3. **A live worker holds leases** — 409, naming the count. An unexpired
+   *     `leased_until` is the frontier's own live-worker detector, and it is the
+   *     test `markCrawlFailed` and the render driver already make.
+   *  4. **Nothing left to resume** — 409 on a settled crawl with no owed work,
+   *     naming every place that was looked: pending frontier rows, rows whose
+   *     lease has expired, and resource rows with a null `fetch_class`. A
+   *     "resume" that quietly ran discovery, found nothing to do and closed the
+   *     row again would cost the site a robots.txt, a sitemap walk and up to
+   *     four host-probe chains to change nothing (rule 7).
+   *  5. **The allowlist / the URL policy** — 403, naming the host.
+   *  6. **The row moved under the call** — 409. The claiming update is
+   *     conditioned on the status this method read, and its row count is READ:
+   *     zero means something else took the crawl between the guards and the
+   *     write, and nothing is queued.
+   *
+   * A CANCELLED CRAWL WITH WORK LEFT IS RESUMABLE, and that is a ruling rather
+   * than an oversight. `cancelled` means an abort signal fired — an operator
+   * stopped the server, or stopped the crawl — and the loop's abort path is
+   * careful to decide nothing on the way out: the URLs it never leased stay
+   * pending, the resource rows it never reached stay null with no reason, and
+   * the 404 probe and the resource pass are skipped rather than recorded as
+   * having found nothing. So the rows an abort leaves are precisely the
+   * questions nobody has answered yet, and resuming asks only those. An operator
+   * who changes their mind is the ordinary case (it is what the Phase 11 gate
+   * did), and refusing it would mean re-crawling a site from scratch to recover
+   * from a decision that cost the site nothing. `failed` is here on the same
+   * terms — a crash decided nothing either — and a caller who wants the crawl
+   * dead rather than continued still has `crawl_mark_failed`.
+   *
+   * ## The honest race, stated rather than papered over
+   *
+   * Checks (2) and (3) are a SNAPSHOT. A lease can expire between the count and
+   * the enqueue, and a worker this server cannot see can take a fresh one just
+   * after it — no lock spans the two, and adding one would only move the window.
+   * Refusal (6) is what narrows it as far as it goes without a lock: the claim
+   * is a compare-and-swap on the status this method read, so of two callers who
+   * both passed the guards only the one whose UPDATE lands first is accepted,
+   * and the database refuses the other on the row itself. It cannot close the
+   * window against a process that never touches the status at all.
+   *
+   * What makes the remainder survivable is that the guard is not the safety
+   * mechanism:
+   * `leaseBatch` is. Two workers leasing at the same instant get DISJOINT
+   * batches (`for update skip locked` over a materialized CTE, see
+   * src/crawl/frontier.ts), and a page row lands in the same transaction that
+   * moves its frontier row to `done`. So the worst case a lost race produces is
+   * two workers dividing one crawl's remaining frontier between them — slower
+   * per worker, twice the politeness pressure on the host, and every page still
+   * written exactly once. That is why this path does NOT reclaim leases: the
+   * loop's `reclaimLeases` hands every live lease in the crawl back to pending,
+   * which is right after a crash and wrong while somebody is working, and this
+   * server cannot tell the two apart from outside. Expired leases come back on
+   * their own through `leaseBatch`; live ones stay with whoever holds them.
+   */
+  async resumeCrawl(crawlId: string): Promise<CrawlAccepted> {
+    if (this.closed) {
+      throw new ServiceError(
+        "CONFLICT",
+        "the server is shutting down and is not accepting crawls",
+      );
+    }
+
+    const row = await this.crawlRow(crawlId);
+
+    // FIRST, BECAUSE IT IS FREE AND BECAUSE THE NEXT CHECKS ARE NOT. This one is
+    // an array lookup in this process; `isUrlAllowed` below resolves the host,
+    // which is a DNS round trip spent on a request this server was always going
+    // to refuse. The three policy checks keep their own order relative to each
+    // other (allowlist before URL policy, per `startCrawl`) — this is inserted
+    // ahead of them, not shuffled among them.
+    if (this.queuePosition(crawlId) !== null) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} is already held by this server ('${row.status}'): it is ` +
+          `running now or waiting to run, and a resume would be a second worker on ` +
+          `the same crawl`,
+      );
+    }
+
+    // The site as the row stores it, re-vetted from scratch. `normalizeUrl`
+    // answers null only for a row this engine did not write (every writer
+    // normalises on the way in), and that is a 409 rather than a guess: a crawl
+    // whose target cannot be parsed is a crawl nobody can say is allowed.
+    const siteUrl = normalizeUrl(row.siteUrl);
+    if (siteUrl === null) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} has a site URL that is not an http(s) URL, so this server ` +
+          `cannot check whether it may still be crawled`,
+      );
+    }
+    const host = new URL(siteUrl).hostname;
+    if (!isHostAllowed(host, this.config.allowedDomains)) {
+      // The same sentence `startCrawl` refuses with, and the same silence about
+      // what the allowlist contains (obligation 6).
+      throw new ServiceError(
+        "FORBIDDEN",
+        this.config.allowedDomains.length === 0
+          ? `host '${host}' is not permitted: this server's crawl allowlist is empty, ` +
+            `so no crawl target is accepted (queries are unaffected). Crawl ` +
+            `${crawlId} cannot be resumed`
+          : `host '${host}' is not in this server's crawl allowlist, so crawl ${crawlId} ` +
+            `cannot be resumed: a crawl accepted earlier is not standing permission`,
+      );
+    }
+
+    const allowPrivate = this.config.crawlDefaults?.allowPrivate === true;
+    const verdict = await isUrlAllowed(siteUrl, { allowPrivate });
+    if (!verdict.allowed) {
+      throw new ServiceError(
+        "FORBIDDEN",
+        `crawl ${crawlId}'s siteUrl is refused by the URL policy: ` +
+          `${verdict.reason ?? "no reason given"}`,
+      );
+    }
+
+    // The crawl's own settings, validated rather than trusted — the same read
+    // the render endpoint makes, and it refuses on the same terms.
+    let stored: CrawlConfig;
+    try {
+      stored = parseStoredConfig(row.config, crawlId);
+    } catch (error) {
+      throw new ServiceError("CONFLICT", messageOf(error));
+    }
+    const config: CrawlConfig = { ...stored, allowPrivate };
+    try {
+      validateCrawlConfig(config);
+    } catch (error) {
+      throw new ServiceError("CONFLICT", messageOf(error));
+    }
+
+    // Hard rule 5 over the hosts the RESUME will fetch, not the ones the first
+    // run did: discovery and the host probe both run again.
+    await this.checkLegacyHosts(siteUrl, config.legacyHosts, allowPrivate);
+    await this.checkSitemapUrls(siteUrl, config.sitemapUrls, allowPrivate);
+
+    const live = await this.liveLeaseCount(crawlId);
+    if (live > 0) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} holds ${live} unexpired lease(s): a worker is still on it, ` +
+          `and resuming would put a second crawler on the same site. A dead worker's ` +
+          `leases expire on their own — try again after they do`,
+      );
+    }
+
+    // Only a SETTLED crawl can be out of work. A `queued` or `running` row that
+    // nobody is holding is a crawl a dead process left behind: its frontier may
+    // be empty simply because it never got as far as seeding one, and resuming
+    // it does what a fresh start does — discover, seed, loop.
+    if (row.status !== "queued" && row.status !== "running") {
+      const work = await this.owedWork(crawlId, config);
+      if (work.total === 0) {
+        throw new ServiceError("CONFLICT", nothingToResume(crawlId, row.status, work));
+      }
+    }
+
+    const claimed = await this.db
+      .update(crawls)
+      .set({
+        status: "queued",
+        // `finished_at` goes with the status: a queued crawl has not finished,
+        // and a row saying both would be unreadable. The crawl loop clears it
+        // too when it starts, but a row can sit in this queue for a while first.
+        finishedAt: null,
+        // AND SO DOES `rules_run_at`, for a sharper reason than tidiness.
+        //
+        // It is the surface's single load-bearing sentence (talos-surface.md
+        // §5): a timestamp means a complete rules pass is on record, so an empty
+        // findings answer means "looked, found nothing", and null means nobody
+        // has looked. Judge a cancelled crawl and then resume it, and the
+        // timestamp would survive over a crawl that has since grown pages —
+        // `findingsCount` would describe a strictly smaller crawl than
+        // `pagesScanned` counts, and every reader is told to trust the pair.
+        // `crawl_compare` would inherit the staleness silently, because it
+        // compares two crawls it believes were both judged.
+        //
+        // So the marker is cleared here, by `finishedAt`'s own argument: the row
+        // must not say two things that cannot both be true. The findings rows
+        // themselves are left alone and are then read exactly as a run that died
+        // part-way — a state the surface already documents and handles — until
+        // `crawl_rules` re-judges the finished crawl and rewrites them.
+        rulesRunAt: null,
+      })
+      // Conditioned on the status this call READ, for `markCrawlFailed`'s
+      // reason: a crawl that started under another process between the guards
+      // and here is left exactly as it is.
+      .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+
+    // AND THE COMPARE-AND-SWAP IS READ, which is the whole point of writing one.
+    //
+    // Zero rows means the guard above raced: between reading the row and this
+    // statement, something else moved the crawl — another process started it,
+    // its own worker closed it, `crawl_mark_failed` retired it. Queueing anyway
+    // would answer `{status: "queued"}` about a row that says nothing of the
+    // kind, and this process would then run a crawl somebody else may be
+    // running: a silent no-op dressed as an acceptance, which is exactly what
+    // hard rule 7 forbids and exactly the trap `markCrawlFailed`'s conditioned
+    // update was written to avoid.
+    //
+    // It is also the narrowest this server can make the double-accept race
+    // without a lock: two callers reading the same status both reach here, and
+    // only the one whose UPDATE lands first sees a row. The other is refused,
+    // by the database, on the row itself.
+    if (claimed.rowCount === null) {
+      throw new Error(
+        `resumeCrawl: the update of crawl ${crawlId} reported no row count, so whether ` +
+          `this server claimed it is unknown`,
+      );
+    }
+    if (claimed.rowCount === 0) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} changed state while this resume was being checked — it was ` +
+          `'${row.status}' when the call began and something else has moved it since. ` +
+          `Nothing was queued; read crawl_status and try again`,
+      );
+    }
+
+    const entry: QueueEntry = { crawlId, config, resuming: true };
+    this.waiting.push(entry);
+    this.pump();
+    return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+  }
+
+  /**
+   * What a resume of this crawl would actually have to do, counted in one
+   * statement so the four numbers describe one instant.
+   *
+   * The three that COUNT are the three a continuation consumes: frontier rows
+   * still `pending`, frontier rows whose lease has expired (`leaseBatch` takes
+   * exactly those two states — this is not a second definition of resumable, it
+   * is that predicate read as a question), and `resources` rows with a null
+   * `fetch_class`, which is precisely the work list the resource pass walks.
+   *
+   * `renderPending` is counted and deliberately NOT part of the total. Those
+   * rows are already-crawled pages the render selection promoted, and the crawl
+   * loop never leases them; they are `crawl_render`'s work. Counting them would
+   * make a resume "succeed" by running a whole discovery pass to do nothing, and
+   * not naming them at all would leave an operator staring at a crawl with
+   * visibly unfinished-looking rows and a refusal that did not mention them. So
+   * the refusal names them and points at the tool that owns them.
+   *
+   * THE RESOURCE COUNT IS ZERO WHEN THE PASS IS OFF, and that is the honest
+   * reading rather than a special case. `fetchResources: false` means the
+   * operator decided about every one of those rows (they carry
+   * `resource-fetch-off`), and a resume will not run the pass, so a null
+   * `fetch_class` there is a decision on record and not owed work. Counting it
+   * would let a resume be accepted for work that provably will not happen.
+   */
+  private async owedWork(crawlId: string, config: CrawlConfig): Promise<OwedWork> {
+    const result = await this.db.execute<{
+      pending: number;
+      expired: number;
+      unfetched_resources: number;
+      render_pending: number;
+    }>(sql`
+      select
+        (select count(*)::int from frontier
+          where crawl_id = ${crawlId} and state = 'pending') as pending,
+        (select count(*)::int from frontier
+          where crawl_id = ${crawlId} and state = 'leased'
+            and leased_until < now()) as expired,
+        (select count(*)::int from resources
+          where crawl_id = ${crawlId} and fetch_class is null) as unfetched_resources,
+        (select count(*)::int from frontier
+          where crawl_id = ${crawlId} and state = 'render_pending') as render_pending`);
+    const row = result.rows[0];
+    if (row === undefined) {
+      // A bare aggregate answers one row over an empty table. No row means the
+      // statement did not run the way this code believes it did.
+      throw new Error(`owedWork: the count for crawl ${crawlId} answered no row`);
+    }
+    const resourcesOff = config.fetchResources === false;
+    const resources = resourcesOff ? 0 : row.unfetched_resources;
+    return {
+      pending: row.pending,
+      expired: row.expired,
+      resources,
+      resourcesOff,
+      renderPending: row.render_pending,
+      total: row.pending + row.expired + resources,
+    };
   }
 
   /**
@@ -3086,9 +3572,22 @@ export class ApiService {
    * seed, loop. The config passed in is the effective one, `allowPrivate`
    * included; the row's stored copy never had it (`storableConfig`), and
    * `ResumeOpts.config` is the documented place to re-assert it.
+   *
+   * That identity is why `crawl_resume` needed no new runner: an entry put here
+   * by `ApiService.resumeCrawl` differs only in that its frontier is NOT empty,
+   * and the loop has continued non-empty frontiers since Phase 1. `entry.resuming`
+   * changes the log line and nothing else.
+   *
+   * `reclaimLeases` is not passed, on either path. See `ApiService.resumeCrawl`:
+   * it would hand every live lease in the crawl back to pending, which is right
+   * after a crash and wrong while another process is working, and this server
+   * cannot tell those apart from outside.
    */
   private async runQueued(entry: QueueEntry, signal: AbortSignal): Promise<void> {
-    this.log(`api: crawl ${entry.crawlId} starting (${entry.config.siteUrl})`);
+    this.log(
+      `api: crawl ${entry.crawlId} ${entry.resuming ? "resuming" : "starting"} ` +
+        `(${entry.config.siteUrl})`,
+    );
     try {
       const summary = await resumeCrawl(this.db, entry.crawlId, {
         config: entry.config,
@@ -4816,6 +5315,46 @@ function stripUndefined<T extends object>(value: T): Partial<T> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The refusal a settled crawl with nothing owed comes back with.
+ *
+ * It NAMES EVERY PLACE THAT WAS LOOKED, with its number, and that is the whole
+ * design of the sentence. "Nothing to resume" on its own is unfalsifiable: the
+ * caller cannot tell it from a bug in the check, and the one thing they want to
+ * know — was the resource pass counted? — is exactly what a short refusal hides.
+ * Three zeroes and the places they came from is a sentence an operator can argue
+ * with (hard rule 7).
+ *
+ * The two conditional clauses are the two ways "zero" means something other than
+ * "asked and answered": a crawl with the resource pass switched off has null
+ * `fetch_class` rows that are a decision rather than owed work, and a crawl with
+ * `render_pending` rows has visible unfinished work that belongs to a different
+ * tool. Both would otherwise send a reader looking for a defect.
+ */
+function nothingToResume(crawlId: string, status: string, work: OwedWork): string {
+  const parts = [
+    `crawl ${crawlId} is '${status}' and has nothing left to resume: ` +
+      `${work.pending} pending frontier row(s), ${work.expired} whose lease has expired, ` +
+      `${work.resources} resource row(s) still unasked`,
+  ];
+  if (work.resourcesOff) {
+    parts.push(
+      `this crawl was configured with fetchResources: false, so its unfetched resource ` +
+        `rows carry that decision and a resume would not ask about them`,
+    );
+  }
+  if (work.renderPending > 0) {
+    parts.push(
+      `${work.renderPending} page(s) are render_pending — already crawled, awaiting the ` +
+        `render pass, which is crawl_render's work and not a resume's`,
+    );
+  }
+  parts.push(
+    `a crawl that finished what it was asked to do is re-run as a new crawl, not continued`,
+  );
+  return parts.join(". ");
 }
 
 /**

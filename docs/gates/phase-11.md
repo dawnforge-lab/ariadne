@@ -791,8 +791,44 @@ Phase 12 pointers, in the order they will be met:
    operator must be told before they agree to it, and the honest ways to shorten
    it (a separate floor for HEAD-only asset requests, or asking only about the
    files some rule would judge) are design questions rather than tuning.
+
+   **PHASE 12: NOT TAKEN, revisit on demand** — proposed in the Phase 12 plan
+   and presented to the owner; RULED CONFIRMED by the owner at Phase 12 integration, 2026-09-02. (Added
+   by P12-T4. This list is a forward ledger, not a measurement — annotating a
+   pointer with what became of it is the same class of edit as `phase-8.md:825`,
+   where item 7 was struck through and marked "CLOSED in the final-review fix
+   wave", and no measured number above it moves.) The reasoning, recorded so the
+   next reader does not re-open it as an oversight: **a faster floor for
+   HEAD-only asset requests is a change to our politeness POSTURE, not a tuning
+   knob** — it asks a site's server for more requests per second than the crawl
+   itself was willing to make, on the argument that a HEAD is cheaper, which is
+   our inference about their infrastructure and not their statement about it
+   (hard rule 9, and the yellow.com.mt incident in
+   `docs/talos-integration.md`). The 4.65× the pass costs was measured (§3),
+   priced, and ACCEPTED as the price of asking politely. The second option —
+   asking only about files some rule would judge — narrows the census to today's
+   rules and makes tomorrow's rule unanswerable over yesterday's crawl, which is
+   the evidence-layer boundary this engine is built on. Neither is refused
+   forever: an operator who says "this site can take it" is a different input
+   from an engine that assumes it, and the day that input exists on the surface
+   the question re-opens with the data to settle it.
 6. **One small honesty fix** (the `fetch_ms` comment landed in the final-review
    fix wave — §10.4): `render.coverage`'s selection fields on a crawl that
    rendered nothing (§6.3).
+
+   **DONE in Phase 12 (P12-T4).** The metric gained `renderPassEvidence`
+   (`ran` | `none`), derived only from things a render pass WROTE, and the four
+   recomputed selection numbers stayed where they are — an agent deciding
+   whether to spend a pass needs them, and blanking them would have spent a null
+   on a question that does apply. `talos-surface.md` §4.5 carries the contract
+   and §13 states the one shape the field gets wrong.
 7. **Tenancy on `crawl_list`** — unchanged since Phase 9, still the pre-tenancy
    posture, still stated in `talos-surface.md` §9.3.
+
+   **PHASE 12: unchanged, and stated rather than closed** — the plan's second
+   proposed decision, presented to the owner and RULED CONFIRMED at Phase 12 integration, 2026-09-02.
+   Nothing in this phase narrowed it and nothing in this phase widened it; the
+   posture is a deployment fact (one tenant per deployment,
+   `talos-surface.md` §9.3) and the phase that makes Ariadne multi-tenant is the
+   phase that ends it. Recorded here so a reader of this list does not take a
+   silent pointer for an oversight.

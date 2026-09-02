@@ -234,6 +234,57 @@ export interface HostGateOptions {
   robotsCrawlDelaySec: number | null;
   /** Upper bound on the honoured delay. Default 30s. */
   maxDelayMs?: number;
+  /**
+   * The widest spacing an EARLIER RUN OF THIS CRAWL already earned —
+   * `crawls.host_spacing_ms` — or null/absent for a crawl that has none.
+   *
+   * It joins `perHostDelayMs` and the robots `Crawl-delay` in the same max, and
+   * it is here rather than at a call site because this module owns spacing (see
+   * `raiseHostFloor`: one policy, one place). The three inputs say three
+   * different things and the widest of them wins: what we configured, what the
+   * site asked for in writing, and what the site taught us by refusing us.
+   *
+   * WHY A RESUME MUST CARRY IT. When the column is above the crawl's base it is
+   * a FINDING rather than a setting — a host refused us and the engine backed
+   * off (rule 9) — and a second run over the same crawl id is the same crawler
+   * talking to the same host. Rebuilding the gate from the configured floor
+   * alone would hit that host at the pace it already refused, and the loop's
+   * first `recordSpacing` would write the floor back over the evidence, so
+   * nobody could see it had happened. This is exactly the ruling `renderPaceMs`
+   * makes for the render pass (docs/gates/phase-6.md §c1633c4), applied to the
+   * pass that earned it.
+   *
+   * `max`, not "replace": a caller who deliberately asks for a wider delay than
+   * the crawl earned keeps it, and the cap binds it like everything else.
+   *
+   * ## Two things this is NOT, both of which a reader will otherwise assume
+   *
+   * **IT IS NOT PER-HOST, AND ON A RESUME IT WIDENS.** `crawls.host_spacing_ms`
+   * is one number for the whole crawl — the WIDEST spacing any host reached
+   * (`maxSpacingMs`) — so re-entering it here applies that width to EVERY host
+   * the resumed run touches, including hosts that never pushed back. On a crawl
+   * whose CDN earned 8s while the origin stayed at 1s, the resumed run crawls
+   * the origin at 8s too. That is slower than it needs to be and it is the
+   * polite direction, which is why it is accepted rather than worked around:
+   * per-host fidelity does not exist to be preserved, because no column records
+   * it. A `crawl_host_spacing` table (host → earned ms) is the Phase 13
+   * candidate that would fix it; until then this widening is the honest cost of
+   * not forgetting. `maxDelayMs` still bounds it, so the worst case is the 30s
+   * cap and never more.
+   *
+   * **THE COLUMN IS NOT ONLY EARNED.** The loop writes `maxSpacingMs()` once
+   * before the first fetch, so a crawl that never escalated still stores
+   * `max(perHostDelayMs, robots Crawl-delay)` — an unearned base wearing the
+   * same column. Two consequences, both real and neither hidden: a robots.txt
+   * `Crawl-delay` the site has SINCE REMOVED stays sticky across every resume of
+   * that crawl (the gate would read the new robots.txt and get nothing, but the
+   * old number is still in the column); and a resume can never LOWER a crawl's
+   * spacing by changing its config, because this max only ever raises. Both are
+   * the safe direction — the failure mode is being too polite to a site that no
+   * longer asks for it — and a caller who genuinely needs the lower pace starts
+   * a new crawl, which has no column to read.
+   */
+  earnedSpacingMs?: number | null;
 }
 
 /**
@@ -295,24 +346,41 @@ export class HostGate {
         `HostGate: robotsCrawlDelaySec must be ≥ 0 or null, got ${opts.robotsCrawlDelaySec}`,
       );
     }
+    if (
+      opts.earnedSpacingMs !== null &&
+      opts.earnedSpacingMs !== undefined &&
+      (!(opts.earnedSpacingMs >= 0) || !Number.isFinite(opts.earnedSpacingMs))
+    ) {
+      throw new RangeError(
+        `HostGate: earnedSpacingMs must be ≥ 0 or null, got ${opts.earnedSpacingMs}`,
+      );
+    }
     if (!(maxDelayMs > 0)) {
       throw new RangeError(`HostGate: maxDelayMs must be > 0, got ${maxDelayMs}`);
     }
 
     // A site asking for a full minute between hits gets 30s: past the cap the
-    // crawl stops being a crawl. Below it, the site's number always wins.
+    // crawl stops being a crawl. Below it, the site's number always wins — and
+    // so does the spacing an earlier run of this crawl earned from it.
     this.delayMs = Math.min(
       maxDelayMs,
-      Math.max(opts.perHostDelayMs, (opts.robotsCrawlDelaySec ?? 0) * 1000),
+      Math.max(
+        opts.perHostDelayMs,
+        (opts.robotsCrawlDelaySec ?? 0) * 1000,
+        opts.earnedSpacingMs ?? 0,
+      ),
     );
     this.maxDelayMs = maxDelayMs;
     this.highWaterMs = this.delayMs;
   }
 
   /**
-   * The CONFIGURED spacing: max(config, robots), capped. A fact about how the
-   * crawl was set up, not about how it is going — it never moves. For what a
-   * host is actually being crawled at right now, see `spacingMs`.
+   * The spacing this gate was BUILT with: max(config, robots, earned), capped.
+   * A fact about how the run was set up, not about how it is going — it never
+   * moves. `earned` is in it because a resumed crawl is set up with what an
+   * earlier run of it learned (see `earnedSpacingMs`); for a fresh crawl the
+   * term is absent and this is max(config, robots) exactly as it always was.
+   * For what a host is actually being crawled at right now, see `spacingMs`.
    */
   effectiveDelayMs(): number {
     return this.delayMs;

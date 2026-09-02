@@ -187,6 +187,15 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // CONSTRUCTION rather than for want of a fixture. Its condition is covered
   // directly in test/rules/resources-query.test.ts, in both directions.
   "resources.not-recorded",
+  // P12-T2's sibling marker, unprovokable here for the mirror-image reason. It
+  // fires when a crawl recorded its files and asked about NONE of them — the
+  // operator's `fetchResources: false`, or a pass interrupted before its first
+  // request. This harness runs the pass to completion over a site that serves
+  // real assets, so every row carries a class and the marker's condition (no row
+  // decided) is false by construction. Both of its reasons are covered directly
+  // in test/rules/resources-query.test.ts, along with the boundary against the
+  // marker above it.
+  "resources.not-fetched",
   "h1.duplicate-skipped",
   "host.duplicate-host-200",
   "host.probe-skipped",
@@ -1714,6 +1723,11 @@ describe("the fixture site end to end", () => {
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
       pagesCrawled: 84,
+      // P12-T4. The end-to-end crawl really did render, so this is the `ran`
+      // side of the field — the whole-site case the unit tests bound from the
+      // other end. `pagesRendered: 70` below is evidence enough on its own
+      // here; the field matters on the crawls where there is none.
+      renderPassEvidence: "ran",
       // P8-T2. The harness renders the AUTOMATIC selection — it names no URLs —
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.

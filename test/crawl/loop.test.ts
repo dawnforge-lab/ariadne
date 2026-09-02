@@ -886,6 +886,34 @@ describe("resumeCrawl", () => {
     expect(resumed.writer.pages).toBe(6 - first.pagesCrawled);
   });
 
+  // THE POLITENESS RATCHET ACROSS A RESUME (P12-T3, rule 9).
+  //
+  // `crawls.host_spacing_ms` is a finding, not a setting: it was written because
+  // the site pushed back and the engine listened. A resume that rebuilt its gate
+  // from `perHostDelayMs` alone would go back to hitting that host at the
+  // configured pace and would overwrite the evidence with the base on its first
+  // `recordSpacing`, so the operator could not even see that it had happened —
+  // which is the same defect `renderPaceMs` fixed for the render pass in Phase 6.
+  it("resumes at the spacing the crawl earned, not the one it was configured with", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    expect(first.status).toBe("cancelled");
+
+    // What the first run would have written had the site refused it: the column
+    // is set directly because the fixture site never blocks, and the number is
+    // the only thing the resume can read the ratchet out of.
+    await db.update(crawls).set({ hostSpacingMs: 250 }).where(eq(crawls.id, first.crawlId));
+
+    const resumed = await resumeCrawl(db, first.crawlId, {
+      config: config({ perHostDelayMs: 0 }),
+    });
+    expect(resumed.status).toBe("finished");
+
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
+    expect(row?.hostSpacingMs).toBeGreaterThanOrEqual(250);
+  });
+
   it("re-fetches a URL whose page row a hard kill left in the buffer", async () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);

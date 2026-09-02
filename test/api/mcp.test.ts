@@ -37,7 +37,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
-  crawls, issues, metrics, pageResources, pages, resources,
+  crawls, frontier, issues, metrics, pageResources, pages, resources,
 } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createMcpServer, type AriadneMcpServer } from "../../src/api/mcp.js";
@@ -75,6 +75,18 @@ function html(title: string, body: string): string {
 let db: Db;
 let siteServer: Server;
 let site: string;
+/**
+ * A site with enough SLOW referenced files to be killed in the middle of its
+ * resource pass — the P11 harness-kill (docs/gates/phase-11.md §5) made
+ * deliberate. Three pages carrying `RESUME_ASSETS` images between them, each
+ * image answered after `ASSET_DELAY_MS`, so the pass takes seconds and a test
+ * that stops the server after the FIRST file lands leaves the rest genuinely
+ * unasked: null `fetch_class`, no reason, which is the resume's work list.
+ */
+let resumeServer: Server;
+let resumeSite: string;
+const RESUME_ASSETS = 24;
+const ASSET_DELAY_MS = 120;
 let exportDir: string;
 /**
  * Where every server in this file keeps the render pass's serialised
@@ -345,6 +357,46 @@ beforeAll(async () => {
   const address = siteServer.address();
   site = `http://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
 
+  // The resumable site. Its images are the only slow thing about it, and they
+  // are slow on purpose: the pass has to still be running when the test stops
+  // the server.
+  resumeServer = createServer((req, res) => {
+    const path = req.url ?? "/";
+    if (path === "/robots.txt") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("User-agent: *\nAllow: /\n");
+      return;
+    }
+    if (path.startsWith("/img/")) {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "image/png", "content-length": "8" });
+        res.end("PNGSTUB0");
+      }, ASSET_DELAY_MS);
+      return;
+    }
+    const imgs = (from: number, count: number): string =>
+      Array.from({ length: count }, (_, i) => `<img src="/img/${from + i}.png" alt="x">`).join("");
+    const per = RESUME_ASSETS / 3;
+    const bodies: Record<string, string> = {
+      "/": html("home", `<a href="/a">a</a><a href="/b">b</a>${imgs(0, per)}`),
+      "/a": html("page a", `<a href="/b">b</a><p>words for the analyzer</p>${imgs(per, per)}`),
+      "/b": html("page b", `<p>the third page</p>${imgs(per * 2, per)}`),
+    };
+    const body = bodies[path];
+    if (body === undefined) {
+      res.writeHead(404, { "content-type": "text/html" });
+      res.end(html("not found", "<p>gone</p>"));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(body);
+  });
+  await new Promise<void>((r) => resumeServer.listen(0, "127.0.0.1", r));
+  const resumeAddress = resumeServer.address();
+  resumeSite = `http://127.0.0.1:${
+    typeof resumeAddress === "object" && resumeAddress !== null ? resumeAddress.port : 0
+  }`;
+
   mcp = createMcpServer({
     db,
     config: {
@@ -448,9 +500,20 @@ beforeAll(async () => {
       fetchedAt: new Date(), fetchMs: 11,
     },
     {
+      // A host that was DOWN while the pass ran — a complete disallow we could
+      // not ask about (P12-T1's `robots_unreachable`).
       crawlId: surfaceCrawlId, url: "https://cdn.mcp-query.example/hero.png",
-      kind: "image", fetchClass: "robots_denied",
+      kind: "image", fetchClass: "robots_unreachable",
       fetchReason: "robots.txt unreachable (503): complete disallow",
+      fetchedAt: new Date(),
+    },
+    {
+      // A host that FORBADE it. Same behaviour, different fact, and now a
+      // different class — so the agent transport has a file on each side of the
+      // split too.
+      crawlId: surfaceCrawlId, url: "https://cdn.mcp-query.example/banned.png",
+      kind: "image", fetchClass: "robots_denied",
+      fetchReason: "robots.txt (cdn.mcp-query.example) disallows this URL",
       fetchedAt: new Date(),
     },
     {
@@ -461,6 +524,7 @@ beforeAll(async () => {
   await db.insert(pageResources).values([
     { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: `${SEEDED_SITE}/theme.css` },
     { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: "https://cdn.mcp-query.example/hero.png" },
+    { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: "https://cdn.mcp-query.example/banned.png" },
     { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: `${SEEDED_SITE}/app.js` },
   ]);
 
@@ -545,18 +609,20 @@ afterAll(async () => {
   await closeDb(db);
   await closeFetchAgents();
   await new Promise<void>((r) => siteServer.close(() => r()));
+  await new Promise<void>((r) => resumeServer.close(() => r()));
   rmSync(exportDir, { recursive: true, force: true });
   rmSync(renderDir, { recursive: true, force: true });
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the fifteen tools of the agent surface, each described", async () => {
+  it("advertises exactly the sixteen tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "compare_urls", "crawl_compare", "crawl_list", "crawl_mark_failed", "crawl_render",
-        "crawl_rules", "crawl_start", "crawl_status", "export_crawl", "issue_urls",
-        "issues_list", "metrics_get", "pages_query", "robots_get", "rules_catalog",
+        "crawl_resume", "crawl_rules", "crawl_start", "crawl_status", "export_crawl",
+        "issue_urls", "issues_list", "metrics_get", "pages_query", "robots_get",
+        "rules_catalog",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -956,18 +1022,26 @@ describe("crawl_status / crawl_list", () => {
   it("answers the resource census and whether the crawl asked for it", async () => {
     const detail = await ok("crawl_status", { crawlId: surfaceCrawlId });
     expect(detail["resources"]).toEqual({
-      seen: 3, fetched: 1, failed: 1, skipped: 1, robotsDenied: 1, capped: true,
+      seen: 4, fetched: 1, failed: 2, skipped: 1,
+      // The two robots counts, apart (P12-T1). Both are subsets of `failed`, so
+      // the partition below is untouched by the split.
+      robotsDenied: 1, robotsUnreachable: 1, capped: true,
     });
     // Nobody turned it off, so the resolved default is reported — which is what
     // makes `fetched: 1` readable as a measurement rather than as a decision.
     expect(detail["fetchResources"]).toBe(true);
+    // Stamped, not counted — and null here because this crawl's rows were
+    // seeded rather than crawled, so no loop ever closed it under 0014. Null is
+    // "nobody counted"; 0 would be "we counted and it was none".
+    expect(detail["resourceRefsCappedPages"]).toBeNull();
 
     // A crawl holding no resource rows answers the block all the same: zeroes
     // are a measurement, and an absent block would leave "this crawl was written
     // before the tables existed" indistinguishable from "this site has no files".
     const bare = await ok("crawl_status", { crawlId: seededCrawlId });
     expect(bare["resources"]).toEqual({
-      seen: 0, fetched: 0, failed: 0, skipped: 0, robotsDenied: 0, capped: false,
+      seen: 0, fetched: 0, failed: 0, skipped: 0,
+      robotsDenied: 0, robotsUnreachable: 0, capped: false,
     });
   });
 
@@ -979,7 +1053,10 @@ describe("crawl_status / crawl_list", () => {
     const listedStatus = await client.listTools();
     const text = listedStatus.tools.find((t) => t.name === "crawl_status")?.description ?? "";
     expect(text, "crawl_status has no description").not.toBe("");
-    for (const field of ["seen", "fetched", "failed", "skipped", "robotsDenied", "capped"]) {
+    for (const field of [
+      "seen", "fetched", "failed", "skipped", "robotsDenied", "robotsUnreachable",
+      "capped", "resourceRefsCappedPages",
+    ]) {
       expect(text, `crawl_status's description does not name '${field}'`).toContain(field);
     }
     // The arithmetic a consumer may rely on.
@@ -990,13 +1067,31 @@ describe("crawl_status / crawl_list", () => {
     // The two readings a bare count would hide.
     expect(text).toContain("SEEN BUT NOT ASKED");
     expect(text).toContain("not a count of broken files");
-    // The robots trap: unreachable is a complete disallow, so the count cannot
-    // tell "they said no" from "we could not ask".
+    // The robots trap, and the split that answers it (P12-T1). An unreachable
+    // robots.txt is still a complete disallow — the behaviour is identical — but
+    // the two are now separate counts rather than one count and a sentence, so
+    // the description has to say which is which.
     expect(text).toContain("unreachable robots.txt is a complete disallow");
     expect(text).toContain("fetchReason");
+    expect(text).toContain("they said no");
+    expect(text).toContain("we could not ask");
+    // The cap-exceeded counter, with the null that is not a zero — the field
+    // most likely to be rendered as "0 pages truncated" on a crawl nobody
+    // counted.
+    expect(text).toContain("null is not zero");
+    expect(text).toContain("a floor");
     // And the off switch's echo, with both readings of a zero spelled out.
     expect(text).toContain("fetchResources");
     expect(text).toContain("false beside fetched 0");
+    // The marker's BOUNDARY, not just its existence. `resources.not-fetched`
+    // fires only where no row was decided at all (resources.ts:695), so a
+    // description that hands "true beside fetched 0" to the marker is wrong on
+    // the two shapes this phase documented: an interrupted pass that asked, and
+    // the all-unknown crawl of talos-surface.md §5.3 — the window the phase
+    // stated rather than closed. Pinned so the polling tool cannot quietly go
+    // back to asserting it away.
+    expect(text).toContain("NOT ONE file was decided");
+    expect(text).toContain("carries NO marker");
 
     const listed = await client.listTools();
     const schema = listed.tools.find((t) => t.name === "crawl_start")?.inputSchema as {
@@ -1188,6 +1283,54 @@ describe("crawl_rules", () => {
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("has stopped");
   });
+
+  /**
+   * P12-T4 — `render.coverage` on the other transport, both values of the field
+   * the Phase 11 audit asked for (docs/gates/phase-11.md §6.3).
+   *
+   * `liveCrawlId` was rendered by the `crawl_render` describe above and judged
+   * by the test above, so it is the `ran` side; the seeded crawl beside it was
+   * never rendered by anything, which is the side that used to be
+   * indistinguishable — its four selection numbers are recomputed and look
+   * exactly like a record of a pass.
+   */
+  it("says over the wire whether a render pass ran, not just how many pages it left", async () => {
+    const coverage = async (crawlId: string): Promise<Record<string, unknown>> => {
+      const body = await ok("metrics_get", { crawlId, metricId: "render.coverage" });
+      const rows = items(body);
+      expect(rows, `no render.coverage row for ${crawlId}`).toHaveLength(1);
+      return rows[0]!["value"] as Record<string, unknown>;
+    };
+
+    const rendered = await coverage(liveCrawlId);
+    expect(rendered["renderPassEvidence"]).toBe("ran");
+    expect(Number(rendered["pagesRendered"])).toBeGreaterThan(0);
+
+    const id = await seedCrawl({
+      id: `crawl_mcp_norender_${Date.now()}`,
+      status: "finished",
+      // The whole rules run happens here, and `robots.missing` reads the
+      // crawl's robots evidence rather than assuming it absent.
+      discovery: {
+        robots: { outcome: "absent", crawlDelaySec: null, note: null, raw: null, truncated: false },
+        sitemapSources: [],
+        suppliedSitemaps: [],
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+        docsFetched: 0,
+      },
+    });
+    await seedPage(id, { slug: "nr1", pageType: "product", statusCode: 200, indexable: true });
+    await seedPage(id, { slug: "nr2", pageType: "product", statusCode: 200, indexable: true });
+    await ok("crawl_rules", { crawlId: id });
+
+    const unrendered = await coverage(id);
+    // The pair that was missing: nothing ran, and the selection numbers are
+    // still answered — as the plan they are, not as a history.
+    expect(unrendered["renderPassEvidence"]).toBe("none");
+    expect(unrendered["pagesRendered"]).toBe(0);
+    expect(unrendered["selectionMode"]).toBe("auto");
+    expect(Number(unrendered["selectionSelected"])).toBeGreaterThan(0);
+  }, 60_000);
 });
 
 describe("crawl_mark_failed", () => {
@@ -1203,6 +1346,240 @@ describe("crawl_mark_failed", () => {
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("'finished'");
   });
+});
+
+/**
+ * `crawl_resume` — the move the Phase 11 gate crawl needed and did not have.
+ *
+ * The crown test here does the thing the gate did by accident: it runs a real
+ * crawl of a real (fixture) site, stops the server in the middle of the resource
+ * pass, and finishes the crawl over the wire. The equality against a never-killed
+ * control is asserted in test/api/http.test.ts, which owns the same fixture
+ * shape; this file's job is that the TOOL reaches the same place.
+ */
+describe("crawl_resume", () => {
+  /**
+   * A second server on the same database, so a crawl can be started on one
+   * process and killed with it — which is exactly what happened to the gate
+   * crawl — and then resumed by a process that never held it.
+   */
+  async function killableServer(): Promise<{ mcp: AriadneMcpServer; client: Client }> {
+    const server = createMcpServer({
+      db,
+      config: {
+        allowedDomains: ["127.0.0.1"],
+        crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+        exportDir,
+        renderDir,
+        log: (line) => serverLog.push(line),
+      },
+    });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "ariadne-test-killable", version: "0.0.1" });
+    await server.connect(serverSide);
+    await c.connect(clientSide);
+    return { mcp: server, client: c };
+  }
+
+  /**
+   * A crawl row on an ALLOWLISTED host with a config a resume can actually
+   * read.
+   *
+   * The file's other seeded crawls are on `mcp-query.example`, which is not on
+   * this server's allowlist and carries a config with none of the five required
+   * fields — so every one of them is refused by check (1) or the config read,
+   * long before the guard a lease or an empty frontier is supposed to trip. A
+   * refusal test that cannot reach its own refusal proves nothing.
+   */
+  async function seedResumable(suffix: string, status: string): Promise<string> {
+    const id = `crawl_mcp_resume_${suffix}_${Date.now()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${resumeSite}/`,
+      config: {
+        siteUrl: `${resumeSite}/`,
+        maxPages: 10,
+        maxDepth: 3,
+        userAgent: "AriadneBot/0.1 (mcp-test)",
+        perHostDelayMs: 0,
+        maxConcurrency: 2,
+        probeHosts: false,
+      },
+      rulesetVersion: "0.0.0-test",
+      status,
+    });
+    createdCrawls.push(id);
+    return id;
+  }
+
+  /** Poll until the predicate holds, or say what never happened. */
+  async function until(
+    what: string,
+    predicate: (detail: Record<string, unknown>) => boolean,
+    crawlId: string,
+    deadlineMs = 30_000,
+  ): Promise<Record<string, unknown>> {
+    const stop = Date.now() + deadlineMs;
+    for (;;) {
+      const detail = await ok("crawl_status", { crawlId });
+      if (predicate(detail)) return detail;
+      if (Date.now() > stop) throw new Error(`never happened: ${what}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  function resources(
+    detail: Record<string, unknown>,
+  ): { seen: number; fetched: number; skipped: number } {
+    return detail["resources"] as { seen: number; fetched: number; skipped: number };
+  }
+
+  it("finishes a crawl a server was killed in the middle of, and keeps its earned spacing", async () => {
+    const { mcp: killable, client: killableClient } = await killableServer();
+    const accepted = await callWith(killableClient, "crawl_start", {
+      siteUrl: `${resumeSite}/`,
+      maxPages: 10,
+    });
+    expect(accepted.isError).toBe(false);
+    const crawlId = String(accepted.body["crawlId"]);
+    createdCrawls.push(crawlId);
+
+    // Wait until the resource pass is demonstrably running — one file weighed,
+    // twenty-three still to ask about — and then take the server away. This is
+    // the harness kill of docs/gates/phase-11.md §5, on purpose this time.
+    const midPass = await until(
+      "the resource pass had weighed a file",
+      (d) => resources(d).fetched >= 1,
+      crawlId,
+    );
+    expect(resources(midPass).seen).toBe(RESUME_ASSETS);
+    expect(resources(midPass).fetched).toBeLessThan(RESUME_ASSETS);
+    await killableClient.close();
+    await killable.close();
+
+    // What the kill left: the graceful abort path, which decides NOTHING about
+    // the rows it did not reach. That is the property the resume rests on.
+    const killed = await ok("crawl_status", { crawlId });
+    expect(killed["status"]).toBe("cancelled");
+    expect(resources(killed).skipped).toBeGreaterThan(0);
+
+    // The spacing the crawl "earned" — written straight to the column because
+    // the fixture site never blocks, and the column is the only thing a resume
+    // can read the ratchet out of (rule 9).
+    await db.update(crawls).set({ hostSpacingMs: 50 }).where(eq(crawls.id, crawlId));
+
+    const resumed = await ok("crawl_resume", { crawlId });
+    // crawl_start's answer, because it is the same crawl continuing.
+    expect(resumed).toEqual({ crawlId, status: "queued", queuePosition: 0 });
+
+    const final = await settle(crawlId, 60_000);
+    expect(final["status"]).toBe("finished");
+    expect(final["frontier"]).toMatchObject({ pending: 0, leased: 0 });
+    // Every file the crawl saw was asked about — the 786 rows the gate crawl
+    // needed a database script for.
+    expect(resources(final).seen).toBe(RESUME_ASSETS);
+    expect(resources(final).fetched).toBe(RESUME_ASSETS);
+    expect(resources(final).skipped).toBe(0);
+    // And the politeness the crawl earned survived the kill: the resumed run
+    // paced at the ratchet, and did not overwrite it with the configured floor.
+    expect(final["hostSpacingMs"]).toBeGreaterThanOrEqual(50);
+  }, 120_000);
+
+  // THE SECOND SURFACE AN AGENT READS, pinned as claims rather than as
+  // "is not empty". These are the sentences most likely to rot: the doctrine
+  // that keeps a resumed pass's summary out of a report, the refusal list an
+  // agent decides its next move from, and the three costs a resume actually has
+  // (a fresh discovery, a re-granted resource budget, a crawl-wide spacing).
+  it("tells an agent what a resume costs, what it unjudges, and how it is refused", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "crawl_resume")?.description ?? "";
+    expect(text, "crawl_resume has no description").not.toBe("");
+
+    // It is the same crawl, and the answer shape says so.
+    expect(text).toContain("THE SAME CRAWL");
+    expect(text).toContain("{crawlId, status, queuePosition}");
+    // The P11-T4 render-from-DB doctrine, with the numbers that made it real.
+    expect(text).toContain("POLL crawl_status FOR WHAT IT FOUND");
+    expect(text).toContain("784 and 1,995");
+    expect(text).toContain("The database is the truth");
+    // What it costs: the re-run discovery, the per-RUN resource budget, and the
+    // spacing widening. Each is a request somebody's server answers.
+    expect(text).toContain("re-reads robots.txt");
+    expect(text).toContain("budgets per RUN, not per crawl");
+    expect(text).toContain("never faster than the one it");
+    // The judged marker, which is the surface's load-bearing sentence.
+    expect(text).toContain("rulesRunAt is cleared");
+    // Every refusal, so an agent can tell "wait" from "ask the operator".
+    for (const refusal of [
+      "no such crawl",
+      "already holding it",
+      "unexpired lease",
+      "nothing owed",
+      "allowlist",
+      "state changed while the call was checking it",
+    ]) {
+      expect(text, `crawl_resume's description does not name '${refusal}'`).toContain(refusal);
+    }
+    // And the work that is NOT a resume's.
+    expect(text).toContain("that is crawl_render");
+  });
+
+  it("refuses a crawl id nobody has", async () => {
+    const answer = await call("crawl_resume", { crawlId: "crawl_no_such_thing" });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("no such crawl");
+  });
+
+  it("refuses a crawl a live worker still holds a lease on", async () => {
+    const id = await seedResumable("leased", "running");
+    await db.insert(frontier).values({
+      crawlId: id,
+      url: `${resumeSite}/leased`,
+      state: "leased",
+      depth: 0,
+      discoveredVia: "seed",
+      leaseId: "another_worker",
+      leasedUntil: new Date(Date.now() + 60_000),
+    });
+    const answer = await call("crawl_resume", { crawlId: id });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("unexpired lease(s)");
+    // The refusal is about a WORKER, not about the status: the row still says
+    // running, and nothing was queued.
+    expect((await ok("crawl_status", { crawlId: id }))["status"]).toBe("running");
+  });
+
+  it("refuses a settled crawl with nothing owed, naming everything it counted", async () => {
+    const id = await seedResumable("done", "finished");
+    const answer = await call("crawl_resume", { crawlId: id });
+    expect(answer.isError).toBe(true);
+    const error = String(answer.body["error"]);
+    expect(error).toContain("nothing left to resume");
+    expect(error).toContain("pending frontier row(s)");
+    expect(error).toContain("lease has expired");
+    expect(error).toContain("resource row(s) still unasked");
+  });
+
+  it("refuses a crawl whose site has left the allowlist, naming the host", async () => {
+    // The empty-allowlist server: the read-only posture, which must refuse a
+    // resume for the same reason it refuses a start. A crawl accepted earlier is
+    // not standing permission (Talos obligation 2, hard rule 5).
+    const answer = await callWith(closedClient, "crawl_resume", { crawlId: liveCrawlId });
+    expect(answer.isError).toBe(true);
+    const error = String(answer.body["error"]);
+    expect(error).toContain("127.0.0.1");
+    expect(error).toContain("allowlist");
+  });
+
+  it("refuses to put a second worker on a crawl this server is already holding", async () => {
+    const accepted = await ok("crawl_start", { siteUrl: `${resumeSite}/`, maxPages: 10 });
+    const crawlId = String(accepted["crawlId"]);
+    createdCrawls.push(crawlId);
+    const answer = await call("crawl_resume", { crawlId });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("already held by this server");
+    await settle(crawlId, 60_000);
+  }, 120_000);
 });
 
 describe("issues_list / issue_urls", () => {
@@ -2002,14 +2379,20 @@ describe("the two transports answer with one shape", () => {
       {
         // The SAME tool on a crawl that carries resource rows. The pair above
         // compares a crawl whose whole resources block is zeroes, which would
-        // let a transport drop or rename any of its six numbers and still
-        // agree; this one has a file on each side of every split it makes.
+        // let a transport drop or rename any of its numbers and still agree;
+        // this one has a file on each side of every split it makes, the two
+        // robots classes included (P12-T1).
         tool: "crawl_status",
         args: { crawlId: surfaceCrawlId },
         path: `/crawls/${surfaceCrawlId}`,
         substantial: (b) => {
           const r = b["resources"] as Record<string, number> | undefined;
-          return r !== undefined && r["seen"] === 3 && r["robotsDenied"] === 1;
+          return (
+            r !== undefined &&
+            r["seen"] === 4 &&
+            r["robotsDenied"] === 1 &&
+            r["robotsUnreachable"] === 1
+          );
         },
       },
       {
@@ -2177,16 +2560,20 @@ describe("the two transports answer with one shape", () => {
 
     expect(streamed.status).toBe(200);
     expect(streamed.text).toBe(file);
-    // A header and the crawl's three files, with the empty cells that make an
+    // A header and the crawl's four files, with the empty cells that make an
     // unfetched row readable rather than absent.
     const lines = file.trimEnd().split("\r\n");
-    expect(lines).toHaveLength(4);
+    expect(lines).toHaveLength(5);
     expect(lines[0]).toBe(
       "url,kind,fetchClass,status,bytes,bytesSource,contentType,cacheControl," +
         "fetchReason,referencingPages",
     );
-    expect(written["rows"]).toBe(3);
+    expect(written["rows"]).toBe(4);
     expect(file).toContain(",resource-cap,1");
+    // Both robots classes reach the file the client opens, so the split is
+    // readable per row and not only as two counts.
+    expect(file).toContain(",robots_unreachable,");
+    expect(file).toContain(",robots_denied,");
   });
 });
 

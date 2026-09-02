@@ -15,13 +15,17 @@
  * `resources.fetch_class` is null for a reference the pass has not asked about —
  * because it has not run, was interrupted, or a cap stopped short of the row.
  * That is the null-vs-zero doctrine's newest citizen and the column comment in
- * src/db/schema.ts says so. Three more classes are unknowns of a different
+ * src/db/schema.ts says so. Four more classes are unknowns of a different
  * shape, and none of them is a fault of the site's:
  *
  *  - `refused` — OUR policy refused the URL (SSRF, a non-http scheme). We never
  *    asked.
- *  - `robots_denied` — the host's robots.txt disallowed it. We were not allowed
- *    to ask, and honouring that is hard rule 9.
+ *  - `robots_denied` — the host's robots.txt was read and disallowed it. We were
+ *    not allowed to ask, and honouring that is hard rule 9.
+ *  - `robots_unreachable` — the host could not tell us its rules, which RFC 9309
+ *    §2.3.1.4 makes a complete disallow, so again we never asked (P12-T1). An
+ *    unknown for the stronger reason: the host that would have answered was
+ *    down, usually a third party's CDN and usually transiently.
  *  - `fetch_error` — we asked and the request did not complete (a timeout, a
  *    DNS or connection failure). Nobody told us anything about the file.
  *
@@ -80,7 +84,12 @@ import type { Db } from "../../db/client.js";
 // in three statements: the fetch pass owns the vocabulary, and a bare literal
 // here would typecheck for ever against a renamed one while the weight and
 // caching rules quietly measured nothing (P11-T4 I-2).
-import { RESOURCE_OK_CLASS } from "../../crawl/resources/fetch-resources.js";
+import {
+  RESOURCE_CAP_REASON,
+  RESOURCE_OFF_REASON,
+  RESOURCE_OK_CLASS,
+  type ResourceFetchClass,
+} from "../../crawl/resources/fetch-resources.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -121,9 +130,9 @@ export const UNCACHED_SAMPLE_RESOURCES = 20;
  *
  * `fetch_error` is deliberately absent: a request that never completed is not a
  * server's verdict, and a flaky network on our side would otherwise be reported
- * to a client as their broken site. `refused` and `robots_denied` are absent for
- * the stronger reason that we never asked at all. All three are counted as
- * unknowns instead — see `UNKNOWN_CLASSES`.
+ * to a client as their broken site. `refused`, `robots_denied` and
+ * `robots_unreachable` are absent for the stronger reason that we never asked at
+ * all. All four are counted as unknowns instead — see `UNKNOWN_CLASSES`.
  */
 const BROKEN_CLASSES = ["client_error", "server_error"] as const;
 
@@ -134,8 +143,26 @@ const BROKEN_CLASSES = ["client_error", "server_error"] as const;
  * Every rule that reports a page's resources carries a count over this set, so a
  * reader can tell a page with two broken files and nothing else from a page with
  * two broken files and forty the pass never reached.
+ *
+ * `robots_unreachable` joined the list when P12-T1 split it out of
+ * `robots_denied`, and it is an unknown for the stronger of the two reasons: we
+ * never asked, AND the host that would have told us was down. A rule that
+ * counted it as a fault would be reporting a third party's outage as a client's
+ * broken site.
+ *
+ * TYPED AS `ResourceFetchClass[]`, not left as a bare tuple: the fetch pass owns
+ * this vocabulary and a member renamed there must not leave a literal here
+ * silently matching nothing. The compiler is what checks the four names against
+ * the list they come from — the same discipline `RESOURCE_OK_CLASS` gets one
+ * import above, applied where a set rather than a single name is needed
+ * (P11-T4 I-2).
  */
-const UNKNOWN_CLASSES = ["refused", "robots_denied", "fetch_error"] as const;
+const UNKNOWN_CLASSES: readonly ResourceFetchClass[] = [
+  "refused",
+  "robots_denied",
+  "robots_unreachable",
+  "fetch_error",
+];
 
 /** `fetch_class` is one of the unknowns, null included. */
 const isUnknownClass = sql`(r.fetch_class is null
@@ -450,6 +477,12 @@ async function uncachedFindings(self: RuleIdentity, db: Db, crawlId: string): Pr
  * "nothing was measured" is what a reader needs to be told before reading their
  * silence. What the marker never does is mistake a site with no assets at all
  * for a crawl that failed to look — that site counts no images either.
+ *
+ * WHAT IT STILL DOES NOT COVER, and no longer has to: a crawl whose rows EXIST
+ * and were never asked about. `resourcesSeen > 0` there, so this rule is silent
+ * by construction — and since P12-T2 that case has its own marker,
+ * `resources.not-fetched` below. The two conditions are complements over the
+ * same number, which is what makes them mutually exclusive.
  */
 async function notRecordedFindings(
   self: RuleIdentity,
@@ -487,6 +520,223 @@ async function notRecordedFindings(
   ];
 }
 
+/**
+ * The reasons a crawl can have SEEN every file and asked about none of them, and
+ * the vocabulary the finding reports one of.
+ *
+ * Three values rather than a boolean because they are three different sentences
+ * about our evidence, and the difference is what a reader does next. `off` is a
+ * DECISION somebody took — a client who asked us not to touch their CDN, a
+ * re-crawl that only needed the page census — and the answer is to run the crawl
+ * again with the pass on. `notRun` is an ACCIDENT — a crawl stopped before the
+ * pass sent its first request — and the answer is to finish the crawl. `cap` is
+ * a BUDGET that claimed every row before anything was asked, which is a number
+ * the operator chose and can raise. Copy is one text per rule, so the finding
+ * says which in its evidence.
+ *
+ * Each is recognised by the reason string the WRITER puts on the row, not by
+ * inference: `RESOURCE_OFF_REASON` from `markResourcesNotAsked`,
+ * `RESOURCE_CAP_REASON` from the pass's closing statement, and the absence of
+ * any reason at all, which is what a row nothing has touched carries. None of
+ * them is a `fetch_class`: no request was made, so no verdict was reached, and
+ * the null that means "seen, not yet asked" stands in all three.
+ */
+export const NOT_FETCHED_REASON = {
+  off: "fetch-off",
+  notRun: "pass-not-run",
+  cap: "budget-cap",
+} as const;
+
+/**
+ * The sentence that rides beside the class in the evidence, one per reason.
+ *
+ * On the `host.probe-skipped` model, whose evidence carries a `skipped`
+ * sentence: a reader meeting this finding in a listing should not have to look
+ * up what `budget-cap` means. Keyed by the reason so the compiler checks that
+ * every member of the vocabulary above has one — a fourth reason with no
+ * sentence would not compile rather than rendering `undefined` at a client.
+ */
+const NOT_ASKED_SENTENCE: Record<(typeof NOT_FETCHED_REASON)[keyof typeof NOT_FETCHED_REASON], string> = {
+  [NOT_FETCHED_REASON.off]:
+    "this crawl recorded every image, stylesheet and script its pages point at and " +
+    "asked the site about none of them: it was started with `fetchResources: false`, " +
+    "so the census is real and nothing was fetched",
+  [NOT_FETCHED_REASON.notRun]:
+    "this crawl recorded every image, stylesheet and script its pages point at and " +
+    "asked the site about none of them: the fetch pass sent no request at all, which " +
+    "is a crawl interrupted before it started asking or one whose pass never ran",
+  [NOT_FETCHED_REASON.cap]:
+    "this crawl recorded every image, stylesheet and script its pages point at and " +
+    "asked the site about none of them: the resource budget (`maxResources`) claimed " +
+    "every row before the pass asked about any of them, so the number to raise is the " +
+    "one the crawl was started with",
+};
+
+/**
+ * THE SIBLING MARKER: the crawl saw the files and asked about none of them.
+ *
+ * `resources.not-recorded` above reports a crawl with NO resource rows — a crawl
+ * from before migration 0013, or one whose extraction never ran. This one
+ * reports the case its condition deliberately excludes: the rows are there, the
+ * census is real, and not one of them was ever put to a server. The four judging
+ * rules are exactly as silent on such a crawl as they are on one with no rows at
+ * all, and `page.weight` reports each page's HTML as its whole weight — so a
+ * reader who meets no marker reads a light, clean site (hard rules 1 and 7).
+ *
+ * ## WHY A SIBLING RATHER THAN A WIDER `resources.not-recorded`
+ *
+ * The Phase 11 gate ruled it (phase-11.md §10.3): widening the existing marker's
+ * condition would change WHEN AN EXISTING RULE FIRES, which is a verdict change
+ * a re-judged crawl would feel. A new rule is additive — a crawl gains a finding
+ * it could not receive before, which is the ruleset bump this task makes
+ * (0.9.0), and no existing verdict moves. `host.probe-skipped` is the house's
+ * precedent for the shape: a marker that reports a crawl OPTION rather than
+ * missing data, whose silence is not a pass.
+ *
+ * The two are MUTUALLY EXCLUSIVE BY CONSTRUCTION and the arithmetic is the whole
+ * proof: that rule needs `resourcesSeen == 0`, this one `resourcesSeen > 0`. A
+ * test drives both conditions and asserts it, so a later loosening of either has
+ * to be deliberate.
+ *
+ * ## WHAT IT DOES NOT FIRE ON, each for its own reason
+ *
+ *  - **A pre-0013 crawl.** No rows, so nothing was seen; that is the other
+ *    marker's fact and reporting it here would be two findings for one silence.
+ *  - **A PARTIAL pass** — a cap that stopped short, an interrupted pass that had
+ *    already asked about something. One decided row means the crawl DID measure,
+ *    so a marker saying "nothing was measured" would be false. What such a crawl
+ *    gets instead is the judging rules' own answer: `unknownResources` rides on
+ *    every finding they write. THAT IS COVERAGE ONLY WHERE THEY WRITE ONE — see
+ *    the window below, which this rule does not close.
+ *  - **A normal completed pass**, where every row carries a class.
+ *
+ * ## HOW THE PASS ACTUALLY LEAVES ROWS UNASKED, since the reasons are read off
+ * ## the rows rather than inferred
+ *
+ * Three writers, three shapes (`fetch-resources.ts`):
+ *
+ *  - `markResourcesNotAsked` stamps `RESOURCE_OFF_REASON` on every undecided row
+ *    when the operator turned the pass off. It runs INSTEAD of the pass.
+ *  - The pass's closing statement stamps `RESOURCE_CAP_REASON` on every
+ *    undecided row when the resource BUDGET was claimed. The budget is claimed
+ *    per slice at the top of a batch, before any of that slice is asked about —
+ *    it is not `admit`'s doing; `admit` refuses on the HOST cap, per row, and
+ *    writes its own reason inline.
+ *  - An ABORT stamps nothing at all: its rows were interrupted, not budgeted
+ *    away, and they keep both nulls. That guard was missing until P12-T2's
+ *    review (C-1) and is now the condition on the statement itself.
+ *
+ * So a census of nothing but `resource-cap` rows means a budget claimed them all
+ * before the pass asked about any of them. The pass no longer produces it — one
+ * row of the claimed slice is asked about unless the caller aborts, and an abort
+ * leaves nulls — but this rule reads a TABLE, not a pass, and a shape it met and
+ * threw on would be the silence it exists to end. It is therefore RECOGNISED,
+ * off the writer's own constant, rather than guessed at or excluded by argument.
+ *
+ * What is left is a genuine MIXTURE — two or three reasons in one census, none
+ * of them true of the crawl as a whole. No writer produces that, each of the
+ * three touching every undecided row or none, so the rule throws with the counts
+ * rather than picking one (hard rule 7).
+ *
+ * ## THE WINDOW THIS MARKER DOES NOT CLOSE (review I-1)
+ *
+ * A crawl whose every resource landed in an UNKNOWN CLASS — `refused`,
+ * `robots_denied`, `robots_unreachable`, `fetch_error` — has decided rows, so
+ * this rule is silent, and it has no `ok` row, so the four judging rules find
+ * nothing to report and `page.weight` counts HTML alone. The
+ * `unknownResources` counts that would explain it live ON findings, and no
+ * finding was written: six rules quiet, no marker, exactly the shape
+ * phase-11.md §10.3 refused to accept as "legible one surface over".
+ *
+ * It IS legible one surface over — `crawl_status.resources` carries `failed`,
+ * `robotsDenied`, `robotsUnreachable` and `fetch_error`'s share of `failed`, and
+ * CHECK-83 is answered first — and that is not the same as a reader meeting a
+ * marker. **Ledgered to Phase 13 as an owner-promotable pointer**: a third
+ * sibling on this model, fired by "no `ok` row on a crawl that has decided
+ * rows". It is not this task's work, and it is stated here and in the four
+ * checklist entries rather than left for the next reader to rediscover.
+ */
+async function notFetchedFindings(
+  self: RuleIdentity,
+  db: Db,
+  crawlId: string,
+): Promise<Finding[]> {
+  const result = await db.execute<{
+    resources_seen: number;
+    unfetched: number;
+    off_rows: number;
+    unasked_rows: number;
+    cap_rows: number;
+    pages_crawled: number;
+  }>(sql`
+    select
+      count(*)::int as resources_seen,
+      count(*) filter (where r.fetch_class is null)::int as unfetched,
+      count(*) filter (
+        where r.fetch_class is null and r.fetch_reason = ${RESOURCE_OFF_REASON}
+      )::int as off_rows,
+      count(*) filter (
+        where r.fetch_class is null and r.fetch_reason is null
+      )::int as unasked_rows,
+      count(*) filter (
+        where r.fetch_class is null and r.fetch_reason = ${RESOURCE_CAP_REASON}
+      )::int as cap_rows,
+      (select count(*)::int from pages p where p.crawl_id = ${crawlId}) as pages_crawled
+    from resources r
+    where r.crawl_id = ${crawlId}`);
+
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new Error(`${self.id}: crawl '${crawlId}' resource-census query returned no row`);
+  }
+  const seen = row.resources_seen;
+  // Nothing seen is the other marker's fact; one row fewer unfetched than seen
+  // means something WAS decided, which is a pass that measured.
+  if (seen === 0 || row.unfetched < seen) return [];
+
+  // One reason true of the WHOLE census, or none. Each writer touches every
+  // undecided row or none of them, so a count equal to `seen` is the writer
+  // identifying itself; anything else is a mixture nobody wrote.
+  const reason =
+    row.off_rows === seen
+      ? NOT_FETCHED_REASON.off
+      : row.unasked_rows === seen
+        ? NOT_FETCHED_REASON.notRun
+        : row.cap_rows === seen
+          ? NOT_FETCHED_REASON.cap
+          : null;
+  if (reason === null) {
+    throw new Error(
+      `${self.id}: crawl '${crawlId}' asked about none of its ${seen} resources and the ` +
+        `unfetched rows carry a mixture of reasons — ${row.off_rows} say ` +
+        `'${RESOURCE_OFF_REASON}', ${row.cap_rows} say '${RESOURCE_CAP_REASON}', ` +
+        `${row.unasked_rows} say nothing at all, and any remainder says something else ` +
+        `again. No writer of ours produces a mixture: each stamps every undecided row ` +
+        `or none`,
+    );
+  }
+  return [
+    queryFinding(self, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        reason,
+        // The sentence beside the class, on the `host.probe-skipped` model: a
+        // reader meeting this finding in a listing should not have to look up
+        // what `fetch-off` means.
+        notAsked: NOT_ASKED_SENTENCE[reason],
+        // Equal by arithmetic — the gate above returned already if anything had
+        // been decided — and both are reported because the EQUALITY is the
+        // finding, in the vocabulary `crawl_status.resources` already uses.
+        resourcesSeen: seen,
+        resourcesSkipped: row.unfetched,
+        pagesCrawled: row.pages_crawled,
+      },
+      dedupeKey: "site",
+    }),
+  ];
+}
+
 const CATEGORY = "technical" as const;
 
 const BROKEN: RuleIdentity = { id: "resources.broken", severity: "warning" };
@@ -494,6 +744,7 @@ const OVERSIZED: RuleIdentity = { id: "images.oversized", severity: "warning" };
 const LEGACY: RuleIdentity = { id: "images.legacy-format", severity: "info" };
 const UNCACHED: RuleIdentity = { id: "resources.uncached", severity: "info" };
 const NOT_RECORDED: RuleIdentity = { id: "resources.not-recorded", severity: "info" };
+const NOT_FETCHED: RuleIdentity = { id: "resources.not-fetched", severity: "info" };
 
 export const resourceRules: QueryRule[] = [
   // A failed network request, which is what CHECK-51 asks for by name — see the
@@ -576,5 +827,20 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
+  }),
+
+  // The sibling marker (P12-T2), claiming the same four checks as the marker
+  // beside it and for the same reason: the silence it explains is the same
+  // silence — the four judging rules quiet and `page.weight` counting HTML
+  // alone. Which of the two speaks is decided by whether the crawl has rows.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: NOT_FETCHED.id,
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+    category: CATEGORY,
+    severity: NOT_FETCHED.severity,
+    ...copyFor(NOT_FETCHED.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
   }),
 ];

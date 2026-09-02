@@ -1,13 +1,15 @@
 /**
- * TWO GUARDS OVER DOCUMENTATION NOTHING ELSE READS.
+ * THREE GUARDS OVER DOCUMENTATION NOTHING ELSE READS.
  *
  * The first (`the skills name only identifiers the engine has`) checks that
  * `skills/**` names identifiers the engine still has. The second (`the surface
- * document cites the test it means`, at the bottom of this file) checks that
- * `docs/talos-surface.md`'s `file:line` citations name the test whose title the
- * document quotes. They share this file because they are one discipline read
- * twice: a document nothing executes drifts silently, so something has to read
- * it.
+ * document cites the test it means`) checks that `docs/talos-surface.md`'s
+ * `file:line` citations name the test whose title the document quotes. The third
+ * (`the surface document's src/ references name what they claim`, at the bottom
+ * of this file) checks the same document's `src/` references for the different
+ * property those can carry — P12-T4 took that decision and states it there. They
+ * share this file because they are one discipline read three times: a document
+ * nothing executes drifts silently, so something has to read it.
  *
  * ---
  *
@@ -614,11 +616,19 @@ describe("the skills name only identifiers the engine has", () => {
   // is on the list for the same reason as the rest — its silence is not a pass).
   //
   // SCOPE, stated because the list being hand-written has a second consequence
-  // (P11-T4, M-6): a SEVENTH marker is not dragged into anything by adding it to
-  // the registry. It has to be written into this list to be checked at all, AND
-  // into CHECK-83's own NOT MEASURED family — which is likewise six ids typed
-  // out, derived from no registry query. Nothing here notices a marker that is
+  // (P11-T4, M-6): a marker is not dragged into anything by adding it to the
+  // registry. It has to be written into this list to be checked at all, AND into
+  // CHECK-83's own NOT MEASURED family — which is likewise a hand-typed list of
+  // ids, derived from no registry query. Nothing here notices a marker that is
   // in neither. Adding a marker is therefore three edits, not one.
+  //
+  // **P12-T2 PAID THAT COST, and it is recorded rather than glossed:** the
+  // seventh marker (`resources.not-fetched`) took exactly the three edits this
+  // paragraph predicted — the rule, the entry below, and CHECK-83's family list
+  // — and only the second of them is enforced by anything. The prediction
+  // holding is not an argument that the arrangement is right; it is the evidence
+  // for deriving both lists from the registry when a check-shaped `marker: true`
+  // flag is worth its own phase.
   it("every NOT MEASURED marker is named in the checklist entry of each check it claims", () => {
     const MARKERS: Record<string, string> = {
       "content.thin-skipped": "the page the corrected thin-content floor cannot judge",
@@ -627,6 +637,7 @@ describe("the skills name only identifiers the engine has", () => {
       "robots.check-skipped": "a robots.txt the crawl could not read",
       "host.probe-skipped": "a crawl started with host probing off",
       "resources.not-recorded": "a crawl that recorded no resources (P11-T3)",
+      "resources.not-fetched": "a crawl that recorded its resources and asked about none (P12-T2)",
     };
     const text = readFileSync(CHECKLIST, "utf8");
     // `### CHECK-NN: …` to the next `### `, which is one check's whole entry.
@@ -808,6 +819,15 @@ describe("the skills name only identifiers the engine has", () => {
  * keeps its evidence in. `talos-surface.md` is the opposite kind of document —
  * a living contract, rewritten every phase, read by somebody about to code
  * against it.
+ *
+ * ## Scope: `test/` citations only — `src/` is the third guard's
+ *
+ * This block reads `test/…` and nothing else, because the anchor-and-attest
+ * property it checks is a property of test files: only they carry declarations
+ * whose titles a document can quote. The same document's `src/` references are
+ * checked at the bottom of this file, for what a source reference CAN carry.
+ * That split is the decision, not an omission — the argument is in the third
+ * guard's own header.
  */
 
 const SURFACE_DOC = join(ROOT, "docs/talos-surface.md");
@@ -1115,5 +1135,184 @@ describe("the surface document cites the test it means", () => {
     expect(CITATIONS.length).toBeGreaterThan(60);
     expect(CITATIONS.filter((citation) => citation.line !== null).length).toBeGreaterThan(60);
     expect(blocksFor("test/api/query.test.ts").length).toBeGreaterThan(80);
+  });
+});
+
+// ============================================================================
+// THE THIRD GUARD: A `src/` REFERENCE IS CHECKED FOR WHAT IT CAN CARRY
+// ============================================================================
+
+/**
+ * THE DECISION P11-M-9 LEFT OPEN, taken here (P12-T4): the surface document
+ * cites `src/` as well as `test/`, and the guard above reads only `test/`.
+ * Widen it — but NOT to the same property, because `src/` cannot carry it.
+ *
+ * ## Why the anchor rule cannot simply be extended
+ *
+ * The test guard's whole design rests on one fact about test files: a citation
+ * can name a DECLARATION whose title the document quotes back. `src/` has no
+ * such thing. A line of `service.ts` opens no named block, its neighbours are
+ * indistinguishable from it, and the nearest equivalent — quoting the line's own
+ * text — would pin the document to code formatting, so a rewrapped argument
+ * list or a renamed local would fail a guard that is supposed to catch
+ * documents drifting from behaviour.
+ *
+ * ## What this document's `src/` references actually are
+ *
+ * They are FILE references without line numbers, of two kinds — and the kinds
+ * are what matters, not the count, which moves every time the document gains a
+ * sentence (it was four when this guard was written and five before the same
+ * commit landed). The floor is asserted at the bottom of this block rather than
+ * restated here.
+ *
+ *  - ARCHITECTURAL ("`src/api/service.ts` holds every query, refusal and
+ *    vocabulary") — claims no grep can settle, and human review either way;
+ *  - PINS, in a fixed form: "Pinned: `src/db/schema.ts`'s
+ *    `resources.fetch_class` comment". That form names a file AND an identifier
+ *    inside it, which is a checkable claim.
+ *
+ * ## So the three properties checked here
+ *
+ *  1. **Existence.** The file is there. A renamed or deleted module is the whole
+ *     rot mode a line-less reference has, and it is the one the test guard's
+ *     first assertion catches too.
+ *  2. **No line numbers.** A `src/file.ts:120` citation is REFUSED outright,
+ *     because nothing here can check it: it would resolve forever, drift
+ *     silently, and carry the confident look of a pin. Cite the file and name
+ *     the artefact in words — which is what the document already does, and this
+ *     is what keeps it that way.
+ *  3. **Attestation, where the document makes one.** An identifier quoted
+ *     immediately after the reference must appear in the file. The last dotted
+ *     segment is what is looked for (`crawls.resource_refs_capped_pages` →
+ *     `resource_refs_capped_pages`), because the document names columns the way
+ *     a reader thinks of them and the file spells them the way Postgres does.
+ *
+ * ## What it still cannot do, stated rather than hidden
+ *
+ * **It cannot read the sentence** — the same limit the test guard states, one
+ * step weaker. A pin naming a real identifier in a real file, beside a claim
+ * that comment does not make, passes here. And a reference with no identifier
+ * beside it is checked for existence only: the architectural claims are in that
+ * class deliberately, because inventing an attestation for them would mean
+ * quoting prose out of a source comment and pinning the document to somebody's
+ * line wrapping.
+ *
+ * Two smaller limits of the checker itself, so nobody reads a green run as more
+ * than it is:
+ *
+ *  - **A reference that is both missing and line-numbered reports ONE problem,
+ *    not two.** The existence check `continue`s, because a line number on a file
+ *    that is not there is not the reader's next question — and the guard is
+ *    re-run after the first fix anyway.
+ *  - **A line number in PROSE passes.** "line 120 of `src/db/schema.ts`" carries
+ *    no colon, so the extractor does not see it as a citation. The rule this
+ *    enforces is about the citation FORM the document uses; a sentence that
+ *    spells a line number out in words is beyond what any regex here settles,
+ *    and is human review like every other prose claim.
+ */
+
+interface SourceRef {
+  docLine: number;
+  file: string;
+  /** Present only where the document wrote one — which it must not. */
+  line: number | null;
+  /** The identifier quoted immediately after, if the document quotes one. */
+  identifier: string | null;
+}
+
+/**
+ * Every reference to a source file in the surface document.
+ *
+ * The attestation window is the same ADJACENT one the test citations use: the
+ * `'s` possessive and the backticked identifier that follows it, with no blank
+ * line in between, so an identifier in the next paragraph cannot be read as this
+ * reference's pin.
+ */
+function sourceRefsOf(text: string): SourceRef[] {
+  const out: SourceRef[] = [];
+  for (const match of text.matchAll(/(src\/[A-Za-z0-9/_.-]+\.ts)(?::(\d+))?/g)) {
+    const end = match.index + match[0].length;
+    const attestation = new RegExp(`^\`?${GAP}'s${GAP}\`([^\`]+)\``).exec(text.slice(end));
+    out.push({
+      docLine: text.slice(0, match.index).split("\n").length,
+      file: match[1]!,
+      line: match[2] === undefined ? null : Number(match[2]),
+      identifier: attestation?.[1] ?? null,
+    });
+  }
+  return out;
+}
+
+/** The three properties, as a list of failures a reader can act on. */
+function sourceRefProblems(refs: readonly SourceRef[]): string[] {
+  const problems: string[] = [];
+  for (const ref of refs) {
+    const where = `docs/talos-surface.md:${ref.docLine} → ${ref.file}`;
+    if (!existsSync(join(ROOT, ref.file))) {
+      problems.push(`${where} — no such file`);
+      continue;
+    }
+    if (ref.line !== null) {
+      problems.push(
+        `${where}:${ref.line} — a src/ reference may not carry a line number: no line of ` +
+          `source declares its own identity, so nothing can check that this one still means ` +
+          `what the sentence says. Cite the file and name the artefact.`,
+      );
+    }
+    if (ref.identifier === null) continue;
+    const needle = ref.identifier.split(".").at(-1)!;
+    if (!readFileSync(join(ROOT, ref.file), "utf8").includes(needle)) {
+      problems.push(`${where} — nothing in that file is called '${needle}'`);
+    }
+  }
+  return problems;
+}
+
+describe("the surface document's src/ references name what they claim", () => {
+  const REFS = sourceRefsOf(readFileSync(SURFACE_DOC, "utf8"));
+
+  it("names source files that exist, without line numbers, attesting what it pins", () => {
+    expect(
+      sourceRefProblems(REFS),
+      "a src/ reference is checked for existence and for the identifier it quotes — " +
+        "it cannot be anchored to a test's title, so it may not be anchored to a line",
+    ).toEqual([]);
+  });
+
+  it("fails a missing file, a line number and an identifier the file does not carry", () => {
+    // The guard tested on input of its own, because every assertion above is
+    // over a document that PASSES: without this, a broken extractor and a clean
+    // document look identical.
+    const problems = sourceRefProblems(
+      sourceRefsOf(
+        "Pinned: `src/db/nosuch.ts`'s `whatever` comment.\n" +
+          "See `src/db/schema.ts:120` for the column.\n" +
+          "Pinned: `src/db/schema.ts`'s `crawls.no_such_column` comment.\n",
+      ),
+    );
+    expect(problems).toHaveLength(3);
+    expect(problems[0]).toContain("no such file");
+    expect(problems[1]).toContain("may not carry a line number");
+    expect(problems[2]).toContain("no_such_column");
+  });
+
+  it("accepts the pin form the document actually uses", () => {
+    // The other half of the same insurance: a checker that failed everything
+    // would also make the assertion above pass.
+    expect(
+      sourceRefProblems(
+        sourceRefsOf("Pinned: `src/db/schema.ts`'s `crawls.resource_refs_capped_pages` comment."),
+      ),
+    ).toEqual([]);
+  });
+
+  it("reads something: the source-reference extraction is not silently empty", () => {
+    // The floor the header refuses to restate as a count. Both kinds have to be
+    // found, or a regex that stopped matching one of them turns the assertions
+    // above green over a document nobody checked.
+    const pins = REFS.filter((ref) => ref.identifier !== null);
+    expect(REFS.length).toBeGreaterThanOrEqual(5);
+    expect(pins.length).toBeGreaterThanOrEqual(3);
+    expect(REFS.length - pins.length, "the architectural references").toBeGreaterThanOrEqual(2);
   });
 });

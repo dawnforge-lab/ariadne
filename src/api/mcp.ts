@@ -1,5 +1,5 @@
 /**
- * The MCP transport: fifteen tools over the same service layer the HTTP routes
+ * The MCP transport: sixteen tools over the same service layer the HTTP routes
  * use.
  *
  * This is a SECOND TRANSPORT, not a second API. Every tool below is a schema, a
@@ -100,6 +100,7 @@ export const TOOL_NAMES = [
   "crawl_status",
   "crawl_list",
   "crawl_mark_failed",
+  "crawl_resume",
   "crawl_render",
   "crawl_rules",
   "robots_get",
@@ -149,6 +150,9 @@ The order of operations is fixed by what the evidence means:
   1. crawl_start   accepts a crawl and returns a crawl id immediately. It is
                    queued, not finished; one crawl runs at a time per server.
   2. crawl_status  polls it. Poll until status is no longer 'queued'/'running'.
+                   A crawl that stopped with work still owed — a server shut
+                   down mid-run, a cancel somebody regrets — is continued with
+                   crawl_resume, which is the same crawl and not a new one.
   3. crawl_render  (optional) re-fetches some pages in a real browser, so
                    client-side-rendered content is measured rather than guessed.
                    Either the engine picks them or you name them with 'urls'.
@@ -295,28 +299,63 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "broken files, which is what the resources.broken finding judges. skipped is " +
         "SEEN BUT NOT ASKED: the pass has not run, was interrupted, hit a cap, or was " +
         "turned off. fetched + failed + skipped = seen, always.\n\n" +
-        "Two fields beside them say what a bare number would hide. robotsDenied is " +
-        "the part of failed that robots.txt put out of reach — READ IT CAREFULLY: an " +
-        "unreachable robots.txt is a complete disallow (RFC 9309), so a CDN that was " +
-        "down while the pass ran looks exactly like a CDN that forbids us. Which one " +
-        "it was is in each row's fetchReason, on the resources CSV view " +
-        "(export_crawl, format=csv, view=resources); this count does not read that " +
-        "sentence. capped is true when a per-crawl cap stopped the pass short of at " +
-        "least one file — one flag for both caps, because the row records one reason " +
-        "whichever cap it was.\n\n" +
+        "Three fields beside them say what a bare number would hide. robotsDenied " +
+        "and robotsUnreachable are both parts of failed that robots.txt put out of " +
+        "reach, and they are two counts because they are two facts: robotsDenied is " +
+        "'they said no' — the file's host served its rules and they forbid us — " +
+        "while robotsUnreachable is 'we could not ask' — the host answered 5xx, timed " +
+        "out or failed at the network, which RFC 9309 makes a complete disallow all " +
+        "the same. An unreachable robots.txt is a complete disallow, so the BEHAVIOUR " +
+        "is identical (no request was made either way) and the report is not: " +
+        "robotsUnreachable is usually a transient condition on somebody's CDN, not a " +
+        "policy the client chose. Each row's fetchReason names the host and the " +
+        "reason, on the resources CSV view (export_crawl, format=csv, " +
+        "view=resources). A crawl run before this split has every robots refusal in " +
+        "robotsDenied — nothing was rewritten. capped is true when a resource cap " +
+        "stopped the pass short of at least one file — one flag for both caps, " +
+        "because the row records one reason whichever cap it was. Those caps are " +
+        "budgets per RUN, not per crawl: crawl_resume grants the whole budget " +
+        "again, so a crawl's lifetime total can exceed maxResources.\n\n" +
+        "resourceRefsCappedPages sits OUTSIDE that block because it counts PAGES, " +
+        "not files: how many of this crawl's pages carried more resource REFERENCES " +
+        "than the analyzer's cap keeps (2,000 per page, the rest turned away). " +
+        "References, not files — past the cap the analyzer stops resolving, so a " +
+        "page whose 2,001st reference repeats its first is counted here and lost no " +
+        "file at all. On those pages resources.seen MAY BE a floor: some of the " +
+        "turned-away references would have been files nobody recorded, so counts " +
+        "over the census may be counts over a sample of that page's references. " +
+        "Which page it is true of is not knowable from any surface. null is not " +
+        "zero: null means nobody counted (a crawl older than the counter, one still " +
+        "running, or one whose process died before its first close — that null is " +
+        "permanent, a later resume cannot recover the pages the dead run read), " +
+        "while 0 means every page was read and none of them lost a reference. Do not " +
+        "render the two the same way, and do not divide this by pagesCrawled: the " +
+        "two are counted off different sources (analyses handed to the writer versus " +
+        "the frontier's settled rows) and a ratio above 1 is legitimate on a crawl " +
+        "that analysed one URL twice.\n\n" +
         "fetchResources says whether this crawl asked at all: true is the default and " +
         "false is an operator's decision, echoed here so it can be confirmed. false " +
         "beside fetched 0 is 'nobody asked'; true beside fetched 0 is a pass that has " +
-        "not run or could not finish. On a crawl older than the resource tables every " +
-        "number here is 0, which is not 'this site references no files' — the " +
-        "resources.not-recorded finding is what says so.\n\n" +
+        "not run, was capped before its first request, or could not finish. The " +
+        "resources.not-fetched finding covers only the crawls where NOT ONE file was " +
+        "decided (skipped equal to seen), and its evidence names which of those three " +
+        "it was. A pass that asked and got only non-ok answers — fetched 0 with " +
+        "failed above 0 — carries NO marker: rows were decided, so nothing fires, and " +
+        "this block is the only discriminator for the silence of the resource rules. " +
+        "On a crawl older than the resource " +
+        "tables every number here is 0, which is not 'this site references no files' " +
+        "— the resources.not-recorded finding is what says so.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
         "number only while THIS server holds the crawl (null otherwise), and " +
         "liveLeases counts unexpired worker leases. A 'queued' crawl with " +
         "queuePosition null was accepted by a server process that is now gone — " +
-        "nobody will run it; re-submit it, or retire it with crawl_mark_failed.\n\n" +
+        "nobody will run it; hand it to crawl_resume, which continues the same " +
+        "crawl, or retire it with crawl_mark_failed. The same pair answers a " +
+        "'running' row with liveLeases 0 long after its server died, and a " +
+        "terminal crawl that stopped with work owed: crawl_resume finishes it, " +
+        "crawl_mark_failed closes it.\n\n" +
         "blockedPages counts pages a WAF or rate limiter answered instead of the " +
         "site (401/403/429/challenge). hostSpacingMs is how far the engine has " +
         "already backed off in response: the widest per-host gap it is enforcing, " +
@@ -368,6 +407,60 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       }),
     },
     async (args) => run("crawl_list", () => service.listCrawls(defined(args))),
+  );
+
+  server.registerTool(
+    named("crawl_resume"),
+    {
+      title: "Resume an interrupted crawl",
+      description:
+        "Continue a crawl that stopped with work still owed — a server that was " +
+        "shut down mid-crawl, a worker that died, or a crawl somebody cancelled " +
+        "and now wants finished. It is THE SAME CRAWL: same crawlId, same row, " +
+        "same frontier, and pages already on record are never fetched again. " +
+        "Answers {crawlId, status, queuePosition} exactly as crawl_start does, " +
+        "with status 'queued' — the work is accepted here and runs later.\n\n" +
+        "POLL crawl_status FOR WHAT IT FOUND. This tool reports nothing about the " +
+        "resumed run, and that is deliberate: a resumed pass's own summary counts " +
+        "what THAT run did, while crawl_status counts what the CRAWL holds. On the " +
+        "Phase 11 gate crawl the two read 784 and 1,995 resources — both true, and " +
+        "only the second one describes the site. The database is the truth.\n\n" +
+        "WHAT IT COSTS THE SITE. Before it picks up where it left off a resume " +
+        "re-reads robots.txt, re-walks the sitemap and re-runs the host probe, " +
+        "because a crawl resumed hours later must honour the rules as they are " +
+        "NOW — roughly a dozen paced requests. Then it does the owed work, and on " +
+        "a crawl that hit its resource cap that is MORE than 'the remainder': the " +
+        "engine's resource-fetch caps are budgets per RUN, not per crawl, so a " +
+        "resume grants the whole budget again and may weigh a budget's worth of " +
+        "further files. That is legitimate work on files the crawl saw and never " +
+        "asked about — but it is a second round of requests to somebody's " +
+        "servers, and crawl_status's resources block reports capped true on " +
+        "exactly the crawls where it applies.\n\n" +
+        "It also keeps the politeness the crawl earned: a host that pushed the " +
+        "spacing to 8s is still crawled at 8s, never back at the configured " +
+        "floor. Read that as a CRAWL-wide number, because that is what it is — " +
+        "hostSpacingMs is the widest spacing any one host reached, so a resume " +
+        "applies it to every host it touches, including ones that never pushed " +
+        "back. A resumed crawl is therefore never faster than the one it " +
+        "continues, and can be slower; the 30000ms cap still bounds it.\n\n" +
+        "IT UNJUDGES THE CRAWL. rulesRunAt is cleared, because the crawl is about " +
+        "to grow and a timestamp left standing would say a completed rules pass " +
+        "describes pages that did not exist when it ran. Re-run crawl_rules after " +
+        "the resumed crawl finishes; until you do, crawl_status reads " +
+        "rulesRunAt null and any findings still in the table are a pass nobody " +
+        "completed.\n\n" +
+        "REFUSED, and each refusal says which: no such crawl; this server is " +
+        "already holding it; the crawl still holds an unexpired lease (a worker is " +
+        "on it — wait, a dead worker's leases expire on their own); a terminal " +
+        "crawl with nothing owed, naming what was counted (pending frontier rows, " +
+        "expired leases, unasked resource rows); the site's host is no longer on " +
+        "this server's crawl allowlist, which is policy and not a fault; or the " +
+        "crawl's state changed while the call was checking it, in which case " +
+        "nothing was queued and crawl_status says what it is now. Pages waiting on " +
+        "the render pass are NOT resumable work — that is crawl_render.",
+      inputSchema: z.strictObject({ crawlId: crawlIdField() }),
+    },
+    async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),
   );
 
   server.registerTool(
@@ -454,7 +547,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "still holds an unexpired lease — a live crawl between batches " +
         "momentarily holds none, which is exactly the window an impatient caller " +
         "would look in. If it is refused because a lease is live, wait: a dead " +
-        "worker's leases expire on their own.",
+        "worker's leases expire on their own.\n\n" +
+        "It is also not the only move on an abandoned crawl. crawl_resume takes " +
+        "the same rows and CONTINUES them instead of retiring them, and it is the " +
+        "better answer whenever the pages already fetched are worth keeping.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_mark_failed", () => service.markCrawlFailed(crawlId)),
@@ -673,8 +769,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "by crawl_render: before that " +
         "pass has run, rendered is false on every page and 'rendered: true' answers " +
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
-        "rendered'. Check crawl_status's renderPassCount before reading anything " +
-        "into a rendered filter.\n\n" +
+        "rendered'. Check whether a pass ran before reading anything into a " +
+        "rendered filter: render.coverage's renderPassEvidence answers it " +
+        "('none' means no pass left a trace), while crawl_status's " +
+        "renderPassCount is only the LAST pass's rendered-page count — its 0 is " +
+        "also what a crawl nobody rendered reports.\n\n" +
         "Filters:\n" +
         "  pageType   — a template cohort as this crawl typed it; '(untyped)' for " +
         "the pages it could not type\n" +

@@ -271,6 +271,107 @@ describe("resource refs — volume", () => {
     // uncapped).
     expect(a.imagesTotal).toBe(n);
   });
+
+  // THE CAP SAYS SO NOW (P12-T1). Until this phase the truncation was silent
+  // for stylesheets and scripts — `imagesTotal` sits beside the image refs and
+  // can be compared against them, but CSS and JS have no counter of their own,
+  // so a page that lost fifty stylesheets past the cap looked exactly like a
+  // page that referenced none. The flag is the analyzer's half of the answer;
+  // `PageWriter` counts the pages carrying it and the crawl loop stamps the
+  // total onto `crawls.resource_refs_capped_pages` (phase-11.md §10.1).
+  it("says on the page itself when the cap dropped a reference", () => {
+    const under = analyzePage(doc(`<img src="/i/a.png" alt="a">`), PAGE);
+    expect(under.resourceRefsCapped).toBe(false);
+
+    // Exactly at the cap and not one reference past it: nothing was dropped, so
+    // the flag must stay false. A flag that fires on a full-but-complete page
+    // would count pages that lost nothing.
+    const exact = Array.from(
+      { length: MAX_RESOURCE_REFS },
+      (_, i) => `<img src="/i/${i}.png" alt="${i}">`,
+    ).join("");
+    const full = analyzePage(doc(exact), PAGE);
+    expect(full.resourceRefs).toHaveLength(MAX_RESOURCE_REFS);
+    expect(full.resourceRefsCapped).toBe(false);
+
+    const over = analyzePage(doc(`${exact}<img src="/i/one-more.png" alt="x">`), PAGE);
+    expect(over.resourceRefs).toHaveLength(MAX_RESOURCE_REFS);
+    expect(over.resourceRefsCapped).toBe(true);
+  });
+
+  // WHAT THE FLAG MEANS, EXACTLY: a reference this page carried was dropped
+  // UNEXAMINED. Past the cap the analyzer stops resolving, so it cannot know
+  // whether the dropped reference would have been a new URL or a repeat of one
+  // already recorded — and the flag says the honest thing rather than the
+  // stronger one. A repeat past the cap therefore raises it too.
+  it("counts a reference dropped unexamined, repeat or not, because it never resolved it", () => {
+    const exact = Array.from(
+      { length: MAX_RESOURCE_REFS },
+      (_, i) => `<img src="/i/${i}.png" alt="${i}">`,
+    ).join("");
+    // The 2001st reference is the 1st one again. Nothing is lost from the list;
+    // the analyzer did not look, and says only that it did not look.
+    const repeat = analyzePage(doc(`${exact}<img src="/i/0.png" alt="again">`), PAGE);
+    expect(repeat.resourceRefs).toHaveLength(MAX_RESOURCE_REFS);
+    expect(repeat.resourceRefsCapped).toBe(true);
+  });
+
+  // ONE MAP FOR EVERY KIND, so the cap is spent in DOCUMENT ORDER and what
+  // survives is whatever the document named first. Named for what it actually
+  // shows: the head's stylesheet is extracted before any of the body's images,
+  // so it survives and an IMAGE is what falls off the end. It is not a
+  // stylesheet-saturation case — those are the two below.
+  it("spends the cap in document order: the head's stylesheet survives, an image falls off", () => {
+    const images = Array.from(
+      { length: MAX_RESOURCE_REFS },
+      (_, i) => `<img src="/i/${i}.png" alt="${i}">`,
+    ).join("");
+    const a = analyzePage(
+      doc(images, `<link rel="stylesheet" href="/css/early.css">`),
+      PAGE,
+    );
+    expect(a.resourceRefsCapped).toBe(true);
+    expect(a.resourceRefs).toHaveLength(MAX_RESOURCE_REFS);
+    expect(a.resourceRefs[0]).toEqual({ url: "https://ex.com/css/early.css", kind: "css" });
+    // The last image is the one the cap turned away, and no image counter moved.
+    expect(a.imagesTotal).toBe(MAX_RESOURCE_REFS);
+    expect(a.resourceRefs.some((r) => r.url === `https://ex.com/i/${MAX_RESOURCE_REFS - 1}.png`))
+      .toBe(false);
+  });
+
+  /**
+   * THE GAP THE COUNTER EXISTS FOR, one kind at a time. `imagesTotal` sits
+   * beside the image refs and is uncapped, so an image list cut short can be
+   * spotted against it; SCRIPTS AND STYLESHEETS HAVE NO COUNTER AT ALL, and
+   * before this flag a page that lost forty of either looked exactly like a page
+   * that referenced none. Saturating with one kind only is the case that proves
+   * the flag does not secretly depend on images being involved.
+   */
+  it("raises the flag on a page saturated by scripts alone", () => {
+    const scripts = Array.from(
+      { length: MAX_RESOURCE_REFS + 1 },
+      (_, i) => `<script src="/js/${i}.js"></script>`,
+    ).join("");
+    const a = analyzePage(doc(scripts), PAGE);
+    expect(a.resourceRefs).toHaveLength(MAX_RESOURCE_REFS);
+    expect(a.resourceRefs.every((r) => r.kind === "js")).toBe(true);
+    expect(a.resourceRefsCapped).toBe(true);
+    // Nothing else on the page could have told anyone: there is no script
+    // counter to compare the short list against.
+    expect(a.imagesTotal).toBe(0);
+  });
+
+  it("raises the flag on a page saturated by stylesheets alone", () => {
+    const sheets = Array.from(
+      { length: MAX_RESOURCE_REFS + 1 },
+      (_, i) => `<link rel="stylesheet" href="/css/${i}.css">`,
+    ).join("");
+    const a = analyzePage(doc("", sheets), PAGE);
+    expect(a.resourceRefs).toHaveLength(MAX_RESOURCE_REFS);
+    expect(a.resourceRefs.every((r) => r.kind === "css")).toBe(true);
+    expect(a.resourceRefsCapped).toBe(true);
+    expect(a.imagesTotal).toBe(0);
+  });
 });
 
 describe("resource refs — where the tokenizer does and does not look", () => {

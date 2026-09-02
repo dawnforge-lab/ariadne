@@ -66,6 +66,7 @@ same JSON:
 | `crawl_list` | `GET /crawls` |
 | `crawl_render` | `POST /crawls/:id/render` |
 | `crawl_rules` | `POST /crawls/:id/rules` |
+| `crawl_resume` | `POST /crawls/:id/resume` |
 | `crawl_mark_failed` | `POST /crawls/:id/fail` |
 | `issues_list` | `GET /crawls/:id/issues` |
 | `issue_urls` | `GET /crawls/:id/issues/:ruleId/urls` |
@@ -219,7 +220,9 @@ target is not something this skill can crawl.
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
  rulesRunAt, findingsCount, pagesScanned, fetchResources,
- resources: {seen, fetched, failed, skipped, robotsDenied, capped}}
+ resourceRefsCappedPages,
+ resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
+             capped}}
 ```
 
 What the fields mean when you are waiting:
@@ -237,14 +240,17 @@ What the fields mean when you are waiting:
   momentarily holds none, which is exactly the window an impatient caller looks in.
 - **`queuePosition`** — a number only while THIS server holds the crawl, null
   otherwise. `status: "queued"` with `queuePosition: null` is the one genuinely broken
-  state: the server that accepted the crawl is gone and nobody will run it. Re-submit
-  it, or retire it with `crawl_mark_failed`.
+  state: the server that accepted the crawl is gone and nobody will run it. Hand it to
+  `crawl_resume`, which picks up the same crawl, or retire it with
+  `crawl_mark_failed`.
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
 - **`renderPassCount`** — despite the name, it is **how many pages the last render
-  pass rendered**, not how many passes ran. Read it as a boolean gate ("≥ 1 means a
-  render pass happened") and take the real coverage from the `render.coverage` metric
-  or from `crawl_render`'s own `selection` block. The name is on the backlog.
+  pass rendered**, not how many passes ran. `≥ 1` means a render pass happened; **`0`
+  does not mean one did not** — a pass that rendered nothing and a crawl nobody ever
+  rendered both leave 0 here. `render.coverage`'s `renderPassEvidence` is the field
+  that separates them, and `crawl_render`'s own `selection` block is the other place
+  the real coverage lives. The name is on the backlog.
 - **`blockedPages`** — pages a WAF or rate limiter answered instead of the site
   (401, 403, 429, or a challenge page). Watch it across polls: the number matters far
   less than whether it is still rising. See the reaction loop below.
@@ -260,13 +266,35 @@ What the fields mean when you are waiting:
   HTML references; `fetched` is the files a server answered about; `failed` is the
   files it could not answer for — a 4xx, a request that failed, a URL our policy
   refused, a file robots.txt put out of reach — and `skipped` is SEEN BUT NOT ASKED.
-  `fetched + failed + skipped = seen`, always. `capped: true` means a per-crawl
-  budget stopped the pass short. `robotsDenied` is the part of `failed` robots.txt
-  caused, and it needs care: an unreachable robots.txt is a complete disallow, so a
-  CDN that was down looks exactly like a CDN that forbids us — the `fetchReason` on
-  each row (the `resources` CSV view) is what says which. `fetchResources` is whether
+  `fetched + failed + skipped = seen`, always. `capped: true` means a resource
+  budget stopped the pass short — those budgets are per RUN, not per crawl, so a
+  resume re-grants them (see `crawl_resume`). `robotsDenied` and
+  `robotsUnreachable` are two
+  subsets of `failed` and are not part of that sum: `robotsDenied` is "they said
+  no" — the host served its robots.txt and it forbids us — while
+  `robotsUnreachable` is "we could not ask" — the host answered 5xx, timed out or
+  failed at the network, which is a complete disallow all the same. The behaviour
+  was identical either way (no request was made), and the report is not:
+  `robotsUnreachable` is usually a third party's CDN briefly down rather than a
+  policy anybody chose. Each row's `fetchReason` on the `resources` CSV view names
+  the host and the reason. A crawl run before the two were split has every robots
+  refusal in `robotsDenied`. `fetchResources` is whether
   the crawl asked at all: `false` is an operator's decision, and beside `fetched: 0`
   it means nobody weighed anything rather than that nothing is heavy.
+- **`resourceRefsCappedPages`** — how many of the crawl's PAGES carried more
+  resource REFERENCES than the analyzer's cap keeps (2,000 per page, the rest
+  turned away). References, not files: past the cap the analyzer stops resolving, so
+  a page whose 2,001st reference repeats its first is counted here and lost no file
+  at all. On those pages the `seen` count above **may be** a floor — some of the
+  turned-away references would have been files nobody recorded — so a count over the
+  census may be a count over a sample of that page's references. Which pages that is
+  actually true of is not knowable from any surface. **`null` is not `0`**: null
+  means nobody counted (a crawl older than the counter, one still running, or one
+  whose process died before its first close — that null is permanent, a later resume
+  cannot recover the pages the dead run read), while `0` means every page was read
+  and none of them lost a reference. Do not report the two the same way, and do not
+  divide this by `pagesCrawled`: they are counted off different sources and a ratio
+  above 1 is legitimate on a crawl that analysed one URL twice.
 - **`rulesRunAt` and `findingsCount`** — the judged marker, and the only pair that
   tells an empty findings listing from an unjudged crawl. `rulesRunAt` is when a rules
   pass last COMPLETED (null: none on record — never judged, being judged now, or a run
@@ -505,20 +533,59 @@ upgrading the engine rather than re-crawling the site.
 ## Step 5 — when things go wrong
 
 **`status: "failed"`** — the crawl ended badly, and the frontier and pages rows are
-whatever it had reached. It is a terminal state; nothing resumes it from this
-surface. Read `frontier.failed` and the crawl's pages before deciding whether to
-re-crawl: a crawl that failed at page 4,000 of 5,000 may still be worth auditing with
-the gap stated.
+whatever it had reached. Read `frontier.failed` and the crawl's pages before deciding
+what to do: a crawl that failed at page 4,000 of 5,000 is usually worth **resuming**
+(`crawl_resume` — see below), and is worth auditing with the gap stated if the
+failure will just recur.
 
 **`status: "cancelled"`** — the server was shut down while this crawl was running,
-and it recorded itself on the way out rather than being killed. Same disposition as
-`failed`: no resume tool on this surface, so start a new crawl when you need one.
+and it recorded itself on the way out rather than being killed. This is the most
+resumable state there is: an abort decides nothing about the work it did not reach,
+so `crawl_resume` picks up exactly the URLs and files nobody has asked about yet.
+
+**`crawl_resume` — finish a crawl instead of re-running it.** It takes a crawlId and
+answers `{crawlId, status, queuePosition}` just as `crawl_start` does, because it IS
+the same crawl: same id, same row, same pages, nothing re-fetched. Poll
+`crawl_status` from there as usual.
+
+Use it whenever a crawl stopped with work owed — a server restarted mid-crawl, a
+worker died, a cancel somebody regrets. It re-reads robots.txt, re-walks the sitemap
+and re-runs the host probe first (a crawl resumed hours later honours the rules as
+they are NOW), which costs the site a dozen paced requests.
+
+Three things to know before you call it:
+
+- **It keeps `hostSpacingMs`, and applies it crawl-wide.** A site that pushed back is
+  not asked to teach the lesson twice. But that field is the widest spacing *any*
+  host reached, so the resumed run uses it for every host — a resumed crawl is never
+  faster than the one it continues, and can be slower. The 30000ms cap still binds.
+- **A capped resource pass gets a fresh budget.** The engine's resource-fetch caps
+  are per RUN, not per crawl, so resuming a crawl whose `resources` block reports
+  `capped` true grants the whole budget again and may weigh a budget's worth more
+  files. Real work on files the crawl saw and never asked about — but a second
+  round of requests to somebody's servers, so read `capped` first if that matters.
+- **It unjudges the crawl.** `rulesRunAt` goes back to null, because the crawl is
+  about to grow and a timestamp over a smaller crawl is the one thing this surface
+  must never say. **Re-run `crawl_rules` after the resumed crawl finishes**, before
+  reading any findings.
+
+It is refused when: there is no such crawl; this server is already holding it; the
+crawl still holds an unexpired lease (a worker is on it — **wait**, a dead worker's
+leases expire on their own); the crawl is terminal with nothing owed, in which case
+the refusal names what it counted (pending frontier rows, expired leases, unasked
+resource rows) so you can see it looked; the site's host has left the server's
+allowlist, which is policy and not a fault; or the crawl's state changed while the
+call was checking it, in which case nothing was queued and `crawl_status` says what
+it is now. Pages sitting in `frontier.renderPending` are not resumable work — that is
+`crawl_render`'s.
 
 **A crawl nobody is working on** — `queued` with `queuePosition: null`, or `running`
-with no lease activity long after the server that held it died. `crawl_mark_failed`
-closes it: `queued` or `running` becomes `failed`.
+with no lease activity long after the server that held it died. Two moves, and
+`crawl_resume` is usually the better one: it continues the crawl and keeps the pages
+already fetched. `crawl_mark_failed` retires it instead: `queued` or `running`
+becomes `failed`, and the pages stay as evidence of a crawl nobody will finish.
 
-It is refused when:
+`crawl_mark_failed` is refused when:
 - the crawl is already terminal — nothing to close;
 - THIS server is holding it (running it, or holding it in its queue) — it is alive,
   you are just impatient;

@@ -30,6 +30,14 @@
  *    src/crawl/render/run-render.ts, carries the history). `selectionMode` is
  *    that record, and in the explicit case the four automatic numbers are null
  *    rather than zero.
+ *
+ *    **AND ONE THING RECOMPUTATION CANNOT SAY AT ALL**: whether ANY pass ran.
+ *    The recomputation answers the same numbers on a crawl nobody has ever
+ *    rendered as on one rendered last week, so `selectionSelected: 18` beside
+ *    `pagesRendered: 0` reads as a record of eighteen pages somebody chose, and
+ *    on an unrendered crawl it is not one. The Phase 11 audit found exactly
+ *    that and filed it (docs/gates/phase-11.md §6.3); `renderPassEvidence` is
+ *    the answer, and it is described where it is written below.
  *  - the EVIDENCE side (`pages*`, `renderFailures`) — what is actually on the
  *    page rows now: how many say `rendered`, and how many carry a
  *    `render_error`.
@@ -55,6 +63,7 @@
  */
 import { eq, sql } from "drizzle-orm";
 
+import { frontierCounts } from "../../crawl/frontier.js";
 import {
   renderSelectionStats,
   type RenderSelectionConfig,
@@ -93,6 +102,13 @@ interface StoredRenderInputs {
    * happened. See `crawls.render_urls_jsonb` (src/db/schema.ts).
    */
   renderUrls: string[] | null;
+  /**
+   * What the LAST render pass stamped on the crawl row: the number of pages it
+   * rendered (`crawls.render_pass_count`, set — never incremented — by step 4
+   * of the pass). Read here only as evidence that a pass ran; see
+   * `renderPassEvidence` below.
+   */
+  renderPassCount: number;
 }
 
 async function readRenderConfig(
@@ -101,7 +117,11 @@ async function readRenderConfig(
   ruleId: string,
 ): Promise<StoredRenderInputs> {
   const rows = await db
-    .select({ config: crawls.config, renderUrls: crawls.renderUrlsJsonb })
+    .select({
+      config: crawls.config,
+      renderUrls: crawls.renderUrlsJsonb,
+      renderPassCount: crawls.renderPassCount,
+    })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
@@ -146,7 +166,7 @@ async function readRenderConfig(
     renderUrls = named as string[];
   }
 
-  return { cfg, renderUrls };
+  return { cfg, renderUrls, renderPassCount: row.renderPassCount };
 }
 
 /**
@@ -158,6 +178,11 @@ async function readRenderConfig(
  *    same denominator the budget is a percentage OF, deliberately: `budget` is
  *    `min(ceil(pages × pct/100), renderMaxPages)` over this number, not over the
  *    renderable subset.
+ *  - `renderPassEvidence` — `ran` or `none`: whether ANYTHING this crawl holds
+ *    was written by a render pass. It comes before `selectionMode` because it
+ *    governs the mode in turn: on `none`, the four automatic numbers below
+ *    describe the selection a pass WOULD make if one were started now, and not
+ *    one that was made. See the section on it below.
  *  - `selectionMode` — `auto` or `explicit`: WHICH DECISION chose the pages, and
  *    therefore how the four numbers after it are to be read. It comes first
  *    among the selection columns because it governs them.
@@ -203,9 +228,53 @@ async function readRenderConfig(
  *
  * A null here means "this question does not apply to how these pages were
  * chosen", which is what it means everywhere else in this engine.
+ *
+ * ## `renderPassEvidence`: `ran` and `none`, and why neither is `false`
+ *
+ * P12-T4, closing the residual the Phase 11 audit filed at
+ * docs/gates/phase-11.md §6.3: on a crawl with no render pass this row read
+ * `{pagesRendered: 0, selectionMode: "auto", selectionBudget: 28,
+ * selectionSampled: 18, selectionSelected: 18}`, and the last three describe a
+ * decision nobody took. `pagesRendered: 0` was the only thing saying so, and it
+ * is the wrong field to say it with: a pass that ran and rendered nothing
+ * writes the same zero.
+ *
+ * **The nulls were the obvious fix and are the wrong one.** Blanking the four
+ * numbers on an unrendered crawl would throw away the one thing an agent
+ * DECIDING WHETHER TO RENDER wants — how many seats a pass would have and how
+ * many pages look worth one — and would spend the doctrine's null on a question
+ * that does apply. The numbers stay; a field beside them says what they are.
+ *
+ * **`ran` is a claim about writing, and every disjunct is something a pass
+ * WROTE:**
+ *
+ *  - a page row saying `rendered`, or one carrying a `render_error` — the two
+ *    outcomes `writeRenderResult` produces;
+ *  - `crawls.render_urls_jsonb` — written inside the pass's own selection
+ *    transaction (`recordRenderSelection`), which is why `explicit` can never
+ *    appear beside `none`;
+ *  - `crawls.render_pass_count` — the pass's step 4. Redundant with
+ *    `pagesRendered` BY CONSTRUCTION today (it is stamped with the count of the
+ *    rows just written), and read anyway because the number is SERVED:
+ *    `crawl_status` publishes it, and answering `none` beside a
+ *    `renderPassCount` of 2 would be two surfaces of one engine disagreeing
+ *    about one crawl;
+ *  - a frontier row still `render_pending` — the only proof a pass ABORTED
+ *    before its first completed render leaves anywhere, and the whole reason
+ *    this rule asks the frontier at all.
+ *
+ * **`none` is a claim about our records, not about history**, and it is worded
+ * that way on purpose: it says nothing this crawl holds was written by a render
+ * pass. There is exactly one shape it gets wrong, and it is stated rather than
+ * hidden — an automatic pass that selected ZERO pages promotes no frontier row,
+ * renders nothing, fails nothing and stamps 0, so it leaves no trace at all. On
+ * that crawl the projection and the record are the same zeroes, so the numbers
+ * beside `none` are still exactly what happened. That is why the value is
+ * `none` and not `false`: a field called "did a pass run" answering `false`
+ * there would be a claim about the past that this rule cannot make.
  */
 async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
-  const { cfg, renderUrls } = await readRenderConfig(db, crawlId, self.id);
+  const { cfg, renderUrls, renderPassCount } = await readRenderConfig(db, crawlId, self.id);
   // Recomputed only when it describes something. On an explicit pass the
   // automatic decision is not merely unreported, it is not asked: running the
   // candidate SQL to throw the answer away would invite a later reader to
@@ -230,11 +299,29 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
     throw new Error(`${self.id}: crawl '${crawlId}' render count query returned no row`);
   }
 
+  const pagesRendered = num(row.pages_rendered, "pages_rendered", self.id);
+  const renderFailures = num(row.render_failures, "render_failures", self.id);
+  // The frontier is asked ONLY for the aborted pass — a selection promoted to
+  // `render_pending` and never completed leaves nothing on `crawls` and nothing
+  // on `pages`. One extra query, over an indexed column, on a rule that runs
+  // once per crawl; `frontierCounts` is used rather than a fifth hand-written
+  // `state = 'render_pending'` so the state string stays owned by the module
+  // that owns the state machine.
+  const renderPending = (await frontierCounts(db, crawlId)).renderPending;
+
   return [
     metricRow(self, {
       scope: "site",
       value: {
         pagesCrawled: num(row.pages_crawled, "pages_crawled", self.id),
+        renderPassEvidence:
+          renderUrls !== null ||
+          renderPassCount > 0 ||
+          pagesRendered > 0 ||
+          renderFailures > 0 ||
+          renderPending > 0
+            ? "ran"
+            : "none",
         selectionMode: selection === null ? "explicit" : "auto",
         selectionBudget: selection?.budget ?? null,
         selectionSuspects: selection?.suspects ?? null,
@@ -248,8 +335,8 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
               (renderUrls?.length ?? 0)
             : Math.min(selection.budget, selection.suspects + selection.sampled),
         selectionTruncated: selection?.truncated ?? null,
-        pagesRendered: num(row.pages_rendered, "pages_rendered", self.id),
-        renderFailures: num(row.render_failures, "render_failures", self.id),
+        pagesRendered,
+        renderFailures,
       },
     }),
   ];

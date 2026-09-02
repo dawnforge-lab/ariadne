@@ -108,6 +108,55 @@ export const crawls = pgTable("crawls", {
   // implies, and a preserved first-write `at` would date numbers that have
   // since moved.
   templateInferenceJsonb: jsonb("template_inference_jsonb"),
+  // How many of this crawl's pages carried more resource references than the
+  // analyzer's `MAX_RESOURCE_REFS` cap keeps — the truncation, counted instead
+  // of silent (migration 0014, P12-T1).
+  //
+  // REFERENCES TURNED AWAY, NOT FILES LOST, and every surface that serves this
+  // number repeats the distinction. Past the cap the analyzer stops resolving,
+  // so it cannot know whether a turned-away reference was a new URL or a repeat
+  // of one already in the page's list: a page whose 2,001st reference duplicates
+  // its first is counted here and lost nothing. The flag claims what the
+  // analyzer can see and nothing stronger (`PageAnalysis.resourceRefsCapped`).
+  //
+  // WHY IT IS A COLUMN AND NOT A QUERY. The same number is derivable from
+  // `page_resources` — count the pages holding exactly the cap's worth of edges
+  // — and Phase 11 measured that: 73 ms and 67 ms over a 500,000-edge crawl,
+  // against a `crawl_status` whose other reads are ≤ 3 ms and which a dashboard
+  // hits on every paint (docs/gates/phase-11.md §10.1). The obvious cheap form
+  // was also disproved there: `pages.images_total` counts `<img>` ELEMENTS while
+  // the extraction emits a DISTINCT-URL set, so comparing them fires on any page
+  // that reuses an image and stays silent on a truncated page whose references
+  // happen to be distinct. So the count is CARRIED: the analyzer flags the page,
+  // `PageWriter` counts the flagged pages, and `closeCrawl` stamps the total —
+  // O(pages), in a place every page already passes through.
+  //
+  // NULLABLE, AND THE NULL IS LOAD-BEARING, exactly as `host_spacing_ms`'s is.
+  // Null means "nobody counted", and there are THREE ways to get one:
+  //
+  //  1. A crawl written before this migration. Never backfilled — the edge table
+  //     cannot reconstruct which pages were truncated, and a guess would be a
+  //     fabricated measurement (hard rule 7).
+  //  2. A crawl still running, or one whose process died and was never resumed.
+  //  3. A crawl that persisted pages and then died before its first close, and
+  //     was later RESUMED. The dead run's pages were counted in a process that
+  //     is gone, and the resume adds to the column rather than replacing it
+  //     (below), so `null + n` keeps it null — PERMANENTLY, on that crawl. That
+  //     is deliberate and not a gap to close later: the resume genuinely does
+  //     not know how many of the earlier run's pages were truncated, and
+  //     stamping its own partial count would publish a number that reads like a
+  //     whole one. A crawl in this state answers "we do not know" for ever, and
+  //     a fresh crawl is what produces a number.
+  //
+  // ZERO IS A MEASUREMENT: the analyzer read every page of that crawl and none
+  // of them lost a reference.
+  //
+  // A RESUMED CRAWL ADDS TO IT rather than overwriting it, because a resume's
+  // writer only ever saw the pages that resume fetched. The addition is done in
+  // SQL so a null stays null (`null + n` is null) — which is both how case 3
+  // above stays honest and why a crawl whose first run predates this column
+  // cannot become a partial count. See `closeCrawl` in src/crawl/loop.ts.
+  resourceRefsCappedPages: integer("resource_refs_capped_pages"),
 });
 
 export const pages = pgTable("pages", {
@@ -594,8 +643,10 @@ export const resources = pgTable("resources", {
   // is what makes an interrupted pass resumable by re-running it.
   fetchClass: text("fetch_class"),
   // Why, in the fetch layer's own words: the policy's refusal, the robots rule,
-  // `resource-cap` for a row a per-crawl cap stopped at. `pages.fetch_reason`'s
-  // twin, and null on a fetch that simply worked.
+  // `resource-cap` for a row a resource cap stopped at — a budget granted per
+  // RUN, not per crawl, so a resume re-grants it and may clear this reason off
+  // rows an earlier run wrote it on. `pages.fetch_reason`'s twin, and null on a
+  // fetch that simply worked.
   fetchReason: text("fetch_reason"),
   statusCode: integer("status_code"),
   contentType: text("content_type"),

@@ -120,6 +120,25 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.9.0: Phase 12, on TWO grounds and both of them are the contract's own —
+    // the version stamps what the ruleset SAYS, and `rules_catalog` serves the
+    // copy stamped with this constant (registry.ts's own paragraph).
+    //
+    //  1. `resources.not-fetched` (T2), a marker a crawl could not receive
+    //     before: a crawl that recorded its files and asked about none of them
+    //     used to meet no finding at all, and a re-judge at 0.9.0 gives it one.
+    //     It is ADDITIVE — the sibling the Phase 11 gate ruled on (§10.3) rather
+    //     than a widened `resources.not-recorded`, whose condition would have
+    //     been a verdict change on an existing rule.
+    //  2. `resources.broken` and `resources.uncached`'s EXPLANATIONS (T1), which
+    //     now name the `robots_unreachable` class the fetch pass writes. Copy is
+    //     part of what a stored finding was produced by, and this constant is
+    //     what a consumer traces it back to.
+    //
+    // ONE BUMP PER PHASE, as below: T1 shipped the class and the counter and
+    // changed no verdict, so the bump lands here with the new rule, and the
+    // phase's remaining tasks verify rather than bump again.
+    //
     // 0.8.0: Phase 11. Five verdicts no page and no site could receive before —
     // `resources.broken`, `images.oversized`, `images.legacy-format`,
     // `resources.uncached` and the `resources.not-recorded` marker — plus the
@@ -164,7 +183,7 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. Phase 9's bump is
     // T2's, above; the phase's other tasks verify rather than bump again.
-    expect(RULESET_VERSION).toBe("0.8.0");
+    expect(RULESET_VERSION).toBe("0.9.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

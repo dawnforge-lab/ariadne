@@ -15,7 +15,7 @@ import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import { RENDER_DEFAULTS, SUSPICION } from "../../src/crawl/render/select.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, links, pages } from "../../src/db/schema.js";
+import { crawls, frontier, links, pages } from "../../src/db/schema.js";
 import { renderMetrics } from "../../src/rules/metric/render-metrics.js";
 import {
   databaseUrl,
@@ -205,6 +205,10 @@ describe("render.coverage against the database", () => {
     expect(Object.keys(rows)).toEqual(["site|"]);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
+      // P12-T4: one page rendered and one failed, so a pass demonstrably ran
+      // over this crawl and the selection numbers below describe the decision
+      // that produced them.
+      renderPassEvidence: "ran",
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -247,6 +251,9 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
+      // P12-T4: nothing on this crawl shows a pass ever ran, so the numbers
+      // below are the selection a pass WOULD make and not one it made.
+      renderPassEvidence: "none",
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -281,6 +288,7 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
+      renderPassEvidence: "none",
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -302,6 +310,11 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 0,
+      // P12-T4. The one crawl where the zeroes below are the same numbers
+      // either way: nothing to select, nothing selected. `none` is still the
+      // honest answer — no pass left a trace here — and the row says so
+      // rather than letting five zeroes stand for a decision.
+      renderPassEvidence: "none",
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -343,6 +356,10 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
+      // P12-T4. A stored URL list is written by the pass itself, inside the
+      // transaction that made the selection — so `explicit` is proof a pass
+      // ran, and this pair can never read `explicit` beside `none`.
+      renderPassEvidence: "ran",
       selectionMode: "explicit",
       // Null, not 1 — the budget the automatic decision would have had — and
       // not 0 either, which reads as "a budget of none".
@@ -374,6 +391,10 @@ describe("render.coverage against the database", () => {
       selectionMode: "explicit",
       selectionSelected: 1,
       selectionBudget: null,
+      // P12-T4. Not one page of this crawl carries render evidence, and the
+      // answer is still `ran`: the list on the crawl row was written by the
+      // pass, so it is a record of a pass whatever came of it.
+      renderPassEvidence: "ran",
     });
   });
 
@@ -393,6 +414,144 @@ describe("render.coverage against the database", () => {
       selectionSuspects: 2,
       selectionSelected: 1,
     });
+  });
+
+  /**
+   * P12-T4, and the residual the Phase 11 audit found (docs/gates/phase-11.md
+   * §6.3). THE FOUR SHAPES THAT PROVE A PASS RAN, one test each.
+   *
+   * The four numbers on the selection side are RECOMPUTED — they have no
+   * column — so a crawl nobody ever rendered answers them exactly as a crawl
+   * that was rendered does, and `selectionSelected: 18` on a crawl with no
+   * render pass reads as a record of eighteen pages somebody chose. It is not
+   * one. `renderPassEvidence` is what separates the two, and every value it
+   * takes is derived from something a pass WROTE:
+   *
+   *  - a page row saying `rendered`
+   *  - a page row carrying a `render_error`
+   *  - `crawls.render_urls_jsonb` (which is also `selectionMode: explicit`)
+   *  - `crawls.render_pass_count`
+   *  - a frontier row still `render_pending` — the shape an ABORTED pass
+   *    leaves, and the only proof that survives a pass killed before it
+   *    completed its first render
+   */
+  it("reads a failed render as proof a pass ran, with nothing rendered", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+    });
+    await addPages(
+      crawlId,
+      SITE_PAGES.map((p) =>
+        p.path === "/a1" ? { ...p, renderError: "navigation timeout after 15000ms" } : p,
+      ),
+    );
+
+    const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
+    expect(rows["site|"]).toMatchObject({
+      // A pass that rendered NOTHING is not a pass that did not run — the two
+      // are what this field exists to separate, and `pagesRendered: 0` beside
+      // `renderFailures: 1` is a pass that ran and got nothing.
+      renderPassEvidence: "ran",
+      pagesRendered: 0,
+      renderFailures: 1,
+    });
+  });
+
+  /**
+   * The pass that was killed before it finished a single render: its selection
+   * is in the frontier as `render_pending` and NOTHING else on this crawl has
+   * moved. No page says `rendered`, none carries an error, and
+   * `render_pass_count` is the 0 it was created with.
+   *
+   * This is the one proof that lives outside `crawls` and `pages`, and it is
+   * why this rule asks the frontier at all.
+   */
+  it("reads a frontier the render selection promoted as proof a pass ran", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+    });
+    await addPages(crawlId, SITE_PAGES);
+    await db.insert(frontier).values({
+      crawlId,
+      url: url("/a1"),
+      state: "render_pending",
+      depth: 1,
+      discoveredVia: "link",
+    });
+
+    const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
+    expect(rows["site|"]).toMatchObject({
+      renderPassEvidence: "ran",
+      pagesRendered: 0,
+      renderFailures: 0,
+    });
+  });
+
+  /**
+   * `render_pass_count` on its own, with no page and no frontier row behind it.
+   *
+   * THE PASS CANNOT PRODUCE THIS SHAPE TODAY — step 4 stamps the count of the
+   * rows it just wrote, so a nonzero stamp always has rendered pages under it.
+   * It is in the disjunction because the number is SERVED: `crawl_status`
+   * publishes `renderPassCount`, and a metric answering `none` beside a
+   * `renderPassCount` of 2 would be two surfaces of one engine contradicting
+   * each other over the same crawl.
+   */
+  it("reads the crawl row's own pass count as proof, so two surfaces cannot disagree", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      renderPassCount: 2,
+    });
+    await addPages(crawlId, SITE_PAGES);
+
+    const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
+    expect(rows["site|"]).toMatchObject({ renderPassEvidence: "ran", pagesRendered: 0 });
+  });
+
+  /**
+   * The negative, stated as the field's whole point: a crawl that was never
+   * rendered answers `none` AND still answers the selection numbers, because
+   * those numbers are worth having — they are what an agent deciding whether
+   * to spend a render pass reads. What they are not is a record.
+   *
+   * The pair is the assertion: `renderPassEvidence: "none"` with
+   * `selectionSelected: 1`. Before P12-T4 the second number stood alone.
+   */
+  it("answers none on a crawl nobody rendered, and still reports what a pass would choose", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+    });
+    await addPages(crawlId, SITE_PAGES);
+
+    const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
+    expect(rows["site|"]).toMatchObject({
+      renderPassEvidence: "none",
+      selectionMode: "auto",
+      selectionBudget: 1,
+      selectionSuspects: 2,
+      selectionSampled: 3,
+      selectionSelected: 1,
+      selectionTruncated: true,
+      pagesRendered: 0,
+      renderFailures: 0,
+    });
+  });
+
+  // The pairing that cannot happen, asserted rather than argued: a stored URL
+  // list is written by the pass, so `explicit` is itself proof. A row reading
+  // `explicit` beside `none` would mean a list nobody wrote.
+  it("never answers explicit beside none — the list is written by the pass", async () => {
+    const crawlId = await newMetricCrawl(db, SITE, created, {
+      config: { userAgent: "AriadneBot-test", maxPages: 500 },
+      renderUrlsJsonb: [url("/a3")],
+    });
+    await addPages(crawlId, SITE_PAGES);
+
+    const row = (await metricRowsByScope(db, rule("render.coverage"), crawlId))["site|"] as Record<
+      string,
+      unknown
+    >;
+    expect([row["selectionMode"], row["renderPassEvidence"]]).toEqual(["explicit", "ran"]);
   });
 
   // A shape this rule cannot read stops it, for the same reason a non-numeric

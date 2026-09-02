@@ -274,10 +274,13 @@ answered from, and its verdict is the confidence interval around all of them.
      200 when nobody chose, `null` for a billed audit. Under a cap, `issues_list`
      groups carry `truncated` with `total` or `atLeast`, and a count is a floor
      rather than a magnitude. Quote the note, never the bare count.
-  4. **How much was rendered?** `renderPassCount` is a boolean gate on whether a
-     render pass happened at all; `metrics_get` with `metricId: "render.coverage"`
-     is the real coverage — how the pages were chosen and how many seats the budget
-     bought. Every check that reads rendered evidence (CHECK-01, CHECK-02, CHECK-34,
+  4. **How much was rendered?** `renderPassCount` ≥ 1 means a render pass happened;
+     0 means only that the last pass rendered nothing, which a crawl nobody rendered
+     also reports. `metrics_get` with `metricId: "render.coverage"` is the real
+     coverage — `renderPassEvidence` says whether a pass ran at all, and the
+     selection numbers say how the pages were chosen and how many seats the budget
+     bought. On `renderPassEvidence: "none"` those numbers are what a pass WOULD
+     choose, not what one chose. Every check that reads rendered evidence (CHECK-01, CHECK-02, CHECK-34,
      the JS half of CHECK-10) is answered over that sample and no further.
   5. **How much of the site's own weight was measured?** `crawl_status`'s
      `resources` block: `seen` is the distinct files the served HTML points at,
@@ -286,15 +289,37 @@ answered from, and its verdict is the confidence interval around all of them.
      `fetched + failed + skipped = seen`, always. `fetchResources` says whether the
      crawl asked in the first place: `false` is an operator's decision and makes
      every resource check NOT MEASURED rather than clean. `capped: true` means a
-     per-crawl budget stopped the pass short. `robotsDenied` needs reading with
-     care — an unreachable robots.txt is a complete disallow, so a CDN that was
-     down looks exactly like a CDN that forbids us, and only each row's
-     `fetchReason` (the `resources` CSV view) says which.
+     resource budget stopped the pass short — those budgets are per RUN, not per
+     crawl, so a resumed crawl can weigh more files in total than
+     `maxResources`. `robotsDenied` and
+     `robotsUnreachable` are two subsets of `failed` and are served as two counts:
+     `robotsDenied` is "they said no" (the host's robots.txt was read and forbids
+     us) and `robotsUnreachable` is "we could not ask" (the host answered 5xx,
+     timed out or failed at the network — a complete disallow all the same). Read
+     the second as a fact about our evidence, usually a third party's CDN briefly
+     down, not as the client's misconfiguration. Each row's `fetchReason` (the
+     `resources` CSV view) names the host and the reason. **A crawl run before the
+     two were split reports every robots refusal in `robotsDenied`.**
+     `resourceRefsCappedPages` sits outside the block and counts PAGES, not files:
+     how many pages carried more resource REFERENCES than the analyzer's cap keeps
+     (2,000 per page). Non-zero means `seen` **may be** a floor on that many pages
+     and those resource checks may be answered over a sample of their references —
+     see the cap bullet below for why "may". **`null` means nobody counted** (a
+     crawl older than the counter, or one whose process died before its first
+     close), which is not `0`.
 - **The markers are part of this check, not a footnote.** `issues_list` with no
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
-  `host.probe-skipped`, `resources.not-recorded`. Each one is the engine saying a
-  check below could not be answered on this crawl. List them here, and mark the
+  `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`. Each one
+  is the engine saying a check below could not be answered on this crawl. The last
+  two are siblings and never both appear: `resources.not-recorded` means the crawl
+  holds NO resource records, `resources.not-fetched` means it recorded them all and
+  asked the site about none of them. **Neither covers a crawl whose every file landed
+  in an unknown class** (refused, robots-disallowed, robots-unreachable, or a request
+  that never completed): rows were decided, so no marker fires and the resource rules
+  are silent regardless. `crawl_status.resources` is the discriminator there —
+  `fetched` at zero with `failed` carrying the census — and a third sibling marker is
+  ledgered to Phase 13. List them here, and mark the
   checks they claim SKIP rather than PASS when you reach them.
 - **Evaluate**:
   - FAIL if `rulesRunAt` is null — nothing below this line is answerable, and the
@@ -310,12 +335,20 @@ answered from, and its verdict is the confidence interval around all of them.
     `pagesScanned`, `findingCap` and which rules were truncated, `renderPassCount`
     and the `render.coverage` numbers, the whole `resources` block with
     `fetchResources` beside it, and every NOT MEASURED marker that fired
-- **Also NOT MEASURED, and stated here because nothing else states it**: the
-  analyzer records at most 2,000 resource references per page. A page above that
-  contributes its first 2,000 and the rest are dropped silently — nothing on any
-  surface counts them, deriving the number costs a scan of every reference the crawl
-  holds, and it is not on `crawl_status` for that reason. On a page with an enormous
-  gallery or script list, read the resource evidence as a floor.
+- **The 2,000-reference cap, now counted rather than silent**: the analyzer records
+  at most 2,000 resource REFERENCES per page and turns the rest away. That used to be
+  invisible; `crawl_status.resourceRefsCappedPages` is the count of the crawl's pages
+  it happened to. **Read the number precisely — it counts references turned away, not
+  files lost.** Past the cap the analyzer stops resolving, so it cannot tell a new URL
+  from a repeat of one it already holds: a page whose 2,001st reference duplicates its
+  first is counted and lost nothing. So non-zero means the resource evidence **may be**
+  a floor on that many pages, and the honest sentence for a report is "some of these
+  pages point at files this crawl did not record", never "N pages are missing files".
+  WHICH pages, and whether any file was really lost, are both NOT MEASURED: no surface
+  answers either, because deriving them costs a scan of every reference the crawl
+  holds. **`null` is not `0`** — a crawl older than the counter, or one whose process
+  died before its first close, has no answer at all, and a report that prints "0 pages
+  truncated" for it is stating a measurement nobody took.
 - **`site.health` is filed here** (`metrics_get` with `metricId: "site.health"`):
   the partition of the crawl's auditable pages by the worst severity each carries,
   plus the pages the census leaves out. It is a rollup of the audit's own findings —
@@ -376,7 +409,10 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
   3. `metrics_get` with `metricId: "render.coverage"` for the denominator: how many
      pages were rendered out of how many crawled, the selection budget, and the
      render failures. A finding count means nothing without it. **Read
-     `selectionMode` first** — `auto` means the engine sampled and the budget
+     `renderPassEvidence` first**: `none` means no render pass has left a trace on
+     this crawl, so the selection numbers beside it describe a pass that WOULD run
+     and CHECK-01 is NOT MEASURED rather than clean — say that instead of quoting
+     them. Then **read `selectionMode`** — `auto` means the engine sampled and the budget
      numbers describe how; `explicit` means an auditor named the pages, and
      `selectionBudget`, `selectionSuspects`, `selectionSampled` and
      `selectionTruncated` are null rather than zero, because no automatic decision
@@ -2108,11 +2144,24 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   running browser). Scripts a page loads with JavaScript are outside the measurement
   entirely, so on a client-rendered site the engine's number is a floor of a floor.
   **Call `issues_list` with `checkId: "CHECK-48"` before quoting the table**, and read
-  its answer first: the one finding it can return is `resources.not-recorded` (info),
-  the marker that fires when a crawl holds no resource records at all. When it is
-  there the `page.weight` row above is a table of HTML sizes and nothing else — a
-  light-looking site that was never measured — and this check is NOT MEASURED on that
-  crawl rather than passed. The remedy is a re-crawl, and the marker says so.
+  its answer first: the two findings it can return are the resource family's NOT
+  MEASURED markers, and exactly one of them can be present. `resources.not-recorded`
+  (info) fires when the crawl holds no resource records at all; `resources.not-fetched`
+  (info) fires when it recorded every file the pages point at and asked the site about
+  none of them — its evidence says which of the three reasons applies: the operator's
+  `fetchResources: false`, a pass that never sent a request, or a resource budget
+  that claimed every row before anything was asked. Whichever it is, the
+  `page.weight` row above is a table of HTML sizes and nothing else — a light-looking
+  site that was never measured — and this check is NOT MEASURED on that crawl rather
+  than passed. The remedy is a re-crawl, and each marker says so.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**: Lighthouse audit — check "Eliminate render-blocking resources" and "Reduce unused JavaScript"
 - **Evaluate**:
   - WARN if render-blocking resources > 3 or unused JS > 50%
@@ -2120,8 +2169,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — five rule ids can come back,
-  four of them findings about the site and one about the crawl.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — six rule ids can come back,
+  four of them findings about the site and two about the crawl.
   `images.missing-dimensions` (info) and `images.missing-alt` (info), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
   images; and, since the resource pass, `images.oversized` (warning) for every image
@@ -2134,13 +2183,23 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   larger than the box it is displayed in; and only images named in the HTML the
   server sent are weighed, so a client-rendered gallery is invisible to all of it.
   RESPONSIVE IMAGES are still browser work — `srcset` is read for its first candidate
-  and nothing checks whether the set is sensible. The fifth id is
-  `resources.not-recorded` (info), the NOT MEASURED marker for the whole resource
-  family: when it is present the crawl recorded no files at all, so the silence of
-  `images.oversized` and `images.legacy-format` says the crawl never asked rather than
-  that the images are fine — the weight and format halves of this check are then NOT
-  MEASURED and a re-crawl is what answers them. The two older findings are unaffected
-  by it; they read the page's markup, not the files.
+  and nothing checks whether the set is sensible. The last two ids are the resource
+  family's NOT MEASURED markers, and only one of them can be present:
+  `resources.not-recorded` (info), which means the crawl recorded no files at all, and
+  `resources.not-fetched` (info), which means it recorded them and asked about none.
+  When either is there the silence of `images.oversized` and `images.legacy-format`
+  says the crawl never asked rather than that the images are fine — the weight and
+  format halves of this check are then NOT MEASURED and a re-crawl is what answers
+  them. The two older findings are unaffected by either; they read the page's markup,
+  not the files.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
 - **Evaluate**:
@@ -2159,11 +2218,20 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   caching and ETag revalidation are invisible, and the finding says the response gave
   no instruction rather than that the file is re-downloaded. The HTML documents' own
   caching headers are not stored at all — this is about the images, stylesheets and
-  scripts. `resources.not-recorded` (info) can come back from the same call: it is the
-  NOT MEASURED marker for the resource family, and when it is present this crawl asked
-  for no files, so a quiet `resources.uncached` says nothing about the site's caching
-  and the answer is a re-crawl. COMPRESSION and PROTOCOL are still NOT MEASURED and
-  stay browser work.
+  scripts. Either of the resource family's two NOT MEASURED markers can come back from
+  the same call — `resources.not-recorded` (info) when the crawl holds no resource
+  records, `resources.not-fetched` (info) when it holds them all and asked about none
+  — and when one is present this crawl fetched no files at all, so a quiet
+  `resources.uncached` says nothing about the site's caching and the answer is a
+  re-crawl. COMPRESSION and PROTOCOL are still NOT MEASURED and stay browser work.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**: Check the homepage's network panel for TTFB and response headers
   (Cache-Control, Content-Encoding, protocol)
 - **Evaluate**:
@@ -2180,14 +2248,32 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   it — a 200 carrying a refusal reason is bot protection answering in place of the
   file, not a healthy asset — and carries an `unknownResources` count for the
   references the crawl could not decide about (never asked, refused by url-policy,
-  disallowed by robots, or a request that did not complete). None of those is a broken
-  file, and a high unknown count means the answer here is partial. The same call can
-  return `resources.not-recorded` (info), the NOT MEASURED marker for the resource
-  family: when it is present the crawl holds no resource records, so no broken file
-  could have been found and the network half of this check is NOT MEASURED rather than
-  clean — re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
+  disallowed by a robots.txt we read, blocked because the host's robots.txt was
+  unreachable while the crawl ran, or a request that did not complete). None of those
+  is a broken file, and a high unknown count means the answer here is partial.
+  `crawl_status.resources` serves the two robots reasons as SEPARATE counts —
+  `robotsDenied` ("they said no") and `robotsUnreachable` ("we could not ask") — so
+  when the unknown count is high, read those before writing anything: a wall of
+  `robotsUnreachable` is a host that was down during our window, not a decision
+  anybody made about this site. The same call can
+  return either of the family's NOT MEASURED markers, never both:
+  `resources.not-recorded` (info) when the crawl holds no resource records, and
+  `resources.not-fetched` (info) when it recorded every file and asked the site about
+  none of them — `fetchResources: false`, a pass interrupted before its first
+  request, or a budget that claimed every row unasked; its evidence names which.
+  When one is present no broken file could have
+  been found and the network half of this check is NOT MEASURED rather than clean —
+  re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
   holds: nothing in a crawl records a console, and requests a script makes at runtime
   are not in the resource table either — both stay browser work.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**:
   1. Navigate to homepage, product, collection
   2. Check console: `list_console_messages` — filter errors
@@ -2459,10 +2545,10 @@ and each check names the call that answers it. What follows is the shape of thos
 calls, so a check's one-line **Engine** entry is enough.
 
 The tools are the MCP surface (`crawl_start`, `crawl_status`, `crawl_list`,
-`crawl_render`, `crawl_rules`, `crawl_mark_failed`, `robots_get`, `issues_list`,
-`issue_urls`, `metrics_get`, `pages_query`, `export_crawl`). The HTTP API exposes the
-same service — `GET /crawls/:id/issues`, `/metrics`, `/pages`, `/robots`,
-`/issues/:ruleId/urls`, `/export` — and answers the same JSON, so an operator running
+`crawl_resume`, `crawl_render`, `crawl_rules`, `crawl_mark_failed`, `robots_get`,
+`issues_list`, `issue_urls`, `metrics_get`, `pages_query`, `export_crawl`). The HTTP
+API exposes the same service — `GET /crawls/:id/issues`, `/metrics`, `/pages`,
+`/robots`, `/issues/:ruleId/urls`, `/export` — and answers the same JSON, so an operator running
 `npm run api:serve` instead of `npm run mcp:serve` changes the transport and nothing
 else.
 
@@ -2540,6 +2626,7 @@ every crawl, so the settings below are about SIZE and REACH, not about coverage.
 | `maxPages` | 500 | A cap the crawl hits leaves the frontier undrained, which makes CHECK-32 SKIP (`links.orphan-skipped`) and every "% of pages" figure a floor. Size it to the site. |
 | `maxDepth` | unset | Truncating depth truncates CHECK-31's distribution and orphans everything past the cut. |
 | `probeHosts` | on | Off means CHECK-14 and CHECK-15 are SKIP (`host.probe-skipped`) — the probe is the only evidence there is. |
+| `fetchResources` | on | Off means the crawl records which files each page points at and asks the site about none of them, so CHECK-48, CHECK-49, CHECK-50 and CHECK-51 are SKIP (`resources.not-fetched`) and `page.weight` counts HTML alone. Turn it off only when the site's owner asked us not to touch their assets. |
 | `legacyHosts` | none | The only way CHECK-15 can report a legacy host still serving content. Each entry must be on the operator's allowlist in its own right. |
 | `renderBudgetPct` / `renderMaxPages` / `renderSamplePerType` | see the tool description | The render pass's sample. CHECK-01, CHECK-02, CHECK-34 and the JS-redirect half of CHECK-10 are measured over the pages it reaches and no others. |
 | `perHostDelayMs` / `maxConcurrency` | polite defaults | Politeness, not throughput. Leave them alone unless the site's owner has asked for something specific; robots.txt's own `crawl-delay` wins when it is longer. |

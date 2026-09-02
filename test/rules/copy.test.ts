@@ -250,6 +250,13 @@ const PHASE_11_RULE_IDS = [
 /** The metric ids of the list above — what the metric-copy contracts apply to. */
 const PHASE_11_METRIC_IDS = ["page.weight"];
 
+/**
+ * Phase 12's rule: the sibling marker. Same contract as every list above, and
+ * the same obligation as the family it joins — it speaks about the CRAWL, and
+ * its copy must not read as a fact about the site.
+ */
+const PHASE_12_RULE_IDS = ["resources.not-fetched"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -258,6 +265,7 @@ const ALL_RULE_IDS = [
   ...PHASE_7_RULE_IDS,
   ...PHASE_10_METRIC_IDS,
   ...PHASE_11_RULE_IDS,
+  ...PHASE_12_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -874,6 +882,29 @@ describe("issue copy", () => {
   it("render.coverage names every column of its shape and both of its sides", () => {
     const text = ISSUE_COPY["render.coverage"]!.explanation;
     expect(text, "pagesCrawled").toMatch(/how many pages the crawl read in total/i);
+    // P12-T4. The field that says whether the four numbers after it are a
+    // record or a projection (docs/gates/phase-11.md §6.3). The copy has to
+    // carry the distinction where the reader meets the numbers, for the same
+    // reason the explicit nulls do below: an unexplained "18 selected" on a
+    // crawl nobody rendered is read as eighteen pages somebody chose.
+    expect(text, "renderPassEvidence").toMatch(
+      /whether a render pass left any trace on this crawl at all/i,
+    );
+    expect(text, "the projection, said as one").toMatch(
+      /the selection a pass WOULD make if one were run now/,
+    );
+    // P12-T4 fix round 1 (M-1). The copy said a pass that ran and rendered
+    // nothing "says so", and in one shape that is FALSE: an automatic pass that
+    // selected no pages leaves no trace and is reported as `none`. The copy
+    // states the underdetermined shape the way the module docblock and
+    // talos-surface.md §13 do, rather than claiming a separation the engine
+    // cannot make.
+    expect(text, "what the field does separate").toMatch(
+      /always told apart from one that never ran/i,
+    );
+    expect(text, "the shape it cannot separate").toMatch(
+      /cannot tell apart is a pass that chose no pages at all/i,
+    );
     expect(text, "selectionMode").toMatch(/the selection mode, which says who chose the pages/i);
     expect(text, "selectionBudget").toMatch(/how many pages the render pass was allowed to open/i);
     expect(text, "selectionSuspects").toMatch(/how many candidates were suspects/i);
@@ -1097,14 +1128,20 @@ describe("issue copy", () => {
     }
   });
 
-  // The four causes of a silence, named individually. "Unknown" as a word is
-  // cheap; what a reader needs is which four things it covers, because three of
-  // them are decisions (ours, the site's robots, a cap) rather than faults.
+  // The FIVE causes of a silence, named individually. "Unknown" as a word is
+  // cheap; what a reader needs is which five things it covers, because four of
+  // them are decisions (ours, the site's robots, an unreachable robots host, a
+  // cap) rather than faults. The fifth arrived with P12-T1's `robots_unreachable`
+  // class, and it is the one most likely to be misread as the client's fault:
+  // the host that could not answer is usually somebody else's CDN.
   it("resources.broken names every reason a file goes uncounted rather than broken", () => {
     const c = ISSUE_COPY["resources.broken"]!;
     expect(c.explanation, "the pass never reached it").toMatch(/never got to ask|did not finish/i);
     expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
     expect(c.explanation, "robots").toMatch(/robots\.txt disallowed/i);
+    expect(c.explanation, "an unreachable robots host").toMatch(
+      /could not (?:be reached|tell us|answer)|was unreachable|unreachable robots/i,
+    );
     expect(c.explanation, "a failed request").toMatch(/request never completed/i);
     // And the shape that makes the reason load-bearing: a 200 with a refusal
     // reason beside it is bot protection, not a healthy file (P11-T2's
@@ -1176,6 +1213,35 @@ describe("issue copy", () => {
       /a site whose files are all healthy and a crawl that never looked/i,
     );
     expect(c.howToFix).toMatch(/re-crawl/i);
+  });
+
+  // The sibling marker (P12-T2). Its copy has one job the other marker's does
+  // not: the census EXISTS here, and a reader who takes this for "no files were
+  // found" has the wrong crawl in mind. So it must say both halves — recorded,
+  // and not asked about — and it must name which of the two reasons applies,
+  // because the remedy differs (re-crawl with the pass on; or finish the crawl).
+  it("resources.not-fetched says the files were recorded AND unasked, and names all three reasons", () => {
+    const c = ISSUE_COPY["resources.not-fetched"]!;
+    expect(c.title.toLowerCase()).toContain("never asked about");
+    expect(c.explanation, "the census is real").toMatch(/recorded every image, stylesheet and script/i);
+    expect(c.explanation, "and nothing was asked").toMatch(/requested none of them/i);
+    expect(c.explanation, "the operator's switch").toContain("fetchResources: false");
+    expect(c.explanation, "the interrupted pass").toMatch(/interrupted before it started asking/i);
+    // The third reason (review C-1): a budget that claimed the rows before
+    // anything was asked. Copy naming two of three would leave a reader with a
+    // `reason` in the evidence the text does not explain.
+    expect(c.explanation, "the budget").toMatch(/resource budget/i);
+    expect(c.explanation, "what the silence is not").toMatch(
+      /rather than a clean bill of health/i,
+    );
+    // The page-weight consequence, which is the one a reader would otherwise
+    // read as a light site.
+    expect(c.explanation, "page.weight beside it").toMatch(/HTML and nothing else/i);
+    expect(c.howToFix).toMatch(/re-run the crawl|resume/i);
+    // NEVER the other marker's sentence: this crawl recorded plenty.
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
+      /recorded no (?:files|resources)|no resource records|found no files/i,
+    );
   });
 
   // The metric-copy column contract, for Phase 11's table. Its shape is five

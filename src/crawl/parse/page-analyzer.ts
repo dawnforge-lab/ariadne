@@ -375,6 +375,29 @@ export interface PageAnalysis {
    * server about (header, same block).
    */
   resourceRefs: ResourceRef[];
+  /**
+   * True when this page carried a resource reference the `MAX_RESOURCE_REFS`
+   * cap dropped — the truncation saying so on the page instead of leaving the
+   * short list to be read as the whole list (P12-T1, phase-11.md §10.1).
+   *
+   * WHAT IT MEANS EXACTLY: at least one reference was dropped UNEXAMINED. Past
+   * the cap the extraction stops resolving, so it cannot know whether the
+   * dropped reference was a new URL or a repeat of one already in the list —
+   * and this reports what it knows rather than the stronger claim. A page whose
+   * 2001st reference repeats its first raises it too, and that is the honest
+   * reading: we did not look.
+   *
+   * False on a page holding exactly `MAX_RESOURCE_REFS` refs and no more —
+   * full is not truncated.
+   *
+   * The gap it closes is specifically CSS and JS. `imagesTotal` sits beside the
+   * image refs and is uncapped, so an image list cut short can be spotted
+   * against it; stylesheets and scripts have no counter at all, so their
+   * truncation was invisible in the data. `PageWriter` counts the pages that
+   * raise this and the crawl loop stamps the total on
+   * `crawls.resource_refs_capped_pages`.
+   */
+  resourceRefsCapped: boolean;
   /** First `<link rel=next>` href; null when absent or href-less. */
   relNext: string | null;
   /** First `<link rel=prev>` href; null when absent or href-less. */
@@ -514,13 +537,16 @@ const MAX_EXTRACTED_LINKS = 2_000;
  * batch exactly as the links do. A gallery page with more than this many
  * distinct assets loses the tail of the list.
  *
- * THE TRUNCATION IS ONLY VISIBLE FOR IMAGES, and the limit is worth stating
- * plainly: `imagesTotal` does not saturate, so an image list cut short can be
- * spotted against it — but CSS and JS have NO counter beside them, so a page
- * whose stylesheets and scripts fall past the cap loses them silently. Nothing
- * in this file can fix that (a second counter would be a new column), so the
- * cap-exceeded signal is CARRIED TO P11-T4, which owns `crawl_status` and can
- * report it once for the crawl instead of once per page.
+ * THE TRUNCATION USED TO BE VISIBLE ONLY FOR IMAGES, and P12-T1 closed that.
+ * `imagesTotal` does not saturate, so an image list cut short can be spotted
+ * against it — but CSS and JS have NO counter beside them, so a page whose
+ * stylesheets and scripts fell past the cap lost them silently. The page now
+ * says so itself, on `PageAnalysis.resourceRefsCapped`, which `PageWriter`
+ * counts and the crawl loop stamps onto `crawls.resource_refs_capped_pages`.
+ * The count is a WRITER's counter rather than a query over the edge table for
+ * the reason phase-11.md §10.1 measured: deriving it in SQL costs a scan of
+ * every reference the crawl holds (73 ms over 500,000 edges, against a
+ * `crawl_status` whose other reads are ≤ 3 ms).
  *
  * Exported so the suite pins the constant rather than a copy of its value
  * (the SOFT_404_PHRASES precedent).
@@ -731,12 +757,23 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // here (hard rule 6). `<source>` is only a resource site inside a `<picture>`,
   // which the depth counter answers on the `navDepth` idiom.
   const resourceRefs = new Map<string, ResourceRef>();
+  // Raised the first time the cap turns a reference away. The check below stays
+  // where it is — BEFORE the resolve — because that is what keeps a mega-gallery
+  // page from paying a URL parse per reference past the cap, and the flag is
+  // worded for exactly that: a reference dropped unexamined, which is all this
+  // position can honestly claim. See `PageAnalysis.resourceRefsCapped`.
+  let resourceRefsCapped = false;
   let pictureDepth = 0;
   const addResource = (raw: string | undefined, kind: ResourceKind) => {
     if (raw === undefined) return;
     const value = raw.trim();
+    // Before the cap check, deliberately: a `data:` URI or a `javascript:` href
+    // is not a resource at all, so turning one away is not a truncation.
     if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return;
-    if (resourceRefs.size >= MAX_RESOURCE_REFS) return;
+    if (resourceRefs.size >= MAX_RESOURCE_REFS) {
+      resourceRefsCapped = true;
+      return;
+    }
     const resolved = normalizeUrl(value, pageUrl);
     // First kind wins, as the first anchor wins for a link target: one URL
     // referenced as both a script and an image is one file, and its kind is
@@ -1257,6 +1294,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     frameworkMarkers: FRAMEWORK_MARKERS.filter((marker) => markersSeen.has(marker)),
     links: Array.from(linksByTarget.values()),
     resourceRefs: Array.from(resourceRefs.values()),
+    resourceRefsCapped,
     relNext: relNext ?? null,
     relPrev: relPrev ?? null,
     domSize,
@@ -1314,6 +1352,7 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     // array is copied rather than shared so the facade's result cannot be
     // mutated through the raw one.
     resourceRefs: raw.resourceRefs.map(({ url, kind }) => ({ url, kind })),
+    resourceRefsCapped: raw.resourceRefsCapped,
     relNext: raw.relNext,
     relPrev: raw.relPrev,
     domSize: raw.domSize,

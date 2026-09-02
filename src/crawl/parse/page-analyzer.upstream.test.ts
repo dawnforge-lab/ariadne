@@ -119,6 +119,11 @@ const EXTENSION_FIELDS = [
   // additions are stripped on exactly this reasoning; the cases live in
   // test/crawl/resource-refs.test.ts, where the absences are asserted too.
   "resourceRefs",
+  // P12-T1's truncation flag, stripped for the same reason and one more: it is
+  // a statement about the port's OWN cap, which the oracle does not have and
+  // must not grow (a cheerio reference that reimplemented MAX_RESOURCE_REFS
+  // would be pinning the port against a copy of itself).
+  "resourceRefsCapped",
 ] as const;
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
@@ -405,6 +410,7 @@ function expectParity(html: string) {
     hasSoft404Phrases: _hasSoft404Phrases,
     h1Text: _h1Text,
     resourceRefs: _resourceRefs,
+    resourceRefsCapped: _resourceRefsCapped,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);

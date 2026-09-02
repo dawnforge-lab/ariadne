@@ -128,6 +128,73 @@ describe("HostGate", () => {
     ).toBe(30000);
   });
 
+  // --- the earned spacing a resumed crawl carries back in (P12-T3) ---
+
+  it("folds the spacing an earlier run earned into the crawl's base", () => {
+    // `crawls.host_spacing_ms` is a FINDING — the site pushed back and the
+    // engine listened — so a second run over the same crawl starts where the
+    // first one ended rather than at the configured floor.
+    expect(
+      new HostGate({
+        perHostDelayMs: 1000,
+        robotsCrawlDelaySec: null,
+        earnedSpacingMs: 8000,
+      }).effectiveDelayMs(),
+    ).toBe(8000);
+    // Max, not replace: a caller who asks for more room than the crawl earned
+    // keeps it, and a crawl that never escalated changes nothing.
+    expect(
+      new HostGate({
+        perHostDelayMs: 8000,
+        robotsCrawlDelaySec: null,
+        earnedSpacingMs: 1000,
+      }).effectiveDelayMs(),
+    ).toBe(8000);
+    expect(
+      new HostGate({
+        perHostDelayMs: 1000,
+        robotsCrawlDelaySec: null,
+        earnedSpacingMs: null,
+      }).effectiveDelayMs(),
+    ).toBe(1000);
+    // The cap binds it exactly as it binds robots and the ratchet: past 30s the
+    // crawl stops being a crawl.
+    expect(
+      new HostGate({
+        perHostDelayMs: 1000,
+        robotsCrawlDelaySec: null,
+        earnedSpacingMs: 90_000,
+      }).effectiveDelayMs(),
+    ).toBe(30_000);
+    // And it is the widest of the three, not the last of them.
+    expect(
+      new HostGate({
+        perHostDelayMs: 500,
+        robotsCrawlDelaySec: 3,
+        earnedSpacingMs: 1000,
+      }).effectiveDelayMs(),
+    ).toBe(3000);
+  });
+
+  it("refuses an earned spacing that is not a number of milliseconds", () => {
+    expect(
+      () =>
+        new HostGate({
+          perHostDelayMs: 100,
+          robotsCrawlDelaySec: null,
+          earnedSpacingMs: -1,
+        }),
+    ).toThrow(RangeError);
+    expect(
+      () =>
+        new HostGate({
+          perHostDelayMs: 100,
+          robotsCrawlDelaySec: null,
+          earnedSpacingMs: Number.NaN,
+        }),
+    ).toThrow(RangeError);
+  });
+
   it("spaces two acquisitions of the same host by the delay", async () => {
     const g = new HostGate({ perHostDelayMs: 120, robotsCrawlDelaySec: null });
     const t0 = Date.now();

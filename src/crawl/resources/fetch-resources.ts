@@ -73,7 +73,10 @@
  * - **robots.txt per host.** The crawl origin's rules are already loaded, and
  *   are passed in rather than re-read. A third-party host's are fetched once,
  *   politely, and cached for the crawl. Disallowed is `robots_denied` and no
- *   request. Googlebot honours robots.txt for assets; so do we.
+ *   request; a host that could not tell us its rules is `robots_unreachable`
+ *   and also no request (RFC 9309 §2.3.1.4 — the same complete disallow, said
+ *   as the different fact it is). Googlebot honours robots.txt for assets; so
+ *   do we.
  * - **Caps are loud** (hard rule 7). `maxResources` and `maxResourceHosts` leave
  *   rows UNFETCHED — `fetch_class` still null, "seen, not yet asked" — with
  *   `fetch_reason = 'resource-cap'` saying who stopped short, and the summary
@@ -101,7 +104,7 @@ import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { request } from "undici";
 import type { Db } from "../../db/client.js";
 import { resources } from "../../db/schema.js";
-import { fetchRobots, type RobotsInfo } from "../discovery.js";
+import { fetchRobots, type RobotsInfo, type RobotsOutcome } from "../discovery.js";
 import { classifyStatus, parseRetryAfter, type FetchClass } from "../fetch-page.js";
 import {
   ACCEPT_ENCODING,
@@ -128,7 +131,21 @@ import { isUrlAllowed } from "../url-policy.js";
  *    them; this pass does not retry (a resource is not worth three requests),
  *    so one class carries them and `fetch_reason` says which it was.
  *  - `refused` — the URL policy said no, before or during the chain.
- *  - `robots_denied` — the host's own robots.txt said no.
+ *  - `robots_denied` — the host's own robots.txt said no. It was READ, and it
+ *    forbade this URL.
+ *  - `robots_unreachable` — the host could not tell us its rules (5xx, timeout,
+ *    network error, or a robots URL our own policy refused), and RFC 9309
+ *    §2.3.1.4 makes that a complete disallow. The OUTCOME is identical to
+ *    `robots_denied` — no request is made — and the FACT is not, which is why it
+ *    is a class of its own (P12-T1; the argument is docs/gates/phase-11.md
+ *    §10.2). "A CDN that forbids us" and "a CDN that was down while we ran" are
+ *    two different sentences about a client's site, and a count that cannot tell
+ *    them apart is a count somebody will read as the wrong one.
+ *
+ * The split is taken off `RobotsInfo.outcome`, a CLOSED VOCABULARY the deny site
+ * already holds, and NEVER off the reason sentence. Phase 11 measured the
+ * alternative and refused it: a count built by prose-matching `fetchReason`
+ * goes silently to zero the day somebody rewords an error message.
  *
  * A `blocked` page (401/403/429) lands here as `client_error`, and a challenge
  * 503 as `server_error`: the STATUS is what the row records, while the block
@@ -142,13 +159,14 @@ export const RESOURCE_FETCH_CLASSES = [
   "fetch_error",
   "refused",
   "robots_denied",
+  "robots_unreachable",
 ] as const;
 
 export type ResourceFetchClass = (typeof RESOURCE_FETCH_CLASSES)[number];
 
 /**
- * The two members of that vocabulary a READER outside this module has to name,
- * exported as typed constants so a rename cannot pass a typecheck.
+ * The three members of that vocabulary a READER outside this module has to
+ * name, exported as typed constants so a rename cannot pass a typecheck.
  *
  * The reason is a real failure mode rather than tidiness. Every consumer of this
  * column reads it in SQL, where the class is a bare string: `service.ts`'s
@@ -166,11 +184,12 @@ export type ResourceFetchClass = (typeof RESOURCE_FETCH_CLASSES)[number];
  * the string this file writes. Same discipline as `RESOURCE_CAP_REASON` below,
  * which `service.ts` already imports rather than spelling out.
  *
- * Only these two are exported because only these two are read elsewhere. A third
- * reader adds a third constant here rather than a third literal there.
+ * Only these are exported because only these are read elsewhere. A fourth
+ * reader adds a fourth constant here rather than a fourth literal there.
  */
 export const RESOURCE_OK_CLASS: ResourceFetchClass = "ok";
 export const RESOURCE_ROBOTS_DENIED_CLASS: ResourceFetchClass = "robots_denied";
+export const RESOURCE_ROBOTS_UNREACHABLE_CLASS: ResourceFetchClass = "robots_unreachable";
 
 /**
  * The reason a row that a cap stopped short of carries. A single literal
@@ -450,7 +469,11 @@ export async function fetchCrawlResources(
   ): Promise<
     | { kind: "capped" }
     | { kind: "parked"; reason: string }
-    | { kind: "denied"; reason: string }
+    // `outcome` rides along because the CALLER writes the class and this is
+    // where the discriminant exists. Carrying the enum rather than a
+    // pre-computed class keeps one decision in one place: `admit` answers "may
+    // we ask, and on what evidence", `processOne` turns that into a row.
+    | { kind: "denied"; reason: string; outcome: RobotsOutcome }
     | { kind: "ok" }
   > => {
     let record = hosts.get(host);
@@ -501,6 +524,7 @@ export async function fetchCrawlResources(
       return {
         kind: "denied",
         reason: robots.note ?? `robots.txt (${host}) disallows this URL`,
+        outcome: robots.outcome,
       };
     }
     return { kind: "ok" };
@@ -602,7 +626,20 @@ export async function fetchCrawlResources(
       }
       if (admission.kind === "denied") {
         failed += 1;
-        return done(unfetchable("robots_denied", note(admission.reason)));
+        // WHICH refusal, off the closed vocabulary rather than off the
+        // sentence. `unreachable` is still a complete disallow (RFC 9309
+        // §2.3.1.4) — no request is made on either branch — but a reader
+        // counting "hosts that forbid us" must not be counting hosts that were
+        // down. See the class list at the top of this file, and
+        // docs/gates/phase-11.md §10.2 for why prose-matching was refused.
+        return done(
+          unfetchable(
+            admission.outcome === "unreachable"
+              ? RESOURCE_ROBOTS_UNREACHABLE_CLASS
+              : RESOURCE_ROBOTS_DENIED_CLASS,
+            note(admission.reason),
+          ),
+        );
       }
 
       await gate.acquire(host);
@@ -794,11 +831,21 @@ export async function fetchCrawlResources(
   // stopped" — the crawl loop closes its row `cancelled` on this (hard rule 7).
   const aborted = opts.signal?.aborted === true;
 
-  if (cappedByResources) {
+  if (cappedByResources && !aborted) {
     // Loud, not silent: every row the cap stopped short of says so, in one
     // statement rather than one per row. An ABORT deliberately marks nothing —
     // those rows were not capped, they were interrupted, nothing was decided
     // about them, and their null already means "seen, not yet asked".
+    //
+    // `&& !aborted` IS WHAT MAKES THAT SENTENCE TRUE (P12-T2, review C-1). The
+    // budget is claimed for a whole slice before any of it is asked about, so
+    // the two stops overlap: `cappedByResources` goes true at the top of a batch
+    // and the caller's signal can fire inside that same batch. Without the guard
+    // this statement then stamped `resource-cap` over rows an abort had left —
+    // contradicting the comment above it and the module header at once, and, on
+    // a small enough budget, producing a whole census of `resource-cap` rows
+    // with nothing decided at all. A stop the CALLER made is not a budget
+    // running out, and only the caller's row shape can say which happened.
     await db
       .update(resources)
       .set({ fetchReason: RESOURCE_CAP_REASON })

@@ -151,8 +151,13 @@ the `ariadne-crawl` skill under the same heading; the short form:
 `auto` — no `urls` — remains right for first contact with a site, or where the types
 give you no clear templates at all.
 
-**Then read what came back, and read the mode first.** `render.coverage`'s
-`selectionMode` says which decision chose the pages. On an `explicit` pass
+**Then read what came back, and read the evidence field first.**
+`render.coverage`'s `renderPassEvidence` says whether a render pass has left any
+trace on this crawl at all — a rendered page, a failed render, a named list, a
+stamped count, a page still waiting for a browser. On `none` everything after it
+is the selection a pass WOULD make, so the JavaScript checks are NOT MEASURED and
+the numbers are a quote for the work rather than a record of it. **Then the
+mode.** `selectionMode` says which decision chose the pages. On an `explicit` pass
 `selectionBudget`, `selectionSuspects`, `selectionSampled` and `selectionTruncated`
 are **null**, not zero: no automatic decision was taken, so quoting them as "no
 suspects found" would be a claim about the site's HTML that nobody made.
@@ -396,7 +401,8 @@ An audit that copies an older findings file forward will under-report all five:
   `crawl_status`'s `resources` block before quoting or not quoting any of them**
   (CHECK-83): on a crawl started with `fetchResources: false`, or one written before
   the tables existed, every one of those rules is silent because nothing was measured,
-  and `resources.not-recorded` (info) is the marker for the second case. What stays
+  and each case has its own marker — `resources.not-fetched` (info) for the first,
+  `resources.not-recorded` (info) for the second, never both on one crawl. What stays
   unmeasured is stated at each check: no image is decoded, only the SERVED HTML's
   references are seen, and fonts, media and favicons are out of scope.
 

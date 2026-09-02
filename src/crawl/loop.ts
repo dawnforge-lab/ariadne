@@ -46,7 +46,7 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
@@ -498,6 +498,16 @@ export async function runCrawl(
  * a caller resuming often enough for that to matter passes `probeHosts: false`
  * in `opts.config`, and the row then keeps whatever walk the earlier run
  * stored, untouched.
+ *
+ * THE POLITENESS STATE IS RE-ENTERED, not restarted. `crawls.host_spacing_ms`
+ * is the widest spacing this crawl's gate ever reached, and it is a finding
+ * rather than a setting — a host refused us and the engine backed off (rule 9).
+ * The continuation's gate is built with it (see `storedSpacingMs` and
+ * `HostGate.earnedSpacingMs`), so a crawl that earned 8s per host resumes at 8s
+ * whatever its stored `perHostDelayMs` says. Until P12-T3 it did not: the gate
+ * came up at the configured floor and the first `recordSpacing` wrote that floor
+ * back over the evidence, which made the regression invisible from
+ * `crawl_status` as well as rude to the site.
  */
 export async function resumeCrawl(
   db: Db,
@@ -806,6 +816,28 @@ async function execute(
   }
 }
 
+/**
+ * `crawls.host_spacing_ms` as the next run of this crawl must read it.
+ *
+ * A missing row is a defect rather than a null: `runToCompletion` is only ever
+ * reached through a crawl whose row this process just wrote or just read, so a
+ * row that is gone means something deleted it underneath the run, and a silent
+ * "no spacing earned" would be that deletion reported as a politeness fact
+ * (hard rule 7).
+ */
+async function storedSpacingMs(db: Db, crawlId: string): Promise<number | null> {
+  const rows = await db
+    .select({ hostSpacingMs: crawls.hostSpacingMs })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error(`crawl ${crawlId}: the crawls row is gone; cannot read its earned spacing`);
+  }
+  return row.hostSpacingMs;
+}
+
 async function runToCompletion(
   db: Db,
   crawlId: string,
@@ -880,9 +912,21 @@ async function runToCompletion(
     max: config.maxConcurrency,
     initial: Math.min(WINDOW_INITIAL, config.maxConcurrency),
   });
+  // THE SPACING AN EARLIER RUN OF THIS CRAWL EARNED, read back off the row.
+  //
+  // Null on every fresh crawl (nothing has written the column yet), so this
+  // changes nothing about `runCrawl`. On a resume it is the whole point: the
+  // column is a finding — a host refused us and the gate doubled its spacing —
+  // and a continuation that rebuilt the gate from `perHostDelayMs` alone would
+  // walk straight back into the pace that earned the refusal, then overwrite
+  // the evidence with the configured floor on the very first `recordSpacing`
+  // below. `HostGate` folds it into the same max as robots' `Crawl-delay`; see
+  // `earnedSpacingMs` there for why the policy lives in that module.
+  const earnedSpacingMs = await storedSpacingMs(db, crawlId);
   const gate = new HostGate({
     perHostDelayMs: config.perHostDelayMs,
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
+    earnedSpacingMs,
   });
 
   /**
@@ -917,6 +961,11 @@ async function runToCompletion(
   // took (hard rule 7 — the miscount would be silent).
   const startCounts = await frontierCounts(db, crawlId);
   let pagesCrawled = crawledRows(startCounts);
+  // Whether pages were already on record when this run began — the same number,
+  // read as a question. `closeCrawl` needs it because the cap-exceeded counter
+  // this run accumulates is a DELTA on a resume and the whole count on a fresh
+  // crawl; see its docblock for why the difference is not cosmetic.
+  const resumed = pagesCrawled > 0;
   let frontierRows =
     startCounts.pending +
     startCounts.leased +
@@ -1354,7 +1403,10 @@ async function runToCompletion(
   // a reader who sees `finished` sees the marker too.
   const pageTemplates = await inferPageTemplates(db, crawlId);
 
-  await closeCrawl(db, crawlId, status, pagesCrawled);
+  await closeCrawl(db, crawlId, status, pagesCrawled, {
+    delta: writer.stats().resourceRefsCappedPages,
+    resumed,
+  });
   return summarise(
     db,
     crawlId,
@@ -1544,6 +1596,7 @@ function emptyWriterStats(): PageWriterStats {
     resources: 0,
     pageResources: 0,
     hreflangUnresolved: 0,
+    resourceRefsCappedPages: 0,
   };
 }
 
@@ -1590,15 +1643,71 @@ async function persistSitemap(
   }
 }
 
+/**
+ * Close the row: the terminal status, the finish time, the page count — and,
+ * when this process ran pages, the cap-exceeded count beside them.
+ *
+ * ## `refsCapped`, and why it is optional
+ *
+ * `crawls.resource_refs_capped_pages` counts the pages whose analyzer dropped a
+ * resource reference at `MAX_RESOURCE_REFS` (migration 0014). The counter lives
+ * on `PageWriter` because that is where the pages go past — the alternative,
+ * deriving it from `page_resources`, is O(edges) and was measured at 73 ms on a
+ * 500,000-edge crawl against a `crawl_status` whose other reads are ≤ 3 ms
+ * (docs/gates/phase-11.md §10.1). This is where the counter is stamped.
+ *
+ * It is optional because `execute`'s failure path closes rows it has no writer
+ * for: a crawl that died anywhere in `runToCompletion` is closed from the
+ * FRONTIER's numbers, and the process holding the counter is the thing that just
+ * failed. Passing `null` LEAVES THE COLUMN ALONE, which is the honest outcome —
+ * nobody counted, and the null says exactly that. Writing 0 there would report a
+ * measurement no one took (hard rule 7).
+ *
+ * ## The resume arithmetic, and the null that has to survive it
+ *
+ * `delta` is what THIS run's writer saw, so a resume must ADD rather than
+ * overwrite: its writer only ever met the pages this run fetched, and the
+ * earlier run's truncated pages are still truncated. The addition is done in
+ * SQL, not in TypeScript, for one property — `null + n` is null in SQL. A crawl
+ * whose first run predates this column has no count, and a resume must not turn
+ * that honest null into a partial number that reads like a whole one.
+ *
+ * A fresh crawl assigns instead of adding: its writer saw every page, the
+ * column is null before it, and `null + n` would leave a crawl that DID count
+ * looking uncounted.
+ *
+ * THE TWO RULES COMPOSE INTO A PERMANENT NULL, and it is the honest outcome
+ * rather than an oversight. A crawl that persisted pages and then died before
+ * ANY close leaves the column null (this function was never reached, or was
+ * reached through `execute`'s catch with no writer); a later resume sees pages
+ * on record, so it adds — and `null + n` is null. That crawl answers "we do not
+ * know" for ever. It is the only answer available: the dead run's truncated
+ * pages were counted in a process that is gone, nothing in the tables can
+ * reconstruct them, and stamping the resume's own count would publish a partial
+ * number in a field a reader takes for a whole one (hard rule 7). A fresh crawl
+ * is what produces a number.
+ */
 async function closeCrawl(
   db: Db,
   crawlId: string,
   status: CrawlSummary["status"],
   pagesCrawled: number,
+  refsCapped: { delta: number; resumed: boolean } | null = null,
 ): Promise<void> {
   await db
     .update(crawls)
-    .set({ status, finishedAt: new Date(), pagesCrawled })
+    .set({
+      status,
+      finishedAt: new Date(),
+      pagesCrawled,
+      ...(refsCapped === null
+        ? {}
+        : {
+            resourceRefsCappedPages: refsCapped.resumed
+              ? sql`${crawls.resourceRefsCappedPages} + ${refsCapped.delta}`
+              : refsCapped.delta,
+          }),
+    })
     .where(eq(crawls.id, crawlId));
 }
 

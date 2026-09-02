@@ -90,6 +90,7 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     ],
     structuredData: [{ type: "Article", raw: { "@type": "Article", name: "n" } }],
     structuredDataParseErrors: 0,
+    resourceRefsCapped: false,
     contentHash: "a".repeat(64),
     simhash: 1234567890123n,
     ...overrides,
@@ -647,6 +648,7 @@ describe("PageWriter", () => {
       resources: 2,
       pageResources: 2,
       hreflangUnresolved: 0,
+      resourceRefsCappedPages: 0,
     });
   });
 
@@ -997,6 +999,46 @@ describe("PageWriter", () => {
     });
 
     /**
+     * THE CAP-EXCEEDED COUNTER (P12-T1). The analyzer says on each page whether
+     * the `MAX_RESOURCE_REFS` cap dropped a reference; the writer is where those
+     * booleans become one number, because it is the one component every page
+     * passes through exactly once and it already holds the crawl's other
+     * O(pages) counters. The crawl loop stamps the total onto
+     * `crawls.resource_refs_capped_pages` at close — the alternative, deriving
+     * it from `page_resources`, was measured at 73 ms over 500,000 edges against
+     * a `crawl_status` whose other reads are ≤ 3 ms (phase-11.md §10.1).
+     */
+    it("counts the pages whose analyzer hit the resource-ref cap, and no others", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId, { batchSize: 2 });
+      for (const [path, capped] of [
+        ["/plain", false],
+        ["/gallery", true],
+        ["/also-plain", false],
+        ["/mega-menu", true],
+      ] as const) {
+        await writer.addPage(
+          item(`${SITE}${path}`),
+          makeFetch(`${SITE}${path}`),
+          makeAnalysis({ resourceRefsCapped: capped }),
+          { complete: true },
+        );
+      }
+      // A page that produced no HTML has no analysis and therefore no answer —
+      // it is not a page whose references were truncated, and counting it as
+      // one would put a 404 in the number.
+      await writer.addPage(
+        item(`${SITE}/gone`),
+        makeFetch(`${SITE}/gone`, { statusCode: 404, fetchClass: "client_error", body: null }),
+        null,
+        { complete: true },
+      );
+      await writer.flush();
+
+      expect(writer.stats().resourceRefsCappedPages).toBe(2);
+    });
+
+    /**
      * The duplicate can also arrive INSIDE one insert, when both pages are in
      * the same batch. `on conflict do nothing` absorbs that too; a plain insert
      * would raise on the unique index and lose the whole batch.
@@ -1103,6 +1145,7 @@ describe("PageWriter", () => {
       resources: 2,
       pageResources: 2,
       hreflangUnresolved: 0,
+      resourceRefsCappedPages: 0,
     });
   });
 });
