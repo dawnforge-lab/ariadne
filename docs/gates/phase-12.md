@@ -1049,11 +1049,13 @@ The sweep itself is still not written (§10.6).
 
 ## 12. Integration
 
-**CI: _(placeholder — PR #11, to be filled in when the run reports)_.**
-
-Phase 12 opens PR #11 against `main`. The link, the run id, the duration and the
-1,765/71 result belong here, and so does whether either §8 watch item appeared
-on a fresh database with migration 0014 applied from nothing.
+**CI: GREEN, first try** — PR #11
+(https://github.com/dawnforge-lab/ariadne/pull/11), run
+https://github.com/dawnforge-lab/ariadne/actions/runs/33646455046 (4m12s,
+1,765/1,765 across 71 files). A fresh database: migration 0014 applied from
+nothing, and neither §8 watch item appeared — the second consecutive
+main-bound run with both absent, and the watch stays open on two data points
+rather than closing on them.
 
 Merge per the owner's instruction at the time; the last two phases merged on
 green.
