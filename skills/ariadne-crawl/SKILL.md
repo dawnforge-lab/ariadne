@@ -275,13 +275,20 @@ What the fields mean when you are waiting:
   refusal in `robotsDenied`. `fetchResources` is whether
   the crawl asked at all: `false` is an operator's decision, and beside `fetched: 0`
   it means nobody weighed anything rather than that nothing is heavy.
-- **`resourceRefsCappedPages`** — how many of the crawl's PAGES referenced more
-  files than the analyzer records (it keeps 2,000 per page and drops the rest). On
-  those pages the `seen` count above is a floor, so any count over the census is a count
-  over a sample of that page's references. **`null` is not `0`**: null means nobody
-  counted (a crawl older than the counter, one still running, or one whose process
-  died before it closed), while `0` means every page was read and none of them lost
-  a reference. Do not report the two the same way.
+- **`resourceRefsCappedPages`** — how many of the crawl's PAGES carried more
+  resource REFERENCES than the analyzer's cap keeps (2,000 per page, the rest
+  turned away). References, not files: past the cap the analyzer stops resolving, so
+  a page whose 2,001st reference repeats its first is counted here and lost no file
+  at all. On those pages the `seen` count above **may be** a floor — some of the
+  turned-away references would have been files nobody recorded — so a count over the
+  census may be a count over a sample of that page's references. Which pages that is
+  actually true of is not knowable from any surface. **`null` is not `0`**: null
+  means nobody counted (a crawl older than the counter, one still running, or one
+  whose process died before its first close — that null is permanent, a later resume
+  cannot recover the pages the dead run read), while `0` means every page was read
+  and none of them lost a reference. Do not report the two the same way, and do not
+  divide this by `pagesCrawled`: they are counted off different sources and a ratio
+  above 1 is legitimate on a crawl that analysed one URL twice.
 - **`rulesRunAt` and `findingsCount`** — the judged marker, and the only pair that
   tells an empty findings listing from an unjudged crawl. `rulesRunAt` is when a rules
   pass last COMPLETED (null: none on record — never judged, being judged now, or a run

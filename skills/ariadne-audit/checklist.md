@@ -296,10 +296,12 @@ answered from, and its verdict is the confidence interval around all of them.
      `resources` CSV view) names the host and the reason. **A crawl run before the
      two were split reports every robots refusal in `robotsDenied`.**
      `resourceRefsCappedPages` sits outside the block and counts PAGES, not files:
-     how many pages referenced more assets than the analyzer records (2,000 per
-     page). Non-zero means `seen` is a floor on that many pages and every resource
-     check is answered over a sample of their references; **`null` means nobody
-     counted** (a crawl older than the counter), which is not `0`.
+     how many pages carried more resource REFERENCES than the analyzer's cap keeps
+     (2,000 per page). Non-zero means `seen` **may be** a floor on that many pages
+     and those resource checks may be answered over a sample of their references —
+     see the cap bullet below for why "may". **`null` means nobody counted** (a
+     crawl older than the counter, or one whose process died before its first
+     close), which is not `0`.
 - **The markers are part of this check, not a footnote.** `issues_list` with no
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
@@ -321,14 +323,19 @@ answered from, and its verdict is the confidence interval around all of them.
     and the `render.coverage` numbers, the whole `resources` block with
     `fetchResources` beside it, and every NOT MEASURED marker that fired
 - **The 2,000-reference cap, now counted rather than silent**: the analyzer records
-  at most 2,000 resource references per page and a page above that contributes its
-  first 2,000. That used to be invisible; `crawl_status.resourceRefsCappedPages` is
-  the count of the crawl's pages it happened to. Non-zero means the resource evidence
-  is a FLOOR on that many pages — read every resource check as answered over a sample
-  of their references. WHICH pages is still NOT MEASURED: no surface lists them,
-  because deriving that costs a scan of every reference the crawl holds. **`null` is
-  not `0`** — a crawl older than the counter has no answer, and a report that prints
-  "0 pages truncated" for it is stating a measurement nobody took.
+  at most 2,000 resource REFERENCES per page and turns the rest away. That used to be
+  invisible; `crawl_status.resourceRefsCappedPages` is the count of the crawl's pages
+  it happened to. **Read the number precisely — it counts references turned away, not
+  files lost.** Past the cap the analyzer stops resolving, so it cannot tell a new URL
+  from a repeat of one it already holds: a page whose 2,001st reference duplicates its
+  first is counted and lost nothing. So non-zero means the resource evidence **may be**
+  a floor on that many pages, and the honest sentence for a report is "some of these
+  pages point at files this crawl did not record", never "N pages are missing files".
+  WHICH pages, and whether any file was really lost, are both NOT MEASURED: no surface
+  answers either, because deriving them costs a scan of every reference the crawl
+  holds. **`null` is not `0`** — a crawl older than the counter, or one whose process
+  died before its first close, has no answer at all, and a report that prints "0 pages
+  truncated" for it is stating a measurement nobody took.
 - **`site.health` is filed here** (`metrics_get` with `metricId: "site.health"`):
   the partition of the crawl's auditable pages by the worst severity each carries,
   plus the pages the census leaves out. It is a rollup of the audit's own findings —

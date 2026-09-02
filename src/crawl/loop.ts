@@ -1631,6 +1631,17 @@ async function persistSitemap(
  * A fresh crawl assigns instead of adding: its writer saw every page, the
  * column is null before it, and `null + n` would leave a crawl that DID count
  * looking uncounted.
+ *
+ * THE TWO RULES COMPOSE INTO A PERMANENT NULL, and it is the honest outcome
+ * rather than an oversight. A crawl that persisted pages and then died before
+ * ANY close leaves the column null (this function was never reached, or was
+ * reached through `execute`'s catch with no writer); a later resume sees pages
+ * on record, so it adds — and `null + n` is null. That crawl answers "we do not
+ * know" for ever. It is the only answer available: the dead run's truncated
+ * pages were counted in a process that is gone, nothing in the tables can
+ * reconstruct them, and stamping the resume's own count would publish a partial
+ * number in a field a reader takes for a whole one (hard rule 7). A fresh crawl
+ * is what produces a number.
  */
 async function closeCrawl(
   db: Db,

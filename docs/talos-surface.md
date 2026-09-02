@@ -280,10 +280,12 @@ terms in that sum — adding the second one moved no arithmetic.
 **`resourceRefsCappedPages` sits outside the block**, and the placement is the
 contract: it counts **pages**, not files, and it is a number the crawl STAMPED at
 close rather than one counted live off the table. It is how many of this crawl's
-pages referenced more files than the analyzer records — it keeps 2,000 per page
-and drops the rest. On those pages **`resources.seen` is a floor**: the site
-points at more files than were recorded, so every count over the census is a
-count over a sample of that page's references. `null` is not `0` — see §5.
+pages carried more resource **references** than the analyzer's cap keeps — 2,000
+per page, the rest turned away. On those pages **`resources.seen` may be a
+floor**: some of the turned-away references would have been files nobody
+recorded, so a count over the census may be a count over a sample of that page's
+references. Read §5.4 before quoting it — the field claims references turned
+away, not files lost, and `null` is not `0`.
 
 **`fetchResources` is the denominator for all of it** — resolved like
 `findingCap`, so an absent key reports the default `true`. `false` beside
@@ -544,23 +546,43 @@ turned resource fetching off".
 ### 5.4 `resourceRefsCappedPages` null — nobody counted
 
 The doctrine's second column-keyed spelling, and the one whose zero is the most
-tempting thing to invent. The field counts **pages whose resource references the
-analyzer truncated**: it keeps 2,000 per page and drops what follows.
+tempting thing to invent. The field counts **pages that carried more resource
+references than the analyzer's cap keeps**: 2,000 per page, the rest turned away.
 
-- **`null` means nobody counted.** A crawl written before the counter existed
-  (migration 0014), a crawl still running, or one whose process died before it
-  could close its row. **It was never backfilled**, and could not honestly be:
-  the edge table cannot tell a page that hit the cap from a page that happens to
-  reference exactly that many distinct files, so a backfill would be a fabricated
-  measurement. Every crawl in the reference database reads `null` today, the
-  paste in §4.2 included.
+**References turned away, not files lost** — the claim is deliberately the weaker
+one. Past the cap the analyzer stops resolving, so it cannot know whether a
+turned-away reference was a new URL or a repeat of one it already holds. A page
+whose 2,001st reference duplicates its first is counted here and lost no file at
+all. That is the price of taking the signal where the cap is enforced instead of
+resolving past it, which on the pages this cap exists for would be a URL parse
+per reference, and it is a price paid in the direction of over-reporting rather
+than silence.
+
+- **`null` means nobody counted**, three ways. A crawl written before the counter
+  existed (migration 0014); a crawl still running; and **a crawl whose process
+  died before its first close and was later resumed** — the first run's pages
+  went uncounted with the process that read them, and the resume adds to a null
+  rather than replacing it, so that crawl reads `null` for ever. It is not a
+  number the resume can repair, and a partial count presented as a whole one
+  would be worse than the null. **Nothing was backfilled**, and nothing honestly
+  could be: the edge table cannot tell a page that hit the cap from a page that
+  happens to reference exactly that many distinct files. Every crawl in the
+  reference database reads `null` today, the paste in §4.2 included.
 - **`0` means the analyzer read every page of that crawl and none of them lost a
   reference.** A measurement.
-- **A number means `resources.seen` is a floor on that many pages.** Counts
-  derived from the census — broken files, uncached files, page weight — are
-  counts over a sample of those pages' references. It is a cap, not a fault: the
-  scalar page counters (`imagesTotal` and its siblings) are uncapped and stay
-  exact, so nothing else on the page moved.
+- **A number means `resources.seen` MAY BE a floor on that many pages.** Some of
+  the turned-away references would have been files nobody recorded, so counts
+  derived from the census — broken files, uncached files, page weight — may be
+  counts over a sample of those pages' references. Which pages, and whether any
+  file was really lost, are both unanswerable from any surface. It is a cap, not
+  a fault: the scalar page counters (`imagesTotal` and its siblings) are uncapped
+  and stay exact, so nothing else on the page moved.
+- **It is not a numerator over `pagesCrawled`.** This counts the analyses handed
+  to the page writer; `pagesCrawled` is the crawl loop's own count off the
+  frontier's settled rows. A crawl that analysed one URL twice — a redirect
+  target also reached under its own row, whose second `pages` insert the unique
+  index drops — can legitimately report more capped pages than pages crawled.
+  Render it as a count, never as a percentage.
 
 The count is carried rather than derived, and the reason is measured rather than
 asserted: deriving it from the edge table costs a scan of every reference the
@@ -1083,17 +1105,21 @@ byte for byte, as it writes it".
 - Resource fetching covers images, CSS and JS only, from the SERVED HTML, and
   stores metadata rather than bodies (§10). Nothing decodes an image, so no
   surface says whether one is over-compressed or oversized for its box.
-- **The per-page reference cap is counted, but WHICH pages is not.** The analyzer
-  records at most 2,000 resource references per page and drops the rest.
+- **The per-page reference cap is counted, but WHICH pages is not — and neither
+  is whether any file was actually lost.** The analyzer records at most 2,000
+  resource references per page and turns the rest away.
   `crawl_status.resourceRefsCappedPages` is how many pages that happened to
-  (§5.4); read `resources.seen` as a floor on that many pages. What no surface
-  answers is which pages they were, and the reason is the measurement that shaped
-  the whole design: deriving anything per page from the edge table costs a scan of
-  every reference the crawl holds — 73 ms over a 500,000-edge crawl, against a
-  polling endpoint whose other reads are ≤ 3 ms (measured 2026-09-02 on a
-  synthetic crawl, since deleted). The COUNT is affordable because nothing derives
-  it: the analyzer flags the page, the writer counts, the crawl loop stamps a
-  column at close.
+  (§5.4), so `resources.seen` MAY BE a floor on that many pages. Two things no
+  surface answers: which pages they were, and whether a turned-away reference was
+  a file this crawl never recorded or a repeat of one it already had — past the
+  cap the analyzer stops resolving, so the signal is honestly "a reference was
+  dropped unexamined" and nothing stronger. The reason for both silences is the
+  measurement that shaped the whole design: deriving anything per page from the
+  edge table costs a scan of every reference the crawl holds — 73 ms over a
+  500,000-edge crawl, against a polling endpoint whose other reads are ≤ 3 ms
+  (measured 2026-09-02 on a synthetic crawl, since deleted). The COUNT is
+  affordable because nothing derives it: the analyzer flags the page, the writer
+  counts, the crawl loop stamps a column at close.
 
   **The cheap indicator was considered and rejected as unsound**, for the record,
   since it looks obvious: comparing `pages.images_total` against a page's counted

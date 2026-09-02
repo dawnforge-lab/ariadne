@@ -112,6 +112,13 @@ export const crawls = pgTable("crawls", {
   // analyzer's `MAX_RESOURCE_REFS` cap keeps — the truncation, counted instead
   // of silent (migration 0014, P12-T1).
   //
+  // REFERENCES TURNED AWAY, NOT FILES LOST, and every surface that serves this
+  // number repeats the distinction. Past the cap the analyzer stops resolving,
+  // so it cannot know whether a turned-away reference was a new URL or a repeat
+  // of one already in the page's list: a page whose 2,001st reference duplicates
+  // its first is counted here and lost nothing. The flag claims what the
+  // analyzer can see and nothing stronger (`PageAnalysis.resourceRefsCapped`).
+  //
   // WHY IT IS A COLUMN AND NOT A QUERY. The same number is derivable from
   // `page_resources` — count the pages holding exactly the cap's worth of edges
   // — and Phase 11 measured that: 73 ms and 67 ms over a 500,000-edge crawl,
@@ -125,18 +132,30 @@ export const crawls = pgTable("crawls", {
   // O(pages), in a place every page already passes through.
   //
   // NULLABLE, AND THE NULL IS LOAD-BEARING, exactly as `host_spacing_ms`'s is.
-  // Null means "nobody counted": a crawl written before this migration (never
-  // backfilled — the edge table cannot reconstruct which pages were truncated,
-  // and a guess would be a fabricated measurement, hard rule 7), or a crawl
-  // still running, or one whose process died before it could close its row.
+  // Null means "nobody counted", and there are THREE ways to get one:
+  //
+  //  1. A crawl written before this migration. Never backfilled — the edge table
+  //     cannot reconstruct which pages were truncated, and a guess would be a
+  //     fabricated measurement (hard rule 7).
+  //  2. A crawl still running, or one whose process died and was never resumed.
+  //  3. A crawl that persisted pages and then died before its first close, and
+  //     was later RESUMED. The dead run's pages were counted in a process that
+  //     is gone, and the resume adds to the column rather than replacing it
+  //     (below), so `null + n` keeps it null — PERMANENTLY, on that crawl. That
+  //     is deliberate and not a gap to close later: the resume genuinely does
+  //     not know how many of the earlier run's pages were truncated, and
+  //     stamping its own partial count would publish a number that reads like a
+  //     whole one. A crawl in this state answers "we do not know" for ever, and
+  //     a fresh crawl is what produces a number.
+  //
   // ZERO IS A MEASUREMENT: the analyzer read every page of that crawl and none
   // of them lost a reference.
   //
   // A RESUMED CRAWL ADDS TO IT rather than overwriting it, because a resume's
   // writer only ever saw the pages that resume fetched. The addition is done in
-  // SQL so a null stays null (`null + n` is null): a crawl whose first run
-  // predates this column cannot become a partial count that reads like a whole
-  // one. See `closeCrawl` in src/crawl/loop.ts.
+  // SQL so a null stays null (`null + n` is null) — which is both how case 3
+  // above stays honest and why a crawl whose first run predates this column
+  // cannot become a partial count. See `closeCrawl` in src/crawl/loop.ts.
   resourceRefsCappedPages: integer("resource_refs_capped_pages"),
 });
 

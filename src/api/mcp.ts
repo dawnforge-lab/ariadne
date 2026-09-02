@@ -311,14 +311,22 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "stopped the pass short of at least one file — one flag for both caps, " +
         "because the row records one reason whichever cap it was.\n\n" +
         "resourceRefsCappedPages sits OUTSIDE that block because it counts PAGES, " +
-        "not files: how many of this crawl's pages referenced more files than the " +
-        "analyzer records (it keeps 2,000 per page and drops the rest). On those " +
-        "pages resources.seen is a floor — the site points at more files than were " +
-        "recorded, so every count over the census is a count over a sample of that " +
-        "page's references. null is not zero: null means nobody counted (a crawl " +
-        "older than the counter, one still running, or one whose process died before " +
-        "it closed), while 0 means every page was read and none of them lost a " +
-        "reference. Do not render the two the same way.\n\n" +
+        "not files: how many of this crawl's pages carried more resource REFERENCES " +
+        "than the analyzer's cap keeps (2,000 per page, the rest turned away). " +
+        "References, not files — past the cap the analyzer stops resolving, so a " +
+        "page whose 2,001st reference repeats its first is counted here and lost no " +
+        "file at all. On those pages resources.seen MAY BE a floor: some of the " +
+        "turned-away references would have been files nobody recorded, so counts " +
+        "over the census may be counts over a sample of that page's references. " +
+        "Which page it is true of is not knowable from any surface. null is not " +
+        "zero: null means nobody counted (a crawl older than the counter, one still " +
+        "running, or one whose process died before its first close — that null is " +
+        "permanent, a later resume cannot recover the pages the dead run read), " +
+        "while 0 means every page was read and none of them lost a reference. Do not " +
+        "render the two the same way, and do not divide this by pagesCrawled: the " +
+        "two are counted off different sources (analyses handed to the writer versus " +
+        "the frontier's settled rows) and a ratio above 1 is legitimate on a crawl " +
+        "that analysed one URL twice.\n\n" +
         "fetchResources says whether this crawl asked at all: true is the default and " +
         "false is an operator's decision, echoed here so it can be confirmed. false " +
         "beside fetched 0 is 'nobody asked'; true beside fetched 0 is a pass that has " +

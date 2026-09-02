@@ -609,16 +609,26 @@ export interface CrawlDetail extends CrawlListItem {
    */
   fetchResources: boolean;
   /**
-   * How many of this crawl's PAGES referenced more files than the analyzer
-   * records — the `MAX_RESOURCE_REFS` cap (2,000 per page) turning references
-   * away, counted instead of silent (migration 0014, P12-T1).
+   * How many of this crawl's PAGES carried more resource REFERENCES than the
+   * analyzer's cap keeps (2,000 per page) — references turned away, counted
+   * instead of silent (migration 0014, P12-T1).
+   *
+   * REFERENCES, NOT FILES, and the distinction is not pedantry. Past the cap the
+   * analyzer stops resolving, so it cannot know whether a turned-away reference
+   * was a new URL or a repeat of one it already holds. A page whose 2,001st
+   * reference duplicates its first is counted here and lost no file at all. The
+   * field claims what the analyzer can see — a reference dropped unexamined —
+   * and nothing stronger.
    *
    * NULL IS NOT ZERO, and the difference is the whole reason the field exists.
-   * Null means nobody counted: a crawl written before migration 0014, a crawl
-   * still running, or one whose process died before it could close its row.
-   * Zero means the analyzer read every page of this crawl and none of them lost
-   * a reference — a measurement. A dashboard that renders the two the same way
-   * is telling an operator we checked when we did not (hard rule 7).
+   * Null means nobody counted, which happens three ways: a crawl written before
+   * migration 0014; a crawl still running; and a crawl whose process died before
+   * its first close and was later resumed — the first run's pages went
+   * uncounted with the process that read them, so the null is PERMANENT on that
+   * crawl rather than something the resume repairs (see `closeCrawl`). Zero
+   * means the analyzer read every page of this crawl and none of them lost a
+   * reference — a measurement. A dashboard that renders the two the same way is
+   * telling an operator we checked when we did not (hard rule 7).
    *
    * IT IS NOT IN `resources` BELOW, deliberately, and the placement is the
    * honest one on two counts. It counts PAGES and every number in that block
@@ -626,12 +636,24 @@ export interface CrawlDetail extends CrawlListItem {
    * block is read live off the `resources` table in one statement. Filed among
    * them it would make the block's own contract false.
    *
+   * IT IS ALSO NOT A DENOMINATOR-SHARING PARTNER OF `pagesCrawled`. This counts
+   * the analyses the page writer was HANDED; `pagesCrawled` is the crawl loop's
+   * own count, closed out from the frontier's settled rows. On a crawl that
+   * analysed the same URL twice — a redirect target reached under its own row,
+   * whose second `pages` insert the `(crawl_id, url)` unique index drops — this
+   * number can legitimately exceed `pagesCrawled`. **Do not render
+   * `resourceRefsCappedPages / pagesCrawled` as a percentage**: the two are read
+   * off different sources and a ratio above 1 is not a bug in either.
+   *
    * WHAT A NON-ZERO NUMBER MEANS FOR THE NUMBERS BESIDE IT: on those pages
-   * `resources.seen` is a FLOOR. The site points at more files than this crawl
-   * recorded, so every count derived from the census — broken files, uncached
-   * files, page weight — is a count over a sample of that page's references
-   * rather than over all of them. It is a cap, not a fault: `imagesTotal` and
-   * its siblings stay exact and uncapped, and no page-level count moved.
+   * `resources.seen` MAY BE a floor. Some of the turned-away references would
+   * have been files this crawl never recorded, so counts derived from the census
+   * — broken files, uncached files, page weight — may be counts over a sample of
+   * that page's references rather than over all of them. Which it is, on which
+   * page, is not knowable from here: that is the price of taking the signal
+   * where the cap is enforced rather than resolving past it. It is a cap, not a
+   * fault: `imagesTotal` and its siblings stay exact and uncapped, and no
+   * page-level count moved.
    *
    * The count is carried rather than derived because Phase 11 measured the
    * derivation: scanning `page_resources` for it costs 73 ms on a 500,000-edge
