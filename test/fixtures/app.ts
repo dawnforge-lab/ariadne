@@ -2,7 +2,7 @@
  * The fixture site: a `node:http` server that serves the fixture collection
  * over real HTTP so the real crawler can crawl it.
  *
- * Five things this server owns beyond dispatch:
+ * Six things this server owns beyond dispatch:
  *  - **The hub.** `/` links every fixture that asks to be linked, so one crawl
  *    from the seed reaches the collection at depth 1. A fixture with
  *    `linkedFromHub: false` is reachable only through the sitemap, which is what
@@ -22,6 +22,9 @@
  *  - **`/sitemap-broken.xml`**, the second declared document: a 200 that is not
  *    XML at all, which is the commonest broken sitemap in the wild and what
  *    `sitemap.invalid` reports.
+ *  - **The static assets** the fixture pages reference (`/img/…`), served with
+ *    real `content-type`, `content-length` and `cache-control` headers so the
+ *    resource fetch pass has something true to record (see ./assets.ts).
  *  - **404 for everything else.**
  *
  * The listener binds every interface rather than 127.0.0.1 alone, so the site
@@ -34,6 +37,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { assetHostImage, serveAsset } from "./assets.js";
 import type { Fixture } from "./fixture.js";
 import { escapeHtml, selfUrl } from "./render.js";
 
@@ -66,6 +70,13 @@ const BROKEN_SITEMAP_PATH = "/sitemap-broken.xml";
  * crawled and judged, so it carries the head tags a healthy page carries — a
  * self-referential canonical included. Findings it does produce are ignored by
  * the harness, which counts coverage from fixture paths only.
+ *
+ * It also carries the fixture world's ONE third-party asset (P11-T2): an image
+ * from the asset host, which is a different origin and therefore a second queue,
+ * a second robots.txt and a second entry in the resource pass's host census. It
+ * is on the hub rather than on a fixture page precisely because nothing is
+ * asserted about the hub's own findings — and it carries `alt` and dimensions so
+ * that the page rules stay as quiet about it as they were before it existed.
  */
 function hubHtml(fixtures: readonly Fixture[], self: string): string {
   const links = fixtures
@@ -84,6 +95,7 @@ function hubHtml(fixtures: readonly Fixture[], self: string): string {
 <body>
 <main>
 <h1>Ariadne fixture site</h1>
+<img src="${escapeHtml(assetHostImage())}" alt="The Ariadne fixture site badge" width="720" height="360">
 <p>Every page below is engineered to make the rule engine say something, except the control page, which is engineered to make it say nothing.</p>
 <ul>
 ${links}
@@ -198,6 +210,10 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
       );
       return;
     }
+
+    // The static assets the fixture pages reference, before the fixture lookup
+    // (no fixture claims an `/img/` path) and after the site-level documents.
+    if (serveAsset(req, res, path)) return;
 
     const fixture = byPath.get(target) ?? byPath.get(path);
     if (fixture === undefined) {

@@ -68,6 +68,15 @@ import {
 } from "../crawl/loop.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES } from "../crawl/fetch-page.js";
+// The resource vocabulary this surface reads, imported rather than spelled out:
+// the one `fetch_reason` literal a surface may read (a constant this repository
+// defines, never a sentence somebody could reword) and the two `fetch_class`
+// members the coverage aggregate names. See `resourceCoverage`.
+import {
+  RESOURCE_CAP_REASON,
+  RESOURCE_OK_CLASS,
+  RESOURCE_ROBOTS_DENIED_CLASS,
+} from "../crawl/resources/fetch-resources.js";
 // The robots vocabulary from the module that WRITES it, never a copy: a fourth
 // outcome added there must not turn every new crawl's stored evidence into a
 // validation refusal here. See `ROBOTS_OUTCOMES` in discovery.ts.
@@ -219,6 +228,7 @@ export interface StartCrawlInput {
   renderMaxPages?: number;
   renderSamplePerType?: number;
   findingCap?: number | null;
+  fetchResources?: boolean;
 }
 
 type FieldKind = "string" | "number" | "boolean" | "string[]" | "number|null";
@@ -252,6 +262,7 @@ export const START_CRAWL_FIELDS: Record<keyof StartCrawlInput, FieldKind> = {
   renderMaxPages: "number",
   renderSamplePerType: "number",
   findingCap: "number|null",
+  fetchResources: "boolean",
 };
 
 /**
@@ -579,6 +590,97 @@ export interface CrawlDetail extends CrawlListItem {
    * different facts read off different tables.
    */
   pagesScanned: number;
+  /**
+   * Whether this crawl asked the site about the files its pages point at —
+   * the resource fetch pass, echoed from the stored config and RESOLVED the way
+   * `findingCap` is: an absent key reports the engine's default, which is
+   * `true`.
+   *
+   * It is the denominator for everything in `resources` below, and it is on the
+   * detail for `legacyHosts`' reason: a setting nothing can confirm is a setting
+   * nobody can trust took effect. `false` beside `resources.fetched: 0` is an
+   * operator's decision; `true` beside the same zero is a pass that has not run
+   * or could not finish, and those are different reports.
+   *
+   * A stored value that is not a boolean is a REFUSAL rather than a guess (see
+   * `configFetchResources`): `"false"` is truthy and would read as "we asked",
+   * about a crawl that did not.
+   */
+  fetchResources: boolean;
+  /**
+   * What this crawl knows about the images, stylesheets and scripts its pages
+   * reference — **read live off the `resources` table, never off a pass's
+   * summary**.
+   *
+   * THE DISTINCTION IS LOAD-BEARING. A resumed crawl's pass asks only the rows
+   * still unfetched, so its summary honestly reports `fetched: 0` on a crawl
+   * whose every file was fetched by the first attempt. The database is the only
+   * thing that can answer "what does this crawl know", which is the question a
+   * poller and an auditor are both asking, so these numbers are counted here
+   * exactly as `findingsCount` and `blockedPages` are.
+   *
+   * The four counts PARTITION the rows — `fetched + failed + skipped == seen` —
+   * and they are read in ONE statement so that stays true of a crawl whose pass
+   * is running while somebody polls it.
+   *
+   * On a crawl written before migration 0013 every number here is 0, which is
+   * not "this site references no files": that case is what the
+   * `resources.not-recorded` finding exists to say, and `rulesRunAt` is what
+   * says whether it could have been written.
+   */
+  resources: {
+    /**
+     * Distinct files this crawl's pages reference, fetched or not — the
+     * analyzer's census. Recorded even when `fetchResources` is false, because
+     * reading markup costs nobody a request.
+     */
+    seen: number;
+    /** Rows the pass classified `ok`: a server answered about the file. */
+    fetched: number;
+    /**
+     * Rows the pass classified anything else — a 4xx or 5xx, a request that
+     * failed, a URL our own policy refused, a file robots.txt put out of reach.
+     * A count of files this crawl could NOT weigh, not a count of broken files:
+     * which is which is `fetch_class` per row, and `resources.broken` is the
+     * rule that judges it.
+     */
+    failed: number;
+    /**
+     * Rows with a null `fetch_class`: SEEN, NOT ASKED. The null-vs-zero
+     * doctrine's newest citizen, and four different sentences live under it —
+     * the pass has not run yet, it was interrupted, a cap stopped short of the
+     * row, or the operator turned it off. Every one of the last three writes
+     * its reason onto the row, and the resources CSV view is where a reader
+     * sees them.
+     */
+    skipped: number;
+    /**
+     * Files a host's robots.txt put out of reach, a subset of `failed`.
+     *
+     * ON ITS OWN because it is the number most likely to be misread. An
+     * unreachable robots.txt is a COMPLETE DISALLOW (RFC 9309 §2.3.1.4), so a
+     * CDN that was down while the pass ran shows up here exactly as a CDN that
+     * forbids us — a wall of `robots_denied` that means "we could not ask"
+     * rather than "they said no". Which one it was is in each row's
+     * `fetchReason`, verbatim, on the resources CSV view; this count deliberately
+     * does not parse that sentence, because a count built by matching prose
+     * would go quietly wrong the day the sentence is reworded.
+     */
+    robotsDenied: number;
+    /**
+     * True when a per-crawl cap stopped the pass short of at least one row
+     * (`maxResources` or `maxResourceHosts`).
+     *
+     * ONE FLAG FOR BOTH CAPS, deliberately: the row records a single reason
+     * (`resource-cap`) whichever cap stopped it, so a surface reading the
+     * database cannot honestly claim to know which — and inventing two flags out
+     * of one fact is how a dashboard reports a host cap that never fired. The
+     * in-run distinction exists on `CrawlSummary.resources`
+     * (`cappedByResources` / `cappedByHosts`) and belongs to the process that
+     * ran the pass.
+     */
+    capped: boolean;
+  };
 }
 
 /**
@@ -1564,10 +1666,11 @@ export class ApiService {
    */
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
     const { row, findingsCount, pagesScanned } = await this.crawlRowWithCounts(crawlId);
-    const [counts, liveLeases, blockedPages] = await Promise.all([
+    const [counts, liveLeases, blockedPages, resourceCounts] = await Promise.all([
       frontierCounts(this.db, crawlId),
       this.liveLeaseCount(crawlId),
       this.blockedPageCount(crawlId),
+      this.resourceCoverage(crawlId),
     ]);
     return {
       crawlId: row.id,
@@ -1590,6 +1693,78 @@ export class ApiService {
       rulesRunAt: row.rulesRunAt === null ? null : row.rulesRunAt.toISOString(),
       findingsCount,
       pagesScanned,
+      fetchResources: configFetchResources(row.config, crawlId),
+      resources: resourceCounts,
+    };
+  }
+
+  /**
+   * The crawl's resource census, counted live off the `resources` table —
+   * `CrawlDetail.resources`.
+   *
+   * ONE STATEMENT, and that is the whole reason this is not four counts in a
+   * `Promise.all`. The four numbers are a PARTITION of the rows
+   * (`fetched + failed + skipped == seen`), the pass writes those rows while a
+   * caller may be polling, and four reads on four pool connections are four
+   * snapshots: a `seen` from before a batch landed beside a `fetched` from after
+   * it composes an arithmetic nobody's database ever held. The same argument
+   * `crawlRowWithCounts` makes about the judged marker, one table along.
+   *
+   * `capped` is a boolean rather than a count because that is what the rows can
+   * honestly support: `RESOURCE_CAP_REASON` is one literal for both caps (see
+   * the field's docblock), and the number of rows carrying it is "how many rows
+   * the pass had not reached when it stopped", which is `skipped` under another
+   * name on a crawl that was not also interrupted. One flag, one meaning.
+   *
+   * IT IS NOT FILTERED BY `fetch_reason` ANYWHERE ELSE. The reasons are
+   * sentences — a URL policy's refusal, a robots note, the fetch layer's own
+   * description of a timeout — and a count built by matching them would be a
+   * count that changes when somebody rewords an error message. The one reason
+   * this reads is a constant this repository defines.
+   *
+   * The class names are the same discipline, and for the same reason: they are
+   * `RESOURCE_OK_CLASS` and `RESOURCE_ROBOTS_DENIED_CLASS`, imported and
+   * INTERPOLATED rather than typed out as `'ok'` and `'robots_denied'`. A bare
+   * literal here would typecheck for ever against a renamed vocabulary while
+   * `robotsDenied` quietly reported 0.
+   */
+  private async resourceCoverage(crawlId: string): Promise<CrawlDetail["resources"]> {
+    const rows = await this.db.execute<{
+      seen: number;
+      fetched: number;
+      failed: number;
+      skipped: number;
+      robots_denied: number;
+      capped: boolean;
+    }>(sql`
+      select count(*)::int as seen,
+             count(*) filter (where r.fetch_class = ${RESOURCE_OK_CLASS})::int as fetched,
+             count(*) filter (
+               where r.fetch_class is not null and r.fetch_class <> ${RESOURCE_OK_CLASS}
+             )::int as failed,
+             count(*) filter (where r.fetch_class is null)::int as skipped,
+             count(*) filter (
+               where r.fetch_class = ${RESOURCE_ROBOTS_DENIED_CLASS}
+             )::int as robots_denied,
+             count(*) filter (
+               where r.fetch_class is null and r.fetch_reason = ${RESOURCE_CAP_REASON}
+             ) > 0 as capped
+      from resources r
+      where r.crawl_id = ${crawlId}`);
+    const row = rows.rows[0];
+    if (row === undefined) {
+      // A bare aggregate over an empty table still answers one row. No row at
+      // all means the statement did not run the way this code believes it did,
+      // which is a defect of ours and not a crawl with no resources.
+      throw new Error(`resourceCoverage: the aggregate over crawl ${crawlId} answered no row`);
+    }
+    return {
+      seen: row.seen,
+      fetched: row.fetched,
+      failed: row.failed,
+      skipped: row.skipped,
+      robotsDenied: row.robots_denied,
+      capped: row.capped,
     };
   }
 
@@ -3846,6 +4021,35 @@ function configFindingCap(config: unknown, crawlId: string): number | null {
   } catch (error) {
     throw new ServiceError("CONFLICT", messageOf(error));
   }
+}
+
+/**
+ * Whether this crawl ran the resource fetch pass, for `CrawlDetail`.
+ *
+ * RESOLVED, like `configFindingCap`: an absent key is the engine's default,
+ * which is `true` — every crawl since the pass shipped asks, and every crawl
+ * written before it also reports `true`, honestly, because nobody chose
+ * otherwise (what such a crawl lacks is the rows, and `resources.seen` is where
+ * that shows).
+ *
+ * A stored value that is neither absent nor a boolean is a 409 on the same
+ * terms as `configStringList`'s: `"false"` is truthy in JavaScript, so guessing
+ * would report "this crawl asked the site about its files" about a crawl that
+ * did not, which is the whole failure this field exists to prevent. The crawl
+ * loop refuses the same shape at `parseStoredConfig`, so a resume and a reader
+ * agree.
+ */
+function configFetchResources(config: unknown, crawlId: string): boolean {
+  if (!isRecord(config)) return true;
+  const value = config["fetchResources"];
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "boolean") {
+    throw new ServiceError(
+      "CONFLICT",
+      `crawl ${crawlId} has a stored config.fetchResources that is not a boolean`,
+    );
+  }
+  return value;
 }
 
 // ------------------------------------------------------- the cross-crawl diff

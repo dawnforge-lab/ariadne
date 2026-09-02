@@ -157,6 +157,58 @@
  * matching the attribute string is deliberate, since anything better is a CSS
  * parser.
  *
+ * Phase 11 (P11-T1) added `resourceRefs` — the URLs of the images, stylesheets
+ * and scripts the page points at — off the same walk that already counted
+ * images. THE COUNTERS STAY, and both exist because they answer different
+ * questions: `imagesTotal` / `imagesMissingAlt` / `imagesMissingDimensions` are
+ * cheap scalar facts ABOUT THE PAGE (uncapped, one integer each, readable
+ * without a join), while a ref is a fact about a FILE — one row per distinct URL
+ * per crawl — that the resource fetch pass then asks a server for. A count
+ * cannot be fetched and a ref list cannot be summed per page in SQL as cheaply;
+ * deriving either from the other would cost the thing the other is for.
+ *
+ * The extraction is a CLOSED LIST of five attribute sites, and it is closed in
+ * the strong sense that a test asserts the absences:
+ *   `<img src>`, `<img srcset>` (first candidate), `<source src>` and
+ *   `<source srcset>` INSIDE a `<picture>`, `<script src>`,
+ *   `<link rel=stylesheet href>`.
+ * NOT: inline `style` `url()`, `@import` inside a `<style>` body (both need CSS
+ * parsing, which this file does not do and the phase stores no bodies for),
+ * `preload` / `prefetch` / `preconnect` hints, favicons, fonts, `<source>`
+ * inside `<video>` / `<audio>` (media is out of the owner's scope for this
+ * phase), and — the one exclusion that is about POLITENESS rather than scope —
+ * an ALTERNATE stylesheet (`rel="alternate stylesheet"`, in either token order).
+ * A browser fetches one of those only if a reader selects that style, so asking
+ * for it would spend a request against a client's server on a file no page load
+ * requests, and would weigh the page by bytes no visitor downloads. Every URL on
+ * this list is one a polite fetcher will later request from somebody's server,
+ * so widening it is a decision, never a tidy-up.
+ *
+ * Four rules the refs follow, each with its reason:
+ *  - **Resolution is `normalizeUrl`**, the same function the link extraction
+ *    uses and the same one the frontier keys pages by: absolute against the page
+ *    URL, http(s) only, fragment stripped, query params sorted, hostname
+ *    lowercased. One resolution semantics for everything this engine fetches.
+ *  - **A ref that names no resource is dropped**: a `data:` URI (the bytes are
+ *    already here), `javascript:`, a fragment-only reference, an empty or
+ *    whitespace-only attribute, and anything `normalizeUrl` refuses. These are
+ *    not failures to report (hard rule 7 is about work that failed, not about
+ *    markup that never named a file) — they are markup that points at nothing
+ *    fetchable.
+ *  - **One entry per URL per page**, first kind wins, on the `linksByTarget`
+ *    idiom. The per-page map is O(page) and capped; the CROSS-page dedup is the
+ *    `resources` table's unique index and is never a set in memory (hard rule 6).
+ *  - **`srcset` is read to its FIRST candidate only.** A candidate list is a set
+ *    of renditions of one image and the fetch pass is asking "how heavy is this
+ *    image", not "how many variants exist"; fetching all of them would multiply
+ *    the request count against a client's CDN for an answer nobody asked for.
+ *    First rather than largest because a `w`/`x` descriptor is a claim about
+ *    intent, not a measurement, and picking by it would mean trusting the markup
+ *    to rank files by weight. The candidate is taken the way the HTML spec's
+ *    parser does — skip leading whitespace and commas, take up to the next
+ *    whitespace, strip trailing commas — so a comma INSIDE a URL (Cloudinary's
+ *    `w_100,h_200`) survives, which splitting on commas would not.
+ *
  * ONE KNOWN, PERMANENT DIVERGENCE, and it is a property of the port rather
  * than a defect in it. An `<a href>` left open across a container boundary —
  * `<a href="/x"><nav><a href="/y">y</a></nav></a>` — makes the DOM report 2
@@ -199,6 +251,20 @@ export interface HreflangPair {
   code: string;
   /** The `href` attribute verbatim — unresolved, as written in the page. */
   href: string;
+}
+
+/**
+ * What a resource IS, for this engine: the three classes the owner scoped for
+ * Phase 11. Fonts, media and favicons are deliberately absent — a kind is what
+ * the fetch pass will go and ask for, so the union is the scope.
+ */
+export type ResourceKind = "image" | "css" | "js";
+
+/** One resource this page points at. See the module header's Phase 11 block. */
+export interface ResourceRef {
+  /** Absolute, normalized (`normalizeUrl`) — the spelling `resources.url` holds. */
+  url: string;
+  kind: ResourceKind;
 }
 
 /** One JSON-LD node lifted out of a `<script type="application/ld+json">`. */
@@ -298,6 +364,17 @@ export interface PageAnalysis {
    */
   frameworkMarkers: string[];
   links: PageLink[];
+  /**
+   * The images, stylesheets and scripts this page references, in document
+   * order, one entry per distinct URL, capped at MAX_RESOURCE_REFS. The closed
+   * extraction list, the drops, the `srcset` rule and the resolution semantics
+   * are all in the module header's Phase 11 block.
+   *
+   * NOT a replacement for `imagesTotal` and its siblings, which stay exact and
+   * uncapped: a count is a page fact, a ref is a file the fetch pass will ask a
+   * server about (header, same block).
+   */
+  resourceRefs: ResourceRef[];
   /** First `<link rel=next>` href; null when absent or href-less. */
   relNext: string | null;
   /** First `<link rel=prev>` href; null when absent or href-less. */
@@ -345,6 +422,16 @@ export interface RawPageLink extends PageLink {
 }
 
 const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
+/**
+ * Resource references that name no fetchable file. `data:` carries its own
+ * bytes (and is case-insensitive as a scheme, which the link twin above does not
+ * have to care about because no page writes `MAILTO:`); `javascript:` is code;
+ * a leading `#` is a fragment of THIS page, which `normalizeUrl` would happily
+ * resolve back to the page's own URL and so cannot be left to it. Everything
+ * else non-http(s) — `blob:`, `about:`, `mailto:` on an `<img>` — dies in
+ * `normalizeUrl`, which returns null for any other scheme.
+ */
+const SKIPPED_RESOURCE_PROTOCOLS = /^(data:|javascript:|#)/i;
 /** Subtrees whose text is not visible content. */
 const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
 /**
@@ -422,6 +509,23 @@ const MAX_H1_TEXT_CHARS = 300;
  * scalar counters (images, headings) do not and stay exact.
  */
 const MAX_EXTRACTED_LINKS = 2_000;
+/**
+ * The same cap on the same reasoning for `resourceRefs`, which sits in a persist
+ * batch exactly as the links do. A gallery page with more than this many
+ * distinct assets loses the tail of the list.
+ *
+ * THE TRUNCATION IS ONLY VISIBLE FOR IMAGES, and the limit is worth stating
+ * plainly: `imagesTotal` does not saturate, so an image list cut short can be
+ * spotted against it — but CSS and JS have NO counter beside them, so a page
+ * whose stylesheets and scripts fall past the cap loses them silently. Nothing
+ * in this file can fix that (a second counter would be a new column), so the
+ * cap-exceeded signal is CARRIED TO P11-T4, which owns `crawl_status` and can
+ * report it once for the crawl instead of once per page.
+ *
+ * Exported so the suite pins the constant rather than a copy of its value
+ * (the SOFT_404_PHRASES precedent).
+ */
+export const MAX_RESOURCE_REFS = 2_000;
 const MAX_HEADING_ORDER = 500;
 const MAX_HREFLANG_PAIRS = 200;
 const MAX_STRUCTURED_DATA_BLOCKS = 50;
@@ -527,6 +631,28 @@ function collectLdJsonNodes(value: unknown, out: unknown[], depth: number): void
   out.push(value);
 }
 
+/**
+ * The FIRST candidate URL of a `srcset`, or undefined when there is none.
+ *
+ * The HTML spec's srcset parser, reduced to its first iteration: skip leading
+ * whitespace and commas, collect characters up to the next whitespace, then
+ * remove any trailing commas (which the spec calls a parse error and still
+ * accepts). Splitting the attribute on commas instead would be wrong for every
+ * URL that contains one — `/i/w_100,h_200/a.png` is one file, not two — and a
+ * URL can never contain unescaped whitespace, so the whitespace split is exact.
+ *
+ * Why only the first: see the module header's Phase 11 block. A candidate list
+ * is renditions of one image, and asking a client's CDN for all of them would
+ * multiply the request count for an answer nobody wants.
+ */
+function firstSrcsetCandidate(srcset: string): string | undefined {
+  const rest = srcset.replace(/^[\s,]+/, "");
+  if (rest === "") return undefined;
+  const token = rest.split(/\s+/, 1)[0] ?? "";
+  const url = token.replace(/,+$/, "");
+  return url === "" ? undefined : url;
+}
+
 /** `@type` of a JSON-LD node — first entry when it is an array. */
 function ldJsonType(node: unknown): string {
   if (typeof node !== "object" || node === null) return "unknown";
@@ -598,6 +724,26 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let imagesMissingDimensions = 0;
   const linksByTarget = new Map<string, RawPageLink>();
   let openAnchor: OpenAnchor | null = null;
+
+  // The page's resource references, keyed by resolved URL so one page says one
+  // thing about one file. O(page) and capped, like `linksByTarget` — the
+  // crawl-wide dedup is the `resources` table's unique index and never a set
+  // here (hard rule 6). `<source>` is only a resource site inside a `<picture>`,
+  // which the depth counter answers on the `navDepth` idiom.
+  const resourceRefs = new Map<string, ResourceRef>();
+  let pictureDepth = 0;
+  const addResource = (raw: string | undefined, kind: ResourceKind) => {
+    if (raw === undefined) return;
+    const value = raw.trim();
+    if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return;
+    if (resourceRefs.size >= MAX_RESOURCE_REFS) return;
+    const resolved = normalizeUrl(value, pageUrl);
+    // First kind wins, as the first anchor wins for a link target: one URL
+    // referenced as both a script and an image is one file, and its kind is
+    // whichever the document named first.
+    if (resolved === null || resourceRefs.has(resolved)) return;
+    resourceRefs.set(resolved, { url: resolved, kind });
+  };
 
   // `nav a[href]` / `footer a[href]`, counted with depth counters the way
   // `titleDepth` is: incremented on the open tag, decremented on the close,
@@ -727,6 +873,15 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       if (href !== undefined && hreflang.length < MAX_HREFLANG_PAIRS) {
         hreflang.push({ code, href });
       }
+    }
+    // A stylesheet, matched as a token (`rel="preload stylesheet"` is one) and
+    // only with an href — a `<link rel=stylesheet>` naming no file references
+    // no resource. `icon`, `preload`, `prefetch` and `preconnect` are NOT on
+    // the list, and neither is an ALTERNATE stylesheet: see the module header's
+    // closed list for both, and for why the alternate is a politeness question
+    // rather than a taxonomy one.
+    if (tokens.includes("stylesheet") && !tokens.includes("alternate")) {
+      addResource(href, "css");
     }
     if (tokens.includes("amphtml")) hasAmp = true;
     if (tokens.includes("next") && relNext === undefined) relNext = href ?? null;
@@ -865,7 +1020,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           case "link":
             handleLinkTag(attribs);
             break;
-          case "img":
+          case "img": {
             imagesTotal += 1;
             if (!("alt" in attribs)) imagesMissingAlt += 1;
             // One image, one count: missing either attribute is the same
@@ -873,7 +1028,34 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             if (!("width" in attribs) || !("height" in attribs)) {
               imagesMissingDimensions += 1;
             }
+            // The refs ride the same walk as the counters above and neither
+            // moves the other: see the module header's Phase 11 block for why
+            // both facts exist. `src` and the first `srcset` candidate are two
+            // different files — the fallback and the first rendition — so an
+            // element carrying both contributes both, and the per-URL map
+            // collapses them when they are in fact one.
+            addResource(attribs["src"], "image");
+            const srcset = attribs["srcset"];
+            if (srcset !== undefined) {
+              addResource(firstSrcsetCandidate(srcset), "image");
+            }
             break;
+          }
+          case "picture":
+            pictureDepth += 1;
+            break;
+          case "source": {
+            // ONLY inside a <picture>. The same element inside <video> /
+            // <audio> names media, which is out of this phase's owner scope,
+            // and a depth counter is how the two are told apart without a tree.
+            if (pictureDepth === 0) break;
+            addResource(attribs["src"], "image");
+            const sourceSrcset = attribs["srcset"];
+            if (sourceSrcset !== undefined) {
+              addResource(firstSrcsetCandidate(sourceSrcset), "image");
+            }
+            break;
+          }
           case "nav":
             navDepth += 1;
             break;
@@ -884,6 +1066,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             // An id is case-sensitive and is not a token list: compared
             // verbatim, unlike `rel` / `type` / meta names above.
             if (attribs["id"] === "__NEXT_DATA__") markersSeen.add("__NEXT_DATA__");
+            // Any `<script src>` is an external script, whatever its `type`:
+            // a module, a classic script and a `text/template` with a src all
+            // cost a request. An inline script has no src and is no resource.
+            addResource(attribs["src"], "js");
             if (
               attribs["type"]?.trim().toLowerCase() === "application/ld+json"
             ) {
@@ -995,6 +1181,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           if (titleDepth === 0) titleDone = true;
         }
         if (name === "nav" && navDepth > 0) navDepth -= 1;
+        if (name === "picture" && pictureDepth > 0) pictureDepth -= 1;
         if (name === "footer" && footerDepth > 0) footerDepth -= 1;
         if (name === "head" && headDepth > 0) headDepth -= 1;
         if (name === "body" && bodyDepth > 0) bodyDepth -= 1;
@@ -1069,6 +1256,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // with a stable spelling is one a SQL comparison can be written against.
     frameworkMarkers: FRAMEWORK_MARKERS.filter((marker) => markersSeen.has(marker)),
     links: Array.from(linksByTarget.values()),
+    resourceRefs: Array.from(resourceRefs.values()),
     relNext: relNext ?? null,
     relPrev: relPrev ?? null,
     domSize,
@@ -1122,6 +1310,10 @@ export function analyzePage(html: string, url: string): PageAnalysis {
       nofollow,
       position,
     })),
+    // The refs are `{url, kind}` on both sides — no narrowing to do, and the
+    // array is copied rather than shared so the facade's result cannot be
+    // mutated through the raw one.
+    resourceRefs: raw.resourceRefs.map(({ url, kind }) => ({ url, kind })),
     relNext: raw.relNext,
     relPrev: raw.relPrev,
     domSize: raw.domSize,

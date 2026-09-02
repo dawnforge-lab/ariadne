@@ -1,5 +1,5 @@
 /**
- * The CSV surface: one writer, one evidence flattening, six views.
+ * The CSV surface: one writer, one evidence flattening, seven views.
  *
  * These are the files a dashboard's "Bulk export" block hands a human. They are
  * NOT a second API — every view here is a keyset-cursored read of tables the
@@ -73,6 +73,7 @@ export const CSV_VIEWS = [
   "links_to_4xx",
   "anchor_texts",
   "redirects",
+  "resources",
 ] as const;
 export type CsvViewName = (typeof CSV_VIEWS)[number];
 
@@ -332,7 +333,7 @@ function linkNext(row: LinkRow): string[] {
 }
 
 /**
- * The six views.
+ * The seven views.
  *
  * Every one of them answers a question the Ahrefs-style bulk-export block asks,
  * and every one of them is a read the JSON surface could already answer more
@@ -563,6 +564,72 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
         String(chain.length - 1),
       ];
     },
+  }),
+
+  /**
+   * Every distinct file this crawl's pages point at — the images, stylesheets
+   * and scripts — with what the server said about it and how many pages carry
+   * it. One row per FILE, which is the table's own grain: an image referenced by
+   * four hundred pages is one fetch, one row, and a `referencingPages` of 400.
+   *
+   * ## `fetchClass` is a column here, and the file is unreadable without it
+   *
+   * The other views' empty cells all mean one thing ("the engine has no value"),
+   * and here they mean four: never asked, asked and refused by our own URL
+   * policy, put out of reach by robots.txt, or a request that never completed.
+   * `status` is empty in every one of those cases, and in three of them nothing
+   * about the file is wrong. So the class travels beside the status — an EMPTY
+   * `fetchClass` is the null-vs-zero doctrine's newest citizen, "seen, not
+   * asked" — and `fetchReason` carries the sentence that separates the rest.
+   * Without both columns a reader of this file would have to guess, and the
+   * guess a spreadsheet invites is "no status means broken".
+   *
+   * `bytesSource` rides beside `bytes` for the smaller version of the same
+   * reason: `header` is a claim the server made and `counted` is a measurement
+   * we took, and a page-weight sum built from the two without distinguishing
+   * them is a number with two different provenances in it.
+   */
+  resources: defineCsvView<{
+    url: string;
+    kind: string;
+    fetch_class: string | null;
+    status_code: number | null;
+    bytes: number | null;
+    bytes_source: string | null;
+    content_type: string | null;
+    cache_control: string | null;
+    fetch_reason: string | null;
+    referencing_pages: number;
+  }>({
+    header: [
+      "url", "kind", "fetchClass", "status", "bytes", "bytesSource",
+      "contentType", "cacheControl", "fetchReason", "referencingPages",
+    ],
+    keyset: ["url"],
+    start: [""],
+    query: (crawlId, cursor, limit) => sql`
+      select r.url, r.kind, r.fetch_class, r.status_code, r.bytes, r.bytes_source,
+             r.content_type, r.cache_control, r.fetch_reason,
+             (select count(*)::int from page_resources pr
+               where pr.crawl_id = r.crawl_id and pr.resource_url = r.url)
+               as referencing_pages
+      from resources r
+      where r.crawl_id = ${crawlId} and r.url > ${cursor[0] ?? ""}::text
+      order by r.url asc
+      limit ${limit}`,
+    next: (row) => [row.url],
+    cells: (row) => [
+      row.url,
+      row.kind,
+      orEmpty(row.fetch_class),
+      orEmpty(row.status_code),
+      orEmpty(row.bytes),
+      orEmpty(row.bytes_source),
+      orEmpty(row.content_type),
+      orEmpty(row.cache_control),
+      orEmpty(row.fetch_reason),
+      String(row.referencing_pages),
+    ],
   }),
 };
 

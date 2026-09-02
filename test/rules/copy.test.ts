@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, it } from "vitest";
 import { copyFor, ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
 import {
@@ -41,6 +43,12 @@ import {
 } from "../../src/rules/metric/crawl-metrics.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
+import {
+  BROKEN_SAMPLE_RESOURCES,
+  IMAGE_WEIGHT_WARN,
+  OVERSIZED_SAMPLE_PAGES,
+  UNCACHED_SAMPLE_RESOURCES,
+} from "../../src/rules/query/resources.js";
 
 /**
  * The content copy spells its distance out in words, so the threshold pin below
@@ -53,6 +61,21 @@ const NUMBER_WORDS: Record<number, string> = {
   3: "three",
   4: "four",
   5: "five",
+};
+
+/**
+ * The same mechanism for the list caps, which are spelled in words too — the
+ * link metrics' copy already says "twenty" and "twenty-five" where the rule says
+ * 20 and 25, and P11's resource copy says "ten" and "twenty".
+ *
+ * A second map rather than entries in the one above, because the two are read at
+ * different scales and an unmapped value must fail rather than pass: a cap of 15
+ * has no word here and the lookup returns undefined, which no `toContain` will
+ * match.
+ */
+const CAP_WORDS: Record<number, string> = {
+  10: "ten",
+  20: "twenty",
 };
 
 /**
@@ -204,6 +227,29 @@ const PHASE_7_RULE_IDS = [
  */
 const PHASE_10_METRIC_IDS = ["site.health"];
 
+/**
+ * Phase 11's rules: the four that judge the files a page points at, the marker
+ * that reports a crawl which recorded none, and the page-weight table.
+ *
+ * Same contract as every list above — copy lands with the rule — and one
+ * obligation of its own, asserted below rather than only written here: every
+ * string in this group has to carry the boundary the whole family is built on.
+ * These are the SERVED HTML's references, and a file the pass never asked about
+ * is UNKNOWN rather than clean or broken. Copy that stated either half loosely
+ * would put a claim in front of a client that the evidence does not support.
+ */
+const PHASE_11_RULE_IDS = [
+  "resources.broken",
+  "images.oversized",
+  "images.legacy-format",
+  "resources.uncached",
+  "resources.not-recorded",
+  "page.weight",
+];
+
+/** The metric ids of the list above — what the metric-copy contracts apply to. */
+const PHASE_11_METRIC_IDS = ["page.weight"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -211,6 +257,7 @@ const ALL_RULE_IDS = [
   ...PHASE_5_RULE_IDS,
   ...PHASE_7_RULE_IDS,
   ...PHASE_10_METRIC_IDS,
+  ...PHASE_11_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -908,20 +955,41 @@ describe("issue copy", () => {
     );
   });
 
-  // THE CHECK ID DISCLAIMER, and the reason it is in the CLIENT-FACING copy
-  // rather than only in the rule's module header: `metrics_get` and
-  // `rules_catalog` both export `checkIds: ["CHECK-32"]` with no caveat, so a
-  // dashboard grouping rules by check would otherwise render this table inside
-  // "Orphan pages" as that check's verdict. The explanation is the one string
-  // that travels with the id to every consumer.
-  it("site.health tells its consumer the check id is a filing, not an answer", () => {
+  // WHERE THIS TABLE BELONGS, in the CLIENT-FACING copy rather than only in the
+  // rule's module header: `metrics_get` and `rules_catalog` both export the
+  // `checkIds` with no caveat, so the explanation is the one string that travels
+  // with the id to every consumer that groups rules by check.
+  //
+  // It said something weaker for one phase. While the checklist had no check
+  // about the engine's own coverage, this row was FILED under CHECK-32 and the
+  // copy had to say so — a disclaimer that the id meant nothing, so that a
+  // dashboard would not render the table inside "Orphan pages" as that check's
+  // verdict. CHECK-83 exists now and this row is evidence for it, so the
+  // disclaimer is gone and the plain statement stands in its place: the two
+  // claims that survive it are that a verdict on another check may never be
+  // reached from here (Evaluation Principle 2) and that a UI shows it under
+  // coverage.
+  it("site.health tells its consumer which check it is evidence for, and what it still is not", () => {
     const text = ISSUE_COPY["site.health"]!.explanation;
-    expect(text, "the disclaimer").toMatch(
-      /THE CHECK ID THIS TABLE CARRIES SAYS WHERE IT IS FILED, NOT WHAT IT ANSWERS/,
+    expect(text, "the plain statement").toMatch(
+      /THE CHECK THIS TABLE CARRIES IS THE ONE IT IS ABOUT/,
     );
-    expect(text, "answers no check").toMatch(/answers no checklist check on its own/i);
+    expect(text, "the coverage check").toMatch(
+      /engine-coverage check the audit answers before any other/i,
+    );
+    // Principle 2, unweakened by the re-file: this is still a crawl summary.
+    expect(text, "no verdict from here").toMatch(
+      /no verdict on any other check may be reached from it/i,
+    );
     // And what a UI should do with it, since the UI is the consumer that groups.
-    expect(text, "context, not verdict").toMatch(/as context beside that check rather than as its verdict/i);
+    expect(text, "grouped under coverage").toMatch(
+      /show it under coverage rather than beside a finding about the site/i,
+    );
+    // THE OLD DISCLAIMER IS GONE, not merely superseded: a copy carrying both
+    // sentences would tell a reader the id means nothing and then tell them what
+    // it means.
+    expect(text, "the retired bridge disclaimer").not.toMatch(/WHERE IT IS FILED/);
+    expect(text, "the retired bridge disclaimer").not.toMatch(/answers no checklist check/i);
   });
 
   // Obligation 6, as a test: Ariadne emits the ingredients and the ratio; Talos
@@ -945,11 +1013,214 @@ describe("issue copy", () => {
     expect(whole).not.toMatch(judgement);
   });
 
+  // The resource copy's threshold, pinned against the rule's own constant the
+  // way the on-page ones are. It is quoted with a thousands separator because
+  // that is how a client reads a byte count, so the pin formats the constant
+  // rather than matching its digits.
+  it("quotes the image weight threshold the rules actually use", () => {
+    const bytes = IMAGE_WEIGHT_WARN.toLocaleString("en-US");
+    expect(bytes).toBe("100,000");
+    expect(ISSUE_COPY["images.oversized"]!.title).toContain(bytes);
+    expect(ISSUE_COPY["images.oversized"]!.explanation).toContain(`${bytes} bytes`);
+    expect(ISSUE_COPY["images.legacy-format"]!.explanation).toContain(`${bytes} bytes`);
+    // And that it is the CHECKLIST's number rather than one we picked, which is
+    // the sentence that stops it drifting on somebody's aesthetic preference.
+    expect(ISSUE_COPY["images.oversized"]!.explanation).toMatch(/100KB line the audit checklist/i);
+  });
+
+  // The three SAMPLE CAPS the resource copy words, pinned against the rules'
+  // own constants exactly as the threshold above is — the change-one-change-both
+  // contract this family's module header invokes, honoured for all four of its
+  // constants rather than only for the one that decides a verdict.
+  //
+  // A capped sample read as a complete list is the misreading these numbers
+  // exist to prevent, so the copy has to say how long the list is; a copy saying
+  // "ten" over a rule that lists twenty is the same defect as an unstated cap.
+  //
+  // THE CHECKLIST RIDES THESE PINS TOO. `skills/ariadne-audit/checklist.md`
+  // quotes the same two numbers in CHECK-50 and CHECK-51, in prose an agent
+  // reads and repeats to a client, and it is the living authority (hard rule 10)
+  // rather than a copy of the copy — so it is asserted here against the same
+  // constants. Change a cap and this test names every place that has to move.
+  it("quotes the sample caps the resource rules actually apply", async () => {
+    expect(BROKEN_SAMPLE_RESOURCES).toBe(10);
+    expect(OVERSIZED_SAMPLE_PAGES).toBe(10);
+    expect(UNCACHED_SAMPLE_RESOURCES).toBe(20);
+
+    const broken = CAP_WORDS[BROKEN_SAMPLE_RESOURCES];
+    const pages = CAP_WORDS[OVERSIZED_SAMPLE_PAGES];
+    const uncached = CAP_WORDS[UNCACHED_SAMPLE_RESOURCES];
+    expect(ISSUE_COPY["resources.broken"]!.explanation, "the broken-file sample").toContain(
+      `lists up to ${broken} of them`,
+    );
+    expect(ISSUE_COPY["images.oversized"]!.explanation, "the referencing-page sample").toContain(
+      `up to ${pages} of those pages`,
+    );
+    expect(ISSUE_COPY["resources.uncached"]!.explanation, "the uncached sample").toContain(
+      `lists up to ${uncached} of the ones with no header`,
+    );
+
+    // Whitespace-collapsed before matching: the checklist is prose wrapped at
+    // 80 columns, and a sentence that moves across a line break is not a change
+    // to what it says. The NUMBER is what this pins.
+    const checklist = (
+      await readFile(new URL("../../skills/ariadne-audit/checklist.md", import.meta.url), "utf8")
+    ).replace(/\s+/g, " ");
+    expect(checklist, "CHECK-51 quotes the broken-file sample").toContain(
+      `names up to ${broken} of the files`,
+    );
+    expect(checklist, "CHECK-50 quotes the uncached sample").toContain(
+      `up to ${uncached} of them named`,
+    );
+  });
+
+  // THE BOUNDARY THE WHOLE FAMILY RESTS ON, in the client-facing text rather
+  // than only in the rules' headers: these are the references in the HTML the
+  // server sent, and a file the crawl never got an answer for is unknown. A
+  // client reading "no oversized images" about a site that injects its images
+  // with JavaScript would otherwise be reading a sentence about our evidence as
+  // a sentence about their site.
+  it("the resource copy states the served-HTML boundary and the unknown one", () => {
+    for (const id of [
+      "resources.broken",
+      "images.oversized",
+      "images.legacy-format",
+      "resources.uncached",
+      "page.weight",
+    ]) {
+      const text = ISSUE_COPY[id]!.explanation;
+      expect(text, `${id}: the served-HTML boundary`).toMatch(/HTML the server sent/i);
+      expect(text, `${id}: what a script loads later`).toMatch(/script|JavaScript/i);
+      expect(text, `${id}: the unknown boundary`).toMatch(
+        /unknown|never (?:asked|got to ask)|not weighed|never weighed/i,
+      );
+    }
+  });
+
+  // The four causes of a silence, named individually. "Unknown" as a word is
+  // cheap; what a reader needs is which four things it covers, because three of
+  // them are decisions (ours, the site's robots, a cap) rather than faults.
+  it("resources.broken names every reason a file goes uncounted rather than broken", () => {
+    const c = ISSUE_COPY["resources.broken"]!;
+    expect(c.explanation, "the pass never reached it").toMatch(/never got to ask|did not finish/i);
+    expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
+    expect(c.explanation, "robots").toMatch(/robots\.txt disallowed/i);
+    expect(c.explanation, "a failed request").toMatch(/request never completed/i);
+    // And the shape that makes the reason load-bearing: a 200 with a refusal
+    // reason beside it is bot protection, not a healthy file (P11-T2's
+    // cf-mitigated rows). Copy printing "broken (HTTP 200)" with nothing beside
+    // it is the absurdity this sentence exists to prevent.
+    expect(c.explanation, "the refused 200").toMatch(/status of 200 with a refusal reason/i);
+  });
+
+  // The measurement is metadata: a status, a content type, a byte count. The
+  // crawl never decodes an image, so no copy here may claim anything about its
+  // dimensions, its compression quality, or its size relative to the box it is
+  // displayed in. Asserted negatively, like every other overclaim guard.
+  it("the image copy claims transferred bytes, never a decoded image", () => {
+    for (const id of ["images.oversized", "images.legacy-format"]) {
+      const text = ISSUE_COPY[id]!.explanation;
+      const overclaim =
+        /(?:is|are) (?:badly|poorly|over)[- ]?compressed|larger than (?:its|the) (?:layout|container|display)|wrong dimensions|its dimensions are/i;
+      expect(text, id).not.toMatch(overclaim);
+    }
+    // And the positive half for the weight rule, which is the one whose number
+    // invites the misreading: it says what it did not open.
+    expect(ISSUE_COPY["images.oversized"]!.explanation).toMatch(/nothing here opens the image/i);
+    // The byte count's provenance, which is the difference between a claim and
+    // a measurement: `bytes_source` is `header` or `counted`, and a reader who
+    // cannot tell them apart will quote a server's claim as our measurement.
+    expect(ISSUE_COPY["images.oversized"]!.explanation).toMatch(
+      /declared size is the server's claim and a counted one is our measurement/i,
+    );
+  });
+
+  // A format is a CHOICE. The rule is info and its copy has to say so, because
+  // "legacy format" reads as a defect unless it is denied — and PNG is the right
+  // answer for a screenshot.
+  it("images.legacy-format offers a candidate rather than declaring a defect", () => {
+    const c = ISSUE_COPY["images.legacy-format"]!;
+    expect(c.explanation).toMatch(/not a fault/i);
+    expect(c.explanation, "and says when PNG is right").toMatch(/screenshots|sharp edges/i);
+    const asDefect =
+      /must (?:be )?convert|should not use|wrong format|outdated format|is a defect|replace (?:all|every)/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(asDefect);
+  });
+
+  // The caching rule reads two headers and nothing else, so it cannot say a
+  // browser re-downloads the file — a CDN or an ETag may be doing that work
+  // where the response says nothing.
+  it("resources.uncached claims the absent header, not a proven re-download", () => {
+    const c = ISSUE_COPY["resources.uncached"]!;
+    expect(c.explanation).toMatch(/Cache-Control/);
+    expect(c.explanation).toMatch(/Expires/);
+    expect(c.explanation, "what it cannot see").toMatch(/ETag|edge caching/i);
+    const overclaim =
+      /(?:is|are) (?:re-?)?downloaded (?:again )?(?:on )?every (?:visit|request|page load)|never cached|no caching (?:is )?happen/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  });
+
+  // The marker's copy is about the CRAWL, like its two siblings. It must not
+  // read as a fault on the site, and it must name each of the three numbers its
+  // evidence carries.
+  it("resources.not-recorded explains the crawl, its three numbers and the remedy", () => {
+    const c = ISSUE_COPY["resources.not-recorded"]!;
+    expect(c.title.toLowerCase()).toContain("could not be run");
+    expect(c.explanation, "resourcesSeen").toMatch(/how many resource records this crawl holds/i);
+    expect(c.explanation, "pagesWithImages").toMatch(
+      /how many of its pages counted at least one image/i,
+    );
+    expect(c.explanation, "pagesCrawled").toMatch(/how many pages it read in all/i);
+    // The unknown-is-not-evidence argument, in the words a client reads.
+    expect(c.explanation, "the two facts that share one silence").toMatch(
+      /a site whose files are all healthy and a crawl that never looked/i,
+    );
+    expect(c.howToFix).toMatch(/re-crawl/i);
+  });
+
+  // The metric-copy column contract, for Phase 11's table. Its shape is five
+  // distributions and three coverage numbers, and the two BOUNDS are the reason
+  // the coverage numbers are on the row at all: a page weight quoted without
+  // them is a number pretending to be a measurement.
+  it("page.weight names every column of its shape and both of its bounds", () => {
+    const c = ISSUE_COPY["page.weight"]!;
+    const text = c.explanation;
+    expect(text, "the five measures").toMatch(
+      /the total weight of a page, its HTML on its own, and its image, stylesheet and script bytes/i,
+    );
+    expect(text, "count").toMatch(/how many pages were measured/i);
+    expect(text, "min and max").toMatch(/smallest and largest/i);
+    expect(text, "the mean").toContain("mean");
+    expect(text, "quartiles").toContain("quartiles");
+    expect(text, "p95").toContain("95th percentile");
+    // The count is per measure, which differs from the cohort size for exactly
+    // one reason and the copy names it.
+    expect(text, "the per-measure count").toMatch(/count is per measure/i);
+    expect(text, "resourcesReferenced").toMatch(/how many file references these pages make/i);
+    expect(text, "resourcesWeighed").toMatch(/how many of those files were actually weighed/i);
+    expect(text, "pagesWithUnmeasuredResources").toMatch(
+      /how many pages reference at least one file that was not/i,
+    );
+    expect(text, "atLeast").toMatch(/flagged as a floor/i);
+    // The ceiling: `page_resources` double-counts src + srcset (schema.ts's own
+    // caveat, handed to this metric by name).
+    expect(text, "the ceiling").toMatch(/CEILING/);
+    expect(text, "why it is a ceiling").toMatch(/responsive renditions|both files to the sum/i);
+    expect(text, "the floor").toMatch(/FLOOR/);
+    // And which number a reader should trust, the `site.health` precedent.
+    expect(text, "the counts are the authority").toMatch(/THE COUNTS ARE THE AUTHORITY/);
+  });
+
   // A metric states what was counted; it does not accuse the site of anything.
   // "Fix" language in a table's copy would turn a distribution into a fault
   // list, and the numbers at the bottom of a distribution are frequently fine.
   it("the metric copy describes a measurement rather than a defect", () => {
-    for (const id of [...PHASE_4_METRIC_IDS, ...PHASE_5_METRIC_IDS, ...PHASE_10_METRIC_IDS]) {
+    for (const id of [
+      ...PHASE_4_METRIC_IDS,
+      ...PHASE_5_METRIC_IDS,
+      ...PHASE_10_METRIC_IDS,
+      ...PHASE_11_METRIC_IDS,
+    ]) {
       const c = ISSUE_COPY[id]!;
       const asFault =
         /this (?:is a|indicates a) (?:problem|fault|error)|must be fixed|you must fix|is broken|penalis|penaliz/i;

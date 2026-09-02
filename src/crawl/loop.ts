@@ -77,6 +77,11 @@ import { analyzePage } from "./parse/page-analyzer.js";
 import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
+import {
+  fetchCrawlResources,
+  markResourcesNotAsked,
+  type ResourcePassSummary,
+} from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
 
 /**
@@ -157,6 +162,42 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * (`storedFindingCap`, src/rules/query/crawl-evidence.ts).
    */
   findingCap?: number | null;
+  /**
+   * The resource fetch pass's two budgets: distinct files this crawl may ask
+   * about, and distinct hosts it may ask. Absent is
+   * `RESOURCE_DEFAULTS` (10_000 and 20) — the module that spends them owns the
+   * numbers and the reasoning behind them, exactly as the render pass owns its
+   * three.
+   *
+   * They are CRAWL config rather than arguments to the pass because the pass is
+   * part of a crawl and a resume must run it the way the first attempt was told
+   * to. A cap is never silent: rows beyond it keep their null `fetch_class` and
+   * carry `fetch_reason: 'resource-cap'` (hard rule 7).
+   */
+  maxResources?: number;
+  maxResourceHosts?: number;
+  /**
+   * Whether this crawl asks the site about the files its pages point at.
+   * Absent is TRUE — the pass runs, which is what every crawl since P11-T2 has
+   * done and what a complete audit needs.
+   *
+   * IT IS AN OFF SWITCH, NOT A BUDGET, and that is why it is a boolean rather
+   * than `maxResources: 0` (which `validateCrawlConfig` refuses on purpose: a
+   * zero cap reads like a typo and would mark every row `resource-cap`, a reason
+   * that says a budget ran out when no budget was ever spent). An operator who
+   * says no to the pass is making a decision about somebody's server — a client
+   * who asked us not to touch their CDN, a re-crawl that only needs the page
+   * census — and the record has to be able to say that plainly.
+   *
+   * WHAT FALSE DOES NOT TURN OFF: the analyzer's references. `PageWriter` still
+   * writes the `resources` rows and the `page_resources` edges, because reading
+   * markup costs nobody a request and "this site's HTML points at 812 distinct
+   * files" is evidence whether or not we asked about any of them. What false
+   * turns off is the asking — and every row it leaves unasked is stamped with
+   * `RESOURCE_OFF_REASON`, so a reader can tell the operator's decision from an
+   * interrupted pass, from a cap, and from a crawl written before 0013.
+   */
+  fetchResources?: boolean;
 }
 
 /**
@@ -277,6 +318,14 @@ export interface CrawlSummary {
    * `pagesRetyped: 0`, and the two must not be read as the same thing.
    */
   pageTemplates: PageTemplateInference | null;
+  /**
+   * What the resource fetch pass did, or null when it did not run — a crawl
+   * that failed before it had pages, or one that was cancelled (an abort means
+   * stop asking servers for things, and the pass is all asking). Null is not
+   * "no resources": that is a summary whose `seen` is 0, and the two must not
+   * be read as the same thing.
+   */
+  resources: ResourcePassSummary | null;
   /** Why the crawl ended, when that needs saying. Null on a clean finish. */
   note: string | null;
 }
@@ -557,6 +606,9 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     renderMaxPages: raw["renderMaxPages"],
     renderSamplePerType: raw["renderSamplePerType"],
     findingCap: raw["findingCap"],
+    maxResources: raw["maxResources"],
+    maxResourceHosts: raw["maxResourceHosts"],
+    fetchResources: raw["fetchResources"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -575,7 +627,11 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
   // The optional fields: absent is fine, present-and-wrong is not. A stored
   // `probeHosts: "false"` must not resume as "probe on" (it is truthy) or as
   // "probe off" (a guess) — it must stop.
-  for (const field of ["probeHosts"] as const) {
+  // `fetchResources` joins `probeHosts` here rather than defaulting on a
+  // non-boolean: a stored `"false"` is truthy, so a resume would turn the pass
+  // back ON for a client who asked us not to touch their servers, and a resume
+  // that guessed `false` would silently stop asking about a crawl that did.
+  for (const field of ["probeHosts", "fetchResources"] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a boolean`);
     }
@@ -587,6 +643,11 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     "renderBudgetPct",
     "renderMaxPages",
     "renderSamplePerType",
+    // The resource budgets, on the same terms: a stored `maxResources: "500"`
+    // must not resume as a NaN cap that stops the pass at the first row and
+    // reports it as a cap the operator asked for.
+    "maxResources",
+    "maxResourceHosts",
   ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "number") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
@@ -691,6 +752,21 @@ export function validateCrawlConfig(config: CrawlConfig): void {
         `${String(config.findingCap)}`,
     );
   }
+  // The resource budgets, checked here for the render budget's reason below: a
+  // `maxResources: 0` is a pass that asks about nothing and marks every row
+  // `resource-cap`, which reads like a decision somebody took. If that is the
+  // intent it has to be said in a way nobody can mistake for a typo, and this
+  // is not it.
+  for (const [field, value] of [
+    ["maxResources", config.maxResources],
+    ["maxResourceHosts", config.maxResourceHosts],
+  ] as const) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+      throw new RangeError(
+        `CrawlConfig.${field} must be an integer ≥ 1, got ${String(value)}`,
+      );
+    }
+  }
   // The render budget, checked by the module that will spend it. A nonsense
   // budget stops the crawl at line one rather than after the last page, where
   // the render pass would have been the one to find out.
@@ -784,7 +860,19 @@ async function runToCompletion(
       skipped: `not probed: ${note}`,
     });
     await closeCrawl(db, crawlId, "failed", crawled);
-    return summarise(db, crawlId, "failed", crawled, emptyWriterStats(), discovery, null, note);
+    return summarise(
+      db,
+      crawlId,
+      "failed",
+      crawled,
+      emptyWriterStats(),
+      discovery,
+      null,
+      // The resource pass never ran: this crawl was refused before it had a
+      // page, let alone a page's references.
+      null,
+      note,
+    );
   }
 
   const writer = new PageWriter(db, crawlId);
@@ -1120,7 +1208,6 @@ async function runToCompletion(
   // The one thing not on offer is log-and-continue. If the skip cannot be
   // recorded either, the crawl has lost its ability to say what it knows, and
   // both errors go into the same aggregation the loop and the shutdown use.
-  const status = aborted ? "cancelled" : "finished";
   try {
     await probeKnownMissing(db, crawlId, config, discovery, gate, {
       allowPrivate,
@@ -1137,6 +1224,94 @@ async function runToCompletion(
     }
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
+
+  // INSERTION 3b — the crawl asks about the files its pages point at.
+  //
+  // Numbered 3b rather than 5 because the markers are positional and INSERTION
+  // 4 is cited by name elsewhere (docs/superpowers/plans/2026-08-29-phase-9-
+  // schema-truth.md): this pass sits between the 404 probe and the template
+  // inference, so it takes a name that says so instead of renaming theirs.
+  //
+  // WHY HERE, between the probe and the template inference, and not at either
+  // of the two obvious alternatives:
+  //
+  //  - AFTER THE PAGE CRAWL, because the reference set is only complete once
+  //    the last page has been parsed and written. A pass that ran alongside the
+  //    loop would ask about a moving target: it would either re-query the work
+  //    list forever or miss the files the last pages introduced, and both are
+  //    silent incompleteness. Running it here also means every resource request
+  //    is issued when no page fetch is competing for the same host's queue,
+  //    which is what keeps the arithmetic in that module's header honest.
+  //  - BEFORE `inferPageTemplates` and before `closeCrawl`, because a crawl's
+  //    wall time is what an operator budgets and what `crawl_status` reports.
+  //    A pass that ran after the row was closed would be work happening on
+  //    somebody's server while the record said the crawl had finished, and a
+  //    reader who saw `finished` would be seeing a crawl whose resource rows
+  //    were still filling in. It sits after the 404 probe for the same reason
+  //    the probe sits after the loop: the probe is one more request to the
+  //    ORIGIN, and it belongs with the page phase it reasons about.
+  //
+  // Skipped on an abort, exactly as the probe is: the caller asked us to stop,
+  // and every row this pass would write is a request to somebody's server. The
+  // nulls it leaves are the resume's work list, unchanged.
+  //
+  // AN ABORT THAT ARRIVES *DURING* THE PASS is the other half of that, and it
+  // is why `status` is computed below this line rather than above the probe: the
+  // pass stops asking within one row and returns `aborted: true`, and a crawl
+  // that closed `finished` on the strength of a flag computed before the pass
+  // ran would be reporting a complete resource census it does not have (hard
+  // rule 7). The rows it left are null with no reason, which is exactly what a
+  // resume picks up.
+  //
+  // NOT CONTAINED the way the probe is, and for the inference's reason: this
+  // pass classifies every site-side failure into a row (a 404 image, a dead CDN,
+  // a robots.txt that refuses us), so anything it throws is OUR defect or a
+  // failed write — and there is no column in which to write "the resource rows
+  // are missing because the writer broke". It propagates, `execute` closes the
+  // row `failed`, and the operator finds out (hard rule 7).
+  //
+  // THE OPERATOR'S OFF SWITCH sits beside the abort and reads the same way from
+  // here — no pass, `resources: null` on the summary — and differently from
+  // everywhere else. An abort decided nothing about the rows it did not reach;
+  // `fetchResources: false` decided all of them, so the rows are stamped with
+  // the reason instead of being left blank (see `RESOURCE_OFF_REASON`). The
+  // check is `=== false` rather than falsy, because absent means ON.
+  if (config.fetchResources === false && !aborted) {
+    await markResourcesNotAsked(db, crawlId);
+  }
+  const resourcePass = aborted || config.fetchResources === false
+    ? null
+    : await fetchCrawlResources(db, crawlId, {
+        siteUrl: config.siteUrl,
+        userAgent: config.userAgent,
+        // THE SAME GATE the pages were fetched through — not a new one. A host
+        // that earned 8s of spacing by refusing the page crawl is still at 8s
+        // when we ask it about its images (hard rule 9).
+        gate,
+        // Already read by `discover`; the pass re-reads nobody's robots.txt but
+        // a third-party asset host's.
+        originRobots: discovery.robots,
+        // THE SETTLED WINDOW, not the configured ceiling. The gate carries its
+        // own state because the pass is handed the gate itself; the window
+        // cannot, because the pass runs its own worker pool — so the number it
+        // adapted to is threaded here by hand. A site that answered 503s until
+        // the window collapsed 4 -> 1 gets one resource worker, not four. Per-host
+        // spacing alone would not have delivered that (it serialises ONE host,
+        // and resources routinely span several), and "the origin just told us to
+        // slow down" is not a statement about one host's queue (rule 9).
+        maxConcurrency: Math.min(window.size(), config.maxConcurrency),
+        maxResources: config.maxResources,
+        maxResourceHosts: config.maxResourceHosts,
+        timeoutMs: FETCH_TIMEOUT_MS,
+        allowPrivate,
+        signal,
+      });
+
+  // The pass stops asking the moment the signal fires, so a crawl that was
+  // cancelled inside it must say `cancelled` — with the note, and with the
+  // frontier's own account of what is left.
+  if (resourcePass?.aborted === true || signal?.aborted === true) aborted = true;
+  const status = aborted ? "cancelled" : "finished";
 
   // INSERTION 4 — the crawl types its own population, now that it has one.
   //
@@ -1188,6 +1363,7 @@ async function runToCompletion(
     writer.stats(),
     discovery,
     pageTemplates,
+    resourcePass,
     aborted
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
@@ -1360,7 +1536,15 @@ function toOutcome(result: FetchResult): BatchOutcome {
 }
 
 function emptyWriterStats(): PageWriterStats {
-  return { pages: 0, links: 0, hreflang: 0, structuredData: 0, hreflangUnresolved: 0 };
+  return {
+    pages: 0,
+    links: 0,
+    hreflang: 0,
+    structuredData: 0,
+    resources: 0,
+    pageResources: 0,
+    hreflangUnresolved: 0,
+  };
 }
 
 /**
@@ -1426,6 +1610,7 @@ async function summarise(
   writerStats: PageWriterStats,
   discovery: DiscoveryResult,
   pageTemplates: PageTemplateInference | null,
+  resources: ResourcePassSummary | null,
   note: string | null,
 ): Promise<CrawlSummary> {
   return {
@@ -1440,6 +1625,7 @@ async function summarise(
       truncation: discovery.truncation,
     },
     pageTemplates,
+    resources,
     note,
   };
 }

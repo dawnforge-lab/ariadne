@@ -11,6 +11,7 @@ import { statusRules } from "./page/status.js";
 import { canonicalRules } from "./page/canonical.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { technicalRules } from "./page/technical.js";
+import { resourceMetrics } from "./metric/resource-metrics.js";
 import { contentRules } from "./query/content.js";
 import { fieldDuplicateRules } from "./query/field-duplicates.js";
 import { hostRules } from "./query/host.js";
@@ -21,6 +22,7 @@ import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
 import { renderDiffRules } from "./query/render-diff.js";
 import { renderRedirectRules } from "./query/render-redirect.js";
+import { resourceRules } from "./query/resources.js";
 import { robotsRules } from "./query/robots.js";
 import { sitemapRules } from "./query/sitemap.js";
 import { structuredDataRules } from "./query/structured-data.js";
@@ -64,6 +66,11 @@ export function buildRegistry(): Registry {
     // separate stage of the crawl (src/crawl/render), not part of a rule.
     ...renderDiffRules,
     ...renderRedirectRules,
+    // The resource rules (P11-T3): what the fetch pass learned about the files
+    // the pages point at. Query-kind for the reason every rule here is — they
+    // read `resources` and `page_resources` through SQL, and "is this file
+    // broken" is a question about a table a page rule is never handed.
+    ...resourceRules,
     // The metric kind. Registered in the same list because a rule is a rule to
     // the registry — the runner is what tells the kinds apart, driving these
     // last, after everything that writes evidence.
@@ -73,6 +80,7 @@ export function buildRegistry(): Registry {
     ...urlMetrics,
     ...crawlMetrics,
     ...renderMetrics,
+    ...resourceMetrics,
     // The health rollup, last among the metrics because it is the only one that
     // measures the RUN rather than the site: it counts the findings the rules
     // above it have just written. The runner drives the metric phase after both

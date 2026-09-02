@@ -110,6 +110,15 @@ const EXTENSION_FIELDS = [
   // would be the oracle re-deriving the port's own arithmetic rather than
   // holding it to a DOM.
   "h1Text",
+  // P11-T1's resource references. Upstream had no such extraction and there is
+  // no DOM implementation to be held to: the field's specification is the
+  // CLOSED LIST in the port's header (which attributes count, which are
+  // deliberately left out, and that `srcset` is read to its first candidate),
+  // and an oracle re-deriving that list from the same prose would only be a
+  // second copy of the decision rather than a reference for it. The Task 6
+  // additions are stripped on exactly this reasoning; the cases live in
+  // test/crawl/resource-refs.test.ts, where the absences are asserted too.
+  "resourceRefs",
 ] as const;
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
@@ -395,6 +404,7 @@ function expectParity(html: string) {
     hasLoremIpsum: _hasLoremIpsum,
     hasSoft404Phrases: _hasSoft404Phrases,
     h1Text: _h1Text,
+    resourceRefs: _resourceRefs,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);

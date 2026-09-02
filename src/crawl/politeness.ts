@@ -26,7 +26,7 @@
  *
  * Pure logic — no I/O, no fetching, no database. The crawl loop wires it.
  *
- * Memory: the gate holds one map keyed by host, whose value is five scalars —
+ * Memory: the gate holds one map keyed by host, whose value is six scalars —
  * O(hosts touched), not O(URLs). A site crawl touches one host, or a handful
  * with its variants; the memory contract (rule 6) is about the frontier and the
  * page bodies, and nothing here grows with either. See `HostState` for the one
@@ -237,7 +237,7 @@ export interface HostGateOptions {
 }
 
 /**
- * What the gate remembers about one host. Fixed size — five scalars, no
+ * What the gate remembers about one host. Fixed size — six scalars, no
  * collections — because the alternative (the set of URLs in the current streak)
  * would be O(URLs) on a host that refuses everything, which is the one thing
  * the memory contract forbids (rule 6). Knowing whether a SECOND distinct URL
@@ -247,6 +247,19 @@ export interface HostGateOptions {
 interface HostState {
   /** The earliest wall-clock ms at which the next hit may start. */
   nextAllowedAt: number;
+  /**
+   * This host's own base spacing, before the ratchet. The crawl's configured
+   * spacing (`delayMs`) unless something raised it — see `raiseHostFloor`, whose
+   * only caller today is the resource fetch pass carrying a THIRD-PARTY host's
+   * `Crawl-delay` onto that host.
+   *
+   * A number rather than a second gate keyed by host: the crawl origin's
+   * robots.txt is folded into `delayMs` at construction because it is known
+   * before the first fetch, and an asset host's robots.txt is not known until
+   * the pass reads it. Both are "this host asked for this much room", and one
+   * base per host is the only spelling in which they mean the same thing.
+   */
+  baseMs: number;
   /**
    * How many times this host's answers have escalated the spacing. Only ever
    * incremented: see `report` for why a success does not give the spacing back.
@@ -305,12 +318,46 @@ export class HostGate {
     return this.delayMs;
   }
 
-  /** The spacing in force for `host` right now: the base, times the ratchet. */
+  /**
+   * The spacing in force for `host` right now: that host's base, times the
+   * ratchet. The base is the crawl's configured spacing unless `raiseHostFloor`
+   * has moved it for this host.
+   */
   spacingMs(host: string): number {
-    const escalations = this.hosts.get(host)?.escalations ?? 0;
-    if (escalations === 0) return this.delayMs;
-    const seed = this.delayMs > 0 ? this.delayMs : ZERO_BASE_SEED_MS;
+    const state = this.hosts.get(host);
+    const base = state?.baseMs ?? this.delayMs;
+    const escalations = state?.escalations ?? 0;
+    if (escalations === 0) return base;
+    const seed = base > 0 ? base : ZERO_BASE_SEED_MS;
     return Math.min(this.maxDelayMs, seed * 2 ** escalations);
+  }
+
+  /**
+   * Raise ONE host's base spacing — never lower it, never touch another host's.
+   *
+   * The case this exists for is a host whose own robots.txt we read after the
+   * gate was built: a third-party asset host, whose `Crawl-delay` is a rule
+   * about that host and about nothing else (see the resource fetch pass). The
+   * crawl's configured spacing is the floor and `maxDelayMs` the ceiling, which
+   * is the same arithmetic the constructor applies to the origin's own
+   * `Crawl-delay` — one policy, in the one module that owns spacing.
+   *
+   * Idempotent and monotonic: calling it twice, or with a smaller number than
+   * the host already has, changes nothing. Raising the base does not pull an
+   * already-claimed slot in either — the next ACQUISITION is what it binds,
+   * exactly as an escalation does.
+   */
+  raiseHostFloor(host: string, delayMs: number): void {
+    if (!Number.isFinite(delayMs) || delayMs < 0) {
+      throw new RangeError(`HostGate.raiseHostFloor: delayMs must be ≥ 0, got ${delayMs}`);
+    }
+    const state = this.stateFor(host);
+    const raised = Math.min(this.maxDelayMs, Math.max(state.baseMs, delayMs));
+    if (raised === state.baseMs) return;
+    state.baseMs = raised;
+    // A lease is sized against the widest spacing in force (see the loop's
+    // leaseSecondsFor), so a base that moved has to move this too.
+    this.highWaterMs = Math.max(this.highWaterMs, this.spacingMs(host));
   }
 
   /**
@@ -447,6 +494,7 @@ export class HostGate {
     if (state === undefined) {
       state = {
         nextAllowedAt: 0,
+        baseMs: this.delayMs,
         escalations: 0,
         streak: 0,
         streakUrl: null,

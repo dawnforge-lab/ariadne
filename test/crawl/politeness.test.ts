@@ -187,6 +187,51 @@ describe("HostGate", () => {
     expect(Date.now() - t0).toBeLessThan(20);
   });
 
+  // --- the per-host floor (P11-T2: a third-party asset host's own rules) ---
+
+  it("raises one host's base spacing and leaves every other host alone", async () => {
+    const g = new HostGate({ perHostDelayMs: 50, robotsCrawlDelaySec: null });
+    g.raiseHostFloor("cdn.example", 400);
+    expect(g.spacingMs("cdn.example")).toBe(400);
+    expect(g.spacingMs("a.example")).toBe(50);
+    // The configured spacing is the crawl's; the floor is that host's, and the
+    // lease sizing has to see the wider of the two.
+    expect(g.effectiveDelayMs()).toBe(50);
+    expect(g.maxSpacingMs()).toBe(400);
+  });
+
+  it("never lowers a floor, and never lifts one past maxDelayMs", () => {
+    const g = new HostGate({
+      perHostDelayMs: 100,
+      robotsCrawlDelaySec: null,
+      maxDelayMs: 1000,
+    });
+    g.raiseHostFloor("cdn.example", 500);
+    // A smaller number is not a new instruction: the wider spacing stands.
+    g.raiseHostFloor("cdn.example", 10);
+    expect(g.spacingMs("cdn.example")).toBe(500);
+    // `Crawl-delay: 3600` is a header a misconfigured CDN can send.
+    g.raiseHostFloor("cdn.example", 3_600_000);
+    expect(g.spacingMs("cdn.example")).toBe(1000);
+    expect(() => g.raiseHostFloor("cdn.example", -1)).toThrow(RangeError);
+  });
+
+  it("ratchets from the raised floor, not from the crawl's base", () => {
+    const g = new HostGate({ perHostDelayMs: 100, robotsCrawlDelaySec: null });
+    g.raiseHostFloor("cdn.example", 400);
+    g.report("cdn.example", {
+      fetchClass: "blocked",
+      statusCode: 429,
+      retryAfterMs: null,
+      url: "https://cdn.example/a.png",
+    });
+    // The host asked for 400ms and then said "not at this rate": doubling its
+    // own number is the polite reading, doubling the crawl's would be a
+    // back-off to less than it had already asked for.
+    expect(g.spacingMs("cdn.example")).toBe(800);
+    expect(g.spacingMs("a.example")).toBe(100);
+  });
+
   it("rejects nonsense construction loudly", () => {
     expect(() => new HostGate({ perHostDelayMs: -1, robotsCrawlDelaySec: null })).toThrow(
       RangeError,

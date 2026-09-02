@@ -1,6 +1,7 @@
 /**
  * The crawl loop's write path: one `addPage` per fetched URL, batched inserts
- * into `pages` / `links` / `hreflang` / `structured_data`.
+ * into `pages` / `links` / `hreflang` / `structured_data` / `resources` /
+ * `page_resources`.
  *
  * The page buffer is also the crawl's durability anchor. Each buffered page
  * row carries the frontier URL it settles, and `flushPages` inserts the rows
@@ -22,7 +23,8 @@
  *
  * KNOW WHAT THAT COSTS, because the fix above sharpened it. A kill between the
  * `pages` commit and the child inserts leaves up to `batchSize - 1` `links`,
- * `hreflang` and `structured_data` rows unwritten for pages the frontier now
+ * `hreflang`, `structured_data`, `resources` and `page_resources` rows
+ * unwritten for pages the frontier now
  * marks `done` — and unlike the page rows, they are UNRECOVERABLE: the URL is
  * finished, so no resume re-fetches it, and a page with no link rows reads
  * exactly like a page that genuinely had no links. The rules cannot tell the
@@ -42,8 +44,10 @@
  *    holding a 2000-row one.
  *  - The transient per-call arrays. `addPage` materialises the row objects for
  *    one page before pushing them, so a call peaks at that page's row count,
- *    which the analyzer's own caps bound (links 2000, hreflang 200,
- *    structured data 50). Across the crawl loop that is
+ *    which the analyzer's own caps bound (links 2000, resource refs 2000 —
+ *    which materialise TWICE, once as `resources` rows and once as
+ *    `page_resources` edges — hreflang 200, structured data 50). Across the
+ *    crawl loop that is
  *    O(concurrency × analyzer caps), not O(URLs) — lazy generators would drop
  *    the constant but buy nothing real at this scale.
  * Nothing here is keyed by URL or by page, so the writer's footprint never
@@ -68,6 +72,21 @@
  *    URL as the page row the crawler created from it, and only the normalised
  *    column can say so.
  *
+ * THE RESOURCE PAIR (P11-T1) sits in those same buffers and follows the same
+ * rules, with one difference that is the point of the pair: `resources` is
+ * about FILES and is written `on conflict do nothing` against
+ * `(crawl_id, url)`, so the second page to reference an image writes an EDGE
+ * and no row. THE DEDUP IS THE DATABASE'S, not the writer's — a per-crawl set
+ * of resource URLs held here is precisely the O(URLs) structure the memory
+ * contract forbids (hard rule 6), and it is also the structure that would be
+ * wrong on a resumed crawl, where the earlier run's rows are in the table and
+ * in no process's memory. The writer's own state stays O(batchSize).
+ *
+ * The crawl path writes three columns of a resource row — `crawl_id`, `url`,
+ * `kind` — and leaves every fetch column null. That null is `fetch_class`'s
+ * "seen, not yet asked" (see src/db/schema.ts), and it is the resource fetch
+ * pass's work list.
+ *
  * `pageId` is minted here rather than read back from the insert, so child rows
  * can reference their page without a round trip. The consequence is stated
  * where it happens (see flushPages): if a page row loses the
@@ -75,7 +94,14 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Db } from "../db/client.js";
-import { hreflang, links, pages, structuredData } from "../db/schema.js";
+import {
+  hreflang,
+  links,
+  pageResources,
+  pages,
+  resources,
+  structuredData,
+} from "../db/schema.js";
 import type { FetchResult } from "./fetch-page.js";
 import type { PageAnalysis } from "./parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
@@ -110,6 +136,15 @@ export interface PageWriterStats {
   hreflang: number;
   structuredData: number;
   /**
+   * Resource rows INSERTED — distinct URLs this crawl had not seen before.
+   * Excludes the rows the `(crawl_id, url)` conflict dropped, which is what
+   * makes the number "files discovered" rather than "references written"
+   * (`pages` is counted the same way, and for the same reason).
+   */
+  resources: number;
+  /** Page→resource edges written: one per reference, not per file. */
+  pageResources: number;
+  /**
    * `<link rel=alternate hreflang>` hrefs that would not resolve against
    * their page URL. `hreflang.target_url` is NOT NULL, so such a pair has no
    * row to be in — it is counted here instead of vanishing.
@@ -143,6 +178,8 @@ interface BufferedPage {
 type LinkRow = typeof links.$inferInsert;
 type HreflangRow = typeof hreflang.$inferInsert;
 type StructuredDataRow = typeof structuredData.$inferInsert;
+type ResourceRow = typeof resources.$inferInsert;
+type PageResourceRow = typeof pageResources.$inferInsert;
 
 export class PageWriter {
   private readonly batchSize: number;
@@ -152,12 +189,16 @@ export class PageWriter {
   private readonly linkBuffer: LinkRow[] = [];
   private readonly hreflangBuffer: HreflangRow[] = [];
   private readonly structuredDataBuffer: StructuredDataRow[] = [];
+  private readonly resourceBuffer: ResourceRow[] = [];
+  private readonly pageResourceBuffer: PageResourceRow[] = [];
 
   private readonly counts: PageWriterStats = {
     pages: 0,
     links: 0,
     hreflang: 0,
     structuredData: 0,
+    resources: 0,
+    pageResources: 0,
     hreflangUnresolved: 0,
   };
 
@@ -243,6 +284,33 @@ export class PageWriter {
         })),
         () => this.flushStructuredData(),
       );
+
+      // The analyzer already deduped the refs by resolved URL for THIS page,
+      // so the edges are unique per page by construction and the resource rows
+      // are unique per page before the table's own dedup ever sees them. Both
+      // buffers are pushed row by row like every other, so a gallery page with
+      // more assets than `batchSize` never holds them all.
+      await this.push(
+        this.resourceBuffer,
+        analysis.resourceRefs.map((ref) => ({
+          crawlId: this.crawlId,
+          url: ref.url,
+          kind: ref.kind,
+          // Every fetch column stays null: this crawl saw the reference and
+          // asked nobody anything about it. See the module header.
+        })),
+        () => this.flushResources(),
+      );
+
+      await this.push(
+        this.pageResourceBuffer,
+        analysis.resourceRefs.map((ref) => ({
+          crawlId: this.crawlId,
+          pageId,
+          resourceUrl: ref.url,
+        })),
+        () => this.flushPageResources(),
+      );
     }
 
     return pageId;
@@ -275,6 +343,12 @@ export class PageWriter {
       ["links", () => this.flushLinks()],
       ["hreflang", () => this.flushHreflang()],
       ["structured_data", () => this.flushStructuredData()],
+      // Resources before their edges, so a crash between the two leaves edges
+      // missing rather than edges pointing at files the table never learned
+      // about. Neither is a foreign key (see schema.ts) — this is about which
+      // half of the pair is the more useful survivor.
+      ["resources", () => this.flushResources()],
+      ["page_resources", () => this.flushPageResources()],
     ];
     const failed: string[] = [];
     const errors: unknown[] = [];
@@ -401,6 +475,40 @@ export class PageWriter {
       this.structuredDataBuffer,
       async (batch) => {
         await this.db.insert(structuredData).values(batch);
+        return batch.length;
+      },
+    );
+  }
+
+  /**
+   * The upsert. `on conflict do nothing` on `(crawl_id, url)` absorbs both
+   * shapes of duplicate: a URL already in the table from an earlier page or an
+   * earlier run, and two pages in the SAME batch referencing one file (which
+   * Postgres resolves within the statement — the `pages` insert has always
+   * relied on the same behaviour for redirect targets).
+   *
+   * The count is `returning`'s length, so it is files DISCOVERED. A conflict
+   * dropping a row is not a loss: the row it conflicted with says the same
+   * three things, and this crawl's own edge is written either way.
+   */
+  private async flushResources(): Promise<void> {
+    await this.drain("resources", "resources", this.resourceBuffer, async (batch) => {
+      const inserted = await this.db
+        .insert(resources)
+        .values(batch)
+        .onConflictDoNothing({ target: [resources.crawlId, resources.url] })
+        .returning({ url: resources.url });
+      return inserted.length;
+    });
+  }
+
+  private async flushPageResources(): Promise<void> {
+    await this.drain(
+      "page_resources",
+      "pageResources",
+      this.pageResourceBuffer,
+      async (batch) => {
+        await this.db.insert(pageResources).values(batch);
         return batch.length;
       },
     );

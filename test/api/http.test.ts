@@ -733,6 +733,55 @@ describe("domain allowlist", () => {
     expect(detail["findingCap"]).toBe(URL_FINDING_CAP);
   });
 
+  // THE OFF SWITCH, ROUND TRIP (P11-T4). `fetchResources` crosses four seams
+  // between the request and the answer — `parseStartCrawlInput`'s field table,
+  // `effectiveConfig`, the stored `config_jsonb` a resume reads back, and
+  // `configFetchResources` — and a break in any one of them is silent: the crawl
+  // runs, the pass runs or does not, and nothing says which was asked for.
+  // Asserted on the ROW as well as the detail, for the reason findingCap is: the
+  // row is what a resume and the crawl loop read (`parseStoredConfig`), and the
+  // detail is how the caller confirms their instruction took.
+  it("accepts fetchResources: false, stores it, and echoes it on the detail", async () => {
+    const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1, fetchResources: false });
+    expect(res.status).toBe(202);
+    const crawlId = String(res.body["crawlId"]);
+    const detail = await settle(crawlId);
+
+    const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    expect((rows[0]!.config as Record<string, unknown>)["fetchResources"]).toBe(false);
+    expect(detail["fetchResources"]).toBe(false);
+    // And the crawl really did ask about nothing: whatever its pages referenced
+    // is seen and unasked, which is the coverage block's own arithmetic.
+    const cov = detail["resources"] as Record<string, number>;
+    expect(cov["fetched"]).toBe(0);
+    expect(cov["failed"]).toBe(0);
+    expect(cov["skipped"]).toBe(cov["seen"]);
+  });
+
+  // ABSENT IS THE INTERESTING CASE, exactly as it is for findingCap: nobody
+  // chose, so the engine's default is what is reported — and `true` is a claim
+  // about what the crawl DID, so it must not be reported for a crawl that was
+  // started with the pass off.
+  it("stores no fetchResources key when nobody named one, and reports the default", async () => {
+    const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1 });
+    expect(res.status).toBe(202);
+    const crawlId = String(res.body["crawlId"]);
+    const detail = await settle(crawlId);
+    const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    expect((rows[0]!.config as Record<string, unknown>)["fetchResources"]).toBeUndefined();
+    expect(detail["fetchResources"]).toBe(true);
+  });
+
+  it("400s a fetchResources that is not a boolean", async () => {
+    for (const bad of ["false", 0, null]) {
+      const res = await call("POST", "/crawls", {
+        body: { siteUrl: `${site}/`, fetchResources: bad },
+      });
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(String(res.body["error"])).toContain("fetchResources");
+    }
+  });
+
   it("echoes a stated finding cap on the detail", async () => {
     const res = await startCrawl({ siteUrl: `${site}/`, maxPages: 1, findingCap: 25 });
     expect(res.status).toBe(202);

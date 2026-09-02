@@ -13,6 +13,7 @@ import { absorbedFixtures } from "./pages/absorbed.js";
 import { authoredFixtures } from "./pages/authored.js";
 import { authoredP3Fixtures } from "./pages/authored-p3.js";
 import { authoredP7Fixtures } from "./pages/authored-p7.js";
+import { authoredP11Fixtures } from "./pages/authored-p11.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -104,13 +105,20 @@ export interface Fixture {
  * Every fixture the site serves: the pages absorbed from badseo, the pages
  * authored in Phase 2 for the rules absorb left unclaimed, the Phase 3 pages
  * authored for the query rules, the Phase 5 pages authored for the render pass,
- * the Phase 7 page whose markup hides most of its own words, and the control.
+ * the Phase 7 page whose markup hides most of its own words, the Phase 11 pair
+ * whose resources rather than whose markup are broken, and the control.
  *
  * The render fixtures need a second HTTP origin to exist before the app serves
  * them — `/render/js-redirect-offsite` reads it on every request — so a caller
  * that starts this site must call `startOffsiteHost()` first. Nothing here
  * enforces that; the handler does, by throwing rather than serving a redirect
  * to nowhere (see test/fixtures/pages/render-p5.ts).
+ *
+ * A THIRD origin joined it in P11-T2: `startAssetHost()` (test/fixtures/
+ * assets.ts), the CDN the hub carries one image from, which the resource fetch
+ * pass has to open a queue for and read a robots.txt from. The hub reads it on
+ * every request and throws the same way. Both must be running before
+ * `startFixtureApp`.
  */
 export function allFixtures(): Fixture[] {
   return [
@@ -119,6 +127,11 @@ export function allFixtures(): Fixture[] {
     ...authoredP3Fixtures,
     ...renderFixtures,
     ...authoredP7Fixtures,
+    // P11: two pages whose markup is the control's and whose RESOURCES are the
+    // defect — an image the site does not serve, and one that weighs 120,000
+    // bytes. The first fixtures whose finding depends on a request the crawler
+    // made after the page was parsed.
+    ...authoredP11Fixtures,
     controlFixture,
   ];
 }

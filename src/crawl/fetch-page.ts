@@ -292,6 +292,16 @@ function isThrottle(fetchClass: FetchClass, statusCode: number): boolean {
 /**
  * Status/header classification, OpenSEO's table.
  *
+ * EXPORTED for the resource fetch pass (src/crawl/resources/fetch-resources.ts),
+ * which asks a server about an image the same way this asks about a page and
+ * must reach the same verdict about a 403, a `cf-mitigated` header or a 503 —
+ * a second copy of this table would be the fork hard rule 9 is about, and it
+ * would drift the first time a vendor added a header. That caller has no body
+ * to offer (it fetches HEAD), so it passes an empty snippet: a 503 it cannot
+ * check for challenge markers stays a `server_error`, which is the honest
+ * reading and the same one this function makes for a 503 whose body was
+ * undecodable.
+ *
  * CHANGED from the plan's starter table: `cf-mitigated` blocks on any value,
  * not only "challenge" — that matches OpenSEO, and Cloudflare has never
  * documented the value set, so equality would fail open on the next one.
@@ -301,7 +311,7 @@ function isThrottle(fetchClass: FetchClass, statusCode: number): boolean {
  * enough (and indistinguishable enough from a page *about* Cloudflare) that
  * matching markers there would misclassify real pages.
  */
-function classifyStatus(
+export function classifyStatus(
   status: number,
   headers: HeaderBag,
   bodySnippet: string,

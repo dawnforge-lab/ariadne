@@ -24,7 +24,9 @@ import { eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, issues, links, metrics, pages } from "../../src/db/schema.js";
+import {
+  crawls, issues, links, metrics, pageResources, pages, resources,
+} from "../../src/db/schema.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { CSV_VIEWS, CSV_VIEW_DEFS, csvRecord } from "../../src/api/csv.js";
 import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
@@ -129,6 +131,12 @@ const HOSTILE_TITLE = "=SUM(1+1)";
 const QUOTED_TITLE = 'He said "hi", then\nleft';
 /** An anchor text carrying the classic CSV-injection payload. */
 const HOSTILE_ANCHOR = `=cmd|' /C calc'!A0`;
+/**
+ * A `Cache-Control` a spreadsheet would execute. The header is the SERVER's
+ * text, so the resources view's cells are attacker-controlled exactly as a
+ * title is — a column of headers is not a column of safe values.
+ */
+const HOSTILE_CACHE_CONTROL = "@SUM(1+1)";
 /** How many filler links the CSV fixture carries, past the four real ones. */
 const FILLER_LINKS = 1200;
 
@@ -659,7 +667,7 @@ beforeAll(async () => {
     depth: 2, wordCount: null, fetchClass: "redirect",
     redirectUrl: `${SITE}/csv-end`, redirectUrlNormalised: `${SITE}/csv-end`,
   });
-  await seedPage(crawlF, {
+  const csvEnd = await seedPage(crawlF, {
     slug: "csv-end", pageType: "product", statusCode: 200, isIndexable: true, rendered: false,
     depth: 3, wordCount: 400, clickDepth: 2,
   });
@@ -700,6 +708,60 @@ beforeAll(async () => {
       crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-quoted`,
       targetPageId: null, anchor: `anchor ${i}`, rel: null, isInternal: true, position: 4 + i,
     })),
+  ]);
+
+  // ------------------------------------------------- the resource fixture
+  //
+  // Five files, one of every shape the surfaces have to tell apart: a file the
+  // pass weighed, a file the server said was gone, a file a cap never reached,
+  // a file robots.txt put out of reach, and a file whose own CACHE HEADER is
+  // hostile text (a server chooses that string, and it lands in a spreadsheet
+  // cell like any other). Between them they make `fetched + failed + skipped ==
+  // seen` non-trivial, put a row on each side of the `robotsDenied` split, and
+  // give `capped` something true to say.
+  await db.insert(resources).values([
+    {
+      crawlId: crawlF, url: `${SITE}/a.png`, kind: "image", fetchClass: "ok",
+      fetchReason: null, statusCode: 200, contentType: "image/png",
+      bytes: 120_000, bytesSource: "header", cacheControl: "public, max-age=600",
+      expires: null, fetchedAt: new Date(), fetchMs: 12,
+    },
+    {
+      crawlId: crawlF, url: `${SITE}/b.css`, kind: "css", fetchClass: "client_error",
+      fetchReason: null, statusCode: 404, contentType: "text/html",
+      bytes: null, bytesSource: null, cacheControl: null, expires: null,
+      fetchedAt: new Date(), fetchMs: 9,
+    },
+    {
+      // Seen, not asked — and the reason says which of the four silences it is.
+      crawlId: crawlF, url: `${SITE}/c.js`, kind: "js", fetchClass: null,
+      fetchReason: "resource-cap", statusCode: null, contentType: null,
+      bytes: null, bytesSource: null, cacheControl: null, expires: null,
+      fetchedAt: null, fetchMs: null,
+    },
+    {
+      crawlId: crawlF, url: "https://cdn.example/d.png", kind: "image",
+      fetchClass: "robots_denied",
+      fetchReason: "robots.txt unreachable (503): complete disallow",
+      statusCode: null, contentType: null, bytes: null, bytesSource: null,
+      cacheControl: null, expires: null, fetchedAt: new Date(), fetchMs: null,
+    },
+    {
+      crawlId: crawlF, url: `${SITE}/hostile.css`, kind: "css", fetchClass: "ok",
+      fetchReason: null, statusCode: 200, contentType: "text/css",
+      bytes: 4096, bytesSource: "counted", cacheControl: HOSTILE_CACHE_CONTROL,
+      expires: null, fetchedAt: new Date(), fetchMs: 30,
+    },
+  ]);
+  await db.insert(pageResources).values([
+    // The image two pages carry: one row in `resources`, two edges, and a
+    // `referencingPages` of 2 — the whole reason the tables are split.
+    { crawlId: crawlF, pageId: csvHome, resourceUrl: `${SITE}/a.png` },
+    { crawlId: crawlF, pageId: csvEnd, resourceUrl: `${SITE}/a.png` },
+    { crawlId: crawlF, pageId: csvHome, resourceUrl: `${SITE}/b.css` },
+    { crawlId: crawlF, pageId: csvHome, resourceUrl: `${SITE}/c.js` },
+    { crawlId: crawlF, pageId: csvHome, resourceUrl: "https://cdn.example/d.png" },
+    { crawlId: crawlF, pageId: csvHome, resourceUrl: `${SITE}/hostile.css` },
   ]);
 
   await seedIssue(crawlF, {
@@ -1422,6 +1484,82 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     expect(res.body["rulesRunAt"]).toBe(stamped.toISOString());
     await db.update(crawls).set({ rulesRunAt: null }).where(eq(crawls.id, crawlE));
   });
+
+  // THE RESOURCE COVERAGE BLOCK (P11-T4). It is the evidence CHECK-83 is
+  // answered from, so what it has to get right is the arithmetic AND the two
+  // splits a single "failed" number would hide.
+  it("counts the resource census off the database, partitioned exactly", async () => {
+    const res = await call(`/crawls/${crawlF}`);
+    expect(res.status).toBe(200);
+    expect(res.body["resources"]).toEqual({
+      seen: 5,
+      fetched: 2,
+      failed: 2,
+      skipped: 1,
+      // A subset of `failed`, on its own because an unreachable robots.txt is a
+      // complete disallow: this number looks the same whether a host forbade us
+      // or was merely down, and only each row's `fetchReason` says which.
+      robotsDenied: 1,
+      // One row carries `resource-cap`, so a cap really did stop the pass short.
+      capped: true,
+    });
+    // The partition, asserted rather than left to the four literals above: a
+    // count that drifted would otherwise only be wrong by a number nobody could
+    // check against anything.
+    const r = res.body["resources"] as Record<string, number>;
+    expect(r["fetched"]! + r["failed"]! + r["skipped"]!).toBe(r["seen"]);
+
+    const counted = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from resources where crawl_id = ${crawlF}`,
+    );
+    expect(r["seen"]).toBe(counted.rows[0]?.n ?? -1);
+  });
+
+  // ZERO IS A MEASUREMENT AND THE BLOCK IS NEVER ABSENT. A crawl written before
+  // migration 0013 answers five zeroes and `capped: false` — which is not "this
+  // site references no files", and `resources.not-recorded` is the finding that
+  // says so. A missing block would leave a consumer unable to tell the two apart
+  // at all.
+  it("answers the block on a crawl that holds no resource rows at all", async () => {
+    const res = await call(`/crawls/${crawlA}`);
+    expect(res.body["resources"]).toEqual({
+      seen: 0, fetched: 0, failed: 0, skipped: 0, robotsDenied: 0, capped: false,
+    });
+  });
+
+  // THE OFF SWITCH, ECHOED. `fetchResources` is resolved the way `findingCap`
+  // is: absent means the engine's default, which is true. Without the echo,
+  // `fetched: 0` on a crawl nobody asked about would be indistinguishable from a
+  // pass that ran and found nothing to weigh.
+  it("echoes whether the crawl asked about its files, resolving an absent key to true", async () => {
+    const dflt = await call(`/crawls/${crawlA}`);
+    expect(dflt.body["fetchResources"]).toBe(true);
+
+    const id = `crawl_query_res_off_${Date.now()}`;
+    try {
+      await seedCrawl(id, { config: { siteUrl: `${SITE}/`, fetchResources: false } });
+      const off = await call(`/crawls/${id}`);
+      expect(off.body["fetchResources"]).toBe(false);
+    } finally {
+      await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
+
+  // A stored value of the wrong SHAPE is a refusal, never a guess: `"false"` is
+  // truthy, so guessing would report "this crawl asked the site about its files"
+  // about a crawl that did not. The same ruling `configStringList` makes one
+  // field along, and the same one `parseStoredConfig` makes on a resume.
+  it("409s a stored fetchResources that is not a boolean rather than reading it as true", async () => {
+    const id = `crawl_query_res_bad_${Date.now()}`;
+    try {
+      await seedCrawl(id, { config: { siteUrl: `${SITE}/`, fetchResources: "false" } });
+      const res = await call(`/crawls/${id}`);
+      expect(res.status).toBe(409);
+      expect(String(res.body["error"])).toContain("fetchResources");
+    } finally {
+      await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
 });
 
 /**
@@ -1744,7 +1882,7 @@ describe("GET /crawls/:id/export", () => {
 });
 
 /**
- * The CSV half of the export surface: six views, streamed as `text/csv`.
+ * The CSV half of the export surface: seven views, streamed as `text/csv`.
  *
  * These are the files the dashboard's "Bulk export" block hands a human, and
  * the properties under test are the ones a human's spreadsheet will decide:
@@ -1884,6 +2022,44 @@ describe("GET /crawls/:id/export?format=csv", () => {
     ]);
   });
 
+  // ONE ROW PER FILE, and the columns that stop an empty cell being read as a
+  // verdict. This is the view an audit opens to answer "what is this site made
+  // of", and every one of its four unfetched spellings means something
+  // different from "broken".
+  it("writes one row per referenced file, with the class that makes an empty status readable", async () => {
+    const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=resources`);
+    expect(res.records[0]).toEqual([
+      "url", "kind", "fetchClass", "status", "bytes", "bytesSource",
+      "contentType", "cacheControl", "fetchReason", "referencingPages",
+    ]);
+
+    // A file the pass weighed, carried by TWO pages and appearing ONCE: the
+    // whole reason `resources` and `page_resources` are separate tables.
+    expect(rowWhere(res, "url", `${SITE}/a.png`)).toEqual([
+      `${SITE}/a.png`, "image", "ok", "200", "120000", "header",
+      "image/png", "public, max-age=600", "", "2",
+    ]);
+    // The server answered, and what it said was 404. Empty bytes here is "a
+    // file we could not have has no weight to report".
+    expect(rowWhere(res, "url", `${SITE}/b.css`)).toEqual([
+      `${SITE}/b.css`, "css", "client_error", "404", "", "", "text/html", "", "", "1",
+    ]);
+    // SEEN, NOT ASKED. Empty class, empty status, and a reason naming the cap —
+    // the row a reader would otherwise count as a file that is fine.
+    expect(rowWhere(res, "url", `${SITE}/c.js`)).toEqual([
+      `${SITE}/c.js`, "js", "", "", "", "", "", "", "resource-cap", "1",
+    ]);
+    // The robots case, with the sentence that separates "they said no" from
+    // "we could not ask" — which the crawl_status count deliberately does not.
+    expect(rowWhere(res, "url", "https://cdn.example/d.png")).toEqual([
+      "https://cdn.example/d.png", "image", "robots_denied", "", "", "", "", "",
+      "robots.txt unreachable (503): complete disallow", "1",
+    ]);
+    // `counted` beside `header` on the row above: a measurement and a claim,
+    // told apart in the file rather than added together in a report.
+    expect(rowWhere(res, "url", `${SITE}/hostile.css`)[5]).toBe("counted");
+  });
+
   // THE GUARD IS THE POINT OF THE WHOLE FILE. A crawled title is attacker text
   // and this file opens in Excel at a client's desk.
   it("never lets a crawled string become a formula", async () => {
@@ -1897,6 +2073,14 @@ describe("GET /crawls/:id/export?format=csv", () => {
 
     const anchors = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
     expect(rowWhere(anchors, "target", `${SITE}/csv-end`)[2]).toBe(`'${HOSTILE_ANCHOR}`);
+
+    // And on the newest view, whose hostile text arrives in a RESPONSE HEADER
+    // rather than in a page's body — the guard is uniform because the inventory
+    // of "which columns hold attacker text" is the thing that goes stale.
+    const files = await callCsv(`/crawls/${crawlF}/export?format=csv&view=resources`);
+    expect(rowWhere(files, "url", `${SITE}/hostile.css`)[7]).toBe(`'${HOSTILE_CACHE_CONTROL}`);
+    expect(files.text).toContain(`,'${HOSTILE_CACHE_CONTROL}`);
+    expect(files.text).not.toContain(`,${HOSTILE_CACHE_CONTROL}`);
   });
 
   it("quotes a cell holding a comma, a quote or a newline, and stays parseable", async () => {
@@ -1932,6 +2116,22 @@ describe("GET /crawls/:id/export?format=csv", () => {
     );
     const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
     expect(rows(internal)).toHaveLength(pageCount.rows[0]?.n ?? -1);
+
+    // The resources view against BOTH of its sources: one row per `resources`
+    // row (never per edge — six edges, five files), and the referencing counts
+    // summing to the edge table.
+    const fileCount = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from resources where crawl_id = ${crawlF}`,
+    );
+    const edgeCount = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from page_resources where crawl_id = ${crawlF}`,
+    );
+    const files = await callCsv(`/crawls/${crawlF}/export?format=csv&view=resources`);
+    expect(rows(files)).toHaveLength(fileCount.rows[0]?.n ?? -1);
+    expect(rows(files)).toHaveLength(5);
+    expect(
+      column(files, "referencingPages").reduce((sum, n) => sum + Number(n), 0),
+    ).toBe(edgeCount.rows[0]?.n ?? -1);
 
     // No duplicates across the batch boundaries either: 1,204 links is three
     // batches, and a keyset that compared on the wrong column would repeat a
@@ -2668,9 +2868,17 @@ describe("nothing inside the process reaches a caller", () => {
       `/compare/urls?baseCrawlId=${cmpBase}&headCrawlId=${cmpHead}&ruleId=title.missing&set=moved`,
     );
     await record(`/crawls/${crawlF}/export?format=csv&view=everything`);
+    // Phase 11's answers, honouring this list's grow-with-the-surface rule. The
+    // crawl detail is here because it gained a block built from `fetch_reason`
+    // strings — a URL policy's refusal, a robots note, the fetch layer's own
+    // description of a timeout — and those are the sentences most likely to
+    // carry a hostname or a path out of the process (`ruleset-mismatch`'s
+    // citation of a gate document is the precedent this sweep caught).
+    await record(`/crawls/${crawlF}`);
+    await record(`/crawls/${crawlF}/export?format=csv&view=resources&ruleId=links.orphan`);
 
     // Not vacuous: the sweep only means something if the answers are real.
-    expect(answers).toHaveLength(14);
+    expect(answers).toHaveLength(16);
     for (const [path, text] of answers) {
       expect(text.length, `${path} answered nothing`).toBeGreaterThan(2);
       expect(internals(text), `${path} leaked`).toEqual([]);
@@ -2678,7 +2886,9 @@ describe("nothing inside the process reaches a caller", () => {
   });
 
   it("holds for the CSV bytes, which are a response like any other", async () => {
-    for (const view of ["issues", "internal_urls", "anchor_texts", "redirects"] as const) {
+    for (const view of [
+      "issues", "internal_urls", "anchor_texts", "redirects", "resources",
+    ] as const) {
       const res = await callCsv(`/crawls/${crawlF}/export?format=csv&view=${view}`);
       expect(res.status).toBe(200);
       expect(res.records.length, `${view} exported nothing`).toBeGreaterThan(1);

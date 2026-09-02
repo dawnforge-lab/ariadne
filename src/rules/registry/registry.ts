@@ -23,9 +23,17 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.8.0: Phase 11. Five verdicts a page or a site could not receive before —
+// `resources.broken`, `images.oversized`, `images.legacy-format`,
+// `resources.uncached` and the `resources.not-recorded` marker — plus the
+// `page.weight` table. They read `resources` and `page_resources`, which
+// migration 0013 created and the resource fetch pass fills, so a crawl re-judged
+// at 0.8.0 can gain findings it did not have and a crawl from before 0013 gains
+// the marker saying why it cannot.
+//
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.7.0";
+export const RULESET_VERSION = "0.8.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

@@ -71,6 +71,73 @@ export function cohortFilter(crawlId: string): SQL {
 export const COHORT_PAGE_TYPE: SQL = sql`coalesce(p.page_type, ${UNTYPED})`;
 
 /**
+ * The eight numbers of a distribution over one column, prefixed so several of
+ * them can be selected side by side in one statement.
+ *
+ * `count` is `count(<column>)`, NOT `count(*)`: it is how many pages carry a
+ * value for this measure. The two differ when the analyzer wrote no measurement
+ * for a page, and the difference matters — `percentile_cont` and `avg` skip
+ * nulls silently, so a `count(*)` beside them would claim a population the
+ * statistics were not computed over. A page with no word count is absent from
+ * the word-count column and present in the text-ratio one; each column says how
+ * many pages it actually measured.
+ *
+ * Rounding is IN SQL and per measure, because measures live on different
+ * scales. Word counts are quotable at two decimal places; a text ratio is a
+ * fraction between 0 and 1, where two decimal places would collapse distinct
+ * templates into one number, so it keeps four; a byte count is an integer and
+ * takes none.
+ *
+ * IT LIVES HERE, beside the cohort, rather than in the file that first needed
+ * it: `content.metrics-by-type` wrote it, `page.weight` (P11-T3) is the second
+ * caller, and a distribution copied into a second metric file is a second place
+ * for the null-handling above to be got wrong. Same reason `cohortFilter` and
+ * `UNTYPED` are here.
+ */
+export function statsAggregates(column: SQL, prefix: string, decimals: number): SQL {
+  const as = (name: string): SQL => sql.raw(`${prefix}_${name}`);
+  const places = sql.raw(String(decimals));
+  const rounded = (expr: SQL): SQL => sql`round((${expr})::numeric, ${places})::float8`;
+  const pct = (q: string): SQL =>
+    rounded(sql`percentile_cont(${sql.raw(q)}) within group (order by ${column})`);
+  return sql`
+    count(${column})::int as ${as("count")},
+    ${rounded(sql`min(${column})`)} as ${as("min")},
+    ${pct("0.25")} as ${as("p25")},
+    ${pct("0.5")} as ${as("median")},
+    ${pct("0.75")} as ${as("p75")},
+    ${pct("0.95")} as ${as("p95")},
+    ${rounded(sql`max(${column})`)} as ${as("max")},
+    ${rounded(sql`avg(${column})`)} as ${as("mean")}`;
+}
+
+/**
+ * The columns of one prefixed distribution, read back and type-checked.
+ *
+ * Indexed by name rather than destructured because a query selects several of
+ * these shapes into one row under different prefixes; the row types that carry
+ * them are index signatures for the same reason.
+ */
+export function readStats(
+  row: Record<string, unknown>,
+  prefix: string,
+  ruleId: string,
+): Record<string, number | null> {
+  const read = (name: string): number | null =>
+    nullableNum(row[`${prefix}_${name}`], `${prefix}_${name}`, ruleId);
+  return {
+    count: num(row[`${prefix}_count`], `${prefix}_count`, ruleId),
+    min: read("min"),
+    p25: read("p25"),
+    median: read("median"),
+    p75: read("p75"),
+    p95: read("p95"),
+    max: read("max"),
+    mean: read("mean"),
+  };
+}
+
+/**
  * A number from a SQL row, checked rather than cast.
  *
  * The casts in the metric queries are what make these columns `int4`/`float8`

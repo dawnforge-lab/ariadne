@@ -161,9 +161,12 @@ describe("the view definitions", () => {
       CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
     ).sql;
 
-  it("defines exactly the six views the surface advertises", () => {
+  it("defines exactly the seven views the surface advertises", () => {
     expect(Object.keys(CSV_VIEW_DEFS).sort()).toEqual([...CSV_VIEWS].sort());
-    expect(CSV_VIEWS).toHaveLength(6);
+    // Seven since P11-T4 added `resources`. The count moves with the vocabulary
+    // deliberately: a view defined and never advertised, or advertised and never
+    // defined, fails the line above, and a view SILENTLY DELETED fails this one.
+    expect(CSV_VIEWS).toHaveLength(7);
   });
 
   it("gives every view a header, a keyset and a start cursor of matching arity", () => {

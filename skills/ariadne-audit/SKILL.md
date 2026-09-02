@@ -2,7 +2,7 @@
 name: ariadne-audit
 description: >
   Run a full SEO & GEO audit against an Ariadne crawl: analytics context from GSC,
-  GA4 and Ahrefs, then the 82-check checklist, with every crawl-derived check answered
+  GA4 and Ahrefs, then the 83-check checklist, with every crawl-derived check answered
   by quoting the engine and every judgement check answered by the agent. Produces a
   findings file the report and action-plan skills consume. Use this skill when the
   user says: "run the audit", "audit this site", "audit the crawl", "run the
@@ -63,7 +63,8 @@ because GA4 was not connected is an audit that mis-prioritised everything downst
 ```
 Phase 0  Analytics context      GSC + GA4 + Ahrefs        CHECK-71 … CHECK-81
 Phase 1  The crawl              ariadne-crawl             (no checks)
-Phase 2  Engine-answered checks issues_list / metrics_get CHECK-01 … CHECK-46
+Phase 2  Engine-answered checks issues_list / metrics_get CHECK-83 first, then
+                                                          CHECK-01 … CHECK-46
 Phase 3  Agent checks           browser + judgement       CHECK-38/41/42, 47 … 70
 Phase 4  Findings assembly      the findings file         all of them
 ```
@@ -352,6 +353,7 @@ Follow the checklist's own sections — they group the calls naturally:
 
 | Section | Checks | Mostly answered by |
 |---------|--------|--------------------|
+| Engine Coverage | 83 | `crawl_status` (incl. its `resources` block) + `site.health` + the NOT MEASURED markers — **answer this one FIRST** |
 | Pre-Crawl | 01, 02 | render diff rules + `render.coverage` |
 | 1. Crawlability & Robots | 03-05 | robots rules + `robots_get`; browser for pattern gaps |
 | 2. Sitemaps | 06-09 | sitemap rules + `sitemap.structure` |
@@ -373,12 +375,30 @@ Record those as NOT MEASURED in `notes` — never substitute a nearby number:
 - H1 ↔ title **alignment** (CHECK-37) — the engine stores each page's first H1 text
   and compares headings only to each other, so whether a heading matches its title is
   still a sampled browser reading;
-- image weight and format (CHECK-49); caching, compression and protocol (CHECK-50);
+- image DIMENSIONS as rendered (CHECK-49) — the resource pass weighs every image and
+  records its content type, so weight and format ARE measured now (see below), but
+  nothing decodes a file, so whether one is over-compressed or larger than the box it
+  is displayed in is still a browser reading; likewise responsive `srcset` sets;
+- compression and protocol (CHECK-50) — caching IS measured for static files
+  (`resources.uncached`), from `Cache-Control` and `Expires` only, and the HTML
+  documents' own caching headers are still not stored;
 - Core Web Vitals (CHECK-47) — the engine measures response time and nothing else;
 - GSC-only orphans (CHECK-32, CHECK-33b) — by definition outside a crawl.
 
-**Four things a previous audit recorded as NOT MEASURED and the engine now measures.**
-An audit that copies an older findings file forward will under-report all four:
+**Five things a previous audit recorded as NOT MEASURED and the engine now measures.**
+An audit that copies an older findings file forward will under-report all five:
+
+- **The files each page points at** (CHECK-48, CHECK-49, CHECK-50, CHECK-51). Since
+  Phase 11 the crawl asks the site about every image, stylesheet and script its served
+  HTML declares — HEAD first, metadata only — so `resources.broken`,
+  `images.oversized`, `images.legacy-format`, `resources.uncached` and the
+  `page.weight` metric all have real numbers behind them. **Read
+  `crawl_status`'s `resources` block before quoting or not quoting any of them**
+  (CHECK-83): on a crawl started with `fetchResources: false`, or one written before
+  the tables existed, every one of those rules is silent because nothing was measured,
+  and `resources.not-recorded` (info) is the marker for the second case. What stays
+  unmeasured is stated at each check: no image is decoded, only the SERVED HTML's
+  references are seen, and fonts, media and favicons are out of scope.
 
 - **Total redirect inlinks** (CHECK-10). `redirect.volume`'s site row carries
   `redirectInlinks` beside `redirectPages`: the number of internal LINKS whose target
@@ -661,7 +681,7 @@ broken there.
   },
   "checklist": {
     "path": "skills/ariadne-audit/checklist.md",
-    "checksTotal": 82
+    "checksTotal": 83
   },
   "coverage": { "pass": 31, "fail": 24, "skip": 12, "agent": 15 },
   "checks": [
@@ -744,7 +764,10 @@ broken there.
 ### Field rules
 
 - **`checks` carries every check in the checklist, exactly once.** A check with no
-  entry is indistinguishable from a check nobody ran. 82 entries, always.
+  entry is indistinguishable from a check nobody ran. **83 entries** as the checklist
+  stands (Phase 11 added CHECK-83) — and the authority is the checklist's own `###`
+  headings, not this sentence: count them rather than trusting a number in a document
+  the file it describes can outgrow.
 - **`verdict`** is one of `PASS`, `FAIL`, `SKIP`, `AGENT`. The checklist's six
   statuses map onto them (see its Status Definitions table): WARN is a `FAIL` at a
   lower `severity`, N/A is a `SKIP` whose notes say why it does not apply, MANUAL is
