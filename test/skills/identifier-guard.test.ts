@@ -1,4 +1,16 @@
 /**
+ * TWO GUARDS OVER DOCUMENTATION NOTHING ELSE READS.
+ *
+ * The first (`the skills name only identifiers the engine has`) checks that
+ * `skills/**` names identifiers the engine still has. The second (`the surface
+ * document cites the test it means`, at the bottom of this file) checks that
+ * `docs/talos-surface.md`'s `file:line` citations name the test whose title the
+ * document quotes. They share this file because they are one discipline read
+ * twice: a document nothing executes drifts silently, so something has to read
+ * it.
+ *
+ * ---
+ *
  * THE SKILLS CANNOT DRIFT FROM THE ENGINE SILENTLY.
  *
  * `skills/**` is documentation an agent EXECUTES: it names rule ids, MCP tools,
@@ -83,7 +95,7 @@
  * network. `buildRegistry()` is pure construction — it registers rule objects
  * and validates their copy — so the whole guard runs on `npm test` anywhere.
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -600,6 +612,13 @@ describe("the skills name only identifiers the engine has", () => {
   // rules are markers" is a judgement about intent that no naming convention
   // settles (`host.probe-skipped` reports a crawl OPTION, not missing data, and
   // is on the list for the same reason as the rest — its silence is not a pass).
+  //
+  // SCOPE, stated because the list being hand-written has a second consequence
+  // (P11-T4, M-6): a SEVENTH marker is not dragged into anything by adding it to
+  // the registry. It has to be written into this list to be checked at all, AND
+  // into CHECK-83's own NOT MEASURED family — which is likewise six ids typed
+  // out, derived from no registry query. Nothing here notices a marker that is
+  // in neither. Adding a marker is therefore three edits, not one.
   it("every NOT MEASURED marker is named in the checklist entry of each check it claims", () => {
     const MARKERS: Record<string, string> = {
       "content.thin-skipped": "the page the corrected thin-content floor cannot judge",
@@ -718,5 +737,380 @@ describe("the skills name only identifiers the engine has", () => {
     // one more than the highest id: CHECK-33b is a check in its own right.)
     expect(CHECK_IDS.size).toBe(83);
     expect(TOOL_VOCABULARY.size).toBe(TOOL_NAMES.length + METRIC_SCOPES.length);
+  });
+});
+
+// ============================================================================
+// THE SECOND GUARD: A CITATION MUST NAME THE TEST IT MEANS
+// ============================================================================
+
+/**
+ * `docs/talos-surface.md` is the contract Talos codes against, and its whole
+ * claim to be trusted is the line under its own heading: *"Each section names
+ * the tests that hold it. A shape claim in this file with no test beside it is
+ * a claim nobody is defending."* Eighty-five `file:line` citations carry that
+ * weight. Nothing executed them, so they rotted: every commit that inserts a
+ * test above one moves it, silently, and the document keeps pointing
+ * confidently at whatever now occupies the line.
+ *
+ * ## Why line-resolution is not the property to check
+ *
+ * P11-T4 repaired 46 stale citations by hand and re-reviewed them twice. Four
+ * survived — and then a fifth was found by a controller checking a sibling.
+ * Every one of them *resolved*: the file existed, the line existed, real test
+ * code sat on it. One landed on the closing lines of an `issues_list` cursor
+ * walk while the sentence beside it described a description pin. A checker that
+ * asks "does this line exist" passes all five, because existing is the one
+ * property a wrong line number also has.
+ *
+ * ## The property this checks instead
+ *
+ * A citation must name a TEST, and the document must say which test, in the
+ * test's own words:
+ *
+ *  1. **Anchored.** The cited line is the opening line of an `it` / `test` /
+ *     `describe` call. A citation is then the identity of a named test rather
+ *     than a byte offset into a file. This costs precision — a pin that meant
+ *     one assertion deep inside a long test now names the whole test — and that
+ *     is the trade: line-granular precision is exactly what rotted, and a
+ *     reader who lands on a title can tell in one second whether they are in
+ *     the right place.
+ *  2. **Attested.** Immediately after the citation the document carries a
+ *     VERBATIM fragment of that test's title in double quotes (`…` elides).
+ *     Verbatim and case-sensitive: no stemming, no synonyms, no prose matching.
+ *  3. **Identifying.** That fragment matches exactly ONE title in the cited
+ *     file. A fragment so generic that two tests answer to it is not a
+ *     citation, it is a hint.
+ *
+ * (2) and (3) are what catch the T4 failure mode. Moving a citation to another
+ * real test now fails: the fragment is not in the new test's title (2), and if
+ * it somehow were, it would be in two titles and fail (3). The fragment cannot
+ * be repaired without retyping the other test's words, which puts the wrongness
+ * in the sentence where a reader sees it instead of in a number where nobody
+ * does.
+ *
+ * ## What it still cannot do, stated rather than hidden
+ *
+ * **It cannot read the sentence.** It checks that the document and the test
+ * agree about WHICH TEST IS BEING CITED; it cannot check that the test proves
+ * the claim in the prose. A citation with a correctly quoted title beside a
+ * sentence that test does not support passes here, and stays human review.
+ * What it removes is the whole class of failure where the document is honest
+ * and the number is wrong — the class that survived two dedicated fix passes.
+ *
+ * ## Scope: this document only
+ *
+ * `docs/gates/*.md` and the plan documents carry citations too and are
+ * DELIBERATELY EXCLUDED. A gate document is a historical record: it describes
+ * the tree at the commit it was written against, and it is never edited
+ * afterwards. Its citations are correct about a past tree, and dragging their
+ * line numbers forward to today's would falsify the record this repository
+ * keeps its evidence in. `talos-surface.md` is the opposite kind of document —
+ * a living contract, rewritten every phase, read by somebody about to code
+ * against it.
+ */
+
+const SURFACE_DOC = join(ROOT, "docs/talos-surface.md");
+
+interface Block {
+  line: number;
+  kind: "it" | "test" | "describe";
+  title: string;
+  indent: number;
+}
+
+/** `it("…"`, `test.skip('…'`, `describe(\`…\`` — with the title's own text. */
+const BLOCK_OPENER = /^(\s*)(it|test|describe)(?:\.\w+)?\(\s*(["'`])/;
+
+/**
+ * Every test declaration in one file, with the title it declares.
+ *
+ * A title that does not close on its own line is recorded with an EMPTY title
+ * rather than skipped, so a citation to it fails the attestation loudly instead
+ * of quietly finding no anchor at all.
+ */
+function blocksOf(file: string): Block[] {
+  const out: Block[] = [];
+  readFileSync(file, "utf8")
+    .split("\n")
+    .forEach((text, index) => {
+      const opener = BLOCK_OPENER.exec(text);
+      if (opener === null) return;
+      const quote = opener[3]!;
+      let title = "";
+      let closed = false;
+      for (let i = opener[0].length; i < text.length; i += 1) {
+        const ch = text[i]!;
+        if (ch === "\\") {
+          title += text[i + 1] ?? "";
+          i += 1;
+          continue;
+        }
+        if (ch === quote) {
+          closed = true;
+          break;
+        }
+        title += ch;
+      }
+      out.push({
+        line: index + 1,
+        kind: opener[2] as Block["kind"],
+        title: closed ? title : "",
+        indent: opener[1]!.length,
+      });
+    });
+  return out;
+}
+
+const BLOCKS = new Map<string, Block[]>();
+
+function blocksFor(file: string): Block[] {
+  const cached = BLOCKS.get(file);
+  if (cached !== undefined) return cached;
+  const blocks = blocksOf(join(ROOT, file));
+  BLOCKS.set(file, blocks);
+  return blocks;
+}
+
+/**
+ * The tests a `describe` holds, by indentation: everything under it until a
+ * declaration at its own indentation or shallower. Nested `describe`s are not
+ * counted as tests; the `it`s inside them are.
+ */
+function testsUnder(blocks: readonly Block[], describeLine: number): number {
+  const start = blocks.findIndex((block) => block.line === describeLine);
+  const self = blocks[start]!;
+  let count = 0;
+  for (let i = start + 1; i < blocks.length; i += 1) {
+    const block = blocks[i]!;
+    if (block.indent <= self.indent) break;
+    if (block.kind !== "describe") count += 1;
+  }
+  return count;
+}
+
+/**
+ * One space for any run of whitespace.
+ *
+ * The document is wrapped at 80 columns and a quoted title wraps with it, so a
+ * fragment carries whatever line break fell inside it. Verbatim is a claim
+ * about the WORDS; making it a claim about the wrapping too would tax the
+ * writer for a newline neither file chose.
+ */
+function flat(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** The pieces of an attestation: `a … b` is "a", then "b", in that order. */
+function piecesOf(fragment: string): string[] {
+  return fragment
+    .split(/\s*(?:…|\.\.\.)\s*/)
+    .map(flat)
+    .filter((piece) => piece !== "");
+}
+
+/** Does `fragment` read out of `title` verbatim, in order? Case-sensitive. */
+function attests(fragment: string, title: string): boolean {
+  const flattened = flat(title);
+  let at = 0;
+  for (const piece of piecesOf(fragment)) {
+    const found = flattened.indexOf(piece, at);
+    if (found === -1) return false;
+    at = found + piece.length;
+  }
+  return true;
+}
+
+/** How much of the title the fragment actually quotes. Short is not identifying. */
+function attestedLength(fragment: string): number {
+  return piecesOf(fragment).reduce((sum, piece) => sum + piece.length, 0);
+}
+
+/** A fragment shorter than this could match half the file by accident. */
+const MIN_ATTESTATION = 16;
+
+interface Citation {
+  /** Line in the document, for the failure message. */
+  docLine: number;
+  file: string;
+  /** Absent for a bare file reference (`test/api/csv.test.ts` with no line). */
+  line: number | null;
+  /** The quoted title fragment that follows, if the document carries one. */
+  fragment: string | null;
+  /** An `(N tests …)` claim that follows, if the document makes one. */
+  claimedTests: number | null;
+  /** Was the citation written as a code span? A bare one has no readable form. */
+  spanned: boolean;
+}
+
+/** Whitespace that may wrap a line but never crosses a blank one. */
+const GAP = "(?:[ \\t]|\\n(?!\\n))*";
+
+/**
+ * Every reference to a test file in the surface document.
+ *
+ * Read out of the raw text rather than out of code spans, so a citation that
+ * FORGOT its backticks is found and refused rather than invisible.
+ */
+function citationsOf(text: string): Citation[] {
+  const out: Citation[] = [];
+  for (const match of text.matchAll(/(test\/[A-Za-z0-9/_.-]+\.ts)(?::(\d+))?/g)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const rest = text.slice(end);
+    // ADJACENT, not merely "somewhere after": the whitespace between the
+    // citation and its attestation may wrap a line but may never cross a blank
+    // one, so a quotation in the NEXT PARAGRAPH cannot be read as this
+    // citation's attestation.
+    const attestation = new RegExp(`^\`?${GAP}\\(?${GAP}"([^"]+)"`).exec(rest);
+    const afterAttestation = rest.slice(attestation?.[0].length ?? 0);
+    const claim = new RegExp(`^\`?${GAP}\\((\\d+) (?:unit )?tests?\\b`).exec(afterAttestation);
+    out.push({
+      docLine: text.slice(0, start).split("\n").length,
+      file: match[1]!,
+      line: match[2] === undefined ? null : Number(match[2]),
+      fragment: attestation?.[1] ?? null,
+      claimedTests: claim === null ? null : Number(claim[1]!),
+      spanned: text[start - 1] === "`" && text[end] === "`",
+    });
+  }
+  return out;
+}
+
+const CITATIONS = citationsOf(readFileSync(SURFACE_DOC, "utf8"));
+
+/** `docs/talos-surface.md:249 → test/api/query.test.ts:1378` — where to go. */
+function where(citation: Citation): string {
+  const target = citation.line === null ? citation.file : `${citation.file}:${citation.line}`;
+  return `docs/talos-surface.md:${citation.docLine} → ${target}`;
+}
+
+/** The block the citation's line opens, or null if the line opens none. */
+function anchorOf(citation: Citation): Block | null {
+  if (citation.line === null) return null;
+  return blocksFor(citation.file).find((block) => block.line === citation.line) ?? null;
+}
+
+describe("the surface document cites the test it means", () => {
+  it("names a test file that exists, in a code span the guard can read", () => {
+    const broken: string[] = [];
+    for (const citation of CITATIONS) {
+      if (!existsSync(join(ROOT, citation.file))) {
+        broken.push(`${where(citation)} — no such file`);
+        continue;
+      }
+      if (citation.line !== null && !citation.spanned) {
+        broken.push(`${where(citation)} — a citation must be written as \`code\``);
+      }
+    }
+    expect(broken).toEqual([]);
+  });
+
+  it("anchors every citation to a test declaration, not to a line number", () => {
+    const broken: string[] = [];
+    for (const citation of CITATIONS) {
+      if (citation.line === null || !existsSync(join(ROOT, citation.file))) continue;
+      const blocks = blocksFor(citation.file);
+      if (anchorOf(citation) !== null) continue;
+      // Say where the enclosing test starts: that is almost always the fix.
+      const enclosing = [...blocks].reverse().find((block) => block.line <= citation.line!);
+      broken.push(
+        `${where(citation)} — that line opens no it()/describe()` +
+          (enclosing === undefined
+            ? ""
+            : `; the declaration above it is :${enclosing.line} "${enclosing.title}"`),
+      );
+    }
+    expect(
+      broken,
+      "a line number is not an identity — cite the it()/describe() line, whose title a reader can check",
+    ).toEqual([]);
+  });
+
+  it("attests every citation with a verbatim fragment of that test's own title", () => {
+    const broken: string[] = [];
+    for (const citation of CITATIONS) {
+      const anchor = anchorOf(citation);
+      if (anchor === null) continue;
+      if (citation.fragment === null) {
+        broken.push(`${where(citation)} — no attestation; the title is "${anchor.title}"`);
+        continue;
+      }
+      if (!attests(citation.fragment, anchor.title)) {
+        // Where DOES it read? Almost always the citation, not the fragment, is
+        // the thing that moved — so name the line that would make it true.
+        const elsewhere = blocksFor(citation.file).filter((block) =>
+          attests(citation.fragment!, block.title),
+        );
+        broken.push(
+          `${where(citation)} — "${citation.fragment}" is not in "${anchor.title}"` +
+            (elsewhere.length === 1 ? `; it reads out of :${elsewhere[0]!.line}` : ""),
+        );
+        continue;
+      }
+      if (attestedLength(citation.fragment) < MIN_ATTESTATION) {
+        broken.push(
+          `${where(citation)} — "${citation.fragment}" quotes ` +
+            `${attestedLength(citation.fragment)} characters, under the ${MIN_ATTESTATION} minimum`,
+        );
+      }
+    }
+    expect(
+      broken,
+      "the document must carry the cited test's own words, so moving the citation breaks the sentence",
+    ).toEqual([]);
+  });
+
+  it("quotes a fragment that identifies exactly one test in the file", () => {
+    const broken: string[] = [];
+    for (const citation of CITATIONS) {
+      const anchor = anchorOf(citation);
+      if (anchor === null || citation.fragment === null) continue;
+      const matches = blocksFor(citation.file).filter((block) =>
+        attests(citation.fragment!, block.title),
+      );
+      if (matches.length > 1) {
+        broken.push(
+          `${where(citation)} — "${citation.fragment}" also reads out of ` +
+            matches
+              .filter((block) => block.line !== anchor.line)
+              .map((block) => `:${block.line}`)
+              .join(", "),
+        );
+      }
+    }
+    expect(
+      broken,
+      "a fragment two tests answer to cannot say which one moved — quote more of the title",
+    ).toEqual([]);
+  });
+
+  it("counts the tests it claims a file or a block holds", () => {
+    const broken: string[] = [];
+    for (const citation of CITATIONS) {
+      if (citation.claimedTests === null) continue;
+      const blocks = blocksFor(citation.file);
+      const anchor = anchorOf(citation);
+      const actual =
+        citation.line === null
+          ? blocks.filter((block) => block.kind !== "describe").length
+          : anchor !== null && anchor.kind === "describe"
+            ? testsUnder(blocks, anchor.line)
+            : null;
+      if (actual === null) {
+        broken.push(`${where(citation)} — a test count belongs on a file or a describe`);
+      } else if (actual !== citation.claimedTests) {
+        broken.push(`${where(citation)} — claims ${citation.claimedTests} tests, holds ${actual}`);
+      }
+    }
+    expect(broken).toEqual([]);
+  });
+
+  it("reads something: the citation extraction is not silently empty", () => {
+    // The same insurance the guard above carries: a regex that stopped matching
+    // would turn every assertion in this block green.
+    expect(CITATIONS.length).toBeGreaterThan(60);
+    expect(CITATIONS.filter((citation) => citation.line !== null).length).toBeGreaterThan(60);
+    expect(blocksFor("test/api/query.test.ts").length).toBeGreaterThan(80);
   });
 });
