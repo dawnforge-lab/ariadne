@@ -266,8 +266,10 @@ What the fields mean when you are waiting:
   HTML references; `fetched` is the files a server answered about; `failed` is the
   files it could not answer for — a 4xx, a request that failed, a URL our policy
   refused, a file robots.txt put out of reach — and `skipped` is SEEN BUT NOT ASKED.
-  `fetched + failed + skipped = seen`, always. `capped: true` means a per-crawl
-  budget stopped the pass short. `robotsDenied` and `robotsUnreachable` are two
+  `fetched + failed + skipped = seen`, always. `capped: true` means a resource
+  budget stopped the pass short — those budgets are per RUN, not per crawl, so a
+  resume re-grants them (see `crawl_resume`). `robotsDenied` and
+  `robotsUnreachable` are two
   subsets of `failed` and are not part of that sum: `robotsDenied` is "they said
   no" — the host served its robots.txt and it forbids us — while
   `robotsUnreachable` is "we could not ask" — the host answered 5xx, timed out or

@@ -643,8 +643,10 @@ export const resources = pgTable("resources", {
   // is what makes an interrupted pass resumable by re-running it.
   fetchClass: text("fetch_class"),
   // Why, in the fetch layer's own words: the policy's refusal, the robots rule,
-  // `resource-cap` for a row a per-crawl cap stopped at. `pages.fetch_reason`'s
-  // twin, and null on a fetch that simply worked.
+  // `resource-cap` for a row a resource cap stopped at — a budget granted per
+  // RUN, not per crawl, so a resume re-grants it and may clear this reason off
+  // rows an earlier run wrote it on. `pages.fetch_reason`'s twin, and null on a
+  // fetch that simply worked.
   fetchReason: text("fetch_reason"),
   statusCode: integer("status_code"),
   contentType: text("content_type"),

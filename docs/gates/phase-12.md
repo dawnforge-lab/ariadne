@@ -965,6 +965,15 @@ In the order they will be met.
 8. **The wall-time shortening designs** — not taken, revisit on demand, §7. The
    day an operator's "this site can take it" exists as an input on the surface,
    this re-opens with the data to settle it.
+9. **The end-to-end robots-split test ledgered at §2.2.** No single automated
+   case carries the chain from a real fetch pass through to the served
+   `robotsDenied` / `robotsUnreachable` counts: the partition tests read seeded
+   rows, the real pass runs on a different crawl, and §2.2's join between them
+   was made by hand for this document. One case — run the pass against the two
+   robots hosts, then assert the served counts off that same crawl — retires
+   the hand-made join. **Not written here on purpose**: a new crawl-creating
+   test moves the 33-rows-per-run figure §11 just pinned, so it belongs beside
+   pointer 6's sweep.
 
 ---
 

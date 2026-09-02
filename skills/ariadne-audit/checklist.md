@@ -289,7 +289,9 @@ answered from, and its verdict is the confidence interval around all of them.
      `fetched + failed + skipped = seen`, always. `fetchResources` says whether the
      crawl asked in the first place: `false` is an operator's decision and makes
      every resource check NOT MEASURED rather than clean. `capped: true` means a
-     per-crawl budget stopped the pass short. `robotsDenied` and
+     resource budget stopped the pass short — those budgets are per RUN, not per
+     crawl, so a resumed crawl can weigh more files in total than
+     `maxResources`. `robotsDenied` and
      `robotsUnreachable` are two subsets of `failed` and are served as two counts:
      `robotsDenied` is "they said no" (the host's robots.txt was read and forbids
      us) and `robotsUnreachable` is "we could not ask" (the host answered 5xx,

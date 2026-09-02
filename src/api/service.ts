@@ -755,8 +755,13 @@ export interface CrawlDetail extends CrawlListItem {
      */
     robotsUnreachable: number;
     /**
-     * True when a per-crawl cap stopped the pass short of at least one row
+     * True when a resource cap stopped the pass short of at least one row
      * (`maxResources` or `maxResourceHosts`).
+     *
+     * THE CAPS ARE BUDGETS PER RUN, not per crawl: `resumeCrawl` grants the
+     * whole budget again, so a crawl's lifetime total can exceed
+     * `maxResources` and this flag goes back to false once a later run weighs
+     * the rows the earlier one left capped.
      *
      * ONE FLAG FOR BOTH CAPS, deliberately: the row records a single reason
      * (`resource-cap`) whichever cap stopped it, so a surface reading the

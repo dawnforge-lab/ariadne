@@ -31,8 +31,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 //  1. `resources.not-fetched` (T2). A marker a crawl could not receive before: a
 //     crawl that recorded every file its pages point at and asked about none of
-//     them — `fetchResources: false`, or a pass interrupted before its first
-//     request — met no finding at all, and a re-judge at 0.9.0 gives it one. It
+//     them — `fetchResources: false`, a pass interrupted before its first
+//     request, or a `maxResources` budget that claimed every row before anything
+//     was asked — met no finding at all, and a re-judge at 0.9.0 gives it one. It
 //     is ADDITIVE by construction: the sibling the Phase 11 gate ruled on
 //     (docs/gates/phase-11.md §10.3), never a widened `resources.not-recorded`,
 //     whose condition moving would have been a verdict change on a rule that

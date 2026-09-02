@@ -311,9 +311,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "policy the client chose. Each row's fetchReason names the host and the " +
         "reason, on the resources CSV view (export_crawl, format=csv, " +
         "view=resources). A crawl run before this split has every robots refusal in " +
-        "robotsDenied — nothing was rewritten. capped is true when a per-crawl cap " +
+        "robotsDenied — nothing was rewritten. capped is true when a resource cap " +
         "stopped the pass short of at least one file — one flag for both caps, " +
-        "because the row records one reason whichever cap it was.\n\n" +
+        "because the row records one reason whichever cap it was. Those caps are " +
+        "budgets per RUN, not per crawl: crawl_resume grants the whole budget " +
+        "again, so a crawl's lifetime total can exceed maxResources.\n\n" +
         "resourceRefsCappedPages sits OUTSIDE that block because it counts PAGES, " +
         "not files: how many of this crawl's pages carried more resource REFERENCES " +
         "than the analyzer's cap keeps (2,000 per page, the rest turned away). " +
@@ -334,8 +336,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "fetchResources says whether this crawl asked at all: true is the default and " +
         "false is an operator's decision, echoed here so it can be confirmed. false " +
         "beside fetched 0 is 'nobody asked'; true beside fetched 0 is a pass that has " +
-        "not run or could not finish. Both of those carry the resources.not-fetched " +
-        "finding, whose evidence names which. On a crawl older than the resource " +
+        "not run, was capped before its first request, or could not finish. The " +
+        "resources.not-fetched finding covers only the crawls where NOT ONE file was " +
+        "decided (skipped equal to seen), and its evidence names which of those three " +
+        "it was. A pass that asked and got only non-ok answers — fetched 0 with " +
+        "failed above 0 — carries NO marker: rows were decided, so nothing fires, and " +
+        "this block is the only discriminator for the silence of the resource rules. " +
+        "On a crawl older than the resource " +
         "tables every number here is 0, which is not 'this site references no files' " +
         "— the resources.not-recorded finding is what says so.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
