@@ -368,4 +368,9 @@ green (CI placeholder — PR #12), and merge per owner (the last four phases:
 merge-on-green). No Serena project is registered for Ariadne, so the auto-memory
 handoff is the record, as every prior phase noted.
 
-CI: _(PR #12 — link on push)_
+**CI: GREEN, first try** — PR #12
+(https://github.com/dawnforge-lab/ariadne/pull/12), run
+https://github.com/dawnforge-lab/ariadne/actions/runs/33670033788 (3m54s,
+1,787/1,787 across 71 files). A fresh database: migration 0015 applied from
+nothing, the marker family and the per-host resume paths all fixture-proven
+without the four kept crawls existing.
