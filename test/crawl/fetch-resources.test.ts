@@ -1059,6 +1059,54 @@ describe("a cancel stops the pass where it stands", () => {
     expect(untouched.fetchReason).toBeNull();
     expect(summary.cappedByResources).toBe(false);
   });
+
+  // THE TWO STOPS AT ONCE (P12-T2, review C-1). The budget cap is claimed for a
+  // whole slice BEFORE any of it is asked about, so `cappedByResources` can be
+  // true while the abort arrives inside that same slice. The closing statement
+  // used to stamp `resource-cap` on every undecided row regardless — over rows
+  // an abort left, which is exactly what this module's header and that
+  // statement's own comment both promise it does not do.
+  //
+  // The shapes it produced were wrong in two directions: a row nobody stopped
+  // short of asking about was labelled as one a budget did, and (with a small
+  // enough budget and an abort early in the slice) a whole crawl of rows could
+  // carry `resource-cap` with nothing decided at all — a census the rule layer
+  // has to be able to read as "interrupted" rather than "budgeted away".
+  it("marks nothing when the abort lands inside a capped batch", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    await seedResources(crawlId, [
+      { url: `${assets.base}/abort-1.png` },
+      { url: `${assets.base}/abort-2.png` },
+      { url: `${assets.base}/a.png` },
+      { url: `${assets.base}/c.png` },
+    ]);
+
+    const controller = new AbortController();
+    onAssetHit = (path) => {
+      if (path === "/a.png" || path === "/abort-1.png") controller.abort();
+    };
+
+    // Budget 2 against four rows: the slice is claimed, the flag is set, and
+    // the first request in it fires the abort.
+    const summary = await runPass(crawlId, assets.base, {
+      maxConcurrency: 1,
+      maxResources: 2,
+      signal: controller.signal,
+    });
+
+    expect(summary.aborted).toBe(true);
+    expect(summary.cappedByResources).toBe(true);
+
+    const rows = await rowsOf(crawlId);
+    const decided = rows.filter((row) => row.fetchClass !== null);
+    // Exactly one row was asked about: the one whose answer fired the signal.
+    expect(decided.length).toBe(1);
+    // And every row the abort left keeps BOTH nulls. A reason here would be a
+    // budget taking credit for a stop the caller made.
+    for (const row of rows.filter((r) => r.fetchClass === null)) {
+      expect(row.fetchReason, row.url).toBeNull();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

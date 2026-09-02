@@ -19,7 +19,10 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pageResources, pages, resources } from "../../src/db/schema.js";
-import { RESOURCE_OFF_REASON } from "../../src/crawl/resources/fetch-resources.js";
+import {
+  RESOURCE_CAP_REASON,
+  RESOURCE_OFF_REASON,
+} from "../../src/crawl/resources/fetch-resources.js";
 import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
 import {
   BROKEN_SAMPLE_RESOURCES,
@@ -859,20 +862,48 @@ describe("resourceRules against the database", () => {
       expect(await run(ID, crawlId)).toEqual([]);
     });
 
-    it("refuses to guess when the unfetched rows disagree about why", async () => {
-      // No row was decided, and the rows give two different reasons for it.
-      // No crawl of ours writes that shape — `markResourcesNotAsked` stamps
-      // EVERY undecided row, and a cap only stamps after the pass asked about
-      // something — so the honest answer is a loud error rather than a reason
-      // picked out of two (hard rule 7).
+    // THE THIRD REASON (review C-1). A census where every row carries
+    // `resource-cap` and nothing was decided says a BUDGET claimed the rows
+    // before anything was asked. The pass no longer produces that shape — the
+    // budget is claimed per slice and at least one row of the slice is asked
+    // about unless the caller aborts, in which case the rows keep both nulls
+    // (asserted in test/crawl/fetch-resources.test.ts) — but the rule reads a
+    // TABLE, not a pass, and a marker that met the shape and threw would be the
+    // silence this whole rule exists to end. It is recognised rather than
+    // guessed at: the reason is on every row and it is the pass's own constant.
+    it("recognises a budget that claimed every row before anything was asked", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 2 }],
+        [
+          unasked("/img/a.png", ["/a"], RESOURCE_CAP_REASON),
+          unasked("/img/b.png", ["/a"], RESOURCE_CAP_REASON),
+        ],
+      );
+      const findings = await run(ID, crawlId);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.evidence).toMatchObject({
+        reason: NOT_FETCHED_REASON.cap,
+        resourcesSeen: 2,
+        resourcesSkipped: 2,
+      });
+      expect(String(findings[0]!.evidence.notAsked)).toMatch(/budget|maxResources/i);
+    });
+
+    it("refuses to guess when the unfetched rows are a mixture", async () => {
+      // Three reasons in one census, none of them true of the crawl as a whole.
+      // No writer of ours produces it — `markResourcesNotAsked` stamps EVERY
+      // undecided row, the cap statement stamps every undecided row, and an
+      // abort stamps none — so the honest answer is a loud error naming the
+      // counts rather than a reason picked out of three (hard rule 7).
       const { crawlId } = await seed(
         [{ path: "/a", imagesTotal: 2 }],
         [
           unasked("/img/a.png", ["/a"], RESOURCE_OFF_REASON),
           unasked("/img/b.png", ["/a"], null),
+          unasked("/img/c.png", ["/a"], RESOURCE_CAP_REASON),
         ],
       );
-      await expect(run(ID, crawlId)).rejects.toThrow(/disagree|unfetched rows/i);
+      await expect(run(ID, crawlId)).rejects.toThrow(/mixture of reasons/i);
     });
   });
 

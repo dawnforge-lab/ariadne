@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 11 (ruleset 0.8.0, migrations 0000–0013,
+**Status:** the contract as of Phase 11 (ruleset 0.9.0, migrations 0000–0014,
 15 MCP tools / 15 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
 
@@ -534,15 +534,25 @@ rows cannot say it and only the config can.
    unasked, because in that case the crawl DID record what it saw. That second
    case is `resources.not-fetched` (info), the sibling added in Phase 12
    (ruleset 0.9.0): the rows exist, not one of them was put to a server, and the
-   finding's evidence says which of the two reasons applies — `reason:
+   finding's evidence says which of three reasons applies — `reason:
    "fetch-off"` for an operator's `fetchResources: false`, `reason:
-   "pass-not-run"` for a pass that sent no request at all — beside
-   `resourcesSeen` and `resourcesSkipped`, which are equal. A PARTIAL pass gets
-   neither marker: something was measured, and the judging rules report it with
-   their `unknownResources` counts. Both cases are also legible on
-   `crawl_status`: `fetchResources: false`, or `skipped` equal to `seen`.
-   **Read the coverage block before quoting any resource finding, or the absence
-   of one.**
+   "pass-not-run"` for a pass that sent no request at all, `reason: "budget-cap"`
+   for a `maxResources` that claimed every row before anything was asked —
+   beside `resourcesSeen` and `resourcesSkipped`, which are equal. A PARTIAL pass
+   gets neither marker: something was measured, and the judging rules carry
+   `unknownResources` on the findings they write. Both marker cases are also
+   legible on `crawl_status`: `fetchResources: false`, or `skipped` equal to
+   `seen`. **Read the coverage block before quoting any resource finding, or the
+   absence of one.**
+
+   **One window neither marker covers, and a consumer must not read as a clean
+   site:** a crawl where every file landed in an UNKNOWN class (`refused`,
+   `robots_denied`, `robots_unreachable`, `fetch_error`). Rows were decided, so
+   no marker fires; no row is `ok`, so the four judging rules write nothing and
+   the `unknownResources` counts that would explain the silence live on findings
+   that do not exist. The discriminator is this block: `fetched` at zero with
+   `failed` carrying the census. A third sibling marker for it is **ledgered to
+   Phase 13**.
 2. **`fetch_class` null is per FILE, so a page's weight can be a floor.** The
    `page.weight` metric flags `atLeast: true` on any row that references a file
    nobody weighed, and reports the referenced-and-weighed pair beside it.
@@ -550,7 +560,7 @@ rows cannot say it and only the config can.
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
 this); `test/api/query.test.ts:2089` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
-`test/crawl/fetch-resources.test.ts:1179` "asks nobody anything when the operator
+`test/crawl/fetch-resources.test.ts:1227` "asks nobody anything when the operator
 turned resource fetching off".
 
 ### 5.4 `resourceRefsCappedPages` null — nobody counted

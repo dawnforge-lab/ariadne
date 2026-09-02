@@ -309,7 +309,12 @@ answered from, and its verdict is the confidence interval around all of them.
   is the engine saying a check below could not be answered on this crawl. The last
   two are siblings and never both appear: `resources.not-recorded` means the crawl
   holds NO resource records, `resources.not-fetched` means it recorded them all and
-  asked the site about none of them. List them here, and mark the
+  asked the site about none of them. **Neither covers a crawl whose every file landed
+  in an unknown class** (refused, robots-disallowed, robots-unreachable, or a request
+  that never completed): rows were decided, so no marker fires and the resource rules
+  are silent regardless. `crawl_status.resources` is the discriminator there —
+  `fetched` at zero with `failed` carrying the census — and a third sibling marker is
+  ledgered to Phase 13. List them here, and mark the
   checks they claim SKIP rather than PASS when you reach them.
 - **Evaluate**:
   - FAIL if `rulesRunAt` is null — nothing below this line is answerable, and the
@@ -2140,6 +2145,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `page.weight` row above is a table of HTML sizes and nothing else — a light-looking
   site that was never measured — and this check is NOT MEASURED on that crawl rather
   than passed. The remedy is a re-crawl, and each marker says so.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**: Lighthouse audit — check "Eliminate render-blocking resources" and "Reduce unused JavaScript"
 - **Evaluate**:
   - WARN if render-blocking resources > 3 or unused JS > 50%
@@ -2170,6 +2183,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   format halves of this check are then NOT MEASURED and a re-crawl is what answers
   them. The two older findings are unaffected by either; they read the page's markup,
   not the files.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
 - **Evaluate**:
@@ -2194,6 +2215,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   — and when one is present this crawl fetched no files at all, so a quiet
   `resources.uncached` says nothing about the site's caching and the answer is a
   re-crawl. COMPRESSION and PROTOCOL are still NOT MEASURED and stay browser work.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**: Check the homepage's network panel for TTFB and response headers
   (Cache-Control, Content-Encoding, protocol)
 - **Evaluate**:
@@ -2227,6 +2256,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
   holds: nothing in a crawl records a console, and requests a script makes at runtime
   are not in the resource table either — both stay browser work.
+  **One window neither marker covers** (P12-T2, review I-1): on a crawl where every
+  file landed in an unknown class — refused by our own policy, disallowed by a
+  robots.txt, its host's robots.txt unreachable while we crawled, or a request that
+  never completed — rows WERE decided, so neither marker fires and the resource rules
+  are silent anyway. The discriminator is `crawl_status.resources`: `fetched` at zero
+  with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. Read it
+  before recording any of these checks as PASS. A third sibling marker for that case
+  is ledgered to Phase 13.
 - **DevTools**:
   1. Navigate to homepage, product, collection
   2. Check console: `list_console_messages` — filter errors

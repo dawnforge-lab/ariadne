@@ -1197,13 +1197,17 @@ describe("issue copy", () => {
   // found" has the wrong crawl in mind. So it must say both halves — recorded,
   // and not asked about — and it must name which of the two reasons applies,
   // because the remedy differs (re-crawl with the pass on; or finish the crawl).
-  it("resources.not-fetched says the files were recorded AND unasked, and names both reasons", () => {
+  it("resources.not-fetched says the files were recorded AND unasked, and names all three reasons", () => {
     const c = ISSUE_COPY["resources.not-fetched"]!;
     expect(c.title.toLowerCase()).toContain("never asked about");
     expect(c.explanation, "the census is real").toMatch(/recorded every image, stylesheet and script/i);
     expect(c.explanation, "and nothing was asked").toMatch(/requested none of them/i);
     expect(c.explanation, "the operator's switch").toContain("fetchResources: false");
     expect(c.explanation, "the interrupted pass").toMatch(/interrupted before it started asking/i);
+    // The third reason (review C-1): a budget that claimed the rows before
+    // anything was asked. Copy naming two of three would leave a reader with a
+    // `reason` in the evidence the text does not explain.
+    expect(c.explanation, "the budget").toMatch(/resource budget/i);
     expect(c.explanation, "what the silence is not").toMatch(
       /rather than a clean bill of health/i,
     );

@@ -831,11 +831,21 @@ export async function fetchCrawlResources(
   // stopped" — the crawl loop closes its row `cancelled` on this (hard rule 7).
   const aborted = opts.signal?.aborted === true;
 
-  if (cappedByResources) {
+  if (cappedByResources && !aborted) {
     // Loud, not silent: every row the cap stopped short of says so, in one
     // statement rather than one per row. An ABORT deliberately marks nothing —
     // those rows were not capped, they were interrupted, nothing was decided
     // about them, and their null already means "seen, not yet asked".
+    //
+    // `&& !aborted` IS WHAT MAKES THAT SENTENCE TRUE (P12-T2, review C-1). The
+    // budget is claimed for a whole slice before any of it is asked about, so
+    // the two stops overlap: `cappedByResources` goes true at the top of a batch
+    // and the caller's signal can fire inside that same batch. Without the guard
+    // this statement then stamped `resource-cap` over rows an abort had left —
+    // contradicting the comment above it and the module header at once, and, on
+    // a small enough budget, producing a whole census of `resource-cap` rows
+    // with nothing decided at all. A stop the CALLER made is not a budget
+    // running out, and only the caller's row shape can say which happened.
     await db
       .update(resources)
       .set({ fetchReason: RESOURCE_CAP_REASON })
