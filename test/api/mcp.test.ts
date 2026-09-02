@@ -1274,6 +1274,54 @@ describe("crawl_rules", () => {
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("has stopped");
   });
+
+  /**
+   * P12-T4 — `render.coverage` on the other transport, both values of the field
+   * the Phase 11 audit asked for (docs/gates/phase-11.md §6.3).
+   *
+   * `liveCrawlId` was rendered by the `crawl_render` describe above and judged
+   * by the test above, so it is the `ran` side; the seeded crawl beside it was
+   * never rendered by anything, which is the side that used to be
+   * indistinguishable — its four selection numbers are recomputed and look
+   * exactly like a record of a pass.
+   */
+  it("says over the wire whether a render pass ran, not just how many pages it left", async () => {
+    const coverage = async (crawlId: string): Promise<Record<string, unknown>> => {
+      const body = await ok("metrics_get", { crawlId, metricId: "render.coverage" });
+      const rows = items(body);
+      expect(rows, `no render.coverage row for ${crawlId}`).toHaveLength(1);
+      return rows[0]!["value"] as Record<string, unknown>;
+    };
+
+    const rendered = await coverage(liveCrawlId);
+    expect(rendered["renderPassEvidence"]).toBe("ran");
+    expect(Number(rendered["pagesRendered"])).toBeGreaterThan(0);
+
+    const id = await seedCrawl({
+      id: `crawl_mcp_norender_${Date.now()}`,
+      status: "finished",
+      // The whole rules run happens here, and `robots.missing` reads the
+      // crawl's robots evidence rather than assuming it absent.
+      discovery: {
+        robots: { outcome: "absent", crawlDelaySec: null, note: null, raw: null, truncated: false },
+        sitemapSources: [],
+        suppliedSitemaps: [],
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+        docsFetched: 0,
+      },
+    });
+    await seedPage(id, { slug: "nr1", pageType: "product", statusCode: 200, indexable: true });
+    await seedPage(id, { slug: "nr2", pageType: "product", statusCode: 200, indexable: true });
+    await ok("crawl_rules", { crawlId: id });
+
+    const unrendered = await coverage(id);
+    // The pair that was missing: nothing ran, and the selection numbers are
+    // still answered — as the plan they are, not as a history.
+    expect(unrendered["renderPassEvidence"]).toBe("none");
+    expect(unrendered["pagesRendered"]).toBe(0);
+    expect(unrendered["selectionMode"]).toBe("auto");
+    expect(Number(unrendered["selectionSelected"])).toBeGreaterThan(0);
+  }, 60_000);
 });
 
 describe("crawl_mark_failed", () => {

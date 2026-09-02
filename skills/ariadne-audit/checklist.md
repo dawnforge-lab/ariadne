@@ -274,10 +274,13 @@ answered from, and its verdict is the confidence interval around all of them.
      200 when nobody chose, `null` for a billed audit. Under a cap, `issues_list`
      groups carry `truncated` with `total` or `atLeast`, and a count is a floor
      rather than a magnitude. Quote the note, never the bare count.
-  4. **How much was rendered?** `renderPassCount` is a boolean gate on whether a
-     render pass happened at all; `metrics_get` with `metricId: "render.coverage"`
-     is the real coverage — how the pages were chosen and how many seats the budget
-     bought. Every check that reads rendered evidence (CHECK-01, CHECK-02, CHECK-34,
+  4. **How much was rendered?** `renderPassCount` ≥ 1 means a render pass happened;
+     0 means only that the last pass rendered nothing, which a crawl nobody rendered
+     also reports. `metrics_get` with `metricId: "render.coverage"` is the real
+     coverage — `renderPassEvidence` says whether a pass ran at all, and the
+     selection numbers say how the pages were chosen and how many seats the budget
+     bought. On `renderPassEvidence: "none"` those numbers are what a pass WOULD
+     choose, not what one chose. Every check that reads rendered evidence (CHECK-01, CHECK-02, CHECK-34,
      the JS half of CHECK-10) is answered over that sample and no further.
   5. **How much of the site's own weight was measured?** `crawl_status`'s
      `resources` block: `seen` is the distinct files the served HTML points at,
@@ -404,7 +407,10 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
   3. `metrics_get` with `metricId: "render.coverage"` for the denominator: how many
      pages were rendered out of how many crawled, the selection budget, and the
      render failures. A finding count means nothing without it. **Read
-     `selectionMode` first** — `auto` means the engine sampled and the budget
+     `renderPassEvidence` first**: `none` means no render pass has left a trace on
+     this crawl, so the selection numbers beside it describe a pass that WOULD run
+     and CHECK-01 is NOT MEASURED rather than clean — say that instead of quoting
+     them. Then **read `selectionMode`** — `auto` means the engine sampled and the budget
      numbers describe how; `explicit` means an auditor named the pages, and
      `selectionBudget`, `selectionSuspects`, `selectionSampled` and
      `selectionTruncated` are null rather than zero, because no automatic decision

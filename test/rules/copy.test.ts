@@ -882,6 +882,20 @@ describe("issue copy", () => {
   it("render.coverage names every column of its shape and both of its sides", () => {
     const text = ISSUE_COPY["render.coverage"]!.explanation;
     expect(text, "pagesCrawled").toMatch(/how many pages the crawl read in total/i);
+    // P12-T4. The field that says whether the four numbers after it are a
+    // record or a projection (docs/gates/phase-11.md §6.3). The copy has to
+    // carry the distinction where the reader meets the numbers, for the same
+    // reason the explicit nulls do below: an unexplained "18 selected" on a
+    // crawl nobody rendered is read as eighteen pages somebody chose.
+    expect(text, "renderPassEvidence").toMatch(
+      /whether a render pass left any trace on this crawl at all/i,
+    );
+    expect(text, "the projection, said as one").toMatch(
+      /the selection a pass WOULD make if one were run now/,
+    );
+    expect(text, "ran-and-rendered-nothing is not the same").toMatch(
+      /a pass that ran and rendered nothing is a different thing/i,
+    );
     expect(text, "selectionMode").toMatch(/the selection mode, which says who chose the pages/i);
     expect(text, "selectionBudget").toMatch(/how many pages the render pass was allowed to open/i);
     expect(text, "selectionSuspects").toMatch(/how many candidates were suspects/i);

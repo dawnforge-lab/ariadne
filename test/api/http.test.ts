@@ -1700,6 +1700,75 @@ describe("POST /crawls/:id/rules", () => {
   }, 120_000);
 });
 
+/**
+ * P12-T4 — `render.coverage` over the wire, on a crawl nobody rendered.
+ *
+ * The residual docs/gates/phase-11.md §6.3 filed was found by an agent reading
+ * this metric THROUGH THIS ROUTE, so this is where the fix has to be provable:
+ * the four selection numbers are recomputed and look identical whether or not a
+ * pass ever ran, and `renderPassEvidence` is what tells the two apart. Its own
+ * crawl, seeded rather than crawled, because every crawl this file starts is
+ * eventually rendered by the render suite above.
+ */
+describe("GET /crawls/:id/metrics — the never-rendered crawl says so", () => {
+  it("serves renderPassEvidence none beside the selection a pass would make", async () => {
+    // `discovery` because the rules run is a WHOLE run: `robots.missing` reads
+    // the crawl's robots evidence and throws without it rather than passing
+    // quietly, which is the engine behaving correctly and not this test's
+    // subject.
+    const id = await seedCrawl({ status: "finished", discovery: DISCOVERY });
+    await db.insert(pages).values(
+      ["n1", "n2"].map((slug) => ({
+        id: `${id}_page_${slug}`,
+        crawlId: id,
+        url: `http://seeded.example/${slug}`,
+        urlNormalised: `http://seeded.example/${slug}`,
+        fetchClass: "ok",
+        statusCode: 200,
+        isIndexable: true,
+        depth: 1,
+        discoveredVia: "link",
+        pageType: "product",
+        title: `title of ${slug}`,
+        wordCount: 200,
+        renderableWordCount: 200,
+        htmlBytes: 20_000,
+        rendered: false,
+      })),
+    );
+
+    expect((await call("POST", `/crawls/${id}/rules`)).status).toBe(200);
+
+    const res = await call("GET", `/crawls/${id}/metrics?metricId=render.coverage`);
+    expect(res.status).toBe(200);
+    const rows = res.body["items"] as Record<string, unknown>[];
+    expect(rows).toHaveLength(1);
+    const value = rows[0]!["value"] as Record<string, unknown>;
+    // The pair, and it is the whole point: nothing rendered, nothing recorded
+    // — and a selection the crawl would still support, reported as the plan it
+    // is rather than as a history nobody made.
+    expect(value["renderPassEvidence"]).toBe("none");
+    expect(value["pagesRendered"]).toBe(0);
+    expect(value["renderFailures"]).toBe(0);
+    expect(value["selectionMode"]).toBe("auto");
+    expect(Number(value["selectionSelected"])).toBeGreaterThan(0);
+  }, 60_000);
+
+  // …and the other side of the same field on the crawl this suite really did
+  // render, so the pin is not one value pinned twice. It reads
+  // `fixtureCrawlId`, which the render describe above rendered and the rules
+  // describe above judged — a metric row exists here only because both ran.
+  it("serves renderPassEvidence ran for the crawl the render pass covered", async () => {
+    const res = await call("GET", `/crawls/${fixtureCrawlId}/metrics?metricId=render.coverage`);
+    expect(res.status).toBe(200);
+    const rows = res.body["items"] as Record<string, unknown>[];
+    expect(rows, "no render.coverage row — was the crawl judged?").toHaveLength(1);
+    const value = rows[0]!["value"] as Record<string, unknown>;
+    expect(value["renderPassEvidence"]).toBe("ran");
+    expect(Number(value["pagesRendered"])).toBeGreaterThan(0);
+  });
+});
+
 describe("GET /crawls/:id/robots", () => {
   it("hands back the robots.txt this crawl actually read, out of its stored evidence", async () => {
     const res = await call("GET", `/crawls/${fixtureCrawlId}/robots`);

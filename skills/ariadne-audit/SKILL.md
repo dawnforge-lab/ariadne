@@ -151,8 +151,13 @@ the `ariadne-crawl` skill under the same heading; the short form:
 `auto` — no `urls` — remains right for first contact with a site, or where the types
 give you no clear templates at all.
 
-**Then read what came back, and read the mode first.** `render.coverage`'s
-`selectionMode` says which decision chose the pages. On an `explicit` pass
+**Then read what came back, and read the evidence field first.**
+`render.coverage`'s `renderPassEvidence` says whether a render pass has left any
+trace on this crawl at all — a rendered page, a failed render, a named list, a
+stamped count, a page still waiting for a browser. On `none` everything after it
+is the selection a pass WOULD make, so the JavaScript checks are NOT MEASURED and
+the numbers are a quote for the work rather than a record of it. **Then the
+mode.** `selectionMode` says which decision chose the pages. On an `explicit` pass
 `selectionBudget`, `selectionSuspects`, `selectionSampled` and `selectionTruncated`
 are **null**, not zero: no automatic decision was taken, so quoting them as "no
 suspects found" would be a claim about the site's HTML that nobody made.

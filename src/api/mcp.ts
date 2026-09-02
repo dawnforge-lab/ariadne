@@ -762,8 +762,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "by crawl_render: before that " +
         "pass has run, rendered is false on every page and 'rendered: true' answers " +
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
-        "rendered'. Check crawl_status's renderPassCount before reading anything " +
-        "into a rendered filter.\n\n" +
+        "rendered'. Check whether a pass ran before reading anything into a " +
+        "rendered filter: render.coverage's renderPassEvidence answers it " +
+        "('none' means no pass left a trace), while crawl_status's " +
+        "renderPassCount is only the LAST pass's rendered-page count — its 0 is " +
+        "also what a crawl nobody rendered reports.\n\n" +
         "Filters:\n" +
         "  pageType   — a template cohort as this crawl typed it; '(untyped)' for " +
         "the pages it could not type\n" +
