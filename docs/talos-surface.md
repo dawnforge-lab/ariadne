@@ -1398,11 +1398,12 @@ byte for byte, as it writes it".
   suite that never deleted what it made: 28 rows it seeded and 5 the crawl loop
   created for it. It now tracks and deletes them the way every other
   crawl-creating file in the suite already did, and the historical residue was
-  swept once with a record: **3,110 crawl rows → 28**, 1,060 MB → 1,044 MB, the
-  four real `lavishalice.com` crawls verified byte-identical either side. The 24
-  rows still there are older `*.example` / `localhost` fixtures from tests that
-  had already stopped leaking, left because the sweep's authorised scope was the
-  two leaking host families and nothing else.
+  swept once with a record: **3,110 crawl rows → 28 → 4**, 1,060 MB → 1,052 MB,
+  the four real `lavishalice.com` crawls verified byte-identical throughout. The
+  first sweep took the two leaking host families (`127.0.0.1:<port>`,
+  `runner.example`) to 28; a second, on the owner's word at T1 review, took the
+  24 older `*.example` / `localhost` fixture rows from tests that had already
+  stopped leaking — leaving exactly the four kept crawls.
   At a hundred thousand crawls the filter wants an expression index on the
   hostname; at this size it is still a scan of a small table.
 - The comparison's identity collapses multi-finding rules to per-URL presence
