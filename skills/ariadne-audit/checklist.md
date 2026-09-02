@@ -2140,8 +2140,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   MEASURED markers, and exactly one of them can be present. `resources.not-recorded`
   (info) fires when the crawl holds no resource records at all; `resources.not-fetched`
   (info) fires when it recorded every file the pages point at and asked the site about
-  none of them — its evidence says which of the two reasons applies, the operator's
-  `fetchResources: false` or a pass that never sent a request. Either way the
+  none of them — its evidence says which of the three reasons applies: the operator's
+  `fetchResources: false`, a pass that never sent a request, or a resource budget
+  that claimed every row before anything was asked. Whichever it is, the
   `page.weight` row above is a table of HTML sizes and nothing else — a light-looking
   site that was never measured — and this check is NOT MEASURED on that crawl rather
   than passed. The remedy is a re-crawl, and each marker says so.
@@ -2250,8 +2251,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   return either of the family's NOT MEASURED markers, never both:
   `resources.not-recorded` (info) when the crawl holds no resource records, and
   `resources.not-fetched` (info) when it recorded every file and asked the site about
-  none of them — `fetchResources: false`, or a pass interrupted before its first
-  request, which its evidence names. When one is present no broken file could have
+  none of them — `fetchResources: false`, a pass interrupted before its first
+  request, or a budget that claimed every row unasked; its evidence names which.
+  When one is present no broken file could have
   been found and the network half of this check is NOT MEASURED rather than clean —
   re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
   holds: nothing in a crawl records a console, and requests a script makes at runtime
