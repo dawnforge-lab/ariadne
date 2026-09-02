@@ -807,6 +807,53 @@ describe("crawl_start", () => {
     expect(detail["findingCap"]).toBeNull();
   });
 
+  // THE OFF SWITCH, ROUND TRIP, over the agent transport (P11-T4). Same four
+  // seams the HTTP suite walks — the field table, the effective config, the
+  // stored `config_jsonb` a resume reads back, and the resolved echo — asserted
+  // here because an agent that turned the pass off has no other way to learn
+  // that it took, and because the MCP schema is a SECOND declaration of the
+  // field: a boolean advertised on one transport and dropped on the other is
+  // how a quietly smaller API appears.
+  it("accepts fetchResources: false, stores it, and crawl_status confirms it", async () => {
+    const answer = await call("crawl_start", {
+      siteUrl: `${site}/`,
+      maxPages: 1,
+      fetchResources: false,
+    });
+    expect(answer.isError ?? false).toBe(false);
+    const crawlId = String(answer.body["crawlId"]);
+    createdCrawls.push(crawlId);
+
+    const detail = await settle(crawlId);
+    const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    expect((rows[0]!.config as Record<string, unknown>)["fetchResources"]).toBe(false);
+    expect(detail["fetchResources"]).toBe(false);
+    const cov = detail["resources"] as Record<string, number>;
+    expect(cov["fetched"]).toBe(0);
+    expect(cov["skipped"]).toBe(cov["seen"]);
+  });
+
+  it("stores nothing when nobody names it, and reports the default true", async () => {
+    const answer = await call("crawl_start", { siteUrl: `${site}/`, maxPages: 1 });
+    expect(answer.isError ?? false).toBe(false);
+    const crawlId = String(answer.body["crawlId"]);
+    createdCrawls.push(crawlId);
+    const detail = await settle(crawlId);
+    const rows = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    expect((rows[0]!.config as Record<string, unknown>)["fetchResources"]).toBeUndefined();
+    expect(detail["fetchResources"]).toBe(true);
+  });
+
+  it("refuses a fetchResources that is not a boolean", async () => {
+    // Refused by the SDK's schema validator before the handler runs, which is
+    // the same wall an argument typo meets — the field is declared `boolean`.
+    for (const bad of ["false", 0]) {
+      const answer = await call("crawl_start", { siteUrl: `${site}/`, fetchResources: bad });
+      expect(answer.isError, JSON.stringify(bad)).toBe(true);
+      expect(answer.text).toContain("fetchResources");
+    }
+  });
+
   // The floor `crawl_start`'s description promises, on the transport it
   // promises it to. Both transports share `parseStartCrawlInput`, so this is
   // the same guard the HTTP suite asserts — checked here because a claim in a

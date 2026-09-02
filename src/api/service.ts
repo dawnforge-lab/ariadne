@@ -68,9 +68,15 @@ import {
 } from "../crawl/loop.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
 import { FETCH_CLASSES } from "../crawl/fetch-page.js";
-// The one `fetch_reason` literal a surface may read: a constant this repository
-// defines, never a sentence somebody could reword (see `resourceCoverage`).
-import { RESOURCE_CAP_REASON } from "../crawl/resources/fetch-resources.js";
+// The resource vocabulary this surface reads, imported rather than spelled out:
+// the one `fetch_reason` literal a surface may read (a constant this repository
+// defines, never a sentence somebody could reword) and the two `fetch_class`
+// members the coverage aggregate names. See `resourceCoverage`.
+import {
+  RESOURCE_CAP_REASON,
+  RESOURCE_OK_CLASS,
+  RESOURCE_ROBOTS_DENIED_CLASS,
+} from "../crawl/resources/fetch-resources.js";
 // The robots vocabulary from the module that WRITES it, never a copy: a fourth
 // outcome added there must not turn every new crawl's stored evidence into a
 // validation refusal here. See `ROBOTS_OUTCOMES` in discovery.ts.
@@ -1715,6 +1721,12 @@ export class ApiService {
    * description of a timeout — and a count built by matching them would be a
    * count that changes when somebody rewords an error message. The one reason
    * this reads is a constant this repository defines.
+   *
+   * The class names are the same discipline, and for the same reason: they are
+   * `RESOURCE_OK_CLASS` and `RESOURCE_ROBOTS_DENIED_CLASS`, imported and
+   * INTERPOLATED rather than typed out as `'ok'` and `'robots_denied'`. A bare
+   * literal here would typecheck for ever against a renamed vocabulary while
+   * `robotsDenied` quietly reported 0.
    */
   private async resourceCoverage(crawlId: string): Promise<CrawlDetail["resources"]> {
     const rows = await this.db.execute<{
@@ -1726,12 +1738,14 @@ export class ApiService {
       capped: boolean;
     }>(sql`
       select count(*)::int as seen,
-             count(*) filter (where r.fetch_class = 'ok')::int as fetched,
+             count(*) filter (where r.fetch_class = ${RESOURCE_OK_CLASS})::int as fetched,
              count(*) filter (
-               where r.fetch_class is not null and r.fetch_class <> 'ok'
+               where r.fetch_class is not null and r.fetch_class <> ${RESOURCE_OK_CLASS}
              )::int as failed,
              count(*) filter (where r.fetch_class is null)::int as skipped,
-             count(*) filter (where r.fetch_class = 'robots_denied')::int as robots_denied,
+             count(*) filter (
+               where r.fetch_class = ${RESOURCE_ROBOTS_DENIED_CLASS}
+             )::int as robots_denied,
              count(*) filter (
                where r.fetch_class is null and r.fetch_reason = ${RESOURCE_CAP_REASON}
              ) > 0 as capped

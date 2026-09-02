@@ -76,6 +76,11 @@
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
+// The one class these rules name positively, imported rather than spelled `'ok'`
+// in three statements: the fetch pass owns the vocabulary, and a bare literal
+// here would typecheck for ever against a renamed one while the weight and
+// caching rules quietly measured nothing (P11-T4 I-2).
+import { RESOURCE_OK_CLASS } from "../../crawl/resources/fetch-resources.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -303,7 +308,7 @@ async function heavyImageFindings(
         -- Only a file the pass actually weighed: ok with a byte count is the
         -- whole population: an unfetched image has no size, and a 404 has no
         -- size worth reporting either.
-        and r.fetch_class = 'ok'
+        and r.fetch_class = ${RESOURCE_OK_CLASS}
         and r.bytes is not null
         and r.bytes > ${IMAGE_WEIGHT_WARN}
         and ${extra}
@@ -382,12 +387,14 @@ async function uncachedFindings(self: RuleIdentity, db: Db, crawlId: string): Pr
     sample: string[];
   }>(sql`
     select
-      count(*) filter (where r.fetch_class = 'ok' and not ${CACHE_DECLARED})::int as uncached,
-      count(*) filter (where r.fetch_class = 'ok')::int as fetched,
+      count(*) filter (
+        where r.fetch_class = ${RESOURCE_OK_CLASS} and not ${CACHE_DECLARED}
+      )::int as uncached,
+      count(*) filter (where r.fetch_class = ${RESOURCE_OK_CLASS})::int as fetched,
       count(*) filter (where ${isUnknownClass})::int as unknown,
       coalesce(
         (array_agg(r.url order by r.url)
-           filter (where r.fetch_class = 'ok' and not ${CACHE_DECLARED})
+           filter (where r.fetch_class = ${RESOURCE_OK_CLASS} and not ${CACHE_DECLARED})
         )[1:${UNCACHED_SAMPLE_RESOURCES}],
         array[]::text[]
       ) as sample

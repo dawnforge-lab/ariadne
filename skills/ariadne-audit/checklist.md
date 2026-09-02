@@ -246,10 +246,10 @@ assess what a person would see".
 
 ## Engine Coverage
 
-One check, and it is the FIRST one answered — before Section 0, before the pre-crawl
-three, before anything that reads a finding. It is not about the site: it is about
-the evidence every other check is about to be answered from, and its verdict is the
-confidence interval around all of them.
+One check, and it is answered **before anything that reads a finding or a metric**
+— which is what "How to Use" step 2 says and where the order actually binds. It is
+not about the site: it is about the evidence every other check is about to be
+answered from, and its verdict is the confidence interval around all of them.
 
 ### CHECK-83: Engine coverage and evidence completeness
 - **Priority**: Critical | **Requires**: Engine

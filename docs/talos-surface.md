@@ -270,14 +270,14 @@ the rows the rule wrote — under a `pageType` filter it is legitimately smaller
 than the note's own `reported`. `sampleUrls` is at most 5 and is a sample, never
 a slice: `issue_urls` is the slice.
 
-Pinned: `test/api/query.test.ts:823`, `test/api/query.test.ts:904` (the capped
+Pinned: `test/api/query.test.ts:823`, `test/api/query.test.ts:966` (the capped
 shape), `test/api/mcp.test.ts:1161`, `test/api/mcp.test.ts:1176`.
 
 ### 4.4 `issue_urls` → `{items: [{url, evidence}], nextCursor}`
 
 `url` is `null` for a site-wide finding. `evidence` is the rule's stored
 `details_jsonb` **verbatim** — it always carries the rule's own `pageUrl` key.
-Pinned: `test/api/query.test.ts:966`, `test/api/query.test.ts:1044` (nothing
+Pinned: `test/api/query.test.ts:1028`, `test/api/query.test.ts:1044` (nothing
 outside the projection),
 `test/api/query.test.ts:1052` (the null url).
 
@@ -402,7 +402,7 @@ Pinned: `test/api/query.test.ts:1589`, `test/api/query.test.ts:1631`,
 `test/api/query.test.ts:1681` (null on an unjudged crawl holding rows),
 `test/api/query.test.ts:1698` (the floor, agreeing
 with `issues_list`), `test/api/query.test.ts:1737` (marker and counts read in one statement);
-`test/api/mcp.test.ts:1263` and `test/api/mcp.test.ts:1249`.
+`test/api/mcp.test.ts:1263` and `test/api/mcp.test.ts:1345`.
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
 
@@ -436,6 +436,15 @@ is what separates them:
 | `resource-fetch-off` | the crawl was started with `fetchResources: false` |
 | *(empty)* | the pass was interrupted, or has not run over this crawl at all |
 | *(empty, and no rows exist)* | the crawl predates migration 0013 |
+
+**One combination collapses two of those rows, and `crawl_status` is the
+discriminator.** A crawl started with `fetchResources: false` that was then
+CANCELLED before its pass slot leaves its rows null with an empty reason, exactly
+as an interrupted pass does — the stamp is written where the pass would have run,
+and an abort skips it, deliberately, because a cancelled crawl decided nothing
+about anything. `fetchResources: false` on the crawl detail is what separates the
+two, which is the other reason the echo is on the shape: on that one crawl the
+rows cannot say it and only the config can.
 
 **Two consequences a consumer must plan for.**
 
@@ -750,7 +759,7 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:2645` and `test/api/query.test.ts:2888`.
+  `test/api/query.test.ts:2845` and `test/api/query.test.ts:2888`.
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the
   two hostnames the caller asked about.
@@ -818,16 +827,18 @@ Three postures a Talos integrator should know about rather than discover:
 
 `RULESET_VERSION` (0.8.0) stamps **judgement**: bump it when a rule's verdict or
 copy changes. Adding a rule or a metric family adds rows without changing a
-verdict, and Phase 10 held 0.7.0 on exactly that argument — `metrics` rows carry
-no version column at all, so a bump would have been a claim about findings that
-did not move.
+verdict — `metrics` rows carry no version column at all — which is the argument
+Phase 10 held 0.7.0 on.
 
-**Phase 11 bumped once, to 0.8.0**, and the bump covers the whole phase: six new
-rules a page or a site could not receive a verdict from before, plus
-`site.health`'s re-filing and the copy change that came with it (§6). One bump
-per phase is the house rule — the version is what a consumer compares crawls by
-(§7.2), and two bumps inside one unreleased phase would be two version numbers
-describing the same change.
+**Phase 11 bumped to 0.8.0, once.** Two things in the phase each require it on
+the rule's own terms: six rules writing verdicts a page or a site could not
+receive before, and `site.health`'s re-filing with the copy change that came
+with it (§6) — copy is what the rule names beside verdicts, so that change
+would have earned the bump on its own. One number rather than two, because the
+phase ships as one change and the version is what a consumer compares crawls by
+(§7.2): two stamps inside it would make `crawl_compare` raise
+`ruleset-mismatch` between crawls that differ by nothing a consumer cares
+about.
 
 Three consequences a consumer must plan for:
 
@@ -951,6 +962,16 @@ transports).
   deliberately NOT on `crawl_status`. On a page with an enormous gallery or
   script list, read `resources.seen` as a floor. A counter would need a column,
   and Phase 11's one schema event was migration 0013.
+
+  **The cheap indicator was considered and rejected as unsound**, for the record,
+  since it looks obvious: comparing `pages.images_total` against a page's counted
+  image edges needs no scan of the edge table at all. It does not work, and not
+  marginally — `images_total` counts every `<img>` ELEMENT while the extraction
+  emits a DISTINCT-URL set, so any page that reuses one image (a logo in a grid,
+  a placeholder, a repeated icon) has more elements than edges with nothing
+  truncated. The comparison would fire on ordinary pages and stay silent on a
+  truncated page whose references happen to be distinct. T1's handoff is
+  therefore answered in the negative rather than left open.
 - **`resources.uncached` reads two headers only** — `Cache-Control` and
   `Expires`. No ETag, no `Age`, no `Last-Modified`, and no CDN edge policy. And
   the HTML documents' OWN cache headers are not stored at all: `resources` covers

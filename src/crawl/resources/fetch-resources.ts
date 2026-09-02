@@ -147,6 +147,32 @@ export const RESOURCE_FETCH_CLASSES = [
 export type ResourceFetchClass = (typeof RESOURCE_FETCH_CLASSES)[number];
 
 /**
+ * The two members of that vocabulary a READER outside this module has to name,
+ * exported as typed constants so a rename cannot pass a typecheck.
+ *
+ * The reason is a real failure mode rather than tidiness. Every consumer of this
+ * column reads it in SQL, where the class is a bare string: `service.ts`'s
+ * coverage aggregate, the resource rules' `filter (where fetch_class = 'ok')`,
+ * and the test fixtures that seed rows. Rename a member of
+ * `RESOURCE_FETCH_CLASSES` and the WRITER in this file is type-checked into
+ * agreement while every one of those readers keeps the old literal — the suite
+ * stays green (the fixtures were renamed too, or they were not and their rows
+ * simply stop matching), and `crawl_status` starts reporting `robotsDenied: 0`
+ * for ever. A count that can silently become 0 while nothing fails is the
+ * defect this repository writes paragraphs about.
+ *
+ * Typed as `ResourceFetchClass`, so the compiler checks them against the list
+ * above; interpolated into the SQL, so the string a reader compares against is
+ * the string this file writes. Same discipline as `RESOURCE_CAP_REASON` below,
+ * which `service.ts` already imports rather than spelling out.
+ *
+ * Only these two are exported because only these two are read elsewhere. A third
+ * reader adds a third constant here rather than a third literal there.
+ */
+export const RESOURCE_OK_CLASS: ResourceFetchClass = "ok";
+export const RESOURCE_ROBOTS_DENIED_CLASS: ResourceFetchClass = "robots_denied";
+
+/**
  * The reason a row that a cap stopped short of carries. A single literal
  * because two readers depend on it: the pass's own re-run (which overwrites it
  * when it finally asks) and the surfaces that report coverage.
@@ -811,10 +837,18 @@ export async function fetchCrawlResources(
  * shape that cannot arise today, since a crawl configured with the pass off
  * never ran one, and asserted by the predicate rather than by that argument.
  *
- * Returns how many rows it stamped, so the caller can say so.
+ * RETURNS NOTHING, and that is the same ruling the surfaces make one layer up:
+ * the number a reader wants is "how many files this crawl has not asked about",
+ * which is `crawl_status.resources.skipped`, counted off the table at read time.
+ * A count returned from here could only reach a caller through
+ * `CrawlSummary.resources` — which is null on a crawl that ran no pass, by
+ * design — so it would be a value nobody reads, and an unread value rots (the
+ * `click_depth` lesson). It also would have cost `returning()`: materialising
+ * every stamped URL to take its `length`, on a statement whose whole job is to
+ * touch rows without carrying them.
  */
-export async function markResourcesNotAsked(db: Db, crawlId: string): Promise<number> {
-  const stamped = await db
+export async function markResourcesNotAsked(db: Db, crawlId: string): Promise<void> {
+  await db
     .update(resources)
     .set({ fetchReason: RESOURCE_OFF_REASON })
     .where(
@@ -823,9 +857,7 @@ export async function markResourcesNotAsked(db: Db, crawlId: string): Promise<nu
         isNull(resources.fetchClass),
         isNull(resources.fetchReason),
       ),
-    )
-    .returning({ url: resources.url });
-  return stamped.length;
+    );
 }
 
 /** A verdict with nothing to report but the reason. */
