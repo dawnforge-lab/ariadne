@@ -284,14 +284,16 @@ one it was configured with").
 
 Two things that column is not, because a reader will otherwise assume both:
 
-- **It is not per-host.** It is one number for the whole crawl — the widest
-  spacing any host reached — so a resume applies that width to *every* host it
-  touches, including ones that never pushed back. A crawl whose CDN earned 8s
-  while the origin stayed at 1s resumes with the origin at 8s too. That is slower
-  than necessary and it is the polite direction, so it is accepted rather than
-  worked around: per-host fidelity does not exist to be preserved, because no
-  column records it. A `host → earned ms` table is the **Phase 13 candidate**
-  that would fix it. The 30s cap still bounds the widening.
+- **It is the crawl-wide fallback, not the per-host truth.** It is one number for
+  the whole crawl — the widest spacing any host reached — so on its own it would
+  apply that width to *every* host a resume touches, including ones that never
+  pushed back. Since Phase 13 (migration 0015) the per-host truth lives beside it
+  in `crawls.host_spacing_jsonb` (`{host: earnedMs}`): each host re-enters ITS OWN
+  earned spacing, so a crawl whose CDN earned 8s while the origin stayed at 1s
+  resumes the CDN at 8s and the origin at 1s. `host_spacing_ms` stays as the
+  fallback a host the map does not name falls back to — a URL discovered only on
+  the continuation, or a pre-0015 crawl whose map is null — which is the polite
+  direction, never a fabricated split. The 30s cap still bounds both.
 - **It is not only earned.** The loop writes the spacing once before its first
   fetch, so a crawl that never escalated still stores `max(perHostDelayMs, robots
   Crawl-delay)`. Consequences: a `Crawl-delay` the site has *since removed* stays

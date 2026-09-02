@@ -38,6 +38,29 @@ export const crawls = pgTable("crawls", {
   // conflates the two would report an unpaced crawl as un-instrumented, or the
   // reverse (hard rule 7).
   hostSpacingMs: integer("host_spacing_ms"),
+  // The SAME finding, per host: `{ host: earnedMs }`, `HostGate.maxSpacingMsByHost()`,
+  // written by the crawl loop beside `host_spacing_ms` (migration 0015, P13-T3).
+  // `host_spacing_ms` above is the WIDEST spacing any single host reached, so a
+  // resume built from it alone widens EVERY host to the worst host's number — a
+  // crawl whose CDN earned 8s while the origin stayed at 1s resumes the origin at
+  // 8s too. This map is what lets each host re-enter ITS OWN earned spacing
+  // instead: on a resume `HostGate` folds `map[host]` (falling back to the
+  // crawl-wide `host_spacing_ms`, then the config floor, for a host not in it)
+  // into the same max(config, robots, earned) capped at 30s (`earnedSpacingByHost`).
+  //
+  // NULLABLE, AND THE NULL IS LOAD-BEARING, as `host_spacing_ms`'s is — but it
+  // means one thing more precisely: "no 0015-aware loop ever wrote this crawl a
+  // map". A crawl that predates the column, or one that failed before its gate
+  // existed. NOT the empty object `{}`, which a 0015 crawl writes when its loop
+  // ran but touched no host worth recording yet — the map's null-vs-empty is the
+  // column-vs-crawl distinction `host_spacing_ms`'s null-vs-zero is. There is NO
+  // BACKFILL: a pre-0015 crawl kept only the crawl-wide number, and a resume of
+  // one falls back to it exactly as before — honest degradation in the polite
+  // direction (the widest, applied to all), never a fabricated per-host split
+  // (hard rule 7). `host_spacing_ms` STAYS: it is that fallback, and it is the
+  // number `crawl_status` already serves a poller (the per-host map is resume
+  // machinery, not a poll surface).
+  hostSpacingJsonb: jsonb("host_spacing_jsonb").$type<Record<string, number>>(),
   // Three crawl-level evidence blobs the query rules read instead of fetching
   // (hard rule 3: rules read the database). All three are nullable, and a null
   // does NOT mean the same thing in each — what a rule may conclude from one

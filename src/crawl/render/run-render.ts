@@ -210,6 +210,17 @@ export interface RenderPassConfig extends RenderSelectionConfig {
  * `max`, not "replace": a caller who deliberately asks for a wider delay than
  * the crawl earned keeps it, and a crawl that never escalated (`null`, or a
  * spacing at or below the configured one) changes nothing.
+ *
+ * CRAWL-WIDE ON PURPOSE, not per-host. Migration 0015 gave the crawl loop a
+ * per-host earned map (`crawls.host_spacing_jsonb`) so a resume re-enters each
+ * host at its own spacing rather than the crawl-wide widest — and the render
+ * pass deliberately does NOT read it. The pass renders pages of the crawl, which
+ * are same-origin by construction (the crawl only enqueues same-origin URLs), so
+ * its workload is effectively one host and per-host fidelity would change
+ * nothing; and `PageRenderer` takes a single `perHostDelayMs` scalar, not a
+ * per-host gate seeded from a map. The crawl-wide widest is the polite direction
+ * over that small, explicit set — the over-politeness cost is bounded by the
+ * selection — so this stays one number (P13-T3).
  */
 export function renderPaceMs(configuredMs: number, earnedMs: number | null): number {
   return Math.max(configuredMs, earnedMs ?? 0);

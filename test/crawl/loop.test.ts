@@ -914,6 +914,66 @@ describe("resumeCrawl", () => {
     expect(row?.hostSpacingMs).toBeGreaterThanOrEqual(250);
   });
 
+  // THE PER-HOST RATCHET ACROSS A RESUME (P13-T3, rule 9).
+  //
+  // `crawls.host_spacing_jsonb` is the SAME finding as `host_spacing_ms`, split
+  // per host so a resume re-enters each host at ITS OWN earned spacing instead of
+  // at the single crawl-wide widest. The crown pattern of the test above, now
+  // reading the map: the number is written to the column directly (the fixture
+  // never blocks), the resume folds it in per host, and it survives the round
+  // trip — the map is re-persisted at close. The two-host case (a CDN at 8s and
+  // an origin at 1s resuming at their own numbers) is unit-tested against the
+  // gate in politeness.test.ts, because this fixture is single-origin.
+  it("resumes each host at its own earned spacing from the per-host map", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    expect(first.status).toBe("cancelled");
+
+    const host = new URL(base).host;
+    // What the first run would have written for this host had the site refused
+    // it: the per-host map beside the crawl-wide number.
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: 250, hostSpacingJsonb: { [host]: 250 } })
+      .where(eq(crawls.id, first.crawlId));
+
+    const resumed = await resumeCrawl(db, first.crawlId, {
+      config: config({ perHostDelayMs: 0 }),
+    });
+    expect(resumed.status).toBe("finished");
+
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
+    // The host re-entered its own 250 (config floor was 0), and the map is
+    // re-persisted rather than dropped on the resume.
+    expect(row?.hostSpacingJsonb?.[host]).toBeGreaterThanOrEqual(250);
+    expect(row?.hostSpacingMs).toBeGreaterThanOrEqual(250);
+  });
+
+  // A pre-0015 row has a null map, and the resume must fall back to the
+  // crawl-wide `host_spacing_ms` exactly as it did before per-host existed —
+  // honest degradation, never a fabricated split.
+  it("falls back to the crawl-wide spacing when the per-host map is null (pre-0015)", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const first = await crawl(config({ perHostDelayMs: 40 }), ac.signal);
+    expect(first.status).toBe("cancelled");
+
+    // The crawl-wide number only — no map, as a row written before 0015 carries.
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: 250, hostSpacingJsonb: null })
+      .where(eq(crawls.id, first.crawlId));
+
+    const resumed = await resumeCrawl(db, first.crawlId, {
+      config: config({ perHostDelayMs: 0 }),
+    });
+    expect(resumed.status).toBe("finished");
+
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
+    expect(row?.hostSpacingMs).toBeGreaterThanOrEqual(250);
+  });
+
   it("re-fetches a URL whose page row a hard kill left in the buffer", async () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
