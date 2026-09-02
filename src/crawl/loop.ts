@@ -46,7 +46,7 @@
  * done and the row was still in a buffer (build plan §7).
  */
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { crawls, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
@@ -917,6 +917,11 @@ async function runToCompletion(
   // took (hard rule 7 — the miscount would be silent).
   const startCounts = await frontierCounts(db, crawlId);
   let pagesCrawled = crawledRows(startCounts);
+  // Whether pages were already on record when this run began — the same number,
+  // read as a question. `closeCrawl` needs it because the cap-exceeded counter
+  // this run accumulates is a DELTA on a resume and the whole count on a fresh
+  // crawl; see its docblock for why the difference is not cosmetic.
+  const resumed = pagesCrawled > 0;
   let frontierRows =
     startCounts.pending +
     startCounts.leased +
@@ -1354,7 +1359,10 @@ async function runToCompletion(
   // a reader who sees `finished` sees the marker too.
   const pageTemplates = await inferPageTemplates(db, crawlId);
 
-  await closeCrawl(db, crawlId, status, pagesCrawled);
+  await closeCrawl(db, crawlId, status, pagesCrawled, {
+    delta: writer.stats().resourceRefsCappedPages,
+    resumed,
+  });
   return summarise(
     db,
     crawlId,
@@ -1544,6 +1552,7 @@ function emptyWriterStats(): PageWriterStats {
     resources: 0,
     pageResources: 0,
     hreflangUnresolved: 0,
+    resourceRefsCappedPages: 0,
   };
 }
 
@@ -1590,15 +1599,60 @@ async function persistSitemap(
   }
 }
 
+/**
+ * Close the row: the terminal status, the finish time, the page count — and,
+ * when this process ran pages, the cap-exceeded count beside them.
+ *
+ * ## `refsCapped`, and why it is optional
+ *
+ * `crawls.resource_refs_capped_pages` counts the pages whose analyzer dropped a
+ * resource reference at `MAX_RESOURCE_REFS` (migration 0014). The counter lives
+ * on `PageWriter` because that is where the pages go past — the alternative,
+ * deriving it from `page_resources`, is O(edges) and was measured at 73 ms on a
+ * 500,000-edge crawl against a `crawl_status` whose other reads are ≤ 3 ms
+ * (docs/gates/phase-11.md §10.1). This is where the counter is stamped.
+ *
+ * It is optional because `execute`'s failure path closes rows it has no writer
+ * for: a crawl that died anywhere in `runToCompletion` is closed from the
+ * FRONTIER's numbers, and the process holding the counter is the thing that just
+ * failed. Passing `null` LEAVES THE COLUMN ALONE, which is the honest outcome —
+ * nobody counted, and the null says exactly that. Writing 0 there would report a
+ * measurement no one took (hard rule 7).
+ *
+ * ## The resume arithmetic, and the null that has to survive it
+ *
+ * `delta` is what THIS run's writer saw, so a resume must ADD rather than
+ * overwrite: its writer only ever met the pages this run fetched, and the
+ * earlier run's truncated pages are still truncated. The addition is done in
+ * SQL, not in TypeScript, for one property — `null + n` is null in SQL. A crawl
+ * whose first run predates this column has no count, and a resume must not turn
+ * that honest null into a partial number that reads like a whole one.
+ *
+ * A fresh crawl assigns instead of adding: its writer saw every page, the
+ * column is null before it, and `null + n` would leave a crawl that DID count
+ * looking uncounted.
+ */
 async function closeCrawl(
   db: Db,
   crawlId: string,
   status: CrawlSummary["status"],
   pagesCrawled: number,
+  refsCapped: { delta: number; resumed: boolean } | null = null,
 ): Promise<void> {
   await db
     .update(crawls)
-    .set({ status, finishedAt: new Date(), pagesCrawled })
+    .set({
+      status,
+      finishedAt: new Date(),
+      pagesCrawled,
+      ...(refsCapped === null
+        ? {}
+        : {
+            resourceRefsCappedPages: refsCapped.resumed
+              ? sql`${crawls.resourceRefsCappedPages} + ${refsCapped.delta}`
+              : refsCapped.delta,
+          }),
+    })
     .where(eq(crawls.id, crawlId));
 }
 

@@ -286,10 +286,20 @@ answered from, and its verdict is the confidence interval around all of them.
      `fetched + failed + skipped = seen`, always. `fetchResources` says whether the
      crawl asked in the first place: `false` is an operator's decision and makes
      every resource check NOT MEASURED rather than clean. `capped: true` means a
-     per-crawl budget stopped the pass short. `robotsDenied` needs reading with
-     care — an unreachable robots.txt is a complete disallow, so a CDN that was
-     down looks exactly like a CDN that forbids us, and only each row's
-     `fetchReason` (the `resources` CSV view) says which.
+     per-crawl budget stopped the pass short. `robotsDenied` and
+     `robotsUnreachable` are two subsets of `failed` and are served as two counts:
+     `robotsDenied` is "they said no" (the host's robots.txt was read and forbids
+     us) and `robotsUnreachable` is "we could not ask" (the host answered 5xx,
+     timed out or failed at the network — a complete disallow all the same). Read
+     the second as a fact about our evidence, usually a third party's CDN briefly
+     down, not as the client's misconfiguration. Each row's `fetchReason` (the
+     `resources` CSV view) names the host and the reason. **A crawl run before the
+     two were split reports every robots refusal in `robotsDenied`.**
+     `resourceRefsCappedPages` sits outside the block and counts PAGES, not files:
+     how many pages referenced more assets than the analyzer records (2,000 per
+     page). Non-zero means `seen` is a floor on that many pages and every resource
+     check is answered over a sample of their references; **`null` means nobody
+     counted** (a crawl older than the counter), which is not `0`.
 - **The markers are part of this check, not a footnote.** `issues_list` with no
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
@@ -310,12 +320,15 @@ answered from, and its verdict is the confidence interval around all of them.
     `pagesScanned`, `findingCap` and which rules were truncated, `renderPassCount`
     and the `render.coverage` numbers, the whole `resources` block with
     `fetchResources` beside it, and every NOT MEASURED marker that fired
-- **Also NOT MEASURED, and stated here because nothing else states it**: the
-  analyzer records at most 2,000 resource references per page. A page above that
-  contributes its first 2,000 and the rest are dropped silently — nothing on any
-  surface counts them, deriving the number costs a scan of every reference the crawl
-  holds, and it is not on `crawl_status` for that reason. On a page with an enormous
-  gallery or script list, read the resource evidence as a floor.
+- **The 2,000-reference cap, now counted rather than silent**: the analyzer records
+  at most 2,000 resource references per page and a page above that contributes its
+  first 2,000. That used to be invisible; `crawl_status.resourceRefsCappedPages` is
+  the count of the crawl's pages it happened to. Non-zero means the resource evidence
+  is a FLOOR on that many pages — read every resource check as answered over a sample
+  of their references. WHICH pages is still NOT MEASURED: no surface lists them,
+  because deriving that costs a scan of every reference the crawl holds. **`null` is
+  not `0`** — a crawl older than the counter has no answer, and a report that prints
+  "0 pages truncated" for it is stating a measurement nobody took.
 - **`site.health` is filed here** (`metrics_get` with `metricId: "site.health"`):
   the partition of the crawl's auditable pages by the worst severity each carries,
   plus the pages the census leaves out. It is a rollup of the audit's own findings —
@@ -2180,8 +2193,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   it — a 200 carrying a refusal reason is bot protection answering in place of the
   file, not a healthy asset — and carries an `unknownResources` count for the
   references the crawl could not decide about (never asked, refused by url-policy,
-  disallowed by robots, or a request that did not complete). None of those is a broken
-  file, and a high unknown count means the answer here is partial. The same call can
+  disallowed by a robots.txt we read, blocked because the host's robots.txt was
+  unreachable while the crawl ran, or a request that did not complete). None of those
+  is a broken file, and a high unknown count means the answer here is partial.
+  `crawl_status.resources` serves the two robots reasons as SEPARATE counts —
+  `robotsDenied` ("they said no") and `robotsUnreachable` ("we could not ask") — so
+  when the unknown count is high, read those before writing anything: a wall of
+  `robotsUnreachable` is a host that was down during our window, not a decision
+  anybody made about this site. The same call can
   return `resources.not-recorded` (info), the NOT MEASURED marker for the resource
   family: when it is present the crawl holds no resource records, so no broken file
   could have been found and the network half of this check is NOT MEASURED rather than

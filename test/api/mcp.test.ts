@@ -448,9 +448,20 @@ beforeAll(async () => {
       fetchedAt: new Date(), fetchMs: 11,
     },
     {
+      // A host that was DOWN while the pass ran — a complete disallow we could
+      // not ask about (P12-T1's `robots_unreachable`).
       crawlId: surfaceCrawlId, url: "https://cdn.mcp-query.example/hero.png",
-      kind: "image", fetchClass: "robots_denied",
+      kind: "image", fetchClass: "robots_unreachable",
       fetchReason: "robots.txt unreachable (503): complete disallow",
+      fetchedAt: new Date(),
+    },
+    {
+      // A host that FORBADE it. Same behaviour, different fact, and now a
+      // different class — so the agent transport has a file on each side of the
+      // split too.
+      crawlId: surfaceCrawlId, url: "https://cdn.mcp-query.example/banned.png",
+      kind: "image", fetchClass: "robots_denied",
+      fetchReason: "robots.txt (cdn.mcp-query.example) disallows this URL",
       fetchedAt: new Date(),
     },
     {
@@ -461,6 +472,7 @@ beforeAll(async () => {
   await db.insert(pageResources).values([
     { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: `${SEEDED_SITE}/theme.css` },
     { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: "https://cdn.mcp-query.example/hero.png" },
+    { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: "https://cdn.mcp-query.example/banned.png" },
     { crawlId: surfaceCrawlId, pageId: surfaceHome, resourceUrl: `${SEEDED_SITE}/app.js` },
   ]);
 
@@ -956,18 +968,26 @@ describe("crawl_status / crawl_list", () => {
   it("answers the resource census and whether the crawl asked for it", async () => {
     const detail = await ok("crawl_status", { crawlId: surfaceCrawlId });
     expect(detail["resources"]).toEqual({
-      seen: 3, fetched: 1, failed: 1, skipped: 1, robotsDenied: 1, capped: true,
+      seen: 4, fetched: 1, failed: 2, skipped: 1,
+      // The two robots counts, apart (P12-T1). Both are subsets of `failed`, so
+      // the partition below is untouched by the split.
+      robotsDenied: 1, robotsUnreachable: 1, capped: true,
     });
     // Nobody turned it off, so the resolved default is reported — which is what
     // makes `fetched: 1` readable as a measurement rather than as a decision.
     expect(detail["fetchResources"]).toBe(true);
+    // Stamped, not counted — and null here because this crawl's rows were
+    // seeded rather than crawled, so no loop ever closed it under 0014. Null is
+    // "nobody counted"; 0 would be "we counted and it was none".
+    expect(detail["resourceRefsCappedPages"]).toBeNull();
 
     // A crawl holding no resource rows answers the block all the same: zeroes
     // are a measurement, and an absent block would leave "this crawl was written
     // before the tables existed" indistinguishable from "this site has no files".
     const bare = await ok("crawl_status", { crawlId: seededCrawlId });
     expect(bare["resources"]).toEqual({
-      seen: 0, fetched: 0, failed: 0, skipped: 0, robotsDenied: 0, capped: false,
+      seen: 0, fetched: 0, failed: 0, skipped: 0,
+      robotsDenied: 0, robotsUnreachable: 0, capped: false,
     });
   });
 
@@ -979,7 +999,10 @@ describe("crawl_status / crawl_list", () => {
     const listedStatus = await client.listTools();
     const text = listedStatus.tools.find((t) => t.name === "crawl_status")?.description ?? "";
     expect(text, "crawl_status has no description").not.toBe("");
-    for (const field of ["seen", "fetched", "failed", "skipped", "robotsDenied", "capped"]) {
+    for (const field of [
+      "seen", "fetched", "failed", "skipped", "robotsDenied", "robotsUnreachable",
+      "capped", "resourceRefsCappedPages",
+    ]) {
       expect(text, `crawl_status's description does not name '${field}'`).toContain(field);
     }
     // The arithmetic a consumer may rely on.
@@ -990,10 +1013,19 @@ describe("crawl_status / crawl_list", () => {
     // The two readings a bare count would hide.
     expect(text).toContain("SEEN BUT NOT ASKED");
     expect(text).toContain("not a count of broken files");
-    // The robots trap: unreachable is a complete disallow, so the count cannot
-    // tell "they said no" from "we could not ask".
+    // The robots trap, and the split that answers it (P12-T1). An unreachable
+    // robots.txt is still a complete disallow — the behaviour is identical — but
+    // the two are now separate counts rather than one count and a sentence, so
+    // the description has to say which is which.
     expect(text).toContain("unreachable robots.txt is a complete disallow");
     expect(text).toContain("fetchReason");
+    expect(text).toContain("they said no");
+    expect(text).toContain("we could not ask");
+    // The cap-exceeded counter, with the null that is not a zero — the field
+    // most likely to be rendered as "0 pages truncated" on a crawl nobody
+    // counted.
+    expect(text).toContain("null is not zero");
+    expect(text).toContain("a floor");
     // And the off switch's echo, with both readings of a zero spelled out.
     expect(text).toContain("fetchResources");
     expect(text).toContain("false beside fetched 0");
@@ -2002,14 +2034,20 @@ describe("the two transports answer with one shape", () => {
       {
         // The SAME tool on a crawl that carries resource rows. The pair above
         // compares a crawl whose whole resources block is zeroes, which would
-        // let a transport drop or rename any of its six numbers and still
-        // agree; this one has a file on each side of every split it makes.
+        // let a transport drop or rename any of its numbers and still agree;
+        // this one has a file on each side of every split it makes, the two
+        // robots classes included (P12-T1).
         tool: "crawl_status",
         args: { crawlId: surfaceCrawlId },
         path: `/crawls/${surfaceCrawlId}`,
         substantial: (b) => {
           const r = b["resources"] as Record<string, number> | undefined;
-          return r !== undefined && r["seen"] === 3 && r["robotsDenied"] === 1;
+          return (
+            r !== undefined &&
+            r["seen"] === 4 &&
+            r["robotsDenied"] === 1 &&
+            r["robotsUnreachable"] === 1
+          );
         },
       },
       {
@@ -2177,16 +2215,20 @@ describe("the two transports answer with one shape", () => {
 
     expect(streamed.status).toBe(200);
     expect(streamed.text).toBe(file);
-    // A header and the crawl's three files, with the empty cells that make an
+    // A header and the crawl's four files, with the empty cells that make an
     // unfetched row readable rather than absent.
     const lines = file.trimEnd().split("\r\n");
-    expect(lines).toHaveLength(4);
+    expect(lines).toHaveLength(5);
     expect(lines[0]).toBe(
       "url,kind,fetchClass,status,bytes,bytesSource,contentType,cacheControl," +
         "fetchReason,referencingPages",
     );
-    expect(written["rows"]).toBe(3);
+    expect(written["rows"]).toBe(4);
     expect(file).toContain(",resource-cap,1");
+    // Both robots classes reach the file the client opens, so the split is
+    // readable per row and not only as two counts.
+    expect(file).toContain(",robots_unreachable,");
+    expect(file).toContain(",robots_denied,");
   });
 });
 

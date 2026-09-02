@@ -1097,14 +1097,20 @@ describe("issue copy", () => {
     }
   });
 
-  // The four causes of a silence, named individually. "Unknown" as a word is
-  // cheap; what a reader needs is which four things it covers, because three of
-  // them are decisions (ours, the site's robots, a cap) rather than faults.
+  // The FIVE causes of a silence, named individually. "Unknown" as a word is
+  // cheap; what a reader needs is which five things it covers, because four of
+  // them are decisions (ours, the site's robots, an unreachable robots host, a
+  // cap) rather than faults. The fifth arrived with P12-T1's `robots_unreachable`
+  // class, and it is the one most likely to be misread as the client's fault:
+  // the host that could not answer is usually somebody else's CDN.
   it("resources.broken names every reason a file goes uncounted rather than broken", () => {
     const c = ISSUE_COPY["resources.broken"]!;
     expect(c.explanation, "the pass never reached it").toMatch(/never got to ask|did not finish/i);
     expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
     expect(c.explanation, "robots").toMatch(/robots\.txt disallowed/i);
+    expect(c.explanation, "an unreachable robots host").toMatch(
+      /could not (?:be reached|tell us|answer)|was unreachable|unreachable robots/i,
+    );
     expect(c.explanation, "a failed request").toMatch(/request never completed/i);
     // And the shape that makes the reason load-bearing: a 200 with a refusal
     // reason beside it is bot protection, not a healthy file (P11-T2's

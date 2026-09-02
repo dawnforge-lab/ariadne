@@ -15,13 +15,17 @@
  * `resources.fetch_class` is null for a reference the pass has not asked about —
  * because it has not run, was interrupted, or a cap stopped short of the row.
  * That is the null-vs-zero doctrine's newest citizen and the column comment in
- * src/db/schema.ts says so. Three more classes are unknowns of a different
+ * src/db/schema.ts says so. Four more classes are unknowns of a different
  * shape, and none of them is a fault of the site's:
  *
  *  - `refused` — OUR policy refused the URL (SSRF, a non-http scheme). We never
  *    asked.
- *  - `robots_denied` — the host's robots.txt disallowed it. We were not allowed
- *    to ask, and honouring that is hard rule 9.
+ *  - `robots_denied` — the host's robots.txt was read and disallowed it. We were
+ *    not allowed to ask, and honouring that is hard rule 9.
+ *  - `robots_unreachable` — the host could not tell us its rules, which RFC 9309
+ *    §2.3.1.4 makes a complete disallow, so again we never asked (P12-T1). An
+ *    unknown for the stronger reason: the host that would have answered was
+ *    down, usually a third party's CDN and usually transiently.
  *  - `fetch_error` — we asked and the request did not complete (a timeout, a
  *    DNS or connection failure). Nobody told us anything about the file.
  *
@@ -80,7 +84,10 @@ import type { Db } from "../../db/client.js";
 // in three statements: the fetch pass owns the vocabulary, and a bare literal
 // here would typecheck for ever against a renamed one while the weight and
 // caching rules quietly measured nothing (P11-T4 I-2).
-import { RESOURCE_OK_CLASS } from "../../crawl/resources/fetch-resources.js";
+import {
+  RESOURCE_OK_CLASS,
+  type ResourceFetchClass,
+} from "../../crawl/resources/fetch-resources.js";
 import { queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -121,9 +128,9 @@ export const UNCACHED_SAMPLE_RESOURCES = 20;
  *
  * `fetch_error` is deliberately absent: a request that never completed is not a
  * server's verdict, and a flaky network on our side would otherwise be reported
- * to a client as their broken site. `refused` and `robots_denied` are absent for
- * the stronger reason that we never asked at all. All three are counted as
- * unknowns instead — see `UNKNOWN_CLASSES`.
+ * to a client as their broken site. `refused`, `robots_denied` and
+ * `robots_unreachable` are absent for the stronger reason that we never asked at
+ * all. All four are counted as unknowns instead — see `UNKNOWN_CLASSES`.
  */
 const BROKEN_CLASSES = ["client_error", "server_error"] as const;
 
@@ -134,8 +141,26 @@ const BROKEN_CLASSES = ["client_error", "server_error"] as const;
  * Every rule that reports a page's resources carries a count over this set, so a
  * reader can tell a page with two broken files and nothing else from a page with
  * two broken files and forty the pass never reached.
+ *
+ * `robots_unreachable` joined the list when P12-T1 split it out of
+ * `robots_denied`, and it is an unknown for the stronger of the two reasons: we
+ * never asked, AND the host that would have told us was down. A rule that
+ * counted it as a fault would be reporting a third party's outage as a client's
+ * broken site.
+ *
+ * TYPED AS `ResourceFetchClass[]`, not left as a bare tuple: the fetch pass owns
+ * this vocabulary and a member renamed there must not leave a literal here
+ * silently matching nothing. The compiler is what checks the four names against
+ * the list they come from — the same discipline `RESOURCE_OK_CLASS` gets one
+ * import above, applied where a set rather than a single name is needed
+ * (P11-T4 I-2).
  */
-const UNKNOWN_CLASSES = ["refused", "robots_denied", "fetch_error"] as const;
+const UNKNOWN_CLASSES: readonly ResourceFetchClass[] = [
+  "refused",
+  "robots_denied",
+  "robots_unreachable",
+  "fetch_error",
+];
 
 /** `fetch_class` is one of the unknowns, null included. */
 const isUnknownClass = sql`(r.fetch_class is null

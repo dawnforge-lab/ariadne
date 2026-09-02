@@ -99,6 +99,13 @@
       "when": 1788298404556,
       "tag": "0013_light_red_ghost",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1788343410275,
+      "tag": "0014_sleepy_jocasta",
+      "breakpoints": true
     }
   ]
 }

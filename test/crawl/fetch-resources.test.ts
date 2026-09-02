@@ -24,7 +24,10 @@ import type { RobotsInfo } from "../../src/crawl/discovery.js";
 import {
   fetchCrawlResources,
   RESOURCE_CAP_REASON,
+  RESOURCE_FETCH_CLASSES,
   RESOURCE_OFF_REASON,
+  RESOURCE_ROBOTS_DENIED_CLASS,
+  RESOURCE_ROBOTS_UNREACHABLE_CLASS,
   type ResourcePassSummary,
 } from "../../src/crawl/resources/fetch-resources.js";
 
@@ -811,7 +814,18 @@ describe("robots.txt, per host, fetched once", () => {
     expect(hitsFor(assets, "/a.png")).toEqual([]);
   });
 
-  it("treats an unreachable third-party robots.txt as a complete disallow", async () => {
+  /**
+   * THE SPLIT (P12-T1). An unreachable robots.txt is a complete disallow
+   * (RFC 9309 §2.3.1.4), so the BEHAVIOUR is identical to a forbidding one: no
+   * request is made. What is not identical is the SENTENCE — "they said no" and
+   * "we could not ask" are different facts about a client's site, and until this
+   * task both landed in `robots_denied` with only the prose reason to tell them
+   * apart. Phase 11 refused to split them by matching that prose (a reworded
+   * error string would zero the count silently) and ledgered the fix:
+   * `RobotsInfo.outcome` is a CLOSED VOCABULARY already in hand at the deny
+   * site, so the class comes off the discriminant (phase-11.md §10.2).
+   */
+  it("classes an unreachable third-party robots.txt apart from a forbidding one", async () => {
     const crawlId = await seedCrawl(assets.base);
     const url = `${dead.base}/one.png`;
     await seedResources(crawlId, [{ url }]);
@@ -819,10 +833,40 @@ describe("robots.txt, per host, fetched once", () => {
     await runPass(crawlId, assets.base, { robotsRetryBackoffMs: 1 });
 
     const row = await rowFor(crawlId, url);
-    expect(row.fetchClass).toBe("robots_denied");
+    expect(row.fetchClass).toBe(RESOURCE_ROBOTS_UNREACHABLE_CLASS);
+    expect(row.fetchClass).not.toBe(RESOURCE_ROBOTS_DENIED_CLASS);
+    // The reason is unchanged and still per-row: the class is a second, cheaper
+    // way to ask the same question, never a replacement for the sentence.
     expect(row.fetchReason).toContain("unreachable");
-    // Nothing but robots.txt was ever asked for.
+    // The disallow is still complete — nothing but robots.txt was ever asked
+    // for. A new class must not become a new permission.
     expect(dead.hits.every((hit) => hit.path === "/robots.txt")).toBe(true);
+  });
+
+  it("keeps `robots_denied` for a file the robots file actually forbade", async () => {
+    const crawlId = await seedCrawl(assets.base);
+    const forbidden = `${third.base}/nope/secret.png`;
+    const unreachable = `${dead.base}/two.png`;
+    await seedResources(crawlId, [{ url: forbidden }, { url: unreachable }]);
+
+    await runPass(crawlId, assets.base, { robotsRetryBackoffMs: 1 });
+
+    // Both are refusals and both count as `failed`; the two rows say WHICH
+    // refusal, which is the whole point of the split.
+    expect((await rowFor(crawlId, forbidden)).fetchClass).toBe(RESOURCE_ROBOTS_DENIED_CLASS);
+    expect((await rowFor(crawlId, unreachable)).fetchClass).toBe(
+      RESOURCE_ROBOTS_UNREACHABLE_CLASS,
+    );
+  });
+
+  // The vocabulary itself, pinned: `robots_unreachable` is a member, and the two
+  // exported constants are the two spellings the readers outside this module
+  // use. A rename that missed one would leave a reader's SQL comparing against a
+  // class nothing writes — the failure mode the constants exist to prevent.
+  it("names the new class in the closed vocabulary the readers share", () => {
+    expect(RESOURCE_FETCH_CLASSES).toContain(RESOURCE_ROBOTS_UNREACHABLE_CLASS);
+    expect(RESOURCE_FETCH_CLASSES).toContain(RESOURCE_ROBOTS_DENIED_CLASS);
+    expect(RESOURCE_ROBOTS_UNREACHABLE_CLASS).not.toBe(RESOURCE_ROBOTS_DENIED_CLASS);
   });
 });
 

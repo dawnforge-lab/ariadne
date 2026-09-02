@@ -295,15 +295,30 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "broken files, which is what the resources.broken finding judges. skipped is " +
         "SEEN BUT NOT ASKED: the pass has not run, was interrupted, hit a cap, or was " +
         "turned off. fetched + failed + skipped = seen, always.\n\n" +
-        "Two fields beside them say what a bare number would hide. robotsDenied is " +
-        "the part of failed that robots.txt put out of reach — READ IT CAREFULLY: an " +
-        "unreachable robots.txt is a complete disallow (RFC 9309), so a CDN that was " +
-        "down while the pass ran looks exactly like a CDN that forbids us. Which one " +
-        "it was is in each row's fetchReason, on the resources CSV view " +
-        "(export_crawl, format=csv, view=resources); this count does not read that " +
-        "sentence. capped is true when a per-crawl cap stopped the pass short of at " +
-        "least one file — one flag for both caps, because the row records one reason " +
-        "whichever cap it was.\n\n" +
+        "Three fields beside them say what a bare number would hide. robotsDenied " +
+        "and robotsUnreachable are both parts of failed that robots.txt put out of " +
+        "reach, and they are two counts because they are two facts: robotsDenied is " +
+        "'they said no' — the file's host served its rules and they forbid us — " +
+        "while robotsUnreachable is 'we could not ask' — the host answered 5xx, timed " +
+        "out or failed at the network, which RFC 9309 makes a complete disallow all " +
+        "the same. An unreachable robots.txt is a complete disallow, so the BEHAVIOUR " +
+        "is identical (no request was made either way) and the report is not: " +
+        "robotsUnreachable is usually a transient condition on somebody's CDN, not a " +
+        "policy the client chose. Each row's fetchReason names the host and the " +
+        "reason, on the resources CSV view (export_crawl, format=csv, " +
+        "view=resources). A crawl run before this split has every robots refusal in " +
+        "robotsDenied — nothing was rewritten. capped is true when a per-crawl cap " +
+        "stopped the pass short of at least one file — one flag for both caps, " +
+        "because the row records one reason whichever cap it was.\n\n" +
+        "resourceRefsCappedPages sits OUTSIDE that block because it counts PAGES, " +
+        "not files: how many of this crawl's pages referenced more files than the " +
+        "analyzer records (it keeps 2,000 per page and drops the rest). On those " +
+        "pages resources.seen is a floor — the site points at more files than were " +
+        "recorded, so every count over the census is a count over a sample of that " +
+        "page's references. null is not zero: null means nobody counted (a crawl " +
+        "older than the counter, one still running, or one whose process died before " +
+        "it closed), while 0 means every page was read and none of them lost a " +
+        "reference. Do not render the two the same way.\n\n" +
         "fetchResources says whether this crawl asked at all: true is the default and " +
         "false is an operator's decision, echoed here so it can be confirmed. false " +
         "beside fetched 0 is 'nobody asked'; true beside fetched 0 is a pass that has " +

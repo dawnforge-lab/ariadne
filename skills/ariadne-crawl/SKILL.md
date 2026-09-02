@@ -219,7 +219,9 @@ target is not something this skill can crawl.
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
  rulesRunAt, findingsCount, pagesScanned, fetchResources,
- resources: {seen, fetched, failed, skipped, robotsDenied, capped}}
+ resourceRefsCappedPages,
+ resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
+             capped}}
 ```
 
 What the fields mean when you are waiting:
@@ -261,12 +263,25 @@ What the fields mean when you are waiting:
   files it could not answer for — a 4xx, a request that failed, a URL our policy
   refused, a file robots.txt put out of reach — and `skipped` is SEEN BUT NOT ASKED.
   `fetched + failed + skipped = seen`, always. `capped: true` means a per-crawl
-  budget stopped the pass short. `robotsDenied` is the part of `failed` robots.txt
-  caused, and it needs care: an unreachable robots.txt is a complete disallow, so a
-  CDN that was down looks exactly like a CDN that forbids us — the `fetchReason` on
-  each row (the `resources` CSV view) is what says which. `fetchResources` is whether
+  budget stopped the pass short. `robotsDenied` and `robotsUnreachable` are two
+  subsets of `failed` and are not part of that sum: `robotsDenied` is "they said
+  no" — the host served its robots.txt and it forbids us — while
+  `robotsUnreachable` is "we could not ask" — the host answered 5xx, timed out or
+  failed at the network, which is a complete disallow all the same. The behaviour
+  was identical either way (no request was made), and the report is not:
+  `robotsUnreachable` is usually a third party's CDN briefly down rather than a
+  policy anybody chose. Each row's `fetchReason` on the `resources` CSV view names
+  the host and the reason. A crawl run before the two were split has every robots
+  refusal in `robotsDenied`. `fetchResources` is whether
   the crawl asked at all: `false` is an operator's decision, and beside `fetched: 0`
   it means nobody weighed anything rather than that nothing is heavy.
+- **`resourceRefsCappedPages`** — how many of the crawl's PAGES referenced more
+  files than the analyzer records (it keeps 2,000 per page and drops the rest). On
+  those pages the `seen` count above is a floor, so any count over the census is a count
+  over a sample of that page's references. **`null` is not `0`**: null means nobody
+  counted (a crawl older than the counter, one still running, or one whose process
+  died before it closed), while `0` means every page was read and none of them lost
+  a reference. Do not report the two the same way.
 - **`rulesRunAt` and `findingsCount`** — the judged marker, and the only pair that
   tells an empty findings listing from an unjudged crawl. `rulesRunAt` is when a rules
   pass last COMPLETED (null: none on record — never judged, being judged now, or a run

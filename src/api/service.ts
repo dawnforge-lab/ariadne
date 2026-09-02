@@ -76,6 +76,7 @@ import {
   RESOURCE_CAP_REASON,
   RESOURCE_OK_CLASS,
   RESOURCE_ROBOTS_DENIED_CLASS,
+  RESOURCE_ROBOTS_UNREACHABLE_CLASS,
 } from "../crawl/resources/fetch-resources.js";
 // The robots vocabulary from the module that WRITES it, never a copy: a fourth
 // outcome added there must not turn every new crawl's stored evidence into a
@@ -608,6 +609,38 @@ export interface CrawlDetail extends CrawlListItem {
    */
   fetchResources: boolean;
   /**
+   * How many of this crawl's PAGES referenced more files than the analyzer
+   * records — the `MAX_RESOURCE_REFS` cap (2,000 per page) turning references
+   * away, counted instead of silent (migration 0014, P12-T1).
+   *
+   * NULL IS NOT ZERO, and the difference is the whole reason the field exists.
+   * Null means nobody counted: a crawl written before migration 0014, a crawl
+   * still running, or one whose process died before it could close its row.
+   * Zero means the analyzer read every page of this crawl and none of them lost
+   * a reference — a measurement. A dashboard that renders the two the same way
+   * is telling an operator we checked when we did not (hard rule 7).
+   *
+   * IT IS NOT IN `resources` BELOW, deliberately, and the placement is the
+   * honest one on two counts. It counts PAGES and every number in that block
+   * counts FILES; and it is a value the crawl STAMPED at close, while that
+   * block is read live off the `resources` table in one statement. Filed among
+   * them it would make the block's own contract false.
+   *
+   * WHAT A NON-ZERO NUMBER MEANS FOR THE NUMBERS BESIDE IT: on those pages
+   * `resources.seen` is a FLOOR. The site points at more files than this crawl
+   * recorded, so every count derived from the census — broken files, uncached
+   * files, page weight — is a count over a sample of that page's references
+   * rather than over all of them. It is a cap, not a fault: `imagesTotal` and
+   * its siblings stay exact and uncapped, and no page-level count moved.
+   *
+   * The count is carried rather than derived because Phase 11 measured the
+   * derivation: scanning `page_resources` for it costs 73 ms on a 500,000-edge
+   * crawl, against an endpoint whose other reads are ≤ 3 ms (phase-11.md
+   * §10.1). The analyzer flags the page, `PageWriter` counts the flagged pages
+   * and `closeCrawl` stamps the total.
+   */
+  resourceRefsCappedPages: number | null;
+  /**
    * What this crawl knows about the images, stylesheets and scripts its pages
    * reference — **read live off the `resources` table, never off a pass's
    * summary**.
@@ -619,9 +652,12 @@ export interface CrawlDetail extends CrawlListItem {
    * poller and an auditor are both asking, so these numbers are counted here
    * exactly as `findingsCount` and `blockedPages` are.
    *
-   * The four counts PARTITION the rows — `fetched + failed + skipped == seen` —
+   * THREE counts PARTITION the rows — `fetched + failed + skipped == seen` —
    * and they are read in ONE statement so that stays true of a crawl whose pass
-   * is running while somebody polls it.
+   * is running while somebody polls it. `robotsDenied` and `robotsUnreachable`
+   * are SUBSETS of `failed` and are not part of that arithmetic; the P12-T1
+   * split added a second subset and moved nothing, which is exactly why it
+   * could be additive.
    *
    * On a crawl written before migration 0013 every number here is 0, which is
    * not "this site references no files": that case is what the
@@ -655,18 +691,44 @@ export interface CrawlDetail extends CrawlListItem {
      */
     skipped: number;
     /**
-     * Files a host's robots.txt put out of reach, a subset of `failed`.
+     * Files a host's robots.txt FORBADE — it was read, and it said no. A subset
+     * of `failed`.
      *
-     * ON ITS OWN because it is the number most likely to be misread. An
-     * unreachable robots.txt is a COMPLETE DISALLOW (RFC 9309 §2.3.1.4), so a
-     * CDN that was down while the pass ran shows up here exactly as a CDN that
-     * forbids us — a wall of `robots_denied` that means "we could not ask"
-     * rather than "they said no". Which one it was is in each row's
-     * `fetchReason`, verbatim, on the resources CSV view; this count deliberately
-     * does not parse that sentence, because a count built by matching prose
-     * would go quietly wrong the day the sentence is reworded.
+     * ON ITS OWN because it is the number most likely to be misread, and until
+     * P12-T1 it carried a second meaning it could not signal. An unreachable
+     * robots.txt is a COMPLETE DISALLOW (RFC 9309 §2.3.1.4), so a CDN that was
+     * down while the pass ran behaved exactly like a CDN that forbids us and
+     * landed in the same count — a wall of `robots_denied` where half of it
+     * meant "we could not ask". That half is now `robotsUnreachable` beside
+     * this, split on `RobotsInfo.outcome` (a closed vocabulary the fetch pass
+     * holds at the deny site) and never on the reason sentence: a count built by
+     * matching prose goes quietly wrong the day somebody rewords an error
+     * message (docs/gates/phase-11.md §10.2).
+     *
+     * **A crawl that ran before P12-T1 has every robots refusal in this number**
+     * — the split is written going forward, and nothing rewrote history.
      */
     robotsDenied: number;
+    /**
+     * Files whose host could not tell us its rules: robots.txt answered 5xx,
+     * timed out, failed at the network, or lived at a URL our own policy
+     * refused. Also a subset of `failed`, and also a complete disallow — we made
+     * no request for any of these — but a different fact from the count above.
+     *
+     * READ IT AS A FACT ABOUT OUR EVIDENCE, NOT AS THE SITE'S FAULT. A number
+     * here says a host was unreachable during the window this pass ran — often
+     * a third party's CDN and not the client's server at all, and often
+     * transient. It is the honest reason a file the site depends on carries no
+     * measurement.
+     *
+     * A LATER PASS DOES NOT RETRY THEM. The pass's work list is the null
+     * `fetch_class` column, and these rows have a class, so they are settled as
+     * far as it is concerned. A fresh crawl is what re-asks; that is the same
+     * treatment every other decided class gets, and the alternative — a class
+     * that means "decided" on Monday and "ask again" on Tuesday — is a row
+     * nobody can read.
+     */
+    robotsUnreachable: number;
     /**
      * True when a per-crawl cap stopped the pass short of at least one row
      * (`maxResources` or `maxResourceHosts`).
@@ -1694,6 +1756,10 @@ export class ApiService {
       findingsCount,
       pagesScanned,
       fetchResources: configFetchResources(row.config, crawlId),
+      // Straight off the column, null included: this one is STAMPED evidence,
+      // not a count taken here, and the null is the honest answer for every
+      // crawl no 0014-aware loop ever closed.
+      resourceRefsCappedPages: row.resourceRefsCappedPages,
       resources: resourceCounts,
     };
   }
@@ -1723,10 +1789,18 @@ export class ApiService {
    * this reads is a constant this repository defines.
    *
    * The class names are the same discipline, and for the same reason: they are
-   * `RESOURCE_OK_CLASS` and `RESOURCE_ROBOTS_DENIED_CLASS`, imported and
-   * INTERPOLATED rather than typed out as `'ok'` and `'robots_denied'`. A bare
+   * `RESOURCE_OK_CLASS`, `RESOURCE_ROBOTS_DENIED_CLASS` and
+   * `RESOURCE_ROBOTS_UNREACHABLE_CLASS`, imported and INTERPOLATED rather than
+   * typed out as `'ok'`, `'robots_denied'` and `'robots_unreachable'`. A bare
    * literal here would typecheck for ever against a renamed vocabulary while
-   * `robotsDenied` quietly reported 0.
+   * the count it feeds quietly reported 0.
+   *
+   * THE PARTITION DID NOT MOVE when P12-T1 split the robots classes, and the
+   * shape of this statement is why: `failed` is every non-null class that is not
+   * `ok`, so a NEW class joins it without being named, and the two robots counts
+   * are `filter`s over the same rows rather than terms in the sum. A partition
+   * written as an explicit list of classes would have needed editing — and would
+   * have quietly dropped the new one until somebody did.
    */
   private async resourceCoverage(crawlId: string): Promise<CrawlDetail["resources"]> {
     const rows = await this.db.execute<{
@@ -1735,6 +1809,7 @@ export class ApiService {
       failed: number;
       skipped: number;
       robots_denied: number;
+      robots_unreachable: number;
       capped: boolean;
     }>(sql`
       select count(*)::int as seen,
@@ -1746,6 +1821,9 @@ export class ApiService {
              count(*) filter (
                where r.fetch_class = ${RESOURCE_ROBOTS_DENIED_CLASS}
              )::int as robots_denied,
+             count(*) filter (
+               where r.fetch_class = ${RESOURCE_ROBOTS_UNREACHABLE_CLASS}
+             )::int as robots_unreachable,
              count(*) filter (
                where r.fetch_class is null and r.fetch_reason = ${RESOURCE_CAP_REASON}
              ) > 0 as capped
@@ -1764,6 +1842,7 @@ export class ApiService {
       failed: row.failed,
       skipped: row.skipped,
       robotsDenied: row.robots_denied,
+      robotsUnreachable: row.robots_unreachable,
       capped: row.capped,
     };
   }

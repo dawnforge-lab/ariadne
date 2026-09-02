@@ -1,0 +1,1 @@
+ALTER TABLE "crawls" ADD COLUMN "resource_refs_capped_pages" integer;

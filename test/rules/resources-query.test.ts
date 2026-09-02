@@ -323,6 +323,20 @@ describe("resourceRules against the database", () => {
             on: ["/a"],
           },
           {
+            // P12-T1's class. A host that could not tell us its rules is a
+            // complete disallow, so we never asked about this file either — and
+            // calling it broken would report a third party's outage as the
+            // client's broken site.
+            url: "https://cdn.example/host-down.png",
+            fetchClass: "robots_unreachable",
+            fetchReason: "robots.txt unreachable (503): complete disallow",
+            statusCode: null,
+            bytes: null,
+            bytesSource: null,
+            cacheControl: null,
+            on: ["/a"],
+          },
+          {
             url: "/img/timeout.png",
             fetchClass: "fetch_error",
             fetchReason: "timeout after 15000ms",
@@ -357,11 +371,20 @@ describe("resourceRules against the database", () => {
             bytes: null,
             on: ["/a"],
           },
+          {
+            url: "https://cdn.example/down.png",
+            fetchClass: "robots_unreachable",
+            statusCode: null,
+            bytes: null,
+            on: ["/a"],
+          },
         ],
       );
       const [f] = await run("resources.broken", crawlId);
       expect(f!.evidence.brokenCount).toBe(1);
-      expect(f!.evidence.unknownResources).toBe(2);
+      // Three unknowns now, and the new class is one of them: a page with one
+      // broken file and three we could not weigh is not a page with one problem.
+      expect(f!.evidence.unknownResources).toBe(3);
     });
 
     it("caps the listing, counts every page exactly and says so on the last one", async () => {

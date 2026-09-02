@@ -150,6 +150,29 @@ export interface PageWriterStats {
    * row to be in — it is counted here instead of vanishing.
    */
   hreflangUnresolved: number;
+  /**
+   * Pages whose analyzer hit `MAX_RESOURCE_REFS` and dropped a reference —
+   * `PageAnalysis.resourceRefsCapped`, counted (P12-T1).
+   *
+   * O(pages), never O(edges), and that is the whole reason it lives here. The
+   * question "how many pages lost references" is answerable from
+   * `page_resources` alone, and phase-11.md §10.1 measured what that costs: a
+   * scan of every reference the crawl holds, 73 ms over a 500,000-edge crawl,
+   * against a `crawl_status` whose other reads are ≤ 3 ms. This class is the
+   * one component every page passes through exactly once, so the count is a
+   * `+= 1` in the same place the link and resource counters are incremented,
+   * and the crawl loop stamps the total onto `crawls.resource_refs_capped_pages`
+   * at close.
+   *
+   * COUNTED WHEN THE PAGE IS HANDED OVER, not when its row lands, which is the
+   * one reading a careful consumer must know: a page row that loses the
+   * `(crawl_id, url)` conflict race is counted here even though its `pages` row
+   * was dropped. That is the same accounting its resource and edge rows already
+   * get — those are written for the losing page too (see the module header on
+   * the minted id) — so the number stays consistent with the rows on disk. It
+   * is NOT `stats().pages`' accounting, which counts inserts.
+   */
+  resourceRefsCappedPages: number;
 }
 
 /**
@@ -200,6 +223,7 @@ export class PageWriter {
     resources: 0,
     pageResources: 0,
     hreflangUnresolved: 0,
+    resourceRefsCappedPages: 0,
   };
 
   constructor(
@@ -249,6 +273,14 @@ export class PageWriter {
     );
 
     if (analysis !== null) {
+      // The truncation flag, counted before anything is buffered: it is a fact
+      // about the ANALYSIS rather than about any row, so it must not depend on
+      // which insert succeeds. A page with no analysis (a 404, a redirect, a
+      // timeout) answers nothing here and is not counted — "no references were
+      // dropped" and "there was no HTML to drop them from" are different
+      // sentences (hard rule 7).
+      if (analysis.resourceRefsCapped) this.counts.resourceRefsCappedPages += 1;
+
       // The analyzer already deduped links by resolved target (first anchor
       // wins) and numbered them; these rows are that set verbatim.
       await this.push(

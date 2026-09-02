@@ -108,6 +108,36 @@ export const crawls = pgTable("crawls", {
   // implies, and a preserved first-write `at` would date numbers that have
   // since moved.
   templateInferenceJsonb: jsonb("template_inference_jsonb"),
+  // How many of this crawl's pages carried more resource references than the
+  // analyzer's `MAX_RESOURCE_REFS` cap keeps — the truncation, counted instead
+  // of silent (migration 0014, P12-T1).
+  //
+  // WHY IT IS A COLUMN AND NOT A QUERY. The same number is derivable from
+  // `page_resources` — count the pages holding exactly the cap's worth of edges
+  // — and Phase 11 measured that: 73 ms and 67 ms over a 500,000-edge crawl,
+  // against a `crawl_status` whose other reads are ≤ 3 ms and which a dashboard
+  // hits on every paint (docs/gates/phase-11.md §10.1). The obvious cheap form
+  // was also disproved there: `pages.images_total` counts `<img>` ELEMENTS while
+  // the extraction emits a DISTINCT-URL set, so comparing them fires on any page
+  // that reuses an image and stays silent on a truncated page whose references
+  // happen to be distinct. So the count is CARRIED: the analyzer flags the page,
+  // `PageWriter` counts the flagged pages, and `closeCrawl` stamps the total —
+  // O(pages), in a place every page already passes through.
+  //
+  // NULLABLE, AND THE NULL IS LOAD-BEARING, exactly as `host_spacing_ms`'s is.
+  // Null means "nobody counted": a crawl written before this migration (never
+  // backfilled — the edge table cannot reconstruct which pages were truncated,
+  // and a guess would be a fabricated measurement, hard rule 7), or a crawl
+  // still running, or one whose process died before it could close its row.
+  // ZERO IS A MEASUREMENT: the analyzer read every page of that crawl and none
+  // of them lost a reference.
+  //
+  // A RESUMED CRAWL ADDS TO IT rather than overwriting it, because a resume's
+  // writer only ever saw the pages that resume fetched. The addition is done in
+  // SQL so a null stays null (`null + n` is null): a crawl whose first run
+  // predates this column cannot become a partial count that reads like a whole
+  // one. See `closeCrawl` in src/crawl/loop.ts.
+  resourceRefsCappedPages: integer("resource_refs_capped_pages"),
 });
 
 export const pages = pgTable("pages", {

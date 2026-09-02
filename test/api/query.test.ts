@@ -712,13 +712,15 @@ beforeAll(async () => {
 
   // ------------------------------------------------- the resource fixture
   //
-  // Five files, one of every shape the surfaces have to tell apart: a file the
+  // Six files, one of every shape the surfaces have to tell apart: a file the
   // pass weighed, a file the server said was gone, a file a cap never reached,
-  // a file robots.txt put out of reach, and a file whose own CACHE HEADER is
-  // hostile text (a server chooses that string, and it lands in a spreadsheet
-  // cell like any other). Between them they make `fetched + failed + skipped ==
-  // seen` non-trivial, put a row on each side of the `robotsDenied` split, and
-  // give `capped` something true to say.
+  // a file whose host was DOWN while the pass ran, a file whose host FORBADE
+  // us, and a file whose own CACHE HEADER is hostile text (a server chooses
+  // that string, and it lands in a spreadsheet cell like any other). Between
+  // them they make `fetched + failed + skipped == seen` non-trivial, put a row
+  // on each side of the robots split (P12-T1 — the two robots classes are
+  // separate counts now, not one count and a sentence), and give `capped`
+  // something true to say.
   await db.insert(resources).values([
     {
       crawlId: crawlF, url: `${SITE}/a.png`, kind: "image", fetchClass: "ok",
@@ -740,9 +742,21 @@ beforeAll(async () => {
       fetchedAt: null, fetchMs: null,
     },
     {
+      // WE COULD NOT ASK: the host was down, which RFC 9309 §2.3.1.4 makes a
+      // complete disallow. The reason has always said so; since P12-T1 the
+      // CLASS does too, so a count no longer has to parse the sentence.
       crawlId: crawlF, url: "https://cdn.example/d.png", kind: "image",
-      fetchClass: "robots_denied",
+      fetchClass: "robots_unreachable",
       fetchReason: "robots.txt unreachable (503): complete disallow",
+      statusCode: null, contentType: null, bytes: null, bytesSource: null,
+      cacheControl: null, expires: null, fetchedAt: new Date(), fetchMs: null,
+    },
+    {
+      // THEY SAID NO: the file's own host read us its rules and this URL is
+      // forbidden by them. Same behaviour as the row above, different fact.
+      crawlId: crawlF, url: "https://cdn.example/e.png", kind: "image",
+      fetchClass: "robots_denied",
+      fetchReason: "robots.txt (cdn.example) disallows this URL",
       statusCode: null, contentType: null, bytes: null, bytesSource: null,
       cacheControl: null, expires: null, fetchedAt: new Date(), fetchMs: null,
     },
@@ -761,6 +775,7 @@ beforeAll(async () => {
     { crawlId: crawlF, pageId: csvHome, resourceUrl: `${SITE}/b.css` },
     { crawlId: crawlF, pageId: csvHome, resourceUrl: `${SITE}/c.js` },
     { crawlId: crawlF, pageId: csvHome, resourceUrl: "https://cdn.example/d.png" },
+    { crawlId: crawlF, pageId: csvHome, resourceUrl: "https://cdn.example/e.png" },
     { crawlId: crawlF, pageId: csvHome, resourceUrl: `${SITE}/hostile.css` },
   ]);
 
@@ -1492,22 +1507,32 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     const res = await call(`/crawls/${crawlF}`);
     expect(res.status).toBe(200);
     expect(res.body["resources"]).toEqual({
-      seen: 5,
+      seen: 6,
       fetched: 2,
-      failed: 2,
+      failed: 3,
       skipped: 1,
-      // A subset of `failed`, on its own because an unreachable robots.txt is a
-      // complete disallow: this number looks the same whether a host forbade us
-      // or was merely down, and only each row's `fetchReason` says which.
+      // TWO subsets of `failed`, and the reason they are two (P12-T1). An
+      // unreachable robots.txt is a complete disallow, so a host that was down
+      // behaves exactly like a host that forbids us — and it is not the same
+      // fact about the client's site. Until this phase both landed in
+      // `robotsDenied` and only each row's `fetchReason` said which; the split
+      // is now taken off `RobotsInfo.outcome`, a closed vocabulary, never off
+      // the sentence.
       robotsDenied: 1,
+      robotsUnreachable: 1,
       // One row carries `resource-cap`, so a cap really did stop the pass short.
       capped: true,
     });
-    // The partition, asserted rather than left to the four literals above: a
-    // count that drifted would otherwise only be wrong by a number nobody could
-    // check against anything.
+    // The partition, asserted rather than left to the literals above: a count
+    // that drifted would otherwise only be wrong by a number nobody could check
+    // against anything. THE ARITHMETIC DID NOT MOVE when the robots split
+    // landed — both robots classes are subsets of `failed`, so the three-way
+    // partition is exactly what it was, and this line is what says so.
     const r = res.body["resources"] as Record<string, number>;
     expect(r["fetched"]! + r["failed"]! + r["skipped"]!).toBe(r["seen"]);
+    // And the subsets are subsets: neither robots count may exceed `failed`,
+    // and together they must not exceed it either.
+    expect(r["robotsDenied"]! + r["robotsUnreachable"]!).toBeLessThanOrEqual(r["failed"]!);
 
     const counted = await db.execute<{ n: number }>(
       sql`select count(*)::int as n from resources where crawl_id = ${crawlF}`,
@@ -1523,8 +1548,43 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
   it("answers the block on a crawl that holds no resource rows at all", async () => {
     const res = await call(`/crawls/${crawlA}`);
     expect(res.body["resources"]).toEqual({
-      seen: 0, fetched: 0, failed: 0, skipped: 0, robotsDenied: 0, capped: false,
+      seen: 0, fetched: 0, failed: 0, skipped: 0,
+      robotsDenied: 0, robotsUnreachable: 0, capped: false,
     });
+  });
+
+  /**
+   * THE CAP-EXCEEDED COUNTER (P12-T1, migration 0014), and the null that is not
+   * a zero.
+   *
+   * It sits OUTSIDE the `resources` block on purpose. Everything in that block
+   * is counted live off the `resources` table in one statement, and this is
+   * neither: it counts PAGES, not files, and it is a value a crawl STAMPED when
+   * it closed. Putting it inside would have made the block's own contract false
+   * — the field name says pages and the block says files — and would have hidden
+   * a stamped number among live ones.
+   */
+  it("reports the cap-exceeded page count a crawl stamped, and null when none did", async () => {
+    // A crawl no loop ever closed under 0014 has no answer. Null is that, and
+    // it is emphatically not 0: 0 means the analyzer read every page and none
+    // of them lost a reference.
+    const before = await call(`/crawls/${crawlA}`);
+    expect(before.status).toBe(200);
+    expect(before.body["resourceRefsCappedPages"]).toBeNull();
+
+    await db
+      .update(crawls)
+      .set({ resourceRefsCappedPages: 3 })
+      .where(eq(crawls.id, crawlA));
+    try {
+      const after = await call(`/crawls/${crawlA}`);
+      expect(after.body["resourceRefsCappedPages"]).toBe(3);
+    } finally {
+      await db
+        .update(crawls)
+        .set({ resourceRefsCappedPages: null })
+        .where(eq(crawls.id, crawlA));
+    }
   });
 
   // THE OFF SWITCH, ECHOED. `fetchResources` is resolved the way `findingCap`
@@ -2049,11 +2109,16 @@ describe("GET /crawls/:id/export?format=csv", () => {
     expect(rowWhere(res, "url", `${SITE}/c.js`)).toEqual([
       `${SITE}/c.js`, "js", "", "", "", "", "", "", "resource-cap", "1",
     ]);
-    // The robots case, with the sentence that separates "they said no" from
-    // "we could not ask" — which the crawl_status count deliberately does not.
+    // The two robots cases, told apart by CLASS since P12-T1 and still carrying
+    // the sentence that says which host and why. The class is the cheap answer
+    // a count can be built on; the reason is the one a person reads.
     expect(rowWhere(res, "url", "https://cdn.example/d.png")).toEqual([
-      "https://cdn.example/d.png", "image", "robots_denied", "", "", "", "", "",
+      "https://cdn.example/d.png", "image", "robots_unreachable", "", "", "", "", "",
       "robots.txt unreachable (503): complete disallow", "1",
+    ]);
+    expect(rowWhere(res, "url", "https://cdn.example/e.png")).toEqual([
+      "https://cdn.example/e.png", "image", "robots_denied", "", "", "", "", "",
+      "robots.txt (cdn.example) disallows this URL", "1",
     ]);
     // `counted` beside `header` on the row above: a measurement and a claim,
     // told apart in the file rather than added together in a report.
@@ -2118,7 +2183,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     expect(rows(internal)).toHaveLength(pageCount.rows[0]?.n ?? -1);
 
     // The resources view against BOTH of its sources: one row per `resources`
-    // row (never per edge — six edges, five files), and the referencing counts
+    // row (never per edge — seven edges, six files), and the referencing counts
     // summing to the edge table.
     const fileCount = await db.execute<{ n: number }>(
       sql`select count(*)::int as n from resources where crawl_id = ${crawlF}`,
@@ -2128,7 +2193,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     );
     const files = await callCsv(`/crawls/${crawlF}/export?format=csv&view=resources`);
     expect(rows(files)).toHaveLength(fileCount.rows[0]?.n ?? -1);
-    expect(rows(files)).toHaveLength(5);
+    expect(rows(files)).toHaveLength(6);
     expect(
       column(files, "referencingPages").reduce((sum, n) => sum + Number(n), 0),
     ).toBe(edgeCount.rows[0]?.n ?? -1);
