@@ -84,6 +84,13 @@ let throttleServer: Server;
 let throttle: string;
 let always429Hits = 0;
 let flaky403Hits = 0;
+/**
+ * Opt-in hook the throttle site awaits on every `/always-429` request. Null for
+ * every test but the per-host write-cadence one, which uses it to read the
+ * persisted spacing map MID-CRAWL — the only way to observe that a non-widest
+ * host's escalation is written within a batch and not merely at close.
+ */
+let onAlways429: (() => Promise<void>) | null = null;
 
 /**
  * A site whose catch-all answers 200 with the same "not found" template for
@@ -293,10 +300,11 @@ beforeAll(async () => {
   });
   broken = await listen(brokenServer);
 
-  throttleServer = createServer((req, res) => {
+  throttleServer = createServer(async (req, res) => {
     const path = req.url ?? "";
     if (path === "/always-429") {
       always429Hits += 1;
+      if (onAlways429 !== null) await onAlways429();
       res.writeHead(429, { "content-type": "text/html", "retry-after": "0" });
       res.end("<html>slow down</html>");
       return;
@@ -972,6 +980,67 @@ describe("resumeCrawl", () => {
 
     const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
     expect(row?.hostSpacingMs).toBeGreaterThanOrEqual(250);
+  });
+
+  // THE RULE-9 HOLE THE FIX-ROUND CLOSES (P13-T3). A host already IN the per-host
+  // map, resumed BELOW the crawl-wide widest, can escalate WITHOUT moving the
+  // widest — so a map write keyed on the widest alone would never re-persist it,
+  // and a hard kill before the close write would seed the next resume at the
+  // STALE lower value: that host re-entering FASTER than it earned. The write
+  // must fire when the HOST moves, not only the widest. Observed mid-crawl,
+  // because a clean close writes the full map either way — the discriminator is
+  // whether the escalation reaches the row DURING the crawl, which is what a
+  // hard kill would rely on.
+  it("re-persists a non-widest host's escalation mid-crawl, not only at close", async () => {
+    const originHost = new URL(throttle).host;
+
+    // A cancelled first run, only to mint a resumable crawl row + frontier.
+    const preAborted = new AbortController();
+    preAborted.abort();
+    const first = await crawl(
+      config({ siteUrl: throttle, perHostDelayMs: 40, probeHosts: false }),
+      preAborted.signal,
+    );
+    expect(first.status).toBe("cancelled");
+
+    // The prior run's finding: some OTHER host earned the crawl-wide widest
+    // 10_000 ms (the fallback), while this origin earned only its 40 ms base —
+    // re-entered here BELOW the widest.
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: 10_000, hostSpacingJsonb: { [originHost]: 40 } })
+      .where(eq(crawls.id, first.crawlId));
+
+    // Read the origin's persisted spacing on every `/always-429` hit. The
+    // retries are requests served AFTER the first escalation's batch-boundary
+    // write, so with the fix they observe the escalated value and without it the
+    // seeded 40 for ever (the widest never moves, so a widest-keyed write never
+    // fires mid-crawl).
+    const observed: number[] = [];
+    onAlways429 = async () => {
+      const [r] = await db
+        .select({ m: crawls.hostSpacingJsonb })
+        .from(crawls)
+        .where(eq(crawls.id, first.crawlId));
+      const v = r?.m?.[originHost];
+      if (typeof v === "number") observed.push(v);
+    };
+    try {
+      const resumed = await resumeCrawl(db, first.crawlId, {
+        config: config({ siteUrl: throttle, perHostDelayMs: 40, probeHosts: false }),
+      });
+      expect(resumed.status).toBe("finished");
+    } finally {
+      onAlways429 = null;
+    }
+
+    // The origin escalated (40 → 80 → …) while staying under the 10_000 widest,
+    // and its move reached the row within a batch — not just at close.
+    expect(Math.max(0, ...observed)).toBeGreaterThanOrEqual(80);
+    // And the final row carries at least what the host earned, so a further
+    // resume re-enters it no faster than the site allowed (rule 9).
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
+    expect(row?.hostSpacingJsonb?.[originHost]).toBeGreaterThanOrEqual(80);
   });
 
   it("re-fetches a URL whose page row a hard kill left in the buffer", async () => {

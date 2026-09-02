@@ -221,6 +221,39 @@ describe("HostGate", () => {
     expect(g.maxSpacingMsByHost()["other.example"]).toBeUndefined();
   });
 
+  it("bumps a spacing generation when ANY host moves, so a non-widest host's write fires", () => {
+    // The loop persists the per-host map when this counter changes rather than
+    // when the crawl-wide widest does — otherwise a non-widest host that
+    // escalated could be left stale for a resume to re-enter too fast (rule 9).
+    const g = new HostGate({ perHostDelayMs: 100, robotsCrawlDelaySec: null });
+    const throttle = (host: string, url: string) =>
+      g.report(host, { fetchClass: "blocked", statusCode: 429, retryAfterMs: null, url });
+
+    // A wide host takes the crawl-wide widest first.
+    throttle("wide.example", "https://wide.example/a");
+    throttle("wide.example", "https://wide.example/b");
+    const widest = g.maxSpacingMs();
+    const genAfterWide = g.spacingGeneration();
+
+    // A DIFFERENT host escalates but stays below the widest: the widest does NOT
+    // move, yet the generation MUST — that is the write the fix depends on.
+    throttle("narrow.example", "https://narrow.example/a");
+    expect(g.maxSpacingMs()).toBe(widest); // widest unchanged
+    expect(g.spacingGeneration()).toBeGreaterThan(genAfterWide); // but a host moved
+
+    // A plain success moves nothing and does not bump the counter.
+    const genBefore = g.spacingGeneration();
+    g.report("narrow.example", { fetchClass: "ok", statusCode: 200, retryAfterMs: null, url: "https://narrow.example/ok" });
+    expect(g.spacingGeneration()).toBe(genBefore);
+
+    // raiseHostFloor that actually raises a base bumps it too; a no-op does not.
+    g.raiseHostFloor("narrow.example", 5000);
+    expect(g.spacingGeneration()).toBeGreaterThan(genBefore);
+    const genAfterRaise = g.spacingGeneration();
+    g.raiseHostFloor("narrow.example", 1); // below the current base — no-op
+    expect(g.spacingGeneration()).toBe(genAfterRaise);
+  });
+
   it("re-enters each host at ITS OWN earned spacing, not the crawl-wide widest", () => {
     // The whole point of the per-host map: a crawl whose CDN earned 8s while the
     // origin stayed at 1s resumes the origin at 1s, NOT at 8s.

@@ -992,19 +992,31 @@ async function runToCompletion(
    * it already refused (hard rule 9). Written once up front (so the crawl-wide
    * column means "the base, so far" rather than "unknown" from the first poll,
    * and the map is `{}` rather than the null a pre-0015 row carries) and then
-   * when the crawl-wide widest MOVES, which is at most a handful of times per
-   * crawl. A final write at close (after the resource pass, which shares this
-   * gate and can escalate a third-party host) lands the complete per-host map:
-   * a per-host escalation that never moved the crawl-wide widest is captured
-   * there rather than at a batch boundary. A hard kill between two crawl-wide
-   * moves loses only those sub-widest per-host escalations, which a resume then
-   * takes from the crawl-wide fallback — wider, the polite direction.
+   * whenever ANY host's spacing MOVES — the gate's `spacingGeneration`, not the
+   * crawl-wide widest. Both are a handful of writes per crawl, but keying on the
+   * widest alone left a rule-9 hole: a non-widest host that a resume seeded from
+   * the per-host map (say a CDN that earned 8s while the origin stayed at 1s, now
+   * resuming with a NEW host wider than the origin) can escalate WITHOUT moving
+   * the widest, so its new spacing would never be re-written, and a hard kill
+   * before the close write would leave the resume re-entering it BELOW what it
+   * earned — faster than the site allowed. Keying on the generation captures such
+   * a host within a batch, restoring the pre-0015 "at most one batch stale" for
+   * every host. The wider-crawl-wide-fallback only ever covered a host ABSENT
+   * from the map (`spacingMs` → `delayMs`); a host PRESENT at a stale value is
+   * seeded at that stale value and does NOT fall back, which is exactly why the
+   * write must fire on its move.
+   *
+   * A final write at close (after the resource pass, which shares this gate and
+   * can escalate a third-party host) still lands the complete map on a clean or
+   * aborted finish. A hard kill loses only whatever moved since the last batch
+   * boundary — at most one batch, for any host.
    *
    * At the batch boundary rather than inside `handleOne`: concurrent handlers
    * would race to write the same value, and one write per batch is enough for a
    * caller polling every 15-30 seconds.
    */
   let reportedSpacingMs = gate.maxSpacingMs();
+  let reportedSpacingGen = gate.spacingGeneration();
   const recordSpacing = async (): Promise<void> => {
     await db
       .update(crawls)
@@ -1261,7 +1273,11 @@ async function runToCompletion(
         if (result.value.outcome !== null) outcomes.push(result.value.outcome);
       }
       window.onBatchSettled(outcomes);
-      if (gate.maxSpacingMs() !== reportedSpacingMs) {
+      // Any host's spacing moving triggers the write, not only the crawl-wide
+      // widest: a non-widest in-map host must not be left stale for a resume to
+      // re-enter too fast (see the recordSpacing docblock, and spacingGeneration).
+      if (gate.spacingGeneration() !== reportedSpacingGen) {
+        reportedSpacingGen = gate.spacingGeneration();
         reportedSpacingMs = gate.maxSpacingMs();
         await recordSpacing();
       }

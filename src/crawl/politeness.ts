@@ -364,6 +364,20 @@ export class HostGate {
   private readonly hosts = new Map<string, HostState>();
   /** The widest spacing any host has reached. Read by the loop's lease sizing. */
   private highWaterMs: number;
+  /**
+   * Bumped every time ANY host's spacing changes — an escalation or a
+   * `raiseHostFloor` that actually moved a base. The loop watches it to persist
+   * the per-host map (`maxSpacingMsByHost`) whenever a host moves, not only when
+   * the crawl-wide widest does: a non-widest host that escalates from a value it
+   * was resumed at would otherwise never be re-written, and a hard kill before
+   * the close write would leave a resume re-entering that host BELOW what it
+   * earned — faster than the site allowed, a rule-9 hole (P13-T3 fix round 1).
+   * A plain counter, not the widest: seeding at construction does not bump it
+   * (the loop writes the seeded map once up front regardless), and a `Retry-After`
+   * push that moves only `nextAllowedAt` does not either — it changes no host's
+   * earned spacing, which is all the map records.
+   */
+  private spacingGen = 0;
 
   constructor(opts: HostGateOptions) {
     const maxDelayMs = opts.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
@@ -483,6 +497,7 @@ export class HostGate {
     const raised = Math.min(this.maxDelayMs, Math.max(state.baseMs, delayMs));
     if (raised === state.baseMs) return;
     state.baseMs = raised;
+    this.spacingGen += 1;
     // A lease is sized against the widest spacing in force (see the loop's
     // leaseSecondsFor), so a base that moved has to move this too.
     this.highWaterMs = Math.max(this.highWaterMs, this.spacingMs(host));
@@ -513,6 +528,17 @@ export class HostGate {
     const out: Record<string, number> = {};
     for (const host of this.hosts.keys()) out[host] = this.spacingMs(host);
     return out;
+  }
+
+  /**
+   * A monotonic counter of how many times any host's earned spacing has moved
+   * (an escalation, or a `raiseHostFloor` that raised a base). The loop persists
+   * the per-host map whenever this changes, so a non-widest host's escalation is
+   * captured within a batch rather than only at the crawl-wide widest's next
+   * move (see `spacingGen`). Not a spacing itself — a change token.
+   */
+  spacingGeneration(): number {
+    return this.spacingGen;
   }
 
   /**
@@ -589,6 +615,7 @@ export class HostGate {
         state.streak >= ESCALATION_STREAK && state.streakDistinct;
       if (namedARate || hostWideStreak) {
         state.escalations += 1;
+        this.spacingGen += 1;
         const spacing = this.spacingMs(host);
         this.highWaterMs = Math.max(this.highWaterMs, spacing);
         this.pushSlot(host, spacing);

@@ -279,7 +279,7 @@ above the crawl's base is a finding — a host refused us and the engine backed 
 at 8s. Until Phase 12 it did not: the gate came up at the configured floor and
 the first spacing write put that floor back over the evidence, which made the
 regression invisible from `crawl_status` as well as rude to the site
-(`test/crawl/loop.test.ts:897` "resumes at the spacing the crawl earned, not the
+(`test/crawl/loop.test.ts:905` "resumes at the spacing the crawl earned, not the
 one it was configured with").
 
 Two things that column is not, because a reader will otherwise assume both:
