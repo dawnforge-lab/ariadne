@@ -1433,7 +1433,9 @@ byte for byte, as it writes it".
   suite that never deleted what it made: 28 rows it seeded and 5 the crawl loop
   created for it. It now tracks and deletes them the way every other
   crawl-creating file in the suite already did, and the historical residue was
-  swept once with a record: **3,110 crawl rows → 28 → 4**, 1,060 MB → 1,052 MB,
+  swept once with a record: **3,110 crawl rows → 28 → 4** (the byte figures are
+  VACUUM-dependent and point-in-time, ~1,060 MB → ~1,050 MB; the row counts are
+  the record),
   the four real `lavishalice.com` crawls verified byte-identical throughout. The
   first sweep took the two leaking host families (`127.0.0.1:<port>`,
   `runner.example`) to 28; a second, on the owner's word at T1 review, took the

@@ -221,8 +221,9 @@ resume machinery) — both concurred at review.
 "none" } as const` is now the single named authority for the two wire values;
 16 pins plus the MCP hint were converted. A grep for the bare literals over
 `src/` finds them only in the constant's own declaration and its docblock in
-`src/rules/metric/render-metrics.ts` (the one other `"none"` in `src/`, in
-`crawl-evidence.ts`, is `findingCap: "none"` — a different vocabulary). The value
+`src/rules/metric/render-metrics.ts` (the one other `"none"` in `src/`, in a
+`crawl-evidence.ts` docblock about `findingCap: "none"`, is a different
+vocabulary). The value
 strings are unchanged: this was literal → named, not a wire change.
 
 **The wire-shape assertion (T4-review Minor 1, taken here).** Because every pin

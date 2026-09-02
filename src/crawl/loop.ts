@@ -1008,8 +1008,13 @@ async function runToCompletion(
    *
    * A final write at close (after the resource pass, which shares this gate and
    * can escalate a third-party host) still lands the complete map on a clean or
-   * aborted finish. A hard kill loses only whatever moved since the last batch
-   * boundary — at most one batch, for any host.
+   * aborted finish. A hard kill loses only whatever moved since the last WRITE:
+   * for a page-crawl host that is at most one batch (the generation checkpoint
+   * fires per batch); for the resource pass there is no per-batch checkpoint, so
+   * a mid-pass kill loses that whole pass's escalations. Both cases resume the
+   * affected host at the crawl-wide fallback or wider — never below — so the
+   * loss is politeness slack, never a rule-9 breach. Narrowing the resource-pass
+   * window is a Phase 14 pointer.
    *
    * At the batch boundary rather than inside `handleOne`: concurrent handlers
    * would race to write the same value, and one write per batch is enough for a
