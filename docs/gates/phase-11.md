@@ -722,8 +722,10 @@ crawl finished:
 
 Every figure in the first three rows matches what the Phase 8 and Phase 10 gate
 documents recorded. The gate crawl is a fourth row and it stays in the dev
-database. Four `lavishalice.com` crawls among 1,523 rows, the rest fixtures the
-suite leaves behind (§ `talos-surface.md` 13).
+database. Four `lavishalice.com` crawls in a table that ended this phase holding
+**1,585** rows, up from 139 at its start — the rest are fixtures the suite leaves
+behind, about 140 a full run, which is a fact about the suite and not about any
+operator (`talos-surface.md` §13).
 
 Commits, in order:
 

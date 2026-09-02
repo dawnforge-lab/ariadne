@@ -1050,13 +1050,13 @@ byte for byte, as it writes it".
   pages: two of the three `critical` rules judge only rendered pages, and the
   third fires outside the census (§6).
 - No index on `crawls.site_url`: the site filter is a sequential scan — 1.1 ms
-  over the 153 rows the dev table held when it was measured, and **1,523 rows
-  today** (2026-09-02). That growth is the SUITE, not the operator: every full
-  run leaves its fixture crawls behind (`127.0.0.1:<port>`, `runner.example`),
-  ~140 rows a run, and the dev table now holds four `lavishalice.com` crawls
-  among 1,519 fixtures. At a hundred thousand crawls the filter wants an
-  expression index on the hostname; at this size it is still a scan of a small
-  table.
+  over the 153 rows the dev table held when it was measured. **Do not read the
+  dev table's row count as an operator's number**: it grew from 139 to 1,585
+  across Phase 11 alone, and the growth is the SUITE, not a user — every full run
+  leaves its fixture crawls behind (`127.0.0.1:<port>`, `runner.example`), about
+  140 rows a run, against four real `lavishalice.com` crawls in the whole table.
+  At a hundred thousand crawls the filter wants an expression index on the
+  hostname; at this size it is still a scan of a small table.
 - The comparison's identity collapses multi-finding rules to per-URL presence
   (§7.1). Nothing on the surface can un-collapse it; `issues_list` counts are
   the row-level truth.
