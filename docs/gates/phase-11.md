@@ -825,9 +825,9 @@ Phase 12 pointers, in the order they will be met:
    posture, still stated in `talos-surface.md` §9.3.
 
    **PHASE 12: unchanged, and stated rather than closed** — the plan's second
-   proposed decision, presented to the owner and unvetoed as of this
-   annotation. Nothing in
-   this phase narrowed it and nothing in this phase widened it; the posture is a
-   deployment fact (one tenant per deployment, `talos-surface.md` §9.3) and the
-   phase that makes Ariadne multi-tenant is the phase that ends it. Recorded here
-   so a reader of this list does not take a silent pointer for an oversight.
+   proposed decision, presented to the owner and unvetoed as of this annotation.
+   Nothing in this phase narrowed it and nothing in this phase widened it; the
+   posture is a deployment fact (one tenant per deployment,
+   `talos-surface.md` §9.3) and the phase that makes Ariadne multi-tenant is the
+   phase that ends it. Recorded here so a reader of this list does not take a
+   silent pointer for an oversight.

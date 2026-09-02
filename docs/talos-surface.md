@@ -172,10 +172,12 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (93 rows) rather than by the crawl. The catalog is
-~98 KB (100,645 bytes, measured 2026-09-02 over the 92 rows of ruleset 0.8.0;
-`resources.not-fetched` adds its own copy to that) because it carries every
-rule's full copy — the tool description says so, and points an agent that only
-wants what fired at `issues_list` instead.
+~101 KB (**103,679 bytes**, re-measured 2026-09-02 by the Phase 12 gate over all
+93 rows of ruleset 0.9.0, by serialising what `rulesCatalog` answers with no
+crawl id — the earlier 100,645 was measured at 92 rows, before
+`resources.not-fetched` had copy of its own) because it carries every rule's full
+copy — the tool description says so, and points an agent that only wants what
+fired at `issues_list` instead.
 
 **Timestamps** are ISO-8601 UTC strings. **Ids** are `crawl_<uuid>`; a caller
 never constructs one.
