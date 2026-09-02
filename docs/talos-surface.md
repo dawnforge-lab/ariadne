@@ -218,7 +218,7 @@ validator before the handler runs (`test/api/mcp.test.ts:789` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (93 rows) rather than by the crawl. The catalog is
+bounded by the **ruleset** (95 rows at 0.11.0) rather than by the crawl. The catalog is
 ~101 KB (**103,679 bytes**, re-measured 2026-09-02 by the Phase 12 gate over all
 93 rows of ruleset 0.9.0, by serialising what `rulesCatalog` answers with no
 crawl id — the earlier 100,645 was measured at 92 rows, before

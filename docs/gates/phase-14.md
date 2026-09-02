@@ -128,7 +128,7 @@ that carries the phase is the divergence on the way back: the apex re-enters at
 inheriting the crawl-wide 160 is the anti-inheritance proof. T2's review made
 the proof concrete: drop the seeding and the apex reads `undefined`, not 80, and
 the assertion fails. The two earned numbers trace to `seed × 2^escalations`
-(5 ms base is not the point; the ratchet doubling is), and the assertions are
+(the 40 ms base is not the point; the ratchet doubling is), and the assertions are
 strict `toBe`, stricter than the loop's looser sibling tests.
 
 The two synthetic-seed unit tests from Phase 13 are KEPT as companions — the
