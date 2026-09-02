@@ -244,17 +244,45 @@ export interface HostGateOptions {
    * different things and the widest of them wins: what we configured, what the
    * site asked for in writing, and what the site taught us by refusing us.
    *
-   * WHY A RESUME MUST CARRY IT. The column is a FINDING, not a setting — it was
-   * written because a host pushed back and the engine listened (rule 9) — and a
-   * second run over the same crawl id is the same crawler talking to the same
-   * host. Rebuilding the gate from the configured floor alone would hit that
-   * host at the pace it already refused, and the loop's first `recordSpacing`
-   * would write the floor back over the evidence, so nobody could see it had
-   * happened. This is exactly the ruling `renderPaceMs` makes for the render
-   * pass (docs/gates/phase-6.md §c1633c4), applied to the pass that earned it.
+   * WHY A RESUME MUST CARRY IT. When the column is above the crawl's base it is
+   * a FINDING rather than a setting — a host refused us and the engine backed
+   * off (rule 9) — and a second run over the same crawl id is the same crawler
+   * talking to the same host. Rebuilding the gate from the configured floor
+   * alone would hit that host at the pace it already refused, and the loop's
+   * first `recordSpacing` would write the floor back over the evidence, so
+   * nobody could see it had happened. This is exactly the ruling `renderPaceMs`
+   * makes for the render pass (docs/gates/phase-6.md §c1633c4), applied to the
+   * pass that earned it.
    *
    * `max`, not "replace": a caller who deliberately asks for a wider delay than
    * the crawl earned keeps it, and the cap binds it like everything else.
+   *
+   * ## Two things this is NOT, both of which a reader will otherwise assume
+   *
+   * **IT IS NOT PER-HOST, AND ON A RESUME IT WIDENS.** `crawls.host_spacing_ms`
+   * is one number for the whole crawl — the WIDEST spacing any host reached
+   * (`maxSpacingMs`) — so re-entering it here applies that width to EVERY host
+   * the resumed run touches, including hosts that never pushed back. On a crawl
+   * whose CDN earned 8s while the origin stayed at 1s, the resumed run crawls
+   * the origin at 8s too. That is slower than it needs to be and it is the
+   * polite direction, which is why it is accepted rather than worked around:
+   * per-host fidelity does not exist to be preserved, because no column records
+   * it. A `crawl_host_spacing` table (host → earned ms) is the Phase 13
+   * candidate that would fix it; until then this widening is the honest cost of
+   * not forgetting. `maxDelayMs` still bounds it, so the worst case is the 30s
+   * cap and never more.
+   *
+   * **THE COLUMN IS NOT ONLY EARNED.** The loop writes `maxSpacingMs()` once
+   * before the first fetch, so a crawl that never escalated still stores
+   * `max(perHostDelayMs, robots Crawl-delay)` — an unearned base wearing the
+   * same column. Two consequences, both real and neither hidden: a robots.txt
+   * `Crawl-delay` the site has SINCE REMOVED stays sticky across every resume of
+   * that crawl (the gate would read the new robots.txt and get nothing, but the
+   * old number is still in the column); and a resume can never LOWER a crawl's
+   * spacing by changing its config, because this max only ever raises. Both are
+   * the safe direction — the failure mode is being too polite to a site that no
+   * longer asks for it — and a caller who genuinely needs the lower pace starts
+   * a new crawl, which has no column to read.
    */
   earnedSpacingMs?: number | null;
 }

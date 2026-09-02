@@ -1428,6 +1428,45 @@ describe("crawl_resume", () => {
     expect(final["hostSpacingMs"]).toBeGreaterThanOrEqual(50);
   }, 120_000);
 
+  // THE SECOND SURFACE AN AGENT READS, pinned as claims rather than as
+  // "is not empty". These are the sentences most likely to rot: the doctrine
+  // that keeps a resumed pass's summary out of a report, the refusal list an
+  // agent decides its next move from, and the three costs a resume actually has
+  // (a fresh discovery, a re-granted resource budget, a crawl-wide spacing).
+  it("tells an agent what a resume costs, what it unjudges, and how it is refused", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "crawl_resume")?.description ?? "";
+    expect(text, "crawl_resume has no description").not.toBe("");
+
+    // It is the same crawl, and the answer shape says so.
+    expect(text).toContain("THE SAME CRAWL");
+    expect(text).toContain("{crawlId, status, queuePosition}");
+    // The P11-T4 render-from-DB doctrine, with the numbers that made it real.
+    expect(text).toContain("POLL crawl_status FOR WHAT IT FOUND");
+    expect(text).toContain("784 and 1,995");
+    expect(text).toContain("The database is the truth");
+    // What it costs: the re-run discovery, the per-RUN resource budget, and the
+    // spacing widening. Each is a request somebody's server answers.
+    expect(text).toContain("re-reads robots.txt");
+    expect(text).toContain("budgets per RUN, not per crawl");
+    expect(text).toContain("never faster than the one it");
+    // The judged marker, which is the surface's load-bearing sentence.
+    expect(text).toContain("rulesRunAt is cleared");
+    // Every refusal, so an agent can tell "wait" from "ask the operator".
+    for (const refusal of [
+      "no such crawl",
+      "already holding it",
+      "unexpired lease",
+      "nothing owed",
+      "allowlist",
+      "state changed while the call was checking it",
+    ]) {
+      expect(text, `crawl_resume's description does not name '${refusal}'`).toContain(refusal);
+    }
+    // And the work that is NOT a resume's.
+    expect(text).toContain("that is crawl_render");
+  });
+
   it("refuses a crawl id nobody has", async () => {
     const answer = await call("crawl_resume", { crawlId: "crawl_no_such_thing" });
     expect(answer.isError).toBe(true);

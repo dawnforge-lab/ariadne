@@ -43,13 +43,13 @@ Two properties make the double-transport claim below cheap to trust:
 - **One service, two transports.** `src/api/service.ts` holds every query,
   refusal and vocabulary; `http.ts` and `mcp.ts` do routing and serialisation
   and nothing else.
-- **The equality is tested, not argued.** `test/api/mcp.test.ts:2358`
+- **The equality is tested, not argued.** `test/api/mcp.test.ts:2397`
   ("answers the same JSON for the same question, route by tool") calls thirteen
   (tool, route) pairs over the wire against one database and asserts the two
-  answers are `toEqual`. `test/api/mcp.test.ts:2379` ("refuses in the same
+  answers are `toEqual`. `test/api/mcp.test.ts:2418` ("refuses in the same
   words, whichever transport asked") does the same for five refusals — the same
-  sentence and the mapped status. `test/api/mcp.test.ts:2436` ("streams the
-  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2458`
+  sentence and the mapped status. `test/api/mcp.test.ts:2475` ("streams the
+  bytes the other transport writes to a file") and `test/api/mcp.test.ts:2497`
   ("streams the resources view byte for byte") assert the CSV a route streams is
   byte-identical to the file the tool writes, for the `issues` and `resources`
   views.
@@ -78,7 +78,7 @@ Two properties make the double-transport claim below cheap to trust:
 
 - The token is `ARIADNE_API_TOKEN`, minimum 16 characters, compared in constant
   time over SHA-256 digests (`src/api/auth.ts`). The server refuses to boot
-  without one (`test/api/http.test.ts:1895` "refuses to produce a config without
+  without one (`test/api/http.test.ts:2042` "refuses to produce a config without
   a token").
 - **The token is checked before routing**, so an unauthenticated caller cannot
   map the surface: an unknown path answers 401, not 404
@@ -86,7 +86,7 @@ Two properties make the double-transport claim below cheap to trust:
   names *which* thing was wrong — missing header, wrong scheme, wrong token.
 - **MCP asks for no credential** and that is a posture, not an omission: an
   stdio client either started this process or was handed its pipes
-  (`test/api/mcp.test.ts:2562` "asks for no bearer token: an stdio client is the
+  (`test/api/mcp.test.ts:2601` "asks for no bearer token: an stdio client is the
   process that started this one"). If Ariadne's MCP server is ever mounted on a
   network transport, that argument dies with the change and a credential has to
   arrive with it.
@@ -109,8 +109,8 @@ Two properties make the double-transport claim below cheap to trust:
 | A defect of ours | 500 `{error: "internal error", correlationId}` | `{error: "internal error", correlationId}` |
 
 `correlationId` is a UUID; the stack goes to the server log under that id and
-nowhere else (`test/api/mcp.test.ts:2485` "turns an unexpected throw into a tool
-error with a correlation id", `test/api/http.test.ts:1838` "turns an unexpected
+nowhere else (`test/api/mcp.test.ts:2524` "turns an unexpected throw into a tool
+error with a correlation id", `test/api/http.test.ts:1985` "turns an unexpected
 throw into a 500 with a correlation id").
 
 ---
@@ -233,20 +233,58 @@ month is not standing permission: a site that has left the allowlist is a 403
 naming the host. Pacing comes from the crawl's own stored config, never from this
 server's current defaults.
 
-**The politeness ratchet survives.** `crawls.host_spacing_ms` is a finding — a
-host pushed back and the engine listened — so the resumed run's gate is built
-with it and a crawl that earned 8s per host resumes at 8s. Until Phase 12 it did
-not: the gate came up at the configured floor and the first spacing write put
-that floor back over the evidence, which made the regression invisible from
-`crawl_status` as well as rude to the site
+**The politeness ratchet survives, and it WIDENS.** `crawls.host_spacing_ms`
+above the crawl's base is a finding — a host refused us and the engine backed off
+— so the resumed run's gate is built with it and a crawl that reached 8s resumes
+at 8s. Until Phase 12 it did not: the gate came up at the configured floor and
+the first spacing write put that floor back over the evidence, which made the
+regression invisible from `crawl_status` as well as rude to the site
 (`test/crawl/loop.test.ts:897` "resumes at the spacing the crawl earned, not the
 one it was configured with").
+
+Two things that column is not, because a reader will otherwise assume both:
+
+- **It is not per-host.** It is one number for the whole crawl — the widest
+  spacing any host reached — so a resume applies that width to *every* host it
+  touches, including ones that never pushed back. A crawl whose CDN earned 8s
+  while the origin stayed at 1s resumes with the origin at 8s too. That is slower
+  than necessary and it is the polite direction, so it is accepted rather than
+  worked around: per-host fidelity does not exist to be preserved, because no
+  column records it. A `host → earned ms` table is the **Phase 13 candidate**
+  that would fix it. The 30s cap still bounds the widening.
+- **It is not only earned.** The loop writes the spacing once before its first
+  fetch, so a crawl that never escalated still stores `max(perHostDelayMs, robots
+  Crawl-delay)`. Consequences: a `Crawl-delay` the site has *since removed* stays
+  sticky across every resume of that crawl, and a resume can never *lower* a
+  crawl's spacing by config change, because the fold only ever raises. Both fail
+  in the safe direction; a caller who needs the lower pace starts a new crawl,
+  which has no column to read.
+
+**A resume can cost more than "the remainder".** The engine's resource-fetch caps
+(operator-configured; not wire fields) are budgets **per run**, not per crawl, so
+resuming a crawl whose resource pass hit its cap grants the whole budget again
+and may weigh a budget's worth of further files. That is legitimate work — those
+files were seen and never asked about — but it is a second round of requests to
+somebody's servers, and the `resources` block's `capped` flag is how to know
+beforehand which crawls this applies to.
+
+**It unjudges the crawl.** `rules_run_at` is cleared in the same statement that
+queues the row, because the crawl is about to grow: a timestamp left standing
+would claim a completed rules pass describes pages that did not exist when it
+ran, `findingsCount` would sit beside a larger `pagesScanned`, and
+`crawl_compare` would inherit the staleness believing both sides were judged —
+against §2's "empty is never a verdict", which rests entirely on that field.
+Findings rows are left in place and then read exactly as a run that died
+part-way, which §5 already covers. Re-run `crawl_rules` after the resumed crawl
+finishes (`test/api/http.test.ts:1287` "unjudges a crawl it queues, so no
+timestamp outlives the pages it described").
 
 Refusals, each naming which one fired: no such crawl (404); this server already
 holds it (409); an unexpired lease says a worker is still on it (409, naming the
 count — `leased_until` is the frontier's own live-worker detector); a settled
 crawl with nothing owed (409, naming what was counted — pending frontier rows,
-expired leases, unasked resource rows); the allowlist (403, naming the host).
+expired leases, unasked resource rows); the allowlist (403, naming the host); and
+the row changing state under the call (409 — see the race below).
 
 **A `cancelled` crawl WITH work left is resumable, and that is a ruling.** The
 abort path decides nothing on its way out: URLs never leased stay pending,
@@ -260,15 +298,25 @@ same terms. A caller who wants the crawl dead rather than continued still has
 **Pages waiting on the render pass are NOT resumable work.** `render_pending`
 rows are already-crawled pages the selection promoted and the crawl loop never
 leases them; the refusal names them and points at `crawl_render`
-(`test/api/http.test.ts:1250` "names render_pending rows as the render pass's
+(`test/api/http.test.ts:1397` "names render_pending rows as the render pass's
 work, not a resume's"). Neither are the null `fetch_class` rows of a crawl
 configured with `fetchResources: false` — those carry the operator's decision,
 and a resume would not ask about them
-(`test/api/http.test.ts:1227` "does not read an off switch as resumable work").
+(`test/api/http.test.ts:1374` "does not read an off switch as resumable work").
 
 **The honest race.** The two liveness checks are a snapshot: a lease can expire
 between the count and the enqueue, and a worker this server cannot see can take a
-fresh one just after. The guard is not the safety mechanism — `leaseBatch` is.
+fresh one just after. The claim itself is a **compare-and-swap** on the status
+the call read, and its row count is *read*: zero rows means something else moved
+the crawl in between, and the answer is a 409 rather than a queued crawl whose
+row says something else — the silent no-op hard rule 7 forbids. That narrows the
+double-accept race as far as it goes without a lock (of two callers past the
+guards, only the one whose UPDATE lands first is accepted), and it cannot close
+the window against a process that never touches the status
+(`test/api/http.test.ts:1316` "409s when the crawl's state changes under the
+call, rather than queueing anyway").
+
+For the remainder, the guard is not the safety mechanism — `leaseBatch` is.
 Two workers leasing at the same instant get disjoint batches (`for update skip
 locked` over a materialized CTE), and a page row lands in the transaction that
 moves its frontier row to `done`, so the worst case is two workers dividing one
@@ -286,7 +334,7 @@ Proven end to end, not argued: a real fixture crawl killed in the middle of its
 resource pass by stopping the server that ran it, resumed over the wire by a
 different server, reaches the totals of a control crawl that was never killed —
 3 pages, 24 resources seen and weighed, 0 unasked, 23 findings, on both
-(`test/api/http.test.ts:1133` "a killed crawl resumed over the wire reaches the
+(`test/api/http.test.ts:1212` "a killed crawl resumed over the wire reaches the
 totals of a control that was never killed"; the MCP half is
 `test/api/mcp.test.ts:1380` "finishes a crawl a server was killed in the middle
 of, and keeps its earned spacing").
@@ -414,8 +462,8 @@ a slice: `issue_urls` is the slice.
 
 Pinned: `test/api/query.test.ts:838` "groups by rule, orders by severity then
 rule id", `test/api/query.test.ts:981` "says so when a rule's listing was capped"
-(the capped shape); `test/api/mcp.test.ts:1490` "groups findings by rule, orders
-them by severity" and `test/api/mcp.test.ts:1504` "carries a capped rule's real
+(the capped shape); `test/api/mcp.test.ts:1529` "groups findings by rule, orders
+them by severity" and `test/api/mcp.test.ts:1543` "carries a capped rule's real
 magnitude".
 
 ### 4.4 `issue_urls` → `{items: [{url, evidence}], nextCursor}`
@@ -434,7 +482,7 @@ null url".
 copy travels with it. Scopes: `site | page_type | rule`. See §6 for
 `site.health` and for the absent-family trap.
 Pinned: `test/api/query.test.ts:1101` "returns the stored value with the
-registry's copy joined", `test/api/mcp.test.ts:1894` "answers the measured
+registry's copy joined", `test/api/mcp.test.ts:1933` "answers the measured
 numbers with their copy joined".
 
 ### 4.6 `pages_query` → `{items: PageRow[], nextCursor}`
@@ -461,7 +509,7 @@ unweighed-file floor). Per template it is `metrics_get` with
 view (§12), which carries `referencingPages`.
 Pinned: `test/api/query.test.ts:1159` "returns a slim projection and nothing
 else", `test/api/query.test.ts:1240` "carries both word counts, so the number a
-reader quotes is the one they can see", `test/api/mcp.test.ts:1917` "answers the
+reader quotes is the one they can see", `test/api/mcp.test.ts:1956` "answers the
 crawled pages, slim and ordered by URL".
 
 ### 4.7 `robots_get` → the robots.txt this crawl obeyed
@@ -472,7 +520,7 @@ a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
 Pinned: `test/api/query.test.ts:1288` "answers with the robots.txt the crawl
-read, and the metadata that makes it readable", `test/api/mcp.test.ts:1995`
+read, and the metadata that makes it readable", `test/api/mcp.test.ts:2034`
 "answers with the robots.txt the crawl read, verbatim".
 
 ### 4.8 `crawl_list` → `{items: CrawlListItem[], nextCursor}`
@@ -490,7 +538,7 @@ Pinned: `test/api/query.test.ts:2369` "narrows the listing to one site, and
 leaves the other site's crawls out", `test/api/query.test.ts:2375` "matches the
 apex and www spellings, both schemes", `test/api/query.test.ts:2389` "refuses a
 siteUrl that is not an http(s) URL rather than dropping the filter";
-`test/api/mcp.test.ts:1789` "narrows crawl_list to one site".
+`test/api/mcp.test.ts:1828` "narrows crawl_list to one site".
 
 **Pre-tenancy posture, stated plainly (see §9).** Without `siteUrl`, this
 listing returns every crawl the engine holds, including other tenants'
@@ -561,8 +609,8 @@ real clean", `test/api/query.test.ts:1741` "says fired null on a crawl nobody ha
 judged, however many rows it holds", `test/api/query.test.ts:1758` "marks a
 capped rule's count as a floor, agreeing with issues_list",
 `test/api/query.test.ts:1797` "reads the marker and the counts from one
-statement"; `test/api/mcp.test.ts:1610` "joins a judged crawl's fired state, zero
-included, summing to findingsCount" and `test/api/mcp.test.ts:1673` "names every
+statement"; `test/api/mcp.test.ts:1649` "joins a judged crawl's fired state, zero
+included, summing to findingsCount" and `test/api/mcp.test.ts:1712` "names every
 field it actually answers with".
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
@@ -951,8 +999,8 @@ every refusal — of which `test/api/query.test.ts:2438` "answers both sides,
 comparable, and the rules in issues_list's order" is the answer itself and
 `test/api/query.test.ts:2852` "makes the same refusals as the summary" is the
 drill-down inheriting the summary's refusals; over the agent transport,
-`test/api/mcp.test.ts:1736` "answers the counts and the caveat when the two
-rulesets differ" and `test/api/mcp.test.ts:1801` "names every field it answers
+`test/api/mcp.test.ts:1775` "answers the counts and the caveat when the two
+rulesets differ" and `test/api/mcp.test.ts:1840` "names every field it answers
 with, and both caveat codes it produced".
 
 **Measured, not fixtured** (2026-09-01, `crawl_3f3ab847` → `crawl_02ff6f7a`):
@@ -1209,10 +1257,10 @@ referencing counts summing to the edge table), `test/api/query.test.ts:2213`
 "reads every view through a cursor that can be walked one row at a time",
 `test/api/query.test.ts:2248` "refuses a view, a format or a rule it cannot
 answer", `test/api/query.test.ts:2318` "refuses a crawl holding a retired rule's
-findings BEFORE the header", `test/api/http.test.ts:1714` "tears the response
+findings BEFORE the header", `test/api/http.test.ts:1861` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:759` "describes the shape of the CSV it writes, not just
-that it writes one" and `test/api/mcp.test.ts:2458` "streams the resources view
+that it writes one" and `test/api/mcp.test.ts:2497` "streams the resources view
 byte for byte, as it writes it".
 
 ---

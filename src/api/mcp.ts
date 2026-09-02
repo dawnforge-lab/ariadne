@@ -418,19 +418,39 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "what THAT run did, while crawl_status counts what the CRAWL holds. On the " +
         "Phase 11 gate crawl the two read 784 and 1,995 resources — both true, and " +
         "only the second one describes the site. The database is the truth.\n\n" +
-        "WHAT IT COSTS THE SITE. A resume re-reads robots.txt, re-walks the " +
-        "sitemap and re-runs the host probe, because a crawl resumed hours later " +
-        "must honour the rules as they are now — roughly a dozen paced requests " +
-        "before it picks up where it left off. It also keeps the politeness the " +
-        "crawl earned: a host that pushed the spacing to 8s is still crawled at 8s, " +
-        "never back at the configured floor.\n\n" +
+        "WHAT IT COSTS THE SITE. Before it picks up where it left off a resume " +
+        "re-reads robots.txt, re-walks the sitemap and re-runs the host probe, " +
+        "because a crawl resumed hours later must honour the rules as they are " +
+        "NOW — roughly a dozen paced requests. Then it does the owed work, and on " +
+        "a crawl that hit its resource cap that is MORE than 'the remainder': the " +
+        "engine's resource-fetch caps are budgets per RUN, not per crawl, so a " +
+        "resume grants the whole budget again and may weigh a budget's worth of " +
+        "further files. That is legitimate work on files the crawl saw and never " +
+        "asked about — but it is a second round of requests to somebody's " +
+        "servers, and crawl_status's resources block reports capped true on " +
+        "exactly the crawls where it applies.\n\n" +
+        "It also keeps the politeness the crawl earned: a host that pushed the " +
+        "spacing to 8s is still crawled at 8s, never back at the configured " +
+        "floor. Read that as a CRAWL-wide number, because that is what it is — " +
+        "hostSpacingMs is the widest spacing any one host reached, so a resume " +
+        "applies it to every host it touches, including ones that never pushed " +
+        "back. A resumed crawl is therefore never faster than the one it " +
+        "continues, and can be slower; the 30000ms cap still bounds it.\n\n" +
+        "IT UNJUDGES THE CRAWL. rulesRunAt is cleared, because the crawl is about " +
+        "to grow and a timestamp left standing would say a completed rules pass " +
+        "describes pages that did not exist when it ran. Re-run crawl_rules after " +
+        "the resumed crawl finishes; until you do, crawl_status reads " +
+        "rulesRunAt null and any findings still in the table are a pass nobody " +
+        "completed.\n\n" +
         "REFUSED, and each refusal says which: no such crawl; this server is " +
         "already holding it; the crawl still holds an unexpired lease (a worker is " +
         "on it — wait, a dead worker's leases expire on their own); a terminal " +
         "crawl with nothing owed, naming what was counted (pending frontier rows, " +
-        "expired leases, unasked resource rows); or the site's host is no longer on " +
-        "this server's crawl allowlist, which is policy and not a fault. Pages " +
-        "waiting on the render pass are NOT resumable work — that is crawl_render.",
+        "expired leases, unasked resource rows); the site's host is no longer on " +
+        "this server's crawl allowlist, which is policy and not a fault; or the " +
+        "crawl's state changed while the call was checking it, in which case " +
+        "nothing was queued and crawl_status says what it is now. Pages waiting on " +
+        "the render pass are NOT resumable work — that is crawl_render.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_resume", () => service.resumeCrawl(crawlId)),

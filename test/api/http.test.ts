@@ -1080,6 +1080,85 @@ describe("POST /crawls/:id/resume", () => {
     return Object.assign(spare, { base: `http://127.0.0.1:${bound.port}` });
   }
 
+  /**
+   * A server whose `execute` fires a side effect once, then delegates.
+   *
+   * It exists for one test and could not be written any other way: the window a
+   * compare-and-swap defends is between a method's reads and its write, and no
+   * caller outside the process can reach it. `owedWork`'s `execute` is the last
+   * statement inside `resumeCrawl`'s window, so a hook there stands exactly
+   * where a competing process would. Everything else is forwarded to the real
+   * handle — nothing is stubbed and the code under test is the real path.
+   */
+  async function racingServer(fire: () => Promise<void>): Promise<ApiServer & { base: string }> {
+    let fired = false;
+    const rigged = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop) as unknown;
+        const bound =
+          typeof value === "function"
+            ? (value as (...args: unknown[]) => unknown).bind(target)
+            : value;
+        if (prop !== "execute" || typeof bound !== "function") return bound;
+        return async (...args: unknown[]) => {
+          if (!fired) {
+            fired = true;
+            await fire();
+          }
+          return bound(...args);
+        };
+      },
+    }) as Db;
+
+    const spare = createApiServer({
+      db: rigged,
+      config: {
+        token: TOKEN,
+        allowedDomains: ["127.0.0.1"],
+        crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+        renderDir,
+        log: (line) => serverLog.push(line),
+      },
+    });
+    const bound = await spare.listen(0);
+    return Object.assign(spare, { base: `http://127.0.0.1:${bound.port}` });
+  }
+
+  /**
+   * A crawl row on the allowlisted resumable site, with a config a resume can
+   * actually read.
+   *
+   * `seedCrawl`'s default site is `seeded.example`, which the allowlist refuses
+   * — so a refusal test built on it would be answered by check (1) and could
+   * never reach the guard it was written for. `probeHosts: false` because these
+   * rows are resumed for real and the probe would cost the fixture four chains
+   * to say nothing this test asks about, and a discovery blob because the rules
+   * read the crawl's own evidence: a row without one is not a shape any crawl
+   * ever produced, and judging it fails for that reason rather than for the one
+   * a test is asking about.
+   */
+  async function seedResumable(status: string): Promise<string> {
+    const id = `crawl_resumable_${createdCrawls.length}_${Date.now()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${resumeSite}/`,
+      config: {
+        siteUrl: `${resumeSite}/`,
+        maxPages: 10,
+        maxDepth: 3,
+        userAgent: "AriadneBot/0.1 (test)",
+        perHostDelayMs: 0,
+        maxConcurrency: 2,
+        probeHosts: false,
+      },
+      rulesetVersion: "0.0.0-test",
+      status,
+      discovery: DISCOVERY,
+    });
+    createdCrawls.push(id);
+    return id;
+  }
+
   function resourcesOf(body: Record<string, unknown>): {
     seen: number;
     fetched: number;
@@ -1197,6 +1276,74 @@ describe("POST /crawls/:id/resume", () => {
     expect(res.status).toBe(404);
     expect(String(res.body["error"])).toContain("no such crawl");
   });
+
+  // THE JUDGED MARKER CANNOT SURVIVE A RESUME. `rulesRunAt` is the surface's
+  // load-bearing sentence (talos-surface.md §5): a timestamp means a complete
+  // rules pass is on record, so an empty findings answer means "looked, found
+  // nothing". Judge a cancelled crawl, resume it, and that timestamp would stand
+  // over a crawl that has since grown pages — `findingsCount` describing a
+  // strictly smaller crawl than `pagesScanned` counts, and `crawl_compare`
+  // inheriting the staleness because it believes both sides were judged.
+  it("unjudges a crawl it queues, so no timestamp outlives the pages it described", async () => {
+    const id = await seedResumable("cancelled");
+    await db.insert(frontier).values({
+      crawlId: id,
+      url: `${resumeSite}/a`,
+      state: "pending",
+      depth: 1,
+      discoveredVia: "link",
+    });
+
+    // Judged for real, through the surface, so the marker under test is the one
+    // a rules pass actually writes.
+    expect((await call("POST", `/crawls/${id}/rules`)).status).toBe(200);
+    expect((await call("GET", `/crawls/${id}`)).body["rulesRunAt"]).not.toBeNull();
+
+    expect((await call("POST", `/crawls/${id}/resume`)).status).toBe(202);
+    // Cleared in the same statement that queued it, so there is no window in
+    // which a poller sees a queued crawl wearing a completed judgement.
+    expect((await call("GET", `/crawls/${id}`)).body["rulesRunAt"]).toBeNull();
+
+    await settle(id, 90_000);
+    // And it stays null after the resumed run: only crawl_rules ever sets it.
+    expect((await call("GET", `/crawls/${id}`)).body["rulesRunAt"]).toBeNull();
+  }, 120_000);
+
+  // The claiming UPDATE is a compare-and-swap on the status this call read, and
+  // reading its row count is the difference between a refusal and a silent
+  // no-op: without it the method queues a crawl whose row says something else
+  // entirely and answers `{status: "queued"}` about it (hard rule 7).
+  it("409s when the crawl's state changes under the call, rather than queueing anyway", async () => {
+    const id = await seedResumable("cancelled");
+    await db.insert(frontier).values({
+      crawlId: id,
+      url: `${resumeSite}/a`,
+      state: "pending",
+      depth: 1,
+      discoveredVia: "link",
+    });
+
+    // The race, made deterministic. Moving the row BEFORE the request would
+    // prove nothing: the method reads the status it then conditions on, so a row
+    // that was already 'failed' matches its own CAS and is accepted. The window
+    // that matters is strictly between this method's SELECTs and its UPDATE, and
+    // `owedWork`'s `execute` is the last statement inside it — so a server whose
+    // `execute` flips the row once, on the way through, stands exactly where
+    // another process would.
+    const spare = await racingServer(async () => {
+      await db.update(crawls).set({ status: "failed" }).where(eq(crawls.id, id));
+    });
+    try {
+      const res = await call("POST", `/crawls/${id}/resume`, { base: spare.base });
+      expect(res.status).toBe(409);
+      expect(String(res.body["error"])).toContain("changed state while this resume");
+      // Nothing was queued, and the row is whatever the other writer left.
+      expect((await call("GET", `/crawls/${id}`)).body["status"]).toBe("failed");
+      expect((await call("GET", `/crawls/${id}`)).body["queuePosition"]).toBeNull();
+    } finally {
+      await spare.close();
+    }
+  }, 60_000);
 
   it("409s a crawl a live worker still holds a lease on", async () => {
     const id = await seedCrawl({ status: "running", siteUrl: `${resumeSite}/` });

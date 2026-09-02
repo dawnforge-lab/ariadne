@@ -547,17 +547,33 @@ the same crawl: same id, same row, same pages, nothing re-fetched. Poll
 Use it whenever a crawl stopped with work owed — a server restarted mid-crawl, a
 worker died, a cancel somebody regrets. It re-reads robots.txt, re-walks the sitemap
 and re-runs the host probe first (a crawl resumed hours later honours the rules as
-they are NOW), which costs the site a dozen paced requests, and it keeps whatever
-`hostSpacingMs` the crawl earned — a site that pushed back is not asked to teach the
-lesson twice.
+they are NOW), which costs the site a dozen paced requests.
+
+Three things to know before you call it:
+
+- **It keeps `hostSpacingMs`, and applies it crawl-wide.** A site that pushed back is
+  not asked to teach the lesson twice. But that field is the widest spacing *any*
+  host reached, so the resumed run uses it for every host — a resumed crawl is never
+  faster than the one it continues, and can be slower. The 30000ms cap still binds.
+- **A capped resource pass gets a fresh budget.** The engine's resource-fetch caps
+  are per RUN, not per crawl, so resuming a crawl whose `resources` block reports
+  `capped` true grants the whole budget again and may weigh a budget's worth more
+  files. Real work on files the crawl saw and never asked about — but a second
+  round of requests to somebody's servers, so read `capped` first if that matters.
+- **It unjudges the crawl.** `rulesRunAt` goes back to null, because the crawl is
+  about to grow and a timestamp over a smaller crawl is the one thing this surface
+  must never say. **Re-run `crawl_rules` after the resumed crawl finishes**, before
+  reading any findings.
 
 It is refused when: there is no such crawl; this server is already holding it; the
 crawl still holds an unexpired lease (a worker is on it — **wait**, a dead worker's
 leases expire on their own); the crawl is terminal with nothing owed, in which case
 the refusal names what it counted (pending frontier rows, expired leases, unasked
-resource rows) so you can see it looked; or the site's host has left the server's
-allowlist, which is policy and not a fault. Pages sitting in `frontier.renderPending`
-are not resumable work — that is `crawl_render`'s.
+resource rows) so you can see it looked; the site's host has left the server's
+allowlist, which is policy and not a fault; or the crawl's state changed while the
+call was checking it, in which case nothing was queued and `crawl_status` says what
+it is now. Pages sitting in `frontier.renderPending` are not resumable work — that is
+`crawl_render`'s.
 
 **A crawl nobody is working on** — `queued` with `queuePosition: null`, or `running`
 with no lease activity long after the server that held it died. Two moves, and

@@ -2045,7 +2045,9 @@ export class ApiService {
    * `crawl_status`. The row is moved to `queued` here for the same reason: a
    * crawl this server is holding must be visible as held, and a `finished_at`
    * left on a row that is queued again would be a contradiction, so it is
-   * cleared with it.
+   * cleared with it — and so is `rules_run_at`, for the sharper reason argued at
+   * the write itself: a judged-then-resumed crawl would otherwise carry a
+   * timestamp over a crawl that has since grown pages.
    *
    * WHAT THE CALLER MUST NOT READ THE ANSWER AS. Nothing here reports what the
    * resumed run will find. `crawl_status` remains the truth about the crawl, and
@@ -2091,6 +2093,10 @@ export class ApiService {
    *     row again would cost the site a robots.txt, a sitemap walk and up to
    *     four host-probe chains to change nothing (rule 7).
    *  5. **The allowlist / the URL policy** — 403, naming the host.
+   *  6. **The row moved under the call** — 409. The claiming update is
+   *     conditioned on the status this method read, and its row count is READ:
+   *     zero means something else took the crawl between the guards and the
+   *     write, and nothing is queued.
    *
    * A CANCELLED CRAWL WITH WORK LEFT IS RESUMABLE, and that is a ruling rather
    * than an oversight. `cancelled` means an abort signal fired — an operator
@@ -2111,7 +2117,14 @@ export class ApiService {
    * Checks (2) and (3) are a SNAPSHOT. A lease can expire between the count and
    * the enqueue, and a worker this server cannot see can take a fresh one just
    * after it — no lock spans the two, and adding one would only move the window.
-   * What makes that survivable is that the guard is not the safety mechanism:
+   * Refusal (6) is what narrows it as far as it goes without a lock: the claim
+   * is a compare-and-swap on the status this method read, so of two callers who
+   * both passed the guards only the one whose UPDATE lands first is accepted,
+   * and the database refuses the other on the row itself. It cannot close the
+   * window against a process that never touches the status at all.
+   *
+   * What makes the remainder survivable is that the guard is not the safety
+   * mechanism:
    * `leaseBatch` is. Two workers leasing at the same instant get DISJOINT
    * batches (`for update skip locked` over a materialized CTE, see
    * src/crawl/frontier.ts), and a page row lands in the same transaction that
@@ -2133,6 +2146,21 @@ export class ApiService {
     }
 
     const row = await this.crawlRow(crawlId);
+
+    // FIRST, BECAUSE IT IS FREE AND BECAUSE THE NEXT CHECKS ARE NOT. This one is
+    // an array lookup in this process; `isUrlAllowed` below resolves the host,
+    // which is a DNS round trip spent on a request this server was always going
+    // to refuse. The three policy checks keep their own order relative to each
+    // other (allowlist before URL policy, per `startCrawl`) — this is inserted
+    // ahead of them, not shuffled among them.
+    if (this.queuePosition(crawlId) !== null) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} is already held by this server ('${row.status}'): it is ` +
+          `running now or waiting to run, and a resume would be a second worker on ` +
+          `the same crawl`,
+      );
+    }
 
     // The site as the row stores it, re-vetted from scratch. `normalizeUrl`
     // answers null only for a row this engine did not write (every writer
@@ -2191,14 +2219,6 @@ export class ApiService {
     await this.checkLegacyHosts(siteUrl, config.legacyHosts, allowPrivate);
     await this.checkSitemapUrls(siteUrl, config.sitemapUrls, allowPrivate);
 
-    if (this.queuePosition(crawlId) !== null) {
-      throw new ServiceError(
-        "CONFLICT",
-        `crawl ${crawlId} is already held by this server ('${row.status}'): it is ` +
-          `running now or waiting to run, and a resume would be a second worker on ` +
-          `the same crawl`,
-      );
-    }
     const live = await this.liveLeaseCount(crawlId);
     if (live > 0) {
       throw new ServiceError(
@@ -2220,16 +2240,67 @@ export class ApiService {
       }
     }
 
-    await this.db
+    const claimed = await this.db
       .update(crawls)
-      // `finished_at` goes with the status: a queued crawl has not finished, and
-      // a row saying both would be unreadable. The crawl loop clears it too when
-      // it starts, but a row can sit in this queue for a while first.
-      .set({ status: "queued", finishedAt: null })
+      .set({
+        status: "queued",
+        // `finished_at` goes with the status: a queued crawl has not finished,
+        // and a row saying both would be unreadable. The crawl loop clears it
+        // too when it starts, but a row can sit in this queue for a while first.
+        finishedAt: null,
+        // AND SO DOES `rules_run_at`, for a sharper reason than tidiness.
+        //
+        // It is the surface's single load-bearing sentence (talos-surface.md
+        // §5): a timestamp means a complete rules pass is on record, so an empty
+        // findings answer means "looked, found nothing", and null means nobody
+        // has looked. Judge a cancelled crawl and then resume it, and the
+        // timestamp would survive over a crawl that has since grown pages —
+        // `findingsCount` would describe a strictly smaller crawl than
+        // `pagesScanned` counts, and every reader is told to trust the pair.
+        // `crawl_compare` would inherit the staleness silently, because it
+        // compares two crawls it believes were both judged.
+        //
+        // So the marker is cleared here, by `finishedAt`'s own argument: the row
+        // must not say two things that cannot both be true. The findings rows
+        // themselves are left alone and are then read exactly as a run that died
+        // part-way — a state the surface already documents and handles — until
+        // `crawl_rules` re-judges the finished crawl and rewrites them.
+        rulesRunAt: null,
+      })
       // Conditioned on the status this call READ, for `markCrawlFailed`'s
       // reason: a crawl that started under another process between the guards
       // and here is left exactly as it is.
       .where(and(eq(crawls.id, crawlId), eq(crawls.status, row.status)));
+
+    // AND THE COMPARE-AND-SWAP IS READ, which is the whole point of writing one.
+    //
+    // Zero rows means the guard above raced: between reading the row and this
+    // statement, something else moved the crawl — another process started it,
+    // its own worker closed it, `crawl_mark_failed` retired it. Queueing anyway
+    // would answer `{status: "queued"}` about a row that says nothing of the
+    // kind, and this process would then run a crawl somebody else may be
+    // running: a silent no-op dressed as an acceptance, which is exactly what
+    // hard rule 7 forbids and exactly the trap `markCrawlFailed`'s conditioned
+    // update was written to avoid.
+    //
+    // It is also the narrowest this server can make the double-accept race
+    // without a lock: two callers reading the same status both reach here, and
+    // only the one whose UPDATE lands first sees a row. The other is refused,
+    // by the database, on the row itself.
+    if (claimed.rowCount === null) {
+      throw new Error(
+        `resumeCrawl: the update of crawl ${crawlId} reported no row count, so whether ` +
+          `this server claimed it is unknown`,
+      );
+    }
+    if (claimed.rowCount === 0) {
+      throw new ServiceError(
+        "CONFLICT",
+        `crawl ${crawlId} changed state while this resume was being checked — it was ` +
+          `'${row.status}' when the call began and something else has moved it since. ` +
+          `Nothing was queued; read crawl_status and try again`,
+      );
+    }
 
     const entry: QueueEntry = { crawlId, config, resuming: true };
     this.waiting.push(entry);
