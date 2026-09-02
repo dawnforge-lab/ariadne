@@ -87,8 +87,9 @@ a 4×4 matrix, sixteen assertions. T1's review ruled the partition total and
 disjoint by enumerating all sixteen `{ok, broken, unknown, null}`
 presence-combinations: the silent space is exactly `O == 0 ∧ B == 0` (plus
 `seen == 0`), which is four shapes, and the four markers biject onto them
-(`seen == 0` → not-recorded, all-null → not-fetched, all-decided-unknown →
-all-unknown, the MIX → partial-unknown); no shape fires two, and every shape
+(`seen == 0` with pages declaring references → not-recorded, all-null →
+not-fetched, all-decided-unknown → all-unknown, the MIX → partial-unknown); no
+shape fires two, and every shape
 with an `ok` or broken row correctly fires no marker (the judging rules and
 `resources.broken` carry it). The last rule-1 silence over `seen > 0` is closed.
 
@@ -262,13 +263,14 @@ it becomes Phase 15 work, not a mid-phase reopen.
 **The proposal: do not add a retry.** The argument, on the engine's own terms:
 
 1. **`fetchRobots` already retries before it declares unreachable.** An
-   unreachable robots.txt (5xx, timeout, network error, or a URL the policy
-   refused — as opposed to an absent 4xx, which is normal) gets three tries with
-   a short linear backoff before the crawl concludes the origin cannot tell us
-   its rules (`src/crawl/discovery.ts`). The resource-level `robots_unreachable`
-   class inherits that already-retried verdict. A second retry layer at the
-   resource pass re-asks a host that a backoff-bounded probe just failed to
-   reach.
+   unreachable robots.txt from a 5xx, timeout, or network error (as opposed to
+   an absent 4xx, which is normal) gets three tries with a short linear backoff
+   before the crawl concludes the origin cannot tell us its rules; a URL the
+   policy refused is classed unreachable immediately, on the first request,
+   since asking again would only be rude (`src/crawl/discovery.ts`,
+   `classifyRobotsFailure`). The resource-level `robots_unreachable` class
+   inherits that verdict. A second retry layer at the resource pass re-asks a
+   host that a backoff-bounded probe just failed to reach.
 2. **Re-asking spends requests on a just-failed host.** That is the hard-rule-9
    direction we most want to avoid: a host that could not answer its robots.txt
    is precisely the host we should not hammer. The polite move is to leave it

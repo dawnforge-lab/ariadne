@@ -661,8 +661,9 @@ const NOT_ASKED_SENTENCE: Record<(typeof NOT_FETCHED_REASON)[keyof typeof NOT_FE
  * It was legible one surface over — `crawl_status.resources` carries `failed`,
  * `robotsDenied`, `robotsUnreachable` and `fetch_error`'s share of `failed`, and
  * CHECK-83 is answered first — but that was never the same as a reader meeting a
- * marker. **`resources.all-unknown` below is that marker**, the third and last
- * sibling on this model, fired by "every row a decided unknown class on a crawl
+ * marker. **`resources.all-unknown` below is that marker**, the third
+ * sibling on this model (Phase 14's `resources.partial-unknown` became the
+ * fourth), fired by "every row a decided unknown class on a crawl
  * that has rows". Phase 12 ledgered it as an owner-promotable pointer
  * (phase-12.md §10.1) because closing it meant another rule and another ruleset
  * bump; Phase 13 spent that bump (0.9.0 → 0.10.0). The window is closed, and the
@@ -1134,7 +1135,7 @@ export const resourceRules: QueryRule[] = [
     run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
   }),
 
-  // The third and last marker (P13-T2), claiming the same four checks as the two
+  // The third marker (P13-T2), claiming the same four checks as the two
   // beside it and for the same reason: the silence it explains is the same
   // silence — the four judging rules quiet and `page.weight` counting HTML
   // alone. Which of the three speaks is decided by whether the crawl has rows

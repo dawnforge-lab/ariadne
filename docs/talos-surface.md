@@ -17,8 +17,9 @@ The four markers — `resources.not-recorded` (`seen == 0`),
 `resources.not-fetched` (every row unfetched), `resources.all-unknown` (every
 row a decided unknown), `resources.partial-unknown` (the mix of null and
 decided-unknown) — are mutually exclusive by construction and together partition
-the "no `ok`, no broken, silent" space over `seen > 0` exactly, so no crawl
-carries more than one. The ruleset moved to **0.11.0** for it (§11). Everything
+the "no `ok`, no broken, silent" space exactly: `resources.not-recorded` covers
+`seen == 0`, and the other three split `seen > 0` into all-null,
+all-decided-unknown, and the mix — so no crawl carries more than one. The ruleset moved to **0.11.0** for it (§11). Everything
 else in Phase 14 was internal and never reached the seam: the per-host resume
 now earns its spacing on two real gate hosts rather than a synthetic seed — the
 same resume machinery §4.1a already documents, with no served field added,
@@ -815,8 +816,10 @@ rows cannot say it and only the config can.
    `resourcesSeen` and `pagesCrawled`. The FOUR markers are mutually exclusive by
    construction — `seen == 0`, every row unfetched, every row a decided unknown,
    and the mix of null-and-decided-unknown — so no crawl carries more than one,
-   and together they partition the "no `ok`, no broken, silent" space over
-   `seen > 0` exactly. The discriminator on this block is unchanged: `fetched` at
+   and together they partition the "no `ok`, no broken, silent" space exactly:
+   `resources.not-recorded` takes `seen == 0` (and only when the pages declared
+   at least one fetchable reference), and the other three partition `seen > 0`.
+   The discriminator on this block is unchanged: `fetched` at
    zero with `failed` carrying the census (and `skipped` non-zero for the partial
    case). **Read the coverage block before quoting any resource finding, or the
    absence of one.**
