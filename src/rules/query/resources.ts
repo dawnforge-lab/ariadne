@@ -965,6 +965,7 @@ export const resourceRules: QueryRule[] = [
     severity: NOT_RECORDED.severity,
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a crawl that recorded no resources (P11-T3)",
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
   }),
 
@@ -980,6 +981,7 @@ export const resourceRules: QueryRule[] = [
     severity: NOT_FETCHED.severity,
     ...copyFor(NOT_FETCHED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a crawl that recorded its resources and asked about none (P12-T2)",
     run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
   }),
 
@@ -997,6 +999,7 @@ export const resourceRules: QueryRule[] = [
     severity: ALL_UNKNOWN.severity,
     ...copyFor(ALL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a crawl whose every resource landed in an unknown class (P13-T2)",
     run: (db, crawlId) => allUnknownFindings(ALL_UNKNOWN, db, crawlId),
   }),
 ];

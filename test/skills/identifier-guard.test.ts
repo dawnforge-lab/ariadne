@@ -559,6 +559,35 @@ function findingsExample(): { keys: Set<string>; paths: Set<string> } {
   return { keys, paths };
 }
 
+/**
+ * The rule ids CHECK-83 enumerates as its NOT MEASURED family: the backticked
+ * ids between the phrase that opens the enumeration and the sentence that closes
+ * it. The window is bounded on both sides so the other backticked marker ids in
+ * the CHECK-83 entry — the ones its prose discusses further down — are not read
+ * as part of the list.
+ *
+ * A missing anchor is a THROW, not an empty set, on this file's own principle: a
+ * family list that MOVED must not read as a family with no members, which would
+ * pass the bijection against a marker set that had also somehow emptied.
+ */
+function notMeasuredFamily(): Set<string> {
+  const text = readFileSync(CHECKLIST, "utf8");
+  const open = text.indexOf("NOT MEASURED family:");
+  if (open === -1) {
+    throw new Error("identifier-guard: CHECK-83 opens no 'NOT MEASURED family:' enumeration");
+  }
+  const rest = text.slice(open);
+  const close = rest.indexOf("Each one");
+  if (close === -1) {
+    throw new Error("identifier-guard: the NOT MEASURED family enumeration has no closing sentence");
+  }
+  // A rule id inside backticks: lowercase segments joined by `.` or `-`, so a
+  // marker id is read and a bare word in the prose is not.
+  return new Set(
+    [...rest.slice(0, close).matchAll(/`([a-z][a-z0-9]*(?:[.-][a-z0-9]+)+)`/g)].map((m) => m[1]!),
+  );
+}
+
 // ------------------------------------------------------------------ the guard
 
 const TOKENS = skillFiles().flatMap(tokensOf);
@@ -605,48 +634,33 @@ describe("the skills name only identifiers the engine has", () => {
   // this crawl, and an agent that never meets it reads the silence of the rules
   // it stands in for as a clean site. So a marker must be named in the checklist
   // entry of every check it claims — which is where the auditor is looking when
-  // the silence would otherwise mislead them.
+  // the silence would otherwise mislead them — AND in CHECK-83's NOT MEASURED
+  // family list, the one place an auditor is told to go looking for the whole
+  // set at once.
   //
   // The guard exists because P11-T3 shipped a marker that claimed four checks
-  // and appeared in none of their entries; the three older markers all did, and
-  // this is what keeps that from being luck. The list is explicit, with the
-  // reason each id is on it, on the `AGENT_CHECK_EVIDENCE` precedent: "which
-  // rules are markers" is a judgement about intent that no naming convention
-  // settles (`host.probe-skipped` reports a crawl OPTION, not missing data, and
-  // is on the list for the same reason as the rest — its silence is not a pass).
+  // and appeared in none of their entries; every older marker did, and this is
+  // what keeps that from being luck.
   //
-  // SCOPE, stated because the list being hand-written has a second consequence
-  // (P11-T4, M-6): a marker is not dragged into anything by adding it to the
-  // registry. It has to be written into this list to be checked at all, AND into
-  // CHECK-83's own NOT MEASURED family — which is likewise a hand-typed list of
-  // ids, derived from no registry query. Nothing here notices a marker that is
-  // in neither. Adding a marker is therefore three edits, not one.
-  //
-  // **P12-T2 PAID THAT COST, and it is recorded rather than glossed:** the
-  // seventh marker (`resources.not-fetched`) took exactly the three edits this
-  // paragraph predicted — the rule, the entry below, and CHECK-83's family list
-  // — and only the second of them is enforced by anything. The prediction
-  // holding is not an argument that the arrangement is right; it is the evidence
-  // for deriving both lists from the registry when a check-shaped `marker: true`
-  // flag is worth its own phase.
-  //
-  // **P13-T2 PAID IT ONE LAST TIME, deliberately:** the eighth and last marker
-  // (`resources.all-unknown`) took the same three edits — the rule, the entry
-  // below, and CHECK-83's family list. Three phases have now paid the toll and
-  // predicted it correctly, which is exactly the standing evidence Phase 13's
-  // Task 4 converts: it derives both lists from a registry `marker: true` flag,
-  // and this hand-typed map goes away. Until then the entry is here by hand.
+  // **WHICH RULES ARE MARKERS IS NOW DERIVED, not hand-listed (P13-T4).** The
+  // `marker` flag on the rule definition is the single source of truth: this
+  // block reads `buildRegistry()` and takes every rule whose `marker` is set.
+  // The hand-written map three phases paid a three-edit toll into — the rule, an
+  // entry in this map, and CHECK-83's family list — is gone, and only the first
+  // of those survives as an edit. Adding a marker is ONE edit, the flag on its
+  // definition, and the two assertions below turn the other two former edits
+  // from silent bookkeeping into enforced obligations: a flagged rule the
+  // checklist forgot fails the first, and an id CHECK-83 names that nobody
+  // flagged — a marker somebody documented and forgot to declare — fails the
+  // second. "Which rules are markers" was a judgement about intent no naming
+  // convention settled (`host.probe-skipped` reports a crawl OPTION, not missing
+  // data — its silence is still not a pass); the flag is now where that
+  // judgement is recorded, once, beside the rule it is about.
+  const MARKERS = buildRegistry()
+    .all()
+    .filter((rule) => rule.marker !== undefined);
+
   it("every NOT MEASURED marker is named in the checklist entry of each check it claims", () => {
-    const MARKERS: Record<string, string> = {
-      "content.thin-skipped": "the page the corrected thin-content floor cannot judge",
-      "h1.duplicate-skipped": "a crawl that stored no heading text",
-      "links.orphan-skipped": "an incomplete crawl, whose orphans cannot be trusted",
-      "robots.check-skipped": "a robots.txt the crawl could not read",
-      "host.probe-skipped": "a crawl started with host probing off",
-      "resources.not-recorded": "a crawl that recorded no resources (P11-T3)",
-      "resources.not-fetched": "a crawl that recorded its resources and asked about none (P12-T2)",
-      "resources.all-unknown": "a crawl whose every resource landed in an unknown class (P13-T2)",
-    };
     const text = readFileSync(CHECKLIST, "utf8");
     // `### CHECK-NN: …` to the next `### `, which is one check's whole entry.
     const sections = new Map<string, string>();
@@ -657,15 +671,12 @@ describe("the skills name only identifiers the engine has", () => {
       sections.set(heading[1]!, text.slice(start, end));
     });
 
-    const byId = new Map(buildRegistry().all().map((rule) => [rule.id, rule]));
     const missing: string[] = [];
-    for (const [ruleId, why] of Object.entries(MARKERS)) {
-      const rule = byId.get(ruleId);
-      if (rule === undefined) throw new Error(`identifier-guard: no rule '${ruleId}' — ${why}`);
+    for (const rule of MARKERS) {
       for (const checkId of rule.checkIds) {
         const section = sections.get(checkId);
         if (section === undefined) throw new Error(`identifier-guard: no ${checkId} entry`);
-        if (!section.includes(ruleId)) missing.push(`${checkId} does not name ${ruleId}`);
+        if (!section.includes(rule.id)) missing.push(`${checkId} does not name ${rule.id}`);
       }
     }
     expect(
@@ -673,6 +684,29 @@ describe("the skills name only identifiers the engine has", () => {
       "a marker an auditor never meets is a silence they will read as a pass — name it " +
         "in the entry of every check it claims, or drop the claim",
     ).toEqual([]);
+  });
+
+  // The SECOND former edit, now enforced: CHECK-83 is the one check that tells an
+  // auditor to scan the whole NOT MEASURED family at once, so its enumeration and
+  // the flagged set must be the same set in both directions. An id the family
+  // list omits is a marker the auditor scanning CHECK-83 never meets; an id it
+  // names that nobody flagged is a marker documented but never declared, whose
+  // rule this guard is not checking at all. Either is the divergence the derived
+  // flag exists to end.
+  it("CHECK-83's NOT MEASURED family list names exactly the flagged markers", () => {
+    const family = notMeasuredFamily();
+    const flagged = new Set(MARKERS.map((rule) => rule.id));
+    expect(
+      [...family].filter((id) => !flagged.has(id)).sort(),
+      "CHECK-83 names these in its NOT MEASURED family, but no rule carries the marker flag",
+    ).toEqual([]);
+    expect(
+      [...flagged].filter((id) => !family.has(id)).sort(),
+      "these rules carry the marker flag, but CHECK-83's NOT MEASURED family list omits them",
+    ).toEqual([]);
+    // Insurance, on this file's own model: a family enumeration a regex change
+    // stopped reading would turn the bijection above into `[] === []`.
+    expect(family.size, "the NOT MEASURED family enumeration read empty").toBeGreaterThanOrEqual(8);
   });
 
   it("names findings-file paths the audit skill's own shape carries", () => {

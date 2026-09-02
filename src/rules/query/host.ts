@@ -263,6 +263,7 @@ export const hostRules: QueryRule[] = [
     severity: SKIPPED.severity,
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a crawl started with host probing off",
     run: async (db, crawlId): Promise<Finding[]> => {
       const evidence = await readHostProbe(db, crawlId, SKIPPED.id);
       if (evidence.probe !== null) return [];

@@ -241,6 +241,7 @@ export const robotsRules: QueryRule[] = [
     severity: SKIPPED.severity,
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
+    marker: "a robots.txt the crawl could not read",
     run: async (db, crawlId): Promise<Finding[]> => {
       const { discovery } = await readCrawlEvidence(db, crawlId, SKIPPED.id);
       const skipped = robotsUnreadable(discovery);

@@ -53,6 +53,7 @@ import {
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
 import { DISCOVERED_VIA } from "../../src/crawl/frontier.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
+import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
@@ -1303,7 +1304,7 @@ describe("crawl_rules", () => {
     };
 
     const rendered = await coverage(liveCrawlId);
-    expect(rendered["renderPassEvidence"]).toBe("ran");
+    expect(rendered["renderPassEvidence"]).toBe(RENDER_PASS_EVIDENCE.ran);
     expect(Number(rendered["pagesRendered"])).toBeGreaterThan(0);
 
     const id = await seedCrawl({
@@ -1326,7 +1327,7 @@ describe("crawl_rules", () => {
     const unrendered = await coverage(id);
     // The pair that was missing: nothing ran, and the selection numbers are
     // still answered — as the plan they are, not as a history.
-    expect(unrendered["renderPassEvidence"]).toBe("none");
+    expect(unrendered["renderPassEvidence"]).toBe(RENDER_PASS_EVIDENCE.none);
     expect(unrendered["pagesRendered"]).toBe(0);
     expect(unrendered["selectionMode"]).toBe("auto");
     expect(Number(unrendered["selectionSelected"])).toBeGreaterThan(0);

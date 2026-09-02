@@ -160,6 +160,10 @@ export function pageRule(
   category: RuleCategory,
   severity: Severity,
   run: (page: PageRecord, self: RuleIdentity) => Finding[],
+  // The NOT MEASURED marker flag, threaded through so a page-rule marker
+  // (`content.thin-skipped`) declares itself the same one way every other marker
+  // does. See `RuleMeta.marker`: present only on a marker, the value its reason.
+  marker?: string,
 ): PageRule {
   const self: RuleIdentity = { id, severity };
   return defineRule<PageRule>({
@@ -170,6 +174,7 @@ export function pageRule(
     severity,
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
+    ...(marker === undefined ? {} : { marker }),
     run: (page) => run(page, self),
   });
 }

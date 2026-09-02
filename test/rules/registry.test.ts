@@ -80,6 +80,14 @@ describe("defineRule", () => {
     expect(() => defineRule({ ...validPageRule, kind: "cosmic" as never }))
       .toThrow(/bad kind 'cosmic'/);
   });
+  it("accepts a marker flag carrying a reason", () => {
+    const marked = { ...validPageRule, marker: "a crawl condition the check cannot judge" };
+    expect(defineRule(marked)).toBe(marked);
+  });
+  it("throws on a present-but-empty marker flag — a flag with no reason", () => {
+    expect(() => defineRule({ ...validPageRule, marker: "   " }))
+      .toThrow(/marker, when present, must be a non-empty reason string/);
+  });
   it("RuleDefinitionError is recognizable by name", () => {
     try {
       defineRule({ ...validPageRule, id: "BAD ID" });

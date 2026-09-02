@@ -64,6 +64,7 @@ import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { FETCH_CLASSES } from "../crawl/fetch-page.js";
 import { DISCOVERED_VIA } from "../crawl/frontier.js";
+import { RENDER_PASS_EVIDENCE } from "../rules/metric/render-metrics.js";
 import { METRIC_SCOPES } from "../rules/registry/types.js";
 import type { ServiceConfig } from "./config.js";
 import { CSV_VIEWS, EXPORT_FORMATS } from "./csv.js";
@@ -774,7 +775,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "{items: []}, which means NOT MEASURED YET rather than 'nothing was " +
         "rendered'. Check whether a pass ran before reading anything into a " +
         "rendered filter: render.coverage's renderPassEvidence answers it " +
-        "('none' means no pass left a trace), while crawl_status's " +
+        `('${RENDER_PASS_EVIDENCE.none}' means no pass left a trace), while crawl_status's ` +
         "renderPassCount is only the LAST pass's rendered-page count — its 0 is " +
         "also what a crawl nobody rendered reports.\n\n" +
         "Filters:\n" +

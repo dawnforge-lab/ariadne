@@ -32,6 +32,7 @@ import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
 import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
+import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -1747,7 +1748,7 @@ describe("GET /crawls/:id/metrics — the never-rendered crawl says so", () => {
     // The pair, and it is the whole point: nothing rendered, nothing recorded
     // — and a selection the crawl would still support, reported as the plan it
     // is rather than as a history nobody made.
-    expect(value["renderPassEvidence"]).toBe("none");
+    expect(value["renderPassEvidence"]).toBe(RENDER_PASS_EVIDENCE.none);
     expect(value["pagesRendered"]).toBe(0);
     expect(value["renderFailures"]).toBe(0);
     expect(value["selectionMode"]).toBe("auto");
@@ -1764,7 +1765,7 @@ describe("GET /crawls/:id/metrics — the never-rendered crawl says so", () => {
     const rows = res.body["items"] as Record<string, unknown>[];
     expect(rows, "no render.coverage row — was the crawl judged?").toHaveLength(1);
     const value = rows[0]!["value"] as Record<string, unknown>;
-    expect(value["renderPassEvidence"]).toBe("ran");
+    expect(value["renderPassEvidence"]).toBe(RENDER_PASS_EVIDENCE.ran);
     expect(Number(value["pagesRendered"])).toBeGreaterThan(0);
   });
 });

@@ -26,6 +26,7 @@ import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/l
 import { renderedHtmlFilename } from "../../src/crawl/render/renderer.js";
 import { runRenderPass, type RenderPassSummary } from "../../src/crawl/render/run-render.js";
 import { RENDER_DEFAULTS } from "../../src/crawl/render/select.js";
+import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -1738,7 +1739,7 @@ describe("the fixture site end to end", () => {
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 70` below is evidence enough on its own
       // here; the field matters on the crawls where there is none.
-      renderPassEvidence: "ran",
+      renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
       // P8-T2. The harness renders the AUTOMATIC selection — it names no URLs —
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.

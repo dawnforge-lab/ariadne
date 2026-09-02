@@ -126,6 +126,12 @@ export function defineRule<T extends AnyRule>(rule: T): T {
   for (const field of ["category", "title", "explanation", "howToFix", "rulesetVersion"] as const)
     if (!rule[field]) fail(`${field} is required (client-facing copy is not optional)`);
   if (typeof rule.run !== "function") fail("run must be a function");
+  // A NOT MEASURED marker declares itself with the `marker` flag, whose value is
+  // the reason it exists. The field is optional, but PRESENT-AND-EMPTY is a flag
+  // with no reason — the exact drift the guard derives this set to prevent — so
+  // it is refused here rather than reaching the registry as a silent marker.
+  if (rule.marker !== undefined && (typeof rule.marker !== "string" || rule.marker.trim() === ""))
+    fail("marker, when present, must be a non-empty reason string");
   return rule;
 }
 
