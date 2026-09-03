@@ -1,8 +1,29 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 13 (ruleset 0.10.0, migrations 0000–0015,
+**Status:** the contract as of Phase 14 (ruleset 0.11.0, migrations 0000–0015,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
+
+**What Phase 14 changed here**, so a reader of the Phase 13 version knows where
+to look: **one shape was added and no served field changed.**
+`resources.partial-unknown` is a fourth resource-coverage marker (info) — the
+last of the family, for a PARTIAL pass where some recorded rows are still `null`
+(never asked about) and the rest a decided unknown class (`refused`,
+`robots_denied`, `robots_unreachable`, `fetch_error`), with no `ok` row and no
+broken row, so the four judging rules write nothing and the silence would
+otherwise go unexplained (§5.3). It closes the window `docs/gates/phase-13.md`
+§8 pointer 1 named — the same class the all-unknown window was, one layer in.
+The four markers — `resources.not-recorded` (`seen == 0`),
+`resources.not-fetched` (every row unfetched), `resources.all-unknown` (every
+row a decided unknown), `resources.partial-unknown` (the mix of null and
+decided-unknown) — are mutually exclusive by construction and together partition
+the "no `ok`, no broken, silent" space exactly: `resources.not-recorded` covers
+`seen == 0`, and the other three split `seen > 0` into all-null,
+all-decided-unknown, and the mix — so no crawl carries more than one. The ruleset moved to **0.11.0** for it (§11). Everything
+else in Phase 14 was internal and never reached the seam: the per-host resume
+now earns its spacing on two real gate hosts rather than a synthetic seed — the
+same resume machinery §4.1a already documents, with no served field added,
+removed, or retyped — and the phase closed the last of the engine-side ledger.
 
 **What Phase 13 changed here**, so a reader of the Phase 12 version knows where
 to look: **one shape was added and no served field changed.**
@@ -198,7 +219,7 @@ validator before the handler runs (`test/api/mcp.test.ts:789` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (93 rows) rather than by the crawl. The catalog is
+bounded by the **ruleset** (95 rows at 0.11.0) rather than by the crawl. The catalog is
 ~101 KB (**103,679 bytes**, re-measured 2026-09-02 by the Phase 12 gate over all
 93 rows of ruleset 0.9.0, by serialising what `rulesCatalog` answers with no
 crawl id — the earlier 100,645 was measured at 92 rows, before
@@ -306,7 +327,7 @@ above the crawl's base is a finding — a host refused us and the engine backed 
 at 8s. Until Phase 12 it did not: the gate came up at the configured floor and
 the first spacing write put that floor back over the evidence, which made the
 regression invisible from `crawl_status` as well as rude to the site
-(`test/crawl/loop.test.ts:905` "resumes at the spacing the crawl earned, not the
+(`test/crawl/loop.test.ts:986` "resumes at the spacing the crawl earned, not the
 one it was configured with").
 
 Two things that column is not, because a reader will otherwise assume both:
@@ -779,14 +800,29 @@ rows cannot say it and only the config can.
    `resources.not-recorded` nor `resources.not-fetched` fires; no row is `ok`, so
    the four judging rules write nothing and the `unknownResources` counts that
    would explain the silence live on findings that do not exist. That silence is
-   what `resources.all-unknown` (info, ruleset 0.10.0) now reports: its evidence
+   what `resources.all-unknown` (info, ruleset 0.10.0) reports: its evidence
    carries a per-class `census` (a count for each of the four unknown classes)
-   and the `dominantClass`, beside `resourcesSeen` and `pagesCrawled`. The three
-   markers are mutually exclusive by construction — `seen == 0`, every row
-   unfetched, every row a decided unknown — so no crawl carries more than one.
-   The discriminator on this block is unchanged: `fetched` at zero with `failed`
-   carrying the census. **Read the coverage block before quoting any resource
-   finding, or the absence of one.**
+   and the `dominantClass`, beside `resourcesSeen` and `pagesCrawled`.
+
+   **A fourth case, and since Phase 14 it has its own marker:** a PARTIAL pass —
+   some rows still `null` (never asked about), the rest a decided unknown class —
+   with no `ok` row and no broken row. The all-unknown marker excludes it (a null
+   row means not every file was reached), not-fetched excludes it (not every row
+   is null), not-recorded excludes it (rows exist), and the judging rules are
+   silent for want of an `ok` row: the exact gap phase-13.md §8 pointer 1 named,
+   one layer in. `resources.partial-unknown` (info, ruleset 0.11.0) now reports
+   it, carrying the same per-class `census` and `dominantClass` as its sibling
+   plus `resourcesUnfetched` — the count of files the pass never reached — beside
+   `resourcesSeen` and `pagesCrawled`. The FOUR markers are mutually exclusive by
+   construction — `seen == 0`, every row unfetched, every row a decided unknown,
+   and the mix of null-and-decided-unknown — so no crawl carries more than one,
+   and together they partition the "no `ok`, no broken, silent" space exactly:
+   `resources.not-recorded` takes `seen == 0` (and only when the pages declared
+   at least one fetchable reference), and the other three partition `seen > 0`.
+   The discriminator on this block is unchanged: `fetched` at
+   zero with `failed` carrying the census (and `skipped` non-zero for the partial
+   case). **Read the coverage block before quoting any resource finding, or the
+   absence of one.**
 2. **`fetch_class` null is per FILE, so a page's weight can be a floor.** The
    `page.weight` metric flags `atLeast: true` on any row that references a file
    nobody weighed, and reports the referenced-and-weighed pair beside it.
@@ -930,17 +966,17 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:937` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:970` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:985` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:1011` "tells
+`test/rules/copy.test.ts:945` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:978` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:993` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1019` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1038` "grades nothing: no score, no label, no threshold";
-`test/rules/coverage.test.ts:302` "site.health is filed under the
+`test/rules/copy.test.ts:1046` "grades nothing: no score, no label, no threshold";
+`test/rules/coverage.test.ts:326` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:1796` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:1806` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -1222,10 +1258,10 @@ Three postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (0.9.0) stamps **judgement**: bump it when a rule's verdict or
-copy changes. Adding a rule or a metric family adds rows without changing a
-verdict — `metrics` rows carry no version column at all — which is the argument
-Phase 10 held 0.7.0 on.
+`RULESET_VERSION` (**0.11.0** as of Phase 14) stamps **judgement**: bump it when
+a rule's verdict or copy changes. Adding a rule or a metric family adds rows
+without changing a verdict — `metrics` rows carry no version column at all —
+which is the argument Phase 10 held 0.7.0 on.
 
 **Phase 11 bumped to 0.8.0, once.** Two things in the phase each require it on
 the rule's own terms: six rules writing verdicts a page or a site could not
@@ -1254,6 +1290,16 @@ copy ground as the second, on the metric an auditor reads before quoting any
 JavaScript finding. One number covers all three — the phase ships as one change,
 and two stamps inside it would make `crawl_compare` raise `ruleset-mismatch`
 between crawls that differ by nothing a consumer cares about.
+
+**Phase 13 bumped to 0.10.0 and Phase 14 to 0.11.0, each once, each on the same
+additive ground.** `resources.all-unknown` (Phase 13) and
+`resources.partial-unknown` (Phase 14) are the third and fourth sibling markers
+of §5.3 — new ids firing where nothing fired, never a widened condition on a
+rule already stamped into stored findings, exactly the distinction Phase 12
+drew. Together they complete the marker family's partition of the silent space
+(a crawl whose resources yielded no judgeable answer now carries exactly one
+marker naming why, whatever the mix of unasked and unknown-answer rows). No
+other rule's verdict or copy moved in either phase.
 
 Three consequences a consumer must plan for:
 

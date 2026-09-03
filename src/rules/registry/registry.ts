@@ -23,6 +23,20 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.11.0: Phase 14 Task 1, on ONE ground. `resources.partial-unknown` (T1), the
+// fourth and last resource marker. A crawl whose census is a MIX — some rows
+// `null` (never asked about), the rest a decided unknown class (`refused`,
+// `robots_denied`, `robots_unreachable`, `fetch_error`), and not one `ok` or
+// broken row — met NO finding at all: the four judging rules gate on an `ok`
+// class and go quiet, `resources.broken` has no broken row, and the three
+// existing markers exclude it by construction (`seen == 0`, every row null,
+// every row a decided unknown — this is the mix none of them match). It closes
+// the window phase-13.md §8 pointer 1 named, one layer in from the §10.1 window
+// `resources.all-unknown` closed. ADDITIVE by the same argument all three
+// siblings are — a crawl gains a finding it could not receive before, no existing
+// verdict moves — which is why the bump belongs here. No copy of any existing
+// rule changed.
+//
 // 0.10.0: Phase 13 Task 2, on ONE ground. `resources.all-unknown` (T2), the
 // third and last resource marker. A crawl whose every resource row landed in an
 // unknown class — `refused`, `robots_denied`, `robots_unreachable`,
@@ -77,7 +91,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.10.0";
+export const RULESET_VERSION = "0.11.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

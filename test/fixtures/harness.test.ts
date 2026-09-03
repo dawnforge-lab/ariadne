@@ -208,6 +208,16 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // boundary against both siblings are covered directly in
   // test/rules/resources-query.test.ts.
   "resources.all-unknown",
+  // P14-T1's fourth and last marker, unprovokable here for the same
+  // by-construction reason as its three siblings. It fires only on a PARTIAL
+  // pass whose decided rows are all a decided unknown class and whose rest is
+  // still unasked (null), with no `ok` and no broken row. This harness runs the
+  // pass to completion over a site that serves five real images (one weighed at
+  // 404), so the census carries `ok` and `client_error` rows and no unasked
+  // null — the mix this marker needs cannot occur. Its firing, its silence on
+  // ok/broken/all-null/all-decided crawls, and the four-way boundary against its
+  // siblings are covered directly in test/rules/resources-query.test.ts.
+  "resources.partial-unknown",
   "h1.duplicate-skipped",
   "host.duplicate-host-200",
   "host.probe-skipped",

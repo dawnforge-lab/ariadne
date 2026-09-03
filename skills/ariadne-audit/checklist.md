@@ -311,18 +311,23 @@ answered from, and its verdict is the confidence interval around all of them.
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
-  `resources.all-unknown`. Each one
+  `resources.all-unknown`, `resources.partial-unknown`. Each one
   is the engine saying a check below could not be answered on this crawl. The last
-  three are siblings and never more than one appears: `resources.not-recorded` means
+  four are siblings and never more than one appears: `resources.not-recorded` means
   the crawl holds NO resource records, `resources.not-fetched` means it recorded them
-  all and asked the site about none of them, and `resources.all-unknown` means it
+  all and asked the site about none of them, `resources.all-unknown` means it
   asked about (or tried to reach) every file and every one landed in an unknown class
   — refused by our own policy, disallowed by a robots.txt, its host's robots.txt
-  unreachable, or a request that never completed. That third case used to fall in a
-  gap no marker covered — rows were decided, so neither of the other two fired, and
-  the resource rules were silent regardless; `resources.all-unknown` (P13-T2) is the
-  marker that now fires there, and `crawl_status.resources` is still the discriminator
-  it puts a name to — `fetched` at zero with `failed` carrying the census. List them
+  unreachable, or a request that never completed — and `resources.partial-unknown`
+  means the pass reached only SOME of the files, got an unknown from every one it
+  reached, and never asked about the rest, with no file coming back usable or broken.
+  The third and fourth cases used to fall in a gap no marker covered — rows were
+  decided (in whole or in part), so neither of the first two fired, and the resource
+  rules were silent regardless; `resources.all-unknown` (P13-T2) and
+  `resources.partial-unknown` (P14-T1) are the markers that now fire there, and
+  `crawl_status.resources` is still the discriminator they put a name to — `fetched`
+  at zero with `failed` carrying the census (`skipped` non-zero as well, for the
+  partial case). List them
   here, and mark the checks they claim SKIP rather than PASS when you reach them.
 - **Evaluate**:
   - FAIL if `rulesRunAt` is null — nothing below this line is answerable, and the
@@ -2167,6 +2172,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `crawl_status.resources` is the discriminator it puts a name to — `fetched` at zero
   with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. When it
   is present this check is NOT MEASURED rather than PASS, and the remedy is a re-crawl.
+  **And its narrower sibling, the last of the family** (P14-T1): a PARTIAL pass that
+  reached only some of the files, got an unknown from every one it reached, and never
+  asked about the rest — no `ok` row and no broken row — fires none of the other three
+  markers either, because the rows exist, are not all null, and are not all decided.
+  `resources.partial-unknown` (info) is the marker that now fires there, carrying the
+  per-class census, the count of files the pass never reached, and the dominant class.
+  When it is present this check is NOT MEASURED rather than PASS, and the remedy is a
+  re-crawl or a resume.
 - **DevTools**: Lighthouse audit — check "Eliminate render-blocking resources" and "Reduce unused JavaScript"
 - **Evaluate**:
   - WARN if render-blocking resources > 3 or unused JS > 50%
@@ -2207,6 +2220,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `crawl_status.resources` is the discriminator it puts a name to — `fetched` at zero
   with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. When it
   is present this check is NOT MEASURED rather than PASS, and the remedy is a re-crawl.
+  **And its narrower sibling, the last of the family** (P14-T1): a PARTIAL pass that
+  reached only some of the files, got an unknown from every one it reached, and never
+  asked about the rest — no `ok` row and no broken row — fires none of the other three
+  markers either, because the rows exist, are not all null, and are not all decided.
+  `resources.partial-unknown` (info) is the marker that now fires there, carrying the
+  per-class census, the count of files the pass never reached, and the dominant class.
+  When it is present the weight and format halves are NOT MEASURED rather than PASS, and
+  the remedy is a re-crawl or a resume.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
 - **Evaluate**:
@@ -2241,6 +2262,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `crawl_status.resources` is the discriminator it puts a name to — `fetched` at zero
   with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. When it
   is present this check is NOT MEASURED rather than PASS, and the remedy is a re-crawl.
+  **And its narrower sibling, the last of the family** (P14-T1): a PARTIAL pass that
+  reached only some of the files, got an unknown from every one it reached, and never
+  asked about the rest — no `ok` row and no broken row — fires none of the other three
+  markers either, because the rows exist, are not all null, and are not all decided.
+  `resources.partial-unknown` (info) is the marker that now fires there, carrying the
+  per-class census, the count of files the pass never reached, and the dominant class.
+  When it is present the caching half is NOT MEASURED rather than PASS, and the remedy
+  is a re-crawl or a resume.
 - **DevTools**: Check the homepage's network panel for TTFB and response headers
   (Cache-Control, Content-Encoding, protocol)
 - **Evaluate**:
@@ -2285,6 +2314,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `crawl_status.resources` is the discriminator it puts a name to — `fetched` at zero
   with `failed`, `robotsDenied` and `robotsUnreachable` carrying the census. When it
   is present this check is NOT MEASURED rather than PASS, and the remedy is a re-crawl.
+  **And its narrower sibling, the last of the family** (P14-T1): a PARTIAL pass that
+  reached only some of the files, got an unknown from every one it reached, and never
+  asked about the rest — no `ok` row and no broken row — fires none of the other three
+  markers either, because the rows exist, are not all null, and are not all decided.
+  `resources.partial-unknown` (info) is the marker that now fires there, carrying the
+  per-class census, the count of files the pass never reached, and the dominant class.
+  When it is present the network half is NOT MEASURED rather than clean, and the remedy
+  is a re-crawl or a resume.
 - **DevTools**:
   1. Navigate to homepage, product, collection
   2. Check console: `list_console_messages` — filter errors

@@ -661,8 +661,9 @@ const NOT_ASKED_SENTENCE: Record<(typeof NOT_FETCHED_REASON)[keyof typeof NOT_FE
  * It was legible one surface over — `crawl_status.resources` carries `failed`,
  * `robotsDenied`, `robotsUnreachable` and `fetch_error`'s share of `failed`, and
  * CHECK-83 is answered first — but that was never the same as a reader meeting a
- * marker. **`resources.all-unknown` below is that marker**, the third and last
- * sibling on this model, fired by "every row a decided unknown class on a crawl
+ * marker. **`resources.all-unknown` below is that marker**, the third
+ * sibling on this model (Phase 14's `resources.partial-unknown` became the
+ * fourth), fired by "every row a decided unknown class on a crawl
  * that has rows". Phase 12 ledgered it as an owner-promotable pointer
  * (phase-12.md §10.1) because closing it meant another rule and another ruleset
  * bump; Phase 13 spent that bump (0.9.0 → 0.10.0). The window is closed, and the
@@ -801,7 +802,10 @@ async function notFetchedFindings(
  *    four unknown classes precisely because a broken row is not one of them.
  *  - **A crawl with even one UNASKED row** (`fetch_class` null). That crawl is
  *    the not-fetched marker's, or a partial pass; a null row is not a decided
- *    verdict, so `unknownDecided < seen`.
+ *    verdict, so `unknownDecided < seen`. A partial pass whose asked rows are all
+ *    unknown and whose rest is unasked — the mix a null row makes here — is
+ *    `resources.partial-unknown`'s (P14-T1), the fourth sibling that closes the
+ *    window phase-13.md §8 pointer 1 named one layer in from this one.
  *
  * ## THE EVIDENCE
  *
@@ -875,6 +879,151 @@ async function allUnknownFindings(
   ];
 }
 
+/**
+ * THE FOURTH AND LAST MARKER (P14-T1): a PARTIAL pass whose decided rows are all
+ * unknown, and the rest of the census still unasked.
+ *
+ * The three markers above each report a crawl that is UNIFORM in one way:
+ * `resources.not-recorded` has no rows, `resources.not-fetched` has rows and not
+ * one was asked about (`null == seen`), `resources.all-unknown` asked about every
+ * row and not one came back usable (`decidedUnknown == seen`). This one reports
+ * the crawl none of them can: a genuine MIX. Some rows are `null` (the pass never
+ * reached them), the rest landed in a decided-unknown class — `refused`,
+ * `robots_denied`, `robots_unreachable`, `fetch_error` — and there is no `ok` row
+ * and no broken (4xx/5xx) row. So the four judging rules gate on an `ok` class and
+ * go quiet, `resources.broken` has no broken row to report, and `page.weight`
+ * counts each page's HTML alone — six rules silent, and until this marker not one
+ * finding to explain it. A reader meeting no marker reads a light, clean site
+ * (hard rules 1 and 7); this marker stands between them and that misreading.
+ *
+ * This is the window phase-13.md §8 pointer 1 named, one layer in from the §10.1
+ * window `resources.all-unknown` closed. The two siblings each drew their boundary
+ * around a partial pass and left it to the judging rules' `unknownResources`
+ * counts — but those counts ride on findings, and a partial pass with no `ok` row
+ * writes none. The silence had no speaker. This marker is it.
+ *
+ * ## WHY A FOURTH MARKER RATHER THAN A WIDER `resources.not-fetched` OR `all-unknown`
+ *
+ * Widening either sibling would corrupt a meaning the family keeps sharp.
+ * `resources.not-fetched`'s premise is "the crawl asked about NONE of them", and
+ * its evidence reports WHICH of three reasons — `fetch-off`, `pass-not-run`,
+ * `budget-cap` — read off the null rows' `fetch_reason`. A partial pass DID ask
+ * about some (the decided-unknown rows), and those rows carry none of those three
+ * reasons, so widening not-fetched would either report a reason that is false of
+ * the whole census or throw on the mixture it already refuses (the mixture guard
+ * there is about the null rows' reasons, a different question). `resources.all-
+ * unknown`'s premise is "the crawl asked about EVERY file", and a partial pass has
+ * not finished asking — null rows are not a verdict. Widening it would make "every
+ * file answered nothing usable" a sentence about a crawl that never asked about
+ * some of its files. A fourth marker keeps each meaning honest.
+ *
+ * ## MUTUALLY EXCLUSIVE WITH ALL THREE SIBLINGS, BY CONSTRUCTION
+ *
+ * The four partition the "no `ok`, no broken, silent" space over `seen > 0`
+ * exactly, and one test drives all four boundaries. Over `seen > 0` with no `ok`
+ * and no broken row, `seen == unfetched + decidedUnknown`, and there are exactly
+ * three cases:
+ *
+ *  - `decidedUnknown == 0` (every row null) → `resources.not-fetched`.
+ *  - `unfetched == 0` (every row a decided unknown) → `resources.all-unknown`.
+ *  - both `> 0` (the mix) → THIS marker.
+ *
+ * And `seen == 0` is `resources.not-recorded`'s. An `ok` row hands the crawl to
+ * the judging rules (partial coverage they carry with `unknownResources`); a
+ * broken row hands it to `resources.broken`. Both disqualify this marker, so it
+ * never doubles with a rule that speaks.
+ *
+ * ## THE EVIDENCE
+ *
+ * Both halves of the census, so a reader sees the shape whole: `resourcesUnfetched`
+ * is the null count (the part the pass never reached), and `census` is the per-
+ * class count of the decided unknowns (every class named even at zero, the
+ * `all-unknown` shape), with `dominantClass` naming the largest so a reader knows
+ * which sentence to read first. The dominant is picked by count with
+ * `UNKNOWN_CLASSES` order as the tie-break, so two runs over one crawl name the
+ * same one (the deterministic-cap lesson).
+ */
+async function partialUnknownFindings(
+  self: RuleIdentity,
+  db: Db,
+  crawlId: string,
+): Promise<Finding[]> {
+  const result = await db.execute<{
+    resources_seen: number;
+    ok_rows: number;
+    broken_rows: number;
+    unknown_decided: number;
+    unfetched: number;
+    census: Record<string, number>;
+    pages_crawled: number;
+  }>(sql`
+    with census as (
+      select r.fetch_class as fetch_class, count(*)::int as n
+      from resources r
+      where r.crawl_id = ${crawlId}
+      group by r.fetch_class
+    )
+    select
+      (select coalesce(sum(n), 0)::int from census) as resources_seen,
+      (select coalesce(sum(n), 0)::int from census
+         where fetch_class = ${RESOURCE_OK_CLASS}) as ok_rows,
+      (select coalesce(sum(n), 0)::int from census
+         where fetch_class = any(${sql.param([...BROKEN_CLASSES])}::text[])) as broken_rows,
+      (select coalesce(sum(n), 0)::int from census
+         where fetch_class = any(${sql.param([...UNKNOWN_CLASSES])}::text[])) as unknown_decided,
+      (select coalesce(sum(n), 0)::int from census
+         where fetch_class is null) as unfetched,
+      (select coalesce(jsonb_object_agg(fetch_class, n), '{}'::jsonb) from census
+         where fetch_class = any(${sql.param([...UNKNOWN_CLASSES])}::text[])) as census,
+      (select count(*)::int from pages p where p.crawl_id = ${crawlId}) as pages_crawled`);
+
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new Error(`${self.id}: crawl '${crawlId}' partial-unknown census query returned no row`);
+  }
+  const seen = row.resources_seen;
+  // The mix, and only the mix. Nothing seen is `not-recorded`'s. Any `ok` row is
+  // partial coverage the judging rules carry; any broken row is `resources.broken`'s
+  // — either means the silence this marker explains is not present. Every row null
+  // is `not-fetched`'s (`unfetched == seen`); every row a decided unknown is
+  // `all-unknown`'s (`unknown_decided == seen`). What is left is both halves
+  // present with no usable or broken row beside them.
+  if (
+    seen === 0 ||
+    row.ok_rows > 0 ||
+    row.broken_rows > 0 ||
+    row.unfetched === 0 ||
+    row.unknown_decided === 0
+  )
+    return [];
+
+  // Report every class, even at zero, so the shape of the evidence is stable
+  // across crawls — the `all-unknown` convention. Filled from the four names the
+  // fetch pass owns.
+  const census: Record<string, number> = {};
+  for (const cls of UNKNOWN_CLASSES) census[cls] = row.census[cls] ?? 0;
+  // Dominant by count, `UNKNOWN_CLASSES` order breaking a tie — deterministic.
+  let dominantClass: ResourceFetchClass = UNKNOWN_CLASSES[0]!;
+  for (const cls of UNKNOWN_CLASSES) {
+    if (census[cls]! > census[dominantClass]!) dominantClass = cls;
+  }
+
+  return [
+    queryFinding(self, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        resourcesSeen: seen,
+        resourcesUnfetched: row.unfetched,
+        census,
+        dominantClass,
+        pagesCrawled: row.pages_crawled,
+      },
+      dedupeKey: "site",
+    }),
+  ];
+}
+
 const CATEGORY = "technical" as const;
 
 const BROKEN: RuleIdentity = { id: "resources.broken", severity: "warning" };
@@ -884,6 +1033,7 @@ const UNCACHED: RuleIdentity = { id: "resources.uncached", severity: "info" };
 const NOT_RECORDED: RuleIdentity = { id: "resources.not-recorded", severity: "info" };
 const NOT_FETCHED: RuleIdentity = { id: "resources.not-fetched", severity: "info" };
 const ALL_UNKNOWN: RuleIdentity = { id: "resources.all-unknown", severity: "info" };
+const PARTIAL_UNKNOWN: RuleIdentity = { id: "resources.partial-unknown", severity: "info" };
 
 export const resourceRules: QueryRule[] = [
   // A failed network request, which is what CHECK-51 asks for by name — see the
@@ -985,7 +1135,7 @@ export const resourceRules: QueryRule[] = [
     run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
   }),
 
-  // The third and last marker (P13-T2), claiming the same four checks as the two
+  // The third marker (P13-T2), claiming the same four checks as the two
   // beside it and for the same reason: the silence it explains is the same
   // silence — the four judging rules quiet and `page.weight` counting HTML
   // alone. Which of the three speaks is decided by whether the crawl has rows
@@ -1001,5 +1151,25 @@ export const resourceRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     marker: "a crawl whose every resource landed in an unknown class (P13-T2)",
     run: (db, crawlId) => allUnknownFindings(ALL_UNKNOWN, db, crawlId),
+  }),
+
+  // The fourth and last marker (P14-T1), claiming the same four checks as the
+  // three beside it and for the same reason: the silence it explains is the same
+  // silence — the four judging rules quiet and `page.weight` counting HTML alone.
+  // Which of the four speaks is decided by the shape of the census (none /
+  // all-null / all-decided-unknown / the mix of null and decided-unknown), and no
+  // crawl satisfies two. This one closes the window phase-13.md §8 pointer 1
+  // named — the partial pass whose asked rows are all unknown and the rest
+  // unasked, with no ok or broken row for any judging rule to ride on.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: PARTIAL_UNKNOWN.id,
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+    category: CATEGORY,
+    severity: PARTIAL_UNKNOWN.severity,
+    ...copyFor(PARTIAL_UNKNOWN.id),
+    rulesetVersion: RULESET_VERSION,
+    marker: "a partial pass whose decided rows are all unknown and the rest unasked (P14-T1)",
+    run: (db, crawlId) => partialUnknownFindings(PARTIAL_UNKNOWN, db, crawlId),
   }),
 ];

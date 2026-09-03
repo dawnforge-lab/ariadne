@@ -591,6 +591,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Re-run the crawl, ideally after reading which state dominated the census. A wall of unreachable-robots or failed requests usually means a CDN or a bot-protection layer was blocking our crawler during the window, and the same URLs may answer normally to a browser or on a later crawl — the same allowlist question a blocked page raises. Where our own policy refused them, the references point somewhere we will not follow, which is a fact about the references rather than a fault to fix. Where a robots.txt disallowed them, that is the site's instruction and honouring it is deliberate. Nothing about the files can be recovered from what is stored: the census records the class each file landed in, not what a healthy fetch would have said.",
   },
+  "resources.partial-unknown": {
+    // Accuracy: this reports a CRAWL, never a site — the fourth marker, for a
+    // PARTIAL pass. It differs from all-unknown in one fact a reader must not
+    // miss: the pass did not finish. Some files were reached and every one of
+    // them landed in an unknown class; the rest were never asked about at all.
+    // No file came back usable and none came back broken, so every resource
+    // check is silent. Copy that read as "every file answered nothing" would be
+    // the all-unknown crawl, not this one; copy that read as a fault on the site
+    // would accuse a client of our own incomplete crawl.
+    title: "The crawl only partly reached the files, and reached nothing usable",
+    explanation:
+      "The checks about images, stylesheets and scripts — broken files, image weight, image format, caching headers, and the page-weight table beside them — read what a server said about each file the pages point at. This crawl asked about only some of the files it recorded, and every one it did reach came back with no usable answer, while the rest were never asked about at all. Each file it reached landed in one of four states that all mean we do not know rather than a verdict about the file: our own policy refused the request (a reserved address or a scheme we do not follow); the site's robots.txt disallowed it; the host could not tell us its robots rules at all because its robots.txt was unreachable while the crawl ran, which we treat as a complete disallow; or the request never completed — a timeout, a DNS failure, a connection reset. The finding gives both halves of the census: how many files were seen, how many were never reached, how many fell into each of those four states, and which state was the largest. Because not one file came back usable, the broken-file, image-weight, image-format and caching checks all found nothing to judge and the page-weight table counts each page's HTML and nothing else — a site that looks light and clean and was in truth only partly measured. This is a limit of this crawl's evidence rather than a clean bill of health for the site: a pass that reached only some files and got only unknowns from them is a crawl that was interrupted or throttled mid-way, not a verdict on anything. Only files named in the HTML the server sent are asked about at all, so assets a script loads later are outside this entirely.",
+    howToFix:
+      "Re-run the crawl to ask about every file afresh — both the ones it never reached and the ones that answered with an unknown; resuming the interrupted crawl instead asks only about the files it never reached, because a file that already landed in a class keeps it and is not tried again on a resume. It is worth reading which state dominated the census first: a wall of unreachable-robots or failed requests usually means a CDN or a bot-protection layer was blocking our crawler during the window, and the same URLs may answer normally to a browser or on a later crawl. Where our own policy refused them, the references point somewhere we will not follow, and where a robots.txt disallowed them, honouring it is deliberate. Nothing about the files can be recovered from what is stored: the census records the state each file reached, or that it was never reached, not what a healthy fetch would have said.",
+  },
 
   // -------------------------------------------------------------------- url
   "url.normalisation-variants": {

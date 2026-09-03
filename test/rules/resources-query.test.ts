@@ -55,7 +55,7 @@ function caps(listing: number | null): RuleCaps {
 }
 
 describe("resourceRules metadata", () => {
-  it("defines the five Phase 11 rules and both P12-T2 / P13-T2 markers", () => {
+  it("defines the five Phase 11 rules and the P12-T2 / P13-T2 / P14-T1 markers", () => {
     expect(resourceRules.map((r) => r.id).sort()).toEqual([
       "images.legacy-format",
       "images.oversized",
@@ -63,6 +63,7 @@ describe("resourceRules metadata", () => {
       "resources.broken",
       "resources.not-fetched",
       "resources.not-recorded",
+      "resources.partial-unknown",
       "resources.uncached",
     ]);
   });
@@ -95,6 +96,15 @@ describe("resourceRules metadata", () => {
       // crawl whose every row landed in an unknown class the same four judging
       // rules go quiet and `page.weight` counts HTML alone.
       "resources.all-unknown": [
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+        "info",
+        "technical",
+      ],
+      // The fourth and last marker (P14-T1). Same four checks, same reason: on a
+      // partial pass whose decided rows are all unknown and the rest unasked —
+      // no ok, no broken — the same four judging rules go quiet and `page.weight`
+      // counts HTML alone.
+      "resources.partial-unknown": [
         ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
         "info",
         "technical",
@@ -1053,15 +1063,188 @@ describe("resourceRules against the database", () => {
     });
   });
 
-  describe("the three markers are mutually exclusive by construction", () => {
-    it("one test, all three boundaries: each marker fires on its own and nowhere else", async () => {
-      // ONE test, three conditions, because the exclusivity is the property:
+  /**
+   * THE FOURTH AND LAST MARKER (P14-T1): a PARTIAL pass whose decided rows are
+   * all unknown and the rest still unasked.
+   *
+   * The window phase-13.md §8 pointer 1 named, one layer in from the §10.1 one
+   * its sibling closed. A crawl whose rows are a MIX of `null` (never asked) and
+   * decided-unknown classes — `refused`, `robots_denied`, `robots_unreachable`,
+   * `fetch_error` — with NO `ok` row and NO broken (4xx/5xx) row fires none of
+   * the three markers: `not-recorded` needs `seen == 0`, `not-fetched` needs
+   * EVERY row null, `all-unknown` needs EVERY row a decided unknown, and the
+   * judging rules' `unknownResources` buckets need an `ok` row to ride on and
+   * there is none. Six rules go quiet with nothing to explain the silence — the
+   * exact rule-1 shape. This marker is the fourth sibling that closes it.
+   *
+   * Every case here seeds a genuine MIX: at least one null row and at least one
+   * decided-unknown row, and never an `ok` and never a broken row. One `ok` row
+   * hands the crawl back to the judging rules (partial coverage they carry with
+   * `unknownResources`); one broken row hands it to `resources.broken`; all-null
+   * is not-fetched's; all-decided-unknown is all-unknown's.
+   */
+  describe("resources.partial-unknown", () => {
+    const ID = "resources.partial-unknown";
+
+    /** A decided-unknown row: a class, no bytes, no headers, the reason beside. */
+    function unknown(url: string, on: string[], fetchClass: string, fetchReason: string): ResourceSpec {
+      return {
+        url,
+        on,
+        fetchClass,
+        fetchReason,
+        statusCode: null,
+        contentType: null,
+        bytes: null,
+        bytesSource: null,
+        cacheControl: null,
+      };
+    }
+
+    /** A row the pass never reached: null class, null everything. */
+    function unasked(url: string, on: string[], fetchReason: string | null): ResourceSpec {
+      return {
+        url,
+        on,
+        fetchClass: null,
+        fetchReason,
+        statusCode: null,
+        contentType: null,
+        bytes: null,
+        bytesSource: null,
+        cacheControl: null,
+      };
+    }
+
+    it("reports a mix of unasked and decided-unknown rows, with the census, the unfetched count and the dominant class", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 4 }, { path: "/b" }],
+        [
+          unknown("https://cdn.example/1.png", ["/a"], "robots_unreachable", "robots.txt unreachable (503)"),
+          unknown("https://cdn.example/2.png", ["/a", "/b"], "robots_unreachable", "robots.txt unreachable (503)"),
+          unknown("/js/3.js", ["/a"], "fetch_error", "timeout after 15000ms"),
+          unasked("/img/4.png", ["/a"], null),
+          unasked("/css/5.css", ["/b"], RESOURCE_CAP_REASON),
+        ],
+      );
+      const findings = await run(ID, crawlId);
+      expect(findings).toHaveLength(1);
+      const f = findings[0]!;
+      expect(f.pageId).toBeNull();
+      expect(f.pageUrl).toBeNull();
+      expect(f.severity).toBe("info");
+      expect(f.dedupeKey).toBe("site");
+      expect(f.evidence).toMatchObject({
+        resourcesSeen: 5,
+        // The unasked half of the census — the rows the pass never reached.
+        resourcesUnfetched: 2,
+        // The decided-unknown half, per class, every class named even at zero.
+        census: {
+          refused: 0,
+          robots_denied: 0,
+          robots_unreachable: 2,
+          fetch_error: 1,
+        },
+        dominantClass: "robots_unreachable",
+        pagesCrawled: 2,
+      });
+    });
+
+    it("is silent when even one file came back ok — that is partial coverage the judging rules carry", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 3 }],
+        [
+          { url: "/img/ok.svg", on: ["/a"] },
+          unknown("/img/refused.png", ["/a"], "refused", "url-policy: reserved address"),
+          unasked("/img/pending.png", ["/a"], null),
+        ],
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent when even one file answered 4xx/5xx — resources.broken speaks", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 3 }],
+        [
+          { url: "/img/gone.png", on: ["/a"], fetchClass: "client_error", statusCode: 404, bytes: null, cacheControl: null },
+          unknown("/img/refused.png", ["/a"], "refused", "url-policy: reserved address"),
+          unasked("/img/pending.png", ["/a"], null),
+        ],
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+      expect(await run("resources.broken", crawlId)).toHaveLength(1);
+    });
+
+    it("is silent when every row is unasked — that crawl is not-fetched's", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 2 }],
+        [unasked("/img/a.png", ["/a"], null), unasked("/img/b.png", ["/a"], null)],
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent when every row is a decided unknown — that crawl is all-unknown's", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 2 }],
+        [
+          unknown("/img/a.png", ["/a"], "refused", "url-policy: reserved address"),
+          unknown("/js/b.js", ["/a"], "fetch_error", "connection reset"),
+        ],
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent on a crawl that recorded no resources at all", async () => {
+      const { crawlId } = await seed([{ path: "/a", imagesTotal: 2 }], []);
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("is silent on a normal completed pass", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 1 }],
+        [{ url: "/img/a.svg", on: ["/a"] }],
+      );
+      expect(await run(ID, crawlId)).toEqual([]);
+    });
+
+    it("names every other rule silent on its own crawl, and is the one that speaks", async () => {
+      // The gap, proven: on the mix shape the six rules go quiet and the three
+      // other markers do not fire either. This marker is the only speaker.
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 3 }],
+        [
+          unknown("https://cdn.example/1.png", ["/a"], "robots_unreachable", "robots.txt unreachable (503)"),
+          unknown("/js/2.js", ["/a"], "fetch_error", "connection reset"),
+          unasked("/img/3.png", ["/a"], null),
+        ],
+      );
+      for (const id of [
+        "resources.broken",
+        "images.oversized",
+        "images.legacy-format",
+        "resources.uncached",
+        "resources.not-recorded",
+        "resources.not-fetched",
+        "resources.all-unknown",
+      ]) {
+        expect(await run(id, crawlId), id).toEqual([]);
+      }
+      expect(await run(ID, crawlId)).toHaveLength(1);
+    });
+  });
+
+  describe("the four markers are mutually exclusive by construction", () => {
+    it("one test, all four boundaries: each marker fires on its own and nowhere else", async () => {
+      // ONE test, four conditions, because the exclusivity is the property:
       // `resources.not-recorded` needs `resourcesSeen == 0`,
-      // `resources.not-fetched` needs every row unfetched (null == seen), and
+      // `resources.not-fetched` needs every row unfetched (null == seen),
       // `resources.all-unknown` needs every row DECIDED into an unknown class
-      // (a null row disqualifies it, an ok or broken row disqualifies it). No
-      // crawl can satisfy two of the three, and this is what says so if any
-      // condition is ever loosened.
+      // (a null row disqualifies it, an ok or broken row disqualifies it), and
+      // `resources.partial-unknown` needs the MIX the other three each exclude —
+      // some null AND some decided-unknown, no ok and no broken row. The four
+      // partition the "no ok, no broken, silent" space over `seen > 0` exactly,
+      // so no crawl can satisfy two, and this is what says so if any condition is
+      // ever loosened.
       const preTables = await seed([{ path: "/a", imagesTotal: 3 }], []);
       const off = await seed(
         [{ path: "/a", imagesTotal: 3 }],
@@ -1091,11 +1274,35 @@ describe("resourceRules against the database", () => {
           },
         ],
       );
+      const partialUnknown = await seed(
+        [{ path: "/a", imagesTotal: 3 }],
+        [
+          {
+            url: "https://cdn.example/a.png",
+            on: ["/a"],
+            fetchClass: "robots_unreachable",
+            fetchReason: "robots.txt unreachable (503)",
+            statusCode: null,
+            bytes: null,
+            cacheControl: null,
+          },
+          {
+            url: "/img/b.png",
+            on: ["/a"],
+            fetchClass: null,
+            fetchReason: null,
+            statusCode: null,
+            bytes: null,
+            cacheControl: null,
+          },
+        ],
+      );
 
       const cases: Array<[string, string]> = [
         ["resources.not-recorded", preTables.crawlId],
         ["resources.not-fetched", off.crawlId],
         ["resources.all-unknown", allUnknown.crawlId],
+        ["resources.partial-unknown", partialUnknown.crawlId],
       ];
       const markers = cases.map(([id]) => id);
       for (const [firer, crawlId] of cases) {

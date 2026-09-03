@@ -103,7 +103,11 @@ describe("buildRegistry", () => {
     // And Phase 13 Task 2's third marker: the crawl whose every file landed in
     // an unknown class, which likewise used to meet no finding at all.
     expect(ids).toContain("resources.all-unknown");
-    expect(ids.length).toBe(94);
+    // And Phase 14 Task 1's fourth and last marker: the partial pass whose
+    // decided rows are all unknown and the rest unasked — the mix none of the
+    // other three markers match, which used to meet no finding at all.
+    expect(ids).toContain("resources.partial-unknown");
+    expect(ids.length).toBe(95);
   });
 
   it("registers every kind the runner drives", () => {

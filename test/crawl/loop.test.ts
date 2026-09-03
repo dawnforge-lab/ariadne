@@ -113,6 +113,30 @@ let brotli: string;
 let brotliHits: string[] = [];
 
 /**
+ * One server answering on TWO gate hosts: its apex spelling (`localhost:PORT`)
+ * and its `www.` variant (`www.localhost:PORT`). `isSameOrigin` admits the
+ * variant into the crawl (same port, www<->apex hostname), but the gate keys by
+ * `new URL(url).host` — which carries the hostname — so the two spellings are
+ * two DISTINCT gate hosts that escalate independently. That is the only way the
+ * main loop reaches a second gate host (a cross-PORT link is external and never
+ * fetched); it is exactly the `www`/apex variant §3.1 of docs/gates/phase-13.md
+ * named as the reachability of the stale-map hole.
+ *
+ * The apex host is throttled once on `/slow-a` (one 429 -> one escalation) and
+ * the www host twice on `/slow-b` (two 429s -> two escalations), so with a 40 ms
+ * base they earn 80 ms and 160 ms respectively — two real hosts at two real
+ * distinct spacings, retiring the synthetic single-origin seed the per-host
+ * resume test used to stand a second host in with (P14-T2). robots.txt 404s
+ * (absent -> allow all).
+ */
+let twoHostServer: Server;
+let twoHost: string;
+/** The `www.` spelling of `twoHost`, synthesised once the port is known. */
+let twoHostWww: string;
+let slowAHits = 0;
+let slowBHits = 0;
+
+/**
  * Set by the poison test: the next `/` request deletes the running crawl row
  * out from under the loop, which makes the handler's enqueue *and* the
  * writer's flush fail with foreign-key violations.
@@ -363,6 +387,61 @@ beforeAll(async () => {
   });
   brotli = await listen(brotliServer);
 
+  // Listened BY NAME so both `localhost` and `www.localhost` reach it — the two
+  // gate hosts the two-host resume test crawls. `req.headers.host` tells the two
+  // spellings apart; each throttles its own path a different number of times.
+  twoHostServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/robots.txt") {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no robots here");
+      return;
+    }
+    const isWww = (req.headers.host ?? "").startsWith("www.");
+    if (!isWww) {
+      // The apex host: its home links to /slow-a (staying on this host) and to
+      // the www home (crossing to the second gate host).
+      if (path === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(html(`<a href="/slow-a">a</a><a href="${twoHostWww}/">www</a>`));
+        return;
+      }
+      if (path === "/slow-a") {
+        slowAHits += 1;
+        if (slowAHits <= 1) {
+          res.writeHead(429, { "content-type": "text/html", "retry-after": "0" });
+          res.end("<html>slow down</html>");
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(html("<p>apex served once it backed off</p>"));
+        return;
+      }
+    } else {
+      // The www host: its home links to /slow-b (staying on this host).
+      if (path === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(html(`<a href="/slow-b">b</a>`));
+        return;
+      }
+      if (path === "/slow-b") {
+        slowBHits += 1;
+        if (slowBHits <= 2) {
+          res.writeHead(429, { "content-type": "text/html", "retry-after": "0" });
+          res.end("<html>slow down</html>");
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(html("<p>www served once it backed off</p>"));
+        return;
+      }
+    }
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("no");
+  });
+  twoHost = await listenByName(twoHostServer);
+  twoHostWww = twoHost.replace("http://", "http://www.");
+
   db = createDb(databaseUrl());
   await runMigrations(db);
 });
@@ -383,6 +462,8 @@ afterAll(async () => {
   brotliServer.closeAllConnections();
   await new Promise<void>((r) => brotliServer.close(() => r()));
   await new Promise<void>((r) => soft404Server.close(() => r()));
+  twoHostServer.closeAllConnections();
+  await new Promise<void>((r) => twoHostServer.close(() => r()));
 });
 
 function config(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
@@ -929,9 +1010,11 @@ describe("resumeCrawl", () => {
   // at the single crawl-wide widest. The crown pattern of the test above, now
   // reading the map: the number is written to the column directly (the fixture
   // never blocks), the resume folds it in per host, and it survives the round
-  // trip — the map is re-persisted at close. The two-host case (a CDN at 8s and
-  // an origin at 1s resuming at their own numbers) is unit-tested against the
-  // gate in politeness.test.ts, because this fixture is single-origin.
+  // trip — the map is re-persisted at close. This single mapped host is the
+  // cheap map-round-trip companion; the genuine two-host divergence (two real
+  // gate hosts earning different spacings from real pushback, each resuming at
+  // its own) is the test below, and the gate-level unit is politeness.test.ts's
+  // "re-enters each host at ITS OWN earned spacing".
   it("resumes each host at its own earned spacing from the per-host map", async () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 50);
@@ -956,6 +1039,60 @@ describe("resumeCrawl", () => {
     // re-persisted rather than dropped on the resume.
     expect(row?.hostSpacingJsonb?.[host]).toBeGreaterThanOrEqual(250);
     expect(row?.hostSpacingMs).toBeGreaterThanOrEqual(250);
+  });
+
+  // THE PER-HOST RATCHET, PROVEN ON TWO REAL GATE HOSTS (P14-T2, rule 9).
+  //
+  // The test above seeds ONE host's earned spacing directly, because its fixture
+  // is single-origin — a stand-in the per-host map's whole reason for existing
+  // (divergence between hosts) could not be shown against. This one earns it for
+  // real: a crawl that genuinely visits two distinct gate hosts, each throttled
+  // a different number of times, so each earns its OWN spacing from real 429s and
+  // the map records the divergence with no synthetic seed.
+  //
+  // The two hosts are the apex and `www.` spellings of one server (§3.1 of
+  // docs/gates/phase-13.md: the only second gate host the main loop can reach,
+  // since a cross-port link is external). The apex is refused once on /slow-a
+  // (one escalation: 40 -> 80 ms); the www host twice on /slow-b (two: 40 -> 160
+  // ms). A resume rebuilds the gate from the map, and each host re-enters its own
+  // number — the pre-0015 behaviour would have seeded BOTH at the crawl-wide
+  // widest (160), so the apex staying at 80 is the proof it did not inherit the
+  // www host's spacing (migration 0015).
+  it("earns two real hosts' distinct spacings and resumes each at its own", async () => {
+    slowAHits = 0;
+    slowBHits = 0;
+    const hostA = new URL(twoHost).host;
+    const hostB = new URL(twoHostWww).host;
+
+    const first = await crawl(
+      config({ siteUrl: twoHost, perHostDelayMs: 40, probeHosts: false }),
+    );
+    expect(first.status).toBe("finished");
+
+    // Both hosts were really fetched — the crawl crossed from apex to www.
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, first.crawlId));
+    const fetchedHosts = new Set(rows.map((r) => new URL(r.url).host));
+    expect(fetchedHosts.has(hostA)).toBe(true);
+    expect(fetchedHosts.has(hostB)).toBe(true);
+
+    // The map records BOTH hosts at DIFFERENT earned spacings, and the crawl-wide
+    // column is the widest of the two.
+    const [earned] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
+    expect(earned?.hostSpacingJsonb?.[hostA]).toBe(80);
+    expect(earned?.hostSpacingJsonb?.[hostB]).toBe(160);
+    expect(earned?.hostSpacingMs).toBe(160);
+
+    // Resume: the gate is rebuilt from the per-host map, so each host re-enters
+    // ITS OWN earned spacing. Config floor is 0, so nothing lifts either host;
+    // the apex holding 80 while the www host holds 160 is the divergence.
+    const resumed = await resumeCrawl(db, first.crawlId, {
+      config: config({ siteUrl: twoHost, perHostDelayMs: 0, probeHosts: false }),
+    });
+    expect(resumed.status).toBe("finished");
+
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
+    expect(row?.hostSpacingJsonb?.[hostA]).toBe(80);
+    expect(row?.hostSpacingJsonb?.[hostB]).toBe(160);
   });
 
   // A pre-0015 row has a null map, and the resume must fall back to the

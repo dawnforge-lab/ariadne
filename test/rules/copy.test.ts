@@ -264,6 +264,13 @@ const PHASE_12_RULE_IDS = ["resources.not-fetched"];
  */
 const PHASE_13_RULE_IDS = ["resources.all-unknown"];
 
+/**
+ * Phase 14's rule: the fourth and last resource marker. Same contract as every
+ * list above, and the same obligation as the family it joins — it speaks about
+ * the CRAWL, and its copy must not read as a fact about the site.
+ */
+const PHASE_14_RULE_IDS = ["resources.partial-unknown"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -274,6 +281,7 @@ const ALL_RULE_IDS = [
   ...PHASE_11_RULE_IDS,
   ...PHASE_12_RULE_IDS,
   ...PHASE_13_RULE_IDS,
+  ...PHASE_14_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -1275,6 +1283,34 @@ describe("issue copy", () => {
     // "never asked" sentences: this crawl recorded plenty and asked about all.
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
       /recorded no (?:files|resources)|no resource records|asked the site about none|never asked about/i,
+    );
+  });
+
+  // The fourth marker (P14-T1). Its copy has the job no sibling's does: the pass
+  // was PARTIAL — it reached only some files, got only unknowns from them, and
+  // never asked about the rest. It must say both halves (only some reached; the
+  // rest never asked about), name the four unknown states, say the silence is a
+  // limit of the evidence rather than a bill of health, and — like every sibling
+  // — never read as a fault on the site.
+  it("resources.partial-unknown says the pass was partial and reached nothing usable, and names the four states", () => {
+    const c = ISSUE_COPY["resources.partial-unknown"]!;
+    // The partial half — only some files reached — and the unasked remainder.
+    expect(c.explanation, "only some reached").toMatch(/only some of the files|asked about only some/i);
+    expect(c.explanation, "the rest never asked about").toMatch(/rest were never asked about|never reached/i);
+    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable|not one.*usable/i);
+    // The four states, each named.
+    expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
+    expect(c.explanation, "robots disallow").toMatch(/robots\.txt disallowed/i);
+    expect(c.explanation, "unreachable robots").toMatch(/robots\.txt was unreachable|could not tell us its robots/i);
+    expect(c.explanation, "a request that never completed").toMatch(/never completed|timeout|connection reset/i);
+    // The census and the consequence a reader would otherwise misread.
+    expect(c.explanation, "page.weight beside it").toMatch(/HTML and nothing else/i);
+    expect(c.explanation, "what the silence is not").toMatch(/rather than a clean bill of health|not a clean bill/i);
+    expect(c.howToFix).toMatch(/re-run the crawl|resume/i);
+    // NEVER a fault on the site, and never the siblings' "recorded none" /
+    // "asked about all" sentences: this crawl recorded plenty and asked about only some.
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
+      /recorded no (?:files|resources)|no resource records/i,
     );
   });
 
