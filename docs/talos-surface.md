@@ -183,6 +183,25 @@ Two properties make the double-transport claim below cheap to trust:
   (`test/api/mcp.test.ts:940` "refuses every crawl when the allowlist is empty",
   `test/api/http.test.ts:849` "refuses every crawl when the allowlist is empty,
   but still answers queries").
+- **`ServiceConfig.allowAnyPublicHost` is a second code-only process-trust seam**
+  (the first is `crawlDefaults`), and a Talos reader who finds the field in
+  `src/api/config.ts` should read this rather than conclude the allowlist is
+  optional. It accepts any host at the crawl-trigger allowlist gate and nothing
+  else: it is never wired to env or to the wire (`loadApiConfig` does not read
+  it, no request or tool field maps to it —
+  `test/api/open-posture.test.ts:284` "loadApiConfig can never set the posture
+  from the environment"), and `api:serve` and `mcp:serve` never set it. Its only
+  setter is the local demo surface added in Phase 15: the `npm run demo`
+  entrypoint `src/demo/serve.ts`, which binds `127.0.0.1`, and the server factory
+  it constructs, `src/demo/server.ts`'s `createDemoServer`, which is where the
+  assignment lives. `isUrlAllowed` still runs on every URL with `allowPrivate`
+  sourced from `crawlDefaults` alone, so loopback and RFC1918 targets stay
+  refused under the posture, with the policy's own reason rather than the
+  allowlist's (`test/api/open-posture.test.ts:242` "the posture does not touch
+  url-policy: loopback is refused with the policy's own reason"). Nothing
+  tenant-visible changes: a deployment that does not set it in code — which is
+  every deployment Talos talks to — behaves exactly as the allowlist rows above
+  describe.
 
 ### Error bodies
 
