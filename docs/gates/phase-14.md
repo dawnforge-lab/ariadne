@@ -328,9 +328,14 @@ to close.
 
 ## 9. Integration
 
-Push `worktree-phase-14`, open **PR #13** against `main`, link CI here when it is
-green (CI placeholder — PR #13), and merge per owner (the standing pattern of the
-last five phases: merge-on-green). No Serena project is registered for Ariadne,
-so the auto-memory handoff is the record, as every prior phase noted.
+Pushed `worktree-phase-14`, opened **PR #13** against `main`, and merged per the
+owner (the standing pattern of the last six phases: merge-on-green). The owner
+also ruled the `robots_unreachable` decision at this integration — accepted, not
+taken, revisit-on-demand (§7). No Serena project is registered for Ariadne, so
+the auto-memory handoff is the record, as every prior phase noted.
 
-**CI: placeholder — PR #13** (link and run to be pasted here when green).
+**CI: GREEN first try.** PR #13, run
+[33734906902](https://github.com/dawnforge-lab/ariadne/actions/runs/33734906902)
+(`test`, 3m57s, 2026-09-03) over the branch. The empty-DB migration replay
+(0000–0015) and the fresh-statistics query planner — the two things a local
+suite cannot exercise — both passed, as on every prior phase.
