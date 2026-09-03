@@ -14,7 +14,7 @@ The phase-13 §8 pointers, resolved:
 | phase-13 §8 | what it named | Phase 14 |
 |---|---|---|
 | 1 | the partial-unknown crawl fires no marker — a genuine residual | **closed** (T1) — `resources.partial-unknown`, info, ruleset 0.11.0; the fourth and last marker of the family |
-| 2 | `robots_unreachable` rows are never retried | **RECORDED — proposed-and-unvetoed decision, NOT TAKEN** (§7, carried to Phase 15 as revisit-on-demand) |
+| 2 | `robots_unreachable` rows are never retried | **not taken — owner-ruled standing** (§7; ruled at PR #13 integration, 2026-09-03, revisit-on-demand) |
 | 3 | the mid-crawl re-persist test uses a synthetic crawl-wide seed, not two real hosts | **closed** (T2) — a two-host fixture crawl earns and resumes per-host spacing on two real gate hosts |
 | 4 | tenancy on `crawl_list` | **unchanged — owner-ruled standing** (§8) |
 | 5 | the wall-time shortening designs | **not taken — owner-ruled standing** (§8) |
@@ -248,17 +248,19 @@ Against the task reports, not a tidy retelling:
 
 ---
 
-## 7. The recorded decision — `robots_unreachable` retry, NOT TAKEN
+## 7. The recorded decision — `robots_unreachable` retry, NOT TAKEN (owner-ruled)
 
 Phase 13 §8 pointer 2 carried this forward: a resource row classed
 `robots_unreachable` is never retried within the crawl. The pass's work list is
 the null `fetch_class` column, and these rows carry a class, so only a fresh
 crawl re-asks. This phase records a decision and does not act on it.
 
-**Proposed, and unvetoed until integration.** This is the P12-T4 M-6 wording
-discipline: the argument below is the plan's proposal, NOT "the owner's
-reasoning", because the owner rules at integration. If the owner vetoes it there,
-it becomes Phase 15 work, not a mid-phase reopen.
+**Owner-ruled at integration (PR #13, 2026-09-03): accepted — not taken,
+revisit on demand.** This was recorded proposed-and-unvetoed through the phase
+(the P12-T4 M-6 wording discipline: the argument below was the plan's proposal,
+not "the owner's reasoning", until the owner ruled). The owner accepted the
+proposal at integration, so it now stands as an owner-ruled decision, not a
+Phase 15 reopen. It reopens only later, on demand.
 
 **The proposal: do not add a retry.** The argument, on the engine's own terms:
 
@@ -295,9 +297,9 @@ statement the closing phase exists to make: there is no engine chore left to do.
 
 What remains is not a chore. Three items, all revisit-on-demand:
 
-1. **`robots_unreachable` retry** — the decision recorded in §7, PROPOSED and
-   not taken. It reopens only if the owner vetoes the proposal at integration, or
-   later on demand.
+1. **`robots_unreachable` retry** — the decision recorded in §7, **not taken,
+   owner-ruled standing** (accepted at PR #13 integration, 2026-09-03). It
+   reopens only later, on demand.
 2. **Tenancy on `crawl_list`** — unchanged, the stated pre-tenancy posture,
    **owner-ruled standing** since Phase 12 integration and not reopened here. It
    reopens the day Ariadne serves more than one Talos tenant from one token.
