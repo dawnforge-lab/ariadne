@@ -38,12 +38,26 @@
  * operator's own address. The response is unreadable to that page, which is
  * exactly why the danger is the crawl and not the answer.
  *
- * So the proxy refuses a request whose `sec-fetch-site` says it came from
- * somewhere else, or whose `Origin` is not this server's own — loudly, with the
- * offending value named. Requests carrying NEITHER header are accepted, because
- * that is `curl`, the test suite, and a browser's own same-origin GET; the two
- * headers are what a browser adds when the request comes from a page, and a
- * page cannot forge either one.
+ * So the proxy refuses a request whose `Host` is not one this server owns,
+ * whose `sec-fetch-site` says it came from somewhere else, or whose `Origin`
+ * does not agree with that `Host` — loudly, with the offending value named.
+ * Requests carrying neither of the latter two headers are accepted, because
+ * that is `curl`, the test suite, and a browser's own same-origin GET; those
+ * two headers are what a browser adds when the request comes from a page, and
+ * a page cannot forge either one.
+ *
+ * THE `Host` CHECK IS WHAT MAKES THE OTHER TWO MEAN ANYTHING, and it was
+ * missing in the first version of this lock. `Origin` is compared against the
+ * request's own `Host`, so on its own that comparison is self-referential: it
+ * proves the caller agrees with itself. DNS rebinding turns that into the whole
+ * attack — a page on `http://evil.example:8484` whose name is re-resolved to
+ * 127.0.0.1 arrives with `Host: evil.example:8484`, `Origin:
+ * http://evil.example:8484` and `sec-fetch-site: same-origin`, all three
+ * consistent, all three the attacker's. Worse than the CSRF case: the page is
+ * now same-origin by the browser's own reckoning, so it READS the answers —
+ * every kept crawl — as well as starting new ones. Pinning `Host` to the names
+ * this server actually answers to (`OWN_HOSTS`) is the standard fix, and the
+ * one webpack-dev-server and Jupyter both landed after the same report.
  */
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -92,33 +106,80 @@ const FORWARDED_RESPONSE_HEADERS = [
 const REFUSAL_ECHO_CHARS = 120;
 
 /**
+ * The names this server answers to — the whole set, and deliberately small.
+ *
+ * A demo bound to loopback is reachable by exactly these three spellings, so
+ * any other `Host` is a request addressed to a name that resolved here without
+ * being one of ours: DNS rebinding, by definition. Both `localhost` and
+ * `127.0.0.1` are in the set because an operator types either one and a browser
+ * treats them as different origins; `[::1]` is here because a browser may pick
+ * the v6 loopback for `localhost` and sends the brackets in the header.
+ *
+ * If this server ever binds something other than loopback, this set is the line
+ * that has to be revisited first — and `src/demo/serve.ts` explains why that
+ * day should not come.
+ */
+const OWN_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * The host half of a `Host` header: the port dropped, an IPv6 literal's
+ * brackets kept (`[::1]:8484` -> `[::1]`, since that is the spelling a browser
+ * sends and the one `OWN_HOSTS` holds).
+ */
+function hostOf(header: string): string {
+  const value = header.trim().toLowerCase();
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    return end === -1 ? value : value.slice(0, end + 1);
+  }
+  const colon = value.indexOf(":");
+  return colon === -1 ? value : value.slice(0, colon);
+}
+
+/**
  * Why this proxied request must not be signed, or `null` when it may be.
  *
- * Two questions, both answered from headers a page cannot set for itself:
+ * Three questions, in the order that makes them mean something. All are
+ * answered from headers a page cannot set for itself.
  *
+ *  - `Host` must be a name this server owns (`OWN_HOSTS`). This is the anchor:
+ *    without it the `Origin` comparison below only proves the caller agrees
+ *    with itself, and a rebound DNS name satisfies every other check while
+ *    being read AND written by an attacker's page. An absent `Host` is refused
+ *    too — HTTP/1.1 requires one, so its absence is a client this demo does not
+ *    serve rather than a case to accommodate.
  *  - `Sec-Fetch-Site` is the browser's own statement about where the request
  *    came from. Anything but `same-origin` (this page) or `none` (the user
  *    typed it) is another site using our credentials.
- *  - `Origin` is compared against the origin the caller ITSELF addressed —
- *    `http://` plus the request's `Host` — rather than against the bound
- *    socket. That is the comparison that stays true when the operator opens
- *    `http://localhost:8484` while the server bound `127.0.0.1`: both sides of
- *    the check then read `localhost:8484`, and a page on any other origin still
- *    cannot make the two agree. The scheme is part of the string, so an
- *    `https://` origin naming the same host is a mismatch, which is correct.
+ *  - `Origin`, when present, must agree with that pinned `Host`. Comparing
+ *    against the request's own `Host` rather than the bound socket is what lets
+ *    `http://localhost:8484` work while the server bound `127.0.0.1` — both
+ *    sides then read `localhost:8484` — and it is safe only BECAUSE the host
+ *    was pinned first. The scheme is part of the string, so an `https://`
+ *    origin naming the same host is a mismatch, which is correct.
  *
- * Absent headers are ACCEPTED and that is not a hole: `curl`, the test suite
- * and a same-origin browser GET all arrive without them, and the request that
- * this check exists to stop — a cross-origin `fetch` — is made by a browser,
- * which always attaches at least one.
+ * Absent `Sec-Fetch-Site` and `Origin` are ACCEPTED and that is not a hole:
+ * `curl`, the test suite and a same-origin browser GET all arrive without them,
+ * and the request that this check exists to stop — one made from a page — is
+ * made by a browser, which always attaches at least one.
  */
 function crossOriginRefusal(req: IncomingMessage): string | null {
+  const host = req.headers.host;
+  if (host === undefined || !OWN_HOSTS.has(hostOf(host))) {
+    return `host: ${host === undefined ? "(absent)" : host.slice(0, REFUSAL_ECHO_CHARS)}`;
+  }
   const site = req.headers["sec-fetch-site"];
   if (typeof site === "string" && site !== "same-origin" && site !== "none") {
     return `sec-fetch-site: ${site.slice(0, REFUSAL_ECHO_CHARS)}`;
   }
   const origin = req.headers.origin;
-  if (origin !== undefined && origin !== "" && origin !== `http://${req.headers.host ?? ""}`) {
+  // Both sides folded: a scheme and a host are case-insensitive, and a browser
+  // that spelled one of them in capitals is not a foreign page.
+  if (
+    origin !== undefined &&
+    origin !== "" &&
+    origin.trim().toLowerCase() !== `http://${host.trim().toLowerCase()}`
+  ) {
     return `origin: ${origin.slice(0, REFUSAL_ECHO_CHARS)}`;
   }
   return null;

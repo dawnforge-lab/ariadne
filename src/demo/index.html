@@ -492,6 +492,13 @@
       // property of the ruleset, and this page joins its copy onto the groups
       // above (docs/talos-surface.md §5.1).
       catalog = await call("/rules?crawlId=" + encodeURIComponent(crawlId));
+      // `listAll`'s discipline for the one listing that is not paginated. A
+      // catalog without its array is a SHAPE error, and treating it as an empty
+      // one would put "this ruleset no longer carries that rule" under every
+      // group on the page — a confident diagnosis of the wrong thing (rule 7).
+      if (!Array.isArray(catalog.rules)) {
+        throw new Error("the engine answered /rules without a rules array");
+      }
       metrics = await listAll("/crawls/" + encodeURIComponent(crawlId) + "/metrics");
     } catch (error) {
       showError(resultsError, "the results could not be read", error.message);
@@ -500,7 +507,8 @@
     }
 
     var copy = {};
-    var rules = Array.isArray(catalog.rules) ? catalog.rules : [];
+    // Shape already checked above, where a failure is still the results error.
+    var rules = catalog.rules;
     for (var i = 0; i < rules.length; i++) copy[rules[i].id] = rules[i];
 
     renderSummary(issues, metrics);

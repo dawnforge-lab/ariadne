@@ -17,10 +17,13 @@
  * request rather than by anything the caller holds, every tab in the operator's
  * browser can reach it — so the cross-origin cases below are not paperwork,
  * they are the difference between a demo and a crawl-anything service pointed
- * at the operator's own address.
+ * at the operator's own address. The rebinding case is the sharpest of them:
+ * `Origin` and `Sec-Fetch-Site` can BOTH be the attacker's and both agree, so
+ * the test that matters is the one that pins `Host`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { connect } from "node:net";
+import { request as httpRequest } from "node:http";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -29,6 +32,7 @@ import { createDemoServer, type DemoServer } from "../../src/demo/server.js";
 let db: Db;
 let demo: DemoServer;
 let base: string;
+let port = 0;
 let apiPort = 0;
 
 beforeAll(async () => {
@@ -39,8 +43,12 @@ beforeAll(async () => {
   demo = createDemoServer({ db });
   const bound = await demo.listen(0, "127.0.0.1");
   base = `http://127.0.0.1:${bound.port}`;
+  port = bound.port;
   apiPort = bound.apiPort;
-});
+  // The migrations run here, and on a cold database they are not instant: the
+  // hook carries the same 60s the file's siblings do, so a slow CI start is a
+  // slow test rather than a timeout that names nothing.
+}, 60_000);
 
 afterAll(async () => {
   await demo.close();
@@ -140,6 +148,58 @@ describe("the door's lock", () => {
 
   it("accepts a request carrying neither header — curl, and this test suite", async () => {
     const res = await fetch(`${base}/api/crawls`);
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * `Host` set by hand, which `fetch` will not do — and which is exactly the
+   * thing a rebound DNS name does for free.
+   */
+  function withHost(host: string, extra: Record<string, string> = {}): Promise<{
+    status: number;
+    body: string;
+  }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          path: "/api/crawls",
+          method: "GET",
+          headers: { host, ...extra },
+        },
+        (res) => {
+          let text = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => (text += chunk));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: text }));
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("refuses a rebound host: every other header agrees, and all of them are the attacker's", async () => {
+    // DNS rebinding, as it arrives on the wire. `evil.example` resolved to
+    // 127.0.0.1, so the browser calls this page same-origin and would READ the
+    // answers — the kept crawls — as well as start new ones. Origin agrees with
+    // Host, which is why an Origin-versus-Host check alone proves nothing.
+    const res = await withHost(`evil.example:${port}`, {
+      origin: `http://evil.example:${port}`,
+      "sec-fetch-site": "same-origin",
+    });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain("host: evil.example");
+  });
+
+  it("still accepts the localhost spelling of its own address", async () => {
+    // The control the host check must not break: `localhost` and `127.0.0.1`
+    // are different origins to a browser, and the operator types either.
+    const res = await withHost(`localhost:${port}`, {
+      origin: `http://localhost:${port}`,
+      "sec-fetch-site": "same-origin",
+    });
     expect(res.status).toBe(200);
   });
 });
