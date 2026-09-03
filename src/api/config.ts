@@ -7,10 +7,13 @@
  * *what*. An unattended agent holding the token still cannot point the crawler
  * at an arbitrary host.
  *
- * There is no "no token" mode and no "allow anything" mode. A tokenless boot
- * throws (see `loadApiConfig`), and an empty allowlist refuses every crawl
- * trigger while leaving queries readable — both are stated positions, not
- * defaults that happen to be permissive.
+ * There is no "no token" mode, and no configured deployment can open the
+ * allowlist to everything. A tokenless boot throws (see `loadApiConfig`), and
+ * an empty allowlist refuses every crawl trigger while leaving queries readable
+ * — both are stated positions, not defaults that happen to be permissive. The
+ * one open-allowlist posture that exists, `ServiceConfig.allowAnyPublicHost`,
+ * is unreachable from the environment and from the wire and is a process-trust
+ * seam like `crawlDefaults`: whoever constructs the server states it in code.
  */
 import { domainToASCII } from "node:url";
 
@@ -48,6 +51,20 @@ export interface ServiceConfig {
    * wildcard (`*.example.com`). An empty array refuses every crawl trigger.
    */
   allowedDomains: readonly string[];
+  /**
+   * Accept ANY host at the crawl-trigger allowlist gate.
+   *
+   * THE SECOND PROCESS-TRUST SEAM, beside `crawlDefaults` below, and bound by
+   * the same rule: code-level only, never wired to env or wire. `loadApiConfig`
+   * does not read it, `serve.ts`/`mcp-serve.ts` never set it, and no request
+   * field maps to it. It exists for the demo entrypoint (`src/demo/serve.ts`),
+   * a local-only page whose point is "type any URL".
+   *
+   * It answers the ALLOWLIST question and nothing else. `isUrlAllowed` still
+   * runs on every URL with `allowPrivate` from `crawlDefaults` alone, so
+   * loopback and RFC1918 targets stay refused under this posture.
+   */
+  allowAnyPublicHost?: boolean;
   /** See the warning above. Code-level only; never wired to env or wire. */
   crawlDefaults?: Partial<CrawlConfig>;
   /**
