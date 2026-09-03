@@ -12,7 +12,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "api:serve": "tsx src/api/serve.ts",
-    "mcp:serve": "tsx src/api/mcp-serve.ts"
+    "mcp:serve": "tsx src/api/mcp-serve.ts",
+    "demo": "tsx src/demo/serve.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
