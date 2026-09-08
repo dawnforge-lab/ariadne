@@ -514,6 +514,14 @@ describe("runCrawl", () => {
     expect(crawlRow[0]?.status).toBe("finished");
     expect(crawlRow[0]?.pagesCrawled).toBe(6);
     expect(crawlRow[0]?.finishedAt).not.toBeNull();
+
+    // INSERTION 3c ran and found nothing to ask about — this site has no 5xx —
+    // so it cost no request and no wall time, and the crawl says a pass IS on
+    // record. That distinction is the whole reason `recheck_pass_at` exists
+    // beside a count that is 0 here and 0 on a crawl nobody ever rechecked.
+    expect(summary.recheck).toMatchObject({ rechecked: 0, capped: false, aborted: false });
+    expect(crawlRow[0]?.recheckPassAt).not.toBeNull();
+    expect(crawlRow[0]?.recheckPassCount).toBe(0);
   });
 
   it("records external links without fetching them", async () => {
@@ -617,6 +625,16 @@ describe("runCrawl", () => {
 
     const crawlRow = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
     expect(crawlRow[0]?.status).toBe("cancelled");
+
+    // INSERTION 3c did not run, and says so by being null rather than by
+    // returning a summary of nothing (the `resources: null` precedent). An
+    // abort means stop asking servers for things, and the recheck pass is all
+    // asking — so `crawls.recheck_pass_at` stays null too: no complete pass is
+    // on record, and a reader must not take a cancelled crawl's silence for
+    // "the 5xx evidence was re-verified".
+    expect(summary.recheck).toBeNull();
+    expect(crawlRow[0]?.recheckPassAt).toBeNull();
+    expect(crawlRow[0]?.recheckPassCount).toBe(0);
   });
 
   it("refuses to crawl a site whose robots.txt is unreachable", async () => {

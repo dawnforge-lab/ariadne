@@ -367,7 +367,7 @@ above the crawl's base is a finding — a host refused us and the engine backed 
 at 8s. Until Phase 12 it did not: the gate came up at the configured floor and
 the first spacing write put that floor back over the evidence, which made the
 regression invisible from `crawl_status` as well as rude to the site
-(`test/crawl/loop.test.ts:986` "resumes at the spacing the crawl earned, not the
+(`test/crawl/loop.test.ts:1004` "resumes at the spacing the crawl earned, not the
 one it was configured with").
 
 Two things that column is not, because a reader will otherwise assume both:
@@ -910,7 +910,7 @@ rows cannot say it and only the config can.
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
 this); `test/api/query.test.ts:2127` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
-`test/crawl/fetch-resources.test.ts:1327` "asks nobody anything when the operator
+`test/crawl/fetch-resources.test.ts:1332` "asks nobody anything when the operator
 turned resource fetching off".
 
 ### 5.4 `resourceRefsCappedPages` null — nobody counted
@@ -1056,7 +1056,7 @@ filing disclaimer is GONE rather than merely superseded),
 `test/rules/coverage.test.ts:339` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:1806` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:1811` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

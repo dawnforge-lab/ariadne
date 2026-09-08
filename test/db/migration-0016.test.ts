@@ -1,7 +1,7 @@
 /**
  * Migration 0016: the two observations — `pages.fetched_at` plus the four
  * `recheck_*` columns, and `crawls.recheck_pass_at` / `recheck_pass_count`
- * (P17-T1).
+ * (P17-T1), and the pass that fills them (P17-T2).
  *
  * What is under test is not the DDL (`runMigrations` either applied it or
  * threw) but the claims the columns make, and they are driven through a REAL
@@ -14,24 +14,24 @@
  *     started_at..finished_at window — a timestamp from some other moment is
  *     the failure this pins, because the recheck pass computes the gap between
  *     the two observations from it;
- *  2. the four recheck columns are null on every row INCLUDING the 5xx ones,
- *     because no pass exists yet. That is the null contract's first row —
- *     NOBODY ASKED — and it is emphatically not "the page is fine";
+ *  2. the four recheck columns are null on every NON-5xx row — the null
+ *     contract's first row, NOBODY ASKED — and carry the second observation on
+ *     the two rows the pass asked about;
  *  3. the invariant `recheck_at IS NULL` <=> `recheck_fetch_class IS NULL`
- *     holds over the whole table (trivially here, both sides null: the point is
- *     that the query exists and runs from the first migration onward);
- *  4. the crawl carries `recheck_pass_at` null and `recheck_pass_count` 0 —
- *     the pair whose null-versus-zero is the whole reason `recheck_pass_at`
- *     exists beside a NOT NULL DEFAULT 0 counter;
+ *     holds over the whole table, now with rows on both sides of it;
+ *  4. the crawl carries a stamped `recheck_pass_at` and a `recheck_pass_count`
+ *     of 2 — the pair whose null-versus-zero is the whole reason
+ *     `recheck_pass_at` exists beside a NOT NULL DEFAULT 0 counter;
  *  5. the cascade, which every column on these two tables depends on.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * T2 EXTENDS THIS FILE: THE PASS HALF (§5.4 of the design). When the recheck
- * pass is wired into the loop, this crawl will run it, and the assertions
- * marked `T2:` below FLIP rather than being deleted: `/broken` and `/flaky`
- * gain a `recheck_fetch_class`, `fetch_class` on them is still `server_error`,
- * `crawls.recheck_pass_at` is stamped and `recheck_pass_count` is 2. The
- * non-5xx rows keep every claim they make here.
+ * THE PASS HALF (§5.4 of the design, P17-T2) is what makes this file slow: the
+ * loop's INSERTION 3c runs at the real `MIN_RECHECK_GAP_MS`, so this crawl —
+ * which is otherwise a second's work — waits out the minute the evidence
+ * claims. That is deliberate and it is the point of driving the WHOLE LOOP
+ * here: the pass's test-only `minGapMs` override cannot reach it, so what this
+ * file proves is the wiring at production numbers. The pass's own nine cases,
+ * which do use the override, are `test/crawl/recheck.test.ts`.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { createServer, type Server } from "node:http";
@@ -39,7 +39,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
-import { runCrawl, type CrawlConfig } from "../../src/crawl/loop.js";
+import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
@@ -55,10 +55,11 @@ function html(body: string): string {
 }
 
 /**
- * How many times each path was asked for. T2 reads this to prove the pass asks
- * a 5xx row exactly one more time and asks a healthy row not at all; T1 uses it
- * only to show the crawl itself does not retry a server error (`RETRYABLE` in
- * src/crawl/loop.ts holds timeout, network_error and blocked, and no 5xx).
+ * How many times each path was asked for: the evidence that the pass asks a 5xx
+ * row exactly ONE more time and asks a healthy row not at all. The crawl itself
+ * does not retry a server error (`RETRYABLE` in src/crawl/loop.ts holds timeout,
+ * network_error and blocked, and no 5xx), so a second hit on a 5xx path is the
+ * pass's and nobody else's.
  */
 const hits = new Map<string, number>();
 
@@ -66,6 +67,7 @@ let db: Db;
 let server: Server;
 let base: string;
 let crawlId = "";
+let passSummary: CrawlSummary["recheck"] = null;
 let startedAt: Date | null = null;
 let finishedAt: Date | null = null;
 const created: string[] = [];
@@ -98,9 +100,9 @@ beforeAll(async () => {
       res.end(html("<p>boom</p>"));
       return;
     }
-    // The flapping page T2's pass is built for: 503 on the crawl's look, 200 on
+    // The flapping page the pass is built for: 503 on the crawl's look, 200 on
     // any later one. The crawl sees only the 503, because a server error is not
-    // in the loop's RETRYABLE set.
+    // in the loop's RETRYABLE set — so the 200 belongs to the recheck.
     if (path === "/flaky") {
       const n = hits.get(path) ?? 1;
       if (n === 1) {
@@ -140,7 +142,10 @@ beforeAll(async () => {
     .where(eq(crawls.id, crawlId));
   startedAt = row?.startedAt ?? null;
   finishedAt = row?.finishedAt ?? null;
-}, 60_000);
+  passSummary = summary.recheck;
+  // A minute of it is `MIN_RECHECK_GAP_MS`, paid once across the oldest-first
+  // walk however many 5xx rows there are. See the header.
+}, 180_000);
 
 afterAll(async () => {
   for (const id of created) await db.delete(crawls).where(eq(crawls.id, id));
@@ -182,10 +187,11 @@ describe("0016 — the two observations", () => {
     expect(byUrl.get(`${base}/broken`)?.statusCode).toBe(500);
     expect(byUrl.get(`${base}/flaky`)?.fetchClass).toBe("server_error");
     expect(byUrl.get(`${base}/flaky`)?.statusCode).toBe(503);
-    // A 5xx is not retried by the loop, so the crawl asked each exactly once.
-    // T2: `/flaky` and `/broken` become 2 here, and `/ok` stays 1.
-    expect(hits.get("/broken")).toBe(1);
-    expect(hits.get("/flaky")).toBe(1);
+    // A 5xx is not retried by the loop, so the crawl asked each exactly once —
+    // and the recheck pass asked each of them exactly once more. A healthy page
+    // is an ANSWER and is never re-asked.
+    expect(hits.get("/broken")).toBe(2);
+    expect(hits.get("/flaky")).toBe(2);
     expect(hits.get("/ok")).toBe(1);
   });
 
@@ -203,29 +209,68 @@ describe("0016 — the two observations", () => {
     }
   });
 
-  it("leaves all four recheck columns null: nobody asked", async () => {
-    // The null contract's first row. This is NOT "the page is fine" — the 5xx
-    // rows below carry it too, and `http.server-error` keeps firing on them.
-    //
-    // T2: the two `server_error` rows gain a class, a status and a time here,
-    // while `/` and `/ok` keep every null they have.
+  it("leaves all four recheck columns null on a page nobody asked about", async () => {
+    // The null contract's first row, and it is NOT "the page is fine": these
+    // are the rows the pass never had a question about, because a 200 and a 404
+    // are both answers.
     const rows = await pageRows();
-    for (const row of rows) {
+    const unasked = rows.filter((row) => row.fetchClass !== "server_error");
+    expect(unasked.length).toBeGreaterThan(0);
+    for (const row of unasked) {
       expect(row.recheckFetchClass, row.url).toBeNull();
       expect(row.recheckStatusCode, row.url).toBeNull();
       expect(row.recheckReason, row.url).toBeNull();
       expect(row.recheckAt, row.url).toBeNull();
     }
-    // And the first observation is untouched by anything: no pass ran, so the
-    // census still says what the crawl saw.
-    const broken = rows.find((r) => r.url === `${base}/broken`);
+  });
+
+  it("writes the second observation beside the first, never over it", async () => {
+    const rows = await pageRows();
+    const byUrl = new Map(rows.map((r) => [r.url, r]));
+
+    // The page that recovered. `fetch_class` STILL SAYS `server_error`: it is
+    // the census every cohort in this engine is cut from, and a row flipped to
+    // `ok` would be an `ok` page with no title, no words and no links.
+    const flaky = byUrl.get(`${base}/flaky`);
+    expect(flaky?.fetchClass).toBe("server_error");
+    expect(flaky?.statusCode).toBe(503);
+    expect(flaky?.recheckFetchClass).toBe("ok");
+    expect(flaky?.recheckStatusCode).toBe(200);
+    expect(flaky?.recheckAt).not.toBeNull();
+    expect(flaky?.recheckReason).toBeNull();
+
+    // The page that did not.
+    const broken = byUrl.get(`${base}/broken`);
     expect(broken?.fetchClass).toBe("server_error");
+    expect(broken?.recheckFetchClass).toBe("server_error");
+    expect(broken?.recheckStatusCode).toBe(500);
+    expect(broken?.recheckAt).not.toBeNull();
+
+    // The second observation was taken AFTER the first, by at least the gap the
+    // pass promises — the number the finding's `gapSeconds` is computed from.
+    for (const row of [flaky, broken]) {
+      expect(row?.recheckAt!.getTime()).toBeGreaterThanOrEqual(
+        row!.fetchedAt!.getTime() + 60_000,
+      );
+    }
+
+    // And the run said the same thing the rows do.
+    expect(passSummary).toMatchObject({
+      rechecked: 2,
+      confirmed: 1,
+      cleared: 1,
+      inconclusive: 0,
+      capped: false,
+      aborted: false,
+    });
   });
 
   it("holds recheck_at IS NULL <=> recheck_fetch_class IS NULL over the table", async () => {
     // Asked as SQL rather than in TypeScript because it is a claim about the
     // TABLE, not about the rows one test happened to select — and because it is
-    // the query T2's pass must keep true for every row it settles.
+    // the query the pass must keep true for every row it settles. With the pass
+    // wired in there are now rows on BOTH sides of it: two settled, the rest
+    // untouched.
     const [row] = await db
       .select({ violations: sql<number>`count(*)::int` })
       .from(pages)
@@ -236,18 +281,19 @@ describe("0016 — the two observations", () => {
     expect(row?.violations).toBe(0);
   });
 
-  it("carries recheck_pass_at null and recheck_pass_count 0 on the crawl", async () => {
+  it("stamps recheck_pass_at and recheck_pass_count on the crawl", async () => {
     // The null-versus-zero pair. The count is NOT NULL DEFAULT 0, so a 0 alone
-    // cannot say whether nothing was rechecked or nobody looked; the null time
-    // beside it is what says "no complete pass is on record".
-    //
-    // T2: `recheck_pass_at` becomes a timestamp and the count becomes 2.
+    // cannot say whether nothing was rechecked or nobody looked; the time beside
+    // it is what says a complete pass is on record — which is the only thing
+    // that can answer "was the 5xx evidence re-verified" on a crawl that had no
+    // server errors at all.
     const [row] = await db
       .select({ at: crawls.recheckPassAt, count: crawls.recheckPassCount })
       .from(crawls)
       .where(eq(crawls.id, crawlId));
-    expect(row?.at).toBeNull();
-    expect(row?.count).toBe(0);
+    expect(row?.at).not.toBeNull();
+    expect(row?.at!.getTime()).toBeLessThanOrEqual(finishedAt!.getTime());
+    expect(row?.count).toBe(2);
   });
 
   it("cascades from the crawl delete, columns and all", async () => {

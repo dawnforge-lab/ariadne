@@ -507,7 +507,12 @@ beforeAll(async () => {
     byScope.set(key, row.value);
     metricsById.set(row.metricId, byScope);
   }
-}, 120_000);
+  // 180s rather than 120s since P17: the fixture site carries a 5xx
+  // (`/status/server-error`), so the loop's INSERTION 3c waits out
+  // `MIN_RECHECK_GAP_MS` — a real minute — before re-asking it. That is the
+  // production number and the pass's test-only override cannot reach a crawl
+  // driven through `runCrawl`, so the net moves instead.
+}, 180_000);
 
 afterAll(async () => {
   // The crawl row cascades to pages, issues and the frontier.

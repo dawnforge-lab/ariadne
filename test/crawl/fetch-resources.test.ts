@@ -1281,7 +1281,12 @@ describe("the crawl runs the pass itself", () => {
     // `config.maxConcurrency` here instead would read 2 — a site that just
     // asked us to slow down getting its full concurrency back for its images.
     expect(maxInFlight).toBe(1);
-  });
+    // A MINUTE OF THIS TEST IS NOT THIS TEST. The two 503s that collapse the
+    // window are `server_error` page rows, so the loop's INSERTION 3c waits out
+    // `MIN_RECHECK_GAP_MS` before re-asking them (P17; the pass's own test-only
+    // override cannot reach a crawl driven through `runCrawl`). The timeout
+    // below is the honest net for that, not a performance claim.
+  }, 120_000);
 
   it("closes the crawl cancelled when the signal fires inside the pass", async () => {
     const controller = new AbortController();

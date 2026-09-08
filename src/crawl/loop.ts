@@ -78,6 +78,10 @@ import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.j
 import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
 import {
+  recheckServerErrors,
+  type RecheckPassSummary,
+} from "./recheck/recheck-server-errors.js";
+import {
   fetchCrawlResources,
   markResourcesNotAsked,
   type ResourcePassSummary,
@@ -326,6 +330,16 @@ export interface CrawlSummary {
    * be read as the same thing.
    */
   resources: ResourcePassSummary | null;
+  /**
+   * What the 5xx re-verification pass did, or null when it did not run — a
+   * crawl that failed before it had pages, or one that was already cancelled
+   * when the pass's turn came (an abort means stop asking servers for things,
+   * and the pass is all asking). The `resources: null` precedent, with the same
+   * warning: null is not "no server errors". That is a summary whose
+   * `rechecked` is 0, and the two must not be read as the same thing — one says
+   * nobody looked, the other says there was nothing to look at.
+   */
+  recheck: RecheckPassSummary | null;
   /** Why the crawl ended, when that needs saying. Null on a clean finish. */
   note: string | null;
 }
@@ -949,6 +963,9 @@ async function runToCompletion(
       // The resource pass never ran: this crawl was refused before it had a
       // page, let alone a page's references.
       null,
+      // Nor the recheck pass, for the same reason: no page was fetched, so no
+      // page answered 5xx, so there is nothing a second look could be about.
+      null,
       note,
     );
   }
@@ -1358,6 +1375,73 @@ async function runToCompletion(
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
 
+  // INSERTION 3c — the crawl takes a SECOND look at every page that answered
+  // "server error", so a finding can say whether the error persists rather than
+  // only that it happened once (P17; docs/superpowers/specs/2026-09-08-5xx-
+  // recheck-design.md). Lettered like 3b, for 3b's reason: the markers are
+  // positional and INSERTION 4 is cited by name elsewhere.
+  //
+  // WHY HERE, between the known-404 probe and the resource pass:
+  //
+  //  - IT IS A PAGE-PHASE QUESTION, and it belongs with the phase it reasons
+  //    about — the same argument that puts the 404 probe after the loop: one
+  //    more request to the ORIGIN, about the pages we just fetched.
+  //  - BEFORE THE RESOURCE PASS, because running after it would measure a
+  //    server we have just spent an hour loading. "The site was under our load"
+  //    is the confound this pass exists to rule out, so the second observation
+  //    is taken before we spend R more requests on the origin's images. It is
+  //    also why the pass cannot be an endpoint an agent calls later: TIME IS THE
+  //    MEASUREMENT, and a recheck run days afterwards is measuring a different
+  //    site while stamping its answer on a crawl whose findings claim to
+  //    describe one moment.
+  //
+  // Skipped on an abort exactly as the resource pass is, and for the same
+  // reason: every row it would write costs somebody's server a request. The
+  // rows it leaves keep both nulls, which is the resume's work list unchanged.
+  //
+  // NOT CONTAINED, on the resource pass's grounds rather than the probe's: this
+  // pass classifies every site-side failure into a row, so anything it throws is
+  // our defect or a failed write, and there is no column in which to write "the
+  // recheck columns are missing because the writer broke".
+  //
+  // It costs up to 60 seconds of wall time on a crawl that saw a 5xx and
+  // nothing at all on one that did not (`MIN_RECHECK_GAP_MS`, paid once across
+  // the whole oldest-first walk, and the work list is empty on a healthy site).
+  const recheckPass = aborted
+    ? null
+    : await recheckServerErrors(db, crawlId, {
+        userAgent: config.userAgent,
+        // THE SAME GATE the pages were fetched through — not a new one — so a
+        // host that earned 8s of spacing keeps it, and a 503 on recheck
+        // escalates it for the resource pass below (hard rule 9).
+        gate,
+        // Already read by `discover`. The work list is this crawl's own pages,
+        // so the origin's rules are the only rules in play.
+        robots: discovery.robots,
+        timeoutMs: FETCH_TIMEOUT_MS,
+        allowPrivate,
+        signal,
+      });
+
+  if (recheckPass !== null) {
+    // The count is stamped WHATEVER happened — an aborted pass says what it
+    // actually did — while the time is stamped only by a pass that COMPLETED.
+    // That asymmetry is the whole reason both columns exist: a 0 count reads
+    // the same on "rechecked nothing" and "nobody looked", and the null time
+    // beside it is what tells them apart (see the schema comments).
+    await db
+      .update(crawls)
+      .set({
+        recheckPassCount: recheckPass.rechecked,
+        ...(recheckPass.aborted ? {} : { recheckPassAt: new Date() }),
+      })
+      .where(eq(crawls.id, crawlId));
+  }
+  // Folded in BEFORE the resource pass reads it: an abort that landed inside the
+  // recheck means the caller has asked us to stop talking to this site, and the
+  // resource pass is the next thing that would.
+  if (recheckPass?.aborted === true) aborted = true;
+
   // INSERTION 3b — the crawl asks about the files its pages point at.
   //
   // Numbered 3b rather than 5 because the markers are positional and INSERTION
@@ -1510,6 +1594,7 @@ async function runToCompletion(
     discovery,
     pageTemplates,
     resourcePass,
+    recheckPass,
     aborted
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
@@ -1814,6 +1899,7 @@ async function summarise(
   discovery: DiscoveryResult,
   pageTemplates: PageTemplateInference | null,
   resources: ResourcePassSummary | null,
+  recheck: RecheckPassSummary | null,
   note: string | null,
 ): Promise<CrawlSummary> {
   return {
@@ -1829,6 +1915,7 @@ async function summarise(
     },
     pageTemplates,
     resources,
+    recheck,
     note,
   };
 }
