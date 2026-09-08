@@ -31,11 +31,11 @@ The spec's §7 T5 gate clauses, and where each is answered:
 
 | | The spec asked | Answered |
 |---|---|---|
-| 1 | full suite green | §8 — **[recorded at gate time]**. At T5 close: 1,871 of 1,874 passing, the three reds all the citation guard on a `docs/talos-surface.md` still being rewritten (§12.2) |
+| 1 | full suite green | §8 — **recorded 2026-09-08 after T4**: 77 files / 1,877 tests, 0 failures, 132.7 s (orchestrator's own run at d50c2ef, before the rebase onto main). The T5-close reds were the citation guard on a `docs/talos-surface.md` still being rewritten; T4 re-anchored all of them (§12.2) |
 | 2 | `npx tsc --noEmit` clean | §8 — **clean**, whole tree |
 | 3 | migration 0016 applied by `npm run db:migrate`, never hand-applied | §2 — `drizzle/0016_damp_ironclad.sql`, seven `ALTER TABLE`s; the dev database's journal holds 17 rows (0000–0016) and carries all seven columns |
 | 4 | ruleset **0.13.0**, **27 critical / 24 warning / 45 info over 96 rules** | §4 — pinned by `test/rules/registry.test.ts` ("holds 27 critical, 24 warning and 45 info rules") and by `test/rules/coverage.test.ts`'s split (27 page + 55 query + 14 metric) |
-| 5 | one recorded crawl showing a `recheck` block with a non-zero `serverErrors`, its partition summing | **[recorded at gate time]** — needs a real run through the demo against a site that serves one; the fixture proof of the same arithmetic is §6 |
+| 5 | one recorded crawl showing a `recheck` block with a non-zero `serverErrors`, its partition summing | **recorded 2026-09-08**: `crawl_1580ccf0-c7b6-4668-9d8b-2bc82bd551ce`, `https://httpbin.org/status/503` through the demo proxy (max 5 pages, resources off). Polled every 10 s: `{serverErrors:1, pending:1}` from 10 s to 61 s, then at 71 s `finished` with `{serverErrors:1, confirmed:1, cleared:0, inconclusive:0, pending:0, capped:false, passAt:"2026-09-08T14:58:56.180Z"}` — partition 1+0+0+0 = 1. Rules at 0.13.0: `http.server-error` fired once with evidence `{statusCode:503, recheck:"confirmed", recheckFetchClass:"server_error", recheckStatusCode:503, recheckReason:null, gapSeconds:60}`; `http.server-error-transient` silent. First attempt against `https://httpstat.us/503` closed `failed` at 14 s because that host's robots.txt answers 502 — the robots-unreachable path, reported not hidden. The fixture proof of the same arithmetic is §6 |
 
 ---
 
@@ -441,7 +441,7 @@ production gap is the number it always was.
 
 | | |
 |---|---|
-| Suite | **[recorded at gate time]**. Measured at T5 close: **1,874 tests / 77 files, 1,871 passing**, wall 141.6 s. The three reds are all `test/skills/identifier-guard.test.ts` and all one cause — `docs/talos-surface.md`'s `file:line` citations drifted while that document was being rewritten for the recheck block, plus two lines this task moved (§12.2). Baseline into the phase was 1,830 (`b2449aa`); the net is T2's pass cases, T3's rule cases, T4's surface cases and T5's six |
+| Suite | **77 files / 1,877 tests, 0 failures, 132.7 s** (orchestrator's run after T4, d50c2ef). Measured at T5 close: 1,874 tests / 77 files, 1,871 passing, wall 141.6 s. The three reds are all `test/skills/identifier-guard.test.ts` and all one cause — `docs/talos-surface.md`'s `file:line` citations drifted while that document was being rewritten for the recheck block, plus two lines this task moved (§12.2). Baseline into the phase was 1,830 (`b2449aa`); the net is T2's pass cases, T3's rule cases, T4's surface cases and T5's six |
 | Typecheck | `npx tsc --noEmit` — **clean**, whole tree, measured at T5 close |
 | Migrations | 0000–**0016**; `drizzle/0016_damp_ironclad.sql`, drizzle-kit generated, applied with `npm run db:migrate`. The dev database's journal holds 17 rows and carries all seven columns (§2) |
 | Ruleset | **0.13.0**, **96 rules** = 27 page + 55 query + 14 metric; **27 critical / 24 warning / 45 info** |
