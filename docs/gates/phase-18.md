@@ -108,4 +108,4 @@ the defect at the Phase 17 gate:
 
 ## 6. Integration
 
-**[recorded at merge]**
+Integrated 2026-09-08 as **PR #16** from `worktree-phase-18`, on the owner's word for these two fixes. CI: green first try on e733c20 (run 34262518642, 4m26s).
