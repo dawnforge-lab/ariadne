@@ -24,13 +24,19 @@ const CATEGORY = "crawl";
  *   network_error  - no answer at all.
  *   disallowed     - no request was made (url-policy or robots, on recheck).
  *
+ * EXPORTED because a second reader needs the SAME set, not a copy of it:
+ * `crawl_status.recheck.cleared` counts the rows this rule pair would call
+ * transient (`recheckCoverage`, src/api/service.ts), and a surface that
+ * spelled the six classes out again would answer a different question from the
+ * rule the day a seventh joined.
+ *
  * TYPED ON BOTH SIDES ON PURPOSE. The members are `FetchClass`, so a class
  * renamed in `src/crawl/fetch-page.ts` stops compiling here rather than
  * quietly falling out of the cleared set; the declared type is
  * `ReadonlySet<string>`, because the value looked up is `pages.recheck_fetch_class`,
  * a `text` column the type system knows only as `string`.
  */
-const RECHECK_CLEARED: ReadonlySet<string> = new Set<FetchClass>([
+export const RECHECK_CLEARED: ReadonlySet<string> = new Set<FetchClass>([
   "ok",
   "redirect",
   "client_error",

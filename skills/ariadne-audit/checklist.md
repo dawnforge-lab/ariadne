@@ -308,15 +308,16 @@ answered from, and its verdict is the confidence interval around all of them.
      crawl older than the counter, or one whose process died before its first
      close), which is not `0`.
   6. **Was the 5xx evidence re-verified?** `crawl_status`'s `recheck` block. Every
-     page whose first fetch was a server error is counted once there, and four
-     numbers partition that total: `confirmed` (looked at again, still a server
-     error), `cleared` (looked at again, the site answered something else — these
-     are the pages carrying `http.server-error-transient` (warning)),
+     page whose first fetch was a server error is counted once there, as
+     `serverErrors`, and four numbers partition that total: `confirmed` (looked
+     at again, still a server error), `cleared` (looked at again, the site
+     answered something else — these are the pages carrying
+     `http.server-error-transient` (warning)),
      `inconclusive` (looked at again, no answer about the page: a timeout, a
      network failure, a bot block, or a request our own policy or the site's
      robots.txt refused) and `pending` (never looked at a second time). `capped`
      is true when a budget stopped the pass, and the rows it never reached are
-     part of `pending`. The block also carries the time a COMPLETE pass finished
+     part of `pending`. `passAt` is the time a COMPLETE pass finished
      over this crawl; null there means no complete pass is on record and every
      server error in this crawl rests on a single observation. **A pending or
      capped row does not make CHECK-12 NOT MEASURED**: the error WAS observed and

@@ -1046,6 +1046,65 @@ describe("crawl_status / crawl_list", () => {
     });
   });
 
+  // THE RECHECK BLOCK, over the agent transport (P17-T4). The arithmetic is
+  // pinned in test/api/query.test.ts against a fixture holding one row of every
+  // outcome; what this asserts is that the same block, with the same meanings,
+  // reaches an agent — and that its two zeroes stay apart on the way.
+  it("answers the recheck coverage, and keeps its two zeroes apart", async () => {
+    // A seeded crawl holding one 5xx row nobody re-asked about: the whole
+    // denominator in `pending`, beside a null stamp. "Nobody looked."
+    const seeded = await ok("crawl_status", { crawlId: seededCrawlId });
+    expect(seeded["recheck"]).toEqual({
+      serverErrors: 1, confirmed: 0, cleared: 0, inconclusive: 0,
+      pending: 1, capped: false, passAt: null,
+    });
+
+    // The same row after a pass settled it with a non-5xx ANSWER from the site:
+    // the count moves from `pending` to `cleared`, which is the one movement on
+    // this surface that turns a critical finding into a warning.
+    const settled = new Date("2026-09-08T12:00:00.000Z");
+    await db.update(pages)
+      .set({ recheckFetchClass: "ok", recheckStatusCode: 200, recheckAt: settled })
+      .where(eq(pages.id, `${seededCrawlId}_page_b1`));
+    await db.update(crawls).set({ recheckPassAt: settled }).where(eq(crawls.id, seededCrawlId));
+    try {
+      const after = await ok("crawl_status", { crawlId: seededCrawlId });
+      expect(after["recheck"]).toEqual({
+        serverErrors: 1, confirmed: 0, cleared: 1, inconclusive: 0,
+        pending: 0, capped: false, passAt: settled.toISOString(),
+      });
+      // The FIRST observation is untouched by the second, on the listing an
+      // agent would check the count against.
+      const row = items(await ok("pages_query", { crawlId: seededCrawlId, statusCode: 500 }))[0];
+      expect(row?.["fetchClass"]).toBe("server_error");
+      expect(row?.["recheckFetchClass"]).toBe("ok");
+      expect(row?.["recheckStatusCode"]).toBe(200);
+      expect(row?.["recheckAt"]).toBe(settled.toISOString());
+    } finally {
+      await db.update(pages)
+        .set({ recheckFetchClass: null, recheckStatusCode: null, recheckAt: null })
+        .where(eq(pages.id, `${seededCrawlId}_page_b1`));
+      await db.update(crawls).set({ recheckPassAt: null }).where(eq(crawls.id, seededCrawlId));
+    }
+
+    // AND THE OTHER ZERO, off a crawl this suite really ran rather than seeded:
+    // the fixture site serves no 5xx, so there was nothing to re-ask — and the
+    // pass still ran and stamped the crawl. `serverErrors: 0` beside a
+    // timestamp is "we looked and there was nothing"; the seeded crawl's null
+    // above is "nobody looked". Same two numbers, opposite sentences.
+    const live = (await ok("crawl_status", { crawlId: liveCrawlId }))["recheck"] as Record<
+      string,
+      unknown
+    >;
+    expect(live["serverErrors"]).toBe(0);
+    expect(live["pending"]).toBe(0);
+    expect(live["capped"]).toBe(false);
+    expect(
+      Number.isNaN(Date.parse(String(live["passAt"]))),
+      "a crawl this process ran to completion left no recheck-pass stamp",
+    ).toBe(false);
+  });
+
   // THE DESCRIPTION, AT BOTH LAYERS. An agent reads the tool's description for
   // what the answer means and the field's for what it may send, and a number
   // whose meaning is only in this repository's source is a number that gets
@@ -1060,6 +1119,25 @@ describe("crawl_status / crawl_list", () => {
     ]) {
       expect(text, `crawl_status's description does not name '${field}'`).toContain(field);
     }
+
+    // THE RECHECK BLOCK'S FIELDS, TAKEN OFF THE ANSWER RATHER THAN RESTATED
+    // (P17-T4), on the `crawl_rules` model: a sixth key added to the block and
+    // left undocumented fails here, which a hand-written list could not do.
+    const answered = (await ok("crawl_status", { crawlId: seededCrawlId }))["recheck"];
+    expect(Object.keys(answered as Record<string, unknown>).sort()).toEqual([
+      "capped", "cleared", "confirmed", "inconclusive", "passAt", "pending", "serverErrors",
+    ]);
+    for (const field of Object.keys(answered as Record<string, unknown>)) {
+      expect(text, `crawl_status does not name recheck.${field}`).toContain(field);
+    }
+    // The arithmetic a consumer may rely on, and the two sentences a bare zero
+    // would hide — the same three claims the resource block above pins.
+    expect(text).toContain("confirmed + cleared + inconclusive + pending = serverErrors");
+    expect(text).toContain("NOT ASKED");
+    expect(text).toContain("nobody looked");
+    // And the rule the counts pay for: a cleared page is the one case that
+    // moves off http.server-error.
+    expect(text).toContain("http.server-error-transient");
     // The arithmetic a consumer may rely on.
     expect(text).toContain("fetched + failed + skipped = seen");
     // Where the numbers come from, which is the T2 warning made public: a
@@ -2026,6 +2104,10 @@ describe("pages_query", () => {
       // over the post-JavaScript DOM, which is the column the CSR rule reads.
       "renderedRenderableWordCount",
       "statusCode", "url", "wordCount",
+      // The two observations (P17-T4), on this transport too: `fetchedAt` and
+      // the four fields the 5xx re-verification pass writes. See the same
+      // assertion in test/api/query.test.ts for why a slim projection widened.
+      "fetchedAt", "recheckFetchClass", "recheckStatusCode", "recheckReason", "recheckAt",
     ].sort());
   });
 
@@ -2066,6 +2148,27 @@ describe("pages_query", () => {
     // wordCount, which counts something else.
     const blocked = items(await ok("pages_query", { crawlId: surfaceCrawlId, fetchClass: "blocked" }));
     expect(blocked[0]?.["renderableWordCount"]).toBeNull();
+  });
+
+  // THE DESCRIPTION IS PINNED TO THE ROW THIS TOOL JUST RETURNED, on the
+  // `crawl_rules` model: an agent reads the description to know what a field
+  // means, and a field returned but never described is one an agent does not
+  // know it can ask about. P17-T4 added five, which is exactly when a
+  // hand-written list goes stale.
+  it("names every field of the row it answers with, in its own description", async () => {
+    const row = items(await ok("pages_query", { crawlId: seededCrawlId }))[0];
+    expect(row, "no page row to check the description against").toBeDefined();
+    const listed = await client.listTools();
+    const description = listed.tools.find((t) => t.name === "pages_query")?.description ?? "";
+    expect(description, "pages_query has no description").not.toBe("");
+    for (const field of Object.keys(row ?? {})) {
+      expect(description, `pages_query does not name ${field}`).toContain(field);
+    }
+    // And the sentence that stops the newest null being read as good news: the
+    // pass asks about no page that was not a server error, so a null there is
+    // "nobody asked" and never "it came back fine".
+    expect(description).toContain("NULL MEANS NOBODY ASKED");
+    expect(description).toContain("http.server-error-transient");
   });
 
   it("refuses a status code that is not an HTTP status", async () => {
@@ -2242,7 +2345,8 @@ describe("export_crawl — the CSV views", () => {
       crawlId: liveCrawlId, format: "csv", view: "internal_urls",
     });
     expect(read(pagesCsv).split("\r\n")[0]).toBe(
-      "url,status,fetchClass,indexable,clickDepth,pageType,title",
+      "url,status,fetchClass,indexable,clickDepth,pageType,title," +
+        "recheckFetchClass,recheckStatus,recheckAt",
     );
   });
 

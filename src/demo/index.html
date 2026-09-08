@@ -465,6 +465,18 @@
       cell(progressGrid, "resources failed", num(resources.failed));
       cell(progressGrid, "resources unasked", num(resources.skipped));
     }
+    // THE SECOND LOOK AT THE SERVER ERRORS, and only when there is one to
+    // report: every 5xx page is re-asked once at crawl end, so on a healthy
+    // site this line would say "0 server errors" on every poll and mean
+    // nothing. The counts are read live off the crawl's pages, which is why
+    // `left` falls while the pass runs and this panel keeps asking every 2s.
+    var recheck = detail.recheck || {};
+    if (typeof recheck.serverErrors === "number" && recheck.serverErrors > 0) {
+      cell(progressGrid, "re-checking server errors",
+        num(recheck.serverErrors) + " seen: " + num(recheck.confirmed) + " confirmed, " +
+        num(recheck.cleared) + " cleared, " + num(recheck.inconclusive) + " inconclusive, " +
+        num(recheck.pending) + " left");
+    }
   }
 
   // ---------------------------------------------------------------- judge

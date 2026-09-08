@@ -67,7 +67,7 @@ import {
   type CrawlConfig,
 } from "../crawl/loop.js";
 import { DISCOVERED_VIA, frontierCounts, type FrontierCounts } from "../crawl/frontier.js";
-import { FETCH_CLASSES } from "../crawl/fetch-page.js";
+import { FETCH_CLASSES, type FetchClass } from "../crawl/fetch-page.js";
 // The resource vocabulary this surface reads, imported rather than spelled out:
 // the one `fetch_reason` literal a surface may read (a constant this repository
 // defines, never a sentence somebody could reword) and the two `fetch_class`
@@ -82,6 +82,13 @@ import {
 // outcome added there must not turn every new crawl's stored evidence into a
 // validation refusal here. See `ROBOTS_OUTCOMES` in discovery.ts.
 import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
+// The recheck vocabulary, imported from the two modules that WRITE it rather
+// than spelled out here: the cap reason the pass stamps on a row it never got
+// to (`RESOURCE_CAP_REASON`'s twin), and the set of second-observation classes
+// the rule pair calls "the site answered, and not with a 5xx". See
+// `recheckCoverage`.
+import { RECHECK_CAP_REASON } from "../crawl/recheck/recheck-server-errors.js";
+import { RECHECK_CLEARED } from "../rules/page/status.js";
 import {
   RENDER_HTML_DIR,
   RenderPassRefusal,
@@ -320,7 +327,8 @@ export function parseRenderCrawlInput(raw: unknown): RenderCrawlInput {
 
 /**
  * Validate a crawl-start body. Never casts, never ignores a field it does not
- * know, and never accepts `allowPrivate` at any value.
+ * know, and never accepts either TEST-ONLY crawl-config field at any value
+ * (`allowPrivate`, `recheckMinGapMs`).
  *
  * Shared by both transports on purpose: the MCP server's `crawl_start` gets the
  * same field allowlist and the same refusals as the HTTP route, because the
@@ -343,6 +351,21 @@ export function parseStartCrawlInput(raw: unknown): StartCrawlInput {
         "escape hatch that admits loopback and private targets, it is never persisted " +
         "on a crawl row, and it can only be set by the process that constructs the " +
         "server",
+    );
+  }
+
+  // The second test-only field, refused by name for the same reason and with
+  // the same weight (P17). The 60-second floor between a page's two
+  // observations is the CLAIM the evidence makes — "still broken a minute
+  // later" — not a tuning knob: a caller who could shrink it could make every
+  // transient 5xx clear and turn a `critical` into a `warning` on demand.
+  if ("recheckMinGapMs" in body) {
+    throw new ServiceError(
+      "VALIDATION",
+      "recheckMinGapMs is not accepted over the API at any value: it is a test-only " +
+        "crawl-config field that shortens the minimum gap between a page's two fetch " +
+        "observations, it is never persisted on a crawl row, and it can only be set by " +
+        "the process that constructs the server",
     );
   }
 
@@ -772,6 +795,79 @@ export interface CrawlDetail extends CrawlListItem {
      * ran the pass.
      */
     capped: boolean;
+  };
+  /**
+   * What the 5xx RE-VERIFICATION pass knows about this crawl — the second look
+   * every `server_error` page gets at crawl end (migration 0016, Phase 17).
+   *
+   * WHY IT IS ON THE WIRE AT ALL. It is the only mechanism on this surface that
+   * turns a `critical` into a `warning`: a 5xx whose second observation got a
+   * non-5xx answer from the site fires `http.server-error-transient` instead of
+   * `http.server-error`. A consumer that cannot see the arithmetic cannot check
+   * the engine's verdict before quoting it to a client.
+   *
+   * COUNTED LIVE OFF `pages`, IN ONE STATEMENT, exactly as `resources` above is
+   * and for the same reason: the pass writes rows while a poller reads them, and
+   * five counts on five pool connections are five snapshots — a `serverErrors`
+   * from before a row settled beside a `pending` from after it composes an
+   * arithmetic nobody's database ever held. The demo page polls this block every
+   * two seconds to watch `pending` fall.
+   *
+   * `confirmed + cleared + inconclusive + pending == serverErrors`, always. The
+   * four are a partition of the crawl's 5xx rows by their `recheck_fetch_class`;
+   * `capped` is a flag over the same rows and is not a term in that sum.
+   *
+   * NOT ON `CrawlListItem`. A listing row is not a coverage report.
+   */
+  recheck: {
+    /**
+     * Pages whose FIRST fetch ended `server_error` — the denominator, and the
+     * only number here that is about the crawl rather than about the pass. Zero
+     * is a measurement: this crawl saw no server errors.
+     */
+    serverErrors: number;
+    /** Re-asked, and the site answered 5xx again: still broken. */
+    confirmed: number;
+    /**
+     * Re-asked, and the site answered something that is not a 5xx — the
+     * transient blip. `RECHECK_CLEARED` is the set, and it is IMPORTED from the
+     * rule that judges it rather than restated (see `recheckCoverage`).
+     */
+    cleared: number;
+    /**
+     * Re-asked, and no answer ABOUT THE PAGE came back: a timeout, a network
+     * error, a block (which is an answer about our crawler), or a URL our own
+     * policy or the site's robots.txt refused on the second look. A decided
+     * outcome, never an absence — and the finding stays `critical`.
+     */
+    inconclusive: number;
+    /**
+     * NOT RE-ASKED AT ALL: nobody looked. A crawl written before migration
+     * 0016, a crawl that failed or was cancelled before the pass reached the
+     * row, a pass still running, or a row the cap stopped short of (which is
+     * also counted in `capped`). Read it with `passAt`: `pending` equal to
+     * `serverErrors` beside a null `passAt` is "no pass is on record", and
+     * beside a timestamp it is a pass that ran and reached none of them.
+     */
+    pending: number;
+    /**
+     * True when the pass's own budget (`MAX_RECHECKS`) stopped it short of at
+     * least one row — those rows carry `recheck_reason` with a null class and
+     * are counted in `pending`.
+     *
+     * ONE LITERAL, READ AS A CONSTANT (`RECHECK_CAP_REASON`), on
+     * `resources.capped`'s model: the reasons on this column are the fetch
+     * layer's own sentences everywhere else, and a count built by matching prose
+     * goes quietly to zero the day somebody rewords one.
+     */
+    capped: boolean;
+    /**
+     * When a recheck pass COMPLETED over this crawl (`crawls.recheck_pass_at`),
+     * or null when no complete pass is on record — the `rulesRunAt` precedent,
+     * and the field that tells "no server errors" apart from "nobody looked".
+     * An ABORTED pass leaves it null and still settles the rows it reached.
+     */
+    passAt: string | null;
   };
 }
 
@@ -1285,6 +1381,32 @@ export interface PageRow {
   renderedRenderableWordCount: number | null;
   /** Why an ATTEMPTED render produced nothing. Null is not "it worked". */
   renderError: string | null;
+  /**
+   * When the crawl fetched this page (migration 0016), or null on a row written
+   * before the column existed. Serialised as an ISO timestamp by both
+   * transports, like every other instant this surface publishes.
+   */
+  fetchedAt: Date | null;
+  /**
+   * The 5xx RE-VERIFICATION pass's second observation, in the `fetchClass`
+   * vocabulary. NULL MEANS NOBODY ASKED — the pass only ever asks about a page
+   * whose first fetch was `server_error`, so null is what a healthy page carries.
+   * `server_error` again is a confirmed outage; anything the site answered that
+   * is not a 5xx is the transient case `http.server-error-transient` reports;
+   * `timeout`, `network_error`, `blocked` and `disallowed` are the second look
+   * learning nothing, and the finding stays `critical`.
+   */
+  recheckFetchClass: string | null;
+  /** The status the second look got. Null when there was no response at all. */
+  recheckStatusCode: number | null;
+  /**
+   * Why the second look ended as it did, or why it was never made: the fetch
+   * layer's own sentence, and `recheck-cap` on a row the pass's budget stopped
+   * short of. Null with a null class means nobody asked at all.
+   */
+  recheckReason: string | null;
+  /** When the pass settled this row. Null exactly when `recheckFetchClass` is. */
+  recheckAt: Date | null;
 }
 
 /** The datasets `GET /crawls/:id/export` can write. */
@@ -1402,6 +1524,14 @@ function severityRank(severity: string): number {
  * `site_url` the pattern cannot read yields null, which matches no family and so
  * hides the row from a site filter rather than offering it to the wrong site.
  */
+/**
+ * The one fetch class the recheck block is about, TYPED so a rename in
+ * `src/crawl/fetch-page.ts` stops compiling here rather than turning
+ * `recheckCoverage`'s counts silently to zero. The class names beside it are
+ * imported sets (`RECHECK_CLEARED`) for the same reason.
+ */
+const SERVER_ERROR_CLASS: FetchClass = "server_error";
+
 const CRAWL_HOSTNAME = sql`substring(lower(${crawls.siteUrl}) from '^[a-z][a-z0-9+.-]*://(?:[^@/]*@)?(\\[[^\\]]*\\]|[^:/?#]*)')`;
 
 /**
@@ -1817,11 +1947,15 @@ export class ApiService {
    */
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
     const { row, findingsCount, pagesScanned } = await this.crawlRowWithCounts(crawlId);
-    const [counts, liveLeases, blockedPages, resourceCounts] = await Promise.all([
+    const [counts, liveLeases, blockedPages, resourceCounts, recheckCounts] = await Promise.all([
       frontierCounts(this.db, crawlId),
       this.liveLeaseCount(crawlId),
       this.blockedPageCount(crawlId),
       this.resourceCoverage(crawlId),
+      // The crawl row's own stamp rides in rather than being read again: it
+      // came out of the statement above, so the block's `passAt` and its
+      // counts cannot describe two different runs of the pass.
+      this.recheckCoverage(crawlId, row.recheckPassAt),
     ]);
     return {
       crawlId: row.id,
@@ -1850,6 +1984,7 @@ export class ApiService {
       // crawl no 0014-aware loop ever closed.
       resourceRefsCappedPages: row.resourceRefsCappedPages,
       resources: resourceCounts,
+      recheck: recheckCounts,
     };
   }
 
@@ -1933,6 +2068,92 @@ export class ApiService {
       robotsDenied: row.robots_denied,
       robotsUnreachable: row.robots_unreachable,
       capped: row.capped,
+    };
+  }
+
+  /**
+   * The crawl's 5xx re-verification coverage, counted live off `pages` —
+   * `CrawlDetail.recheck`.
+   *
+   * ONE STATEMENT, on `resourceCoverage`'s argument one table along: the four
+   * outcome counts are a PARTITION of this crawl's `server_error` rows
+   * (`confirmed + cleared + inconclusive + pending == serverErrors`), the pass
+   * settles those rows while a poller may be watching `pending` fall, and four
+   * reads on four pool connections are four snapshots — a denominator from
+   * before a row settled beside a `pending` from after it is an arithmetic
+   * nobody's database ever held.
+   *
+   * THE VOCABULARY IS IMPORTED, NEVER TYPED OUT, for the reason the resource
+   * block states: a bare `'ok'` here would typecheck for ever against a renamed
+   * class while the count it feeds quietly reported 0. `RECHECK_CLEARED` is the
+   * SAME set `http.server-error-transient` fires on (`src/rules/page/status.ts`),
+   * so `cleared` is by construction the number of pages that rule claims —
+   * a copy of the six class names would answer a different question the day a
+   * seventh joined. `SERVER_ERROR_CLASS` is a typed `FetchClass`, so a rename
+   * stops compiling here.
+   *
+   * `inconclusive` IS THE REMAINDER, written as "decided, and neither of the
+   * other two", never as a list of `timeout | network_error | blocked |
+   * disallowed`. A new fetch class joins it without being named — and a
+   * hand-listed alternative would have dropped it silently into nothing, which
+   * is exactly how a partition stops adding up.
+   *
+   * `capped` matches ONE literal this repository defines (`RECHECK_CAP_REASON`)
+   * rather than "any reason at all": the field is named for the budget, and the
+   * day the pass gains a second reason to decline a row, this flag must not
+   * start calling it a cap. Those rows are counted in `pending` either way,
+   * because nothing about them was decided.
+   *
+   * `passAt` is NOT counted here — it is `crawls.recheck_pass_at`, handed in
+   * from the crawl-row read so the stamp and the counts come off one crawl-row
+   * snapshot rather than two.
+   */
+  private async recheckCoverage(
+    crawlId: string,
+    passAt: Date | null,
+  ): Promise<CrawlDetail["recheck"]> {
+    // The set as a list, so the template renders it as an IN tuple of bound
+    // parameters — never as text spliced into the statement.
+    const cleared = [...RECHECK_CLEARED];
+    const rows = await this.db.execute<{
+      server_errors: number;
+      confirmed: number;
+      cleared: number;
+      inconclusive: number;
+      pending: number;
+      capped: boolean;
+    }>(sql`
+      select count(*)::int as server_errors,
+             count(*) filter (
+               where p.recheck_fetch_class = ${SERVER_ERROR_CLASS}
+             )::int as confirmed,
+             count(*) filter (where p.recheck_fetch_class in ${cleared})::int as cleared,
+             count(*) filter (
+               where p.recheck_fetch_class is not null
+                 and p.recheck_fetch_class <> ${SERVER_ERROR_CLASS}
+                 and not (p.recheck_fetch_class in ${cleared})
+             )::int as inconclusive,
+             count(*) filter (where p.recheck_fetch_class is null)::int as pending,
+             count(*) filter (
+               where p.recheck_fetch_class is null and p.recheck_reason = ${RECHECK_CAP_REASON}
+             ) > 0 as capped
+      from pages p
+      where p.crawl_id = ${crawlId} and p.fetch_class = ${SERVER_ERROR_CLASS}`);
+    const row = rows.rows[0];
+    if (row === undefined) {
+      // A bare aggregate over no rows still answers one row. No row at all
+      // means the statement did not run the way this code believes it did,
+      // which is our defect and not a crawl with no server errors.
+      throw new Error(`recheckCoverage: the aggregate over crawl ${crawlId} answered no row`);
+    }
+    return {
+      serverErrors: row.server_errors,
+      confirmed: row.confirmed,
+      cleared: row.cleared,
+      inconclusive: row.inconclusive,
+      pending: row.pending,
+      capped: row.capped,
+      passAt: passAt === null ? null : passAt.toISOString(),
     };
   }
 
@@ -5119,6 +5340,49 @@ export const PAGE_FIELDS = {
    */
   renderedRenderableWordCount: pages.renderedRenderableWordCount,
   renderError: pages.renderError,
+  /**
+   * WHEN THE FIRST OBSERVATION WAS TAKEN — the timestamp the page writer stamps
+   * on every row (migration 0016). Null only on a row written before it.
+   *
+   * Named here because it is the other end of the recheck's gap: the second
+   * observation's `recheckAt` beside it is what says how long the site had to
+   * recover, and a gap nobody can compute is a claim nobody can check.
+   */
+  fetchedAt: pages.fetchedAt,
+  /**
+   * THE SECOND OBSERVATION, in the same `fetchClass` vocabulary as the first —
+   * the 5xx re-verification pass's answer for this page (Phase 17).
+   *
+   * The projection is documented as deliberately slim, so this is a decision
+   * rather than a drift: the recheck is the ONLY mechanism on this surface that
+   * turns a `critical` into a `warning` (`http.server-error` becomes
+   * `http.server-error-transient` when the second look got a non-5xx answer),
+   * and an agent that cannot see the second observation cannot check the
+   * engine's arithmetic before quoting it to a client.
+   *
+   * NULL MEANS NOBODY ASKED, and it never means "it was fine": the pass only
+   * ever asks about a row whose FIRST fetch was `server_error`, so it is null on
+   * every healthy page of every crawl. `recheckReason` beside it separates "the
+   * pass never reached this row" (both null) from "the pass declined to ask, and
+   * says why" (a reason with a null class).
+   *
+   * Tenant-safe by the same construction as `fetchReason`: composed from the
+   * response and the URL policy, never from a stack trace or a local path.
+   */
+  recheckFetchClass: pages.recheckFetchClass,
+  /** The status the second look got, or null when there was no response. */
+  recheckStatusCode: pages.recheckStatusCode,
+  /**
+   * Why, in the fetch layer's own words — `fetchReason`'s twin for the second
+   * observation, null on a recheck that simply worked, and the column that
+   * carries the pass's own `recheck-cap` on a row it never got to.
+   */
+  recheckReason: pages.recheckReason,
+  /**
+   * When the pass SETTLED this row. Moves with `recheckFetchClass`: both null or
+   * both non-null, over the whole table.
+   */
+  recheckAt: pages.recheckAt,
 } as const;
 
 const SEVERITIES: readonly Severity[] = ["critical", "warning", "info"];

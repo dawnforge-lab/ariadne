@@ -215,6 +215,31 @@ describe("the demo flow", () => {
     const resources = detail["resources"] as Record<string, unknown>;
     expect(typeof resources["seen"]).toBe("number");
 
+    // THE RECHECK BLOCK, on the same poll and through the same proxy. The page
+    // renders its line only when `serverErrors` is above zero, and this fixture
+    // site serves none — so what is asserted here is the shape the page reads
+    // on EVERY poll (a missing block would make the panel throw on a healthy
+    // crawl) and the partition it renders, which must hold at zero as well.
+    const recheck = detail["recheck"] as Record<string, unknown>;
+    expect(recheck, "the progress panel has no recheck block to read").toBeDefined();
+    expect(recheck["serverErrors"]).toBe(0);
+    expect(recheck["confirmed"]).toBe(0);
+    expect(recheck["cleared"]).toBe(0);
+    expect(recheck["inconclusive"]).toBe(0);
+    expect(recheck["pending"]).toBe(0);
+    expect(recheck["capped"]).toBe(false);
+    // And the pass really ran over this crawl: zero server errors WITH a stamp
+    // is "we looked and there was nothing", which is the reading the page's
+    // silence is entitled to. A null here would mean nobody looked.
+    expect(
+      Number.isNaN(Date.parse(String(recheck["passAt"]))),
+      "the demo crawl finished without a recheck pass stamp",
+    ).toBe(false);
+    expect(
+      Number(recheck["confirmed"]) + Number(recheck["cleared"]) +
+        Number(recheck["inconclusive"]) + Number(recheck["pending"]),
+    ).toBe(Number(recheck["serverErrors"]));
+
     // JUDGE — 200, not 202: the rules run synchronously and answer the summary.
     const judgedRes = await fetch(`${base}/api/crawls/${crawlId}/rules`, { method: "POST" });
     expect(judgedRes.status).toBe(200);

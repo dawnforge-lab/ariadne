@@ -222,7 +222,8 @@ target is not something this skill can crawl.
  rulesRunAt, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
  resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
-             capped}}
+             capped},
+ recheck: {serverErrors, confirmed, cleared, inconclusive, pending, capped, passAt}}
 ```
 
 What the fields mean when you are waiting:
@@ -281,6 +282,22 @@ What the fields mean when you are waiting:
   refusal in `robotsDenied`. `fetchResources` is whether
   the crawl asked at all: `false` is an operator's decision, and beside `fetched: 0`
   it means nobody weighed anything rather than that nothing is heavy.
+- **`recheck`** — the second look at this crawl's server errors. Every page whose
+  first fetch ended 5xx is asked once more at the end of the crawl, at least a
+  minute later, because a 5xx seen once may be a blip rather than a broken page.
+  `serverErrors` is how many pages answered 5xx the first time, and four numbers
+  partition it: `confirmed` (5xx again), `cleared` (the site answered something
+  that is not a 5xx — the transient case, and the only thing that turns an Error
+  into a Warning), `inconclusive` (asked, no answer about the page: a timeout, a
+  network failure, a block, or a URL our policy or robots.txt refused) and
+  `pending` (never asked). `confirmed + cleared + inconclusive + pending =
+  serverErrors`, always, and the counts are read live off the pages — so
+  `pending` falling is the pass working while you poll. `capped: true` means the
+  pass's own 500-row budget stopped it short; those rows stay in `pending`.
+  `passAt` is when a COMPLETE pass finished, and **null there is "nobody looked",
+  not "nothing to look at"** — those pages keep their Errors, and their evidence
+  says `recheck: "not run"`.
+
 - **`resourceRefsCappedPages`** — how many of the crawl's PAGES carried more
   resource REFERENCES than the analyzer's cap keeps (2,000 per page, the rest
   turned away). References, not files: past the cap the analyzer stops resolving, so
