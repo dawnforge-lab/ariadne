@@ -33,6 +33,8 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { HostGate, type HostOutcome } from "../../src/crawl/politeness.js";
 import {
   recheckServerErrors,
+  MAX_RECHECKS,
+  MIN_RECHECK_GAP_MS,
   RECHECK_CAP_REASON,
   type RecheckPassSummary,
 } from "../../src/crawl/recheck/recheck-server-errors.js";
@@ -224,6 +226,31 @@ async function runPass(
     ...overrides,
   });
 }
+
+// ---------------------------------------------------------------------------
+// 0. The production numbers every override in this file stands in for
+// ---------------------------------------------------------------------------
+
+describe("the constants the test-only overrides shadow", () => {
+  /**
+   * Every case below runs at `minGapMs: 50` and the three loop-driven suites run
+   * at `CrawlConfig.recheckMinGapMs: 200` (P17-T5), so NOTHING in this
+   * repository would notice if the default quietly became 50 too. This is the
+   * assertion that would: the 60 seconds is read off the exported constant
+   * rather than waited for, because waiting a minute to observe a number is a
+   * minute spent proving nothing a read cannot prove.
+   *
+   * 60 s is the smallest gap that covers the case the pass exists for — an
+   * upstream, pool or container restart, or a deploy, which is tens of seconds
+   * to about two minutes. It is the claim the evidence makes, not a tuning knob:
+   * `http.server-error-transient` says "the site answered normally a minute
+   * later", and shrinking this silently weakens every finding the pass clears.
+   */
+  it("keeps the real floor at 60 seconds and the real cap at 500 rows", () => {
+    expect(MIN_RECHECK_GAP_MS).toBe(60_000);
+    expect(MAX_RECHECKS).toBe(500);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 1-4. What the second observation says, and who gets asked at all

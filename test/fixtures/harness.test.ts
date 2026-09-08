@@ -218,6 +218,33 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // ok/broken/all-null/all-decided crawls, and the four-way boundary against its
   // siblings are covered directly in test/rules/resources-query.test.ts.
   "resources.partial-unknown",
+  // P17-T3's transient half of the 5xx split, and the ONLY entry on this list
+  // that is exempt because of what the fixture site DELIBERATELY IS NOT.
+  //
+  // It fires on a page whose first fetch was a server error and whose SECOND
+  // — taken by the crawl's own recheck pass, INSERTION 3c — got a non-5xx
+  // answer from the site. Provoking it needs a FLAPPING route: 503 to the crawl,
+  // 200 to the look a minute later. The design ruled that route out of the
+  // shared fixture app on purpose (§5.6): this app serves one site to one crawl
+  // that every other file in the suite reads, and a stateful route would change
+  // what that crawl sees depending on which test ran first and how many times
+  // the page was fetched — the render pass, the resource pass and the 404 probe
+  // all issue requests of their own. A fixture whose answer depends on request
+  // ORDER is the one thing this file exists not to have.
+  //
+  // So `/status/server-error` stays a STATELESS 503, which means the recheck
+  // asks it and gets 503 again — CONFIRMED, `http.server-error` at `critical`,
+  // exactly as before the split. Both halves of that are asserted below ("the
+  // 5xx re-verification pass ran on the fixture crawl"), including the negative
+  // that belongs here: this rule fired on NO fixture, which is what proves the
+  // split does not leak a confirmed outage into the transient bucket.
+  //
+  // The rule itself is covered end to end on servers that CAN flap: the pass's
+  // nine cases in test/crawl/recheck.test.ts, the whole-loop wiring in
+  // test/db/migration-0016.test.ts, and the rule's own predicate over the entire
+  // `FetchClass` union — including the exclusivity guard that no 5xx page can
+  // fire both rules or neither — in test/rules/status.test.ts.
+  "http.server-error-transient",
   "h1.duplicate-skipped",
   "host.duplicate-host-200",
   "host.probe-skipped",
@@ -420,6 +447,14 @@ beforeAll(async () => {
     legacyHosts: [app.legacyBase],
     // The sanctioned test-only use: the fixture site is on 127.0.0.1.
     allowPrivate: true,
+    // The second sanctioned test-only field (P17-T5). This site serves a 5xx
+    // (`/status/server-error`), so the loop's INSERTION 3c re-asks it — and
+    // would wait out the real `MIN_RECHECK_GAP_MS` first, a minute added to
+    // every run of the slowest file in the suite. What this harness asserts
+    // about the recheck is WHICH ROW carries a second observation and WHICH
+    // RULE fires on it, and neither claim depends on the length of the gap; the
+    // 60 seconds is asserted as the constant it is in test/crawl/recheck.test.ts.
+    recheckMinGapMs: 200,
     // Stored on the `crawls` row by `startCrawl`, and read back out of it by
     // `render.coverage` — which is why the budget lives in the CRAWL config
     // rather than being handed to the render pass alone. The metric describes
@@ -507,12 +542,7 @@ beforeAll(async () => {
     byScope.set(key, row.value);
     metricsById.set(row.metricId, byScope);
   }
-  // 180s rather than 120s since P17: the fixture site carries a 5xx
-  // (`/status/server-error`), so the loop's INSERTION 3c waits out
-  // `MIN_RECHECK_GAP_MS` — a real minute — before re-asking it. That is the
-  // production number and the pass's test-only override cannot reach a crawl
-  // driven through `runCrawl`, so the net moves instead.
-}, 180_000);
+}, 120_000);
 
 afterAll(async () => {
   // The crawl row cascades to pages, issues and the frontier.
@@ -2237,7 +2267,9 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the nine `SKIP_HARNESS_CLAIMS` name and explain. A
+    // this one crawl, save the fourteen `SKIP_HARNESS_CLAIMS` names and
+    // explains (the count was written as nine when the list held nine and has
+    // been carried stale through four phases of markers; P17 corrects it). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     expect(
@@ -2351,5 +2383,114 @@ describe("the resource fetch pass ran on the fixture crawl", () => {
     // carries — which is why `fetch_class` is what a rule gates on.
     expect(uncached.cacheControl).toBeNull();
     expect(uncached.expires).toBeNull();
+  });
+});
+
+/**
+ * The 5xx re-verification pass, on the one fixture that answers one (P17-T5,
+ * §5.6 of docs/superpowers/specs/2026-09-08-5xx-recheck-design.md).
+ *
+ * DELIBERATELY MINIMAL, and the design says why: no flapping route was added to
+ * this app. `/status/server-error` is a STATELESS 503 — it answers the recheck
+ * exactly as it answered the crawl — so what this site can prove is the
+ * CONFIRMED half of the split, end to end through the real loop, and the
+ * negative that goes with it. The transient half needs a route whose answer
+ * changes between two requests, which is a route whose answer depends on how
+ * many times the suite happened to ask; that lives on its own servers, in
+ * test/crawl/recheck.test.ts and test/db/migration-0016.test.ts (see this file's
+ * `SKIP_HARNESS_CLAIMS` entry).
+ *
+ * What is under test here is therefore the SEAM: that a crawl of a real site
+ * runs the pass, that the pass finds the site's one server error, that the
+ * second observation lands on the row without disturbing the first, and that the
+ * rule pair reads it the way the rest of the engine reports it.
+ */
+describe("the 5xx re-verification pass ran on the fixture crawl", () => {
+  it("re-asked the site's one server error and confirmed it", () => {
+    const pass = summary.recheck;
+    if (pass === null) throw new Error("the crawl reported no recheck pass");
+
+    // One 5xx on the whole site (`/status/server-error`), asked exactly once
+    // more. The partition is asserted as arithmetic rather than spot-checked:
+    // `confirmed + cleared + inconclusive == rechecked` is the claim
+    // `RecheckPassSummary` makes, and a pass that lost a row would satisfy any
+    // single equality above it.
+    expect(pass).toEqual({
+      rechecked: 1,
+      confirmed: 1,
+      cleared: 0,
+      inconclusive: 0,
+      capped: false,
+      aborted: false,
+    });
+    expect(pass.confirmed + pass.cleared + pass.inconclusive).toBe(pass.rechecked);
+  });
+
+  it("wrote the second observation beside the first without touching it", () => {
+    const page = pageByPath.get("/status/server-error");
+    if (page === undefined) throw new Error("/status/server-error has no pages row");
+
+    // THE FIRST OBSERVATION, unchanged. This is the assertion that would catch
+    // the whole design going wrong at once: a pass that wrote `fetch_class`
+    // would move this page into the `ok` cohort every other rule is cut from,
+    // as an `ok` page with no title, no words and no links (§2.2, hard rule 1).
+    expect(page.fetchClass).toBe("server_error");
+    expect(page.statusCode).toBe(503);
+    // …and it carries the timestamp the gap is computed from.
+    expect(page.fetchedAt).not.toBeNull();
+
+    // THE SECOND, on its own columns. A stateless 503 answers the recheck the
+    // way it answered the crawl, so this is CONFIRMED and nothing is cleared.
+    expect(page.recheckFetchClass).toBe("server_error");
+    expect(page.recheckStatusCode).toBe(503);
+    expect(page.recheckAt).not.toBeNull();
+    // Null because the recheck simply worked: `recheck_reason` is
+    // `fetch_reason`'s twin and says why, when there is a why. A `recheck-cap`
+    // here would mean the cap fired on a site with one server error.
+    expect(page.recheckReason).toBeNull();
+    // The invariant migration-0016 pins over its whole table, on the one row in
+    // this crawl that is on the non-null side of it.
+    expect(page.recheckAt === null).toBe(page.recheckFetchClass === null);
+  });
+
+  it("still reports the confirmed error as critical, and says it was re-verified", () => {
+    const fired = issuesByPath.get("/status/server-error") ?? new Set<string>();
+    expect([...fired]).toContain("http.server-error");
+
+    // The severity from the REGISTRY rather than from a literal here: the split
+    // moved a verdict, and the claim is that the confirmed half kept the one it
+    // had (27 critical at ruleset 0.13.0).
+    const rule = registry.all().find((r) => r.id === "http.server-error");
+    if (rule === undefined) throw new Error("http.server-error is not registered");
+    expect(rule.severity).toBe("critical");
+
+    // The evidence, which is where the four-value recheck state lives. A report
+    // writer must be able to tell "still broken a minute later" from "nobody
+    // asked", and on this crawl it is the former.
+    expect(detailsByPath.get("/status/server-error\nhttp.server-error")).toMatchObject({
+      statusCode: 503,
+      recheck: "confirmed",
+      recheckStatusCode: 503,
+      recheckFetchClass: "server_error",
+    });
+  });
+
+  it("fired the transient rule on nothing at all", () => {
+    // THE NEGATIVE THAT PROVES THE SPLIT DOES NOT LEAK. `http.server-error` and
+    // `http.server-error-transient` are mutually exclusive and jointly
+    // exhaustive over `fetch_class = 'server_error'` (§3.1), so on a site whose
+    // only 5xx is confirmed the transient rule must be silent — on every
+    // fixture, on the hub, and site-wide. If it ever speaks here it is because
+    // the predicate reads a confirmed outage as a cleared one, and the finding
+    // would be a `warning` where a `critical` belongs.
+    //
+    // The `SKIP_HARNESS_CLAIMS` sweep above asserts the same silence from the
+    // other direction (an exempted rule that fires must leave the list); this
+    // one says WHICH SITE it is silent on and why that is the right answer
+    // rather than a missing fixture.
+    for (const [path, ids] of issuesByPath) {
+      expect([...ids], path).not.toContain("http.server-error-transient");
+    }
+    expect([...siteFindings.keys()]).not.toContain("http.server-error-transient");
   });
 });

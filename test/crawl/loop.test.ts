@@ -1313,7 +1313,7 @@ describe("unsupported_encoding is not retried", () => {
  * switched it back on. A dangerous setting that carries itself forward without
  * anyone re-stating the intent is the silent fallback hard rule 7 forbids.
  */
-describe("allowPrivate is not persisted", () => {
+describe("the test-only config fields are not persisted", () => {
   it("is stripped from the config the crawls row stores", async () => {
     const summary = await crawl(config());
     const rows = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
@@ -1331,6 +1331,49 @@ describe("allowPrivate is not persisted", () => {
       perHostDelayMs: 0,
       maxConcurrency: 4,
     });
+  });
+
+  /**
+   * `recheckMinGapMs` is the second test-only field and it is stripped by the
+   * same function for a reason of its own (P17-T5).
+   *
+   * The floor under the gap between the two 5xx observations is the CLAIM THE
+   * EVIDENCE MAKES — "still broken a minute later" — and the knob exists only so
+   * a loop-driven test does not sit out that minute. A row that carried it would
+   * make the shortened claim DURABLE: every resume of this crawl, months later,
+   * in a process nobody is watching, would re-ask its server errors a fifth of a
+   * second after seeing them and report the answer as if a minute had passed.
+   * That is the silent fallback hard rule 7 forbids, one field over from the one
+   * the strip was written for.
+   *
+   * Asserted on the stored blob AND through `parseStoredConfig`, because the
+   * strip and the closed read-back field set are two independent walls and
+   * either one going missing is the same defect.
+   */
+  it("strips the test-only recheck gap from the stored config, and never reads it back", async () => {
+    const summary = await crawl(config({ recheckMinGapMs: 200 }));
+    const rows = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
+    const stored = rows[0]?.config as Record<string, unknown>;
+
+    // Gone entirely, not stored as 60000: the row should not carry the field at
+    // all, so nobody reading it can mistake it for a decision somebody took.
+    expect(stored).not.toHaveProperty("recheckMinGapMs");
+    expect(stored).not.toHaveProperty("allowPrivate");
+    // …and the strip took only the two test-only fields.
+    expect(stored).toMatchObject({
+      siteUrl: base,
+      maxPages: 100,
+      maxDepth: 10,
+      userAgent: "AriadneBot-test",
+      perHostDelayMs: 0,
+      maxConcurrency: 4,
+    });
+
+    // The second wall: a row that carried it anyway — written by an older
+    // process, or edited by hand — must not be the thing that shortens a
+    // resume's gap. The closed field set does not read it.
+    const revived = parseStoredConfig({ ...stored, recheckMinGapMs: 1 }, summary.crawlId);
+    expect(revived.recheckMinGapMs).toBeUndefined();
   });
 
   /**

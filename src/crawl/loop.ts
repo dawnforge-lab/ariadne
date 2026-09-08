@@ -107,11 +107,51 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * suite can crawl a 127.0.0.1 fixture server. Never wire this to an API
    * field, a CLI flag or an env var.
    *
-   * It is also the one field that is NOT persisted on the `crawls` row: a
+   * It is one of the two fields that are NOT persisted on the `crawls` row: a
    * resume must re-assert it in `ResumeOpts.config` rather than inherit it.
    * See storableConfig.
    */
   allowPrivate?: boolean;
+  /**
+   * TEST ONLY override of the recheck pass's `MIN_RECHECK_GAP_MS`, on
+   * `allowPrivate`'s precedent in every respect. Never wire this to an API
+   * field, a CLI flag or an env var.
+   *
+   * WHY IT EXISTS AT ALL. The 60 second floor between the two observations is
+   * the CLAIM THE EVIDENCE MAKES — "still broken a minute later" — and not a
+   * tuning knob, so production has no reason to move it and no way to. But it
+   * is also real wall time inside any test that drives `runCrawl` over a
+   * fixture carrying a 5xx: the pass's own test-only `minGapMs`
+   * (`RecheckPassOpts`) cannot reach a crawl the loop runs, so before this
+   * field three loop-driven suites each waited a real minute for a pass whose
+   * behaviour their assertions do not depend on the gap for
+   * (test/db/migration-0016.test.ts, test/crawl/fetch-resources.test.ts,
+   * test/fixtures/harness.test.ts). The alternative was raising three timeouts
+   * and paying three minutes on every CI run for nothing.
+   *
+   * WHAT KEEPS IT HONEST, in the order the risks run:
+   *
+   *  - **It is not persisted.** `storableConfig` strips it beside
+   *    `allowPrivate`, and `parseStoredConfig`'s closed field set does not read
+   *    it back, so no resume months later inherits a one-second gap from a row
+   *    nobody reads (hard rule 7).
+   *  - **It is not accepted over the API at any value.** `StartCrawlInput`'s
+   *    field allowlist is closed (`parseStartCrawlInput`, src/api/service.ts),
+   *    so a body carrying this key is refused by both transports; it wants the
+   *    named refusal `allowPrivate` gets, so the message says WHY rather than
+   *    "unknown field". A client that could shrink the gap could make every
+   *    transient 5xx clear.
+   *  - **The default is the real number, and it is asserted as a number.**
+   *    Absent means `MIN_RECHECK_GAP_MS` — the spread at INSERTION 3c passes
+   *    nothing when nobody said anything. Since every loop-driven test now sets
+   *    this, the 60 seconds is pinned by reading the exported constant
+   *    (test/crawl/recheck.test.ts, "keeps the real floor at 60 seconds and the
+   *    real cap at 500 rows") rather than by a test that waits a minute to
+   *    observe a number. What the loop-driven tests still prove is that the pass
+   *    honours THE GAP IT WAS GIVEN: test/db/migration-0016.test.ts reads it
+   *    back off the two timestamps.
+   */
+  recheckMinGapMs?: number;
   /**
    * Walk the host's other spellings before crawling (see host-probe). Defaults
    * to on: it costs four chains paced by `perHostDelayMs`, and it is the only
@@ -559,8 +599,9 @@ export async function resumeCrawl(
 }
 
 /**
- * The config as `crawls.config_jsonb` should hold it: everything except
- * `allowPrivate` (build-plan §7, "before the first real-site crawl").
+ * The config as `crawls.config_jsonb` should hold it: everything except the two
+ * TEST-ONLY fields, `allowPrivate` (build-plan §7, "before the first real-site
+ * crawl") and `recheckMinGapMs` (P17).
  *
  * `allowPrivate` is a test-only escape hatch that admits loopback and RFC1918
  * targets. Persisting it would make it *durable* — every resume of that crawl
@@ -587,9 +628,19 @@ export async function resumeCrawl(
  * returns. The second-writer amendment this docblock carried through Phase 8 —
  * and the "patch keys individually" rule it imposed — is retired; the history
  * is in docs/gates/phase-8.md §12 and §15.
+ *
+ * `recheckMinGapMs` joins the strip by the same argument, one field over. It
+ * shortens the floor under the gap between the two 5xx observations so a
+ * loop-driven test does not wait a real minute, and a row that carried it would
+ * make that durable: every resume of that crawl would re-verify its server
+ * errors a second after seeing them and report the answer as if a minute had
+ * passed. Persisting a shortened gap is persisting a WEAKER CLAIM about the
+ * evidence, which is worse than persisting a stale number.
  */
-export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
-  const { allowPrivate: _allowPrivate, ...rest } = config;
+export function storableConfig(
+  config: CrawlConfig,
+): Omit<CrawlConfig, "allowPrivate" | "recheckMinGapMs"> {
+  const { allowPrivate: _allowPrivate, recheckMinGapMs: _recheckMinGapMs, ...rest } = config;
   return rest;
 }
 
@@ -605,6 +656,10 @@ export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPri
  * turns it on. Off is the value the escape hatch has unless a caller says
  * otherwise in this call, which is the whole point of the strip; leaving it
  * off is the documented behaviour, not a guess covering a failure.
+ *
+ * `recheckMinGapMs` is absent from the closed set below for the same reason and
+ * with the same consequence: a resume re-verifies this crawl's server errors at
+ * `MIN_RECHECK_GAP_MS`, whatever a test handed the first run.
  *
  * Exported for the second reader of that column: the API's render endpoint
  * builds its `RenderPassConfig` from the crawl's own stored config, so the
@@ -799,6 +854,20 @@ export function validateCrawlConfig(config: CrawlConfig): void {
         `CrawlConfig.${field} must be an integer ≥ 1, got ${String(value)}`,
       );
     }
+  }
+  // The test-only recheck gap, checked here for `findingCap`'s reason: the pass
+  // that spends it runs after the last page, so a nonsense value would be found
+  // by a `RangeError` an hour into a crawl. It is range-checked and not
+  // clamped — a fractional or negative gap is a caller's mistake, not a number
+  // to quietly round (hard rule 7).
+  if (
+    config.recheckMinGapMs !== undefined &&
+    (!Number.isInteger(config.recheckMinGapMs) || config.recheckMinGapMs < 0)
+  ) {
+    throw new RangeError(
+      `CrawlConfig.recheckMinGapMs must be an integer ≥ 0, got ` +
+        `${String(config.recheckMinGapMs)}`,
+    );
   }
   // The render budget, checked by the module that will spend it. A nonsense
   // budget stops the crawl at line one rather than after the last page, where
@@ -1420,6 +1489,14 @@ async function runToCompletion(
         robots: discovery.robots,
         timeoutMs: FETCH_TIMEOUT_MS,
         allowPrivate,
+        // TEST ONLY, and spread rather than passed so ABSENT stays absent: the
+        // pass's own default is `MIN_RECHECK_GAP_MS`, and a `minGapMs:
+        // undefined` must reach it as "nobody said" rather than as a value. See
+        // the field's docblock on `CrawlConfig` — it is stripped from the stored
+        // row exactly as `allowPrivate` is, and refused over the API.
+        ...(config.recheckMinGapMs === undefined
+          ? {}
+          : { minGapMs: config.recheckMinGapMs }),
         signal,
       });
 

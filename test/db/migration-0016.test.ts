@@ -25,13 +25,16 @@
  *  5. the cascade, which every column on these two tables depends on.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * THE PASS HALF (§5.4 of the design, P17-T2) is what makes this file slow: the
- * loop's INSERTION 3c runs at the real `MIN_RECHECK_GAP_MS`, so this crawl —
- * which is otherwise a second's work — waits out the minute the evidence
- * claims. That is deliberate and it is the point of driving the WHOLE LOOP
- * here: the pass's test-only `minGapMs` override cannot reach it, so what this
- * file proves is the wiring at production numbers. The pass's own nine cases,
- * which do use the override, are `test/crawl/recheck.test.ts`.
+ * THE PASS HALF (§5.4 of the design, P17-T2) drives the WHOLE LOOP, which is
+ * the point: the claim is that INSERTION 3c is WIRED — that a real crawl of a
+ * real server asks a 5xx page exactly one more time, asks a healthy page not at
+ * all, writes the second observation beside the first without touching it, and
+ * stamps the crawl row. None of that is a claim about how long the loop waits
+ * first, so the crawl below hands the loop `recheckMinGapMs: 200` (P17-T5) and
+ * this file runs in seconds rather than sitting out a real minute. The 60
+ * seconds itself is `MIN_RECHECK_GAP_MS`, asserted as the constant it is in
+ * `test/crawl/recheck.test.ts`, which is also where the pass's own nine cases
+ * live.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { createServer, type Server } from "node:http";
@@ -49,6 +52,16 @@ function databaseUrl(): string {
   if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
   return url;
 }
+
+/**
+ * The gap this file's crawl runs at, standing in for the production
+ * `MIN_RECHECK_GAP_MS` of 60 seconds (P17-T5, `CrawlConfig.recheckMinGapMs`).
+ *
+ * Big enough to be observable — the gap assertion below reads it back off the
+ * two timestamps, so a pass that did not wait at all would fail — and small
+ * enough that proving the WIRING does not cost a minute. See the header.
+ */
+const RECHECK_MIN_GAP_MS = 200;
 
 function html(body: string): string {
   return `<!doctype html><html><head><title>t</title></head><body>${body}</body></html>`;
@@ -131,6 +144,15 @@ beforeAll(async () => {
     maxConcurrency: 2,
     // The sanctioned test-only use: the fixture site is on 127.0.0.1.
     allowPrivate: true,
+    // The second sanctioned test-only field (P17-T5): the floor under the gap
+    // between the two observations, dropped from a real minute to 200ms. What
+    // this file proves is the WIRING — that a real crawl asks a 5xx page exactly
+    // one more time, writes the second observation beside the first and stamps
+    // the crawl — and none of those claims is a claim about 60 seconds. The
+    // number itself is asserted where it lives, as a constant, in
+    // test/crawl/recheck.test.ts. Stripped from the stored row by
+    // `storableConfig`, so no resume inherits it (test/crawl/loop.test.ts).
+    recheckMinGapMs: RECHECK_MIN_GAP_MS,
   };
   const summary = await runCrawl(db, config);
   crawlId = summary.crawlId;
@@ -143,9 +165,7 @@ beforeAll(async () => {
   startedAt = row?.startedAt ?? null;
   finishedAt = row?.finishedAt ?? null;
   passSummary = summary.recheck;
-  // A minute of it is `MIN_RECHECK_GAP_MS`, paid once across the oldest-first
-  // walk however many 5xx rows there are. See the header.
-}, 180_000);
+}, 60_000);
 
 afterAll(async () => {
   for (const id of created) await db.delete(crawls).where(eq(crawls.id, id));
@@ -246,11 +266,16 @@ describe("0016 — the two observations", () => {
     expect(broken?.recheckStatusCode).toBe(500);
     expect(broken?.recheckAt).not.toBeNull();
 
-    // The second observation was taken AFTER the first, by at least the gap the
-    // pass promises — the number the finding's `gapSeconds` is computed from.
+    // The second observation was taken AFTER the first, by at least the gap
+    // THIS CRAWL was given — the quantity the finding's `gapSeconds` is computed
+    // from, and the one the pass is obliged to honour whatever the floor is set
+    // to. The floor itself is 60 seconds in production and is asserted as the
+    // exported constant in test/crawl/recheck.test.ts; asserting it here would
+    // mean adding a real minute to this file to observe a number a read gives
+    // for free (P17-T5, `CrawlConfig.recheckMinGapMs`).
     for (const row of [flaky, broken]) {
       expect(row?.recheckAt!.getTime()).toBeGreaterThanOrEqual(
-        row!.fetchedAt!.getTime() + 60_000,
+        row!.fetchedAt!.getTime() + RECHECK_MIN_GAP_MS,
       );
     }
 
