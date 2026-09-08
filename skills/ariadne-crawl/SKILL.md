@@ -216,7 +216,7 @@ target is not something this skill can crawl.
 
 ```
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
- renderPassCount, rulesetVersion, legacyHosts, sitemapUrls, findingCap,
+ renderPassCount, rulesetVersion, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
  rulesRunAt, findingsCount, pagesScanned, fetchResources,
@@ -230,6 +230,17 @@ What the fields mean when you are waiting:
 
 - **`status`** — `queued`, `running`, `finished`, `cancelled`, `failed`. The last
   three are terminal.
+- **`failureReason`** — why a `failed` crawl failed: one sentence, and `null` on
+  every crawl that is not `failed`. **Read it before you re-run anything.** A
+  crawl refused before it began carries the classified sentence — `robots.txt
+  unreachable after 3 attempts (HTTP 502): complete disallow` is a host that
+  could not serve its own robots.txt, which RFC 9309 makes a complete disallow,
+  and re-running it changes nothing until that host answers. A crawl that threw
+  mid-run carries the first line of what threw. A crawl somebody retired with
+  `crawl_mark_failed` says so in those words. **`null` on a `failed` crawl is not
+  "no reason"** — it is a row this engine closed before the field existed. It is
+  a diagnostic sentence and not client copy: quote it in a handover note, not in
+  a report.
 - **`frontier.pending` + `frontier.leased`** — URLs still to fetch and URLs in
   flight. This is the progress bar: `pending` falling while `done` rises is a healthy
   crawl, however slow.

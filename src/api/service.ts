@@ -462,6 +462,39 @@ export interface CrawlListItem {
 export interface CrawlDetail extends CrawlListItem {
   rulesetVersion: string;
   pagesTotal: number | null;
+  /**
+   * WHY THIS CRAWL IS `failed` — one sentence, or null.
+   *
+   * **Null unless `status` is `failed`.** The column's contract is an
+   * implication (`crawls.failure_reason`, migration 0017): a reason implies a
+   * failure, and a failure does NOT imply a reason. A `failed` crawl with null
+   * here is a row closed before 0017 existed — "the engine recorded no reason",
+   * which is a different sentence from "it failed for no reason" and must be
+   * rendered as such. Every crawl closed since carries one.
+   *
+   * WHY IT IS ON THE WIRE. Without it a `failed` status is a dead end: the
+   * Phase 17 gate pointed a crawl at a host whose robots.txt answered 502, and
+   * fourteen seconds later the surface said `failed` and nothing else — the
+   * sentence explaining it existed only in the engine's process log, which is
+   * exactly the place a caller driving this engine over a network cannot read
+   * (docs/gates/phase-17.md §5, clause 5).
+   *
+   * THREE WRITERS, three shapes of sentence, and a reader can tell them apart:
+   * the crawl loop's own classified sentence when the crawl was REFUSED before
+   * it began (`robots.txt unreachable after 3 attempts (HTTP 502): complete
+   * disallow`); the first line of whatever threw inside the run; and the fixed
+   * `marked failed by an operator: no worker held it` when a caller retired an
+   * orphan with `crawl_mark_failed` (`MARKED_FAILED_REASON`).
+   *
+   * **It is a DIAGNOSTIC STRING, not client copy** — `pages_query`'s
+   * `renderError` precedent, and the same caveat: first line only, never a
+   * stack, but engine-originated text rather than a sentence written for a
+   * tenant to read (docs/talos-surface.md §9).
+   *
+   * NOT ON `CrawlListItem`: a listing row says a crawl failed, and the crawl is
+   * where the reason lives.
+   */
+  failureReason: string | null;
   frontier: FrontierCounts;
   /**
    * This process's queue position, or null.
@@ -1532,6 +1565,18 @@ function severityRank(severity: string): number {
  */
 const SERVER_ERROR_CLASS: FetchClass = "server_error";
 
+/**
+ * What `markCrawlFailed` writes into `crawls.failure_reason` (migration 0017).
+ *
+ * A CONSTANT, and exported, because it is the one failure sentence on this
+ * surface that nothing threw: an operator retired a row whose worker was gone,
+ * and the sentence has to say that rather than imply a crawl that broke. A test
+ * asserting it by re-typing the prose would go quietly green the day somebody
+ * reworded it (the `RESOURCE_CAP_REASON` discipline, one column along).
+ */
+export const MARKED_FAILED_REASON =
+  "marked failed by an operator: no worker held it";
+
 const CRAWL_HOSTNAME = sql`substring(lower(${crawls.siteUrl}) from '^[a-z][a-z0-9+.-]*://(?:[^@/]*@)?(\\[[^\\]]*\\]|[^:/?#]*)')`;
 
 /**
@@ -1967,6 +2012,12 @@ export class ApiService {
       pagesTotal: row.pagesTotal,
       renderPassCount: row.renderPassCount,
       rulesetVersion: row.rulesetVersion,
+      // Straight off the column, null included. The null is not defaulted to a
+      // sentence here on either side of the contract: on a `finished` crawl it
+      // is the correct answer, and on a `failed` one it means the row predates
+      // migration 0017 — which is a fact about our own history and is said in
+      // those words by the surfaces that render it, never invented here.
+      failureReason: row.failureReason,
       frontier: counts,
       queuePosition: row.status === "queued" ? this.queuePosition(crawlId) : null,
       liveLeases,
@@ -2268,7 +2319,17 @@ export class ApiService {
 
     await this.db
       .update(crawls)
-      .set({ status: "failed", finishedAt: new Date() })
+      // THE REASON IS A FIXED SENTENCE, because this close has no error to
+      // quote: nothing threw, and the three guards above have just established
+      // the only fact there is — the row is `queued` or `running`, this server
+      // is not holding it, and no unexpired lease is on it. That is what the
+      // sentence says, and it is what distinguishes this row on the wire from
+      // one the crawl loop closed with a cause of its own (migration 0017).
+      .set({
+        status: "failed",
+        finishedAt: new Date(),
+        failureReason: MARKED_FAILED_REASON,
+      })
       // Conditioned on the status this call READ, so a crawl that started (or
       // was closed by its own worker) between the guard and here is left alone
       // rather than overwritten. `getCrawl` below reports what actually stands.
@@ -3870,10 +3931,19 @@ export class ApiService {
       // will not take — would leave the row `queued`, which is a lie: nobody
       // will ever run it. Closing it is transparency, not recovery; the error
       // is logged either way and never swallowed into a clean-looking row.
+      // AND THE ROW SAYS WHY, not only this process's log (migration 0017).
+      // The `where` is what keeps the two writers from arguing: a row the loop
+      // already closed `failed` — with the loop's own, more specific reason —
+      // is no longer `queued`, so this update passes over it and leaves that
+      // sentence alone. Only the throws that never reached the loop land here.
       this.log(`api: crawl ${entry.crawlId} threw — ${messageOf(error)}`);
       await this.db
         .update(crawls)
-        .set({ status: "failed", finishedAt: new Date() })
+        .set({
+          status: "failed",
+          finishedAt: new Date(),
+          failureReason: firstLine(messageOf(error)),
+        })
         .where(and(eq(crawls.id, entry.crawlId), eq(crawls.status, "queued")));
     }
   }
@@ -5613,6 +5683,25 @@ function stripUndefined<T extends object>(value: T): Partial<T> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The first line of a message, for `crawls.failure_reason` (migration 0017).
+ *
+ * The crawl loop's `failureReasonOf` on this side of the seam, and the
+ * `pages.render_error` discipline both of them follow: what is served is a
+ * SENTENCE, never a stack. This module logs `stackOf(error)` where a stack is
+ * wanted, and that is where it stays.
+ */
+function firstLine(message: string): string {
+  const line = (message.split("\n")[0] ?? message).trim();
+  if (line === "") {
+    throw new Error(
+      "firstLine: a crawl failed with an empty message — there is nothing to " +
+        "record in crawls.failure_reason",
+    );
+  }
+  return line;
 }
 
 /**

@@ -1,0 +1,1 @@
+ALTER TABLE "crawls" ADD COLUMN "failure_reason" text;

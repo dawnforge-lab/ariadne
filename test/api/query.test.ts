@@ -27,6 +27,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import {
   crawls, issues, links, metrics, pageResources, pages, resources,
 } from "../../src/db/schema.js";
+import { MARKED_FAILED_REASON } from "../../src/api/service.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { CSV_VIEWS, CSV_VIEW_DEFS, csvRecord } from "../../src/api/csv.js";
 import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
@@ -3386,5 +3387,133 @@ describe("the query surface is behind the same token as the rest", () => {
     ]) {
       expect((await call(path, { token: null })).status).toBe(401);
     }
+  });
+});
+
+/**
+ * `failureReason` — why a `failed` crawl failed, on the wire (migration 0017).
+ *
+ * The Phase 17 gate pointed a crawl at a host whose robots.txt answered 502 and
+ * watched it close `failed` in 14 seconds with nothing on `GET /crawls/:id` to
+ * say why (docs/gates/phase-17.md §5, clause 5). The sentence is written by the
+ * crawl loop and by two paths in this service, and `test/db/migration-0017.test.ts`
+ * drives real crawls through the first; what is pinned HERE is the SERIALISATION
+ * — that the column reaches the detail, that a null stays a null, that a listing
+ * row does not carry it, and that the one reason this service composes itself is
+ * the constant it claims to be.
+ *
+ * The rows below are seeded for the reason every row in this file is: the shape
+ * of the answer is the claim, and a real crawl would supply it less predictably
+ * and far more slowly.
+ */
+describe("GET /crawls/:id — why a failed crawl failed", () => {
+  /** The loop's own sentence, verbatim, as migration-0017's fixture produces it. */
+  const ROBOTS_REASON = "robots.txt unreachable after 3 attempts (HTTP 502): complete disallow";
+  let failedId = "";
+  let pre0017Id = "";
+  let orphanId = "";
+
+  beforeAll(async () => {
+    failedId = `crawl_q_failed_${Date.now()}`;
+    await db.insert(crawls).values({
+      id: failedId,
+      siteUrl: `${SITE}/`,
+      config: { siteUrl: `${SITE}/` },
+      rulesetVersion: "0.0.0-test",
+      status: "failed",
+      failureReason: ROBOTS_REASON,
+    });
+
+    // A crawl this engine closed BEFORE the column existed. It is seeded rather
+    // than described because it is the only row shape the contract's converse
+    // does not cover, and every reader of this field has to handle it.
+    pre0017Id = `crawl_q_pre0017_${Date.now()}`;
+    await db.insert(crawls).values({
+      id: pre0017Id,
+      siteUrl: `${SITE}/`,
+      config: { siteUrl: `${SITE}/` },
+      rulesetVersion: "0.0.0-test",
+      status: "failed",
+    });
+
+    // The orphan `markCrawlFailed` exists for: accepted by a process that is
+    // gone, held by nobody here, no lease on it.
+    orphanId = `crawl_q_orphan_${Date.now()}`;
+    await db.insert(crawls).values({
+      id: orphanId,
+      siteUrl: `${SITE}/`,
+      config: { siteUrl: `${SITE}/` },
+      rulesetVersion: "0.0.0-test",
+      status: "queued",
+    });
+  });
+
+  afterAll(async () => {
+    for (const id of [failedId, pre0017Id, orphanId]) {
+      await db.delete(crawls).where(eq(crawls.id, id));
+    }
+  });
+
+  it("carries null on a crawl that finished", async () => {
+    const res = await call(`/crawls/${crawlA}`);
+    expect(res.status).toBe(200);
+    // PRESENT AND NULL, not absent: a consumer reads the key on every crawl and
+    // a missing one would be indistinguishable from an old server.
+    expect(res.body).toHaveProperty("failureReason");
+    expect(res.body["failureReason"]).toBeNull();
+    expect(res.body["status"]).toBe("finished");
+  });
+
+  it("carries the crawl loop's own sentence on a crawl the robots path refused", async () => {
+    const res = await call(`/crawls/${failedId}`);
+    expect(res.status).toBe(200);
+    expect(res.body["status"]).toBe("failed");
+    // Whole and unedited: this is the sentence the loop composed out of what
+    // the host did, and the surface neither rewords it nor shortens it.
+    expect(res.body["failureReason"]).toBe(ROBOTS_REASON);
+    // A sentence, not a trace — the served-field obligation (§9).
+    expect(String(res.body["failureReason"])).not.toContain("\n");
+  });
+
+  it("tells a pre-0017 failed crawl apart from a crawl that did not fail", async () => {
+    // Same null, two different sentences, and the pair is the whole reason the
+    // column is nullable rather than `not null default ''`.
+    const old = await call(`/crawls/${pre0017Id}`);
+    expect(old.body["status"]).toBe("failed");
+    expect(old.body["failureReason"]).toBeNull();
+    const fine = await call(`/crawls/${crawlA}`);
+    expect(fine.body["status"]).toBe("finished");
+    expect(fine.body["failureReason"]).toBeNull();
+    // Nothing on this surface pretends to resolve it: `status` is the
+    // discriminator, and the reading belongs to whoever renders the pair.
+    expect(old.body["failureReason"]).toBe(fine.body["failureReason"]);
+  });
+
+  it("says an operator retired it, in the constant's own words", async () => {
+    const res = await fetch(`${base}/crawls/${orphanId}/fail`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body["status"]).toBe("failed");
+    // IMPORTED, not retyped: a hand-written copy of the sentence here would
+    // keep passing the day somebody reworded the constant.
+    expect(body["failureReason"]).toBe(MARKED_FAILED_REASON);
+    // And it reads as what it is — nothing threw; a row was retired.
+    expect(String(body["failureReason"])).toContain("operator");
+    // The detail read back agrees with the answer the command gave.
+    expect((await call(`/crawls/${orphanId}`)).body["failureReason"]).toBe(MARKED_FAILED_REASON);
+  });
+
+  it("keeps the reason off the listing, where a row is not a report", async () => {
+    const res = await call(`/crawls?siteUrl=${encodeURIComponent(`${SITE}/`)}`);
+    expect(res.status).toBe(200);
+    const rows = res.body["items"] as Record<string, unknown>[];
+    const listed = rows.find((row) => row["crawlId"] === failedId);
+    expect(listed, "the failed crawl is not in its own site's listing").toBeDefined();
+    // The listing says a crawl failed; the crawl is where the reason lives.
+    expect(listed).not.toHaveProperty("failureReason");
+    expect(listed?.["status"]).toBe("failed");
   });
 });

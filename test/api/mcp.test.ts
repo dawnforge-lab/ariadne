@@ -47,6 +47,7 @@ import { CSV_VIEWS, EXPORT_FORMATS } from "../../src/api/csv.js";
 import {
   COMPARE_SETS,
   EXPORT_DATASETS,
+  MARKED_FAILED_REASON,
   MIN_PER_HOST_DELAY_MS,
   START_CRAWL_FIELDS,
 } from "../../src/api/service.js";
@@ -2831,5 +2832,69 @@ describe("boot configuration", () => {
     });
     expect(onlyRender.renderDir).toBe("/srv/ariadne/renders");
     expect(onlyRender.exportDir).toBeUndefined();
+  });
+});
+
+/**
+ * `failureReason` on the agent transport (migration 0017).
+ *
+ * `test/api/query.test.ts` pins the same field over HTTP; this is the mirror,
+ * because the two transports serve ONE service and the pair is what says so.
+ * What it adds beyond the mirror is the tool DESCRIPTION: an agent that cannot
+ * see a field named in the tool it polls will not read it, so the field and the
+ * sentence explaining it are asserted together — the `recheck` block's
+ * discipline, one field along.
+ */
+describe("crawl_status — why a failed crawl failed", () => {
+  /** The crawl loop's own sentence, as test/db/migration-0017.test.ts produces it. */
+  const ROBOTS_REASON = "robots.txt unreachable after 3 attempts (HTTP 502): complete disallow";
+
+  it("carries the loop's sentence on a failed crawl and null on one that finished", async () => {
+    const failedId = await seedCrawl({ id: `crawl_mcp_failed_${Date.now()}`, status: "failed" });
+    await db
+      .update(crawls)
+      .set({ failureReason: ROBOTS_REASON })
+      .where(eq(crawls.id, failedId));
+
+    const failed = await ok("crawl_status", { crawlId: failedId });
+    expect(failed["status"]).toBe("failed");
+    expect(failed["failureReason"]).toBe(ROBOTS_REASON);
+
+    // The other side of the contract, off a crawl this suite really ran: a
+    // crawl that finished has no reason, and the key is present and null rather
+    // than absent.
+    const live = await ok("crawl_status", { crawlId: liveCrawlId });
+    expect(live["status"]).toBe("finished");
+    expect(live).toHaveProperty("failureReason");
+    expect(live["failureReason"]).toBeNull();
+  });
+
+  it("says an operator retired an orphan, and crawl_mark_failed's answer already says it", async () => {
+    // The queue's orphan: `queued`, held by no process here, no lease on it —
+    // the only state crawl_mark_failed accepts.
+    const orphanId = await seedCrawl({ id: `crawl_mcp_orphan_${Date.now()}`, status: "queued" });
+    const retired = await ok("crawl_mark_failed", { crawlId: orphanId });
+    expect(retired["status"]).toBe("failed");
+    // IMPORTED from the service rather than retyped: a copy of the sentence
+    // here would keep passing the day somebody reworded the constant.
+    expect(retired["failureReason"]).toBe(MARKED_FAILED_REASON);
+    // The command's answer and the poll agree — it is the same read.
+    const polled = await ok("crawl_status", { crawlId: orphanId });
+    expect(polled["failureReason"]).toBe(MARKED_FAILED_REASON);
+  });
+
+  it("names the field in the tool description, with what its null means", async () => {
+    const listed = await client.listTools();
+    const text = listed.tools.find((t) => t.name === "crawl_status")?.description ?? "";
+    expect(text, "crawl_status has no description").not.toBe("");
+    expect(text, "crawl_status does not name failureReason").toContain("failureReason");
+    // The two readings a bare field name would leave an agent to guess: that
+    // the null is not "no reason", and that the sentence is a diagnostic rather
+    // than something to paste into a client report.
+    expect(text).toContain("NULL ON A FAILED CRAWL IS NOT");
+    expect(text).toContain("crawl_mark_failed");
+    // The robots case by name, because it is the one an agent will hit and the
+    // one where "re-run it" is the wrong move.
+    expect(text).toContain("complete disallow");
   });
 });

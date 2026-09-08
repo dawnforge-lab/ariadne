@@ -258,9 +258,21 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
-        "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
+        "with, failureReason, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
         "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount, " +
         "pagesScanned, fetchResources, resources and recheck.\n\n" +
+        "WHY A FAILED CRAWL FAILED: failureReason, one sentence, and null on " +
+        "every crawl that is not 'failed'. It is the difference between 'failed' " +
+        "as a dead end and 'failed' as something you can act on — a crawl refused " +
+        "before it began carries the classified sentence ('robots.txt unreachable " +
+        "after 3 attempts (HTTP 502): complete disallow', which is a host that " +
+        "could not serve its own robots.txt and therefore a complete disallow, " +
+        "not a defect to retry harder against); a crawl that threw mid-run " +
+        "carries the first line of what threw; a crawl somebody retired with " +
+        "crawl_mark_failed says so in those words. NULL ON A FAILED CRAWL IS NOT " +
+        "'no reason': it is a row this engine closed before the column existed. " +
+        "Never a stack — it is a diagnostic sentence, not copy to hand a client " +
+        "unedited.\n\n" +
         "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
         "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
         "complete pass is on record — never judged, being judged right now, or " +
