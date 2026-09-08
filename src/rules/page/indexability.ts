@@ -52,7 +52,7 @@ export const indexabilityRules: PageRule[] = [
   // Both sources declare something and only one of them says noindex. Engines
   // resolve conflicting robots directives by taking the most restrictive, so
   // the page is very likely noindex whichever source was meant to win.
-  pageRule("indexability.meta-header-conflict", ["CHECK-04"], CATEGORY, "warning", (p, self) => {
+  pageRule("indexability.meta-header-conflict", ["CHECK-04"], CATEGORY, "critical", (p, self) => {
     if (!isAuditable(p) || !present(p.robotsMeta) || !present(p.xRobotsTag)) return [];
     return saysNoindex(p.robotsMeta) !== saysNoindex(p.xRobotsTag)
       ? [finding(self, p, { robotsMeta: p.robotsMeta, xRobotsTag: p.xRobotsTag })]

@@ -48,10 +48,10 @@ describe("canonicalRules metadata", () => {
     expect(Object.fromEntries(canonicalRules.map((r) => [r.id, r.severity]))).toEqual({
       "canonical.missing": "warning",
       "canonical.points-elsewhere": "info",
-      "canonical.multiple": "warning",
-      "canonical.html-header-conflict": "warning",
-      "canonical.cross-domain": "info",
-      "directive.canonical-noindex-conflict": "warning",
+      "canonical.multiple": "critical",
+      "canonical.html-header-conflict": "critical",
+      "canonical.cross-domain": "warning",
+      "directive.canonical-noindex-conflict": "critical",
     });
   });
 
@@ -248,7 +248,7 @@ describe("canonical.multiple", () => {
   it("boundary: 2 fires, 1 and 0 do not", () => {
     const f = rule("canonical.multiple").run(mkPage({ canonicalCount: 2 }));
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("canonical.multiple").severity);
     expect(f[0]!.evidence).toMatchObject({
       canonicalCount: 2,
       kept: "https://example.com/page",
@@ -274,7 +274,7 @@ describe("canonical.html-header-conflict", () => {
       }),
     );
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("canonical.html-header-conflict").severity);
     expect(f[0]!.evidence).toMatchObject({
       htmlCanonical: "https://example.com/html-one",
       headerCanonical: "https://example.com/header-one",
@@ -347,7 +347,7 @@ describe("canonical.cross-domain", () => {
       mkPage({ canonicalHtml: "https://other.example/thing" }),
     );
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.severity).toBe(rule("canonical.cross-domain").severity);
     expect(f[0]!.evidence).toMatchObject({
       canonicalHost: "other.example",
       pageHost: "example.com",
@@ -398,7 +398,7 @@ describe("directive.canonical-noindex-conflict", () => {
       mkPage({ canonicalHtml: "https://example.com/other", robotsMeta: "noindex, follow" }),
     );
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("directive.canonical-noindex-conflict").severity);
     expect(f[0]!.evidence).toMatchObject({
       canonical: "https://example.com/other",
       robotsMeta: "noindex, follow",

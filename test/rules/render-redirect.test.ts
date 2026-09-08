@@ -38,7 +38,7 @@ describe("renderRedirectRules metadata", () => {
     // `redirect.loop` and the `redirect.volume` metric: this is the shape of it
     // no HTTP-level rule can see.
     expect(r.checkIds).toEqual(["CHECK-10"]);
-    expect(r.severity).toBe("warning");
+    expect(r.severity).toBe("critical");
     expect(r.category).toBe("redirects");
     expect(r.title.length).toBeGreaterThan(5);
     expect(r.explanation.length).toBeGreaterThan(40);
@@ -193,7 +193,7 @@ describe("redirect.js against the database", () => {
     expect(findings).toHaveLength(2);
 
     const offSite = findings.find((f) => f.pageId === ids.get("/off-site-evidence"))!;
-    expect(offSite.severity).toBe("warning");
+    expect(offSite.severity).toBe(rule("redirect.js").severity);
     expect(offSite.dedupeKey).toBe(url("/off-site-evidence"));
     expect(offSite.evidence).toEqual({
       fromUrl: url("/off-site-evidence"),

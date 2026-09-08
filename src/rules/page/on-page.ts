@@ -42,7 +42,7 @@ function firstLevelSkip(order: number[]): number {
 }
 
 export const onPageRules: PageRule[] = [
-  pageRule("title.missing", ["CHECK-35"], CATEGORY, "warning", (p, self) =>
+  pageRule("title.missing", ["CHECK-35"], CATEGORY, "critical", (p, self) =>
     isAuditable(p) && !present(p.title) ? [finding(self, p, { title: p.title })] : [],
   ),
 
@@ -176,7 +176,7 @@ export const onPageRules: PageRule[] = [
     "the page the corrected thin-content floor cannot judge",
   ),
 
-  pageRule("content.placeholder", ["CHECK-40"], CONTENT, "warning", (p, self) =>
+  pageRule("content.placeholder", ["CHECK-40"], CONTENT, "critical", (p, self) =>
     isAuditable(p) && p.hasLoremIpsum ? [finding(self, p, { wordCount: p.wordCount })] : [],
   ),
 ];

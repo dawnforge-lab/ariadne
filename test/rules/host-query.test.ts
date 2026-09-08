@@ -96,9 +96,9 @@ describe("hostRules metadata", () => {
     expect(
       Object.fromEntries(hostRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
-      "host.http-serves-200": [["CHECK-14"], "warning", "host"],
-      "host.duplicate-host-200": [["CHECK-15"], "warning", "host"],
-      "host.legacy-host-reachable": [["CHECK-15"], "info", "host"],
+      "host.http-serves-200": [["CHECK-14"], "critical", "host"],
+      "host.duplicate-host-200": [["CHECK-15"], "critical", "host"],
+      "host.legacy-host-reachable": [["CHECK-15"], "warning", "host"],
       // The skip covers both checks, because both are unanswerable without the
       // probe.
       "host.probe-skipped": [["CHECK-14", "CHECK-15"], "info", "host"],
@@ -170,7 +170,7 @@ describe("the host rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
-        severity: "warning",
+        severity: rule(ID).severity,
         pageId: null,
         pageUrl: APEX_HTTP,
         dedupeKey: APEX_HTTP,
@@ -225,7 +225,7 @@ describe("the host rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
-        severity: "warning",
+        severity: rule(ID).severity,
         pageId: null,
         pageUrl: null,
         dedupeKey: "www-apex",
@@ -291,7 +291,7 @@ describe("the host rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
-        severity: "info",
+        severity: rule(ID).severity,
         pageId: null,
         pageUrl: LEGACY_HTTPS,
         dedupeKey: LEGACY_HTTPS,

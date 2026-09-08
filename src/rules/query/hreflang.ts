@@ -36,10 +36,10 @@ export const HREFLANG_PAGE_BATCH = 200;
 /** URLs per `= any(...)` lookup when the x-default sets are attributed. */
 const MEMBER_LOOKUP_BATCH = 500;
 
-const INVALID_CODE: RuleIdentity = { id: "hreflang.invalid-code", severity: "warning" };
+const INVALID_CODE: RuleIdentity = { id: "hreflang.invalid-code", severity: "critical" };
 const X_DEFAULT: RuleIdentity = { id: "hreflang.missing-x-default", severity: "info" };
-const RETURN_LINK: RuleIdentity = { id: "hreflang.missing-return-link", severity: "warning" };
-const NON_INDEXABLE: RuleIdentity = { id: "hreflang.non-indexable-target", severity: "warning" };
+const RETURN_LINK: RuleIdentity = { id: "hreflang.missing-return-link", severity: "critical" };
+const NON_INDEXABLE: RuleIdentity = { id: "hreflang.non-indexable-target", severity: "critical" };
 
 /**
  * The comparison key for an hreflang target.

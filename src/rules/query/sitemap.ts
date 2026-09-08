@@ -75,10 +75,10 @@ const CATEGORY = "sitemap";
 export const MAX_FAILURES_LISTED = 50;
 
 const MISSING: RuleIdentity = { id: "sitemap.missing", severity: "warning" };
-const INVALID: RuleIdentity = { id: "sitemap.invalid", severity: "warning" };
-const NON_200: RuleIdentity = { id: "sitemap.non-200", severity: "warning" };
+const INVALID: RuleIdentity = { id: "sitemap.invalid", severity: "critical" };
+const NON_200: RuleIdentity = { id: "sitemap.non-200", severity: "critical" };
 const REDIRECTED: RuleIdentity = { id: "sitemap.redirected", severity: "warning" };
-const NON_INDEXABLE: RuleIdentity = { id: "sitemap.non-indexable", severity: "warning" };
+const NON_INDEXABLE: RuleIdentity = { id: "sitemap.non-indexable", severity: "critical" };
 const UNCRAWLED: RuleIdentity = { id: "sitemap.uncrawled", severity: "info" };
 const NOT_IN_SITEMAP: RuleIdentity = { id: "pages.not-in-sitemap", severity: "info" };
 

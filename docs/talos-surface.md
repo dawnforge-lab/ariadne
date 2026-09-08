@@ -1,8 +1,17 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 14 (ruleset 0.11.0, migrations 0000–0015,
+**Status:** the contract as of Phase 16 (ruleset 0.12.0, migrations 0000–0015,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
+
+**What Phase 16 changed here**, so a reader of the Phase 14 version knows where
+to look: **no served field or shape changed; 29 rules changed severity.**
+`RULESET_VERSION` is 0.12.0. 23 rules moved `warning` → `critical`, 5
+`info` → `warning`, and `crawl.blocked` became a NOT MEASURED marker at `info`
+(its copy reworded to match; 27 / 23 / 45 after), so `rules_catalog` and every
+`issues`/`crawl_issues` row judged at 0.12.0 carry the new bands, and
+`site.health`'s `urlsCritical` means more than it did — §11 has the full
+account. Phase 15 (the local demo page) touched nothing Talos codes against.
 
 **What Phase 14 changed here**, so a reader of the Phase 13 version knows where
 to look: **one shape was added and no served field changed.**
@@ -183,6 +192,25 @@ Two properties make the double-transport claim below cheap to trust:
   (`test/api/mcp.test.ts:940` "refuses every crawl when the allowlist is empty",
   `test/api/http.test.ts:849` "refuses every crawl when the allowlist is empty,
   but still answers queries").
+- **`ServiceConfig.allowAnyPublicHost` is a second code-only process-trust seam**
+  (the first is `crawlDefaults`), and a Talos reader who finds the field in
+  `src/api/config.ts` should read this rather than conclude the allowlist is
+  optional. It accepts any host at the crawl-trigger allowlist gate and nothing
+  else: it is never wired to env or to the wire (`loadApiConfig` does not read
+  it, no request or tool field maps to it —
+  `test/api/open-posture.test.ts:284` "loadApiConfig can never set the posture
+  from the environment"), and `api:serve` and `mcp:serve` never set it. Its only
+  setter is the local demo surface added in Phase 15: the `npm run demo`
+  entrypoint `src/demo/serve.ts`, which binds `127.0.0.1`, and the server factory
+  it constructs, `src/demo/server.ts`'s `createDemoServer`, which is where the
+  assignment lives. `isUrlAllowed` still runs on every URL with `allowPrivate`
+  sourced from `crawlDefaults` alone, so loopback and RFC1918 targets stay
+  refused under the posture, with the policy's own reason rather than the
+  allowlist's (`test/api/open-posture.test.ts:242` "the posture does not touch
+  url-policy: loopback is refused with the policy's own reason"). Nothing
+  tenant-visible changes: a deployment that does not set it in code — which is
+  every deployment Talos talks to — behaves exactly as the allowlist rows above
+  describe.
 
 ### Error bodies
 
@@ -219,7 +247,7 @@ validator before the handler runs (`test/api/mcp.test.ts:789` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (95 rows at 0.11.0) rather than by the crawl. The catalog is
+bounded by the **ruleset** (95 rows at 0.12.0) rather than by the crawl. The catalog is
 ~101 KB (**103,679 bytes**, re-measured 2026-09-02 by the Phase 12 gate over all
 93 rows of ruleset 0.9.0, by serialising what `rulesCatalog` answers with no
 crawl id — the earlier 100,645 was measured at 92 rows, before
@@ -1258,7 +1286,7 @@ Three postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.11.0** as of Phase 14) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.12.0** as of Phase 16) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1300,6 +1328,22 @@ drew. Together they complete the marker family's partition of the silent space
 (a crawl whose resources yielded no judgeable answer now carries exactly one
 marker naming why, whatever the mix of unasked and unknown-answer rows). No
 other rule's verdict or copy moved in either phase.
+
+**Phase 16 bumped to 0.12.0 on a different ground: severity, and only
+severity.** 29 of the 95 rules changed band (23 `warning` → `critical`, 5
+`info` → `warning`, `crawl.blocked` `warning` → `info` as the tenth NOT
+MEASURED marker; 27 / 23 / 45 after), recalibrated against the written
+rubric in `docs/superpowers/specs/2026-09-08-severity-recalibration-design.md`.
+No rule was added, retired or rescoped, one copy entry (`crawl.blocked`) was
+reworded to say it is a crawl outcome, and no finding's existence
+or evidence changed — the same crawl re-judged at 0.12.0 yields the identical
+finding set with those rows' `severity` moved. It is still a bump because
+severity is judgement: crawls judged either side of it are not row-comparable
+on severity, `crawl_compare` raises `ruleset-mismatch` between them as it
+should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
+broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
+must show the ruleset version beside the number. Stored findings keep the
+severity their ruleset stamped; nothing is backfilled.
 
 Three consequences a consumer must plan for:
 

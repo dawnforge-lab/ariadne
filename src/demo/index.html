@@ -1,0 +1,698 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ariadne demo</title>
+<!--
+  The demo page: type a URL, watch a crawl, read what the rules found.
+
+  ONE FILE, NO NETWORK BUT OURS. Every byte here is inline — no CDN, no font,
+  no favicon on somebody else's host — because this page is opened by an
+  operator against their own machine and a page that phones home would make
+  every demo run a request somebody did not ask for. `test/demo/flow.test.ts`
+  asserts there is no off-origin `src`/`href` in the served HTML.
+
+  NO CREDENTIAL LIVES HERE. Every call is `/api/...` on this page's own origin;
+  the front server signs it on the way through (see `src/demo/server.ts`). That
+  is why there is no token in this source and no header to set.
+
+  THE API'S SENTENCE IS THIS PAGE'S SENTENCE (hard rule 7). `call()` throws the
+  response's own `error` string on any non-2xx, each step has exactly one catch,
+  and that catch prints the string next to the step that failed. There is no
+  retry, no default, no "something went wrong": a refused URL, a failed crawl
+  and a dead rules pass are all RESULTS, rendered where they happened.
+
+  THE SEVERITY BANDS ARE ENGINE SEVERITY. critical -> Errors, warning ->
+  Warnings, info -> Notices, and nothing else. This page invents no priority of
+  its own; if the bands are wrong the registry is wrong.
+-->
+<style>
+  :root {
+    --ink: #16181d;
+    --muted: #5b6270;
+    --line: #d9dce3;
+    --bg: #ffffff;
+    --panel: #f6f7f9;
+    --critical: #b3261e;
+    --warning: #8a5a00;
+    --info: #26507d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    padding: 2rem 1.25rem 5rem;
+    max-width: 62rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.05rem; margin: 2rem 0 .5rem; }
+  h3 { font-size: .95rem; margin: 0; }
+  .lede { color: var(--muted); margin: 0 0 1.5rem; }
+  fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 1rem; margin: 0; }
+  legend { padding: 0 .4rem; color: var(--muted); font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; }
+  label { display: block; margin: .6rem 0 .2rem; font-weight: 600; }
+  .hint { font-weight: 400; color: var(--muted); }
+  input[type="text"], input[type="number"] {
+    font: inherit; padding: .45rem .55rem; border: 1px solid var(--line);
+    border-radius: 4px; background: #fff; color: inherit;
+  }
+  input[type="text"] { width: 100%; }
+  input[type="number"] { width: 8rem; }
+  .check { display: flex; align-items: baseline; gap: .5rem; margin: .7rem 0 0; font-weight: 600; }
+  .check input { margin: 0; }
+  button {
+    font: inherit; font-weight: 600; margin-top: 1.1rem; padding: .5rem 1.1rem;
+    border: 1px solid var(--ink); border-radius: 4px; background: var(--ink);
+    color: #fff; cursor: pointer;
+  }
+  button[disabled] { opacity: .5; cursor: default; }
+  .panel { border: 1px solid var(--line); border-radius: 6px; padding: 1rem; margin-top: 1.5rem; background: var(--panel); }
+  .hidden { display: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: .6rem 1rem; margin: .6rem 0 0; }
+  .cell { border-top: 1px solid var(--line); padding-top: .35rem; }
+  .cell .k { display: block; color: var(--muted); font-size: .8rem; }
+  .cell .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .stage { margin: .4rem 0 0; color: var(--muted); }
+  .terminal { border-left: 4px solid var(--critical); padding-left: .8rem; margin-top: .8rem; }
+  .terminal strong { color: var(--critical); }
+  /*
+    The error box: loud, monospaced, and never populated with anything but the
+    string the API sent. `.step` says where it happened; `.said` is verbatim.
+  */
+  .error { margin-top: .8rem; border-left: 4px solid var(--critical); padding: .2rem 0 .2rem .8rem; }
+  .error .step { display: block; font-weight: 700; color: var(--critical); }
+  .error .said { display: block; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .87rem; }
+  .band { margin-top: 1.5rem; }
+  .band > h3 { border-bottom: 2px solid var(--line); padding-bottom: .3rem; }
+  .band.critical > h3 { border-color: var(--critical); }
+  .band.warning > h3 { border-color: var(--warning); }
+  .band.info > h3 { border-color: var(--info); }
+  .rule { border-bottom: 1px solid var(--line); padding: .8rem 0; }
+  .rule .head { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }
+  .rule .rid { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; }
+  .rule .count { font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+  .rule p { margin: .4rem 0 0; }
+  .rule .fix { color: var(--muted); }
+  details { margin-top: .5rem; }
+  summary { cursor: pointer; color: var(--info); }
+  .urls { margin: .5rem 0 0; padding-left: 1.1rem; }
+  .urls li { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; word-break: break-all; }
+  .note { color: var(--muted); font-size: .87rem; margin-top: .4rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  td.value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<h1>Ariadne demo</h1>
+<p class="lede">
+  Crawl a site, run the rules over it, read the findings. Everything on this page
+  comes from this machine's own engine; nothing is cached and nothing is sent
+  anywhere else.
+</p>
+
+<form id="start-form">
+  <fieldset>
+    <legend>Start a crawl</legend>
+
+    <label for="site-url">Site URL <span class="hint">— the page to start from</span></label>
+    <input id="site-url" type="text" name="site-url" placeholder="https://example.com/" autocomplete="off" spellcheck="false">
+
+    <label for="max-pages">Max pages <span class="hint">— leave empty for the engine's default (500)</span></label>
+    <input id="max-pages" type="number" name="max-pages" min="1" step="1" value="50">
+
+    <p class="check">
+      <input id="fetch-resources" type="checkbox" name="fetch-resources">
+      <label for="fetch-resources">Weigh images, scripts and stylesheets <span class="hint">— one request per file, to the site and its CDNs</span></label>
+    </p>
+
+    <p class="check">
+      <input id="render-pass" type="checkbox" name="render-pass">
+      <label for="render-pass">Run the render pass <span class="hint">— a real browser over a sample of pages, before the rules</span></label>
+    </p>
+
+    <button id="start" type="submit">Start crawl</button>
+    <div id="start-error" class="error hidden"></div>
+  </fieldset>
+</form>
+
+<section id="progress" class="panel hidden">
+  <h2>Progress</h2>
+  <p class="stage" id="progress-stage">…</p>
+  <div class="grid" id="progress-grid"></div>
+  <div id="progress-terminal"></div>
+  <div id="progress-error" class="error hidden"></div>
+</section>
+
+<section id="results" class="panel hidden">
+  <h2>Results</h2>
+  <div id="summary"></div>
+  <div id="results-error" class="error hidden"></div>
+  <div id="band-critical"></div>
+  <div id="band-warning"></div>
+  <div id="band-info"></div>
+  <h2>Metrics</h2>
+  <div id="metrics"></div>
+</section>
+
+<script>
+(function () {
+  "use strict";
+
+  /** How often the progress panel asks the engine where it has got to. */
+  var POLL_MS = 2000;
+  /**
+   * The most listing pages this page will walk before it stops and SAYS it
+   * stopped. A demo must not become an unbounded loop against a crawl with a
+   * hundred thousand findings; a bound nobody is told about would be worse than
+   * either, so hitting it prints a line (hard rule 7 in its UI-facing form).
+   */
+  var MAX_PAGES_FOLLOWED = 20;
+  /** Rows per listing request. The API's own maximum for these routes. */
+  var PAGE_SIZE = 200;
+  /** The band split IS engine severity. Three severities, three headings. */
+  var BANDS = [
+    { severity: "critical", id: "band-critical", heading: "Errors" },
+    { severity: "warning", id: "band-warning", heading: "Warnings" },
+    { severity: "info", id: "band-info", heading: "Notices" }
+  ];
+
+  var byId = function (id) { return document.getElementById(id); };
+
+  /** Element with text — never `innerHTML`, because most of this text is a crawled site's. */
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function show(node) { node.classList.remove("hidden"); }
+  function hide(node) { node.classList.add("hidden"); }
+
+  /**
+   * Render an error where the step that failed is, and say which step.
+   *
+   * `message` is the API's own sentence, printed whole. This function never
+   * rewords it and never substitutes one of its own.
+   */
+  function showError(box, step, message) {
+    clear(box);
+    box.appendChild(el("span", "step", step));
+    box.appendChild(el("span", "said", message));
+    show(box);
+  }
+
+  function clearError(box) { clear(box); hide(box); }
+
+  /**
+   * The one door to the API, and the only place a non-2xx is turned into a throw.
+   *
+   * The thrown message is the response's `error` field verbatim when there is
+   * one. When there is not — which would mean the surface answered something
+   * this page has never seen — the status and the first of the body are quoted
+   * instead, because inventing a friendlier sentence would hide exactly the
+   * case worth seeing.
+   */
+  async function call(path, opts) {
+    var res = await fetch("/api" + path, opts || {});
+    var text = await res.text();
+    var body = null;
+    if (text !== "") {
+      try {
+        body = JSON.parse(text);
+      } catch (parseError) {
+        throw new Error(
+          "the engine answered " + res.status + " with a body this page could not read as JSON (" +
+          parseError.message + "): " + text.slice(0, 400)
+        );
+      }
+    }
+    if (!res.ok) {
+      if (body && typeof body.error === "string") throw new Error(body.error);
+      throw new Error("the engine answered " + res.status + " with no error field: " + text.slice(0, 400));
+    }
+    if (body === null) throw new Error("the engine answered " + res.status + " with an empty body");
+    return body;
+  }
+
+  /**
+   * Walk a `{items, nextCursor}` listing to its end, or to the bound.
+   *
+   * Returns the rows AND whether more were left, so the caller can say so on
+   * screen rather than quietly presenting a slice as the whole.
+   */
+  async function listAll(path) {
+    var items = [];
+    var cursor = null;
+    var followed = 0;
+    for (;;) {
+      var query = path + (path.indexOf("?") === -1 ? "?" : "&") + "limit=" + PAGE_SIZE +
+        (cursor === null ? "" : "&cursor=" + encodeURIComponent(cursor));
+      var body = await call(query);
+      if (!Array.isArray(body.items)) {
+        throw new Error("the engine answered " + path + " without an items array");
+      }
+      items = items.concat(body.items);
+      followed += 1;
+      cursor = typeof body.nextCursor === "string" && body.nextCursor !== "" ? body.nextCursor : null;
+      if (cursor === null) return { items: items, more: false };
+      if (followed >= MAX_PAGES_FOLLOWED) return { items: items, more: true };
+    }
+  }
+
+  function num(value) {
+    return typeof value === "number" ? String(value) : "—";
+  }
+
+  /** `1m 04s`, from two ISO timestamps — the second may be absent (still running). */
+  function duration(fromIso, toIso) {
+    if (typeof fromIso !== "string") return "—";
+    var from = Date.parse(fromIso);
+    if (Number.isNaN(from)) return "—";
+    var to = typeof toIso === "string" ? Date.parse(toIso) : Date.now();
+    if (Number.isNaN(to)) return "—";
+    var seconds = Math.max(0, Math.round((to - from) / 1000));
+    var minutes = Math.floor(seconds / 60);
+    var rest = seconds % 60;
+    return minutes === 0 ? seconds + "s" : minutes + "m " + (rest < 10 ? "0" : "") + rest + "s";
+  }
+
+  function cell(grid, key, value) {
+    var box = el("div", "cell");
+    box.appendChild(el("span", "k", key));
+    box.appendChild(el("span", "v", value));
+    grid.appendChild(box);
+  }
+
+  // ---------------------------------------------------------------- state
+
+  var form = byId("start-form");
+  var startButton = byId("start");
+  var startError = byId("start-error");
+  var progress = byId("progress");
+  var progressStage = byId("progress-stage");
+  var progressGrid = byId("progress-grid");
+  var progressTerminal = byId("progress-terminal");
+  var progressError = byId("progress-error");
+  var results = byId("results");
+  var resultsError = byId("results-error");
+
+  /** The crawl this page is watching, and the timer watching it. */
+  var crawlId = null;
+  var timer = null;
+  /** The last status body, kept for the summary the results panel prints. */
+  var lastDetail = null;
+
+  function stopPolling() {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  }
+
+  function finishRun() {
+    stopPolling();
+    startButton.disabled = false;
+  }
+
+  // ---------------------------------------------------------------- start
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    start();
+  });
+
+  async function start() {
+    stopPolling();
+    clearError(startError);
+    clearError(progressError);
+    clearError(resultsError);
+    hide(results);
+    clear(progressGrid);
+    clear(progressTerminal);
+    // A second run starts from an empty screen. Leaving the last crawl's
+    // findings in the DOM would put them back on screen for the moment between
+    // `show(results)` and the new rows arriving, under a new crawl's heading.
+    clear(byId("summary"));
+    clear(byId("metrics"));
+    for (var b = 0; b < BANDS.length; b++) clear(byId(BANDS[b].id));
+    crawlId = null;
+    lastDetail = null;
+    startButton.disabled = true;
+
+    var payload = { siteUrl: byId("site-url").value.trim() };
+    var maxPages = byId("max-pages").value.trim();
+    // Empty means "say nothing", so the engine's own default applies. A number
+    // this page invented would be this page overriding the engine silently.
+    if (maxPages !== "") payload.maxPages = Number(maxPages);
+    // BOTH states of a checkbox are the operator's decision, so the field is
+    // always sent. Omitting it when unticked would let the engine's default
+    // (true) run a resource pass beside a box that says it is off — a screen
+    // disagreeing with the crawl it describes.
+    payload.fetchResources = byId("fetch-resources").checked;
+    var wantsRender = byId("render-pass").checked;
+
+    var accepted;
+    try {
+      accepted = await call("/crawls", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      showError(startError, "the crawl was not accepted", error.message);
+      startButton.disabled = false;
+      return;
+    }
+
+    crawlId = String(accepted.crawlId);
+    show(progress);
+    progressStage.textContent =
+      "accepted as " + crawlId + " — " + String(accepted.status) +
+      (typeof accepted.queuePosition === "number" ? ", queue position " + accepted.queuePosition : "");
+    poll(wantsRender);
+  }
+
+  // ---------------------------------------------------------------- watch
+
+  async function poll(wantsRender) {
+    var detail;
+    try {
+      detail = await call("/crawls/" + encodeURIComponent(crawlId));
+    } catch (error) {
+      // Polling stops where it failed. A poller that kept trying would bury the
+      // one answer worth reading under identical retries.
+      showError(progressError, "the crawl status could not be read", error.message);
+      finishRun();
+      return;
+    }
+    lastDetail = detail;
+    renderProgress(detail);
+
+    if (detail.status === "queued" || detail.status === "running") {
+      progressStage.textContent =
+        "watching " + crawlId + " — asking again in " + (POLL_MS / 1000) + "s";
+      timer = setTimeout(function () { poll(wantsRender); }, POLL_MS);
+      return;
+    }
+    stopPolling();
+
+    if (detail.status !== "finished") {
+      // A failed or cancelled crawl is an OUTCOME. It is rendered with the
+      // crawl's own numbers and the run stops here — there is nothing to judge.
+      var box = el("div", "terminal");
+      box.appendChild(el("strong", null, "the crawl ended " + String(detail.status)));
+      box.appendChild(el("p", null,
+        "It crawled " + num(detail.pagesCrawled) + " page(s) in " +
+        duration(detail.startedAt, detail.finishedAt) + ". The frontier was left with " +
+        num((detail.frontier || {}).pending) + " pending and " +
+        num((detail.frontier || {}).failed) + " failed. Nothing was judged."));
+      clear(progressTerminal);
+      progressTerminal.appendChild(box);
+      startButton.disabled = false;
+      return;
+    }
+
+    judge(wantsRender);
+  }
+
+  function renderProgress(detail) {
+    var frontier = detail.frontier || {};
+    clear(progressGrid);
+    cell(progressGrid, "status", String(detail.status));
+    cell(progressGrid, "pages crawled", num(detail.pagesCrawled));
+    cell(progressGrid, "frontier pending", num(frontier.pending));
+    cell(progressGrid, "frontier done", num(frontier.done));
+    cell(progressGrid, "frontier failed", num(frontier.failed));
+    cell(progressGrid, "elapsed", duration(detail.startedAt, detail.finishedAt));
+    // THE POLITENESS PAIR, labelled as such: how often a host refused us, and
+    // how far apart we are spacing requests to it now.
+    cell(progressGrid, "politeness — blocked pages", num(detail.blockedPages));
+    cell(progressGrid, "politeness — host spacing", typeof detail.hostSpacingMs === "number" ? detail.hostSpacingMs + " ms" : "—");
+    if (detail.fetchResources === true) {
+      var resources = detail.resources || {};
+      cell(progressGrid, "resources seen", num(resources.seen));
+      cell(progressGrid, "resources fetched", num(resources.fetched));
+      cell(progressGrid, "resources failed", num(resources.failed));
+      cell(progressGrid, "resources unasked", num(resources.skipped));
+    }
+  }
+
+  // ---------------------------------------------------------------- judge
+
+  async function judge(wantsRender) {
+    if (wantsRender) {
+      progressStage.textContent = "rendering… (a real browser over the selected pages)";
+      try {
+        await call("/crawls/" + encodeURIComponent(crawlId) + "/render", { method: "POST" });
+      } catch (error) {
+        showError(progressError, "the render pass failed", error.message);
+        finishRun();
+        return;
+      }
+    }
+    progressStage.textContent = "judging… (running the rules over the crawled pages)";
+    var summary;
+    try {
+      summary = await call("/crawls/" + encodeURIComponent(crawlId) + "/rules", { method: "POST" });
+    } catch (error) {
+      showError(progressError, "the rules pass failed", error.message);
+      finishRun();
+      return;
+    }
+    progressStage.textContent =
+      "judged: " + num(summary.findings) + " finding(s) over " + num(summary.pagesScanned) + " page(s)";
+    loadResults();
+  }
+
+  // -------------------------------------------------------------- results
+
+  async function loadResults() {
+    show(results);
+    clearError(resultsError);
+    var issues;
+    var catalog;
+    var metrics;
+    try {
+      // The status this page last polled was read BEFORE the rules ran, so its
+      // `findingsCount` is the pre-judge zero and its `rulesRunAt` is null.
+      // Printing that beside the findings underneath it would be this page
+      // contradicting itself, so the judged row is read again — one request,
+      // and the summary then describes the crawl the results came from.
+      lastDetail = await call("/crawls/" + encodeURIComponent(crawlId));
+      issues = await listAll("/crawls/" + encodeURIComponent(crawlId) + "/issues");
+      // Not paginated, and keyed by `id` rather than `ruleId`: the catalog is a
+      // property of the ruleset, and this page joins its copy onto the groups
+      // above (docs/talos-surface.md §5.1).
+      catalog = await call("/rules?crawlId=" + encodeURIComponent(crawlId));
+      // `listAll`'s discipline for the one listing that is not paginated. A
+      // catalog without its array is a SHAPE error, and treating it as an empty
+      // one would put "this ruleset no longer carries that rule" under every
+      // group on the page — a confident diagnosis of the wrong thing (rule 7).
+      if (!Array.isArray(catalog.rules)) {
+        throw new Error("the engine answered /rules without a rules array");
+      }
+      metrics = await listAll("/crawls/" + encodeURIComponent(crawlId) + "/metrics");
+    } catch (error) {
+      showError(resultsError, "the results could not be read", error.message);
+      finishRun();
+      return;
+    }
+
+    var copy = {};
+    // Shape already checked above, where a failure is still the results error.
+    var rules = catalog.rules;
+    for (var i = 0; i < rules.length; i++) copy[rules[i].id] = rules[i];
+
+    renderSummary(issues, metrics);
+    renderBands(issues, copy);
+    renderMetrics(metrics);
+    finishRun();
+  }
+
+  function renderSummary(issues, metrics) {
+    var groupCount = issues.items.length;
+    var metricCount = metrics.items.length;
+    var detail = lastDetail || {};
+    var box = byId("summary");
+    clear(box);
+    var grid = el("div", "grid");
+    cell(grid, "crawl", crawlId === null ? "—" : crawlId);
+    cell(grid, "pages crawled", num(detail.pagesCrawled));
+    cell(grid, "duration", duration(detail.startedAt, detail.finishedAt));
+    cell(grid, "politeness — blocked pages", num(detail.blockedPages));
+    cell(grid, "politeness — host spacing", typeof detail.hostSpacingMs === "number" ? detail.hostSpacingMs + " ms" : "—");
+    cell(grid, "findings", num(detail.findingsCount));
+    // Rules that WROTE FINDINGS — not "rules that ran". A metric rule measures
+    // and writes no issues, so it never appears in a band and is not counted
+    // here; its numbers are in the metrics table below.
+    cell(grid, "rules with findings", String(groupCount));
+    cell(grid, "metric rows", String(metricCount));
+    box.appendChild(grid);
+    // The bound, said ONCE and where the counts are, rather than repeated under
+    // every band. A slice presented as the whole is the failure worth avoiding.
+    if (issues.more) {
+      box.appendChild(el("p", "note",
+        "This page followed " + MAX_PAGES_FOLLOWED + " pages of findings and stopped: the " +
+        "bands below are not the whole listing. Export the crawl for all of it."));
+    }
+  }
+
+  function renderBands(issues, copy) {
+    for (var b = 0; b < BANDS.length; b++) {
+      var band = BANDS[b];
+      var host = byId(band.id);
+      clear(host);
+      host.className = "band " + band.severity;
+
+      var groups = [];
+      var findings = 0;
+      for (var i = 0; i < issues.items.length; i++) {
+        if (issues.items[i].severity === band.severity) {
+          groups.push(issues.items[i]);
+          findings += typeof issues.items[i].count === "number" ? issues.items[i].count : 0;
+        }
+      }
+      host.appendChild(el("h3", null,
+        band.heading + " — " + groups.length + " rule(s), " + findings + " finding(s)"));
+      if (groups.length === 0) {
+        host.appendChild(el("p", "note", "No rule of this severity fired on this crawl."));
+        continue;
+      }
+      for (var g = 0; g < groups.length; g++) host.appendChild(ruleRow(groups[g], copy));
+    }
+  }
+
+  /**
+   * One rule's row: the count as the engine qualified it, the registry's copy,
+   * and a lazily-fetched slice of URLs.
+   */
+  function ruleRow(group, copy) {
+    var row = el("div", "rule");
+    var head = el("div", "head");
+    var left = el("div");
+    left.appendChild(el("h3", null, String(group.title)));
+    left.appendChild(el("span", "rid", String(group.ruleId) +
+      (Array.isArray(group.checkIds) && group.checkIds.length > 0 ? " · " + group.checkIds.join(", ") : "")));
+    head.appendChild(left);
+    // `truncated` means `count` is rows written, not cases found. A "+" and a
+    // sentence, never a bare number that a reader would quote as the total.
+    head.appendChild(el("span", "count",
+      group.truncated === true ? String(group.count) + "+" : String(group.count)));
+    row.appendChild(head);
+
+    if (group.truncated === true) {
+      row.appendChild(el("p", "note",
+        typeof group.total === "number"
+          ? "The listing was capped: " + group.count + " rows written of " + group.total + " cases counted."
+          : "The listing was capped: " + group.count + " rows written, and at least " +
+            num(group.atLeast) + " cases seen. The real number is not known."));
+    }
+
+    var rule = copy[group.ruleId];
+    if (rule === undefined) {
+      // Rule 7: a missing join is said out loud, not rendered as blank copy.
+      row.appendChild(el("p", "note",
+        "This ruleset has no copy for '" + group.ruleId + "' — the findings were written by a " +
+        "ruleset this engine no longer carries."));
+    } else {
+      row.appendChild(el("p", null, String(rule.explanation)));
+      row.appendChild(el("p", "fix", String(rule.howToFix)));
+    }
+
+    var details = el("details");
+    details.appendChild(el("summary", null, "Show URLs"));
+    var slot = el("div");
+    details.appendChild(slot);
+    var loaded = false;
+    // The crawl is captured HERE, not read from the module's `crawlId` when the
+    // toggle fires: these rows outlive the run that made them, and a drill-down
+    // opened after a second crawl started must not ask the new crawl about the
+    // old crawl's rule.
+    var forCrawl = crawlId;
+    details.addEventListener("toggle", function () {
+      if (!details.open || loaded) return;
+      loaded = true;
+      loadUrls(forCrawl, group.ruleId, slot);
+    });
+    row.appendChild(details);
+    return row;
+  }
+
+  /** The drill-down: FIRST PAGE ONLY, and it says so when there was more. */
+  async function loadUrls(forCrawl, ruleId, slot) {
+    clear(slot);
+    slot.appendChild(el("p", "note", "loading…"));
+    var body;
+    try {
+      body = await call("/crawls/" + encodeURIComponent(forCrawl) + "/issues/" +
+        encodeURIComponent(ruleId) + "/urls?limit=" + PAGE_SIZE);
+    } catch (error) {
+      clear(slot);
+      var box = el("div", "error");
+      box.appendChild(el("span", "step", "the URLs for " + ruleId + " could not be read"));
+      box.appendChild(el("span", "said", error.message));
+      slot.appendChild(box);
+      return;
+    }
+    clear(slot);
+    var items = Array.isArray(body.items) ? body.items : [];
+    if (items.length === 0) {
+      slot.appendChild(el("p", "note", "The engine returned no URLs for this rule."));
+      return;
+    }
+    var list = el("ul", "urls");
+    for (var i = 0; i < items.length; i++) {
+      // A site-wide finding has no URL — that is a fact about the crawl, and
+      // the row says so rather than showing an empty bullet.
+      list.appendChild(el("li", null,
+        items[i].url === null ? "(site-wide — this finding is about the crawl, not a page)" : String(items[i].url)));
+    }
+    slot.appendChild(list);
+    if (typeof body.nextCursor === "string" && body.nextCursor !== "") {
+      slot.appendChild(el("p", "note",
+        "The first " + items.length + " of more — this page asks for one slice per rule."));
+    }
+  }
+
+  function renderMetrics(metrics) {
+    var host = byId("metrics");
+    clear(host);
+    if (metrics.items.length === 0) {
+      host.appendChild(el("p", "note",
+        "The rules pass wrote no metrics for this crawl. An absent metric has not measured zero."));
+      return;
+    }
+    var table = el("table");
+    var head = el("tr");
+    head.appendChild(el("th", null, "metric"));
+    head.appendChild(el("th", null, "scope"));
+    head.appendChild(el("th", null, "value"));
+    table.appendChild(head);
+    for (var i = 0; i < metrics.items.length; i++) {
+      var row = metrics.items[i];
+      var tr = el("tr");
+      tr.appendChild(el("td", null, String(row.metricId)));
+      tr.appendChild(el("td", null, String(row.scope) + (row.scopeValue ? " · " + String(row.scopeValue) : "")));
+      // The value's shape belongs to the metric, so it is printed as it came.
+      tr.appendChild(el("td", "value", JSON.stringify(row.value)));
+      table.appendChild(tr);
+    }
+    host.appendChild(table);
+    if (metrics.more) {
+      host.appendChild(el("p", "note",
+        "This page stopped after " + MAX_PAGES_FOLLOWED + " pages of metrics; there are more."));
+    }
+  }
+})();
+</script>
+
+</body>
+</html>

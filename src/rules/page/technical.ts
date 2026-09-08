@@ -32,7 +32,7 @@ const CATEGORY = "technical";
 export const technicalRules: PageRule[] = [
   // Fires only on the absence of the tag. Nothing here inspects the contents of
   // a viewport that does exist, and the copy must not claim otherwise.
-  pageRule("mobile.viewport-missing", ["CHECK-52"], CATEGORY, "warning", (p, self) =>
+  pageRule("mobile.viewport-missing", ["CHECK-52"], CATEGORY, "critical", (p, self) =>
     isAuditable(p) && !p.hasViewport ? [finding(self, p, {})] : [],
   ),
 
@@ -53,7 +53,7 @@ export const technicalRules: PageRule[] = [
 
   // An absent alt attribute — not an empty one, which is the correct value for
   // a decorative image and is counted as present by the analyzer.
-  pageRule("images.missing-alt", ["CHECK-49"], CATEGORY, "info", (p, self) =>
+  pageRule("images.missing-alt", ["CHECK-49"], CATEGORY, "warning", (p, self) =>
     isAuditable(p) && p.imagesMissingAlt > 0
       ? [finding(self, p, { imagesMissingAlt: p.imagesMissingAlt, imagesTotal: p.imagesTotal })]
       : [],
@@ -62,7 +62,7 @@ export const technicalRules: PageRule[] = [
   // One measurement of one fetch, from this machine, on this crawl. A null is
   // an unrecorded timing, not a fast one: firing on it would be reporting a
   // number the crawl does not have.
-  pageRule("performance.slow-response", ["CHECK-50"], CATEGORY, "info", (p, self) =>
+  pageRule("performance.slow-response", ["CHECK-50"], CATEGORY, "warning", (p, self) =>
     isAuditable(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
       ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: SLOW_MS })]
       : [],

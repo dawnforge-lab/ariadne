@@ -39,7 +39,7 @@ import {
 import type { RuleCaps } from "../registry/types.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
-const JS_REDIRECT: RuleIdentity = { id: "redirect.js", severity: "warning" };
+const JS_REDIRECT: RuleIdentity = { id: "redirect.js", severity: "critical" };
 
 /**
  * Pages that redirect themselves in the browser after answering 200 (CHECK-10).

@@ -49,9 +49,9 @@ describe("linkTargetRules metadata", () => {
     expect(
       Object.fromEntries(linkTargetRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
-      "links.broken-internal": [["CHECK-11"], "warning", "links"],
-      "canonical.non-200-target": [["CHECK-19"], "warning", "canonical"],
-      "canonical.non-indexable-target": [["CHECK-19"], "warning", "canonical"],
+      "links.broken-internal": [["CHECK-11"], "critical", "links"],
+      "canonical.non-200-target": [["CHECK-19"], "critical", "canonical"],
+      "canonical.non-indexable-target": [["CHECK-19"], "critical", "canonical"],
     });
   });
 
@@ -165,7 +165,7 @@ describe("linkTargetRules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: "links.broken-internal",
-        severity: "warning",
+        severity: rule("links.broken-internal").severity,
         // The finding belongs to the broken target: one fix, one row, however
         // many pages link to it.
         pageId: ids.get("/gone"),
@@ -274,7 +274,7 @@ describe("linkTargetRules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: "canonical.non-200-target",
-        severity: "warning",
+        severity: rule("canonical.non-200-target").severity,
         pageId: ids.get("/points-at-404"),
         pageUrl: url("/points-at-404"),
         dedupeKey: url("/points-at-404"),

@@ -56,7 +56,7 @@ describe("robotsRules metadata", () => {
       Object.fromEntries(robotsRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
       "robots.missing": [["CHECK-03"], "info", "crawl"],
-      "robots.blocks-sitemap-urls": [["CHECK-03"], "warning", "crawl"],
+      "robots.blocks-sitemap-urls": [["CHECK-03"], "critical", "crawl"],
       // Info: a statement about what this crawl could read, not a fault on the
       // site's markup.
       "robots.check-skipped": [["CHECK-03"], "info", "crawl"],
@@ -189,7 +189,7 @@ describe("the robots rules against the database", () => {
     expect(found).toHaveLength(1);
     expect(found[0]!).toMatchObject({
       ruleId: "robots.blocks-sitemap-urls",
-      severity: "warning",
+      severity: rule("robots.blocks-sitemap-urls").severity,
       pageUrl: `${SITE}/admin/secret`,
       dedupeKey: `${SITE}/admin/secret`,
     });

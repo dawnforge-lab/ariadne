@@ -1611,7 +1611,7 @@ export class ApiService {
     }
     const host = new URL(siteUrl).hostname;
 
-    if (!isHostAllowed(host, this.config.allowedDomains)) {
+    if (!this.crawlHostAllowed(host)) {
       // The rejected host is named; the allowlist itself is NOT listed back.
       // On a multi-tenant deployment its contents are other tenants' domains
       // (obligation 6), and the caller does not need them to fix their request.
@@ -1664,6 +1664,17 @@ export class ApiService {
     this.waiting.push(entry);
     this.pump();
     return { crawlId, status: "queued", queuePosition: this.queuePosition(crawlId) ?? 0 };
+  }
+
+  /**
+   * The crawl-trigger allowlist gate, in one place for its four callers
+   * (start, resume, legacyHosts/sitemapUrls, render urls) so the demo posture
+   * cannot drift per-site. `allowAnyPublicHost` short-circuits the ALLOWLIST
+   * only; every caller runs the URL policy regardless.
+   */
+  private crawlHostAllowed(host: string): boolean {
+    if (this.config.allowAnyPublicHost === true) return true;
+    return isHostAllowed(host, this.config.allowedDomains);
   }
 
   /**
@@ -2180,7 +2191,7 @@ export class ApiService {
       );
     }
     const host = new URL(siteUrl).hostname;
-    if (!isHostAllowed(host, this.config.allowedDomains)) {
+    if (!this.crawlHostAllowed(host)) {
       // The same sentence `startCrawl` refuses with, and the same silence about
       // what the allowlist contains (obligation 6).
       throw new ServiceError(
@@ -3800,7 +3811,7 @@ export class ApiService {
       if (checked.has(host)) continue;
       checked.add(host);
 
-      if (!isHostAllowed(host, this.config.allowedDomains)) {
+      if (!this.crawlHostAllowed(host)) {
         throw new ServiceError("FORBIDDEN", refusal.allowlist(host));
       }
       const verdict = await isUrlAllowed(target, { allowPrivate });
@@ -3919,7 +3930,7 @@ export class ApiService {
         );
       }
       const host = new URL(url).hostname;
-      if (!own.has(host) && !isHostAllowed(host, this.config.allowedDomains)) {
+      if (!own.has(host) && !this.crawlHostAllowed(host)) {
         throw new ServiceError(
           "FORBIDDEN",
           `urls entry '${clip(url)}' is on '${host}', which is neither a spelling of ` +

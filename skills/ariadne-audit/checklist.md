@@ -311,7 +311,8 @@ answered from, and its verdict is the confidence interval around all of them.
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
-  `resources.all-unknown`, `resources.partial-unknown`. Each one
+  `resources.all-unknown`, `resources.partial-unknown`, and the per-page
+  `crawl.blocked`. Each one
   is the engine saying a check below could not be answered on this crawl. The last
   four are siblings and never more than one appears: `resources.not-recorded` means
   the crawl holds NO resource records, `resources.not-fetched` means it recorded them
@@ -636,7 +637,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   1. `issues_list` with `checkId: "CHECK-03"`. Three rules can answer:
      - `robots.missing` (info) — the site answered 4xx for /robots.txt. The crawl
        treated that as allow-all, which is correct and is still worth reporting.
-     - `robots.blocks-sitemap-urls` (warning) — URLs the site's own sitemap
+     - `robots.blocks-sitemap-urls` (critical) — URLs the site's own sitemap
        publishes and its own robots.txt forbids. `issue_urls` gives the list.
      - `robots.check-skipped` (info) — the stored robots.txt could not be re-parsed
        (too large to read, or never served). This is a NOT MEASURED marker: the
@@ -694,7 +695,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   1. `issues_list` with `checkId: "CHECK-04"`. Two rules:
      - `indexability.noindex` (info) — every page the crawl found excluded from the
        index, whether by meta tag or by header.
-     - `indexability.meta-header-conflict` (warning) — a page whose robots meta and
+     - `indexability.meta-header-conflict` (critical) — a page whose robots meta and
        `X-Robots-Tag` header disagree. That is a directive the site cannot predict
        the outcome of, and it is a finding on its own.
   2. `issue_urls` with `ruleId: "indexability.noindex"` for the FULL list — this is
@@ -725,10 +726,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-05: Geo/IP redirects and bot blockers
 - **Priority**: Critical | **Requires**: Engine + DevTools + Manual
-- **Engine**: `issues_list` with `checkId: "CHECK-05"` — `crawl.blocked` (warning)
+- **Engine**: `issues_list` with `checkId: "CHECK-05"` — `crawl.blocked` (info)
   reports pages the crawler was refused rather than served (the fetch was classified
-  `blocked`; the evidence carries the status code). A branded, politely paced crawler
-  being blocked is a bot-blocker finding, and `issue_urls` gives the affected URLs.
+  `blocked`; the evidence carries the status code). This is a NOT MEASURED marker,
+  not a site issue: it says how this crawl was received, and every check on those
+  pages is unanswered on this crawl rather than clean. Whether search engines meet
+  the same wall is this check's manual question; `issue_urls` gives the URLs.
   Report it against the user agent the crawl actually used (`robots_get`'s
   `userAgent`) — the claim is "this UA was blocked on these URLs", never "all bots are
   blocked".
@@ -760,7 +763,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-06"`. Two rules:
   - `sitemap.missing` (warning) — the crawl found no sitemap to read: robots.txt
     declared none and the conventional locations answered nothing.
-  - `sitemap.invalid` (warning) — a declared sitemap document was fetched and could
+  - `sitemap.invalid` (critical) — a declared sitemap document was fetched and could
     not be read as a sitemap (the commonest real case is a 200 that is HTML). It is
     ONE site-scoped finding, so `sampleUrls` is empty and `count` is 1 however many
     documents failed: read it with `issue_urls` on `ruleId: "sitemap.invalid"`, where
@@ -792,9 +795,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-07"` — four rules, and each is one
   of the reasons the Record line asks you to break the count down by:
-  - `sitemap.non-200` (warning) — a listed URL that did not answer 200
+  - `sitemap.non-200` (critical) — a listed URL that did not answer 200
   - `sitemap.redirected` (warning) — a listed URL that redirects
-  - `sitemap.non-indexable` (warning) — a listed URL the crawl judged non-indexable
+  - `sitemap.non-indexable` (critical) — a listed URL the crawl judged non-indexable
   - `sitemap.uncrawled` (info) — a listed URL this crawl never reached: blocked by
     robots or outside the crawl's budget, off this crawl's origin (another host,
     port, or scheme — never attempted by design; the evidence's `offOrigin` flag
@@ -844,7 +847,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   1. `issues_list` with `checkId: "CHECK-10"` — three finding rules:
      - `redirect.chain` (warning) — a redirect that lands on another redirect
      - `redirect.loop` (critical) — a redirect that returns to a URL already in its chain
-     - `redirect.js` (warning) — a redirect performed by JavaScript rather than by a
+     - `redirect.js` (critical) — a redirect performed by JavaScript rather than by a
        3xx, found by the render pass (so it needs `renderPassCount` ≥ 1 to be measured)
      `issue_urls` per rule for the hops and the URLs.
   2. `metrics_get` with `metricId: "redirect.volume"` — the site row carries
@@ -907,7 +910,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-11: Broken internal links (4xx)
 - **Priority**: Critical | **Requires**: Engine + DevTools
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-11"` — `links.broken-internal` (warning):
+  1. `issues_list` with `checkId: "CHECK-11"` — `links.broken-internal` (critical):
      an internal link whose target answered 4xx.
   2. `issue_urls` with `ruleId: "links.broken-internal"` — the developer's list.
      Each row's evidence names the broken target and where the link was found, which
@@ -935,7 +938,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-13: Soft-404s and thin OK responses
 - **Priority**: Medium | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-13"` — three rules:
-  - `content.soft-404` (warning) — a 200 response whose text reads as a
+  - `content.soft-404` (critical) — a 200 response whose text reads as a
     not-found page
   - `content.thin` (warning) — a 200 page with too little body text to serve any
     query (the same rule answers CHECK-40)
@@ -971,7 +974,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-14: HTTP to HTTPS canonical route
 - **Priority**: High | **Requires**: Engine (host probe)
 - **Engine**: `issues_list` with `checkId: "CHECK-14"` — two rules:
-  - `host.http-serves-200` (warning) — a plaintext spelling of the site answered 200
+  - `host.http-serves-200` (critical) — a plaintext spelling of the site answered 200
     instead of redirecting to https. One finding per spelling that did.
   - `host.probe-skipped` (info) — the crawl ran with `probeHosts: false`, so nothing
     about the host variants was measured. SKIP the check on that evidence; do not
@@ -985,9 +988,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-15: Primary host choice (www vs apex, legacy, staging)
 - **Priority**: Medium | **Requires**: Engine (host probe)
 - **Engine**: `issues_list` with `checkId: "CHECK-15"` — three rules:
-  - `host.duplicate-host-200` (warning) — two spellings of the site (apex and www)
+  - `host.duplicate-host-200` (critical) — two spellings of the site (apex and www)
     both serve 200 over https, so the same content lives at two hosts
-  - `host.legacy-host-reachable` (info) — a host passed as `legacyHosts` at
+  - `host.legacy-host-reachable` (warning) — a host passed as `legacyHosts` at
     `crawl_start` still serves content instead of redirecting to the live site
   - `host.probe-skipped` (info) — as above: nothing was probed
   **Legacy and staging hosts are only checked if you named them.** Pass them as
@@ -1052,8 +1055,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-18: Conflicting canonical signals
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-18"` — two rules:
-  - `canonical.multiple` (warning) — more than one canonical on the page
-  - `canonical.html-header-conflict` (warning) — the HTML canonical and the
+  - `canonical.multiple` (critical) — more than one canonical on the page
+  - `canonical.html-header-conflict` (critical) — the HTML canonical and the
     `Link: rel=canonical` header name different URLs
   `issue_urls` per rule; the evidence carries the competing targets.
 - **Evaluate**:
@@ -1063,9 +1066,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-19: Canonical to non-200 / non-indexable target
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-19"` — two rules:
-  - `canonical.non-200-target` (warning) — the canonical points at a URL that did
+  - `canonical.non-200-target` (critical) — the canonical points at a URL that did
     not answer 200
-  - `canonical.non-indexable-target` (warning) — it points at a page the crawl
+  - `canonical.non-indexable-target` (critical) — it points at a page the crawl
     judged non-indexable
   Both join the canonical to the target's own crawled row, so a target the crawl
   never fetched produces no finding: check `pages_query` for the target URLs before
@@ -1077,7 +1080,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-20: Cross-domain canonicals
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-20"` — `canonical.cross-domain`
-  (info): a page whose canonical points at another host. No post-processing: the
+  (warning): a page whose canonical points at another host. No post-processing: the
   rule does the host comparison, including the apex/www spellings the crawl treats
   as one site.
 - **Evaluate**:
@@ -1087,7 +1090,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-21: Directive conflicts (canonical + noindex)
 - **Priority**: Medium | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-21"` —
-  `directive.canonical-noindex-conflict` (warning): a page that is both noindexed
+  `directive.canonical-noindex-conflict` (critical): a page that is both noindexed
   and canonicalised somewhere else. The cross-reference is the rule's; there are no
   two lists to intersect by hand.
 - **Evaluate**:
@@ -1193,7 +1196,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**:
   1. `issues_list` with `checkId: "CHECK-24"` — `hreflang.missing-return-link`
-     (warning): page A names B, and B does not name A back. One finding per broken
+     (critical): page A names B, and B does not name A back. One finding per broken
      pair; `issue_urls` carries both sides.
   2. `metrics_get` with `metricId: "hreflang.coverage"` — the coverage half of this
      check, which the Important note below demands and a finding list cannot give:
@@ -1214,7 +1217,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-25: Language-region codes and x-default
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-25"` — two rules:
-  - `hreflang.invalid-code` (warning) — a declared code that is not a valid
+  - `hreflang.invalid-code` (critical) — a declared code that is not a valid
     language, or language-region, value
   - `hreflang.missing-x-default` (info) — a cluster with no `x-default` member
   `issue_urls` per rule for the affected URLs and the codes they declared.
@@ -1226,7 +1229,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-26: Hreflang to non-indexable or redirected URLs
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-26"` —
-  `hreflang.non-indexable-target` (warning): an hreflang alternate that points at a
+  `hreflang.non-indexable-target` (critical): an hreflang alternate that points at a
   page this crawl judged non-indexable (noindexed, canonicalised away, or not a 200).
   `issue_urls` gives the source/target pairs and the reason per row. A target the
   crawl never fetched cannot be judged and produces no finding — read it as
@@ -1248,7 +1251,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      Evaluate line asks for is yours to make from `topParams`; the counts are the
      engine's.
   2. `issues_list` with `checkId: "CHECK-27"` — `url.parameter-pages-indexable`
-     (info): parameterised URLs that are indexable, which is the "without proper
+     (warning): parameterised URLs that are indexable, which is the "without proper
      canonicals" half. Cross-read CHECK-17 for where those canonicals point.
 - **Evaluate**:
   - Categorise params: pagination (?page=), sort (?sort_by=), filter, variant (?variant=), search, tracking (utm_), currency
@@ -1326,7 +1329,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-30: Case and trailing-slash normalisation
 - **Priority**: Medium | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-30"` —
-  `url.normalisation-variants` (warning): URLs the crawl reached in more than one
+  `url.normalisation-variants` (critical): URLs the crawl reached in more than one
   spelling (case, trailing slash) where both answered 200 instead of one redirecting
   to the other. `issue_urls` gives the variant sets.
 - **DevTools**: Test an uppercase URL — check if it 301s to lowercase. Test with/without trailing slash
@@ -1612,7 +1615,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-35"` — four rules:
-  `title.missing` (warning), `title.too-short` (info), `title.too-long` (info) and
+  `title.missing` (critical), `title.too-short` (info), `title.too-long` (info) and
   `title.duplicate` (warning). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
   `issue_urls` gives the titles themselves in the evidence, which is where the
@@ -1831,7 +1834,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-39: Near-duplicate content — root cause analysis
 - **Priority**: High | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-39"` — two rules:
-  - `content.exact-duplicate` (warning) — pages whose body content is identical
+  - `content.exact-duplicate` (critical) — pages whose body content is identical
   - `content.near-duplicate` (warning) — pages alike past the similarity threshold
   `issue_urls` gives them: `content.near-duplicate` writes one finding per PAIR
   (`{urlA, urlB, hamming, pageTypeA, pageTypeB}` — the page types are the pair-type
@@ -1908,7 +1911,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   same rule CHECK-13 reads), `content.thin-skipped` (info, the same marker CHECK-13
   reads: pages carrying a `wordCount` and no `renderableWordCount`, which a pre-Phase-7
   crawl wrote and this check cannot be run on — a re-crawl is the fix, and while it
-  fires the thin count is a floor) and `content.placeholder` (warning: lorem ipsum and
+  fires the thin count is a floor) and `content.placeholder` (critical: lorem ipsum and
   friends left in live copy). `issue_urls` for all three; filter `issues_list` by
   `pageType` to say which templates the thin pages belong to, and read
   `content.metrics-by-type` for the distributions behind the threshold — it carries
@@ -2189,7 +2192,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: Medium | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-49"` — six rule ids can come back,
   four of them findings about the site and two about the crawl.
-  `images.missing-dimensions` (info) and `images.missing-alt` (info), page by page
+  `images.missing-dimensions` (info) and `images.missing-alt` (warning), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
   images; and, since the resource pass, `images.oversized` (warning) for every image
   over the 100,000 bytes this check's own WARN line names, and `images.legacy-format`
@@ -2237,7 +2240,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-50: TTFB, caching, and compression
 - **Priority**: Medium | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-50"` — `performance.slow-response`
-  (info): pages whose response time crossed the threshold, with the measured time in
+  (warning): pages whose response time crossed the threshold, with the measured time in
   the evidence. This is server response time over a whole crawl, which is a better
   sample than one browser load. Beside it, `resources.uncached` (info) answers the
   CACHING half for static files: one site-scoped finding counting the files the crawl
@@ -2334,7 +2337,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-52: Mobile viewport, tap targets, sticky overlays
 - **Priority**: Medium | **Requires**: Engine + DevTools + Visual
 - **Engine**: `issues_list` with `checkId: "CHECK-52"` — `mobile.viewport-missing`
-  (warning): pages with no viewport meta tag, across the crawl rather than on the two
+  (critical): pages with no viewport meta tag, across the crawl rather than on the two
   pages a browser check would reach. Tap targets and overlays are visual and stay below.
 - **DevTools**: Resize to 375x812 and work through the visual checks
 - **Visual**: Navigate homepage and product page on mobile viewport. Visually assess: tap target spacing, intrusive overlays (consent banners, chat widgets, promo bars), sticky elements blocking content

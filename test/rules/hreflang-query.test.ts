@@ -45,10 +45,10 @@ describe("hreflangRules metadata", () => {
 
   it("carries the severities the tables assign", () => {
     expect(Object.fromEntries(hreflangRules.map((r) => [r.id, r.severity]))).toEqual({
-      "hreflang.invalid-code": "warning",
+      "hreflang.invalid-code": "critical",
       "hreflang.missing-x-default": "info",
-      "hreflang.missing-return-link": "warning",
-      "hreflang.non-indexable-target": "warning",
+      "hreflang.missing-return-link": "critical",
+      "hreflang.non-indexable-target": "critical",
     });
   });
 
@@ -188,7 +188,7 @@ describe("hreflangRules against the database", () => {
       expect(found.map((f) => f.evidence.code).sort()).toEqual(["english-uk", "zz-qqqq"]);
       const one = found.find((f) => f.evidence.code === "english-uk")!;
       expect(one.ruleId).toBe("hreflang.invalid-code");
-      expect(one.severity).toBe("warning");
+      expect(one.severity).toBe(rule("hreflang.invalid-code").severity);
       expect(one.pageId).toBe(ids.get("/one"));
       expect(one.pageUrl).toBe(`${SITE}/one`);
       expect(one.evidence).toMatchObject({
@@ -492,7 +492,7 @@ describe("hreflangRules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: "hreflang.missing-return-link",
-        severity: "warning",
+        severity: rule("hreflang.missing-return-link").severity,
         pageId: ids.get("/en"),
         pageUrl: url("/en"),
         dedupeKey: `${url("/en")}→${url("/fr")}`,
@@ -584,7 +584,7 @@ describe("hreflangRules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: "hreflang.non-indexable-target",
-        severity: "warning",
+        severity: rule("hreflang.non-indexable-target").severity,
         pageId: ids.get("/en"),
         pageUrl: url("/en"),
         dedupeKey: `${url("/en")}→${url("/fr")}`,

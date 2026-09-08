@@ -41,7 +41,7 @@ const robotsParser = robotsParserImport as unknown as (url: string, robotstxt: s
 export const SITEMAP_URL_BATCH = 500;
 
 const MISSING: RuleIdentity = { id: "robots.missing", severity: "info" };
-const BLOCKS: RuleIdentity = { id: "robots.blocks-sitemap-urls", severity: "warning" };
+const BLOCKS: RuleIdentity = { id: "robots.blocks-sitemap-urls", severity: "critical" };
 const SKIPPED: RuleIdentity = { id: "robots.check-skipped", severity: "info" };
 
 /**

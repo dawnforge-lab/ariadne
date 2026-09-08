@@ -59,8 +59,8 @@ export { NEAR_DUPLICATE_PAIR_CAP } from "./crawl-evidence.js";
 
 const CATEGORY = "content" as const;
 
-const SOFT_404: RuleIdentity = { id: "content.soft-404", severity: "warning" };
-const EXACT: RuleIdentity = { id: "content.exact-duplicate", severity: "warning" };
+const SOFT_404: RuleIdentity = { id: "content.soft-404", severity: "critical" };
+const EXACT: RuleIdentity = { id: "content.exact-duplicate", severity: "critical" };
 const NEAR: RuleIdentity = { id: "content.near-duplicate", severity: "warning" };
 
 /**

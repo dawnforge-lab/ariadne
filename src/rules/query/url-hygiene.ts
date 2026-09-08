@@ -37,9 +37,9 @@ import { capsOr, limitTo, noteTruncation, readCrawlEvidence } from "./crawl-evid
 
 const CATEGORY = "url" as const;
 
-const VARIANTS: RuleIdentity = { id: "url.normalisation-variants", severity: "warning" };
+const VARIANTS: RuleIdentity = { id: "url.normalisation-variants", severity: "critical" };
 const TRACKING: RuleIdentity = { id: "url.tracking-params-internal", severity: "warning" };
-const PARAM_PAGES: RuleIdentity = { id: "url.parameter-pages-indexable", severity: "info" };
+const PARAM_PAGES: RuleIdentity = { id: "url.parameter-pages-indexable", severity: "warning" };
 
 /**
  * Variant URLs listed on a normalisation finding. The count beside them is
