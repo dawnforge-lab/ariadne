@@ -786,13 +786,28 @@ async function sendCsv(res: ServerResponse, csv: CsvStream, log: (line: string) 
   // Records handed to the socket, header included — what the log reports, and
   // the only measure of how far an abandoned export got.
   let written = 0;
+  // How many of those records the socket refused to take at once, so this loop
+  // waited on `drainOrGone`. Reported beside the record count because it is the
+  // difference between the two ways an export ends early: a zero says the
+  // client left between records, and any other number says the wedge's own
+  // branch — the one that used to hang for ever — is where it ended. A test
+  // cannot see that from the record count alone.
+  let waits = 0;
   try {
     for await (const record of csv.records()) {
       // Backpressure: a slow client slows the database reader instead of
       // filling this process with pending writes. A client that has LEFT stops
       // it altogether — checked between records for the export that fits in the
       // socket buffers, and inside the wait for the one that does not.
-      const stillThere = res.destroyed ? false : res.write(record) || (await drainOrGone(res));
+      let stillThere: boolean;
+      if (res.destroyed) {
+        stillThere = false;
+      } else if (res.write(record)) {
+        stillThere = true;
+      } else {
+        waits += 1;
+        stillThere = await drainOrGone(res);
+      }
       if (!stillThere) {
         // Rule 7, on the quiet side of it: an export that ended early is an
         // outcome, and an outcome the operator cannot see is a silent one. The
@@ -800,7 +815,8 @@ async function sendCsv(res: ServerResponse, csv: CsvStream, log: (line: string) 
         // question — which export, and how far did it get.
         const correlationId = randomUUID();
         log(
-          `api: csv export abandoned by the client ${correlationId} ${csv.view} after ${written} records`,
+          `api: csv export abandoned by the client ${correlationId} ${csv.view} ` +
+            `after ${written} records, ${waits} backpressure waits`,
         );
         res.destroy();
         return;

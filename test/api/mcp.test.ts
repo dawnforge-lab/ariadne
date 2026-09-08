@@ -2897,4 +2897,65 @@ describe("crawl_status — why a failed crawl failed", () => {
     // one where "re-run it" is the wrong move.
     expect(text).toContain("complete disallow");
   });
+
+  /**
+   * The sentence is cleared by the RESUME, not only by the next close.
+   *
+   * The column's contract is an implication — `failure_reason IS NOT NULL` ⟹
+   * `status = 'failed'` — and a resume is the one move that changes the status
+   * without closing the crawl. Left alone, the row would answer `queued` (this
+   * writer) or `running` (the crawl loop's) while still serving why the last
+   * run died, which is the pair the implication forbids and reads, to an agent
+   * polling `crawl_status`, as a crawl that failed the instant it was accepted.
+   *
+   * Written at the END of this file on purpose: `docs/talos-surface.md` cites
+   * tests here by line, and a test added higher up moves every citation below
+   * it (`test/skills/identifier-guard.test.ts`).
+   */
+  it("clears the failure sentence of the crawl a resume accepts", async () => {
+    // A crawl that failed with work still owed — the state a resume is for. The
+    // pending frontier row is what gets it past the "nothing to resume" guard.
+    const id = `crawl_mcp_resume_failed_${Date.now()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: `${resumeSite}/`,
+      config: {
+        siteUrl: `${resumeSite}/`,
+        maxPages: 10,
+        maxDepth: 3,
+        userAgent: "AriadneBot/0.1 (mcp-test)",
+        perHostDelayMs: 0,
+        maxConcurrency: 2,
+        probeHosts: false,
+      },
+      rulesetVersion: "0.0.0-test",
+      status: "failed",
+      failureReason: ROBOTS_REASON,
+    });
+    createdCrawls.push(id);
+    await db.insert(frontier).values({
+      crawlId: id,
+      url: `${resumeSite}/`,
+      state: "pending",
+      depth: 0,
+      discoveredVia: "seed",
+    });
+
+    const accepted = await ok("crawl_resume", { crawlId: id });
+    expect(accepted["status"]).toBe("queued");
+
+    // Read while the crawl is LIVE, which is the only window where the two
+    // could disagree: whichever writer got here first — the queue runner's
+    // `queued` or the loop's `running` — the reason is gone with the status it
+    // belonged to.
+    const live = await ok("crawl_status", { crawlId: id });
+    expect(["queued", "running"], `the resumed crawl is '${String(live["status"])}'`).toContain(
+      live["status"],
+    );
+    expect(live["failureReason"], "a resumed crawl still serves the old failure").toBeNull();
+
+    const final = await settle(id, 60_000);
+    expect(final["status"]).toBe("finished");
+    expect(final["failureReason"]).toBeNull();
+  }, 120_000);
 });

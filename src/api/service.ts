@@ -60,6 +60,7 @@ import type { Db } from "../db/client.js";
 import { crawls, frontier, issues, pages } from "../db/schema.js";
 import {
   CRAWL_DEFAULTS,
+  failureReasonOf,
   parseStoredConfig,
   resumeCrawl,
   storableConfig,
@@ -2582,6 +2583,12 @@ export class ApiService {
         // part-way — a state the surface already documents and handles — until
         // `crawl_rules` re-judges the finished crawl and rewrites them.
         rulesRunAt: null,
+        // AND THE FAILURE SENTENCE, by `finishedAt`'s argument again: the
+        // column's contract is `failure_reason IS NOT NULL` ⟹ `status =
+        // 'failed'` (migration 0017), so a queued row still carrying why the
+        // last run failed breaks it — and serves an accepted crawl with a
+        // death notice attached. The loop clears it too when it starts.
+        failureReason: null,
       })
       // Conditioned on the status this call READ, for `markCrawlFailed`'s
       // reason: a crawl that started under another process between the guards
@@ -3942,7 +3949,12 @@ export class ApiService {
         .set({
           status: "failed",
           finishedAt: new Date(),
-          failureReason: firstLine(messageOf(error)),
+          // The crawl loop's own helper, imported rather than re-implemented:
+          // one rule for what may go in this column, on both sides of the seam.
+          // It composes a sentence for an error with no message rather than
+          // throwing, because a throw here would abandon this close and leave
+          // the row `queued` for ever — the lie this catch exists to prevent.
+          failureReason: failureReasonOf(error),
         })
         .where(and(eq(crawls.id, entry.crawlId), eq(crawls.status, "queued")));
     }
@@ -5683,25 +5695,6 @@ function stripUndefined<T extends object>(value: T): Partial<T> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * The first line of a message, for `crawls.failure_reason` (migration 0017).
- *
- * The crawl loop's `failureReasonOf` on this side of the seam, and the
- * `pages.render_error` discipline both of them follow: what is served is a
- * SENTENCE, never a stack. This module logs `stackOf(error)` where a stack is
- * wanted, and that is where it stays.
- */
-function firstLine(message: string): string {
-  const line = (message.split("\n")[0] ?? message).trim();
-  if (line === "") {
-    throw new Error(
-      "firstLine: a crawl failed with an empty message — there is nothing to " +
-        "record in crawls.failure_reason",
-    );
-  }
-  return line;
 }
 
 /**

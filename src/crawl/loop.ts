@@ -592,7 +592,15 @@ export async function resumeCrawl(
 
   await db
     .update(crawls)
-    .set({ status: "running", finishedAt: null })
+    .set({
+      status: "running",
+      finishedAt: null,
+      // The earlier run's sentence goes with the status it belonged to: the
+      // column's contract is `failure_reason IS NOT NULL` ⟹ `status = 'failed'`
+      // (migration 0017), and a `running` row still carrying why it once failed
+      // breaks it and tells a reader a live crawl has already died.
+      failureReason: null,
+    })
     .where(eq(crawls.id, crawlId));
 
   return execute(db, crawlId, config, opts.signal);
@@ -1717,27 +1725,43 @@ function messageOf(error: unknown): string {
 /**
  * What goes in `crawls.failure_reason`: the message's FIRST LINE, trimmed.
  *
+ * EXPORTED, AND THE ONLY ONE. Both writers of the column reach a failed row
+ * through a thrown value — the loop's `execute` below, and the API queue
+ * runner's catch (`src/api/service.ts`) — and they had a copy of this each.
+ * Two copies of "what a served sentence may be" is two places for the rule to
+ * drift; the API imports this one. It lives here because this module is the
+ * column's first writer and the API already imports from it, so there is no
+ * cycle to pay for.
+ *
  * The `pages.render_error` precedent, and deliberately the same one: an
  * engine-originated diagnostic string, first line only, no stack frames. The
  * stack is still logged by whoever catches the error — this is the sentence,
  * not the trace, and a column that carried a trace would put one on the wire
  * (docs/talos-surface.md §9, obligation 6).
  *
- * A message with nothing in it is a THROW rather than a placeholder. Every
- * caller here is on a path that just failed, and "the crawl failed and the
- * error had no message" is a defect of ours worth seeing, not a blank to fill
- * with a friendly sentence (hard rule 7).
+ * A MESSAGE WITH NOTHING IN IT IS A SENTENCE ABOUT THAT, never a throw. This
+ * is called from inside the recovery path that closes the row `failed`, so a
+ * throw here would abandon the close and leave the row `running` for ever —
+ * the exact lie this module exists to prevent, produced by the guard meant to
+ * keep the column honest. A dependency that throws `new Error("")` is still a
+ * defect of ours; naming it in the column is how it gets seen (hard rule 7),
+ * and the row closes either way.
  */
-function failureReasonOf(error: unknown): string {
-  const message = messageOf(error);
+export function failureReasonOf(error: unknown): string {
+  // A thrown `null` or `undefined` stringifies to "null"/"undefined", which is
+  // a non-empty string and would sail past the check below as if it were a
+  // reason. It is not one: it is the same defect as an empty message.
+  const message = error === null || error === undefined ? "" : messageOf(error);
   const first = (message.split("\n")[0] ?? message).trim();
-  if (first === "") {
-    throw new Error(
-      `failureReasonOf: a crawl failed with an empty message (${String(error)}) — ` +
-        `there is nothing to record in crawls.failure_reason`,
-    );
-  }
+  if (first === "") return `the crawl threw a ${thrownKind(error)} with no message`;
   return first;
+}
+
+/** What was thrown, for the sentence above: a class name where there is one. */
+function thrownKind(error: unknown): string {
+  if (error === null) return "null";
+  if (error instanceof Error) return error.constructor.name;
+  return typeof error;
 }
 
 /**

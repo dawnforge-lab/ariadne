@@ -2306,6 +2306,14 @@ describe("a client that leaves mid-export", () => {
       const written = Number(/after (\d+) records/.exec(String(line))?.[1]);
       expect(written).toBeGreaterThan(1);
       expect(written, "the whole export was written into a dead socket").toBeLessThan(WEDGE_ROWS);
+      // AND IT ENDED IN THE WAIT, which is the only branch this test is about.
+      // The record count above is consistent with a client that left between
+      // records — a socket that never filled, a wedge never entered. The wait
+      // count is not: it is incremented only where `res.write` returned false
+      // and the loop parked on `drainOrGone`, so one or more of them is the
+      // arithmetic in the docblock actually happening on this machine.
+      const waits = Number(/(\d+) backpressure waits/.exec(String(line))?.[1]);
+      expect(waits, `the export never reached the backpressure wait: ${line}`).toBeGreaterThanOrEqual(1);
     } finally {
       // If the race above lost, `close()` is still pending: force the sockets
       // shut so one failing assertion does not hang the whole suite.

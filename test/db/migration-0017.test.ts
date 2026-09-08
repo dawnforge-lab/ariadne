@@ -34,6 +34,12 @@
  *     `failure_reason IS NOT NULL` ⟹ `status = 'failed'`. The converse is NOT
  *     asserted and must not be: a `failed` row with a null reason is a row this
  *     engine closed before 0017 existed.
+ *  6. RESUMING that failed crawl clears the sentence with the status it
+ *     belonged to — held mid-run against the fixture, because "running, and
+ *     here is why it failed" is precisely the pair claim 5 forbids;
+ *  7. and `failureReasonOf`, the one helper both writers now use, answers a
+ *     sentence for an error with no message rather than throwing — a throw
+ *     there is inside the recovery path and would leave the row `running`.
  *
  * …and the cascade, which every column on this table depends on.
  */
@@ -42,7 +48,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
 import { closeFetchAgents } from "../../src/crawl/http.js";
-import { runCrawl, type CrawlConfig, type CrawlSummary } from "../../src/crawl/loop.js";
+import {
+  failureReasonOf,
+  resumeCrawl,
+  runCrawl,
+  type CrawlConfig,
+  type CrawlSummary,
+} from "../../src/crawl/loop.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
@@ -73,6 +85,32 @@ let db: Db;
 let brokenRobots: Server;
 let brokenBase: string;
 
+/** One crawl config for every run in this file — the resume reads it too. */
+function config(siteUrl: string): CrawlConfig {
+  return {
+    siteUrl,
+    maxPages: 10,
+    maxDepth: 2,
+    userAgent: "AriadneBot-0017",
+    perHostDelayMs: 0,
+    maxConcurrency: 2,
+    probeHosts: false,
+    // The sanctioned test-only use: both fixture sites are on 127.0.0.1.
+    allowPrivate: true,
+  };
+}
+
+/**
+ * A one-shot hold on the broken robots.txt, for the resume case below.
+ *
+ * Armed, the next request for /robots.txt announces itself and then waits for
+ * the test to let it go — which parks the resumed crawl in `running` for as
+ * long as the assertion needs, instead of racing a poll against a crawl that
+ * fails in milliseconds. Disarmed by the request that trips it, so the two
+ * retries behind it answer 502 at once and the crawl closes as it always does.
+ */
+let robotsHold: { asked: () => void; release: Promise<void> } | null = null;
+
 /** The control: an ordinary site that crawls to completion. */
 let healthy: Server;
 let healthyBase: string;
@@ -90,8 +128,18 @@ beforeAll(async () => {
     if ((req.url ?? "") === "/robots.txt") {
       // The gateway in front of the origin, not the origin: no body a parser
       // could read as rules, and a status that is retried and then given up on.
-      res.writeHead(502, { "content-type": "text/html" });
-      res.end(html("<p>bad gateway</p>"));
+      const answer = (): void => {
+        res.writeHead(502, { "content-type": "text/html" });
+        res.end(html("<p>bad gateway</p>"));
+      };
+      const hold = robotsHold;
+      if (hold !== null) {
+        robotsHold = null;
+        hold.asked();
+        void hold.release.then(answer);
+        return;
+      }
+      answer();
       return;
     }
     res.writeHead(200, { "content-type": "text/html" });
@@ -126,18 +174,6 @@ beforeAll(async () => {
   const healthyAddr = healthy.address();
   if (healthyAddr === null || typeof healthyAddr === "string") throw new Error("no fixture port");
   healthyBase = `http://127.0.0.1:${healthyAddr.port}`;
-
-  const config = (siteUrl: string): CrawlConfig => ({
-    siteUrl,
-    maxPages: 10,
-    maxDepth: 2,
-    userAgent: "AriadneBot-0017",
-    perHostDelayMs: 0,
-    maxConcurrency: 2,
-    probeHosts: false,
-    // The sanctioned test-only use: both fixture sites are on 127.0.0.1.
-    allowPrivate: true,
-  });
 
   failedSummary = await runCrawl(db, config(`${brokenBase}/`));
   failedCrawlId = failedSummary.crawlId;
@@ -217,6 +253,66 @@ describe("0017 — a failed crawl says why", () => {
       .from(pages)
       .where(eq(pages.crawlId, okCrawlId));
     expect(count?.n).toBeGreaterThan(0);
+  });
+
+  it("clears the sentence when the failed crawl is resumed, and writes it again on the next close", async () => {
+    // The row this starts from is the failed one every case above read: a real
+    // crawl, closed `failed`, carrying a real reason.
+    const before = await crawlRow(failedCrawlId);
+    expect(before.status).toBe("failed");
+    expect(before.failureReason).not.toBeNull();
+
+    // Hold the first robots.txt request, so the resumed crawl is DEMONSTRABLY
+    // mid-run when the row is read. Without the hold this is a poll racing a
+    // crawl that fails in milliseconds, and a miss would look like a pass.
+    let letGo = (): void => {};
+    const asked = new Promise<void>((ok) => {
+      robotsHold = {
+        asked: ok,
+        release: new Promise<void>((released) => {
+          letGo = () => released();
+        }),
+      };
+    });
+
+    const run = resumeCrawl(db, failedCrawlId, { config: config(`${brokenBase}/`) });
+    try {
+      await asked;
+      const mid = await crawlRow(failedCrawlId);
+      // The pair the contract forbids, asked of a live row: a crawl that is
+      // running does not get to keep the sentence explaining how it died.
+      expect(mid.status).toBe("running");
+      expect(mid.failureReason, "a resumed crawl still serves the old failure").toBeNull();
+    } finally {
+      letGo();
+      robotsHold = null;
+    }
+
+    // And the resume is not a way to lose the reason either: this run fails the
+    // same way, and the column says so again.
+    const summary = await run;
+    expect(summary.status).toBe("failed");
+    const after = await crawlRow(failedCrawlId);
+    expect(after.status).toBe("failed");
+    expect(String(after.failureReason)).toContain("robots.txt unreachable");
+  }, 60_000);
+
+  it("composes a sentence for an error with no message rather than throwing", () => {
+    // `failureReasonOf` runs INSIDE the recovery path that closes the row
+    // `failed` (`execute` in the crawl loop, and the API queue runner's catch).
+    // A throw there would abandon the close and leave the row `running` for
+    // ever — the failure mode this whole column exists to end. So an empty
+    // message is a sentence about the empty message, and the row still closes.
+    expect(failureReasonOf(new Error(""))).toBe("the crawl threw a Error with no message");
+    expect(failureReasonOf("")).toBe("the crawl threw a string with no message");
+    // `String(null)` is "null", which is non-empty and would sail past a naive
+    // check as if it were a reason. It is the same defect, and says so.
+    expect(failureReasonOf(null)).toBe("the crawl threw a null with no message");
+    expect(failureReasonOf(new Error("   \n  "))).toBe("the crawl threw a Error with no message");
+    // And the ordinary case is untouched: first line, trimmed, no frames.
+    expect(failureReasonOf(new Error("robots.txt unreachable\n    at somewhere:1:1"))).toBe(
+      "robots.txt unreachable",
+    );
   });
 
   it("holds failure_reason IS NOT NULL => status = 'failed' over the table", async () => {

@@ -1168,12 +1168,18 @@ in a process that is gone; inventing one now would be a fabricated fact in a
 field a reader takes for a recorded one (hard rule 7).
 
 Pinned: `src/db/schema.ts`'s `crawls.failure_reason` comment (the contract,
-stated at the column); `test/db/migration-0017.test.ts:222` "holds
+stated at the column); `test/db/migration-0017.test.ts:318` "holds
 failure_reason IS NOT NULL => status = 'failed' over the table" (the implication
 itself, asked as SQL over the whole table, with a real crawl on each side of it);
-`test/db/migration-0017.test.ts:169` "closes the robots-502 crawl failed, with a
+`test/db/migration-0017.test.ts:205` "closes the robots-502 crawl failed, with a
 reason naming robots and the status" (a real crawl of a real host whose
-robots.txt answers 502); `test/api/query.test.ts:3478` "tells a pre-0017 failed
+robots.txt answers 502); `test/db/migration-0017.test.ts:258` "clears the
+sentence when the failed crawl is resumed" (the implication over a RESUME, which
+is the one move that changes the status without closing the crawl — the fixture
+holds the robots request so the row is read mid-run);
+`test/api/mcp.test.ts:2915` "clears the failure sentence of the crawl a resume
+accepts" (the same, over the queue's own writer and on the wire);
+`test/api/query.test.ts:3478` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
 
 ---
@@ -1507,7 +1513,12 @@ Four postures a Talos integrator should know about rather than discover:
    the same rule `renderError` follows. The crawl loop's own throws name crawl
    ids, URLs and counts rather than paths, but a failure that originates BELOW
    the loop (a database or socket error, say) carries whatever the runtime put
-   in its message, which can include a host and port this engine connects to.
+   in its message, which can include a host and port this engine connects to —
+   **and an absolute path on this server.** Node's own errors carry the path
+   they were about: a Postgres unix socket (`connect ENOENT
+   /var/run/postgresql/.s.PGSQL.5432`), a CA bundle or a module the runtime
+   could not read (`ENOENT`, `EACCES`), a disk that filled (`ENOSPC`). Every
+   one of them arrives in `error.message`, which is what this column holds.
    **Show it to an operator, log it, quote it in a handover — do not paste it
    into a tenant-facing report.** A crawl's `siteUrl` is the tenant's own; this
    sentence is the engine's.
