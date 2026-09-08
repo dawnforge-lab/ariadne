@@ -23,6 +23,16 @@
   retry, no default, no "something went wrong": a refused URL, a failed crawl
   and a dead rules pass are all RESULTS, rendered where they happened.
 
+  A FAILED CRAWL IS THE ONE THAT DID NOT THROW, and until migration 0017 it was
+  the one this rule could not keep: `GET /crawls/:id` answers 200 with
+  `status: "failed"`, so no catch fires and the panel had only the word "failed"
+  to show — which is what the Phase 17 gate watched happen to a crawl of a host
+  whose robots.txt answered 502. `failureReason` is the engine's sentence for
+  it, and `poll` writes it into the SAME error box every other failed step uses.
+  Where it is null the page says the engine recorded none, rather than inventing
+  a cause: a `failed` row with no reason is a crawl closed before that column
+  existed, and that is a different sentence from "it failed for no reason".
+
   THE SEVERITY BANDS ARE ENGINE SEVERITY. critical -> Errors, warning ->
   Warnings, info -> Notices, and nothing else. This page invents no priority of
   its own; if the bands are wrong the registry is wrong.
@@ -427,6 +437,22 @@
     stopPolling();
 
     if (detail.status !== "finished") {
+      // A failed crawl SAYS WHY, in the same box every other failed step uses.
+      //
+      // Until the engine had `failureReason` this panel could only print
+      // "the crawl ended failed" and the frontier's numbers, which is what the
+      // Phase 17 gate saw: a crawl of a host whose robots.txt answered 502
+      // closed in 14 seconds and the page had nothing to show for it. The
+      // reason is the engine's own sentence, printed whole, and when there is
+      // none the page says THAT rather than inventing a cause (rule 7).
+      if (detail.status === "failed") {
+        // Two states, not three: the engine refuses to record an empty reason,
+        // so `string` is a sentence and anything else is the honest null.
+        showError(progressError, "the crawl failed",
+          typeof detail.failureReason === "string"
+            ? detail.failureReason
+            : "the engine recorded no reason — a crawl closed before migration 0017");
+      }
       // A failed or cancelled crawl is an OUTCOME. It is rendered with the
       // crawl's own numbers and the run stops here — there is nothing to judge.
       var box = el("div", "terminal");

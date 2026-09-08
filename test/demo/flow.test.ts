@@ -394,8 +394,8 @@ describe("the demo flow", () => {
  * handling exists for is a response still being WRITTEN when the client goes,
  * and the largest body that suite had — the ~108KB rule catalog — is swallowed
  * whole by the loopback socket buffers, so `sendCsv` never reaches the
- * `once(res, "drain")` it would wedge in. Both assertions passed with the
- * handler and without it.
+ * backpressure wait it would have wedged in (fixed since: `drainOrGone`). Both
+ * assertions passed with the handler and without it.
  *
  * A CSV export big enough to exceed those buffers does reach it, and this is
  * where one can be had. The crawl is SEEDED rather than crawled — a fixture
@@ -502,8 +502,8 @@ describe("a client that leaves mid-export", () => {
     await after.text();
 
     // `close()` waits for connections to go idle. An upstream response nobody
-    // cancelled never does — the API sits in `once(res, "drain")` holding its
-    // database reader — so a hang here IS the bug.
+    // cancelled never does: `sendCsv` breaks when its own client leaves (fixed
+    // since), but only this handler makes it leave — so a hang here IS the bug.
     const closed = own.close().then(() => "closed" as const);
     const timer = new Promise<"hung">((resolve) => {
       setTimeout(() => resolve("hung"), 10_000).unref();
@@ -528,5 +528,103 @@ describe("a refused start, as the page sees it", () => {
     // Not smoothed into the proxy's own words on the way out, and not empty:
     // there is a sentence for the page to show (rule 7).
     expect(String(body["error"])).not.toContain("demo proxy");
+  });
+});
+
+/**
+ * A failed crawl, as the page sees it (migration 0017).
+ *
+ * The Phase 17 gate ran the demo against a host whose robots.txt answered 502.
+ * The crawl closed `failed` in fourteen seconds, the progress panel said
+ * "failed" and nothing else, and the sentence explaining it was in the engine's
+ * process log — a place an operator watching a browser cannot read
+ * (docs/gates/phase-17.md §5, clause 5). This is that run, on loopback, with
+ * the field the panel now renders.
+ *
+ * TWO LEVELS, which is this file's own discipline: the reason has to CROSS the
+ * proxy (the API half), and the page has to have somewhere to put it and a
+ * sentence for the case where the engine has none (the static half). There is
+ * no browser in this suite, so the second half is read out of the served HTML.
+ */
+describe("a crawl that fails, as the page sees it", () => {
+  /** A site that is perfectly healthy behind a robots.txt its CDN cannot serve. */
+  let downRobots: Server;
+  let downBase: string;
+
+  beforeAll(async () => {
+    downRobots = createServer((req, res) => {
+      if ((req.url ?? "") === "/robots.txt") {
+        res.writeHead(502, { "content-type": "text/html" });
+        res.end(page("bad gateway", "<p>the CDN, not the origin</p>"));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(page("a page nobody may ask for", "<p>behind an unreadable robots.txt</p>"));
+    });
+    await new Promise<void>((r) => downRobots.listen(0, "127.0.0.1", r));
+    const addr = downRobots.address();
+    downBase = `http://127.0.0.1:${typeof addr === "object" && addr !== null ? addr.port : 0}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => downRobots.close(() => r()));
+  });
+
+  it("hands the browser the engine's own sentence for why the crawl failed", async () => {
+    const started = await fetch(`${base}/api/crawls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ siteUrl: `${downBase}/`, maxPages: 10 }),
+    });
+    expect(started.status).toBe(202);
+    const crawlId = String(((await started.json()) as Record<string, unknown>)["crawlId"]);
+    createdCrawls.push(crawlId);
+
+    let detail: Record<string, unknown> = {};
+    await waitFor("the failing crawl to settle", async () => {
+      const res = await fetch(`${base}/api/crawls/${crawlId}`);
+      expect(res.status).toBe(200);
+      detail = (await res.json()) as Record<string, unknown>;
+      return detail["status"] !== "queued" && detail["status"] !== "running";
+    });
+
+    // RFC 9309 §2.3.1.4: a robots.txt nobody can read is a complete disallow,
+    // so this crawl is refused rather than run. That is the outcome the page
+    // renders, and the run stops there — nothing is judged.
+    expect(detail["status"]).toBe("failed");
+    expect(Number(detail["pagesCrawled"])).toBe(0);
+
+    // THE FIELD THE GATE WAS MISSING, through the proxy, on the same poll the
+    // page makes. Not just present: it names what was unreachable, that we
+    // asked more than once, and what the host answered — the three things that
+    // stop an operator re-running a crawl that cannot succeed.
+    const reason = detail["failureReason"];
+    expect(typeof reason, "the failed crawl carries no reason").toBe("string");
+    expect(String(reason)).toContain("robots.txt unreachable");
+    expect(String(reason)).toContain("502");
+    // The panel prints it with `textContent` into a one-line box, and it is a
+    // served field: a sentence, never a stack (hard rule 7, obligation 6).
+    expect(String(reason)).not.toContain("\n");
+    expect(String(reason)).not.toMatch(/\s+at /);
+  }, 60_000);
+
+  it("has a step, a box and a null sentence for it in the page it serves", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    // The box the reason is written into is the one every other failed step
+    // uses — there is no second error surface to keep in sync.
+    expect(html).toContain(`id="progress-error"`);
+    // The CALL, not the phrase: this page's head comment discusses the same
+    // words, and a `toContain("the crawl failed")` would go green off the
+    // prose the day the code stopped making the call.
+    expect(html).toContain(`showError(progressError, "the crawl failed",`);
+    // And the one case the page cannot get a sentence for. It says so instead
+    // of inventing a cause — a `failed` row with no reason is a crawl this
+    // engine closed before the column existed. Quoted with the branch it is the
+    // else of, for the reason above.
+    expect(html).toContain(
+      `: "the engine recorded no reason — a crawl closed before migration 0017")`,
+    );
+    // The routing: the reason is read off `failureReason` and nothing else.
+    expect(html).toContain(`typeof detail.failureReason === "string"`);
   });
 });

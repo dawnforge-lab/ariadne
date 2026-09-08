@@ -592,7 +592,15 @@ export async function resumeCrawl(
 
   await db
     .update(crawls)
-    .set({ status: "running", finishedAt: null })
+    .set({
+      status: "running",
+      finishedAt: null,
+      // The earlier run's sentence goes with the status it belonged to: the
+      // column's contract is `failure_reason IS NOT NULL` ⟹ `status = 'failed'`
+      // (migration 0017), and a `running` row still carrying why it once failed
+      // breaks it and tells a reader a live crawl has already died.
+      failureReason: null,
+    })
     .where(eq(crawls.id, crawlId));
 
   return execute(db, crawlId, config, opts.signal);
@@ -884,6 +892,13 @@ export function validateCrawlConfig(config: CrawlConfig): void {
  *
  * The error itself is never swallowed; if recording the failure *also* fails,
  * both surface together.
+ *
+ * AND THE ROW NOW SAYS WHY (migration 0017). The status alone told a reader
+ * that something went wrong and refused to say what — the Phase 17 gate watched
+ * a crawl close `failed` in 14 seconds with the only sentence about it in this
+ * process's log (docs/gates/phase-17.md §5, clause 5). `crawls.failure_reason`
+ * carries `failureReasonOf(error)`, the message's FIRST LINE; the stack still
+ * goes to the log exactly as before.
  */
 async function execute(
   db: Db,
@@ -897,7 +912,14 @@ async function execute(
     try {
       // The frontier's own crawled count, not a counter held in this process:
       // it is the honest number, and it survives whatever went wrong.
-      await closeCrawl(db, crawlId, "failed", crawledRows(await frontierCounts(db, crawlId)));
+      await closeCrawl(
+        db,
+        crawlId,
+        "failed",
+        crawledRows(await frontierCounts(db, crawlId)),
+        null,
+        failureReasonOf(error),
+      );
     } catch (closeError) {
       throw new AggregateError(
         [error, closeError],
@@ -1020,7 +1042,12 @@ async function runToCompletion(
     await writeNotFoundProbe(db, crawlId, {
       skipped: `not probed: ${note}`,
     });
-    await closeCrawl(db, crawlId, "failed", crawled);
+    // THE SAME SENTENCE THE SUMMARY CARRIES, onto the row (migration 0017).
+    // This path composes a classified sentence rather than catching an error,
+    // so there is nothing to take a first line of: `note` names the outcome,
+    // the attempts and the status the host answered with, and it is what the
+    // Phase 17 gate could only read in a log.
+    await closeCrawl(db, crawlId, "failed", crawled, null, note);
     return summarise(
       db,
       crawlId,
@@ -1696,6 +1723,48 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * What goes in `crawls.failure_reason`: the message's FIRST LINE, trimmed.
+ *
+ * EXPORTED, AND THE ONLY ONE. Both writers of the column reach a failed row
+ * through a thrown value — the loop's `execute` below, and the API queue
+ * runner's catch (`src/api/service.ts`) — and they had a copy of this each.
+ * Two copies of "what a served sentence may be" is two places for the rule to
+ * drift; the API imports this one. It lives here because this module is the
+ * column's first writer and the API already imports from it, so there is no
+ * cycle to pay for.
+ *
+ * The `pages.render_error` precedent, and deliberately the same one: an
+ * engine-originated diagnostic string, first line only, no stack frames. The
+ * stack is still logged by whoever catches the error — this is the sentence,
+ * not the trace, and a column that carried a trace would put one on the wire
+ * (docs/talos-surface.md §9, obligation 6).
+ *
+ * A MESSAGE WITH NOTHING IN IT IS A SENTENCE ABOUT THAT, never a throw. This
+ * is called from inside the recovery path that closes the row `failed`, so a
+ * throw here would abandon the close and leave the row `running` for ever —
+ * the exact lie this module exists to prevent, produced by the guard meant to
+ * keep the column honest. A dependency that throws `new Error("")` is still a
+ * defect of ours; naming it in the column is how it gets seen (hard rule 7),
+ * and the row closes either way.
+ */
+export function failureReasonOf(error: unknown): string {
+  // A thrown `null` or `undefined` stringifies to "null"/"undefined", which is
+  // a non-empty string and would sail past the check below as if it were a
+  // reason. It is not one: it is the same defect as an empty message.
+  const message = error === null || error === undefined ? "" : messageOf(error);
+  const first = (message.split("\n")[0] ?? message).trim();
+  if (first === "") return `the crawl threw a ${thrownKind(error)} with no message`;
+  return first;
+}
+
+/** What was thrown, for the sentence above: a class name where there is one. */
+function thrownKind(error: unknown): string {
+  if (error === null) return "null";
+  if (error instanceof Error) return error.constructor.name;
+  return typeof error;
+}
+
+/**
  * The `crawls.discovery_jsonb` row for one discovery result.
  *
  * The config is the second argument because the PROVENANCE of the sitemap
@@ -1942,6 +2011,28 @@ async function persistSitemap(
  * reconstruct them, and stamping the resume's own count would publish a partial
  * number in a field a reader takes for a whole one (hard rule 7). A fresh crawl
  * is what produces a number.
+ *
+ * ## `failureReason`, and why it is CHECKED rather than defaulted
+ *
+ * `crawls.failure_reason` (migration 0017) holds one sentence saying why a
+ * `failed` row is failed. The column's contract is an implication —
+ * `failure_reason IS NOT NULL` ⟹ `status = 'failed'` — and this function is
+ * where it is enforced, in both directions, as a throw:
+ *
+ *  - a `failed` close with NO reason would put a row on the wire that says
+ *    "something went wrong" and refuses to say what, which is the exact defect
+ *    0017 exists to remove;
+ *  - a NON-`failed` close WITH one would file a sentence about a failure under
+ *    a `finished` status, where every reader would misread it.
+ *
+ * Neither is a caller's mistake to absorb quietly (hard rule 7), and neither is
+ * reachable from this module today — the check is here so the NEXT close path
+ * cannot forget.
+ *
+ * The write is unconditional in the other direction: a non-`failed` close sets
+ * the column to NULL rather than leaving it alone, so a resume that finishes a
+ * crawl an earlier run failed does not leave the earlier run's sentence
+ * standing under a `finished` status.
  */
 async function closeCrawl(
   db: Db,
@@ -1949,13 +2040,27 @@ async function closeCrawl(
   status: CrawlSummary["status"],
   pagesCrawled: number,
   refsCapped: { delta: number; resumed: boolean } | null = null,
+  failureReason: string | null = null,
 ): Promise<void> {
+  if (status === "failed" && failureReason === null) {
+    throw new Error(
+      `closeCrawl: crawl ${crawlId} is being closed 'failed' with no reason — ` +
+        `crawls.failure_reason is what a reader is left with (migration 0017)`,
+    );
+  }
+  if (status !== "failed" && failureReason !== null) {
+    throw new Error(
+      `closeCrawl: crawl ${crawlId} is being closed '${status}' with a failure ` +
+        `reason ('${failureReason}') — that column belongs to 'failed' rows only`,
+    );
+  }
   await db
     .update(crawls)
     .set({
       status,
       finishedAt: new Date(),
       pagesCrawled,
+      failureReason,
       ...(refsCapped === null
         ? {}
         : {

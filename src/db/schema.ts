@@ -22,6 +22,34 @@ export const crawls = pgTable("crawls", {
   // guard (src/crawl/render/run-render.ts), which refuses `running` and
   // `queued`, and the API's crawl serialisation. No rule reads this column.
   status: text("status").notNull().default("running"),
+  // WHY THIS CRAWL IS `failed` — one sentence, never a stack (migration 0017,
+  // P18).
+  //
+  // THE CONTRACT, and it is an implication rather than an equivalence:
+  // `failure_reason IS NOT NULL` ⟹ `status = 'failed'`. Every writer that
+  // closes a row `failed` writes one, and every writer that closes a row any
+  // other way writes NULL over whatever stood there — so a resume that
+  // finishes a crawl an earlier run failed does not leave the old sentence
+  // sitting under a `finished` status. Three writers exist and there are no
+  // others: `closeCrawl` in src/crawl/loop.ts (which REFUSES a `failed` close
+  // with no reason and a non-`failed` close with one), the API queue runner's
+  // catch, and `markCrawlFailed` (src/api/service.ts).
+  //
+  // THE CONVERSE DOES NOT HOLD, and the null is why the column is nullable
+  // rather than a `not null default ''`: a `failed` row with a NULL reason is a
+  // PRE-0017 ROW — closed by a loop that had no column to write into. It is not
+  // "the crawl failed for no reason", and no surface may render it as one. The
+  // demo page says exactly that sentence rather than inventing a cause.
+  //
+  // WHAT GOES IN IT. The FIRST LINE of the error's own message, or — on the
+  // robots-unreachable path — the classified sentence the loop already composed
+  // for the summary (`robots.txt unreachable after 3 attempts (HTTP 502):
+  // complete disallow`). Never a stack: the stack goes to the process log as it
+  // always has, and this column carries the sentence a reader needs. It is
+  // SERVED (`CrawlDetail.failureReason`), so it is a diagnostic string on the
+  // `render_error` precedent one table along — engine-originated text, first
+  // line only, no frames — and not client copy.
+  failureReason: text("failure_reason"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   pagesCrawled: integer("pages_crawled").notNull().default(0),

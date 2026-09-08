@@ -273,11 +273,14 @@ export function createDemoServer(opts: CreateDemoServerOpts): DemoServer {
       // is the case that matters, because that response is a streamed database
       // read. `answer.pipe(res)` is the only link between the two halves and it
       // does not carry a cancellation backwards: on an early close it unpipes
-      // and leaves the upstream response paused FOREVER, so the API handler sits
-      // in `sendCsv`'s `once(res, "drain")` holding its reader, the connection
-      // never goes idle, and `close()` — which waits for exactly that — hangs on
-      // shutdown. Destroying the upstream request propagates the disconnect to
-      // the surface doing the work, which is where it means something.
+      // and leaves the upstream response paused, and nothing tells the API its
+      // reader has no reader. `sendCsv` now notices its OWN client leaving
+      // (`drainOrGone`, Phase 18) — but its client is this proxy, and the proxy
+      // is still here unless this handler ends it. Destroying the upstream
+      // request is what turns the tab's disappearance into the API's client
+      // leaving, so the export stops and the reader is released where the work
+      // is being done; without it the connection never goes idle and `close()`
+      // — which waits for exactly that — hangs on shutdown.
       let clientGone = false;
       res.on("close", () => {
         if (res.writableEnded) return;
