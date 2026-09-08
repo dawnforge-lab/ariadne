@@ -2852,7 +2852,7 @@ export class ApiService {
       howToFix: rule.howToFix,
       // The registry's flag, mirrored exactly: the key exists on a marker and
       // on nothing else. Spreading a `marker: undefined` instead would put the
-      // key on all 95 rows and make "is this a marker" a truthiness question
+      // key on all 96 rows and make "is this a marker" a truthiness question
       // about a value that is sometimes absent — see `CatalogRule.marker`.
       ...(rule.marker === undefined ? {} : { marker: rule.marker }),
     });

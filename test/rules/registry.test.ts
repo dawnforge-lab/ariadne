@@ -150,9 +150,10 @@ describe("check universe", () => {
     //
     // 0.12.0: Phase 16, on ONE ground — a severity recalibration and nothing
     // else. 29 of the 95 rules move band (23 warning→critical, 5 info→warning,
-    // crawl.blocked warning→info as a marker), leaving 27 critical / 23 warning / 45 info; the ids and the rubric behind
-    // them are docs/superpowers/specs/2026-09-08-severity-recalibration-design.md
-    // §1–3. It is ADDITIVE of nothing and SUBTRACTIVE of nothing: the same crawl
+    // crawl.blocked warning→info as the tenth marker), leaving 27 critical / 23
+    // warning / 45 info. The ids and the rubric behind them are
+    // docs/superpowers/specs/2026-09-08-severity-recalibration-design.md §1–3.
+    // It is ADDITIVE of nothing and SUBTRACTIVE of nothing: the same crawl
     // re-judged at 0.12.0 yields the identical finding set — same ids, same
     // scopes, same evidence, same copy — with only those 29 rules' `severity`
     // moved. It is still a bump because the version stamps what the ruleset SAYS

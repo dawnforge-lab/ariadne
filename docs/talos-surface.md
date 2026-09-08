@@ -278,14 +278,16 @@ validator before the handler runs (`test/api/mcp.test.ts:789` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (95 rows at 0.12.0) rather than by the crawl. The catalog is
-~107 KB (**109,949 bytes**, re-measured 2026-09-08 by Phase 17 over all 95 rows
-of ruleset 0.12.0, by serialising what `rulesCatalog` answers with no crawl id —
-of which **681 bytes** are the new `marker` strings on the ten markers; the
-earlier 103,679 was measured at 93 rows of ruleset 0.9.0, and the 100,645 before
-it at 92 rows, before `resources.not-fetched` had copy of its own) because it
-carries every rule's full copy — the tool description says so, and points an
-agent that only wants what fired at `issues_list` instead.
+bounded by the **ruleset** (96 rows at 0.13.0) rather than by the crawl. The
+catalog is ~109 KB (**111,419 bytes**, re-measured 2026-09-08 at the end of
+Phase 17 over all 96 rows of ruleset 0.13.0, by serialising what `rulesCatalog`
+answers with no crawl id — of which **681 bytes** are the `marker` strings on
+the ten markers; the 109,949 before it was measured earlier in the same phase,
+at 95 rows of 0.12.0 and before `http.server-error` was split in two; the
+103,679 before that at 93 rows of ruleset 0.9.0, and the 100,645 before it at 92
+rows, before `resources.not-fetched` had copy of its own) because it carries
+every rule's full copy — the tool description says so, and points an agent that
+only wants what fired at `issues_list` instead.
 
 **Timestamps** are ISO-8601 UTC strings. **Ids** are `crawl_<uuid>`; a caller
 never constructs one.
@@ -387,7 +389,7 @@ above the crawl's base is a finding — a host refused us and the engine backed 
 at 8s. Until Phase 12 it did not: the gate came up at the configured floor and
 the first spacing write put that floor back over the evidence, which made the
 regression invisible from `crawl_status` as well as rude to the site
-(`test/crawl/loop.test.ts:1004` "resumes at the spacing the crawl earned, not the
+(`test/crawl/loop.test.ts:1113` "resumes at the spacing the crawl earned, not the
 one it was configured with").
 
 Two things that column is not, because a reader will otherwise assume both:

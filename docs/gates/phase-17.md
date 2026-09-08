@@ -205,8 +205,8 @@ The walls, each load-bearing:
   propagates, `execute` closes the row `failed`, and the operator finds out (hard
   rule 7).
 
-**The three constants** (`src/crawl/recheck/recheck-server-errors.ts:127`, `:130`,
-`:138`):
+**The three constants** (`src/crawl/recheck/recheck-server-errors.ts:135`, `:142`,
+`:150`):
 
 | constant | value | why this number |
 |---|---|---|
@@ -321,7 +321,7 @@ Owned by T4 and summarised here rather than re-derived:
 - **`src/demo/index.html`** gains one live progress line, shown only when
   `recheck.serverErrors > 0`.
 - **`docs/talos-surface.md`** gains the block in §4.2, the five fields in §4.6,
-  and a §5.7 null-versus-zero entry.
+  and a §5.5 null-versus-zero entry.
 
 ---
 
@@ -441,10 +441,11 @@ production gap is the number it always was.
 
 | | |
 |---|---|
-| Suite | **77 files / 1,877 tests, 0 failures, 132.7 s** (orchestrator's run after T4, d50c2ef). Measured at T5 close: 1,874 tests / 77 files, 1,871 passing, wall 141.6 s. The three reds are all `test/skills/identifier-guard.test.ts` and all one cause — `docs/talos-surface.md`'s `file:line` citations drifted while that document was being rewritten for the recheck block, plus two lines this task moved (§12.2). Baseline into the phase was 1,830 (`b2449aa`); the net is T2's pass cases, T3's rule cases, T4's surface cases and T5's six |
+| Suite | **77 files / 1,877 tests, 0 failures, 132.7 s** (orchestrator's run after T4, d50c2ef). Measured at T5 close: 1,874 tests / 77 files, 1,871 passing, wall 141.6 s. The three reds are all `test/skills/identifier-guard.test.ts` and all one cause — `docs/talos-surface.md`'s `file:line` citations drifted while that document was being rewritten for the recheck block, plus two lines this task moved (§12.2). Baseline into the phase was 1,830 (`b2449aa`); the net is T2's pass cases, T3's rule cases, T4's surface cases and T5's six. **Re-measured after the review fixes: 77 files / 1,879 tests, 0 failures, 119.6 s** — the two added are the abort-during-the-recheck-pass case in `test/crawl/loop.test.ts` and the no-cap-stamp-on-an-abort case in `test/crawl/recheck.test.ts` |
 | Typecheck | `npx tsc --noEmit` — **clean**, whole tree, measured at T5 close |
 | Migrations | 0000–**0016**; `drizzle/0016_damp_ironclad.sql`, drizzle-kit generated, applied with `npm run db:migrate`. The dev database's journal holds 17 rows and carries all seven columns (§2) |
 | Ruleset | **0.13.0**, **96 rules** = 27 page + 55 query + 14 metric; **27 critical / 24 warning / 45 info** |
+| Corrected in passing | `test/rules/registry.test.ts`'s **Phase 16 history comment** said "29 of the 95 rules move band (24 warning→critical, 5 info→warning), leaving 28 critical / 23 warning / 44 info" — which contradicted the assertion 150 lines below it in the same file (27 / 23 / 45 at 0.12.0) by not counting `crawl.blocked`'s warning→info move among the 29. Corrected here to **23 warning→critical, 5 info→warning, `crawl.blocked` warning→info, leaving 27 / 23 / 45**. A version comment that disagrees with the ledger under it is failing at the one job it has |
 | Checklist | 83 checks; coverage unmoved — the 47 crawl-derived checks account as **44 claimed / 3 agent / 0 unclaimed**. CHECK-12 rewritten, CHECK-83 gains question 6 |
 | Markers | **ten**, unchanged by this phase — (B) deliberately added none (§4), and (A) surfaces the ten that exist |
 | Guards | the identifier guard, the citation guard and its `src/` form, the marker guard and the copy contracts — see §12 for the one citation this task's line shifts invalidated |

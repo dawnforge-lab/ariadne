@@ -59,6 +59,14 @@
  *    nothing a sample would not. Rows past the cap keep `recheck_fetch_class`
  *    null and are stamped with the reason below, in ONE statement at the end.
  *
+ *    IT COUNTS ROWS THE PASS SETTLED, NOT REQUESTS IT ISSUED, and a refusal is
+ *    a settled row: a URL the policy now forbids or robots.txt now disallows is
+ *    written `disallowed` with a reason, no request is made, and it spends one
+ *    of the 500 all the same. That is the budget's job — it bounds the WALK,
+ *    not the traffic, and a pass that could be refused 500 times and keep
+ *    walking would be unbounded on exactly the site that had moved behind a
+ *    login.
+ *
  *  - **`RECHECK_CAP_REASON = 'recheck-cap'`.** The `RESOURCE_CAP_REASON`
  *    doctrine verbatim, its `&& !aborted` guard included: a budget running out
  *    is a decision the pass made and every row it applies to says so (hard rule
@@ -126,7 +134,11 @@ import { isUrlAllowed } from "../url-policy.js";
  */
 export const MIN_RECHECK_GAP_MS = 60_000;
 
-/** Rows one pass will re-ask about. See the module header. */
+/**
+ * Rows one pass will settle — those it re-asks about AND those it refuses
+ * without asking, since a policy or robots refusal is a settled row too. See
+ * the module header.
+ */
 export const MAX_RECHECKS = 500;
 
 /**
@@ -504,8 +516,9 @@ export async function recheckServerErrors(
  *
  * `id` breaks the tie, so the pair is unique and no row can be visited twice or
  * stepped over. The cursor is needed even though every settled row leaves the
- * work list: the rows a cap or an unparseable URL leaves behind do not, and a
- * cursorless re-query would hand them back for ever.
+ * work list: the rows the cap leaves behind do not, and a cursorless re-query
+ * would hand them back for ever. An unparseable URL is not one of them — it is
+ * settled `disallowed` by `isUrlAllowed` and leaves the list like any other.
  */
 async function workList(
   db: Db,
@@ -513,7 +526,7 @@ async function workList(
   cursor: WorkItem | null,
   limit: number,
 ): Promise<WorkItem[]> {
-  const result = await db.execute<{ id: string; url: string; fetched_at: Date | null }>(
+  const result = await db.execute<{ id: string; url: string; fetched_at: string | null }>(
     sql`select id, url, fetched_at
           from pages
          where crawl_id = ${crawlId}
@@ -532,7 +545,12 @@ async function workList(
   return result.rows.map((row) => ({
     id: row.id,
     url: row.url,
-    // node-postgres hands a timestamptz back as a Date; the null stays null.
+    // A STRING, not a Date: `db.execute` hands back postgres's own text form
+    // (`2026-09-08 14:14:37.642+00`) rather than the Date the query builder's
+    // column mappers produce (src/api/csv.ts says the same of its own views).
+    // So the conversion is LOAD-BEARING, not cosmetic — `item.fetchedAt` is
+    // read as `.getTime()` when the gap is computed, which a string has not
+    // got. The null stays null.
     fetchedAt: row.fetched_at === null ? null : new Date(row.fetched_at),
   }));
 }

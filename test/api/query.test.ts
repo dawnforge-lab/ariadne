@@ -865,13 +865,13 @@ beforeAll(async () => {
     depth: 1, wordCount: null, fetchedAt: FIRST_LOOK,
     recheckFetchClass: "ok", recheckStatusCode: 200, recheckAt: RECHECK_PASS_AT,
   });
-  // Asked, and no answer ABOUT THE PAGE came back. A decided outcome, and the
-  // finding stays critical.
+  // No answer ABOUT THE PAGE, and a REFUSAL rather than a timeout: `disallowed`
+  // is the only inconclusive class the pass writes a reason with, because
+  // `fetchPage` leaves `disallowedReason` null on a timeout. Finding stays critical.
   await seedPage(crawlG, {
     slug: "no-answer", pageType: null, statusCode: 502, isIndexable: null, rendered: false,
-    depth: 1, wordCount: null, fetchedAt: FIRST_LOOK,
-    recheckFetchClass: "timeout", recheckReason: "no response within 20000ms",
-    recheckAt: RECHECK_PASS_AT,
+    depth: 1, wordCount: null, fetchedAt: FIRST_LOOK, recheckAt: RECHECK_PASS_AT,
+    recheckFetchClass: "disallowed", recheckReason: "link-local IPv4 address (169.254.0.0/16)",
   });
   // Never asked: both recheck columns null. Nothing was decided.
   await seedPage(crawlG, {
@@ -1311,12 +1311,12 @@ describe("GET /crawls/:id/pages", () => {
     expect(by("blip")["fetchedAt"]).toBe("2026-09-08T09:57:00.000Z");
 
     // Confirmed, and inconclusive: the class is the discriminator, and a
-    // recheck that failed carries the fetch layer's own sentence rather than a
-    // null anybody could read as "nobody asked".
+    // recheck the pass REFUSED to make carries the policy's own sentence rather
+    // than a null anybody could read as "nobody asked".
     expect(by("still-broken")["recheckFetchClass"]).toBe("server_error");
-    expect(by("no-answer")["recheckFetchClass"]).toBe("timeout");
+    expect(by("no-answer")["recheckFetchClass"]).toBe("disallowed");
     expect(by("no-answer")["recheckStatusCode"]).toBeNull();
-    expect(by("no-answer")["recheckReason"]).toBe("no response within 20000ms");
+    expect(by("no-answer")["recheckReason"]).toBe("link-local IPv4 address (169.254.0.0/16)");
 
     // The three nulls that are three different sentences. Nobody asked (both
     // null); the pass declined and said why (a reason with a null class); and a

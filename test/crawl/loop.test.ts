@@ -113,6 +113,29 @@ let brotli: string;
 let brotliHits: string[] = [];
 
 /**
+ * A site with a PAGE-level 5xx — the only fixture here that has one, and the
+ * only shape INSERTION 3c asks a second question about:
+ *   /       -> /boom-a, /boom-b
+ *   /boom-a -> 500 for ever
+ *   /boom-b -> 500 for ever
+ * robots.txt 404s (absent -> allow all) so the crawl itself is ordinary.
+ */
+let boomServer: Server;
+let boom: string;
+/**
+ * Every request to a `/boom` path, counted across the whole crawl: the page
+ * loop's two (a server error is not in `RETRYABLE`, so it asks each once) and
+ * then the recheck pass's. That makes hit 3 a KNOWN moment inside the pass.
+ */
+let boomHits = 0;
+/**
+ * Fired with the running count on each `/boom` request. The abort-during-recheck
+ * case cancels from INSIDE the pass with it, which is the only way to stop at a
+ * known row rather than at a hoped-for moment.
+ */
+let onBoomHit: ((n: number) => void) | null = null;
+
+/**
  * One server answering on TWO gate hosts: its apex spelling (`localhost:PORT`)
  * and its `www.` variant (`www.localhost:PORT`). `isSameOrigin` admits the
  * variant into the crawl (same port, www<->apex hostname), but the gate keys by
@@ -387,6 +410,31 @@ beforeAll(async () => {
   });
   brotli = await listen(brotliServer);
 
+  boomServer = createServer((req, res) => {
+    const path = req.url ?? "";
+    if (path === "/robots.txt") {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("no robots here");
+      return;
+    }
+    if (path === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html(`<a href="/boom-a">a</a><a href="/boom-b">b</a>`));
+      return;
+    }
+    if (path.startsWith("/boom")) {
+      boomHits += 1;
+      onBoomHit?.(boomHits);
+      res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
+      res.end(html("<p>boom</p>"));
+      return;
+    }
+    // The known-404 probe's URL lands here, and must not be counted as a boom.
+    res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+    res.end(html("<p>gone</p>"));
+  });
+  boom = await listen(boomServer);
+
   // Listened BY NAME so both `localhost` and `www.localhost` reach it — the two
   // gate hosts the two-host resume test crawls. `req.headers.host` tells the two
   // spellings apart; each throttles its own path a different number of times.
@@ -462,6 +510,7 @@ afterAll(async () => {
   brotliServer.closeAllConnections();
   await new Promise<void>((r) => brotliServer.close(() => r()));
   await new Promise<void>((r) => soft404Server.close(() => r()));
+  await new Promise<void>((r) => boomServer.close(() => r()));
   twoHostServer.closeAllConnections();
   await new Promise<void>((r) => twoHostServer.close(() => r()));
 });
@@ -635,6 +684,66 @@ describe("runCrawl", () => {
     expect(summary.recheck).toBeNull();
     expect(crawlRow[0]?.recheckPassAt).toBeNull();
     expect(crawlRow[0]?.recheckPassCount).toBe(0);
+  });
+
+  it("abort DURING the recheck pass cancels the crawl and stamps a count but no time", async () => {
+    // The other half of the case above: there, the signal fired before INSERTION
+    // 3c and the pass never ran (`recheck: null`). Here it fires with the pass IN
+    // FLIGHT, which is the wiring the loop does by hand — the count stamped
+    // whatever happened, the time withheld, and the pass's own `aborted` folded
+    // into the crawl's status before the resource pass reads it.
+    const ac = new AbortController();
+    boomHits = 0;
+    // A 5xx is not in the loop's `RETRYABLE` set, so the page crawl asks each of
+    // the two broken pages exactly once: hit 3 is the RECHECK's first request,
+    // and the abort lands between the row it is settling and the row after it.
+    onBoomHit = (n) => {
+      if (n === 3) ac.abort();
+    };
+    let summary;
+    try {
+      summary = await crawl(
+        // The test-only gap (P17-T5), so the pass reaches its first row in
+        // milliseconds rather than after a real minute.
+        config({ siteUrl: boom, recheckMinGapMs: 50 }),
+        ac.signal,
+      );
+    } finally {
+      onBoomHit = null;
+    }
+
+    // Two by the crawl, one by the pass, and nothing after the signal fired.
+    expect(boomHits).toBe(3);
+    expect(summary.status).toBe("cancelled");
+    // The pass RAN, unlike the case above, and says what it settled before it
+    // was stopped.
+    expect(summary.recheck).toMatchObject({ rechecked: 1, capped: false, aborted: true });
+    // And its abort is the crawl's: the resource pass is the next thing that
+    // would talk to this site, and it never ran (`resources: null`).
+    expect(summary.resources).toBeNull();
+
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
+    expect(row?.status).toBe("cancelled");
+    // THE ASYMMETRY, which is the whole reason both columns exist: the COUNT is
+    // stamped whatever happened, so an aborted pass says what it actually did;
+    // the TIME is stamped only by a pass that COMPLETED, so no reader can take
+    // this crawl's silence for "the 5xx evidence was re-verified".
+    expect(row?.recheckPassCount).toBe(1);
+    expect(row?.recheckPassAt).toBeNull();
+
+    // One row settled, one left exactly as the crawl wrote it — both nulls,
+    // nothing decided, and no `recheck-cap`: that is the resume's work list.
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    const errors = rows.filter((r) => r.fetchClass === "server_error");
+    expect(errors).toHaveLength(2);
+    const settled = errors.filter((r) => r.recheckFetchClass !== null);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.recheckFetchClass).toBe("server_error");
+    expect(settled[0]?.recheckStatusCode).toBe(500);
+    const untouched = errors.filter((r) => r.recheckFetchClass === null);
+    expect(untouched).toHaveLength(1);
+    expect(untouched[0]?.recheckReason).toBeNull();
+    expect(untouched[0]?.recheckAt).toBeNull();
   });
 
   it("refuses to crawl a site whose robots.txt is unreachable", async () => {

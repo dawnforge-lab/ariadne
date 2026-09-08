@@ -479,6 +479,42 @@ describe("the cap", () => {
     expect(hitCount("/broken-b")).toBe(0);
   });
 
+  it("stamps no reason when the CALLER stopped the walk, budget or no budget", async () => {
+    const crawlId = await seedCrawl();
+    await seedPages(crawlId, [
+      { path: "/broken-a", fetchClass: "server_error", statusCode: 500, agoSec: 2 },
+      { path: "/broken-b", fetchClass: "server_error", statusCode: 500, agoSec: 1 },
+    ]);
+
+    // A budget that WOULD have stopped this walk at one row, and a signal that
+    // gets there first. `RECHECK_CAP_REASON`'s `&& !aborted` guard is what this
+    // pins: an abort decided nothing about /broken-b, so it says nothing about
+    // it — no class, no time and NO REASON. A `recheck-cap` here would claim a
+    // decision nobody made, and would survive into the next pass's evidence.
+    const ac = new AbortController();
+    onHit = (path) => {
+      if (path === "/broken-a") ac.abort();
+    };
+    const summary = await runPass(crawlId, {
+      signal: ac.signal,
+      maxRechecks: 1,
+      minGapMs: 200,
+    });
+
+    // `capped` is FALSE, and that is the ordering rather than an accident: the
+    // budget is read after the wait, and both the wait and the top of each row
+    // check the signal first — so within one pass the two flags cannot both be
+    // true, and the abort is always the one that wins. The guard on the stamp
+    // is what keeps that true if either check ever moves.
+    expect(summary).toMatchObject({ rechecked: 1, aborted: true, capped: false });
+
+    const second = await rowFor(crawlId, "/broken-b");
+    expect(second.recheckFetchClass).toBeNull();
+    expect(second.recheckReason).toBeNull();
+    expect(second.recheckAt).toBeNull();
+    expect(hitCount("/broken-b")).toBe(0);
+  });
+
   it("re-asks a capped row on the next pass, overwriting the reason", async () => {
     const crawlId = await seedCrawl();
     await seedPages(crawlId, [
