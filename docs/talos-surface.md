@@ -1046,14 +1046,14 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:945` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:978` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:993` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:1019` "tells
+`test/rules/copy.test.ts:955` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:988` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:1003` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1029` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1046` "grades nothing: no score, no label, no threshold";
-`test/rules/coverage.test.ts:326` "site.health is filed under the
+`test/rules/copy.test.ts:1056` "grades nothing: no score, no label, no threshold";
+`test/rules/coverage.test.ts:339` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
 `test/fixtures/harness.test.ts:1806` "the health rollup agrees with a

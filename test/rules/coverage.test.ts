@@ -252,10 +252,23 @@ describe("checklist coverage", () => {
   // THE CLAIMED-CHECK ARITHMETIC STILL DOES NOT MOVE: CHECK-48/49/50/51 are
   // section-12 checks outside the build plan's 47, and all four were already
   // claimed by the rules this marker stands in for.
-  it("pins the ruleset split the gate doc reports: 95 rules = 26 page + 55 query + 14 metric", () => {
+  // Phase 17 Task 3 adds ONE page rule: `http.server-error-transient`, the 5xx a
+  // second observation cleared. It is the other half of a SPLIT rather than a
+  // marker's arrival — `http.server-error` stops firing on exactly the rows this
+  // one claims, so the two partition `fetch_class = 'server_error'` and the
+  // ruleset bump (0.12.0 -> 0.13.0) carries a verdict move as well as an
+  // addition.
+  //
+  //   page    26 + 1 = 27
+  //   total   95 + 1 = 96
+  //
+  // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE: both rules claim CHECK-12, which
+  // `http.server-error` already claimed. A check answered in two bands is not a
+  // new claim.
+  it("pins the ruleset split the gate doc reports: 96 rules = 27 page + 55 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(95);
-    expect(registry.byKind("page")).toHaveLength(26);
+    expect(registry.all()).toHaveLength(96);
+    expect(registry.byKind("page")).toHaveLength(27);
     expect(registry.byKind("query")).toHaveLength(55);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

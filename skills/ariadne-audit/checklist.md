@@ -254,7 +254,7 @@ answered from, and its verdict is the confidence interval around all of them.
 ### CHECK-83: Engine coverage and evidence completeness
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**: `crawl_status` for the crawl you are auditing, read in full, plus
-  `issues_list` for the NOT MEASURED markers. Five questions, in this order:
+  `issues_list` for the NOT MEASURED markers. Six questions, in this order:
   1. **Did the crawl finish, or stop?** `status` is `finished`, `cancelled` or
      `failed`; `frontier.pending` and `frontier.leased` above zero on a closed crawl
      mean URLs were left unfetched. A crawl that hit `maxPages` finishes with a
@@ -307,6 +307,21 @@ answered from, and its verdict is the confidence interval around all of them.
      see the cap bullet below for why "may". **`null` means nobody counted** (a
      crawl older than the counter, or one whose process died before its first
      close), which is not `0`.
+  6. **Was the 5xx evidence re-verified?** `crawl_status`'s `recheck` block. Every
+     page whose first fetch was a server error is counted once there, and four
+     numbers partition that total: `confirmed` (looked at again, still a server
+     error), `cleared` (looked at again, the site answered something else — these
+     are the pages carrying `http.server-error-transient` (warning)),
+     `inconclusive` (looked at again, no answer about the page: a timeout, a
+     network failure, a bot block, or a request our own policy or the site's
+     robots.txt refused) and `pending` (never looked at a second time). `capped`
+     is true when a budget stopped the pass, and the rows it never reached are
+     part of `pending`. The block also carries the time a COMPLETE pass finished
+     over this crawl; null there means no complete pass is on record and every
+     server error in this crawl rests on a single observation. **A pending or
+     capped row does not make CHECK-12 NOT MEASURED**: the error WAS observed and
+     `http.server-error` (critical) is still the verdict — what is unknown is
+     whether it persists, and that is the sentence the report owes the client.
 - **The markers are part of this check, not a footnote.** `issues_list` with no
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
@@ -926,14 +941,52 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-12: 5xx server errors
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-12"` — `http.server-error`
-  (critical), one finding per page whose fetch was classified a server error, with
-  the status code in the evidence. `issue_urls` for the list. A 5xx during a crawl
-  can also be a rate-limit symptom: check the crawl's pacing before reporting a
-  site-wide outage (the engine paces itself, but a fragile host can still tip).
+- **Engine**: `issues_list` with `checkId: "CHECK-12"` — TWO rules, and every page
+  whose fetch was classified a server error carries exactly one of them:
+  - `http.server-error` (critical) — the error was not cleared. One finding per
+    page, with the status code in the evidence.
+  - `http.server-error-transient` (warning) — the crawl looked again and the site
+    answered with something that is not a 5xx, so the page failed once and serves
+    now. Its evidence carries both status codes and the gap between them.
+
+  `issue_urls` per rule for the two lists. A 5xx during a crawl can also be a
+  rate-limit symptom: check the crawl's pacing before reporting a site-wide outage
+  (the engine paces itself, but a fragile host can still tip).
+
+  **The second look is the engine's, not yours.** Before a crawl closes it
+  re-fetches every server error exactly once more — at least a minute after the
+  first attempt, through the same politeness gate, and it never overwrites the
+  first observation. The `recheck` key in `http.server-error`'s evidence says
+  which of four states the finding is in, and the wording of the report depends
+  on it:
+  - "confirmed" — the site answered a server error again. This is the one to
+    report as a broken page.
+  - "inconclusive" — the second request got no answer ABOUT THE PAGE: it timed
+    out, failed at the network, was met by a bot block, or was refused before it
+    was sent (our own URL policy, or the site's robots.txt on the second pass).
+  - "capped" — the crawl held more server errors than the pass's budget, so this
+    row was never asked about a second time; `recheckReason` carries the reason.
+  - "not run" — no pass covered this row at all: a crawl older than the pass, or
+    one cancelled before it reached here.
+
+  `recheckStatusCode`, `recheckFetchClass`, `recheckReason` and `gapSeconds` carry
+  the detail behind the word.
+
+  **The ruling: a 5xx whose re-check did not run is still an Error.** The site
+  answered "server error" once and nothing has contradicted it; the unknown is
+  whether it PERSISTS, not whether it happened. So the finding stays
+  `http.server-error` (critical) and there is no marker for the unverified case —
+  `crawl_status`'s `recheck` block is what says so, counting those rows as
+  `pending` (with `capped` true when a budget was what stopped the pass). Say it
+  in the report in those words: N confirmed, M never re-verified.
 - **Evaluate**:
-  - FAIL if internal 5xx > 0
-  - Record: count, affected URLs, source pages
+  - FAIL if internal 5xx > 0 that the re-check did not clear (confirmed,
+    inconclusive, pending or capped)
+  - WARN if the only server errors seen were ones the re-check cleared: the site
+    is not serving errors now, but it did, and an intermittent 5xx still costs
+    crawl rate
+  - Record: count per rule, affected URLs, source pages, and for each URL the
+    recheck state and the gap between the two observations
 
 ### CHECK-13: Soft-404s and thin OK responses
 - **Priority**: Medium | **Requires**: Engine
