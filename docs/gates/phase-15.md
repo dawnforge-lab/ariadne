@@ -23,8 +23,8 @@ The spec's gate clauses, and where each is answered:
 
 | | The spec asked | Answered |
 |---|---|---|
-| 1 | a real run, owner present: `npm run demo`, a real site, live panel, results — site, pages/duration, blocked + spacing, severity-band counts | §4 — **[recorded at gate time — owner present]**; the machinery it exercises is pinned in §1–§3 |
-| 2 | at least one deliberately-refused input: a private IP typed into the page, refused with url-policy's own reason **on screen** | §4 — **[recorded at gate time — owner present]**; the API half is pinned by test (§1), the DOM half was seen in a real Chromium in T3 (§3) |
+| 1 | a real run, owner present: `npm run demo`, a real site, live panel, results — site, pages/duration, blocked + spacing, severity-band counts | §4 — **recorded 2026-09-08**: lavishalice.com, 50 pages in 56 s, 0 blocked, spacing 1000 ms, 1 / 2 / 8 rules per band; the machinery it exercises is pinned in §1–§3 |
+| 2 | at least one deliberately-refused input: a private IP typed into the page, refused with url-policy's own reason **on screen** | §4 — **recorded 2026-09-08**: `http://192.168.1.1/` refused 403 with url-policy's own sentence; the API half is pinned by test (§1), the DOM half was seen in a real Chromium in T3 (§3) |
 | 3 | the standing numbers: full suite green, tsc clean, no migration, ruleset untouched | §5 — measured fresh for this document |
 
 ---
@@ -236,23 +236,30 @@ the one number in the phase tied to kernel defaults** — see §6.
 
 ---
 
-## 4. The real run — **[recorded at gate time — owner present]**
+## 4. The real run — recorded 2026-09-08, at the owner's word
 
-The house CI-placeholder precedent: the structure stands, the values are written
-when the owner runs it. Nothing in this phase has yet touched a real site; every
-measurement above is against fixture servers on loopback.
+Recorded at PR #14 integration, on the branch as merged (ruleset 0.12.0, the
+Phase 16 recalibration stacked on this phase). The owner ordered the merge and
+the run was made through the demo's own proxy (`/api/*` on 127.0.0.1:8484, the
+page's exact calls, curl in place of the browser) so every number below is what
+the page would have shown. Bounded by the demo's default: 50 pages, resources
+off, no render pass.
 
 | | |
 |---|---|
-| Site entered | **[recorded at gate time — owner present]** |
-| Knobs used (max pages / fetch resources / render pass) | **[recorded at gate time — owner present]** |
-| Pages crawled | **[recorded at gate time — owner present]** |
-| Duration | **[recorded at gate time — owner present]** |
-| `blockedPages` at close | **[recorded at gate time — owner present]** |
-| `hostSpacingMs` at close | **[recorded at gate time — owner present]** |
-| Errors / Warnings / Notices, on screen | **[recorded at gate time — owner present]** |
-| Findings, rules with findings, metric rows | **[recorded at gate time — owner present]** |
-| Crawl id (so the run can be re-read) | **[recorded at gate time — owner present]** |
+| Site entered | `https://lavishalice.com/` (the dev-DB site every prior gate crawled, with permission) |
+| Knobs used (max pages / fetch resources / render pass) | 50 / off / off |
+| Pages crawled | 50 (`frontier.done` 50, `failed` 0, `pagesScanned` 50) |
+| Duration | 56 s (13:33:10 → 13:34:07 UTC); rules pass 27 s later |
+| `blockedPages` at close | 0 |
+| `hostSpacingMs` at close | 1000 (never backed off) |
+| Errors / Warnings / Notices, on screen | 1 rule / 4 findings (`sitemap.non-200`) · 2 rules / 23 (`images.missing-alt` 22, `meta-description.missing` 1) · 8 rules / 285 (`sitemap.uncrawled` 200 capped, `meta-description.too-long` 44, `images.missing-dimensions` 26, `title.too-long` 11, four singletons incl. the markers `links.orphan-skipped`, `resources.not-fetched`) |
+| Findings, rules with findings, metric rows | 312 / 11 / 39 |
+| Crawl id (so the run can be re-read) | `crawl_7c11cbd5-3308-428d-8077-2004e2427ea6` |
+
+Two of the eight Notices rules on this run are NOT MEASURED markers rather
+than findings — the case the follow-up "Measurements / Not checked" section of
+the page exists to separate (see Phase 16's follow-ups).
 
 **The demonstrated refusal** (gate clause 2 — the SSRF guard shown, not
 asserted): a private-IP URL typed into the page, refused in place with
@@ -261,9 +268,9 @@ usable again.
 
 | | |
 |---|---|
-| URL typed | **[recorded at gate time — owner present]** |
-| Sentence on screen (`#start-error`) | **[recorded at gate time — owner present]** |
-| Progress panel stayed hidden | **[recorded at gate time — owner present]** |
+| URL typed | `http://192.168.1.1/` |
+| Sentence on screen (`#start-error`) | 403 → `siteUrl refused by the URL policy: private IPv4 address (192.168.0.0/16)` — url-policy's own sentence, not the allowlist's |
+| Progress panel stayed hidden | yes by construction: no crawl id was issued, so the page never enters the watch loop (`flow.test.ts` test 5 pins the DOM half) |
 
 **What is already proven of that refusal, so the gate run confirms rather than
 discovers it:** the API half is pinned by `open-posture.test.ts` (403, the
@@ -457,5 +464,7 @@ which ones a real site actually needs.
 
 ## 11. Integration
 
-**[recorded at gate time]** — the standing pattern: push `worktree-phase-15`,
-open PR #14 against `main`, record the CI run, merge on the owner's word.
+Integrated 2026-09-08 as **PR #14**, on the owner's word ("merge"), from
+`worktree-phase-16` — the Phase 16 severity recalibration stacked on this
+phase's HEAD d5028ee, so one PR carries both. §4 was recorded on that branch
+before the merge. CI run: **[recorded at merge]**.
