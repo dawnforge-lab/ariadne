@@ -555,4 +555,4 @@ told is the agent's judgement, and the evidence layer's job here is done.
 
 ## 13. Integration
 
-**[recorded at merge]**
+Integrated 2026-09-08 as **PR #15** from `worktree-phase-17` (rebased onto main ae2b581), on the owner's standing word for this phase ("merge and do your recommendations"). CI: green first try on 9110923 (run 34244359555, 4m16s).
