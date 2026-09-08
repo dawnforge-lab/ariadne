@@ -24,8 +24,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
 // 0.12.0: Phase 16, on ONE ground — a severity recalibration, and nothing else.
-// 29 of the 95 rules move band: 24 from `warning` to `critical` and 5 from
-// `info` to `warning`, leaving 28 critical / 23 warning / 44 info. The rules,
+// 29 of the 95 rules move band: 23 from `warning` to `critical`, 5 from
+// `info` to `warning`, and `crawl.blocked` from `warning` to `info` as the tenth
+// NOT MEASURED marker (owner-ruled: a crawl refusal is a fact about our crawl,
+// not a site issue), leaving 27 critical / 23 warning / 45 info. The rules,
 // the rubric they were classified against and the per-rule rationale are
 // docs/superpowers/specs/2026-09-08-severity-recalibration-design.md §1-3;
 // that document's §3 is the authority for which ids moved.
@@ -35,7 +37,8 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // same crawl re-judged at 0.12.0 produces the identical set of findings, with the
 // `severity` column of those 29 rules' rows moved and every other column — id,
 // scope, url, evidence, copy — byte-identical. No rule was added, retired,
-// rewritten or rescoped, and no `title`, `explanation` or `howToFix` changed.
+// rewritten or rescoped; the one copy edit is `crawl.blocked`'s title and
+// explanation, reworded to say it is a crawl outcome rather than a defect.
 //
 // It is still a bump, because the version stamps what the ruleset SAYS about a
 // site and this changes that: a crawl judged at 0.11.0 and one judged at 0.12.0

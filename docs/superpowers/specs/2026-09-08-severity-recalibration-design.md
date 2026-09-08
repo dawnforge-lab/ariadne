@@ -1,6 +1,6 @@
 # Severity recalibration — design (Phase 16)
 
-Date: 2026-09-08. Owner-approved 2026-09-08 as proposed (all nine borderline calls kept as written, including `crawl.blocked` → critical).
+Date: 2026-09-08. Owner-approved 2026-09-08 as proposed, then AMENDED the same day on one rule: the owner ruled that **crawl failures are not website issues** — a 401/403/429/challenge aimed at our crawler is a fact about the crawl system, not a defect to fix on the site. So `crawl.blocked` does NOT go to `critical` (borderline call 2 is overruled in the other direction): it becomes the tenth NOT MEASURED marker at `info`, its copy reworded, and CHECK-83's family list names it. Final shape: 23 warning→critical, 5 info→warning, 1 warning→info; **27 / 23 / 45**. Rows and totals below are the pre-amendment proposal and are kept as the record of what was reviewed.
 Decision context: the owner found the Errors band read as a system-health panel (4 critical rules, all "mechanically broken") while the real audit lived in Warnings. Alternatives considered and rejected: renaming the enum to Critical/High/Medium/Low (same axis, four boxes, no calibration gain) and a Screaming-Frog-style second `priority` axis (puts a second judgement call in the engine; spec and Talos seam say severity-in-context is the agent's). Chosen: recalibrate the existing three-value enum against a written rubric. Follow-ups not designed here: 5xx re-verification at crawl end, and presenting metrics/markers separately from Notices downstream.
 
 ## The problem being fixed

@@ -311,7 +311,8 @@ answered from, and its verdict is the confidence interval around all of them.
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
-  `resources.all-unknown`, `resources.partial-unknown`. Each one
+  `resources.all-unknown`, `resources.partial-unknown`, and the per-page
+  `crawl.blocked`. Each one
   is the engine saying a check below could not be answered on this crawl. The last
   four are siblings and never more than one appears: `resources.not-recorded` means
   the crawl holds NO resource records, `resources.not-fetched` means it recorded them
@@ -725,10 +726,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-05: Geo/IP redirects and bot blockers
 - **Priority**: Critical | **Requires**: Engine + DevTools + Manual
-- **Engine**: `issues_list` with `checkId: "CHECK-05"` — `crawl.blocked` (critical)
+- **Engine**: `issues_list` with `checkId: "CHECK-05"` — `crawl.blocked` (info)
   reports pages the crawler was refused rather than served (the fetch was classified
-  `blocked`; the evidence carries the status code). A branded, politely paced crawler
-  being blocked is a bot-blocker finding, and `issue_urls` gives the affected URLs.
+  `blocked`; the evidence carries the status code). This is a NOT MEASURED marker,
+  not a site issue: it says how this crawl was received, and every check on those
+  pages is unanswered on this crawl rather than clean. Whether search engines meet
+  the same wall is this check's manual question; `issue_urls` gives the URLs.
   Report it against the user agent the crawl actually used (`robots_get`'s
   `userAgent`) — the claim is "this UA was blocked on these URLs", never "all bots are
   blocked".

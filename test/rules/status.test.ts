@@ -70,6 +70,15 @@ describe("crawl.blocked", () => {
     expect(f[0]!.evidence).toMatchObject({ statusCode: 403 });
   });
 
+  it("is a NOT MEASURED marker at info — a crawl refusal is not a site issue", () => {
+    // Owner-ruled 2026-09-08 (ruleset 0.12.0). The marker flag is what puts it
+    // in CHECK-83's family and keeps it out of the Errors band; `info` is what
+    // the marker contract requires (see registry.test.ts "severity shape").
+    const r = rule("crawl.blocked");
+    expect(r.severity).toBe("info");
+    expect(r.marker).toMatch(/refused/);
+  });
+
   it("is silent on other fetch classes, including 5xx", () => {
     for (const fetchClass of ["ok", "redirect", "client_error", "server_error"]) {
       expect(rule("crawl.blocked").run(mkPage({ fetchClass })), fetchClass).toHaveLength(0);

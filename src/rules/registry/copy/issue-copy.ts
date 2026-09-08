@@ -176,9 +176,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Check the server and application logs for this URL and fix the underlying error. If the page is genuinely gone, return a 404 or 410, or redirect it to the closest live page, rather than leaving it erroring.",
   },
   "crawl.blocked": {
-    title: "Crawler was blocked",
+    title: "Crawler was blocked — page not audited",
     explanation:
-      "The site answered with a bot challenge or an access denial (a 401, 403, 429, or a challenge interstitial) instead of the page. We report that honestly rather than treating the page as broken, but it could not be audited, and search engine crawlers may hit the same wall.",
+      "The site answered our crawler with a bot challenge or an access denial (a 401, 403, 429, or a challenge interstitial) instead of the page. This is a fact about how this crawl was received, not a defect of the page: nothing on it could be checked, so every finding this page would otherwise carry is unanswered rather than clean. Whether search engine crawlers meet the same wall is a separate question the audit settles by hand.",
     howToFix:
       'Allowlist the user agent this crawl sent ("AriadneBot" unless it was overridden) in your WAF or bot-protection settings, then re-run the crawl. If the block is deliberate and applies to search engine crawlers too, confirm that these URLs are meant to be unreachable.',
   },

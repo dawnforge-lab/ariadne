@@ -5,9 +5,10 @@
 exists and what obligations bind it; this document says *what the seam is*.
 
 **What Phase 16 changed here**, so a reader of the Phase 14 version knows where
-to look: **no served field, shape or copy changed; 29 rules changed severity.**
-`RULESET_VERSION` is 0.12.0. 24 rules moved `warning` → `critical` and 5
-`info` → `warning` (28 / 23 / 44 after), so `rules_catalog` and every
+to look: **no served field or shape changed; 29 rules changed severity.**
+`RULESET_VERSION` is 0.12.0. 23 rules moved `warning` → `critical`, 5
+`info` → `warning`, and `crawl.blocked` became a NOT MEASURED marker at `info`
+(its copy reworded to match; 27 / 23 / 45 after), so `rules_catalog` and every
 `issues`/`crawl_issues` row judged at 0.12.0 carry the new bands, and
 `site.health`'s `urlsCritical` means more than it did — §11 has the full
 account. Phase 15 (the local demo page) touched nothing Talos codes against.
@@ -1329,10 +1330,12 @@ marker naming why, whatever the mix of unasked and unknown-answer rows). No
 other rule's verdict or copy moved in either phase.
 
 **Phase 16 bumped to 0.12.0 on a different ground: severity, and only
-severity.** 29 of the 95 rules changed band (24 `warning` → `critical`, 5
-`info` → `warning`; 28 / 23 / 44 after), recalibrated against the written
+severity.** 29 of the 95 rules changed band (23 `warning` → `critical`, 5
+`info` → `warning`, `crawl.blocked` `warning` → `info` as the tenth NOT
+MEASURED marker; 27 / 23 / 45 after), recalibrated against the written
 rubric in `docs/superpowers/specs/2026-09-08-severity-recalibration-design.md`.
-No rule was added, retired, rescoped or re-worded, and no finding's existence
+No rule was added, retired or rescoped, one copy entry (`crawl.blocked`) was
+reworded to say it is a crawl outcome, and no finding's existence
 or evidence changed — the same crawl re-judged at 0.12.0 yields the identical
 finding set with those rows' `severity` moved. It is still a bump because
 severity is judgement: crawls judged either side of it are not row-comparable

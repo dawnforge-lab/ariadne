@@ -279,16 +279,16 @@ describe("check annotations", () => {
  * §2 table carries the per-rule reasoning. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
- * the nine markers, which report a hole in OUR evidence and never a fault of
+ * the ten markers, which report a hole in OUR evidence and never a fault of
  * the site.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 28 critical, 23 warning and 44 info rules", () => {
+  it("holds 27 critical, 23 warning and 45 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 28, warning: 23, info: 44 });
+    expect(counts).toEqual({ critical: 27, warning: 23, info: 45 });
     expect(all).toHaveLength(95);
   });
 
@@ -302,7 +302,6 @@ describe("severity shape of the ruleset", () => {
       "content.exact-duplicate",
       "content.placeholder",
       "content.soft-404",
-      "crawl.blocked",
       "directive.canonical-noindex-conflict",
       "host.duplicate-host-200",
       "host.http-serves-200",
