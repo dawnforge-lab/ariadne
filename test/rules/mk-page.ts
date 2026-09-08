@@ -102,6 +102,18 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     renderedHtmlPath: null,
     renderedRedirectUrl: null,
     renderError: null,
+    // The two observations (migration 0016). The clean page was fetched once,
+    // by a current crawl, so it carries a `fetched_at` — a null there is "this
+    // row predates 0016", which is a different page from a clean one.
+    fetchedAt: new Date("2026-09-08T12:00:00.000Z"),
+    // NOBODY ASKED: the clean page is not a server error, so no recheck pass
+    // ever had a reason to look at it. All four move together — see the null
+    // contract on pages.recheck_fetch_class — and a test about the recheck
+    // overrides the class and the time as a PAIR.
+    recheckFetchClass: null,
+    recheckStatusCode: null,
+    recheckReason: null,
+    recheckAt: null,
     ...overrides,
   };
 }

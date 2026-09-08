@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 17 (ruleset 0.12.0, migrations 0000–0015,
+**Status:** the contract as of Phase 17 (ruleset 0.12.0, migrations 0000–0016,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
 

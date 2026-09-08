@@ -180,6 +180,32 @@ export const crawls = pgTable("crawls", {
   // above stays honest and why a crawl whose first run predates this column
   // cannot become a partial count. See `closeCrawl` in src/crawl/loop.ts.
   resourceRefsCappedPages: integer("resource_refs_capped_pages"),
+  // When a 5xx recheck pass COMPLETED over this crawl (migration 0016, P17-T1).
+  //
+  // The `rules_run_at` precedent, and it exists for the one reader the page
+  // columns cannot serve: "did a pass run over this crawl at all". On a crawl
+  // with zero server errors the two answers differ — this is stamped and no
+  // page carries anything — and that difference is the honest distinction
+  // between "this site had no server errors" and "nobody looked" (hard rule 7).
+  //
+  // NULL MEANS NO COMPLETE PASS IS ON RECORD: a crawl written before 0016, one
+  // still running, one that failed before the pass, or one whose pass was
+  // ABORTED — a cancelled pass is deliberately not stamped, because the rows it
+  // never reached are still unasked.
+  recheckPassAt: timestamp("recheck_pass_at", { withTimezone: true }),
+  // How many rows the LAST pass rechecked.
+  //
+  // THE `render_pass_count` PRECEDENT, WITH ITS TRAP: a 0 here says "rechecked
+  // nothing", which is exactly what a crawl nobody ever rechecked also reports,
+  // because the column is NOT NULL DEFAULT 0 and has no null to distinguish
+  // them with. `recheck_pass_at` is what tells them apart, and every reader
+  // that quotes this number must read that one beside it.
+  //
+  // LAST-RUN SEMANTICS, like `render_urls_jsonb`: an aborted pass stamps what
+  // it actually did (and no `recheck_pass_at`), and a resume overwrites the
+  // count with its own — which is the only reading that stays true, since the
+  // resumed pass asks only the rows the interrupted one never reached.
+  recheckPassCount: integer("recheck_pass_count").notNull().default(0),
 });
 
 export const pages = pgTable("pages", {
@@ -494,6 +520,87 @@ export const pages = pgTable("pages", {
   // different fact from a page that was never rendered (hard rule 7: the
   // failure is a recorded row, not a silently unrendered page).
   renderError: text("render_error"),
+  // ---------------------------------------------------------------------------
+  // THE TWO OBSERVATIONS (migration 0016, P17-T1).
+  //
+  // A page fetched once is a page whose 5xx nobody has re-checked, and the
+  // recheck pass (src/crawl/recheck) exists to take a SECOND look at exactly
+  // those rows. Both looks are kept: the first observation above is never
+  // rewritten by the second, because `fetch_class` is the census every cohort
+  // in this engine is cut from — `isAuditable`, the partial duplicate indexes
+  // whose predicates spell `fetch_class = 'ok'`, `blockedPages`, `site.health`,
+  // the render selection and the CSV views all read it — and a row flipped to
+  // `ok` after the fact would be an `ok` page with no title, no words, no links
+  // and no simhash: silently exempt from most of the ruleset while looking
+  // healthy (hard rules 1 and 7).
+  // ---------------------------------------------------------------------------
+  //
+  // WHEN THE FIRST OBSERVATION WAS TAKEN. Stamped by `PageWriter` on EVERY page
+  // row it writes, off one `new Date()` per row; `resources.fetched_at` is the
+  // precedent it borrows, and `crawls.started_at` is not a substitute because a
+  // crawl is not a moment.
+  //
+  // NO OTHER WRITER TOUCHES IT. The render pass (`writeRenderResult`), the
+  // click-depth derivation and the page-type inference all rewrite ANALYSIS
+  // columns of a body this row already fetched, so moving the timestamp would
+  // date the fetch by when we last thought about it. A resume does not re-stamp
+  // it either: the page insert is `on conflict do nothing` on (crawl_id, url),
+  // so a URL already in the table keeps the row — and the time — its first
+  // observation wrote.
+  //
+  // NULLABLE, AND THE NULL IS LOAD-BEARING: "no 0016-aware writer wrote this
+  // row", i.e. a crawl that predates this migration. NEVER BACKFILLED — a fetch
+  // time cannot be reconstructed from a row, and stamping `started_at` on it
+  // would publish a fabricated measurement (hard rule 7). The recheck pass
+  // reads the null as "the gap between the two observations is unknown" and
+  // reports `gapSeconds: null` rather than a number nobody measured, and falls
+  // back to `passStart + MIN_RECHECK_GAP_MS` for the wait it owes that row.
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }),
+  // THE SECOND OBSERVATION'S CLASS, in the `FetchClass` vocabulary
+  // (src/crawl/fetch-page.ts is the authority; this comment tracks it):
+  // ok|redirect|client_error|server_error|blocked|timeout|network_error|
+  // non_html|too_large|unsupported_encoding|disallowed.
+  //
+  // THE NULL CONTRACT, stated once here for all four recheck columns and
+  // enforced by test/db/migration-0016.test.ts:
+  //
+  //   class NULL, reason NULL      NOBODY ASKED. No pass ever ran over this
+  //                                crawl (a crawl written before 0016, one that
+  //                                failed before the pass), or the pass was
+  //                                cancelled before it reached this row.
+  //                                NOTHING WAS DECIDED — and emphatically not
+  //                                "the page is fine": `http.server-error`
+  //                                keeps firing at `critical` on such a row and
+  //                                its evidence says `recheck: "not run"`.
+  //   class NULL, reason non-null  THE PASS DECIDED NOT TO ASK, AND SAYS WHY.
+  //                                One reason at launch, `recheck-cap`, on the
+  //                                `RESOURCE_CAP_REASON` doctrine.
+  //   class non-null               A SECOND OBSERVATION EXISTS — or a request
+  //                                our own policy or robots refused, which is
+  //                                `disallowed` plus a reason: a refusal is a
+  //                                DECIDED outcome, not an absence.
+  //
+  // A recheck that itself FAILS is never a null here: `fetchPage` classifies a
+  // timeout as `timeout` and a DNS/socket failure as `network_error`, and both
+  // are written as the classes they are (hard rule 7).
+  //
+  // The pass reads the null as its WORK LIST (`fetch_class = 'server_error' and
+  // recheck_fetch_class is null`), which is what makes an interrupted pass
+  // resumable by re-running it — and what makes a capped row, still null, get
+  // picked up by the resume that overwrites its reason.
+  recheckFetchClass: text("recheck_fetch_class"),
+  // The status the second observation got, or null when there was no response
+  // at all (timeout, refused connection, a request never made).
+  recheckStatusCode: integer("recheck_status_code"),
+  // Why, in the fetch layer's own words — `pages.fetch_reason`'s twin, and null
+  // on a recheck that simply worked. Also the column that carries `recheck-cap`
+  // while the class stays null, which is the second row of the table above.
+  recheckReason: text("recheck_reason"),
+  // When the pass SETTLED this row. MOVES WITH `recheck_fetch_class`: the
+  // invariant `recheck_at IS NULL` <=> `recheck_fetch_class IS NULL` holds over
+  // the whole table, and it is asserted rather than assumed. A `recheck-cap`
+  // row is not settled, so it carries a reason and no time.
+  recheckAt: timestamp("recheck_at", { withTimezone: true }),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),

@@ -622,6 +622,24 @@ export class PageWriter {
       // Unsigned analyzer value -> signed column; see the module header.
       simhash: analysis === null ? null : BigInt.asIntN(64, analysis.simhash),
       responseTimeMs: fetch.responseTimeMs,
+      // WHEN THIS OBSERVATION WAS TAKEN (migration 0016). One `new Date()` per
+      // row on the hot path, which is what the row costs and nothing more.
+      //
+      // STAMPED HERE AND NOWHERE ELSE. This is the only place a page row is
+      // created from a FETCH, and the timestamp belongs to the fetch: the
+      // render pass, the click-depth derivation and the page-type inference all
+      // update ANALYSIS columns of a body this row already has, so none of them
+      // may touch it — moving it would date the fetch by when we last thought
+      // about the page.
+      //
+      // NOTHING IS NEEDED ON THE RESUME PATH EITHER, and that is a decision
+      // rather than an omission: the pages insert is `on conflict do nothing`
+      // on (crawl_id, url) (see `flushPages`), never an upsert, so a URL a
+      // previous run already wrote keeps that run's row and that run's
+      // timestamp. That is the correct answer — the first observation is the
+      // one `fetch_class` beside it describes, and re-stamping it would claim
+      // the census was taken at a time it was not (hard rule 7).
+      fetchedAt: new Date(),
       htmlBytes: fetch.htmlBytes,
       domSize: analysis?.domSize ?? null,
       imagesTotal: analysis?.imagesTotal ?? 0,

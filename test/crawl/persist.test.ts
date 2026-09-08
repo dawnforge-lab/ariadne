@@ -412,6 +412,82 @@ describe("PageWriter", () => {
     expect(row?.h2Count).toBe(2);
   });
 
+  // `fetched_at` is the FIRST of the two observations migration 0016 gave the
+  // table, and the recheck pass computes the gap between them from it. Nothing
+  // else writes it, so if the writer stops stamping it the column is null for
+  // ever on that crawl and the gap is unmeasurable.
+  it("stamps fetched_at on every row it writes, and leaves the recheck columns null", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const before = Date.now();
+    const good = `${SITE}/works`;
+    const broken = `${SITE}/boom`;
+    await writer.addPage(item(good), makeFetch(good), makeAnalysis(), { complete: true });
+    // A page with no body and no analysis is stamped too: the timestamp is the
+    // FETCH's, not the analysis's.
+    await writer.addPage(
+      item(broken),
+      makeFetch(broken, { statusCode: 503, fetchClass: "server_error", body: null }),
+      null,
+      { complete: true },
+    );
+    await writer.flush();
+    const after = Date.now();
+
+    const rows = await db
+      .select({
+        url: pages.url,
+        fetchedAt: pages.fetchedAt,
+        recheckFetchClass: pages.recheckFetchClass,
+        recheckStatusCode: pages.recheckStatusCode,
+        recheckReason: pages.recheckReason,
+        recheckAt: pages.recheckAt,
+      })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    expect(rows.length).toBe(2);
+    for (const row of rows) {
+      expect(row.fetchedAt, row.url).not.toBeNull();
+      expect(row.fetchedAt!.getTime(), row.url).toBeGreaterThanOrEqual(before);
+      expect(row.fetchedAt!.getTime(), row.url).toBeLessThanOrEqual(after);
+      // NOBODY ASKED: the writer never writes a second observation, not even on
+      // the 5xx row. Only the recheck pass does.
+      expect(row.recheckFetchClass, row.url).toBeNull();
+      expect(row.recheckStatusCode, row.url).toBeNull();
+      expect(row.recheckReason, row.url).toBeNull();
+      expect(row.recheckAt, row.url).toBeNull();
+    }
+  });
+
+  // The conflict path, stated as a claim rather than left to be inferred: the
+  // pages insert is `on conflict do nothing`, so a re-crawl of a URL already in
+  // the table keeps the FIRST observation's row and its timestamp. Re-stamping
+  // it would date the census by when we last looked (hard rule 7).
+  it("keeps the first row's fetched_at when a second write hits the (crawl, url) conflict", async () => {
+    const crawlId = await newCrawl();
+    const url = `${SITE}/twice`;
+    const first = new PageWriter(db, crawlId);
+    await first.addPage(item(url), makeFetch(url), makeAnalysis(), { complete: true });
+    await first.flush();
+    const [original] = await db
+      .select({ fetchedAt: pages.fetchedAt })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    expect(original?.fetchedAt).not.toBeNull();
+
+    await new Promise((ok) => setTimeout(ok, 5));
+    const second = new PageWriter(db, crawlId);
+    await second.addPage(item(url), makeFetch(url), makeAnalysis(), { complete: true });
+    await second.flush();
+
+    const rows = await db
+      .select({ fetchedAt: pages.fetchedAt })
+      .from(pages)
+      .where(eq(pages.crawlId, crawlId));
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.fetchedAt!.getTime()).toBe(original!.fetchedAt!.getTime());
+  });
+
   // The redirect graph is joined on `redirect_url_normalised`, so the writer
   // owes it the frontier key of the target — while `redirect_url` keeps the
   // `Location` as the server sent it, because that is the evidence. A page with
