@@ -118,8 +118,8 @@ describe("contentRules metadata", () => {
     expect(
       Object.fromEntries(contentRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
-      "content.soft-404": [["CHECK-13"], "warning", "content"],
-      "content.exact-duplicate": [["CHECK-39"], "warning", "content"],
+      "content.soft-404": [["CHECK-13"], "critical", "content"],
+      "content.exact-duplicate": [["CHECK-39"], "critical", "content"],
       "content.near-duplicate": [["CHECK-39"], "warning", "content"],
     });
   });
@@ -254,7 +254,7 @@ describe("the content rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
-        severity: "warning",
+        severity: rule(ID).severity,
         pageId: ids.get("/gone"),
         pageUrl: url("/gone"),
         dedupeKey: url("/gone"),
@@ -488,7 +488,7 @@ describe("the content rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
-        severity: "warning",
+        severity: rule(ID).severity,
         pageId: ids.get("/help/returns"),
         pageUrl: url("/help/returns"),
         dedupeKey: "same",

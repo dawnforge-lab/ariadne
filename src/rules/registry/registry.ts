@@ -23,6 +23,30 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.12.0: Phase 16, on ONE ground — a severity recalibration, and nothing else.
+// 29 of the 95 rules move band: 24 from `warning` to `critical` and 5 from
+// `info` to `warning`, leaving 28 critical / 23 warning / 44 info. The rules,
+// the rubric they were classified against and the per-rule rationale are
+// docs/superpowers/specs/2026-09-08-severity-recalibration-design.md §1-3;
+// that document's §3 is the authority for which ids moved.
+//
+// This is the cleanest bump the file has had, and the property worth stating is
+// what it does NOT change: no finding's existence and no finding's evidence. The
+// same crawl re-judged at 0.12.0 produces the identical set of findings, with the
+// `severity` column of those 29 rules' rows moved and every other column — id,
+// scope, url, evidence, copy — byte-identical. No rule was added, retired,
+// rewritten or rescoped, and no `title`, `explanation` or `howToFix` changed.
+//
+// It is still a bump, because the version stamps what the ruleset SAYS about a
+// site and this changes that: a crawl judged at 0.11.0 and one judged at 0.12.0
+// are not row-comparable on severity, and anything rolled up FROM severity moves
+// with them. `site.health`'s `urlsCritical` is the one to watch — it meant
+// "pages that are mechanically broken" at 0.11.0 and means "pages carrying a
+// first-fix SEO defect" at 0.12.0, so a gauge drawn from it needs the ruleset
+// version beside the number. Stored findings keep the severity their ruleset
+// gave them; nothing is backfilled, which is what `test/api/query.test.ts`'s
+// cross-ruleset machinery exists to report.
+//
 // 0.11.0: Phase 14 Task 1, on ONE ground. `resources.partial-unknown` (T1), the
 // fourth and last resource marker. A crawl whose census is a MIX — some rows
 // `null` (never asked about), the rest a decided unknown class (`refused`,
@@ -91,7 +115,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.11.0";
+export const RULESET_VERSION = "0.12.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

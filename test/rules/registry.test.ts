@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+
+import { buildRegistry } from "../../src/rules/index.js";
 import {
   AGENT_CHECKS,
   CRAWL_CHECK_IDS,
@@ -128,6 +130,18 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.12.0: Phase 16, on ONE ground — a severity recalibration and nothing
+    // else. 29 of the 95 rules move band (24 warning→critical, 5 info→warning),
+    // leaving 28 critical / 23 warning / 44 info; the ids and the rubric behind
+    // them are docs/superpowers/specs/2026-09-08-severity-recalibration-design.md
+    // §1–3. It is ADDITIVE of nothing and SUBTRACTIVE of nothing: the same crawl
+    // re-judged at 0.12.0 yields the identical finding set — same ids, same
+    // scopes, same evidence, same copy — with only those 29 rules' `severity`
+    // moved. It is still a bump because the version stamps what the ruleset SAYS
+    // about a site, and severity is part of that: findings across the
+    // 0.11.0/0.12.0 boundary are not row-comparable on severity, and neither is
+    // anything rolled up from it (`site.health`'s `urlsCritical` above all).
+    //
     // 0.11.0: Phase 14 Task 1, on ONE ground. `resources.partial-unknown` (T1),
     // the fourth and last resource marker: a crawl whose census is a MIX — some
     // rows null, the rest a decided unknown class, and not one `ok` or broken
@@ -210,7 +224,7 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. Phase 9's bump is
     // T2's, above; the phase's other tasks verify rather than bump again.
-    expect(RULESET_VERSION).toBe("0.11.0");
+    expect(RULESET_VERSION).toBe("0.12.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -237,5 +251,84 @@ describe("check annotations", () => {
   it("the agent list is well-formed and inside the crawl-derived universe", () => {
     expect(new Set(AGENT_CHECKS).size, "AGENT_CHECKS repeats an id").toBe(AGENT_CHECKS.length);
     for (const c of AGENT_CHECKS) expect(CRAWL_CHECK_IDS, c).toContain(c);
+  });
+});
+
+
+/**
+ * The severity shape of the whole ruleset, pinned.
+ *
+ * Severity is the axis every downstream consumer bands on — the demo page's
+ * Errors / Warnings / Notices, `site.health`'s per-page rollup, and whatever
+ * gauge Talos eventually draws from it — and nothing computes it at runtime:
+ * each rule's severity is a literal at definition time. That makes the totals
+ * below a fact about the ruleset rather than about any crawl, and it makes an
+ * accidental one-character edit invisible everywhere except here.
+ *
+ * **A change to either assertion in this block is a RULESET BUMP and must be
+ * deliberate.** Moving a rule between bands changes what the engine SAYS about
+ * a site: the same crawl re-judged reports the same findings at a different
+ * severity, and every rollup taken from severity moves with it. Update these
+ * literals only alongside `RULESET_VERSION`, a written rationale in the comment
+ * block above it, and the matching parenthetical in
+ * `skills/ariadne-audit/checklist.md` — never to make a red test green.
+ *
+ * The current shape is Phase 16's recalibration (ruleset 0.12.0), classified
+ * against the rubric in
+ * `docs/superpowers/specs/2026-09-08-severity-recalibration-design.md` §1, whose
+ * §2 table carries the per-rule reasoning. Two classes are fixed by
+ * construction rather than by judgement and can never appear in the critical
+ * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
+ * the nine markers, which report a hole in OUR evidence and never a fault of
+ * the site.
+ */
+describe("severity shape of the ruleset", () => {
+  const all = buildRegistry().all();
+
+  it("holds 28 critical, 23 warning and 44 info rules", () => {
+    const counts = { critical: 0, warning: 0, info: 0 };
+    for (const r of all) counts[r.severity] += 1;
+    expect(counts).toEqual({ critical: 28, warning: 23, info: 44 });
+    expect(all).toHaveLength(95);
+  });
+
+  it("names exactly the rules that are critical", () => {
+    expect(all.filter((r) => r.severity === "critical").map((r) => r.id).sort()).toEqual([
+      "canonical.html-header-conflict",
+      "canonical.multiple",
+      "canonical.non-200-target",
+      "canonical.non-indexable-target",
+      "content.csr-dependent",
+      "content.exact-duplicate",
+      "content.placeholder",
+      "content.soft-404",
+      "crawl.blocked",
+      "directive.canonical-noindex-conflict",
+      "host.duplicate-host-200",
+      "host.http-serves-200",
+      "hreflang.invalid-code",
+      "hreflang.missing-return-link",
+      "hreflang.non-indexable-target",
+      "http.server-error",
+      "indexability.meta-header-conflict",
+      "links.broken-internal",
+      "mobile.viewport-missing",
+      "nav.js-only",
+      "redirect.js",
+      "redirect.loop",
+      "robots.blocks-sitemap-urls",
+      "sitemap.invalid",
+      "sitemap.non-200",
+      "sitemap.non-indexable",
+      "title.missing",
+      "url.normalisation-variants",
+    ]);
+  });
+
+  it("no metric rule and no marker is above info", () => {
+    for (const r of all) {
+      if (r.kind === "metric") expect(r.severity, r.id).toBe("info");
+      if (r.marker) expect(r.severity, r.id).toBe("info");
+    }
   });
 });

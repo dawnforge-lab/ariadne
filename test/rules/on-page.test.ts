@@ -121,7 +121,7 @@ describe("title rules", () => {
     const f = rule("title.missing").run(mkPage({ title: null }));
     expect(f).toHaveLength(1);
     expect(f[0]!.ruleId).toBe("title.missing");
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("title.missing").severity);
     expect(f[0]!.evidence).toMatchObject({ title: null });
   });
 
@@ -380,7 +380,7 @@ describe("content rules", () => {
       mkPage({ hasLoremIpsum: true, wordCount: 320 }),
     );
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("content.placeholder").severity);
     expect(f[0]!.evidence).toMatchObject({ wordCount: 320 });
   });
 

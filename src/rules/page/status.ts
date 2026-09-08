@@ -19,7 +19,7 @@ export const statusRules: PageRule[] = [
       : [],
   ),
 
-  pageRule("crawl.blocked", ["CHECK-05"], CATEGORY, "warning", (p, self) =>
+  pageRule("crawl.blocked", ["CHECK-05"], CATEGORY, "critical", (p, self) =>
     p.fetchClass === "blocked" ? [finding(self, p, { statusCode: p.statusCode })] : [],
   ),
 ];

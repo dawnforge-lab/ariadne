@@ -28,7 +28,7 @@ describe("indexabilityRules metadata", () => {
   it("carries the severities the table assigns", () => {
     expect(Object.fromEntries(indexabilityRules.map((r) => [r.id, r.severity]))).toEqual({
       "indexability.noindex": "info",
-      "indexability.meta-header-conflict": "warning",
+      "indexability.meta-header-conflict": "critical",
     });
   });
 
@@ -138,7 +138,7 @@ describe("indexability.meta-header-conflict", () => {
       mkPage({ robotsMeta: "noindex", xRobotsTag: "index, follow" }),
     );
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("indexability.meta-header-conflict").severity);
     expect(f[0]!.evidence).toMatchObject({
       robotsMeta: "noindex",
       xRobotsTag: "index, follow",

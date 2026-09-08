@@ -66,7 +66,7 @@ describe("crawl.blocked", () => {
     );
     expect(f).toHaveLength(1);
     expect(f[0]!.ruleId).toBe("crawl.blocked");
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("crawl.blocked").severity);
     expect(f[0]!.evidence).toMatchObject({ statusCode: 403 });
   });
 

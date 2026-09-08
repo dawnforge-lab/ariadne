@@ -57,10 +57,10 @@ describe("sitemapRules metadata", () => {
       Object.fromEntries(sitemapRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
       "sitemap.missing": [["CHECK-06"], "warning", "sitemap"],
-      "sitemap.invalid": [["CHECK-06"], "warning", "sitemap"],
-      "sitemap.non-200": [["CHECK-07"], "warning", "sitemap"],
+      "sitemap.invalid": [["CHECK-06"], "critical", "sitemap"],
+      "sitemap.non-200": [["CHECK-07"], "critical", "sitemap"],
       "sitemap.redirected": [["CHECK-07"], "warning", "sitemap"],
-      "sitemap.non-indexable": [["CHECK-07"], "warning", "sitemap"],
+      "sitemap.non-indexable": [["CHECK-07"], "critical", "sitemap"],
       // Info: a sitemap entry the crawl never reached is usually the crawl's
       // own boundary, not a fault on the site.
       "sitemap.uncrawled": [["CHECK-07"], "info", "sitemap"],
@@ -238,7 +238,7 @@ describe("the sitemap rules against the database", () => {
     expect(found).toHaveLength(1);
     expect(found[0]!).toMatchObject({
       ruleId: "sitemap.invalid",
-      severity: "warning",
+      severity: rule("sitemap.invalid").severity,
       pageId: null,
       pageUrl: null,
       dedupeKey: "site",

@@ -92,13 +92,13 @@ export const canonicalRules: PageRule[] = [
   // `canonicalCount` counts every <link rel=canonical> the HTML declared;
   // `canonicalHtml` is the first one, which is the one we audit everywhere else
   // — reported as `kept` so the finding says which of the several that was.
-  pageRule("canonical.multiple", ["CHECK-18"], CATEGORY, "warning", (p, self) =>
+  pageRule("canonical.multiple", ["CHECK-18"], CATEGORY, "critical", (p, self) =>
     isAuditable(p) && p.canonicalCount > 1
       ? [finding(self, p, { canonicalCount: p.canonicalCount, kept: p.canonicalHtml })]
       : [],
   ),
 
-  pageRule("canonical.html-header-conflict", ["CHECK-18"], CATEGORY, "warning", (p, self) => {
+  pageRule("canonical.html-header-conflict", ["CHECK-18"], CATEGORY, "critical", (p, self) => {
     const { canonicalHtml: html, canonicalHeader: header } = p;
     if (!isAuditable(p) || !present(html) || !present(header)) return [];
     // A value that does not resolve falls back to its literal text rather than
@@ -114,7 +114,7 @@ export const canonicalRules: PageRule[] = [
   // Hosts are compared literally, so `www.example.com` and `example.com` are
   // different hosts here and this fires. That is deliberate: the rule states
   // the fact and the agent judges whether the site treats the two as one.
-  pageRule("canonical.cross-domain", ["CHECK-20"], CATEGORY, "info", (p, self) => {
+  pageRule("canonical.cross-domain", ["CHECK-20"], CATEGORY, "warning", (p, self) => {
     if (!isAuditable(p)) return [];
     const target = resolveEffectiveCanonical(p);
     if (target === null || target.resolved === null) return [];
@@ -129,7 +129,7 @@ export const canonicalRules: PageRule[] = [
   // signals into another URL, the noindex asks to drop the page entirely. A
   // canonical that does not resolve is not known to point anywhere, so it is
   // not a contradiction — `canonical.points-elsewhere` reports the malformation.
-  pageRule("directive.canonical-noindex-conflict", ["CHECK-21"], CATEGORY, "warning", (p, self) => {
+  pageRule("directive.canonical-noindex-conflict", ["CHECK-21"], CATEGORY, "critical", (p, self) => {
     if (!isAuditable(p) || !hasNoindex(p)) return [];
     const target = resolveEffectiveCanonical(p);
     return target !== null && target.pointsElsewhere

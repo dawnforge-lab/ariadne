@@ -49,11 +49,11 @@ describe("urlHygieneRules metadata", () => {
     expect(
       Object.fromEntries(urlHygieneRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
-      "url.normalisation-variants": [["CHECK-30"], "warning", "url"],
+      "url.normalisation-variants": [["CHECK-30"], "critical", "url"],
       "url.tracking-params-internal": [["CHECK-28"], "warning", "url"],
       // Info: a parameter page that canonicalises to itself is a configuration
       // to look at with the param inventory beside it, not a fault on its own.
-      "url.parameter-pages-indexable": [["CHECK-27"], "info", "url"],
+      "url.parameter-pages-indexable": [["CHECK-27"], "warning", "url"],
     });
   });
 
@@ -176,7 +176,7 @@ describe("the URL rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
-        severity: "warning",
+        severity: rule(ID).severity,
         // The lexically first variant, so the finding lands on a URL rather
         // than on the crawl as a whole.
         pageId: ids.get("/Product?a=1&b=2"),
@@ -394,7 +394,7 @@ describe("the URL rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
-        severity: "info",
+        severity: rule(ID).severity,
         pageId: ids.get("/list?colour=red&sort=asc"),
         pageUrl: url("/list?colour=red&sort=asc"),
         dedupeKey: url("/list?colour=red&sort=asc"),

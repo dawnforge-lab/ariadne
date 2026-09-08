@@ -242,9 +242,9 @@ async function canonicalTargetFindings(
   return noteTruncation(findings, total);
 }
 
-const BROKEN: RuleIdentity = { id: "links.broken-internal", severity: "warning" };
-const NON_200: RuleIdentity = { id: "canonical.non-200-target", severity: "warning" };
-const NON_INDEXABLE: RuleIdentity = { id: "canonical.non-indexable-target", severity: "warning" };
+const BROKEN: RuleIdentity = { id: "links.broken-internal", severity: "critical" };
+const NON_200: RuleIdentity = { id: "canonical.non-200-target", severity: "critical" };
+const NON_INDEXABLE: RuleIdentity = { id: "canonical.non-indexable-target", severity: "critical" };
 
 export const linkTargetRules: QueryRule[] = [
   defineRule<QueryRule>({

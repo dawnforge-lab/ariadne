@@ -33,9 +33,9 @@ import { readHostProbe } from "./crawl-evidence.js";
 
 const CATEGORY = "host" as const;
 
-const HTTP_200: RuleIdentity = { id: "host.http-serves-200", severity: "warning" };
-const DUPLICATE: RuleIdentity = { id: "host.duplicate-host-200", severity: "warning" };
-const LEGACY: RuleIdentity = { id: "host.legacy-host-reachable", severity: "info" };
+const HTTP_200: RuleIdentity = { id: "host.http-serves-200", severity: "critical" };
+const DUPLICATE: RuleIdentity = { id: "host.duplicate-host-200", severity: "critical" };
+const LEGACY: RuleIdentity = { id: "host.legacy-host-reachable", severity: "warning" };
 const SKIPPED: RuleIdentity = { id: "host.probe-skipped", severity: "info" };
 
 /**

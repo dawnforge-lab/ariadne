@@ -48,10 +48,10 @@ describe("technicalRules metadata", () => {
 
   it("carries the severities the table assigns", () => {
     expect(Object.fromEntries(technicalRules.map((r) => [r.id, r.severity]))).toEqual({
-      "mobile.viewport-missing": "warning",
+      "mobile.viewport-missing": "critical",
       "images.missing-dimensions": "info",
-      "images.missing-alt": "info",
-      "performance.slow-response": "info",
+      "images.missing-alt": "warning",
+      "performance.slow-response": "warning",
     });
   });
 
@@ -78,7 +78,7 @@ describe("mobile.viewport-missing", () => {
     const f = rule("mobile.viewport-missing").run(mkPage({ hasViewport: false }));
     expect(f).toHaveLength(1);
     expect(f[0]!.ruleId).toBe("mobile.viewport-missing");
-    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.severity).toBe(rule("mobile.viewport-missing").severity);
     expect(f[0]!.dedupeKey).toBe("https://example.com/page");
     // The rule knows only that the tag is absent; it has nothing to report about
     // a tag it never saw.
@@ -122,7 +122,7 @@ describe("images.missing-alt", () => {
   it("fires when at least one image has no alt attribute", () => {
     const f = rule("images.missing-alt").run(mkPage({ imagesTotal: 4, imagesMissingAlt: 2 }));
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.severity).toBe(rule("images.missing-alt").severity);
     expect(f[0]!.evidence).toEqual({ imagesMissingAlt: 2, imagesTotal: 4 });
   });
 
@@ -142,7 +142,7 @@ describe("performance.slow-response", () => {
   it("fires on a response slower than the threshold and reports both numbers", () => {
     const f = rule("performance.slow-response").run(mkPage({ responseTimeMs: 3200 }));
     expect(f).toHaveLength(1);
-    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.severity).toBe(rule("performance.slow-response").severity);
     expect(f[0]!.evidence).toEqual({ responseTimeMs: 3200, threshold: SLOW_MS });
   });
 
