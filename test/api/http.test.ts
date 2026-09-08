@@ -26,7 +26,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, frontier, pages, resources } from "../../src/db/schema.js";
+import { crawls, frontier, issues, pages, resources } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
@@ -2158,4 +2158,158 @@ describe("boot configuration", () => {
     expect(config.renderDir).toBeUndefined();
     expect(config.exportDir).toBeUndefined();
   });
+});
+
+/**
+ * The other way a streaming export ends: the client hangs up half way through.
+ *
+ * "failure containment"'s mid-stream test covers the failure that is OURS (the
+ * database died); this one is theirs (a tab closed, a `curl | head`, a proxy
+ * that stopped reading), and until this test existed the two ended very
+ * differently. A response whose client is GONE emits
+ * `close` — never `drain`, never `error` — so `sendCsv`'s backpressure wait was
+ * a promise nothing could settle: the `for await` over `csv.records()` was
+ * suspended for the life of the process, holding the reader and its batch, and
+ * `close()` — which waits for the connection to go idle — hung behind it. The
+ * defect was found and deliberately left by Phase 15 (docs/gates/phase-15.md
+ * §7, which is history and stays as written); this is the test that closes it.
+ *
+ * ## What is the proof here, and what is only a guard
+ *
+ * `test/demo/flow.test.ts` can assert the hang directly, because a proxy in
+ * front of the API keeps the upstream socket open and `close()` waits on it
+ * forever. A client that hangs up ON THE API destroys that socket itself, so
+ * `close()` returns either way and the race below is a GUARD (against a fix that
+ * frees the loop but leaves the connection), not the proof. The proof is the log
+ * line: it is written where the loop breaks, so it exists only if the `for await`
+ * actually returned — which is what finalises `csv.records()` and lets go of the
+ * batch it was holding — and the record count in it is short of the seeded rows,
+ * which places the break mid-stream. Rule 7 wants that line for its own sake
+ * too: an export that ends early is an outcome, and outcomes are not silent.
+ *
+ * ## Why the body has to be this big, and how to re-derive it
+ *
+ * The wedge only exists past `res.write()` returning false, so the export has to
+ * out-run the buffers between the two ends: the API's socket send buffer, the
+ * client's receive buffer, and Node's own 16KB stream buffer. On this machine
+ * that is `tcp_wmem` max (4MB) plus `tcp_rmem` max (6MB), and the measurement
+ * agrees to two figures — a client that reads 64KB and then STOPS (the same
+ * disconnect a browser tab makes) stalls the API after 2,585 records, ~10.4MB,
+ * repeatably. 12,000 findings with a long `pageUrl` is ~48MB of CSV, a 4.6x
+ * margin over that, and it is the same number `test/demo/flow.test.ts` derived
+ * for its own two-hop path. Seeding it costs about a second; the rows are
+ * SEEDED rather than crawled because a fixture site that produced fifty
+ * megabytes of findings would be a crawl, not a setup. If a future kernel
+ * absorbs four times as much, the record-count assertion below says so with the
+ * number in the message rather than passing for the wrong reason.
+ */
+describe("a client that leaves mid-export", () => {
+  /** ~48MB of CSV: rows × URL length, per the docblock. */
+  const WEDGE_ROWS = 12_000;
+  const WEDGE_URL_CHARS = 3_800;
+  /** A rule this ruleset defines, so the `issues` view can join its copy. */
+  const WEDGE_RULE = "canonical.missing";
+  /** Long enough for the API to fill the buffers and park in the drain wait. */
+  const PAUSE_BEFORE_LEAVING_MS = 1_000;
+
+  async function seedFindings(): Promise<string> {
+    const crawlId = await seedCrawl({ status: "finished" });
+    const filler = "x".repeat(WEDGE_URL_CHARS);
+    for (let start = 0; start < WEDGE_ROWS; start += 500) {
+      const batch = [];
+      for (let i = start; i < Math.min(start + 500, WEDGE_ROWS); i++) {
+        batch.push({
+          crawlId,
+          ruleId: WEDGE_RULE,
+          severity: "warning",
+          dedupeKey: `wedge-${i}`,
+          details: {
+            pageUrl: `http://seeded.example/${i}?q=${filler}`,
+            note: "a seeded finding, for a body big enough to block a socket",
+          },
+        });
+      }
+      await db.insert(issues).values(batch);
+    }
+    return crawlId;
+  }
+
+  /**
+   * Read until the body is genuinely flowing, stop reading, then hang up.
+   *
+   * The first 64KB make this an abort MID-BODY rather than mid-request — by
+   * then the API is inside `sendCsv`'s write loop, which is the only place the
+   * wedge lives. Then the reader STOPS, which is what puts that loop in the
+   * backpressure branch: a client that keeps reading is a client it never waits
+   * for. The abort is the disconnect itself — undici destroys the socket, which
+   * is what the API's response sees as `close`. This is the same `fetch` the
+   * rest of the file uses, driven a chunk at a time.
+   */
+  async function abandonMidExport(url: string): Promise<number> {
+    const client = new AbortController();
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      signal: client.signal,
+    });
+    expect(res.status).toBe(200);
+    if (res.body === null) throw new Error("the export answered 200 with no body");
+    const reader = res.body.getReader();
+    let seen = 0;
+    while (seen < 64 * 1024) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`the export sent only ${seen} bytes before ending`);
+      seen += value.byteLength;
+    }
+    await new Promise((r) => setTimeout(r, PAUSE_BEFORE_LEAVING_MS));
+    client.abort();
+    return seen;
+  }
+
+  it("stops the export, says so, and lets the server close", async () => {
+    const crawlId = await seedFindings();
+    // Its own server: the assertion is about close(), and the shared one has to
+    // survive the rest of the file.
+    const rig = await riggedServer({});
+    try {
+      const bytes = await abandonMidExport(
+        `${rig.base}/crawls/${crawlId}/export?format=csv&view=issues`,
+      );
+      expect(bytes).toBeGreaterThanOrEqual(64 * 1024);
+
+      // The abort took one request down, not the server.
+      const after = await call("GET", "/crawls?limit=1", { base: rig.base });
+      expect(after.status).toBe(200);
+
+      // Bounded shutdown — the guard, per the docblock. A client's own RST frees
+      // this socket, so this passes with the defect too; what it catches is a
+      // fix that breaks the loop and leaves the connection behind.
+      const closed = rig.api.close().then(() => "closed" as const);
+      const timer = new Promise<"hung">((resolve) => {
+        setTimeout(() => resolve("hung"), 10_000).unref();
+      });
+      expect(await Promise.race([closed, timer])).toBe("closed");
+
+      // THE READER WAS RELEASED, and this line is how a test can see it. It is
+      // written where the loop breaks — so it exists at all only if the
+      // `for await` returned, which is what runs the generator's finalisation
+      // and lets go of the batch it was holding. The count is short of the
+      // seeded rows, which is what makes it mid-stream rather than a whole
+      // export written into a dead socket.
+      const line = rig.log.find((l) => l.includes("csv export abandoned by the client"));
+      expect(line, `the export was abandoned in silence: ${rig.log.join(" | ")}`).toBeDefined();
+      expect(line).toContain("issues");
+      expect(line).toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
+      // 2,585 records — ~10.4MB — when this was written, which is the buffer
+      // sum the docblock derives. Far short of the 12,001 a complete export
+      // yields, so the break happened in the backpressure wait and not in the
+      // cheap `res.destroyed` check between records.
+      const written = Number(/after (\d+) records/.exec(String(line))?.[1]);
+      expect(written).toBeGreaterThan(1);
+      expect(written, "the whole export was written into a dead socket").toBeLessThan(WEDGE_ROWS);
+    } finally {
+      // If the race above lost, `close()` is still pending: force the sockets
+      // shut so one failing assertion does not hang the whole suite.
+      rig.api.server.closeAllConnections();
+    }
+  }, 120_000);
 });

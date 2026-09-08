@@ -89,7 +89,6 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
 
 import type { Db } from "../db/client.js";
 import type { ApiServerConfig } from "./config.js";
@@ -764,6 +763,17 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
  * silent failure hard rule 7 exists to prevent, and it would be a client
  * concluding their site has fewer broken links than it does. The detail goes to
  * the log, as a 500's would (Talos obligation 6).
+ *
+ * ## When the CLIENT fails mid-file
+ *
+ * The other half of the same minute, and the one that used to be fatal. A tab
+ * closed, a `curl | head`, a proxy that stopped reading: the response's socket
+ * goes away and emits `close` — never `drain`, and never `error`. A bare
+ * `once(res, "drain")` therefore waited on a promise nothing could settle, and
+ * the `for await` over `csv.records()` stayed suspended for the life of the
+ * process, holding the reader and the batch it had in hand. `drainOrGone` waits
+ * on all three events instead and says which arrived; a client that is gone ends
+ * the loop, which is what finalises the generator and releases the read.
  */
 async function sendCsv(res: ServerResponse, csv: CsvStream, log: (line: string) => void): Promise<void> {
   res.writeHead(200, {
@@ -773,11 +783,29 @@ async function sendCsv(res: ServerResponse, csv: CsvStream, log: (line: string) 
     "content-disposition": `attachment; filename="${csv.filename}"`,
     "cache-control": "no-store",
   });
+  // Records handed to the socket, header included — what the log reports, and
+  // the only measure of how far an abandoned export got.
+  let written = 0;
   try {
     for await (const record of csv.records()) {
       // Backpressure: a slow client slows the database reader instead of
-      // filling this process with pending writes.
-      if (!res.write(record)) await once(res, "drain");
+      // filling this process with pending writes. A client that has LEFT stops
+      // it altogether — checked between records for the export that fits in the
+      // socket buffers, and inside the wait for the one that does not.
+      const stillThere = res.destroyed ? false : res.write(record) || (await drainOrGone(res));
+      if (!stillThere) {
+        // Rule 7, on the quiet side of it: an export that ended early is an
+        // outcome, and an outcome the operator cannot see is a silent one. The
+        // same shape as the failure line below, because it answers the same
+        // question — which export, and how far did it get.
+        const correlationId = randomUUID();
+        log(
+          `api: csv export abandoned by the client ${correlationId} ${csv.view} after ${written} records`,
+        );
+        res.destroy();
+        return;
+      }
+      written += 1;
     }
     res.end();
   } catch (error) {
@@ -785,6 +813,38 @@ async function sendCsv(res: ServerResponse, csv: CsvStream, log: (line: string) 
     log(`api: csv export failed mid-stream ${correlationId} ${csv.view} — ${stackOf(error)}`);
     res.destroy();
   }
+}
+
+/**
+ * Wait out one backpressure pause: `true` if the client drained, `false` if it
+ * is gone.
+ *
+ * THE LISTENERS ARE REMOVED ON EVERY OUTCOME, and that is not tidiness. This is
+ * called once per stalled record on a stream that can run to 35,145 rows, so a
+ * handler left attached per call is an O(records) structure on a response —
+ * hard rule 6 in miniature, and `MaxListenersExceededWarning` long before it
+ * mattered.
+ *
+ * `error` counts as gone rather than being thrown on: the caller's answer to
+ * both is the same (stop reading, destroy, say so), and a rejection here would
+ * be reported as the export having failed when the client is simply not there.
+ */
+function drainOrGone(res: ServerResponse): Promise<boolean> {
+  // Already over — `close` fired before this was called, so no event is coming.
+  if (res.destroyed || res.writableEnded) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    const settle = (stillThere: boolean): void => {
+      res.removeListener("drain", onDrain);
+      res.removeListener("close", onGone);
+      res.removeListener("error", onGone);
+      resolve(stillThere);
+    };
+    const onDrain = (): void => settle(true);
+    const onGone = (): void => settle(false);
+    res.on("drain", onDrain);
+    res.on("close", onGone);
+    res.on("error", onGone);
+  });
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
