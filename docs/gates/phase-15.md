@@ -467,4 +467,4 @@ which ones a real site actually needs.
 Integrated 2026-09-08 as **PR #14**, on the owner's word ("merge"), from
 `worktree-phase-16` — the Phase 16 severity recalibration stacked on this
 phase's HEAD d5028ee, so one PR carries both. §4 was recorded on that branch
-before the merge. CI run: **[recorded at merge]**.
+before the merge. CI: green first try on every push — d0e2131 (run 34232719102, 4m09s) and the §4 commit 726d6b6 (run 34232919245, 4m16s).
