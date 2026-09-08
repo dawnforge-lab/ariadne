@@ -1,8 +1,19 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 16 (ruleset 0.12.0, migrations 0000–0015,
+**Status:** the contract as of Phase 17 (ruleset 0.12.0, migrations 0000–0015,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
+
+**What Phase 17 changed here**, so a reader of the Phase 16 version knows where
+to look: **one field was ADDED to the rules catalog and nothing changed type.**
+Every `rules_catalog` / `GET /rules` row for a NOT MEASURED marker now carries
+`marker`, the registry's own reason string for that marker; every other row
+carries no `marker` key at all (never `null`, never `""`). Ten of the 45 `info`
+rules are markers, and until now the wire said nothing about which — a consumer
+banding by severity filed "this check could not be answered" beside "this check
+found something small", and the only way to tell them apart was a hard-coded
+list that goes stale the next time a marker is added (§5.1). Nothing else moved:
+no field was removed or retyped, no ruleset bump, no rule copy edit.
 
 **What Phase 16 changed here**, so a reader of the Phase 14 version knows where
 to look: **no served field or shape changed; 29 rules changed severity.**
@@ -241,19 +252,20 @@ clamping it").
 **Closed vocabularies.** Every query parameter, body field and tool argument is
 on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
-(`test/api/query.test.ts:2966` "refuses a typo'd filter instead of answering the
+(`test/api/query.test.ts:3004` "refuses a typo'd filter instead of answering the
 question nobody asked"). MCP argument typos are refused by the SDK's schema
 validator before the handler runs (`test/api/mcp.test.ts:789` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (95 rows at 0.12.0) rather than by the crawl. The catalog is
-~101 KB (**103,679 bytes**, re-measured 2026-09-02 by the Phase 12 gate over all
-93 rows of ruleset 0.9.0, by serialising what `rulesCatalog` answers with no
-crawl id — the earlier 100,645 was measured at 92 rows, before
-`resources.not-fetched` had copy of its own) because it carries every rule's full
-copy — the tool description says so, and points an agent that only wants what
-fired at `issues_list` instead.
+~107 KB (**109,949 bytes**, re-measured 2026-09-08 by Phase 17 over all 95 rows
+of ruleset 0.12.0, by serialising what `rulesCatalog` answers with no crawl id —
+of which **681 bytes** are the new `marker` strings on the ten markers; the
+earlier 103,679 was measured at 93 rows of ruleset 0.9.0, and the 100,645 before
+it at 92 rows, before `resources.not-fetched` had copy of its own) because it
+carries every rule's full copy — the tool description says so, and points an
+agent that only wants what fired at `issues_list` instead.
 
 **Timestamps** are ISO-8601 UTC strings. **Ids** are `crawl_<uuid>`; a caller
 never constructs one.
@@ -673,9 +685,9 @@ seeded as `http://example.com/`. It is the engine's one definition of "the same
 site" (`hostnameSpellings`), the same one the cross-site compare refusal uses.
 A `siteUrl` that is not an http(s) URL is **refused by name and never read as
 "no filter"** — a dropped filter would answer with every crawl the engine holds.
-Pinned: `test/api/query.test.ts:2369` "narrows the listing to one site, and
-leaves the other site's crawls out", `test/api/query.test.ts:2375` "matches the
-apex and www spellings, both schemes", `test/api/query.test.ts:2389` "refuses a
+Pinned: `test/api/query.test.ts:2407` "narrows the listing to one site, and
+leaves the other site's crawls out", `test/api/query.test.ts:2413` "matches the
+apex and www spellings, both schemes", `test/api/query.test.ts:2427` "refuses a
 siteUrl that is not an http(s) URL rather than dropping the filter";
 `test/api/mcp.test.ts:1886` "narrows crawl_list to one site".
 
@@ -709,12 +721,23 @@ partial pass's rows are real rows, and **only `rulesRunAt` says whether they
 are a finished judgement**. Read the marker before quoting any count as the
 site's.
 
-### 5.1 `rules_catalog` — three states of `fired`
+### 5.1 `rules_catalog` — three states of `fired`, and the `marker` flag
 
 ```json
 {"rulesetVersion":"0.7.0","rules":[{"id":"links.orphan","kind":"query",
  "severity":"warning","category":"links","checkIds":["CHECK-32"],
  "title":"…","explanation":"…","howToFix":"…","fired":{"count":243}}]}
+```
+
+A NOT MEASURED marker's row carries one field more — `marker`, the reason
+(Phase 17; the key is on markers and on nothing else):
+
+```json
+{"id":"resources.not-fetched","kind":"query","severity":"info",
+ "category":"technical","checkIds":["CHECK-48","CHECK-49","CHECK-50","CHECK-51"],
+ "title":"…","explanation":"…","howToFix":"…",
+ "marker":"a crawl that recorded its resources and asked about none (P12-T2)",
+ "fired":{"count":1}}
 ```
 
 | state | spelling | what it means |
@@ -736,6 +759,26 @@ Two flags ride beside a count:
   render "passed" against a rule that never had a verdict to give. Its numbers
   are in `metrics_get`.
 
+**`marker` is a third flag, and it is not about the count — it is about the
+rule.** Present, as a non-empty string, on a NOT MEASURED marker and on no other
+row: the key is simply absent elsewhere, never `null` and never `""`, so
+`"marker" in rule` and a truthiness test agree. The value is the registry's own
+reason — the crawl condition whose silence that marker explains ("a robots.txt
+the crawl could not read", "a crawl started with host probing off") — and it is
+the same string `RuleMeta.marker` carries, mirrored rather than restated.
+
+A marker's findings say a check **could not be answered on this crawl**: they
+are facts about the crawl, not defects in the site (§5.3 tells the resource
+family's version of the same story, and CHECK-83 lists the whole family). Ten of
+the ruleset's 45 `info` rules are markers, so **severity cannot separate them**:
+a consumer that bands by severity alone files "we could not look" under the same
+heading as "we looked and found something small". Read this field. Do not keep a
+list of marker ids of your own — that list goes stale the next time a marker is
+added, which is exactly what happened to the engine's own hand-written map
+before the flag replaced it. `src/demo/index.html` is the worked example: it
+routes any group whose catalog row carries `marker` out of the severity bands
+into a fourth section, "Not checked on this crawl".
+
 **The counts sum to `crawl_status.findingsCount`.** Verified live on
 `crawl_02ff6f7a`: 86 rules, 22 fired, counts summing to 17,659 = its
 `findingsCount`. On the capped `crawl_3f3ab847`: sum 1,326, with `atLeast: true`
@@ -747,16 +790,17 @@ catalog count to a client as "the number of orphans on this site" is the Phase 6
 D-1 incident recurring in a new place.
 
 Pinned: `test/api/query.test.ts:1649` "answers the whole ruleset with its
-client-facing copy and no fired state", `test/api/query.test.ts:1691` "joins a
+client-facing copy and no fired state", `test/api/query.test.ts:1729` "joins a
 judged crawl's fired state, and counts a clean rule as zero",
-`test/api/query.test.ts:1715` "marks a metric rule's structural zero apart from a
-real clean", `test/api/query.test.ts:1741` "says fired null on a crawl nobody has
-judged, however many rows it holds", `test/api/query.test.ts:1758` "marks a
+`test/api/query.test.ts:1753` "marks a metric rule's structural zero apart from a
+real clean", `test/api/query.test.ts:1779` "says fired null on a crawl nobody has
+judged, however many rows it holds", `test/api/query.test.ts:1796` "marks a
 capped rule's count as a floor, agreeing with issues_list",
-`test/api/query.test.ts:1797` "reads the marker and the counts from one
-statement"; `test/api/mcp.test.ts:1707` "joins a judged crawl's fired state, zero
-included, summing to findingsCount" and `test/api/mcp.test.ts:1770` "names every
-field it actually answers with".
+`test/api/query.test.ts:1835` "reads the marker and the counts from one
+statement", `test/api/query.test.ts:1691` "carries the registry's marker on every
+NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1707` "joins a
+judged crawl's fired state, zero included, summing to findingsCount" and
+`test/api/mcp.test.ts:1770` "names every field it actually answers with".
 
 ### 5.2 `metrics_get` — an absent family is not a zero gauge
 
@@ -851,12 +895,20 @@ rows cannot say it and only the config can.
    zero with `failed` carrying the census (and `skipped` non-zero for the partial
    case). **Read the coverage block before quoting any resource finding, or the
    absence of one.**
+
+   **Since Phase 17 none of these four has to be recognised by id.** Each one's
+   `rules_catalog` row carries `marker` with the reason it exists, and so does
+   every marker outside this family — `crawl.blocked`, `links.orphan-skipped`,
+   `robots.check-skipped`, `host.probe-skipped`, `h1.duplicate-skipped`,
+   `content.thin-skipped` (§5.1). A consumer sorting findings into "the site's
+   problems" and "what this crawl could not answer" reads that field; the id
+   list above is prose for a human, not a switch statement for a client.
 2. **`fetch_class` null is per FILE, so a page's weight can be a floor.** The
    `page.weight` metric flags `atLeast: true` on any row that references a file
    nobody weighed, and reports the referenced-and-weighed pair beside it.
 
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
-this); `test/api/query.test.ts:2089` "writes one row per referenced file, with
+this); `test/api/query.test.ts:2127` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
 `test/crawl/fetch-resources.test.ts:1327` "asks nobody anything when the operator
 turned resource fetching off".
@@ -1161,9 +1213,9 @@ showing a user.
 
 Pinned: the whole `GET /compare` and `GET /compare/urls` blocks of
 `test/api/query.test.ts` — the arithmetic, the per-URL collapse, every caveat and
-every refusal — of which `test/api/query.test.ts:2438` "answers both sides,
+every refusal — of which `test/api/query.test.ts:2476` "answers both sides,
 comparable, and the rules in issues_list's order" is the answer itself and
-`test/api/query.test.ts:2852` "makes the same refusals as the summary" is the
+`test/api/query.test.ts:2890` "makes the same refusals as the summary" is the
 drill-down inheriting the summary's refusals; over the agent transport,
 `test/api/mcp.test.ts:1833` "answers the counts and the caveat when the two
 rulesets differ" and `test/api/mcp.test.ts:1898` "names every field it answers
@@ -1218,8 +1270,8 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:2910` "carries no path, no document and no stack in any
-  answer this phase added" and `test/api/query.test.ts:2953` "holds for the CSV
+  `test/api/query.test.ts:2948` "carries no path, no document and no stack in any
+  answer this phase added" and `test/api/query.test.ts:2991` "holds for the CSV
   bytes, which are a response like any other".
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the
@@ -1424,7 +1476,7 @@ Semantics a consumer must repeat to its own users:
   quoting. The trade is deliberate — a negative number would render `'-3`; no
   column in these seven views emits one. It is not a text-column guard: a
   `Cache-Control` header is the server's own string and lands in a cell exactly
-  as a page title does, which is what `test/api/query.test.ts:2130` "never lets a
+  as a page title does, which is what `test/api/query.test.ts:2168` "never lets a
   crawled string become a formula" asserts.
 - **No BOM**, `\r\n` line endings, RFC 4180 quoting. Excel on a non-UTF-8
   Windows locale may mangle accents on a double-click; every parser and pipeline
@@ -1442,18 +1494,18 @@ Semantics a consumer must repeat to its own users:
 
 Pinned: `test/api/csv.test.ts` (25 unit tests: the writer, the guard, the
 flattening, the SQL keyset pins, and the seven-view vocabulary);
-`test/api/query.test.ts:1999` "writes each view's header, always, and the row a
-caller came for", `test/api/query.test.ts:2089` "writes one row per referenced
+`test/api/query.test.ts:2037` "writes each view's header, always, and the row a
+caller came for", `test/api/query.test.ts:2127` "writes one row per referenced
 file, with the class that makes an empty status readable" (the four unfetched
-spellings), `test/api/query.test.ts:2130` "never lets a crawled string become a
-formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:2151`
+spellings), `test/api/query.test.ts:2168` "never lets a crawled string become a
+formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:2189`
 "quotes a cell holding a comma, a quote or a newline",
-`test/api/query.test.ts:2164` "exports exactly as many rows as the source holds"
+`test/api/query.test.ts:2202` "exports exactly as many rows as the source holds"
 (for `resources`, against BOTH of its tables: one row per file, and the
-referencing counts summing to the edge table), `test/api/query.test.ts:2213`
+referencing counts summing to the edge table), `test/api/query.test.ts:2251`
 "reads every view through a cursor that can be walked one row at a time",
-`test/api/query.test.ts:2248` "refuses a view, a format or a rule it cannot
-answer", `test/api/query.test.ts:2318` "refuses a crawl holding a retired rule's
+`test/api/query.test.ts:2286` "refuses a view, a format or a rule it cannot
+answer", `test/api/query.test.ts:2356` "refuses a crawl holding a retired rule's
 findings BEFORE the header", `test/api/http.test.ts:1931` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:760` "describes the shape of the CSV it writes, not just

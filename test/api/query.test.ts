@@ -1680,6 +1680,44 @@ describe("GET /rules", () => {
     }
   });
 
+  // THE MARKER FLAG, MIRRORED — not restated. A NOT MEASURED marker reports
+  // that a check COULD NOT BE ANSWERED on this crawl, and every one of them is
+  // `info`, so a consumer banding by severity files them beside real notices
+  // unless the wire says which rules they are. The registry's `marker` is the
+  // single source of truth for that (`RuleMeta.marker`); this asserts the
+  // catalog carries it VERBATIM on exactly the flagged rules and puts no key at
+  // all on the others — the expectation is built from `buildRegistry()`, so a
+  // marker added tomorrow is covered here without an edit.
+  it("carries the registry's marker on every NOT MEASURED marker, and on no other rule", async () => {
+    const flagged = new Map(
+      registry
+        .all()
+        .filter((rule) => rule.marker !== undefined)
+        .map((rule) => [rule.id, rule.marker as string]),
+    );
+    // Insurance on this test's own model: a registry that stopped flagging
+    // anything would make both loops below vacuously true.
+    expect(flagged.size, "the registry reported no markers at all").toBeGreaterThanOrEqual(8);
+
+    // Both forms of the answer — the bare checklist and a judged crawl's — come
+    // from one `copy` closure, and both are read so a future split cannot drop
+    // the flag from one of them.
+    for (const path of ["/rules", `/rules?crawlId=${crawlB}`]) {
+      const rules = byId(await call(path));
+      expect(rules.size).toBe(registry.all().length);
+      for (const [id, rule] of rules) {
+        const reason = flagged.get(id);
+        if (reason === undefined) {
+          // ABSENT, not null and not "": the same three-state discipline
+          // `fired` keeps, so `"marker" in rule` answers the question.
+          expect(rule, `${path}: ${id} is no marker but carries one`).not.toHaveProperty("marker");
+          continue;
+        }
+        expect(rule["marker"], `${path}: ${id}'s marker is not the registry's`).toBe(reason);
+      }
+    }
+  });
+
   it("orders the catalog the way issues_list orders its groups", async () => {
     const rules = rulesOf(await call("/rules"));
     const rank: Record<string, number> = { critical: 0, warning: 1, info: 2 };

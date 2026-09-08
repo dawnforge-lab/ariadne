@@ -1024,6 +1024,24 @@ export interface CatalogRule {
   explanation: string;
   howToFix: string;
   /**
+   * Present ONLY on a NOT MEASURED marker, and then the registry's own reason
+   * string — the crawl condition whose silence the marker explains. Absent on
+   * every ordinary rule: never `null`, never `""`, so `"marker" in rule` and a
+   * truthiness test agree (`RuleMeta.marker`, which the flag is copied from).
+   *
+   * IT IS NOT A SEVERITY AND NOT A COUNT. A marker's findings say that a check
+   * COULD NOT BE ANSWERED on this crawl — `links.orphan-skipped`,
+   * `resources.not-fetched`, `crawl.blocked` and their siblings — so they are
+   * facts about the crawl, not about the site. Every one of them is `info`, and
+   * a consumer that bands by severity alone therefore files them beside real
+   * notices, where a reader counts them as things to fix. The registry knows
+   * which rules those are; without this field the wire does not, and no
+   * consumer can tell them apart without hard-coding a list that goes stale the
+   * next time a marker is added. The demo page routes on exactly this flag
+   * (`src/demo/index.html`, `#band-not-checked`).
+   */
+  marker?: string;
+  /**
    * THREE STATES, AND THEY ARE THREE DIFFERENT SENTENCES.
    *
    *  - **absent** — no crawl was named. This is the checklist skeleton: what
@@ -2611,6 +2629,11 @@ export class ApiService {
       title: rule.title,
       explanation: rule.explanation,
       howToFix: rule.howToFix,
+      // The registry's flag, mirrored exactly: the key exists on a marker and
+      // on nothing else. Spreading a `marker: undefined` instead would put the
+      // key on all 95 rows and make "is this a marker" a truthiness question
+      // about a value that is sometimes absent — see `CatalogRule.marker`.
+      ...(rule.marker === undefined ? {} : { marker: rule.marker }),
     });
 
     // NO CRAWL, NO `fired` KEY AT ALL. Not `null`, which means "this crawl was

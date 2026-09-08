@@ -876,7 +876,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The whole ruleset, with the client-facing copy each rule would report " +
         "with: {rulesetVersion, rules: [{id, kind, severity, category, checkIds, " +
-        "title, explanation, howToFix}]}. kind is page | query | metric, severity " +
+        "title, explanation, howToFix, marker?}]}. kind is page | query | metric, severity " +
         "is critical | warning | info, and checkIds trace each rule to the audit " +
         "checklist. Ordered by severity then rule id — the order issues_list " +
         "returns its groups in.\n\n" +
@@ -885,6 +885,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the rules that found something, so it cannot answer 'what else was " +
         "examined'. Use this to render or walk the full list; use issues_list for " +
         "the findings themselves.\n\n" +
+        "marker is present on a NOT MEASURED marker and on no other rule, and its " +
+        "value is the crawl condition whose silence that marker explains. A marker " +
+        "rule's findings say a check COULD NOT BE ANSWERED on this crawl — they are " +
+        "facts about the crawl, not defects in the site — so do not file them with " +
+        "the site's issues. They are all severity info, which is why severity alone " +
+        "cannot tell them apart: read this field, not a list of your own.\n\n" +
         "WITH crawlId, every rule additionally carries `fired`, and it has THREE " +
         "states that mean three different things:\n" +
         "  fired absent      — no crawlId was given. Nobody has looked; this is " +
@@ -915,7 +921,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Not paginated: the ruleset is a fixed list that does not grow with the " +
         "size of a crawl — but it is not small, and there is no cursor to take it " +
         "in pieces. Every rule's full copy is tens of kilobytes in one answer " +
-        "(about 80KB, roughly 20k tokens, at this ruleset), so spend the context " +
+        "(about 107KB, roughly 27k tokens, at this ruleset), so spend the context " +
         "deliberately: if you only need the rules that FOUND something, " +
         "issues_list is a fraction of the size.",
       inputSchema: z.strictObject({

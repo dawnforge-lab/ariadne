@@ -11,10 +11,19 @@
  * breaks silently in a browser and loudly here.
  *
  * THE PAGE ITSELF IS PART OF THE SAME CONTRACT. The second test asserts that
- * every element id the flow above corresponds to is present in the served HTML.
- * There is no browser in this suite, so that list is the only thing standing
- * between "the page renders results" and a renamed id that nobody notices until
- * an operator sees a blank panel. Renaming an id is a red test, not a drift.
+ * every element id the flow above corresponds to is present in the served HTML,
+ * and that the fourth section sits after the three bands. There is no browser in
+ * this suite, so that list is the only thing standing between "the page renders
+ * results" and a renamed id that nobody notices until an operator sees a blank
+ * panel. Renaming an id is a red test, not a drift.
+ *
+ * THE FOURTH SECTION'S ROUTING IS ASSERTED AT THIS FILE'S OWN LEVEL. A NOT
+ * MEASURED marker reports that a check could not be answered on this crawl, and
+ * every marker is `info` — so without a key of its own the page would file them
+ * under Notices as findings. The key is the catalog's `marker`, and no browser
+ * is needed to check the decision it drives: the first test reads the same two
+ * answers the page reads, and asserts which groups the page must route out of
+ * Notices and what the Notices count is left with.
  *
  * The last describe is the SSRF line, seen from the browser's side. The demo's
  * real posture — `allowAnyPublicHost` with no `allowPrivate` — refuses a
@@ -237,7 +246,13 @@ describe("the demo flow", () => {
       "catalog",
     )) as unknown as {
       rulesetVersion: string;
-      rules: { id: string; title: string; explanation: string; howToFix: string }[];
+      rules: {
+        id: string;
+        title: string;
+        explanation: string;
+        howToFix: string;
+        marker?: string;
+      }[];
     };
     expect(catalog.rulesetVersion.length).toBeGreaterThan(0);
     const copy = new Map(catalog.rules.map((rule) => [rule.id, rule]));
@@ -246,6 +261,38 @@ describe("the demo flow", () => {
       expect(joined, `catalog has no copy for ${group.ruleId}`).toBeDefined();
       expect(joined?.howToFix.length).toBeGreaterThan(0);
       expect(joined?.explanation.length).toBeGreaterThan(0);
+    }
+
+    // THE FOURTH SECTION, at the level this file works at.
+    //
+    // There is no browser here, so what is asserted is the DECISION the page
+    // makes and the two answers it makes it from: a group belongs under
+    // `#band-not-checked` when its catalog row carries `marker`, and under its
+    // severity band otherwise. `renderBands` computes exactly this predicate
+    // (`isMarker`), so a change to the routing key on either side lands here.
+    const marked = issues.items.filter((g) => typeof copy.get(g.ruleId)?.marker === "string");
+    // This crawl carries at least one, or everything below is vacuous: the demo
+    // server runs with `probeHosts: false`, so `host.probe-skipped` reports the
+    // host checks nobody asked.
+    expect(marked.map((g) => g.ruleId)).toContain("host.probe-skipped");
+    for (const group of marked) {
+      // Why severity cannot do this job: every marker is `info`, so Notices is
+      // exactly where these would sit if the page banded on severity alone.
+      expect(group.severity, `${group.ruleId} is a marker at a band severity`).toBe("info");
+      expect(String(copy.get(group.ruleId)?.marker).length).toBeGreaterThan(0);
+    }
+
+    // …and the Notices band is what is LEFT of the info groups: strictly fewer,
+    // and not one of them carrying a marker key. The count under that heading no
+    // longer includes a check the crawl could not answer.
+    const info = issues.items.filter((g) => g.severity === "info");
+    const notices = info.filter((g) => typeof copy.get(g.ruleId)?.marker !== "string");
+    expect(notices.length).toBe(info.length - marked.length);
+    expect(notices.length).toBeLessThan(info.length);
+    for (const group of notices) {
+      expect(copy.get(group.ruleId), `${group.ruleId} kept a marker key`).not.toHaveProperty(
+        "marker",
+      );
     }
 
     // The drill-down the "show URLs" toggle fetches, first page only.
@@ -288,11 +335,21 @@ describe("the demo flow", () => {
       "band-critical",
       "band-warning",
       "band-info",
+      // The fourth section, which is not a band: the checks this crawl could
+      // not answer, routed here by the catalog's `marker` (see the first test).
+      "band-not-checked",
       "metrics",
       "summary",
     ]) {
       expect(html, `missing id="${id}"`).toContain(`id="${id}"`);
     }
+
+    // And it is rendered AFTER the three bands. A section that says "not
+    // checked" above the findings would read as the headline of the run.
+    const at = (id: string): number => html.indexOf(`id="${id}"`);
+    expect(at("band-not-checked")).toBeGreaterThan(at("band-info"));
+    expect(at("band-info")).toBeGreaterThan(at("band-warning"));
+    expect(at("band-warning")).toBeGreaterThan(at("band-critical"));
   });
 
   it("asks for nothing off this origin: no external URL in the page", async () => {
