@@ -410,13 +410,32 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
     click_depth: number | null;
     page_type: string | null;
     title: string | null;
+    recheck_fetch_class: string | null;
+    recheck_status_code: number | null;
+    /**
+     * A STRING, not a Date: these views read through `db.execute`, which hands
+     * back postgres's own text form (`2026-09-08 14:14:37.642+00`) rather than
+     * the Date the query builder's column mappers produce. Typed as what it is,
+     * and converted below.
+     */
+    recheck_at: string | null;
   }>({
-    header: ["url", "status", "fetchClass", "indexable", "clickDepth", "pageType", "title"],
+    header: [
+      "url", "status", "fetchClass", "indexable", "clickDepth", "pageType", "title",
+      // THE SECOND OBSERVATION, three columns wide (Phase 17). A list of server
+      // errors that cannot be sorted by "still broken" is the wrong list: the
+      // 5xx re-verification pass is what separates a confirmed outage from a
+      // blip, and a spreadsheet is where that separation is actually used.
+      // Empty on every page nobody re-asked about, which is every page whose
+      // first fetch was not a `server_error` — never "it was fine".
+      "recheckFetchClass", "recheckStatus", "recheckAt",
+    ],
     keyset: ["url"],
     start: [""],
     query: (crawlId, cursor, limit) => sql`
       select p.url, p.status_code, p.fetch_class, p.is_indexable,
-             p.click_depth, p.page_type, p.title
+             p.click_depth, p.page_type, p.title,
+             p.recheck_fetch_class, p.recheck_status_code, p.recheck_at
       from pages p
       where p.crawl_id = ${crawlId} and p.url > ${cursor[0] ?? ""}::text
       order by p.url asc
@@ -430,6 +449,13 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
       orEmpty(row.click_depth),
       orEmpty(row.page_type),
       orEmpty(row.title),
+      orEmpty(row.recheck_fetch_class),
+      orEmpty(row.recheck_status_code),
+      // ISO 8601, the same spelling every other instant on this surface uses —
+      // postgres's own text form is neither ISO nor what a reader comparing this
+      // cell with `crawl_status`'s `passAt` would expect. An unparseable value
+      // throws here rather than becoming a cell nobody can read.
+      row.recheck_at === null ? "" : new Date(row.recheck_at).toISOString(),
     ],
   }),
 

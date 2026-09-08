@@ -1268,6 +1268,13 @@ describe("the crawl runs the pass itself", () => {
       maxConcurrency: 2,
       probeHosts: false,
       allowPrivate: true,
+      // A MINUTE OF THIS TEST WOULD NOT BE THIS TEST. The two 503s that collapse
+      // the window are `server_error` page rows, so the loop's INSERTION 3c
+      // re-asks them — and would wait out the real `MIN_RECHECK_GAP_MS` first
+      // (P17). The test-only knob (`CrawlConfig.recheckMinGapMs`, P17-T5) drops
+      // that floor to 200ms: what is under test here is the window the resource
+      // pass inherits, and the recheck is only standing in front of it.
+      recheckMinGapMs: 200,
     });
 
     expect(summary.status).toBe("finished");

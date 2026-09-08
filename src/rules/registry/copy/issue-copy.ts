@@ -171,9 +171,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "http.server-error": {
     title: "Server error (5xx)",
     explanation:
-      "The URL returned a 5xx server error instead of a page, so nobody, crawlers included, can read it. Search engines that repeatedly see server errors slow their crawling of the site and eventually drop the affected pages from the index.",
+      "The URL returned a 5xx server error instead of a page, so nobody, crawlers included, could read it. Search engines that repeatedly see server errors slow their crawling of the site and eventually drop the affected pages from the index. The crawl takes a second look at every server error before the run closes, and the finding records what that look found: \"confirmed\" is the error again, \"inconclusive\" is a second request that got no answer about the page at all, \"capped\" is a run with more server errors than the re-check budget allows, and \"not run\" means this URL was never looked at twice — it has not been re-verified, and the error stands on the one observation the crawl made.",
     howToFix:
-      "Check the server and application logs for this URL and fix the underlying error. If the page is genuinely gone, return a 404 or 410, or redirect it to the closest live page, rather than leaving it erroring.",
+      "Check the server and application logs for this URL and fix the underlying error; the finding carries both timestamps, so the logs to read are the ones covering them. If the page is genuinely gone, return a 404 or 410, or redirect it to the closest live page, rather than leaving it erroring.",
+  },
+  "http.server-error-transient": {
+    title: "Server error that cleared on re-check",
+    explanation:
+      "The crawl got a 5xx server error from this URL, and the second request it made later in the run got a normal answer instead, so the page is not permanently broken. It failed once all the same: an intermittent 5xx costs crawl rate, because search engines that meet one back off from the whole site for a while, and a visitor who arrives during the same window sees the error page rather than the content.",
+    howToFix:
+      "Read the application and upstream logs for the window between the two timestamps in this finding — that is where the cause sits, usually a restart, a deploy, a connection pool exhausted under load, or an upstream timing out. Recurring blips on the same URLs point at a resource limit worth raising rather than at a one-off.",
   },
   "crawl.blocked": {
     title: "Crawler was blocked — page not audited",

@@ -107,7 +107,10 @@ describe("buildRegistry", () => {
     // decided rows are all unknown and the rest unasked — the mix none of the
     // other three markers match, which used to meet no finding at all.
     expect(ids).toContain("resources.partial-unknown");
-    expect(ids.length).toBe(95);
+    // And Phase 17 Task 3's other half of the 5xx split: the server error a
+    // second observation cleared, which used to be reported as a permanent one.
+    expect(ids).toContain("http.server-error-transient");
+    expect(ids.length).toBe(96);
   });
 
   it("registers every kind the runner drives", () => {

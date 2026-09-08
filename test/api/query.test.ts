@@ -30,6 +30,13 @@ import {
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { CSV_VIEWS, CSV_VIEW_DEFS, csvRecord } from "../../src/api/csv.js";
 import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
+// The pass's own literal, read from the module that writes it: a hand-typed
+// 'recheck-cap' here would keep passing the day the constant changed.
+import { RECHECK_CAP_REASON } from "../../src/crawl/recheck/recheck-server-errors.js";
+// The cleared-class set, imported from the rule that judges it: this test
+// asserts the surface counts the SAME set, which a copy of the six names here
+// could not do.
+import { RECHECK_CLEARED } from "../../src/rules/page/status.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
@@ -71,6 +78,19 @@ let crawlE = "";
  * links so the links-derived views cross the export batch more than twice.
  */
 let crawlF = "";
+
+/**
+ * The 5xx RE-VERIFICATION fixture: six pages, five of them server errors, one
+ * in each state the recheck pass can leave a row in — confirmed, cleared,
+ * inconclusive, never asked, and stopped short by the cap — plus a healthy page
+ * that must not be counted anywhere in the block.
+ *
+ * Its own crawl because `crawl_status`'s recheck block is an aggregate over the
+ * whole crawl: any of these rows added to a listing crawl above would move
+ * numbers other tests pin, and one crawl per arithmetic is what makes a wrong
+ * count a wrong count rather than a plausible one.
+ */
+let crawlG = "";
 
 /**
  * The comparison fixtures — six crawls whose only job is to make one cross-crawl
@@ -311,6 +331,18 @@ interface SeedPage {
   redirectUrl?: string;
   redirectUrlNormalised?: string;
   clickDepth?: number | null;
+  /** When the FIRST observation was taken (migration 0016). */
+  fetchedAt?: Date;
+  /**
+   * The SECOND observation, on a row whose first fetch was a server error. Left
+   * out on every other page, which is what a real crawl's rows look like: the
+   * recheck pass asks about nothing else.
+   */
+  recheckFetchClass?: string;
+  recheckStatusCode?: number;
+  /** `recheck-cap` with a null class is the pass declining to ask, and saying why. */
+  recheckReason?: string;
+  recheckAt?: Date;
 }
 
 async function seedPage(crawlId: string, p: SeedPage): Promise<string> {
@@ -339,6 +371,15 @@ async function seedPage(crawlId: string, p: SeedPage): Promise<string> {
       ? {}
       : { redirectUrlNormalised: p.redirectUrlNormalised }),
     ...(p.clickDepth === undefined ? {} : { clickDepth: p.clickDepth }),
+    ...(p.fetchedAt === undefined ? {} : { fetchedAt: p.fetchedAt }),
+    ...(p.recheckFetchClass === undefined
+      ? {}
+      : { recheckFetchClass: p.recheckFetchClass }),
+    ...(p.recheckStatusCode === undefined
+      ? {}
+      : { recheckStatusCode: p.recheckStatusCode }),
+    ...(p.recheckReason === undefined ? {} : { recheckReason: p.recheckReason }),
+    ...(p.recheckAt === undefined ? {} : { recheckAt: p.recheckAt }),
   });
   return id;
 }
@@ -382,6 +423,7 @@ beforeAll(async () => {
   crawlC = `crawl_query_c_${stamp}`;
   crawlD = `crawl_query_d_${stamp}`;
   crawlE = `crawl_query_e_${stamp}`;
+  crawlG = `crawl_query_g_${stamp}`;
   for (const id of [crawlA, crawlD]) await seedCrawl(id);
   // JUDGED, and the two of them for different reasons. crawlB is the catalog's
   // fired-state fixture: a completed pass is what makes a rule with no rows a
@@ -797,6 +839,60 @@ beforeAll(async () => {
     evidence: { inSitemap: false, discoveredVia: "sitemap", note: "n".repeat(400) },
   });
 
+  // ------------------------------------------------- the recheck fixture
+  //
+  // Five server errors, one in each state the 5xx re-verification pass can
+  // leave a row in, and one healthy page that must stay out of every count.
+  // The crawl carries a `recheck_pass_at`, so this is a crawl a COMPLETE pass
+  // ran over — which is what makes `pending: 1` here "the pass never reached
+  // that row" rather than "nobody looked".
+  await seedCrawl(crawlG);
+  const RECHECK_PASS_AT = new Date("2026-09-08T10:00:00.000Z");
+  await db.update(crawls).set({ recheckPassAt: RECHECK_PASS_AT, recheckPassCount: 3 })
+    .where(eq(crawls.id, crawlG));
+  const FIRST_LOOK = new Date("2026-09-08T09:57:00.000Z");
+  // Still 5xx on the second look: confirmed.
+  await seedPage(crawlG, {
+    slug: "still-broken", pageType: null, statusCode: 503, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchedAt: FIRST_LOOK,
+    recheckFetchClass: "server_error", recheckStatusCode: 503,
+    recheckAt: RECHECK_PASS_AT,
+  });
+  // A non-5xx ANSWER from the site: cleared, and the one row on this crawl
+  // carrying `http.server-error-transient` rather than `http.server-error`.
+  await seedPage(crawlG, {
+    slug: "blip", pageType: null, statusCode: 500, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchedAt: FIRST_LOOK,
+    recheckFetchClass: "ok", recheckStatusCode: 200, recheckAt: RECHECK_PASS_AT,
+  });
+  // No answer ABOUT THE PAGE, and a REFUSAL rather than a timeout: `disallowed`
+  // is the only inconclusive class the pass writes a reason with, because
+  // `fetchPage` leaves `disallowedReason` null on a timeout. Finding stays critical.
+  await seedPage(crawlG, {
+    slug: "no-answer", pageType: null, statusCode: 502, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchedAt: FIRST_LOOK, recheckAt: RECHECK_PASS_AT,
+    recheckFetchClass: "disallowed", recheckReason: "link-local IPv4 address (169.254.0.0/16)",
+  });
+  // Never asked: both recheck columns null. Nothing was decided.
+  await seedPage(crawlG, {
+    slug: "unasked", pageType: null, statusCode: 500, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchedAt: FIRST_LOOK,
+  });
+  // The pass declined to ask, and said why. Null class with a reason: counted
+  // in `pending`, because nothing about the page was decided, and flagged by
+  // `capped`, because a budget is why.
+  await seedPage(crawlG, {
+    slug: "over-budget", pageType: null, statusCode: 500, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchedAt: FIRST_LOOK, recheckReason: RECHECK_CAP_REASON,
+  });
+  // The control: a healthy page. The pass never asks about one, so it must not
+  // reach the denominator — a block counting every page would look right on a
+  // crawl where every page is broken and nowhere else.
+  await seedPage(crawlG, {
+    slug: "fine", pageType: "product", statusCode: 200, isIndexable: true, rendered: false,
+    depth: 0, wordCount: 400, fetchedAt: FIRST_LOOK,
+  });
+
   await db.insert(metrics).values([
     { crawlId: crawlA, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: crawlA, metricId: "inlinks.distribution", scope: "site", scopeValue: "", value: { median: 4 } },
@@ -824,7 +920,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await api.close();
   for (const id of [
-    crawlA, crawlB, crawlC, crawlD, crawlE, crawlF,
+    crawlA, crawlB, crawlC, crawlD, crawlE, crawlF, crawlG,
     cmpBase, cmpHead, cmpOld, cmpCapped, cmpOther, cmpWww, cmpUnjudged,
     cmpMixed, cmpUnstampedA, cmpUnstampedB,
   ]) {
@@ -1176,11 +1272,71 @@ describe("GET /crawls/:id/pages", () => {
       // is now evidence only — two instruments, both on the wire, named apart.
       "renderedRenderableWordCount",
       "statusCode", "url", "wordCount",
+      // THE TWO OBSERVATIONS (P17-T4), added to a projection this repository
+      // calls deliberately slim — so the widening is DELIBERATE and pinned as
+      // such. `fetchedAt` is when the crawl looked; the four `recheck*` fields
+      // are what the 5xx re-verification pass got when it looked again, and
+      // they are here because that second look is the only thing on this
+      // surface that turns a critical finding into a warning. An agent that
+      // cannot see it cannot check the engine's arithmetic before quoting it.
+      "fetchedAt", "recheckFetchClass", "recheckStatusCode", "recheckReason", "recheckAt",
     ].sort());
     // The column nobody selected stays where it is.
     expect(JSON.stringify(res.body)).not.toContain("LEAK-CONTENT-HASH-MARKER");
     // …and so does everything else the row carries but the projection omits.
     expect(JSON.stringify(res.body)).not.toContain("description of p1");
+  });
+
+  // THE SECOND OBSERVATION, PAGE BY PAGE (P17-T4). The crawl_status block
+  // counts these rows; this is where an agent checks the count against the
+  // pages behind it, which is the whole reason the five fields are published.
+  it("carries both observations, and never lets the second rewrite the first", async () => {
+    const rows = items(await call(`/crawls/${crawlG}/pages`));
+    const by = (slug: string): Record<string, unknown> => {
+      const row = rows.find((r) => r["url"] === `${SITE}/${slug}`);
+      if (row === undefined) throw new Error(`no page row for ${slug}`);
+      return row;
+    };
+
+    // Cleared: the crawl saw a 500, the second look got a 200. BOTH are on the
+    // row — the first observation is never overwritten, which is what stops a
+    // page moving into cohorts it was never measured in.
+    expect(by("blip")["statusCode"]).toBe(500);
+    expect(by("blip")["fetchClass"]).toBe("server_error");
+    expect(by("blip")["recheckFetchClass"]).toBe("ok");
+    expect(by("blip")["recheckStatusCode"]).toBe(200);
+    expect(by("blip")["recheckReason"]).toBeNull();
+    // ISO instants, like every other time this surface publishes.
+    expect(by("blip")["recheckAt"]).toBe("2026-09-08T10:00:00.000Z");
+    expect(by("blip")["fetchedAt"]).toBe("2026-09-08T09:57:00.000Z");
+
+    // Confirmed, and inconclusive: the class is the discriminator, and a
+    // recheck the pass REFUSED to make carries the policy's own sentence rather
+    // than a null anybody could read as "nobody asked".
+    expect(by("still-broken")["recheckFetchClass"]).toBe("server_error");
+    expect(by("no-answer")["recheckFetchClass"]).toBe("disallowed");
+    expect(by("no-answer")["recheckStatusCode"]).toBeNull();
+    expect(by("no-answer")["recheckReason"]).toBe("link-local IPv4 address (169.254.0.0/16)");
+
+    // The three nulls that are three different sentences. Nobody asked (both
+    // null); the pass declined and said why (a reason with a null class); and a
+    // page the pass never asks about at all, which is every healthy page.
+    expect(by("unasked")["recheckFetchClass"]).toBeNull();
+    expect(by("unasked")["recheckReason"]).toBeNull();
+    expect(by("unasked")["recheckAt"]).toBeNull();
+    expect(by("over-budget")["recheckFetchClass"]).toBeNull();
+    expect(by("over-budget")["recheckReason"]).toBe("recheck-cap");
+    expect(by("fine")["recheckFetchClass"]).toBeNull();
+    expect(by("fine")["recheckReason"]).toBeNull();
+    // …and it still carries the FIRST timestamp, because every row gets one.
+    expect(by("fine")["fetchedAt"]).toBe("2026-09-08T09:57:00.000Z");
+
+    // The invariant the schema states, over every row this listing returned:
+    // `recheckAt` is null exactly when `recheckFetchClass` is.
+    for (const row of rows) {
+      expect(row["recheckAt"] === null, `${String(row["url"])} breaks the recheck-at invariant`)
+        .toBe(row["recheckFetchClass"] === null);
+    }
   });
 
   it("filters by pageType, statusCode, indexable and rendered", async () => {
@@ -1553,6 +1709,118 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     });
   });
 
+  // THE RECHECK BLOCK (P17-T4). Same discipline as the resource census above,
+  // one table along: what has to be right is the partition and the two states a
+  // single number would hide — "no server errors" and "nobody looked".
+  it("partitions the crawl's server errors by what the second look found", async () => {
+    const res = await call(`/crawls/${crawlG}`);
+    expect(res.status).toBe(200);
+    expect(res.body["recheck"]).toEqual({
+      // Five of the crawl's six pages answered 5xx on the FIRST look. The sixth
+      // is healthy and is in none of these numbers.
+      serverErrors: 5,
+      confirmed: 1,
+      cleared: 1,
+      inconclusive: 1,
+      // Two rows nobody decided anything about: one the pass never reached and
+      // one its budget stopped short of. The second is why `capped` is true,
+      // and it is counted here all the same.
+      pending: 2,
+      capped: true,
+      passAt: "2026-09-08T10:00:00.000Z",
+    });
+
+    // The partition, asserted rather than left to the literals above: a count
+    // that drifted would otherwise be wrong by a number nobody could check
+    // against anything.
+    const r = res.body["recheck"] as Record<string, number>;
+    expect(r["confirmed"]! + r["cleared"]! + r["inconclusive"]! + r["pending"]!).toBe(
+      r["serverErrors"],
+    );
+    // And the denominator is the crawl's own 5xx rows, counted in SQL rather
+    // than restated: the block must not drift into counting pages.
+    const counted = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from pages
+           where crawl_id = ${crawlG} and fetch_class = 'server_error'`,
+    );
+    expect(r["serverErrors"]).toBe(counted.rows[0]?.n ?? -1);
+    const all = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from pages where crawl_id = ${crawlG}`,
+    );
+    expect(all.rows[0]?.n, "the healthy control page is missing from the fixture").toBe(6);
+  });
+
+  // `cleared` IS THE RULE'S OWN SET, not a list this test agrees with. The six
+  // classes that mean "the site answered, and not with a 5xx" are exported by
+  // the rule that fires on them, so a class added there is counted here on the
+  // same commit — and a surface counting a seventh class the rule does not
+  // would be reporting a warning nobody wrote.
+  it("counts as cleared exactly the classes http.server-error-transient fires on", async () => {
+    const page = `${crawlG}_page_blip`;
+    for (const fetchClass of RECHECK_CLEARED) {
+      await db.update(pages).set({ recheckFetchClass: fetchClass }).where(eq(pages.id, page));
+      const r = (await call(`/crawls/${crawlG}`)).body["recheck"] as Record<string, number>;
+      expect(r["cleared"], `${fetchClass} is in RECHECK_CLEARED but is not counted`).toBe(1);
+      expect(r["inconclusive"], `${fetchClass} was counted twice`).toBe(1);
+    }
+    // And a class OUTSIDE the set moves the same row to the other side, which
+    // is what says the count is a predicate rather than "any non-null class".
+    await db.update(pages).set({ recheckFetchClass: "blocked" }).where(eq(pages.id, page));
+    const blocked = (await call(`/crawls/${crawlG}`)).body["recheck"] as Record<string, number>;
+    expect(blocked["cleared"]).toBe(0);
+    expect(blocked["inconclusive"]).toBe(2);
+    await db.update(pages).set({ recheckFetchClass: "ok" }).where(eq(pages.id, page));
+  });
+
+  // THE TWO ZEROES, WHICH SAY DIFFERENT THINGS. `serverErrors: 0` is a
+  // measurement — this crawl saw no server errors — and `passAt: null` is
+  // "nobody looked". A consumer that reads them as one number reports a crawl
+  // nobody rechecked as a crawl with nothing to recheck.
+  it("tells a crawl with no server errors apart from a crawl nobody rechecked", async () => {
+    // crawlE holds five pages and not one of them is a 5xx, and no pass ever
+    // ran over it: zeroes with a null stamp.
+    const never = await call(`/crawls/${crawlE}`);
+    expect(never.body["recheck"]).toEqual({
+      serverErrors: 0, confirmed: 0, cleared: 0, inconclusive: 0,
+      pending: 0, capped: false, passAt: null,
+    });
+
+    // The same crawl after a pass completed over it: identical counts, and now
+    // a timestamp saying they were measured rather than assumed.
+    const stamped = new Date("2026-09-08T11:22:33.000Z");
+    await db.update(crawls).set({ recheckPassAt: stamped }).where(eq(crawls.id, crawlE));
+    try {
+      const after = await call(`/crawls/${crawlE}`);
+      expect(after.body["recheck"]).toEqual({
+        serverErrors: 0, confirmed: 0, cleared: 0, inconclusive: 0,
+        pending: 0, capped: false, passAt: stamped.toISOString(),
+      });
+    } finally {
+      await db.update(crawls).set({ recheckPassAt: null }).where(eq(crawls.id, crawlE));
+    }
+
+    // And a crawl that DID see a server error nobody re-asked about: the whole
+    // denominator sits in `pending` beside a null stamp, which is the sentence
+    // "this crawl's server errors rest on one observation".
+    const unrechecked = await call(`/crawls/${crawlA}`);
+    expect(unrechecked.body["recheck"]).toEqual({
+      serverErrors: 1, confirmed: 0, cleared: 0, inconclusive: 0,
+      pending: 1, capped: false, passAt: null,
+    });
+  });
+
+  // NOT ON THE LISTING ROW. A listing is not a coverage report, and a block
+  // whose numbers are only meaningful beside `passAt` is exactly the thing a
+  // dashboard would render as a column.
+  it("keeps the recheck block off the crawl listing", async () => {
+    const listed = await call(`/crawls?siteUrl=${encodeURIComponent(`${SITE}/`)}`);
+    expect(listed.status).toBe(200);
+    const row = items(listed)[0];
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty("recheck");
+    expect(row).not.toHaveProperty("resources");
+  });
+
   /**
    * THE CAP-EXCEEDED COUNTER (P12-T1, migration 0014), and the null that is not
    * a zero.
@@ -1677,6 +1945,44 @@ describe("GET /rules", () => {
       // report — which is a different sentence from "this crawl was never
       // judged" (null) and from "this rule found nothing" ({count: 0}).
       expect(rule, `${id} carries a fired state nobody asked for`).not.toHaveProperty("fired");
+    }
+  });
+
+  // THE MARKER FLAG, MIRRORED — not restated. A NOT MEASURED marker reports
+  // that a check COULD NOT BE ANSWERED on this crawl, and every one of them is
+  // `info`, so a consumer banding by severity files them beside real notices
+  // unless the wire says which rules they are. The registry's `marker` is the
+  // single source of truth for that (`RuleMeta.marker`); this asserts the
+  // catalog carries it VERBATIM on exactly the flagged rules and puts no key at
+  // all on the others — the expectation is built from `buildRegistry()`, so a
+  // marker added tomorrow is covered here without an edit.
+  it("carries the registry's marker on every NOT MEASURED marker, and on no other rule", async () => {
+    const flagged = new Map(
+      registry
+        .all()
+        .filter((rule) => rule.marker !== undefined)
+        .map((rule) => [rule.id, rule.marker as string]),
+    );
+    // Insurance on this test's own model: a registry that stopped flagging
+    // anything would make both loops below vacuously true.
+    expect(flagged.size, "the registry reported no markers at all").toBeGreaterThanOrEqual(8);
+
+    // Both forms of the answer — the bare checklist and a judged crawl's — come
+    // from one `copy` closure, and both are read so a future split cannot drop
+    // the flag from one of them.
+    for (const path of ["/rules", `/rules?crawlId=${crawlB}`]) {
+      const rules = byId(await call(path));
+      expect(rules.size).toBe(registry.all().length);
+      for (const [id, rule] of rules) {
+        const reason = flagged.get(id);
+        if (reason === undefined) {
+          // ABSENT, not null and not "": the same three-state discipline
+          // `fired` keeps, so `"marker" in rule` answers the question.
+          expect(rule, `${path}: ${id} is no marker but carries one`).not.toHaveProperty("marker");
+          continue;
+        }
+        expect(rule["marker"], `${path}: ${id}'s marker is not the registry's`).toBe(reason);
+      }
     }
   });
 
@@ -2019,14 +2325,41 @@ describe("GET /crawls/:id/export?format=csv", () => {
     const internal = await callCsv(`/crawls/${crawlF}/export?format=csv&view=internal_urls`);
     expect(internal.records[0]).toEqual([
       "url", "status", "fetchClass", "indexable", "clickDepth", "pageType", "title",
+      // The SECOND observation, three columns wide (P17-T4): a list of server
+      // errors that cannot be sorted by "still broken" is the wrong list.
+      "recheckFetchClass", "recheckStatus", "recheckAt",
     ]);
+    // Empty in all three on a page nobody re-asked about — which is every page
+    // whose first fetch was not a server error, and never "it came back clean".
     expect(rowWhere(internal, "url", `${SITE}/csv-end`)).toEqual([
-      `${SITE}/csv-end`, "200", "ok", "true", "2", "product", "title of csv-end",
+      `${SITE}/csv-end`, "200", "ok", "true", "2", "product", "title of csv-end", "", "", "",
     ]);
     // An empty cell is "the engine has no value", never a zero: this page has
     // no click depth because nothing links to it.
     expect(rowWhere(internal, "url", `${SITE}/csv-gone`)).toEqual([
-      `${SITE}/csv-gone`, "404", "client_error", "", "", "", "title of csv-gone",
+      `${SITE}/csv-gone`, "404", "client_error", "", "", "", "title of csv-gone", "", "", "",
+    ]);
+
+    // And the crawl that HAS a second observation writes it: the class, the
+    // status it came back with, and an ISO instant a spreadsheet can sort.
+    const rechecked = await callCsv(`/crawls/${crawlG}/export?format=csv&view=internal_urls`);
+    expect(rowWhere(rechecked, "url", `${SITE}/still-broken`)).toEqual([
+      `${SITE}/still-broken`, "503", "server_error", "", "", "", "title of still-broken",
+      "server_error", "503", "2026-09-08T10:00:00.000Z",
+    ]);
+    // The first observation is NEVER rewritten by the second: this row's own
+    // `status` and `fetchClass` are still the 500 the crawl saw, beside an `ok`
+    // recheck. Two facts, two columns.
+    expect(rowWhere(rechecked, "url", `${SITE}/blip`)).toEqual([
+      `${SITE}/blip`, "500", "server_error", "", "", "", "title of blip",
+      "ok", "200", "2026-09-08T10:00:00.000Z",
+    ]);
+    // A row the cap stopped short of: no class, no status, no time — the reason
+    // it carries lives on the row, and this view does not claim it decided
+    // anything.
+    expect(rowWhere(rechecked, "url", `${SITE}/over-budget`)).toEqual([
+      `${SITE}/over-budget`, "500", "server_error", "", "", "", "title of over-budget",
+      "", "", "",
     ]);
 
     const broken = await callCsv(`/crawls/${crawlF}/export?format=csv&view=links_to_4xx`);
@@ -2155,7 +2488,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
     expect(rowWhere(internal, "url", `${SITE}/csv-quoted`)[6]).toBe(QUOTED_TITLE);
     expect(internal.text).toContain(`"He said ""hi"", then\nleft"`);
     // Every record has the same width, which a mis-quoted newline would break.
-    for (const row of internal.records) expect(row).toHaveLength(7);
+    for (const row of internal.records) expect(row).toHaveLength(10);
   });
 
   // ROW COUNTS EQUAL THE SOURCE. A view that silently dropped rows — a keyset
@@ -2958,6 +3291,40 @@ describe("nothing inside the process reaches a caller", () => {
       expect(res.status).toBe(200);
       expect(res.records.length, `${view} exported nothing`).toBeGreaterThan(1);
       expect(internals(res.text), `${view} leaked`).toEqual([]);
+    }
+  });
+});
+
+/**
+ * THE TWO TEST-ONLY CRAWL-CONFIG FIELDS, REFUSED BY NAME.
+ *
+ * Here rather than beside a live crawl because the refusal happens in
+ * `parseStartCrawlInput`, before anything this read-only server would decline
+ * for its own reasons — the body is judged on its keys, and the answer is the
+ * same on both transports (the parser is shared).
+ *
+ * `test/api/http.test.ts` "refuses allowPrivate at any value, saying why" is the
+ * sibling of the first; this is the second, added with the recheck pass (P17).
+ */
+describe("crawl-start refuses the test-only fields by name", () => {
+  it("refuses recheckMinGapMs at any value, saying why", async () => {
+    for (const value of [0, 1, 1000, 60_000]) {
+      const res = await fetch(`${base}/crawls`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ siteUrl: `${SITE}/`, recheckMinGapMs: value }),
+      });
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(res.status, `recheckMinGapMs: ${value} was not refused`).toBe(400);
+      // NAMED, not "unknown field": a caller sending this has read about the
+      // knob somewhere and has to be told it is not an API field at all. The
+      // 60-second floor is the claim the evidence makes — "still broken a
+      // minute later" — so a caller who could shrink it could clear every
+      // transient 5xx on demand.
+      expect(String(body["error"])).toContain(
+        "recheckMinGapMs is not accepted over the API",
+      );
+      expect(String(body["error"])).toContain("test-only");
     }
   });
 });

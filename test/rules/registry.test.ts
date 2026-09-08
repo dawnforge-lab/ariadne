@@ -130,11 +130,30 @@ describe("check universe", () => {
     expect(CRAWL_CHECK_IDS).toHaveLength(47);
     expect(CRAWL_CHECK_IDS).toContain("CHECK-33b");
     expect(AGENT_CHECKS).toEqual(["CHECK-38", "CHECK-41", "CHECK-42"]);
+    // 0.13.0: Phase 17, on THREE grounds. The 5xx re-verification pass
+    // (docs/superpowers/specs/2026-09-08-5xx-recheck-design.md) takes a SECOND
+    // look at every `server_error` page at crawl end, and the ruleset reads it:
+    // (1) `http.server-error-transient` (warning) is a verdict no page could
+    // receive before — a 5xx whose second look got a non-5xx answer from the
+    // site; (2) `http.server-error` no longer fires on those pages, which is the
+    // one verdict MOVE in the bump, from `critical` to `warning` and only where
+    // a recheck actually cleared the row; (3) `http.server-error`'s copy, which
+    // now names the second observation. The pair is mutually exclusive and
+    // jointly exhaustive over `fetch_class = 'server_error'`, so no 5xx page
+    // goes silent (hard rule 1). Totals move to 27/24/45 over 96.
+    //
+    // NOTHING IS BACKFILLED, and that is the property that makes the move safe:
+    // the recheck columns are null on every row written before migration 0016,
+    // a null class never clears, so an older crawl re-judged at 0.13.0 reports
+    // exactly what it reported at 0.12.0 — every Error still an Error — with
+    // `recheck: "not run"` added to the evidence saying it was never re-verified.
+    //
     // 0.12.0: Phase 16, on ONE ground — a severity recalibration and nothing
-    // else. 29 of the 95 rules move band (24 warning→critical, 5 info→warning),
-    // leaving 28 critical / 23 warning / 44 info; the ids and the rubric behind
-    // them are docs/superpowers/specs/2026-09-08-severity-recalibration-design.md
-    // §1–3. It is ADDITIVE of nothing and SUBTRACTIVE of nothing: the same crawl
+    // else. 29 of the 95 rules move band (23 warning→critical, 5 info→warning,
+    // crawl.blocked warning→info as the tenth marker), leaving 27 critical / 23
+    // warning / 45 info. The ids and the rubric behind them are
+    // docs/superpowers/specs/2026-09-08-severity-recalibration-design.md §1–3.
+    // It is ADDITIVE of nothing and SUBTRACTIVE of nothing: the same crawl
     // re-judged at 0.12.0 yields the identical finding set — same ids, same
     // scopes, same evidence, same copy — with only those 29 rules' `severity`
     // moved. It is still a bump because the version stamps what the ruleset SAYS
@@ -224,7 +243,7 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. Phase 9's bump is
     // T2's, above; the phase's other tasks verify rather than bump again.
-    expect(RULESET_VERSION).toBe("0.12.0");
+    expect(RULESET_VERSION).toBe("0.13.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -276,7 +295,12 @@ describe("check annotations", () => {
  * The current shape is Phase 16's recalibration (ruleset 0.12.0), classified
  * against the rubric in
  * `docs/superpowers/specs/2026-09-08-severity-recalibration-design.md` §1, whose
- * §2 table carries the per-rule reasoning. Two classes are fixed by
+ * §2 table carries the per-rule reasoning, plus Phase 17's one addition at
+ * 0.13.0: `http.server-error-transient` (warning), the 5xx a second observation
+ * cleared. The critical list below is UNCHANGED by that bump —
+ * `http.server-error` is still critical and still fires on every 5xx the
+ * recheck did not clear — which is the whole of the "no old crawl silently
+ * loses an Error" claim, read off the severity shape. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
  * the ten markers, which report a hole in OUR evidence and never a fault of
@@ -285,11 +309,11 @@ describe("check annotations", () => {
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 27 critical, 23 warning and 45 info rules", () => {
+  it("holds 27 critical, 24 warning and 45 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 27, warning: 23, info: 45 });
-    expect(all).toHaveLength(95);
+    expect(counts).toEqual({ critical: 27, warning: 24, info: 45 });
+    expect(all).toHaveLength(96);
   });
 
   it("names exactly the rules that are critical", () => {

@@ -23,6 +23,34 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.13.0: Phase 17, on THREE grounds — one rule added, one verdict MOVED, and
+// copy changed. The 5xx re-verification pass
+// (docs/superpowers/specs/2026-09-08-5xx-recheck-design.md) fetches every
+// `server_error` page exactly once more at crawl end and writes the second
+// observation beside the first, and the ruleset now reads it:
+//
+//  1. `http.server-error-transient` (warning), a verdict no page could receive
+//     before: a 5xx whose second look got a non-5xx answer FROM THE SITE.
+//  2. `http.server-error` no longer fires on those pages. That is the verdict
+//     MOVE, and the only one: a page that was `critical` at 0.12.0 is a
+//     `warning` at 0.13.0 when — and only when — a recheck cleared it. The two
+//     rules are mutually exclusive and jointly exhaustive over
+//     `fetch_class = 'server_error'`, so no 5xx page goes silent.
+//  3. `http.server-error`'s explanation and howToFix, reworded to name the
+//     second observation and to say plainly that a finding whose `recheck` is
+//     "not run" has not been re-verified. Both rules' evidence carries the
+//     recheck columns.
+//
+// Totals move to 27 critical / 24 warning / 45 info over 96 rules.
+//
+// THE MIGRATION STORY, because this is the first bump that could have lost an
+// Error and does not: NOTHING IS BACKFILLED. The recheck columns are null on
+// every row written before migration 0016, and `recheckCleared` is false on a
+// null class, so an older crawl re-judged at 0.13.0 reports exactly what it
+// reported at 0.12.0 — every Error still an Error — with `recheck: "not run"`
+// added to the evidence saying why it was never re-verified. A finding moves
+// band only on a crawl that actually took a second look and got an answer.
+//
 // 0.12.0: Phase 16, on ONE ground — a severity recalibration, and nothing else.
 // 29 of the 95 rules move band: 23 from `warning` to `critical`, 5 from
 // `info` to `warning`, and `crawl.blocked` from `warning` to `info` as the tenth
@@ -118,7 +146,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.12.0";
+export const RULESET_VERSION = "0.13.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

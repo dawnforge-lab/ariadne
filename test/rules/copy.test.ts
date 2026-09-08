@@ -271,6 +271,15 @@ const PHASE_13_RULE_IDS = ["resources.all-unknown"];
  */
 const PHASE_14_RULE_IDS = ["resources.partial-unknown"];
 
+/**
+ * Phase 17's rule: the other half of the 5xx split. Same contract as every list
+ * above — copy lands with the rule — and one obligation of its own: it is the
+ * only rule in the ruleset whose subject is TWO observations, so its copy has to
+ * say that the page failed once and serves now. Copy that reported only the
+ * second look would tell a client nothing happened.
+ */
+const PHASE_17_RULE_IDS = ["http.server-error-transient"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -282,6 +291,7 @@ const ALL_RULE_IDS = [
   ...PHASE_12_RULE_IDS,
   ...PHASE_13_RULE_IDS,
   ...PHASE_14_RULE_IDS,
+  ...PHASE_17_RULE_IDS,
 ];
 
 describe("issue copy", () => {

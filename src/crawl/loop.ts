@@ -78,6 +78,10 @@ import { hostProbeStarts, isSameOrigin, normalizeUrl } from "./parse/url-utils.j
 import { PageWriter, type PageWriterStats } from "./persist.js";
 import { CrawlWindow, HostGate, type BatchOutcome } from "./politeness.js";
 import {
+  recheckServerErrors,
+  type RecheckPassSummary,
+} from "./recheck/recheck-server-errors.js";
+import {
   fetchCrawlResources,
   markResourcesNotAsked,
   type ResourcePassSummary,
@@ -103,11 +107,51 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * suite can crawl a 127.0.0.1 fixture server. Never wire this to an API
    * field, a CLI flag or an env var.
    *
-   * It is also the one field that is NOT persisted on the `crawls` row: a
+   * It is one of the two fields that are NOT persisted on the `crawls` row: a
    * resume must re-assert it in `ResumeOpts.config` rather than inherit it.
    * See storableConfig.
    */
   allowPrivate?: boolean;
+  /**
+   * TEST ONLY override of the recheck pass's `MIN_RECHECK_GAP_MS`, on
+   * `allowPrivate`'s precedent in every respect. Never wire this to an API
+   * field, a CLI flag or an env var.
+   *
+   * WHY IT EXISTS AT ALL. The 60 second floor between the two observations is
+   * the CLAIM THE EVIDENCE MAKES — "still broken a minute later" — and not a
+   * tuning knob, so production has no reason to move it and no way to. But it
+   * is also real wall time inside any test that drives `runCrawl` over a
+   * fixture carrying a 5xx: the pass's own test-only `minGapMs`
+   * (`RecheckPassOpts`) cannot reach a crawl the loop runs, so before this
+   * field three loop-driven suites each waited a real minute for a pass whose
+   * behaviour their assertions do not depend on the gap for
+   * (test/db/migration-0016.test.ts, test/crawl/fetch-resources.test.ts,
+   * test/fixtures/harness.test.ts). The alternative was raising three timeouts
+   * and paying three minutes on every CI run for nothing.
+   *
+   * WHAT KEEPS IT HONEST, in the order the risks run:
+   *
+   *  - **It is not persisted.** `storableConfig` strips it beside
+   *    `allowPrivate`, and `parseStoredConfig`'s closed field set does not read
+   *    it back, so no resume months later inherits a one-second gap from a row
+   *    nobody reads (hard rule 7).
+   *  - **It is not accepted over the API at any value.** `StartCrawlInput`'s
+   *    field allowlist is closed (`parseStartCrawlInput`, src/api/service.ts),
+   *    so a body carrying this key is refused by both transports; it wants the
+   *    named refusal `allowPrivate` gets, so the message says WHY rather than
+   *    "unknown field". A client that could shrink the gap could make every
+   *    transient 5xx clear.
+   *  - **The default is the real number, and it is asserted as a number.**
+   *    Absent means `MIN_RECHECK_GAP_MS` — the spread at INSERTION 3c passes
+   *    nothing when nobody said anything. Since every loop-driven test now sets
+   *    this, the 60 seconds is pinned by reading the exported constant
+   *    (test/crawl/recheck.test.ts, "keeps the real floor at 60 seconds and the
+   *    real cap at 500 rows") rather than by a test that waits a minute to
+   *    observe a number. What the loop-driven tests still prove is that the pass
+   *    honours THE GAP IT WAS GIVEN: test/db/migration-0016.test.ts reads it
+   *    back off the two timestamps.
+   */
+  recheckMinGapMs?: number;
   /**
    * Walk the host's other spellings before crawling (see host-probe). Defaults
    * to on: it costs four chains paced by `perHostDelayMs`, and it is the only
@@ -326,6 +370,16 @@ export interface CrawlSummary {
    * be read as the same thing.
    */
   resources: ResourcePassSummary | null;
+  /**
+   * What the 5xx re-verification pass did, or null when it did not run — a
+   * crawl that failed before it had pages, or one that was already cancelled
+   * when the pass's turn came (an abort means stop asking servers for things,
+   * and the pass is all asking). The `resources: null` precedent, with the same
+   * warning: null is not "no server errors". That is a summary whose
+   * `rechecked` is 0, and the two must not be read as the same thing — one says
+   * nobody looked, the other says there was nothing to look at.
+   */
+  recheck: RecheckPassSummary | null;
   /** Why the crawl ended, when that needs saying. Null on a clean finish. */
   note: string | null;
 }
@@ -545,8 +599,9 @@ export async function resumeCrawl(
 }
 
 /**
- * The config as `crawls.config_jsonb` should hold it: everything except
- * `allowPrivate` (build-plan §7, "before the first real-site crawl").
+ * The config as `crawls.config_jsonb` should hold it: everything except the two
+ * TEST-ONLY fields, `allowPrivate` (build-plan §7, "before the first real-site
+ * crawl") and `recheckMinGapMs` (P17).
  *
  * `allowPrivate` is a test-only escape hatch that admits loopback and RFC1918
  * targets. Persisting it would make it *durable* — every resume of that crawl
@@ -573,9 +628,19 @@ export async function resumeCrawl(
  * returns. The second-writer amendment this docblock carried through Phase 8 —
  * and the "patch keys individually" rule it imposed — is retired; the history
  * is in docs/gates/phase-8.md §12 and §15.
+ *
+ * `recheckMinGapMs` joins the strip by the same argument, one field over. It
+ * shortens the floor under the gap between the two 5xx observations so a
+ * loop-driven test does not wait a real minute, and a row that carried it would
+ * make that durable: every resume of that crawl would re-verify its server
+ * errors a second after seeing them and report the answer as if a minute had
+ * passed. Persisting a shortened gap is persisting a WEAKER CLAIM about the
+ * evidence, which is worse than persisting a stale number.
  */
-export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPrivate"> {
-  const { allowPrivate: _allowPrivate, ...rest } = config;
+export function storableConfig(
+  config: CrawlConfig,
+): Omit<CrawlConfig, "allowPrivate" | "recheckMinGapMs"> {
+  const { allowPrivate: _allowPrivate, recheckMinGapMs: _recheckMinGapMs, ...rest } = config;
   return rest;
 }
 
@@ -591,6 +656,10 @@ export function storableConfig(config: CrawlConfig): Omit<CrawlConfig, "allowPri
  * turns it on. Off is the value the escape hatch has unless a caller says
  * otherwise in this call, which is the whole point of the strip; leaving it
  * off is the documented behaviour, not a guess covering a failure.
+ *
+ * `recheckMinGapMs` is absent from the closed set below for the same reason and
+ * with the same consequence: a resume re-verifies this crawl's server errors at
+ * `MIN_RECHECK_GAP_MS`, whatever a test handed the first run.
  *
  * Exported for the second reader of that column: the API's render endpoint
  * builds its `RenderPassConfig` from the crawl's own stored config, so the
@@ -786,6 +855,20 @@ export function validateCrawlConfig(config: CrawlConfig): void {
       );
     }
   }
+  // The test-only recheck gap, checked here for `findingCap`'s reason: the pass
+  // that spends it runs after the last page, so a nonsense value would be found
+  // by a `RangeError` an hour into a crawl. It is range-checked and not
+  // clamped — a fractional or negative gap is a caller's mistake, not a number
+  // to quietly round (hard rule 7).
+  if (
+    config.recheckMinGapMs !== undefined &&
+    (!Number.isInteger(config.recheckMinGapMs) || config.recheckMinGapMs < 0)
+  ) {
+    throw new RangeError(
+      `CrawlConfig.recheckMinGapMs must be an integer ≥ 0, got ` +
+        `${String(config.recheckMinGapMs)}`,
+    );
+  }
   // The render budget, checked by the module that will spend it. A nonsense
   // budget stops the crawl at line one rather than after the last page, where
   // the render pass would have been the one to find out.
@@ -948,6 +1031,9 @@ async function runToCompletion(
       null,
       // The resource pass never ran: this crawl was refused before it had a
       // page, let alone a page's references.
+      null,
+      // Nor the recheck pass, for the same reason: no page was fetched, so no
+      // page answered 5xx, so there is nothing a second look could be about.
       null,
       note,
     );
@@ -1358,6 +1444,81 @@ async function runToCompletion(
   }
   raiseFailures(crawlId, failures, "while probing for a known-404");
 
+  // INSERTION 3c — the crawl takes a SECOND look at every page that answered
+  // "server error", so a finding can say whether the error persists rather than
+  // only that it happened once (P17; docs/superpowers/specs/2026-09-08-5xx-
+  // recheck-design.md). Lettered like 3b, for 3b's reason: the markers are
+  // positional and INSERTION 4 is cited by name elsewhere.
+  //
+  // WHY HERE, between the known-404 probe and the resource pass:
+  //
+  //  - IT IS A PAGE-PHASE QUESTION, and it belongs with the phase it reasons
+  //    about — the same argument that puts the 404 probe after the loop: one
+  //    more request to the ORIGIN, about the pages we just fetched.
+  //  - BEFORE THE RESOURCE PASS, because running after it would measure a
+  //    server we have just spent an hour loading. "The site was under our load"
+  //    is the confound this pass exists to rule out, so the second observation
+  //    is taken before we spend R more requests on the origin's images. It is
+  //    also why the pass cannot be an endpoint an agent calls later: TIME IS THE
+  //    MEASUREMENT, and a recheck run days afterwards is measuring a different
+  //    site while stamping its answer on a crawl whose findings claim to
+  //    describe one moment.
+  //
+  // Skipped on an abort exactly as the resource pass is, and for the same
+  // reason: every row it would write costs somebody's server a request. The
+  // rows it leaves keep both nulls, which is the resume's work list unchanged.
+  //
+  // NOT CONTAINED, on the resource pass's grounds rather than the probe's: this
+  // pass classifies every site-side failure into a row, so anything it throws is
+  // our defect or a failed write, and there is no column in which to write "the
+  // recheck columns are missing because the writer broke".
+  //
+  // It costs up to 60 seconds of wall time on a crawl that saw a 5xx and
+  // nothing at all on one that did not (`MIN_RECHECK_GAP_MS`, paid once across
+  // the whole oldest-first walk, and the work list is empty on a healthy site).
+  const recheckPass = aborted
+    ? null
+    : await recheckServerErrors(db, crawlId, {
+        userAgent: config.userAgent,
+        // THE SAME GATE the pages were fetched through — not a new one — so a
+        // host that earned 8s of spacing keeps it, and a 503 on recheck
+        // escalates it for the resource pass below (hard rule 9).
+        gate,
+        // Already read by `discover`. The work list is this crawl's own pages,
+        // so the origin's rules are the only rules in play.
+        robots: discovery.robots,
+        timeoutMs: FETCH_TIMEOUT_MS,
+        allowPrivate,
+        // TEST ONLY, and spread rather than passed so ABSENT stays absent: the
+        // pass's own default is `MIN_RECHECK_GAP_MS`, and a `minGapMs:
+        // undefined` must reach it as "nobody said" rather than as a value. See
+        // the field's docblock on `CrawlConfig` — it is stripped from the stored
+        // row exactly as `allowPrivate` is, and refused over the API.
+        ...(config.recheckMinGapMs === undefined
+          ? {}
+          : { minGapMs: config.recheckMinGapMs }),
+        signal,
+      });
+
+  if (recheckPass !== null) {
+    // The count is stamped WHATEVER happened — an aborted pass says what it
+    // actually did — while the time is stamped only by a pass that COMPLETED.
+    // That asymmetry is the whole reason both columns exist: a 0 count reads
+    // the same on "rechecked nothing" and "nobody looked", and the null time
+    // beside it is what tells them apart (see the schema comments).
+    await db
+      .update(crawls)
+      .set({
+        recheckPassCount: recheckPass.rechecked,
+        ...(recheckPass.aborted ? {} : { recheckPassAt: new Date() }),
+      })
+      .where(eq(crawls.id, crawlId));
+  }
+  // Folded in BEFORE the resource pass reads it: an abort that landed inside the
+  // recheck means the caller has asked us to stop talking to this site, and the
+  // resource pass is the next thing that would.
+  if (recheckPass?.aborted === true) aborted = true;
+
   // INSERTION 3b — the crawl asks about the files its pages point at.
   //
   // Numbered 3b rather than 5 because the markers are positional and INSERTION
@@ -1510,6 +1671,7 @@ async function runToCompletion(
     discovery,
     pageTemplates,
     resourcePass,
+    recheckPass,
     aborted
       ? "aborted by the caller; the frontier still holds pending URLs"
       : seedNote,
@@ -1814,6 +1976,7 @@ async function summarise(
   discovery: DiscoveryResult,
   pageTemplates: PageTemplateInference | null,
   resources: ResourcePassSummary | null,
+  recheck: RecheckPassSummary | null,
   note: string | null,
 ): Promise<CrawlSummary> {
   return {
@@ -1829,6 +1992,7 @@ async function summarise(
     },
     pageTemplates,
     resources,
+    recheck,
     note,
   };
 }

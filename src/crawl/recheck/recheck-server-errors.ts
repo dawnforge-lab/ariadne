@@ -1,0 +1,556 @@
+/**
+ * The 5xx re-verification pass: at crawl end, every page the crawl saw answer
+ * "server error" is asked ONE more time, so a finding can say whether the error
+ * PERSISTS rather than only that it happened once (P17-T2).
+ *
+ * The distinction this pass exists to draw is not "was there a 5xx" — the crawl
+ * already answered that — but "is it still there a minute later". A deploy, a
+ * pool restart or a request-scoped blow-up under momentary load all produce a
+ * 503 that is gone by the time anybody reads the report, and today that blip is
+ * recorded as a `critical` site issue for life. A second observation is the only
+ * thing that can tell those apart, and only a second observation TAKEN BY THIS
+ * CRAWL can, because a recheck run days later by an agent is measuring a
+ * different site while stamping its answer on a crawl whose findings claim to
+ * describe one moment.
+ *
+ * ## Both observations are kept. The first is never rewritten.
+ *
+ * The pass writes `recheck_fetch_class`, `recheck_status_code`,
+ * `recheck_reason` and `recheck_at`, and NOTHING ELSE. It never touches
+ * `fetch_class`, `status_code`, `fetch_reason` or any analysis column, and the
+ * reasons are in src/db/schema.ts's "THE TWO OBSERVATIONS" block: `fetch_class`
+ * is the census every cohort in this engine is cut from, and a row flipped to
+ * `ok` after the fact would be an `ok` page with no title, no words, no links
+ * and no simhash — silently exempt from most of the ruleset while looking
+ * healthy (hard rules 1 and 7). Two observations are two facts.
+ *
+ * ## The budget: one request per already-broken page
+ *
+ * That is the whole reason this pass can be unconditional. Nothing but
+ * `server_error` rows is re-fetched — not 4xx (an answer), not `timeout` or
+ * `network_error` (the loop already retried those up to `MAX_ATTEMPTS`), not
+ * `blocked` (owner-ruled a fact about our CRAWLER, not the site), not
+ * `non_html` / `too_large` / `unsupported_encoding` (deterministic non-answers).
+ * On a healthy site the work list is empty and the pass costs one SQL query.
+ *
+ * ## The three constants, and why they are these numbers
+ *
+ *  - **`MIN_RECHECK_GAP_MS = 60_000`.** Three things produce a transient 5xx: a
+ *    request-scoped error under momentary load (seconds); an upstream, pool or
+ *    container restart, or a deploy (tens of seconds to about two minutes — the
+ *    case that matters); and a rate limiter answering 503, which the gate's own
+ *    back-off already handles. 30s covers only the front of the second case. 60s
+ *    is the smallest number that covers its common shape. 5 minutes would delay
+ *    every crawl carrying one 5xx for marginal gain, and would misread what the
+ *    finding claims: "still broken an hour later" is a RE-CRAWL's claim, not a
+ *    pass's.
+ *
+ *    THE WAIT IS PAID AT MOST ONCE, NOT PER ROW. The work list is walked
+ *    oldest-first, each row's wait is `max(0, fetchedAt + gap - now)`, and that
+ *    is monotonically decreasing across the walk — so the total wall time this
+ *    pass adds to a crawl is bounded by 60 seconds however many rows it holds.
+ *    A row whose `fetched_at` is null (a pre-0016 crawl resumed by a 0016 loop)
+ *    counts from the pass's own start instead, which can only bound the gap and
+ *    never report it; the finding's `gapSeconds` is then null, the honest answer
+ *    rather than a computed number nobody measured.
+ *
+ *  - **`MAX_RECHECKS = 500`.** More than 500 server errors is a site-wide
+ *    outage, not a set of broken pages, and re-asking every one of them buys
+ *    nothing a sample would not. Rows past the cap keep `recheck_fetch_class`
+ *    null and are stamped with the reason below, in ONE statement at the end.
+ *
+ *    IT COUNTS ROWS THE PASS SETTLED, NOT REQUESTS IT ISSUED, and a refusal is
+ *    a settled row: a URL the policy now forbids or robots.txt now disallows is
+ *    written `disallowed` with a reason, no request is made, and it spends one
+ *    of the 500 all the same. That is the budget's job — it bounds the WALK,
+ *    not the traffic, and a pass that could be refused 500 times and keep
+ *    walking would be unbounded on exactly the site that had moved behind a
+ *    login.
+ *
+ *  - **`RECHECK_CAP_REASON = 'recheck-cap'`.** The `RESOURCE_CAP_REASON`
+ *    doctrine verbatim, its `&& !aborted` guard included: a budget running out
+ *    is a decision the pass made and every row it applies to says so (hard rule
+ *    7), while a stop the CALLER made decided nothing about anything and its
+ *    rows carry no reason at all. Only the row shape can tell those apart, and a
+ *    capped row is still null, so a resume picks it up and overwrites the
+ *    reason.
+ *
+ * ## Where the walls are
+ *
+ *  - **`isUrlAllowed` explicitly, on every URL, hard rule 5.** `fetchPage`
+ *    re-checks the policy internally — belt and braces, not a substitute — but
+ *    the explicit call is the one that produces a CLASSIFIED ROW rather than a
+ *    throw, and the policy is DNS-dependent: a hostname vetted three hours ago
+ *    at enqueue time may now resolve into RFC1918 space.
+ *  - **robots.txt, re-asked of the rules we already hold.** The crawl origin's
+ *    `RobotsInfo` is passed in rather than re-read; a page that has since been
+ *    disallowed is `disallowed` plus a reason and no request. A refusal is a
+ *    DECIDED outcome, not an absence.
+ *  - **The SAME `HostGate` INSTANCE the page loop used**, never a new one, so a
+ *    host that earned 8s of spacing by refusing the page crawl is still at 8s
+ *    when we ask it again (hard rule 9). `gate.report` is told about every
+ *    request, so a 503 on recheck escalates that host for everything that
+ *    follows — including the resource pass, which shares this gate.
+ *  - **Strictly sequential. No pool, no `CrawlWindow`, no `maxConcurrency`.**
+ *    The work list is empty on a healthy site; a site with many 5xx rows is a
+ *    site in trouble, and the last thing to do is open concurrent sockets to it
+ *    (the yellow.com.mt incident, docs/talos-integration.md). The whole set is
+ *    normally one host, which the gate serialises anyway.
+ *  - **The body is discarded, and no links are enqueued.** Analyzing it would
+ *    produce a half-analyzed page whose links go nowhere, and writing it would
+ *    be the first-observation rewrite this pass exists not to do.
+ *  - **No retries.** ONE more fetch. A timeout on the recheck is a `timeout`
+ *    row and the finding stays `critical`.
+ *  - **RAM is O(1)** (hard rule 6): the work list is read in cursor-paged
+ *    batches and nothing here holds a set of URLs.
+ *
+ * ## Resumable the frontier's way
+ *
+ * The work list IS `fetch_class = 'server_error' and recheck_fetch_class is
+ * null`, so an interrupted pass re-run asks exactly the rows the first one never
+ * reached and re-asks nothing it settled. An abort leaves BOTH nulls — nothing
+ * was decided — and returns `aborted: true` so the crawl loop closes its row
+ * `cancelled` rather than reporting a complete recheck it does not have.
+ *
+ * ## Not contained
+ *
+ * Like the resource pass and unlike the 404 probe. Every site-side failure is
+ * classified into a row here, so anything this throws is OUR defect or a failed
+ * write, and there is no column in which to write "the recheck columns are
+ * missing because the writer broke". It propagates, `execute` closes the crawl
+ * `failed`, and the operator finds out (hard rule 7).
+ */
+import { and, eq, isNull, sql } from "drizzle-orm";
+import type { Db } from "../../db/client.js";
+import { pages } from "../../db/schema.js";
+import type { RobotsInfo } from "../discovery.js";
+import { fetchPage, type FetchClass } from "../fetch-page.js";
+import type { HostGate } from "../politeness.js";
+import { isUrlAllowed } from "../url-policy.js";
+
+/**
+ * The floor under the gap between the two observations. See the module header
+ * for why 60 seconds and why the wait is paid once rather than per row.
+ */
+export const MIN_RECHECK_GAP_MS = 60_000;
+
+/**
+ * Rows one pass will settle — those it re-asks about AND those it refuses
+ * without asking, since a policy or robots refusal is a settled row too. See
+ * the module header.
+ */
+export const MAX_RECHECKS = 500;
+
+/**
+ * The reason a row the cap stopped short of carries, while its class stays
+ * null. Exported because two readers depend on the literal: this pass's own
+ * re-run (which overwrites it when it finally asks) and the surfaces that report
+ * `recheck.capped` off the column.
+ */
+export const RECHECK_CAP_REASON = "recheck-cap";
+
+/** The deadline one recheck gets. The crawl loop's own, passed in by it. */
+const DEFAULT_TIMEOUT_MS = 20_000;
+
+/** Rows read from the work list at a time. Bounds this pass's memory. */
+const WORK_BATCH = 200;
+
+/**
+ * The longest this pass sleeps without looking at the signal. A single 60s
+ * `setTimeout` would mean a cancelled crawl sat there for a minute after the
+ * caller said stop; "we stopped" has to mean the next quarter-second.
+ */
+const SLEEP_SLICE_MS = 250;
+
+export interface RecheckPassOpts {
+  userAgent: string;
+  /**
+   * The gate the PAGE crawl used, not a new one. See the module header: this is
+   * how a host that earned wider spacing keeps it for its recheck, and how a
+   * 503 on recheck escalates that host for the resource pass that follows.
+   */
+  gate: HostGate;
+  /**
+   * The crawl origin's robots.txt, already read by `discover`. This pass reads
+   * nobody's robots.txt: every URL in its work list is a page THIS crawl
+   * fetched, so it is on the origin or one of the same-site spellings
+   * `RobotsInfo.isAllowed` already judges against the origin's rules.
+   */
+  robots: RobotsInfo;
+  /** The deadline one recheck gets; the loop passes its own `FETCH_TIMEOUT_MS`. */
+  timeoutMs?: number;
+  /**
+   * TEST ONLY. Threaded to url-policy and the connect guard so the suite can
+   * re-ask a 127.0.0.1 fixture server. Never wire this to config, an API field
+   * or an env var.
+   */
+  allowPrivate?: boolean;
+  /**
+   * TEST ONLY override of `MIN_RECHECK_GAP_MS`, on the `robotsRetryBackoffMs`
+   * precedent in the resource pass: without it every test that drives this pass
+   * would wait a real minute. Production has no reason to move it — the number
+   * IS the claim the evidence makes about the gap.
+   */
+  minGapMs?: number;
+  /** TEST ONLY override of `MAX_RECHECKS`, so a cap can be provoked with two rows. */
+  maxRechecks?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * What the pass did, for `CrawlSummary.recheck`.
+ *
+ * DELIBERATELY SMALL, and deliberately not the coverage block `crawl_status`
+ * reports. That block is counted LIVE off `pages` (`serverErrors`, `pending`
+ * and the rest), because a poller must be able to watch `pending` fall WHILE
+ * the pass runs and because a resumed crawl's numbers are the table's, not one
+ * run's. These six are the facts only the run itself knows: what THIS pass
+ * settled, and whether a budget or a caller stopped it.
+ *
+ * `confirmed + cleared + inconclusive == rechecked`, always: the three are an
+ * exhaustive partition of the `FetchClass` union (see `outcomeOf`, which the
+ * compiler holds to it).
+ */
+export interface RecheckPassSummary {
+  /** Rows this pass settled: wrote a `recheck_fetch_class` onto. */
+  rechecked: number;
+  /** Of those, still 5xx. */
+  confirmed: number;
+  /** Of those, the site answered and not with a 5xx. */
+  cleared: number;
+  /**
+   * Of those, no answer ABOUT THE PAGE: a timeout, a network error, a block
+   * (which is an answer about our crawler) or a refusal by our own policy or by
+   * robots (which is no request at all). Settled rows every one — the pass
+   * decided something and said what — but nothing that clears a 5xx.
+   */
+  inconclusive: number;
+  /** `MAX_RECHECKS` stopped the walk; the rows past it say `recheck-cap`. */
+  capped: boolean;
+  /**
+   * The caller's signal fired and the pass stopped early. Distinct from
+   * `capped` in the way it has to be: a cap is a budget the operator set and the
+   * rows it stopped at SAY SO, while an abort decided nothing about anything —
+   * its rows keep both nulls, `crawls.recheck_pass_at` is not stamped, and the
+   * crawl that ran this pass must close `cancelled` rather than `finished`
+   * (hard rule 7; the loop reads this).
+   */
+  aborted: boolean;
+}
+
+/** One row of the work list. */
+interface WorkItem {
+  id: string;
+  url: string;
+  /** When the FIRST observation was taken. Null on a pre-0016 row. */
+  fetchedAt: Date | null;
+}
+
+/**
+ * Which of the three things a second observation can mean, off the class alone.
+ *
+ * The switch is exhaustive over `FetchClass` BY THE COMPILER — the declared
+ * return type has no `undefined` in it, so a member added to `FETCH_CLASSES` and
+ * not named here is a typecheck failure rather than a row that silently counts
+ * as one of the three. Every exclusion from `cleared` is deliberate:
+ *
+ *   server_error   confirmed, not cleared.
+ *   blocked        an answer about our CRAWLER, not about the page (owner
+ *                  ruling, `crawl.blocked`); it clears nothing.
+ *   timeout        no answer at all.
+ *   network_error  no answer at all.
+ *   disallowed     no request was made (url-policy or robots, on recheck).
+ *
+ * The rule layer holds its own copy of this partition (`RECHECK_CLEARED` in
+ * src/rules/page/status.ts) because a rule reads a `PageRecord` and must not
+ * import the crawler. The two are the same partition, and the exhaustiveness
+ * guard in each is what keeps them one.
+ */
+function outcomeOf(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
+  switch (fetchClass) {
+    case "server_error":
+      return "confirmed";
+    case "ok":
+    case "redirect":
+    case "client_error":
+    case "non_html":
+    case "too_large":
+    case "unsupported_encoding":
+      return "cleared";
+    case "blocked":
+    case "timeout":
+    case "network_error":
+    case "disallowed":
+      return "inconclusive";
+  }
+}
+
+function positiveInt(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new RangeError(`recheckServerErrors: ${name} must be an integer ≥ 1, got ${value}`);
+  }
+}
+
+function nonNegativeInt(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new RangeError(`recheckServerErrors: ${name} must be an integer ≥ 0, got ${value}`);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * A URL's gate key, or null when the string is not a URL at all.
+ *
+ * `pages.url` was vetted at enqueue time, so null here means the row was edited
+ * underneath us. It is not swallowed: the wait simply has no host queue to
+ * respect (no request will be issued for it), and `isUrlAllowed` below turns
+ * the row into a `disallowed` one with the policy's own words.
+ */
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask every unrechecked `server_error` page of `crawlId` one more time, and
+ * record what it said.
+ *
+ * Never throws for a site's behaviour — a second 500, a timeout, a WAF that has
+ * started refusing us are all classified rows (hard rule 7). It DOES throw for
+ * ours: a failed write, an empty user agent, a nonsensical budget. The crawl
+ * loop lets those propagate (see the module header).
+ */
+export async function recheckServerErrors(
+  db: Db,
+  crawlId: string,
+  opts: RecheckPassOpts,
+): Promise<RecheckPassSummary> {
+  const minGapMs = opts.minGapMs ?? MIN_RECHECK_GAP_MS;
+  const maxRechecks = opts.maxRechecks ?? MAX_RECHECKS;
+  nonNegativeInt("minGapMs", minGapMs);
+  positiveInt("maxRechecks", maxRechecks);
+  if (opts.userAgent.trim() === "") {
+    throw new Error("recheckServerErrors: userAgent must not be empty (rule 9: branded UA)");
+  }
+
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const allowPrivate = opts.allowPrivate === true;
+  const gate = opts.gate;
+  /** The floor a row with no `fetched_at` counts its gap from. See the header. */
+  const passStart = Date.now();
+  /**
+   * The signal, read through a call rather than inline, so the compiler cannot
+   * narrow one check into an assumption about a later one: the flag is set by
+   * the caller between two of our awaits, which is exactly the case
+   * control-flow analysis assumes cannot happen.
+   */
+  const isAborted = (): boolean => opts.signal?.aborted === true;
+
+  let rechecked = 0;
+  let confirmed = 0;
+  let cleared = 0;
+  let inconclusive = 0;
+  let capped = false;
+
+  /** Write one settled row, and count what it settled to. */
+  const settle = async (
+    item: WorkItem,
+    fetchClass: FetchClass,
+    statusCode: number | null,
+    reason: string | null,
+  ): Promise<void> => {
+    await db
+      .update(pages)
+      .set({
+        recheckFetchClass: fetchClass,
+        recheckStatusCode: statusCode,
+        recheckReason: reason,
+        // Moves with the class: `recheck_at is null` <=> `recheck_fetch_class
+        // is null` over the whole table, which migration-0016's test asserts.
+        recheckAt: new Date(),
+      })
+      .where(eq(pages.id, item.id));
+    rechecked += 1;
+    switch (outcomeOf(fetchClass)) {
+      case "confirmed":
+        confirmed += 1;
+        break;
+      case "cleared":
+        cleared += 1;
+        break;
+      case "inconclusive":
+        inconclusive += 1;
+        break;
+    }
+  };
+
+  /**
+   * Sleep until `target`, in slices, and say whether we got there. False means
+   * the caller's signal fired on the way.
+   */
+  const waitUntil = async (target: number): Promise<boolean> => {
+    for (;;) {
+      if (isAborted()) return false;
+      const remaining = target - Date.now();
+      if (remaining <= 0) return true;
+      await sleep(Math.min(remaining, SLEEP_SLICE_MS));
+    }
+  };
+
+  // ---- the work list, cursor-paged so nothing accumulates (hard rule 6) ----
+  let cursor: WorkItem | null = null;
+  walk: for (;;) {
+    if (isAborted()) break;
+    const batch = await workList(db, crawlId, cursor, WORK_BATCH);
+    if (batch.length === 0) break;
+    cursor = batch[batch.length - 1]!;
+
+    for (const item of batch) {
+      // The caller's stop, honoured per ROW rather than per batch, and again
+      // inside the wait. The row is left exactly as it was: both nulls, nothing
+      // decided, and it is the resume's work list.
+      if (isAborted()) break walk;
+
+      const host = hostOf(item.url);
+      // The gap this row owes, counted from ITS OWN first observation, with the
+      // host's earned spacing as the other floor — `MIN_RECHECK_GAP_MS` is a
+      // floor ON TOP of the gate's spacing, never instead of it (rule 9).
+      const base = item.fetchedAt?.getTime() ?? passStart;
+      const wait = Math.max(minGapMs, host === null ? 0 : gate.spacingMs(host));
+      if (!(await waitUntil(base + wait))) break walk;
+
+      // After the wait, because the budget is about requests we are about to
+      // make and the wait may have been a minute long.
+      if (rechecked >= maxRechecks) {
+        capped = true;
+        break walk;
+      }
+
+      // Hard rule 5, explicitly and every time. The policy is DNS-dependent and
+      // this URL was last vetted when it was enqueued; a refusal here is a
+      // classified row rather than the throw `fetchPage` would raise.
+      const policy = await isUrlAllowed(item.url, { allowPrivate });
+      if (!policy.allowed) {
+        await settle(item, "disallowed", null, policy.reason ?? "refused by the URL policy");
+        continue;
+      }
+      if (!opts.robots.isAllowed(item.url)) {
+        await settle(
+          item,
+          "disallowed",
+          null,
+          opts.robots.note ?? `robots.txt (${host ?? "origin"}) disallows this URL`,
+        );
+        continue;
+      }
+
+      // `host` is non-null from here: the policy accepted the URL, which it
+      // cannot do for a string `new URL` refused.
+      const gateHost = host ?? new URL(item.url).host;
+      await gate.acquire(gateHost);
+      const result = await fetchPage(item.url, {
+        userAgent: opts.userAgent,
+        allowPrivate,
+        timeoutMs,
+      });
+      // The gate hears about it before anything else does, so a 503 on recheck
+      // escalates this host for whatever comes next — the rest of this pass, and
+      // the resource pass that shares this gate.
+      gate.report(gateHost, {
+        fetchClass: result.fetchClass,
+        statusCode: result.statusCode,
+        retryAfterMs: result.retryAfterMs,
+        url: item.url,
+      });
+      // `result.body` is dropped on this line and never read: see the header.
+      await settle(item, result.fetchClass, result.statusCode, result.disallowedReason);
+    }
+  }
+
+  // Read once, at the end: the signal may have fired inside the wait rather than
+  // at a row boundary, and the caller has to be able to tell "the pass finished"
+  // from "the pass was stopped".
+  const aborted = isAborted();
+
+  if (capped && !aborted) {
+    // Loud, not silent: every row the cap stopped short of says so, in ONE
+    // statement rather than one per row. `&& !aborted` is what keeps that
+    // sentence true — an abort's rows were not capped, they were interrupted,
+    // and stamping a reason on them would claim a decision nobody made
+    // (`RESOURCE_CAP_REASON`, P12-T2 review C-1).
+    //
+    // `recheck_reason is null` in the predicate keeps it idempotent and off a
+    // row an earlier run already claimed.
+    await db
+      .update(pages)
+      .set({ recheckReason: RECHECK_CAP_REASON })
+      .where(
+        and(
+          eq(pages.crawlId, crawlId),
+          eq(pages.fetchClass, "server_error"),
+          isNull(pages.recheckFetchClass),
+          isNull(pages.recheckReason),
+        ),
+      );
+  }
+
+  return { rechecked, confirmed, cleared, inconclusive, capped, aborted };
+}
+
+/**
+ * The next slice of the work list: this crawl's server errors that no pass has
+ * settled, OLDEST FIRST.
+ *
+ * The order is not cosmetic — it is what makes the 60-second wait cost 60
+ * seconds instead of 60 per row (see the module header). `fetched_at` is
+ * nullable, and `nulls first` is spelled as `coalesce(..., '-infinity')` so the
+ * ORDER BY and the keyset comparison are the same expression: a cursor over a
+ * column whose ordering rule lives in one place and whose comparison lives in
+ * another is how a paged walk silently skips rows.
+ *
+ * `id` breaks the tie, so the pair is unique and no row can be visited twice or
+ * stepped over. The cursor is needed even though every settled row leaves the
+ * work list: the rows the cap leaves behind do not, and a cursorless re-query
+ * would hand them back for ever. An unparseable URL is not one of them — it is
+ * settled `disallowed` by `isUrlAllowed` and leaves the list like any other.
+ */
+async function workList(
+  db: Db,
+  crawlId: string,
+  cursor: WorkItem | null,
+  limit: number,
+): Promise<WorkItem[]> {
+  const result = await db.execute<{ id: string; url: string; fetched_at: string | null }>(
+    sql`select id, url, fetched_at
+          from pages
+         where crawl_id = ${crawlId}
+           and fetch_class = 'server_error'
+           and recheck_fetch_class is null
+           ${
+             cursor === null
+               ? sql``
+               : sql`and (coalesce(fetched_at, '-infinity'::timestamptz), id)
+                       > (coalesce(${cursor.fetchedAt}::timestamptz, '-infinity'::timestamptz),
+                          ${cursor.id})`
+           }
+         order by coalesce(fetched_at, '-infinity'::timestamptz) asc, id asc
+         limit ${limit}`,
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    url: row.url,
+    // A STRING, not a Date: `db.execute` hands back postgres's own text form
+    // (`2026-09-08 14:14:37.642+00`) rather than the Date the query builder's
+    // column mappers produce (src/api/csv.ts says the same of its own views).
+    // So the conversion is LOAD-BEARING, not cosmetic — `item.fetchedAt` is
+    // read as `.getTime()` when the gap is computed, which a string has not
+    // got. The null stays null.
+    fetchedAt: row.fetched_at === null ? null : new Date(row.fetched_at),
+  }));
+}

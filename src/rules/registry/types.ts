@@ -105,7 +105,10 @@ interface RuleMeta {
    * is the drift the field exists to prevent.
    *
    * NOT a verdict and NOT client copy: it never reaches a finding, a metric or
-   * the ruleset version. It is registry metadata the guard reads.
+   * the ruleset version. It is the registry's own metadata — read by the guard
+   * and, since Phase 17, mirrored onto the rules catalog (`CatalogRule.marker`)
+   * so a UI can tell "this check could not be answered" from "this check found
+   * something small" without keeping its own list of which rules are markers.
    */
   marker?: string;
 }

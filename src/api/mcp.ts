@@ -260,7 +260,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
         "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount, " +
-        "pagesScanned, fetchResources and resources.\n\n" +
+        "pagesScanned, fetchResources, resources and recheck.\n\n" +
         "IS THIS CRAWL JUDGED? rulesRunAt is the answer and the only one: it is " +
         "the timestamp of the last COMPLETED crawl_rules pass, and null means no " +
         "complete pass is on record — never judged, being judged right now, or " +
@@ -349,6 +349,32 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "to. On a crawl older than the resource " +
         "tables every number here is 0, which is not 'this site references no files' " +
         "— the resources.not-recorded finding is what says so.\n\n" +
+        "recheck is what the 5xx RE-VERIFICATION pass knows about this crawl, " +
+        "COUNTED OFF THE DATABASE like the block above it. Every page whose first " +
+        "fetch ended 5xx is asked exactly once more at crawl end, at least 60 " +
+        "seconds later, through the same politeness gate — because a 5xx seen once " +
+        "may be a blip rather than a broken page, and only a second observation can " +
+        "say which. serverErrors is how many pages answered 5xx on the FIRST look: " +
+        "the denominator. confirmed is 5xx again — still broken. cleared is a " +
+        "non-5xx ANSWER from the site, which is the transient case and the only " +
+        "thing on this surface that turns a critical into a warning (the finding " +
+        "becomes http.server-error-transient). inconclusive is re-asked with no " +
+        "answer about the page — a timeout, a network error, a block (an answer " +
+        "about our crawler, not the page), or a URL our own policy or robots.txt " +
+        "refused on the second look — and it stays critical. pending is NOT ASKED " +
+        "AT ALL. confirmed + cleared + inconclusive + pending = serverErrors, " +
+        "always.\n\n" +
+        "passAt is when a pass COMPLETED over this crawl, and null means no " +
+        "complete pass is on record — never run, running right now, or stopped " +
+        "part-way. READ IT WITH pending, because zeroes have two meanings here: " +
+        "serverErrors 0 beside a passAt timestamp is 'this crawl saw no server " +
+        "errors', while pending equal to serverErrors beside a null passAt is " +
+        "'nobody looked' — those pages keep their critical findings and their " +
+        "evidence says recheck: not run. capped is true when the pass's own budget " +
+        "(500 rows) stopped it short of at least one page; those rows are counted " +
+        "in pending, because nothing about them was decided. A crawl older than " +
+        "the pass answers zeroes with a null passAt, which is the second reading, " +
+        "not the first.\n\n" +
         "This is the polling tool. status is one of queued, running, finished, " +
         "cancelled, failed — the last three are terminal. Two fields answer the " +
         "question 'is anybody actually working on this': queuePosition is a " +
@@ -761,6 +787,24 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "status, how many attempts the URL got, and the per-host spacing the engine " +
         "had backed off to before giving up — read it before deciding whether a " +
         "blocked page means 'crawl slower' or 'this site refuses us'.\n\n" +
+        "THE SECOND OBSERVATION, on the five fields that carry it. fetchedAt is " +
+        "when the crawl fetched the page. The other four are the 5xx " +
+        "re-verification pass's answer: every page whose first fetch ended 5xx is " +
+        "asked once more at crawl end, at least 60 seconds later, and " +
+        "recheckFetchClass, recheckStatusCode, recheckReason and recheckAt are what " +
+        "it got. recheckFetchClass NULL MEANS NOBODY ASKED and never 'it was " +
+        "fine' — the pass only ever asks about a server_error row, so null is what " +
+        "every healthy page carries. server_error again is a confirmed outage; any " +
+        "other ANSWER from the site (ok, redirect, client_error, non_html, " +
+        "too_large, unsupported_encoding) is the transient case, and it is the one " +
+        "thing that moves a page from http.server-error to " +
+        "http.server-error-transient; timeout, network_error, blocked and " +
+        "disallowed are the second look learning nothing, and the finding stays " +
+        "critical. recheckReason with a NULL class is the pass declining to ask and " +
+        "saying why (recheck-cap, its 500-row budget), which is a different fact " +
+        "from both nulls together. recheckAt is null exactly when " +
+        "recheckFetchClass is. crawl_status's recheck block is the same evidence " +
+        "counted, and its passAt is what says whether a pass ran at all.\n\n" +
         "WHICH PASS WROTE WHAT, because a filter can outrun the evidence. The rows " +
         "themselves — url, statusCode, fetchClass, pageType, indexable, depth, " +
         "discoveredVia, wordCount, renderableWordCount — are written by the CRAWL, " +
@@ -876,7 +920,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The whole ruleset, with the client-facing copy each rule would report " +
         "with: {rulesetVersion, rules: [{id, kind, severity, category, checkIds, " +
-        "title, explanation, howToFix}]}. kind is page | query | metric, severity " +
+        "title, explanation, howToFix, marker?}]}. kind is page | query | metric, severity " +
         "is critical | warning | info, and checkIds trace each rule to the audit " +
         "checklist. Ordered by severity then rule id — the order issues_list " +
         "returns its groups in.\n\n" +
@@ -885,6 +929,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the rules that found something, so it cannot answer 'what else was " +
         "examined'. Use this to render or walk the full list; use issues_list for " +
         "the findings themselves.\n\n" +
+        "marker is present on a NOT MEASURED marker and on no other rule, and its " +
+        "value is the crawl condition whose silence that marker explains. A marker " +
+        "rule's findings say a check COULD NOT BE ANSWERED on this crawl — they are " +
+        "facts about the crawl, not defects in the site — so do not file them with " +
+        "the site's issues. They are all severity info, which is why severity alone " +
+        "cannot tell them apart: read this field, not a list of your own.\n\n" +
         "WITH crawlId, every rule additionally carries `fired`, and it has THREE " +
         "states that mean three different things:\n" +
         "  fired absent      — no crawlId was given. Nobody has looked; this is " +
@@ -915,7 +965,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Not paginated: the ruleset is a fixed list that does not grow with the " +
         "size of a crawl — but it is not small, and there is no cursor to take it " +
         "in pieces. Every rule's full copy is tens of kilobytes in one answer " +
-        "(about 80KB, roughly 20k tokens, at this ruleset), so spend the context " +
+        "(about 109KB, roughly 27k tokens, at this ruleset), so spend the context " +
         "deliberately: if you only need the rules that FOUND something, " +
         "issues_list is a fraction of the size.",
       inputSchema: z.strictObject({
