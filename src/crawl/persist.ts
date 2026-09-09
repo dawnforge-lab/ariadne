@@ -621,6 +621,20 @@ export class PageWriter {
       contentHash: analysis?.contentHash ?? null,
       // Unsigned analyzer value -> signed column; see the module header.
       simhash: analysis === null ? null : BigInt.asIntN(64, analysis.simhash),
+      // The main-content fingerprint (migration 0018), same spelling and the
+      // same round trip as `simhash` above it. TWO different nulls reach this
+      // column and both are correct: no analysis ran at all (no HTML), and an
+      // analysis that found no main content to fingerprint — an empty <main>,
+      // or a body that is nothing but chrome. The pair below moves with it.
+      mainSimhash:
+        analysis === null || analysis.mainSimhash === null
+          ? null
+          : BigInt.asIntN(64, analysis.mainSimhash),
+      mainWordCount: analysis?.mainWordCount ?? null,
+      // Null exactly when `has_lorem_ipsum` below is false — the analyzer
+      // derives both from one match, so the writer cannot break the pairing by
+      // writing one of them.
+      placeholderSnippet: analysis?.placeholderSnippet ?? null,
       responseTimeMs: fetch.responseTimeMs,
       // WHEN THIS OBSERVATION WAS TAKEN (migration 0016). One `new Date()` per
       // row on the hot path, which is what the row costs and nothing more.

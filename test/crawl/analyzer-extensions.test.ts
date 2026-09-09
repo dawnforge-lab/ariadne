@@ -684,3 +684,235 @@ describe("the Phase 7 fixture page measures what its own arithmetic says", () =>
     expect(a.wordCount - a.renderableWordCount).toBe(82);
   });
 });
+
+/**
+ * The Phase 19 main-content pair. The DOM parity oracle already holds the two
+ * numbers to a tree (page-analyzer.upstream.test.ts); these cases pin what the
+ * numbers MEAN — which subtree is measured, when the pair is null, and the one
+ * property the whole change exists for: two pages that differ only in their
+ * chrome are far apart in the main fingerprint and next to each other in the
+ * whole-page one.
+ */
+describe("mainWordCount / mainSimhash: the main-content fingerprint", () => {
+  const CHROME =
+    `<header><p>the shop brand</p></header>` +
+    `<nav><a href="/a">shop all</a> <a href="/b">new in</a></nav>` +
+    `<aside><p>you may also like these</p></aside>` +
+    `<footer><p>terms and delivery and returns</p></footer>`;
+  const page = (body: string) => analyzePage(`<html><body>${body}</body></html>`, "https://ex.com/p");
+
+  it("measures the text inside <main> when the page declares one", () => {
+    const a = page(`${CHROME}<main><p>one two three four five</p></main>`);
+    // 3 + 4 + 5 + 5 of chrome, and five words of the page's own.
+    expect(a.wordCount).toBe(22);
+    expect(a.mainWordCount).toBe(5);
+    expect(a.mainSimhash).toBe(simhash64("one two three four five"));
+    // And it is NOT the whole-page fingerprint, which is the entire point.
+    expect(a.mainSimhash).not.toBe(a.simhash);
+  });
+
+  it("falls back to the body minus nav, header, footer and aside", () => {
+    const a = page(`${CHROME}<div class="content"><p>one two three four five</p></div>`);
+    expect(a.wordCount).toBe(22);
+    expect(a.mainWordCount).toBe(5);
+    // The same five words as the `<main>` page above, so the same fingerprint:
+    // the two routes to the main content are one measurement.
+    expect(a.mainSimhash).toBe(simhash64("one two three four five"));
+  });
+
+  it("tells two chrome-heavy pages apart where the whole-page hash cannot", () => {
+    // THE DEFECT THIS COLUMN CLOSES, reproduced at the size that produced it
+    // (spec §2): a site whose pages carry ~900 words of identical header,
+    // navigation and footer around ~150 words of their own. Here that is 970
+    // words per page, 150 of them the product's.
+    const CHROME_HEAVY =
+      `<header><p>${"the shop brand tagline ".repeat(25)}</p></header>` +
+      `<nav><p>${"shop all new in dresses knitwear sale gifts ".repeat(40)}</p></nav>` +
+      `<aside><p>${"you may also like these ".repeat(30)}</p></aside>` +
+      `<footer><p>${"terms delivery returns privacy contact ".repeat(50)}</p></footer>`;
+    const product = (topic: string) =>
+      `<p>${`a paragraph about our ${topic} and how it is made `.repeat(15)}</p>`;
+    const a = page(`${CHROME_HEAVY}<main>${product("dresses")}</main>`);
+    const b = page(`${CHROME_HEAVY}<main>${product("candles")}</main>`);
+    expect(a.wordCount).toBe(970);
+    expect(a.mainWordCount).toBe(150);
+    // Two unrelated products. Read whole, they are 3 bits apart — INSIDE
+    // `content.near-duplicate`'s threshold of 3, which is how 500 findings
+    // across unrelated templates happened.
+    expect(hammingDistance(a.simhash, b.simhash)).toBeLessThanOrEqual(3);
+    // Read over their main content, they are not the same page at all.
+    expect(hammingDistance(a.mainSimhash!, b.mainSimhash!)).toBeGreaterThan(3);
+  });
+
+  it("still calls two pages with the same main content duplicates", () => {
+    // The other direction, and the reason the column is not just a filter: one
+    // product page under two URLs, with the chrome differing (a menu that
+    // highlights the current section). Same main content, same fingerprint.
+    const a = page(`<nav><p>shop all NEW IN sale</p></nav><main><p>one two three four five</p></main>`);
+    const b = page(`<nav><p>shop all new in SALE</p></nav><main><p>one two three four five</p></main>`);
+    expect(hammingDistance(a.mainSimhash!, b.mainSimhash!)).toBe(0);
+  });
+
+  it("is null on a page that is nothing but chrome — not zero", () => {
+    const a = page(CHROME);
+    expect(a.wordCount).toBe(17);
+    // "Nothing to fingerprint", which a rule must be able to tell from a page
+    // it measured. Zero would be a measurement.
+    expect(a.mainWordCount).toBeNull();
+    expect(a.mainSimhash).toBeNull();
+  });
+
+  it("is null on an empty <main>, whatever else the body carries", () => {
+    const a = page(`${CHROME}<main>  </main>`);
+    expect(a.mainWordCount).toBeNull();
+    expect(a.mainSimhash).toBeNull();
+  });
+
+  it("counts a nested <main> as part of the first one", () => {
+    // Invalid HTML that real pages ship. The depth idiom keeps the inner close
+    // from ending the outer element.
+    const a = page(`<main><p>outer copy</p><main><p>inner copy</p></main><p>after</p></main>`);
+    expect(a.mainWordCount).toBe(5);
+  });
+
+  it("measures the FIRST <main> and not the second", () => {
+    const a = page(`<main><p>the first main</p></main><main><p>the second main here</p></main>`);
+    expect(a.mainWordCount).toBe(3);
+    expect(a.mainSimhash).toBe(simhash64("the first main"));
+  });
+
+  it("keeps chrome that sits INSIDE the main content", () => {
+    // A document that says where its content is has said so about the in-page
+    // nav in it too: the exclusion is the FALLBACK's rule, not a filter.
+    const a = page(`<header><p>site chrome</p></header><main><nav><a href="/x">jump to</a></nav><p>article copy</p></main>`);
+    expect(a.mainWordCount).toBe(4);
+  });
+
+  it("excludes template text from the main content, as it does from wordCount", () => {
+    const a = page(`<main><p>real copy</p><template><p>a card the js clones</p></template></main>`);
+    expect(a.mainWordCount).toBe(2);
+  });
+
+  it("does not let a <main> inside a <template> claim the page", () => {
+    // The template's `<main>` is in no rendered document, so the fallback runs
+    // and measures the body minus its chrome.
+    const a = page(`<template><main><p>a cloned layout</p></main></template><nav><p>chrome words here</p></nav><p>the page's own copy</p>`);
+    expect(a.mainWordCount).toBe(4);
+    expect(a.mainSimhash).toBe(simhash64("the page's own copy"));
+  });
+
+  it("counts markup-hidden text in the main content", () => {
+    // Deliberately NOT `renderableWordCount`'s rule: this fingerprint is over
+    // the main content AS SERVED, and a hamming distance between two templates
+    // must not depend on which of them hides a dialog.
+    const a = page(`<main><p>visible copy</p><div hidden><p>hidden copy</p></div></main>`);
+    expect(a.mainWordCount).toBe(4);
+    expect(a.renderableWordCount).toBe(2);
+  });
+
+  it("does not merge the words on either side of a chrome block", () => {
+    // No element between the text and the `<nav>`: the fallback stream still
+    // has to put a separator where the chrome was.
+    const a = page(`before<nav><p>menu</p></nav>after`);
+    expect(a.mainWordCount).toBe(2);
+  });
+
+  it("excludes all four chrome elements and nothing else", () => {
+    const a = page(
+      `<header>h</header><nav>n</nav><aside>a</aside><footer>f</footer>` +
+        `<section>section</section><article>article</article><div>div</div>`,
+    );
+    expect(a.wordCount).toBe(7);
+    expect(a.mainWordCount).toBe(3);
+  });
+});
+
+describe("placeholderSnippet: the evidence for hasLoremIpsum", () => {
+  const page = (body: string) => analyzePage(`<html><body>${body}</body></html>`, "https://ex.com/p");
+
+  it("is null when the page carries no placeholder copy", () => {
+    const a = page(`<p>a page with real copy on it</p>`);
+    expect(a.hasLoremIpsum).toBe(false);
+    expect(a.placeholderSnippet).toBeNull();
+  });
+
+  it("quotes the whole text when the page is shorter than the window", () => {
+    const a = page(`<p>Lorem ipsum dolor sit amet.</p>`);
+    expect(a.hasLoremIpsum).toBe(true);
+    expect(a.placeholderSnippet).toBe("Lorem ipsum dolor sit amet.");
+  });
+
+  it("matches across a line break, because the text it reads is collapsed", () => {
+    const a = page(`<p>Lorem\n   ipsum dolor sit amet.</p>`);
+    expect(a.hasLoremIpsum).toBe(true);
+    expect(a.placeholderSnippet).toBe("Lorem ipsum dolor sit amet.");
+  });
+
+  it("matches across an element boundary and quotes the collapsed form", () => {
+    const a = page(`<p>Lorem</p><p>ipsum dolor sit amet.</p>`);
+    expect(a.hasLoremIpsum).toBe(true);
+    expect(a.placeholderSnippet).toBe("Lorem ipsum dolor sit amet.");
+  });
+
+  it("is case-insensitive, like the flag it is evidence for", () => {
+    const a = page(`<p>LOREM IPSUM DOLOR.</p>`);
+    expect(a.placeholderSnippet).toBe("LOREM IPSUM DOLOR.");
+  });
+
+  it("quotes the excerpt a reader will find on the listing page", () => {
+    // The shape from the crawl that provoked the column (spec §3): a 1,000-word
+    // post whose only placeholder copy is the card excerpt, and evidence that
+    // said `{wordCount}`.
+    const a = page(
+      `<header><p>${"the shop brand ".repeat(20)}</p></header>` +
+        `<main><h1>A post about something</h1>` +
+        `<p class="excerpt">Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>` +
+        `<p>${"the real body copy of this post ".repeat(40)}</p></main>`,
+    );
+    const snippet = a.placeholderSnippet!;
+    expect(snippet).toContain("Lorem ipsum dolor sit amet, consectetur adipiscing elit.");
+    expect(snippet.length).toBeLessThanOrEqual(160);
+    // Whole words at both ends: a quotation that starts mid-word reads as a
+    // corruption of the page rather than a quotation from it.
+    expect(snippet).toBe(snippet.trim());
+    expect(a.wordCount).toBeGreaterThan(300);
+  });
+
+  it("centres the window on the match and keeps whole words at both ends", () => {
+    const before = "alpha ".repeat(60);
+    const after = "omega ".repeat(60);
+    const a = page(`<p>${before}Lorem ipsum dolor. ${after}</p>`);
+    const snippet = a.placeholderSnippet!;
+    expect(snippet.length).toBeLessThanOrEqual(160);
+    expect(snippet).toContain("Lorem ipsum dolor.");
+    // Centred: there is text from both sides of the match in the quotation.
+    expect(snippet.startsWith("alpha")).toBe(true);
+    expect(snippet.endsWith("omega")).toBe(true);
+    // Whole words: every token in the snippet is one of the page's own.
+    for (const word of snippet.split(" ")) {
+      expect(["alpha", "omega", "Lorem", "ipsum", "dolor."]).toContain(word);
+    }
+  });
+
+  it("quotes the first match when a page carries several", () => {
+    const a = page(
+      `<p>${"filler ".repeat(40)}</p><p>Lorem ipsum one.</p>` +
+        `<p>${"filler ".repeat(40)}</p><p>Lorem ipsum two.</p>`,
+    );
+    expect(a.placeholderSnippet).toContain("Lorem ipsum one.");
+    expect(a.placeholderSnippet).not.toContain("Lorem ipsum two.");
+  });
+
+  it("is null exactly when hasLoremIpsum is false, over every case above", () => {
+    for (const html of [
+      `<p>real copy</p>`,
+      `<p>Lorem ipsum.</p>`,
+      `<script>var x = "lorem ipsum";</script><p>real copy</p>`,
+      `<template><p>lorem ipsum in a template</p></template><p>real copy</p>`,
+      `<p>${"w ".repeat(500)}lorem ipsum${" w".repeat(500)}</p>`,
+    ]) {
+      const a = page(html);
+      expect(a.placeholderSnippet === null, html).toBe(!a.hasLoremIpsum);
+    }
+  });
+});

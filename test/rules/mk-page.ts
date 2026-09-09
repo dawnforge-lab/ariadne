@@ -64,6 +64,17 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     textRatio: 0.4,
     contentHash: "0".repeat(64),
     simhash: 1234567890123456789n,
+    // The main-content pair (migration 0018). The clean page is a page a
+    // current crawl wrote, so both are set: it has content of its own, and less
+    // of it than `word_count`, because it has chrome like every real page. A
+    // null in either is "this row predates 0018", which is the crawl
+    // `content.near-duplicate-skipped` refuses — a test about that gate
+    // overrides BOTH, since they are one measurement written twice.
+    mainSimhash: 987654321098765432n,
+    mainWordCount: 250,
+    // Null because `hasLoremIpsum` is false. The two are one observation:
+    // a test that sets the flag sets the quotation with it.
+    placeholderSnippet: null,
     structuredDataParseErrors: 0,
     responseTimeMs: 200,
     htmlBytes: 40_000,

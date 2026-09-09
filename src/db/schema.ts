@@ -384,6 +384,49 @@ export const pages = pgTable("pages", {
   // The bit pattern — all a hamming distance cares about — is identical either
   // way, so the round trip is lossless. See src/crawl/parse/simhash.ts.
   simhash: bigint("simhash", { mode: "bigint" }),
+  // The same fingerprint over the page's MAIN CONTENT instead of over
+  // everything it renders: the visible text inside the first <main> when the
+  // document has one, else the body's visible text with the <nav>, <header>,
+  // <footer> and <aside> subtrees removed. Written by the crawl (`PageWriter`)
+  // off the same single pass as `simhash`, and stored on exactly the contract
+  // stated on `simhash` above — unsigned analyzer value, signed column,
+  // `BigInt.asIntN(64, …)` in and `BigInt.asUintN(64, …)` out.
+  //
+  // WHY IT EXISTS (migration 0018, Phase 19). `simhash` reads the whole visible
+  // text, and on a templated site most of that text is the same header,
+  // navigation and footer on every page: the crawl that provoked this carries
+  // ~900 words of chrome around a median of ~150 words of content, so two
+  // unrelated templates landed 3 bits apart and `content.near-duplicate`
+  // reported 500 findings, 237 of them across pages with nothing to do with
+  // each other. This column is what that rule compares now; `simhash` keeps its
+  // meaning and its readers.
+  //
+  // NULLABLE, AND THE NULL IS A GATE, twice over:
+  //  - "nothing to fingerprint" — an empty <main>, or a body that is nothing
+  //    but chrome. Never `0` and never a hash of the empty string.
+  //  - "this row predates 0018". PRE-0018 ROWS ARE NULL AND ARE NOT
+  //    BACKFILLED: the text cannot be recomputed without the HTML, which the
+  //    crawl does not store. A rule meeting a crawl with no main fingerprint
+  //    must SAY SO rather than pass — `content.near-duplicate-skipped` is how
+  //    (hard rule 1), on the `content.thin-skipped` precedent.
+  mainSimhash: bigint("main_simhash", { mode: "bigint" }),
+  // Words in the text `main_simhash` was taken over. Written with it, null with
+  // it, and read as the floor under a near-duplicate claim: a page with less
+  // main content than a rule's threshold has nothing to be a near-duplicate OF,
+  // and `content.thin` is the check that owns it.
+  mainWordCount: integer("main_word_count"),
+  // Up to 160 characters of the visible text around the first "lorem ipsum"
+  // match — the EVIDENCE for `has_lorem_ipsum`, which without it reports a URL
+  // and a word count. The finding that provoked it was true and unusable: three
+  // 1,000-word blog posts whose placeholder copy was the card excerpt and the
+  // meta description, which no reader could find from `{wordCount}`.
+  //
+  // NULL EXACTLY WHEN `has_lorem_ipsum` IS FALSE. The two are one observation
+  // written twice — the flag and the quotation behind it — and the invariant is
+  // asserted as SQL over the table in test/db/migration-0018.test.ts. Pre-0018
+  // rows carry a flag and no snippet and are not backfilled, for the same
+  // reason as the pair above: the text is gone.
+  placeholderSnippet: text("placeholder_snippet"),
   // JSON-LD blocks on this page that would not parse (invalid JSON, or over
   // the analyzer's per-block cap). A count, not a silence: a page whose
   // structured data does not parse is an audit finding.

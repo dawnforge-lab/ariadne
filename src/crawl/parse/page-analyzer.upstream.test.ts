@@ -78,6 +78,24 @@
  *    over CSS-hidden markup would agree on the wrong answer, which is why the
  *    limitation is written down instead of tested around.
  *
+ * Phase 19 (P19-T1) put the main-content pair ON the parity surface and, less
+ * obviously, `placeholderSnippet` with it:
+ *  - `mainWordCount` and `mainSimhash` are DOM reads in the strongest sense
+ *    this file recognises — WHICH SUBTREE the text comes from is the whole
+ *    question, and the oracle answers it by walking for the first `<main>` and
+ *    otherwise by walking the body while declining to descend into
+ *    `CHROME_TAGS`. Two things are shared with the port rather than re-derived,
+ *    on the `INLINE_TEXT_TAGS` precedent: the four chrome names (a tag table)
+ *    and `simhash64` (a hash of the text, not a reading of the tree). What is
+ *    NOT shared is where the text comes from, which is the claim.
+ *  - `placeholderSnippet` is a `bodyText` derivation, so by this file's own
+ *    rule — the one that strips `hasLoremIpsum` and `contentHash` — it could
+ *    have been stripped too. It is kept because it is ARITHMETIC (a window,
+ *    centred, pulled back to whole words) rather than a predicate, and a second
+ *    implementation of a windowing rule catches an off-by-one that a boolean
+ *    never could. The oracle's copy is written from the field's contract, not
+ *    from the port's code.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -85,10 +103,12 @@ import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
 import {
   analyzeHtml,
+  CHROME_TAGS,
   FRAMEWORK_MARKERS,
   INLINE_TEXT_TAGS,
   type RawPageAnalysis,
 } from "./page-analyzer.js";
+import { simhash64 } from "./simhash.js";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 
 /** The Task 6 additions, which the oracle does not model. */
@@ -168,6 +188,73 @@ function collectVisibleText(node: DomNode, out: string[]): void {
   if (boundary) out.push(" ");
   for (const child of node.children ?? []) collectVisibleText(child, out);
   if (boundary) out.push(" ");
+}
+
+/**
+ * The main content, DOM-side, in two halves that mirror the port's two
+ * candidate streams:
+ *  - `findMain` returns the first `<main>` the WALK reaches — a walk, not
+ *    `$("main").first()`, because a selector reaches into a `<template>` (and
+ *    every other subtree this file's text walks stop at) and the port's
+ *    tokenizer deliberately does not claim a `<main>` that is in no rendered
+ *    document. The two sides have to be looking for the same element before
+ *    they can be compared on its text.
+ *  - `collectContentText` is `collectVisibleText` that declines to descend into
+ *    a chrome subtree and pushes ONE separator where it does — which is exactly
+ *    what the port's `chromeDepth` bracket produces on the other side, so
+ *    words on either side of a `<nav>` never merge on either.
+ */
+function findMain(node: DomNode): DomNode | null {
+  const name = node.name?.toLowerCase();
+  if (name !== undefined) {
+    if (NON_CONTENT_TAGS.has(name)) return null;
+    if (name === "main") return node;
+  }
+  for (const child of node.children ?? []) {
+    const found = findMain(child);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function collectContentText(node: DomNode, out: string[]): void {
+  if (node.type === "text") {
+    out.push(node.data ?? "");
+    return;
+  }
+  const name = node.name?.toLowerCase();
+  if (name === undefined) return;
+  if (NON_CONTENT_TAGS.has(name)) return;
+  if (CHROME_TAGS.has(name)) {
+    out.push(" ");
+    return;
+  }
+  const boundary = !INLINE_TEXT_TAGS.has(name);
+  if (boundary) out.push(" ");
+  for (const child of node.children ?? []) collectContentText(child, out);
+  if (boundary) out.push(" ");
+}
+
+/**
+ * The quotation around the first "lorem ipsum", written from the contract in
+ * `PageAnalysis.placeholderSnippet`: up to 160 characters of the visible text,
+ * centred on the match as far as the text allows, whole words at both ends, and
+ * the whole text when it is shorter than the window.
+ */
+function placeholderSnippet(text: string): string | null {
+  const at = text.search(/lorem ipsum/i);
+  if (at < 0) return null;
+  if (text.length <= 160) return text;
+  // The window, clamped so it stays inside the text at both ends.
+  const wanted = Math.round(at + "lorem ipsum".length / 2 - 80);
+  const from = Math.min(Math.max(wanted, 0), text.length - 160);
+  const to = from + 160;
+  const words = text.slice(from, to).split(" ");
+  // A cut edge is the one that may hold half a word; an uncut edge is whole.
+  if (to < text.length) words.pop();
+  if (from > 0) words.shift();
+  const trimmed = words.join(" ").trim();
+  return /lorem ipsum/i.test(trimmed) ? trimmed : text.slice(from, to).trim();
 }
 
 /**
@@ -298,6 +385,16 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   const renderableText = renderableParts.join("").replace(/\s+/g, " ").trim();
   const renderableWordCount = renderableText ? renderableText.split(/\s+/).length : 0;
 
+  // The main-content stream: inside the first `<main>` the walk finds, else the
+  // body minus its chrome. Chrome is NOT removed inside a `<main>` — a document
+  // that says where its content is has said so about the `<nav>` in it too.
+  const mainEl = bodyEl ? findMain(bodyEl) : null;
+  const mainParts: string[] = [];
+  if (mainEl !== null) collectVisibleText(mainEl, mainParts);
+  else if (bodyEl) collectContentText(bodyEl, mainParts);
+  const mainText = mainParts.join("").replace(/\s+/g, " ").trim();
+  const mainWordCount = mainText === "" ? null : mainText.split(/\s+/).length;
+
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
   let imagesMissingDimensions = 0;
@@ -377,6 +474,11 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     headingOrder: headingOrder.slice(0, 500),
     wordCount,
     renderableWordCount,
+    mainWordCount,
+    // Null with the count, never a hash of the empty string: "nothing to
+    // fingerprint" is the pair's shared meaning.
+    mainSimhash: mainWordCount === null ? null : simhash64(mainText),
+    placeholderSnippet: placeholderSnippet(bodyText),
     imagesTotal,
     imagesMissingAlt,
     imagesMissingDimensions,
@@ -806,5 +908,112 @@ describe("analyzeHtml extraction caps", () => {
     expect(analysis.imagesTotal).toBe(1_100);
     expect(analysis.imagesMissingAlt).toBe(1_100);
     expect(analysis.headingCounts[1]).toBe(600);
+  });
+});
+
+/**
+ * The Phase 19 main-content surfaces, against the DOM.
+ *
+ * `expectParity` compares the whole shape, so every case here asserts the
+ * `<main>`-versus-fallback choice, the chrome exclusion, the word count, the
+ * fingerprint over the chosen text and the placeholder quotation at once — on
+ * markup where the tokenizer and a tree could plausibly disagree about which
+ * subtree the text came from, which is the only question this pair asks.
+ */
+describe("the main-content stream, against the DOM", () => {
+  /** Chrome the way a real theme carries it: the same block on every page. */
+  const CHROME =
+    `<header><p>${"brand tagline ".repeat(20)}</p></header>` +
+    `<nav><ul><li><a href="/a">shop all</a></li><li><a href="/b">new in</a></li>` +
+    `<li><p>${"menu column ".repeat(60)}</p></li></ul></nav>` +
+    `<aside><p>${"you may also like ".repeat(30)}</p></aside>` +
+    `<footer><p>${"terms delivery returns ".repeat(40)}</p></footer>`;
+  /** The page's own copy: the ~150 words the chrome above buries. */
+  const CONTENT = `<h1>A dress</h1><p>${"a sentence about this one product ".repeat(25)}</p>`;
+
+  it("agrees on a page that declares its main content", () => {
+    expectParity(`<html><body>${CHROME}<main>${CONTENT}</main></body></html>`);
+  });
+
+  it("agrees on a page with no <main>, where chrome is most of the words", () => {
+    expectParity(`<html><body>${CHROME}<div id="content">${CONTENT}</div></body></html>`);
+  });
+
+  it("agrees on a page that is nothing but chrome", () => {
+    expectParity(`<html><body>${CHROME}</body></html>`);
+  });
+
+  it("agrees on an empty <main> beside a body full of chrome", () => {
+    expectParity(`<html><body>${CHROME}<main>   </main></body></html>`);
+  });
+
+  it("agrees on a nested <main> — invalid HTML, and one element's text", () => {
+    expectParity(
+      `<html><body><main><p>outer copy</p><main><p>inner copy</p></main><p>after</p></main></body></html>`,
+    );
+  });
+
+  it("agrees that the FIRST <main> is the one measured", () => {
+    expectParity(
+      `<html><body><main><p>the first main</p></main><main><p>the second main</p></main></body></html>`,
+    );
+  });
+
+  it("agrees on chrome INSIDE a <main> — it is content there", () => {
+    expectParity(
+      `<html><body><header><p>site chrome</p></header>` +
+        `<main><nav><a href="/x">in-article nav</a></nav><p>article copy</p></main></body></html>`,
+    );
+  });
+
+  it("agrees on a <template> inside a <main>", () => {
+    expectParity(
+      `<html><body><main><p>real copy</p><template><p>a card the JS clones</p></template>` +
+        `<p>more real copy</p></main></body></html>`,
+    );
+  });
+
+  it("agrees that a <main> inside a <template> is not the page's main", () => {
+    // A selector reaches it and neither text walk does: the fallback measures
+    // the body, and the template's words are in neither number.
+    expectParity(
+      `<html><body><template><main><p>a cloned layout</p></main></template>` +
+        `<nav><p>chrome</p></nav><p>the page's own copy</p></body></html>`,
+    );
+  });
+
+  it("agrees on chrome that nests, and on a stray close tag between", () => {
+    expectParity(
+      `<html><body><footer><nav><a href="/a">a</a></nav>footer copy</footer></nav>` +
+        `<p>body copy after a stray close</p></body></html>`,
+    );
+  });
+
+  it("agrees on text pressed directly against a chrome boundary", () => {
+    // No element between the words and the `<nav>`: this is where a missing
+    // separator would silently merge "before" and "after" into one word.
+    expectParity(`<html><body>before<nav><p>menu</p></nav>after</body></html>`);
+  });
+
+  it("agrees on a page whose only text is inside hidden markup", () => {
+    // The main-content stream does NOT apply the hidden rule, so it counts
+    // these words while `renderableWordCount` does not — on both sides.
+    expectParity(`<html><body><div hidden><p>hidden copy in no main</p></div></body></html>`);
+  });
+
+  it("agrees on the placeholder quotation in a card excerpt", () => {
+    expectParity(
+      `<html><body>${CHROME}<main><h1>A post</h1>` +
+        `<p class="excerpt">Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>` +
+        `<p>${"the real body copy of the post ".repeat(20)}</p></main></body></html>`,
+    );
+  });
+
+  it("agrees when the placeholder is split by a line break", () => {
+    expectParity(`<html><body><p>Lorem\n  ipsum dolor sit amet.</p></body></html>`);
+  });
+
+  it("agrees on a short page whose whole text is the quotation", () => {
+    expectParity(`<html><body><p>Lorem ipsum dolor.</p></body></html>`);
   });
 });
