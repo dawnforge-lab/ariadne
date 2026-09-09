@@ -276,18 +276,32 @@ of three ways:
   | `meta-description.duplicate` | 200 in 3.0s | 1,000 in 13.7s |
   | `h1.duplicate-text` | 200 in 2.9s | 1,000 in 11.7s |
   | `content.exact-duplicate` | 200 in 4.5s | 1,000 in 18.4s |
-  | `content.near-duplicate` | 200 in 0.02s | 3,000 in 0.20s |
+  | `content.near-duplicate` | 200 in 0.61s | **2,000 pages** in 0.74s |
 
   About a minute of extra wall time on a 20k crawl, at ~116MB RSS. That is the
   billing story: the whole picture is minutes, not hours.
 
+  The near-duplicate row counts PAGES, not pairs, and was re-measured on the
+  page shape over the same synthetic cohort (500 clusters of four = the 3,000
+  pairs the row used to quote) on a slower machine than the rows above it, so
+  read it for its shape rather than against them. A site where thousands of
+  pages share one template is the expensive case and it is bounded rather than
+  cheap: each page's own partner count stops at 200, which turns a cohort of
+  20,000 identical pages from ~16 minutes into ~99 seconds. `findingCap: null`
+  does not lift that per-page count — it is a wall-clock bound, not a listing
+  budget — so those pages read "200+" however the cap is set.
+
   **A site whose pages are near-identical in the thousands.**
   `content.near-duplicate` reports one finding per PAGE — `{mainWords,
   nearDuplicates, closest}`, where `closest` names up to five partners with their
-  distances — so a cluster of 900 templated pages is 900 rows saying "899
-  near-duplicates", not the 404,550 pairs between them. Do not add the counts up:
-  every member of a cluster reports every other member, so the sum is roughly the
-  square of the thing you want. Sort by `nearDuplicates`, take the cluster, and
+  distances — so a cluster of 900 templated pages is 900 rows, not the 404,550
+  pairs between them. `nearDuplicates` is exact up to 200; past that it reads 200
+  with `nearDuplicatesAtLeast: true` beside it, and the only honest rendering is
+  **"200+"** (counting every partner of every page of a cluster that size is the
+  square the page shape exists to avoid — see the cost table above). Do not add
+  the counts up either: every member of a cluster reports every other member, so
+  the sum is roughly the square of the thing you want. Sort by
+  `nearDuplicates`, take the cluster, and
   report it as what it is: **the site has no distinct content on that template**,
   which is a finding in its own right and a far more useful sentence than an
   enumeration. Size it with `content.template-similarity` and the duplicate-group

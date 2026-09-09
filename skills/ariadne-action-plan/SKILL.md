@@ -524,7 +524,9 @@ The tab body is the URL plus the rule's own evidence, flattened.
     spans, which is usually the fix's shape.
   - **`content.near-duplicate`** — one finding per PAGE that has at least one
     near-duplicate: `{mainWords, nearDuplicates, closest}`, where `nearDuplicates`
-    is the exact number of other pages within the threshold and `closest` names up
+    is the number of other pages within the threshold — exact up to 200, and a
+    FLOOR above it, which `nearDuplicatesAtLeast: true` beside it is what says
+    (write those cells as "200+") — and `closest` names up
     to five of them as `{url, hamming, mainWords}`. A 50-row tab is 50 pages, and
     the cluster behind them is usually far smaller than the sum of the counts —
     every page of a cluster of forty reports the other thirty-nine. Sort by

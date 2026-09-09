@@ -1271,13 +1271,13 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1102` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:1135` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:1150` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:1176` "tells
+`test/rules/copy.test.ts:1111` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:1144` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:1159` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1185` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1203` "grades nothing: no score, no label, no threshold";
+`test/rules/copy.test.ts:1212` "grades nothing: no score, no label, no threshold";
 `test/rules/coverage.test.ts:365` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
@@ -1320,10 +1320,12 @@ incompatible shapes — a content hash moves when the site edits a word, and a
 change.
 
 **The cost, stated because a consumer must state it too: a rule that fires more
-than once on a page collapses to per-URL presence.** On the reference crawl the
-comparison sees 281 near-duplicate URLs, not 16,789 rows, and a page that went
-from two near-duplicate partners to fifty is `persisting`, not `new`. So every
-row carries four counts:
+than once on a page collapses to per-URL presence.** `images.oversized` files one
+finding per IMAGE, so on the reference crawl the comparison sees its 157 URLs,
+not its 833 rows, and a page that went from one oversized image to nine is
+`persisting`, not `new`. (This paragraph's example was `content.near-duplicate`
+while that rule reported PAIRS; §11 below is what changed it.) So every row
+carries four counts:
 
 - `baseCount` / `headCount` — finding ROWS, the numbers `issues_list` reports;
 - `baseUrls` / `headUrls` — the distinct URLs the diff is actually over.
@@ -1656,7 +1658,11 @@ crawl with no main-content fingerprint gets `content.near-duplicate-skipped`
 re-crawl, adds two more facts to the same version: that rule now reports one
 finding per PAGE (`{mainWords, nearDuplicates, closest}`, up to five closest,
 capped by pages with an exact total — so the 500-pair budget and the
-100,000-pair scan ceiling are gone and `findingCap` governs one listing budget),
+100,000-pair scan ceiling are gone and `findingCap` governs one listing budget;
+`nearDuplicates` itself is exact to 200 and a stated floor above it,
+`nearDuplicatesAtLeast: true`, which is what keeps the rule's wall time off the
+square of the site on a degenerate cohort — 16.5 s where the exact count took
+101.9 s over 5,000 identical fingerprints, 98.7 s against 950.1 s over 20,000),
 and `content.thin` fires on `main_word_count < 150` — the words a page has of
 its own — as a QUERY rule rather than a page rule, with `content.thin-skipped`
 site-scoped beside it, because the column's null means "no main content at all"

@@ -63,6 +63,15 @@ reference` (warning), `hreflang.alternates-not-crawled` and
 five) and `content.thin` reading own-content words (both now query rules, with
 `content.thin-skipped` site-scoped beside them). Nothing is backfilled.
 
+One correction taken at review, in the same version: each page's partner count
+is gathered by a lateral that stops at 201, so `nearDuplicates` is exact to 200
+and a stated floor above it (`nearDuplicatesAtLeast: true`). Aggregating pairs
+per page had removed the quadratic ARRAY and left the quadratic WORK — on a
+seeded cohort of identical fingerprints the exact count took 101.9 s at 5,000
+pages and 950.1 s at 20,000, against 16.5 s and 98.7 s through the probe. The
+crawls in §4 and §5 read identically either way: this site's noisiest page has
+30 partners.
+
 ## 4. The motivating crawl, re-judged
 
 `crawl_9c9292c7` (crawled 2026-09-09 07:46 at 0.13.0 / migration 0017; pages
@@ -102,7 +111,7 @@ too) and judged on the final code:
 |---|---|---|
 | main-content words, median | (whole page 1,064) | 292 |
 | pages with < 150 own words | not measurable | 68 (thin fires on 69 incl. one with no own text at all) |
-| `content.near-duplicate` | 500 capped pairs, 237 across templates | 89 pages, one row each with count and closest (top: `/collections/all`, 13 near-duplicates at 1,297 own words) |
+| `content.near-duplicate` | 500 capped pairs, 237 across templates | 89 pages, one row each with count and closest (top: `/collections/express-shipping-options`, 30 near-duplicates at 1,257 own words; every count here is exact — the 200 floor bites on degenerate cohorts, not on this site) |
 | `content.thin` | 0 (chrome-blind) | 69: the home page (17 own words), `/apps/wishlist` (0), the blog index (99), the empty `/pages/*` |
 | `content.exact-duplicate` | 2 (canonical variants) | 0 |
 | `hreflang.missing-return-link` | 2 (canonical variants) | 0 |
@@ -122,7 +131,7 @@ content. Old crawl re-judged on the final code: 1,132 findings, both
 | | |
 |---|---|
 | `npx tsc --noEmit` | clean |
-| Suite | **80 files / 2,033 tests, 0 failures** (orchestrator's run after the §11 amendment; a delta review of the amendment follows) |
+| Suite | **80 files / 2,035 tests, 0 failures** (after the review corrections; the §11 amendment's own run was 80 / 2,034 and the per-page count cap added the one test that names the 200+ shape) |
 | Review | independent opus review of the nine-commit branch: no blockers; five should-fixes applied, the material one being the SQL canonical twin (fragment / host case / port / param order made a self-canonical read as "elsewhere", which would have silenced the duplicate rules on such pages) |
 
 ## 7. What the machine does NOT cover

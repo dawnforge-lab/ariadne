@@ -174,6 +174,42 @@ export const THIN_WORDS = 150;
 export const NEAR_DUPLICATE_CLOSEST = 5;
 
 /**
+ * How far a page's own near-duplicate count is allowed to run before the number
+ * becomes "200 or more".
+ *
+ * THIS IS A WALL-CLOCK BOUND, not a listing budget, and it is what takes the
+ * expensive half of the rule's cost off the square of the site. Counting every
+ * partner exactly means visiting every pair, and a degenerate cohort — a
+ * templated site where thousands of pages share one main-content fingerprint —
+ * has a square of them. Measured on a seeded cohort of identical fingerprints,
+ * the exact count took 101.9s at 5,000 pages and 950.1s at 20,000; with this cap
+ * the same crawls take 16.5s and 98.7s (the full numbers and the plan that
+ * explains them are on `nearDuplicateFindings`). The memory contract was never
+ * at risk — the partners are counted inside Postgres — but hard rule 6's
+ * sibling, a 50k crawl that finishes, was.
+ *
+ * Two hundred rather than five or fifty because the count is READ, not just
+ * sorted on: "eleven near-duplicates" and "sixty" are different findings about
+ * different problems, and both should be exact. Above two hundred they are the
+ * same finding — this template has no distinct content — and the extra
+ * precision buys a reader nothing while costing every page beyond the cap a
+ * full pass over its band candidates.
+ *
+ * A page that hits it says so IN THE EVIDENCE (`nearDuplicatesAtLeast: true`),
+ * in the vocabulary the listing notes already use for a floor
+ * (`LowerBoundTruncation`, src/rules/query/crawl-evidence.ts): a number nothing
+ * behind it counted exactly must never be presented as exact. Absent the flag,
+ * `nearDuplicates` is the exact count.
+ */
+export const NEAR_DUPLICATE_COUNT_CAP = 200;
+
+/**
+ * One probe past the cap: the extra row is how the query knows the difference
+ * between "exactly 200" and "200 or more" without counting the rest.
+ */
+const NEAR_DUPLICATE_COUNT_PROBE = NEAR_DUPLICATE_COUNT_CAP + 1;
+
+/**
  * URLs quoted on a duplicate-GROUP finding. The count beside them is exact.
  *
  * Shared with the field-level duplicate rules (src/rules/query/field-duplicates.ts),
@@ -613,16 +649,26 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * capping it — the pair set is counted inside Postgres and never crosses the
  * driver, and what this process holds is at most one finding per page, exactly
  * like every other listing rule. The ceiling went with it (see
- * `resolveRuleCaps`). What remains quadratic is the JOIN's own work, which is
- * Postgres's time rather than our memory, and the four band indexes are what
- * bound it (below).
+ * `resolveRuleCaps`).
+ *
+ * **AND THE COUNT IS BOUNDED PER PAGE, WHICH IS WHAT TOOK THE WALL CLOCK OFF
+ * THE SQUARE.** Removing the quadratic ARRAY left the quadratic WORK: a
+ * symmetric self-join aggregated per page still visits every pair, so on a
+ * degenerate cohort — one fingerprint shared by thousands of pages — the clock
+ * grew with the square even though the memory did not. It is now one bounded
+ * probe per page: for each candidate `a`, a lateral that stops after
+ * `NEAR_DUPLICATE_COUNT_PROBE` partners, so the rows fetched and filtered are
+ * O(pages × 201) rather than O(pairs). A page at the cap reports
+ * `nearDuplicates: 200` with `nearDuplicatesAtLeast` beside it — a floor, said
+ * as a floor. What is left growing with the square, and why it is cheap, is in
+ * **What this costs** below with the numbers.
  *
  * The evidence names the page's own main word count, how many near-duplicates
- * it has (exact, whatever the `closest` list holds) and the
- * `NEAR_DUPLICATE_CLOSEST` nearest partners with their distances — nearest
- * first, ties broken by URL. `pageUrl` is not in the evidence because the
- * writer puts it there (src/rules/run.ts), on every finding, from the finding's
- * own `pageUrl`.
+ * it has (exact below `NEAR_DUPLICATE_COUNT_CAP`, a stated floor at it,
+ * whatever the `closest` list holds) and the `NEAR_DUPLICATE_CLOSEST` nearest
+ * partners with their distances — nearest first, ties broken by URL. `pageUrl`
+ * is not in the evidence because the writer puts it there (src/rules/run.ts), on
+ * every finding, from the finding's own `pageUrl`.
  *
  * **WHY `main_simhash` AND NOT `simhash`** (Phase 19 §2). `simhash` is taken
  * over the whole visible text, and on a templated site most of that text is the
@@ -673,11 +719,12 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * `bit_count` in the WHERE clause is the exact verification the bands only
  * approximate.
  *
- * **The join is SYMMETRIC now** (`b.id <> a.id`, where the pair form said
+ * **The probe is SYMMETRIC** (`b.id <> a.id`, where the pair form said
  * `a.id < b.id`). A page has to see every partner it has, not the ones with a
  * larger id, or the count would be an artefact of insertion order. Each pair is
  * therefore visited twice, once from each end, which is what one row per page
- * means.
+ * means — and the per-page `limit` is what keeps that from being a second
+ * quadratic.
  *
  * **The sign, again.** `>>` on a Postgres bigint is an arithmetic shift, so the
  * sign bit propagates into the high bits of a shifted negative value — but both
@@ -705,11 +752,13 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * rather than described: `test/db/migration-0019.test.ts` compares these four
  * predicates with the four index definitions and EXPLAINs the join. Perturbing
  * one shift there turns the whole plan into a sequential scan on the inner
- * side, and that is what the test catches. THE LATERAL'S OWN BANDS ARE SPELLED
- * WITH A TWO-LETTER ALIAS (`cp`/`nb`) ON PURPOSE: that test lifts every
- * single-letter band predicate out of this file and expects exactly the four
- * the counting join runs, so the lateral's copies must not answer to the same
- * regex. Postgres matches the index on the expression, not on the alias.
+ * side, and that is what the test catches. THE CLOSEST-PARTNER LATERAL'S OWN
+ * BANDS ARE SPELLED WITH A TWO-LETTER ALIAS (`cp`/`nb`) ON PURPOSE: that test
+ * lifts every single-letter band predicate out of this file and expects exactly
+ * the four the counting probe runs, so its copies must not answer to the same
+ * regex. Postgres matches the index on the expression, not on the alias — and
+ * the counting probe keeps `a`/`b` for the same reason, so the four the test
+ * lifts are the four the count is bounded by.
  *
  * **THE CAP COMES BEFORE THE LATERAL**, the exact-duplicate rule's lesson one
  * file-section up: a `cross join lateral` at the same query level as an
@@ -719,27 +768,59 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * first, so the five-closest lookup runs against at most that many pages rather
  * than against every page on the site that has a near-duplicate.
  *
- * **What this costs.** Measured on `simhash` while its own indexes covered it,
- * and quoted unchanged because the arithmetic did not change — only which
- * column it runs over, and 0019 gave the new column the same four bands. With
- * the indexes, 5,000 pages measured ~0.11s on a fresh table, against ~2.9s
- * without them as a quadratic nested loop. Two caveats that belong in the 50k
- * gate's expectations rather than in a footnote:
+ * **What this costs.** Two shapes of site, both measured on this column with
+ * 0019's indexes in place and `pages` ANALYZEd, running the whole rule:
+ *
+ *  - the SITE THE COST TABLE IS ABOUT (skills/ariadne-audit/SKILL.md): 20,000
+ *    pages carrying 500 near-duplicate clusters of four. 200 findings in 0.61s
+ *    at the default cap, 2,000 uncapped in 0.74s. This is the ordinary case —
+ *    most pages have no partner at all, and the ones that do have three.
+ *  - the DEGENERATE COHORT, which is what the per-page cap exists for: every
+ *    page sharing one main-content fingerprint, so every page is every other
+ *    page's near-duplicate. Counting each page's partners exactly took **101.9s
+ *    at 5,000 pages and 950.1s at 20,000** — 4× the rows for 9.3× the time,
+ *    which is the square, in Postgres's clock rather than in our memory.
+ *    Through the per-page probe the same two crawls are **16.5s and 98.7s**.
+ *
+ * The residual growth in that second pair is worth naming rather than rounding
+ * off, because it says where the next bottleneck is. EXPLAIN over the 5,000-page
+ * cohort puts all four `Bitmap Index Scan`s under one `BitmapOr` inside the
+ * lateral, per outer row, with the `Limit` stopping the heap scan at 201 rows
+ * every time (`Heap Blocks: exact=110000` across 5,000 loops, `Rows Removed by
+ * Filter: 0`). What the limit cannot bound is the BITMAP BUILD: the OR is
+ * resolved over every candidate the bands match before a single heap row is
+ * fetched, and on this cohort that is the whole crawl. So the heap work and the
+ * canonical-exclusion evaluations — the expensive part, a dozen regex and array
+ * operations per row — are O(pages × 201), and what remains O(pages²) is a
+ * cheap in-memory bitmap. That is the difference between sixteen minutes and
+ * ninety-nine seconds.
+ *
+ * Two caveats that belong in the 50k gate's expectations rather than in a
+ * footnote:
  *  - expression indexes have no statistics until the table is ANALYZEd, and the
  *    planner will not choose a plan it cannot cost. A freshly loaded `pages` is
  *    exactly that table, so a gate crawl that runs the rules immediately after
  *    writing 50,000 rows should ANALYZE first or expect the planner to guess.
- *  - 0.11s is the HEALTHY site, whose band values are spread. Band skew — a few
- *    thousand templated pages sharing a band value — measured ~521ms: bounded,
- *    because the aggregate visits each candidate pair once and holds a counter
- *    per page rather than a row per pair, but not closed.
+ *  - a 50k crawl that IS the degenerate cohort still costs minutes, not
+ *    seconds, on the bitmap build above. It is bounded and it finishes; it is
+ *    not free, and a site shaped like that is a site whose whole template has
+ *    one page's worth of content — which is the finding, and the reason nobody
+ *    needs its exact pair count.
  *
  * The listing is capped at `caps.listing` pages, ordered by how many
  * near-duplicates each has and then by URL, with the ordinary `noteTruncation`
- * note carrying the EXACT total — which the pair shape could not offer, because
- * counting every pair was the unbounded scan its cap existed to avoid. The
+ * note carrying the EXACT PAGE total — which the pair shape could not offer,
+ * because counting every pair was the unbounded scan its cap existed to avoid,
+ * and which the per-page count cap does not weaken: capping what one page says
+ * about itself says nothing about how many pages there are, and that number is
+ * still one `count(*) over ()`. The ordering survives the count cap too, with
+ * one consequence worth naming: pages at the cap all tie at
+ * `NEAR_DUPLICATE_COUNT_CAP` and are ordered among themselves by URL. On a site
+ * with more than `caps.listing` such pages the listing is therefore an
+ * alphabetical slice of one undifferentiated cohort — which is what that site
+ * IS, and the finding to write about it is the template, not the row. The
  * threshold (`NEAR_DUPLICATE_HAMMING`, 3 bits) is not a knob and does not move
- * with the cap: it defines what a near-duplicate IS, and widening it would
+ * with either cap: it defines what a near-duplicate IS, and widening it would
  * change the finding rather than the size of the list.
  */
 async function nearDuplicateFindings(
@@ -766,21 +847,39 @@ async function nearDuplicateFindings(
   }>(sql`
     with counted as (
       select a.id, a.url, a.main_simhash, a.content_hash, a.main_word_count,
-             count(*)::int as near_count
+             n.near_count
       from pages a
-      join pages b on b.crawl_id = a.crawl_id and b.id <> a.id
-        and a.content_hash is distinct from b.content_hash
-        and ( (a.main_simhash >> 0)  & 65535 = (b.main_simhash >> 0)  & 65535
-           or (a.main_simhash >> 16) & 65535 = (b.main_simhash >> 16) & 65535
-           or (a.main_simhash >> 32) & 65535 = (b.main_simhash >> 32) & 65535
-           or (a.main_simhash >> 48) & 65535 = (b.main_simhash >> 48) & 65535 )
-      where a.crawl_id = ${crawlId} and ${AUDITABLE("a")} and ${AUDITABLE("b")}
-        and not ${CANONICALISED_ELSEWHERE("a")} and not ${CANONICALISED_ELSEWHERE("b")}
-        and a.main_simhash is not null and b.main_simhash is not null
+      cross join lateral (
+        -- THE LIMIT IS INSIDE AND THE COUNT IS OUTSIDE, which is the whole
+        -- bound: the derived table stops the moment it has produced
+        -- NEAR_DUPLICATE_COUNT_PROBE partners, so this page costs at most that
+        -- many band probes however many near-duplicates it really has. The
+        -- aggregate over an empty derived table is 0, so a page with none is a
+        -- row with near_count 0 rather than a missing row — the outer filter
+        -- is what drops it, and the cross join never silently loses a page.
+        select count(*)::int as near_count
+        from (
+          select 1
+          from pages b
+          where b.crawl_id = a.crawl_id and b.id <> a.id
+            and a.content_hash is distinct from b.content_hash
+            and ( (a.main_simhash >> 0)  & 65535 = (b.main_simhash >> 0)  & 65535
+               or (a.main_simhash >> 16) & 65535 = (b.main_simhash >> 16) & 65535
+               or (a.main_simhash >> 32) & 65535 = (b.main_simhash >> 32) & 65535
+               or (a.main_simhash >> 48) & 65535 = (b.main_simhash >> 48) & 65535 )
+            and ${AUDITABLE("b")}
+            and not ${CANONICALISED_ELSEWHERE("b")}
+            and b.main_simhash is not null
+            and b.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
+            and bit_count((a.main_simhash # b.main_simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
+          limit ${NEAR_DUPLICATE_COUNT_PROBE}
+        ) probe
+      ) n
+      where a.crawl_id = ${crawlId} and ${AUDITABLE("a")}
+        and not ${CANONICALISED_ELSEWHERE("a")}
+        and a.main_simhash is not null
         and a.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
-        and b.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
-        and bit_count((a.main_simhash # b.main_simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
-      group by a.id, a.url, a.main_simhash, a.content_hash, a.main_word_count
+        and n.near_count > 0
     ),
     capped as (
       select c.id, c.url, c.main_simhash, c.content_hash, c.main_word_count, c.near_count,
@@ -818,8 +917,13 @@ async function nearDuplicateFindings(
     ) s
     order by cp.near_count desc, cp.url`);
 
-  const findings = result.rows.map((row) =>
-    queryFinding(NEAR, {
+  const findings = result.rows.map((row) => {
+    // The probe row past the cap, turned into the two things a reader needs:
+    // the number, and whether it is the whole number. `near_count` can only be
+    // `NEAR_DUPLICATE_COUNT_PROBE` when the derived table stopped early, so this
+    // is a fact about the query rather than a guess about the site.
+    const atLeast = row.near_count > NEAR_DUPLICATE_COUNT_CAP;
+    return queryFinding(NEAR, {
       pageId: row.id,
       pageUrl: row.url,
       evidence: {
@@ -828,14 +932,17 @@ async function nearDuplicateFindings(
         // another to within three bits is a weaker claim than one at 800, and a
         // reader deciding whether to consolidate needs to see which this is.
         mainWords: row.main_word_count,
-        // EXACT, whatever `closest` holds: the count comes from the aggregate
-        // over the whole join, the list from a five-row lateral.
-        nearDuplicates: row.near_count,
+        // EXACT up to `NEAR_DUPLICATE_COUNT_CAP`, whatever `closest` holds: the
+        // count comes from the per-page probe, the list from a five-row lateral.
+        // At the cap it is a FLOOR and the flag beside it says so — 200 with
+        // `nearDuplicatesAtLeast` is "200 or more", never "200".
+        nearDuplicates: atLeast ? NEAR_DUPLICATE_COUNT_CAP : row.near_count,
+        ...(atLeast ? { nearDuplicatesAtLeast: true } : {}),
         closest: row.closest,
       },
       dedupeKey: row.url,
-    }),
-  );
+    });
+  });
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 

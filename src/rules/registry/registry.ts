@@ -51,9 +51,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //      `{mainWords, nearDuplicates, closest: [{url, hamming, mainWords}]}`, up
 //      to five closest, capped by pages with an exact total. The 500-pair
 //      budget and the 100,000-pair scan ceiling are gone with the unit — the
-//      pair set is now counted inside Postgres — so `findingCap` governs one
+//      partners are now counted inside Postgres — so `findingCap` governs one
 //      listing budget instead of three, and a cluster of 79 empty templates is
-//      79 rows rather than 500 arbitrary pairs out of 3,081.
+//      79 rows rather than 500 arbitrary pairs out of 3,081. `nearDuplicates`
+//      is exact up to 200 and a stated floor above it (`nearDuplicatesAtLeast:
+//      true`): counting past 200 partners per page is what made the wall clock
+//      quadratic on a degenerate cohort, and no reader needs the difference
+//      between 200 and 3,000 to reach the same verdict about the template.
 //  (6) `content.thin` fires on `main_word_count < 150` — the words a page has
 //      of its OWN — instead of `renderable_word_count`, and is a QUERY rule
 //      where it was a page rule (with its marker `content.thin-skipped`, now

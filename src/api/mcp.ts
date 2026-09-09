@@ -1026,9 +1026,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "of the CONTENT it found, which changes the moment the site edits a word, so " +
         "diffing on it would report an unchanged problem as one fixed and one new. " +
         "The consequence is that a rule which can fire more than once on a page " +
-        "COLLAPSES TO PER-URL PRESENCE here: on the reference site " +
-        "content.near-duplicate wrote 16,789 findings across 281 URLs, and this tool " +
-        "sees 281 things. That is why every row carries both numbers — baseCount and " +
+        "COLLAPSES TO PER-URL PRESENCE here: images.oversized files one finding per " +
+        "IMAGE and wrote 833 of them across 157 URLs on the reference site, and this " +
+        "tool sees 157 things. That is why every row carries both numbers — baseCount and " +
         "headCount are the finding ROWS (the numbers issues_list reports), baseUrls " +
         "and headUrls are the distinct URLs the diff is actually over — and why the " +
         "arithmetic that always holds is stated in URLs: headUrls = new + " +

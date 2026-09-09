@@ -244,6 +244,15 @@ listing convention), and a cluster of 40 empty pages reads as 40 rows saying
 "39 near-duplicates" rather than 780 pairs capped at 500. Screaming Frog's
 "Near Duplicates" column is the precedent.
 
+*Amended again at review, for wall time.* Aggregating pairs per page removed
+the quadratic ARRAY and left the quadratic WORK: on a cohort sharing one
+fingerprint the exact count still visited every pair (measured on seeded
+identical fingerprints — see the rule's own cost paragraph). `N` is therefore
+counted through a per-page probe that stops at 201, so the rows the rule fetches
+and filters are O(pages × 201); it is exact to 200 and a stated floor above it
+(`nearDuplicatesAtLeast: true`, the `atLeast` vocabulary the listing notes
+already use). The listing's own `truncated` total stays exact.
+
 **`content.thin` reads `main_word_count`.** On the fresh crawl 35 pages have
 fewer than 150 words of their own and 0 have fewer than 150 renderable words;
 `content.thin` fired on none. Thin is now `main_word_count < 150` (the floor

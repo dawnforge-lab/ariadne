@@ -587,10 +587,12 @@ export interface CrawlDetail extends CrawlListItem {
    * crawl skills now tell an agent to set `findingCap: null` for client work, and
    * a setting nothing can confirm is a setting nobody can trust took effect.
    *
-   * The one thing it cannot distinguish is an explicit `200` from an absent key.
-   * They differ only in the near-duplicate PAIR budget (200 against the default
-   * 500), and surfacing a second number for that would put an implementation
-   * detail of one rule on the crawl's shape. The crawl skill states it instead.
+   * The one thing it cannot distinguish is an explicit `200` from an absent key,
+   * and since Phase 19 §11 there is nothing left to distinguish: the
+   * near-duplicate rule's separate PAIR budget (200 against a default 500) went
+   * with the pair shape, so one budget now cuts every listing and the stated
+   * default judges exactly as the absent one does. The crawl skill says the
+   * same from the other side.
    */
   findingCap: number | null;
   /**
@@ -1023,10 +1025,13 @@ export interface RenderCrawlInput {
  * from `atLeast`.
  *
  * The distinction is not pedantry. `links.orphan` reports 200 on a site with
- * 222 orphans and `content.near-duplicate` reports 500 of an unknown number;
- * without this field both read as exact, and an audit quotes a floor as a fact
- * (the Phase 6 gate's D-1 — an auditor did exactly that, and had to reconstruct
- * the real magnitude from a metric).
+ * 222 orphans, and `hreflang.alternates-not-crawled` — the one rule that stops
+ * LOOKING rather than stops listing, so its number is a floor and the real one
+ * is unknown at the cap's price — reports what it saw; without this field both
+ * read as exact, and an audit quotes a floor as a fact (the Phase 6 gate's D-1
+ * — an auditor did exactly that, and had to reconstruct the real magnitude from
+ * a metric). `content.near-duplicate` was the second `atLeast` rule until Phase
+ * 19 §11 made it count in SQL; it writes an exact `total` now.
  */
 export type IssueTruncation =
   | { truncated: true; total: number; atLeast?: never }
@@ -1300,9 +1305,9 @@ export interface CompareRule {
   /**
    * DISTINCT URLS, which is what the diff is over. `baseCount` and `baseUrls`
    * differ for every rule that can fire more than once on a page —
-   * `content.near-duplicate` wrote 16,789 rows across 281 URLs on the reference
-   * crawl — and the two invariants a consumer may rely on are stated in terms of
-   * the URL counts: `headUrls == new + persisting` and
+   * `images.oversized` files one finding per IMAGE and wrote 833 rows across 157
+   * URLs on the reference crawl — and the two invariants a consumer may rely on
+   * are stated in terms of the URL counts: `headUrls == new + persisting` and
    * `baseUrls == resolved + persisting`.
    */
   baseUrls: number;
@@ -3237,9 +3242,11 @@ export class ApiService {
    *
    * **What that costs, stated rather than discovered.** A rule that fires more
    * than once on a page COLLAPSES TO PER-URL PRESENCE. On the reference crawl
-   * `content.near-duplicate` wrote 16,789 findings across 281 URLs; this
-   * comparison sees 281 things, and a page that went from two near-duplicate
-   * partners to fifty is `persisting`, not `new`. That is why `baseCount` and
+   * `images.oversized` — one finding per IMAGE — wrote 833 findings across 157
+   * URLs; this comparison sees 157 things, and a page that went from one
+   * oversized image to nine is `persisting`, not `new`. (`content.near-duplicate`
+   * was this paragraph's example while it reported PAIRS; since Phase 19 §11 it
+   * is one row per page and no longer multi-fires.) That is why `baseCount` and
    * `headCount` (rows — the numbers `issues_list` reports) travel beside
    * `baseUrls` and `headUrls` (the diff's own denominators), and why the two
    * invariants are stated on the URL counts:

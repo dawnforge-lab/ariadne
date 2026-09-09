@@ -17,6 +17,7 @@ import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
 import {
   DUPLICATE_SAMPLE_URLS,
+  NEAR_DUPLICATE_COUNT_CAP,
   NEAR_DUPLICATE_HAMMING,
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
   SOFT_404_WORDS,
@@ -587,6 +588,14 @@ describe("issue copy", () => {
     // never paired here will go looking for the pairs that are missing.
     expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toMatch(
       new RegExp(`\\b${NEAR_DUPLICATE_MIN_MAIN_WORDS} words\\b`),
+    );
+    // And the per-page COUNT cap, pinned the same way. A count presented as
+    // exact when it is a floor is the defect hard rule 1 is about, one level
+    // down: the copy has to say where counting stops, and it has to say the
+    // number the rule actually stops at.
+    const cap = String(NEAR_DUPLICATE_COUNT_CAP);
+    expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toMatch(
+      new RegExp(`exactly up to ${cap}, and stated as ${cap} or more`),
     );
   });
 

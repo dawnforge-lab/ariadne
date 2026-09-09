@@ -605,18 +605,26 @@ describe("runRules against the database", () => {
   /**
    * THE REGRESSION THIS FILE EXISTS TO HOLD, after the P6 gate found it.
    *
-   * `content.near-duplicate` lists at most `NEAR_DUPLICATE_PAIR_CAP` pairs and
-   * its query has no `ORDER BY` — deliberately, since ordering would force the
-   * quadratic join the cap avoids — so it reports a FIXED NUMBER of pairs whose
-   * IDENTITY is undefined. Under the old append-only `issues` table with
-   * `onConflictDoNothing`, a second run's different arbitrary 500 collided with
-   * nothing and was simply added: the gate crawl ended two runs with 751
-   * near-duplicate rows behind a summary that said 500, and 1565 issue rows
-   * behind a run reporting 1314 findings. The agent surface reads the table.
+   * `content.near-duplicate` USED TO list at most `NEAR_DUPLICATE_PAIR_CAP`
+   * pairs from a query with no `ORDER BY` — deliberately, since ordering would
+   * have forced the quadratic join the cap avoided — so it reported a FIXED
+   * NUMBER of pairs whose IDENTITY was undefined. Under the old append-only
+   * `issues` table with `onConflictDoNothing`, a second run's different
+   * arbitrary 500 collided with nothing and was simply added: the gate crawl
+   * ended two runs with 751 near-duplicate rows behind a summary that said 500,
+   * and 1565 issue rows behind a run reporting 1314 findings. The agent surface
+   * reads the table.
    *
-   * Reproduced synthetically rather than by seeding half a million real pairs:
-   * a query rule with a stable cap of three and a run-varying listing is the
-   * same shape, and it is the SHAPE — not simhash — that broke the invariant.
+   * That rule is no longer of this shape — Phase 19 §11 made it one ordered row
+   * per page — and neither the constant nor the pair cap exists any more. The
+   * INVARIANT it broke is what this test holds, and it belongs to the writer
+   * rather than to any one rule: a capped listing whose membership can vary
+   * between runs must REPLACE the previous run's rows, not add to them. So it is
+   * reproduced synthetically, as it always was rather than by seeding half a
+   * million real pairs: a query rule with a stable cap of three and a
+   * run-varying listing is the shape, and it was the SHAPE — not simhash — that
+   * broke the invariant. Any future rule that cannot afford to order its cap
+   * lands here again.
    */
   it("recomputes a capped rule's findings instead of accumulating them", async () => {
     const crawlId = await newCrawl();
@@ -633,7 +641,7 @@ describe("runRules against the database", () => {
       title: "A capped rule whose listing is not deterministic",
       explanation:
         "Reports a fixed number of real cases, but not the same ones twice — " +
-        "the shape content.near-duplicate has, without its quadratic join.",
+        "the shape a capped rule takes when its listing cannot afford an order.",
       howToFix: "Nothing: the rule is a stand-in for one whose cap cannot afford an order.",
       rulesetVersion: RULESET_VERSION,
       // Every run reports CAP findings and every dedupe key is new, so nothing

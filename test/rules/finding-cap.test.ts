@@ -18,7 +18,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues, pages } from "../../src/db/schema.js";
-import { contentRules } from "../../src/rules/query/content.js";
+import { contentRules, NEAR_DUPLICATE_COUNT_CAP } from "../../src/rules/query/content.js";
 import {
   DEFAULT_RULE_CAPS,
   resolveRuleCaps,
@@ -308,11 +308,18 @@ describe("the finding cap against the database", () => {
    * hard rule 6.
    *
    * Reporting pages removes the structure instead of bounding it. The same
-   * crawl is 450 findings — one per page, each saying "449 near-duplicates" —
-   * and the 101,025 pairs are counted inside Postgres and never cross the
-   * driver. Uncapped and NOTELESS, which is the assertion that matters: the
-   * listing is complete, and a reader takes completeness from the absence of
-   * the note.
+   * crawl is 450 findings — one per page — and the pairs are counted inside
+   * Postgres and never cross the driver. Uncapped and NOTELESS, which is the
+   * assertion that matters: the LISTING is complete, and a reader takes
+   * completeness from the absence of the note.
+   *
+   * The per-page COUNT is a separate budget and it is capped here, which is the
+   * second half of the same lesson: `findingCap: null` buys every page a row,
+   * not an exact count of a cohort whose exact counts cost a square of wall
+   * time. Each of these 450 pages has 449 near-duplicates and reports
+   * `NEAR_DUPLICATE_COUNT_CAP` with `nearDuplicatesAtLeast` beside it — a floor,
+   * said as a floor, which is the honest reading of a number the probe stopped
+   * short of.
    */
   it("reports one row per page on a degenerate cohort, uncapped and complete", async () => {
     const crawlId = await newCrawl({ findingCap: null });
@@ -341,9 +348,10 @@ describe("the finding cap against the database", () => {
     );
     expect(found).toHaveLength(450);
     for (const f of found) {
-      expect(f.evidence["nearDuplicates"]).toBe(449);
+      expect(f.evidence["nearDuplicates"]).toBe(NEAR_DUPLICATE_COUNT_CAP);
+      expect(f.evidence["nearDuplicatesAtLeast"]).toBe(true);
       expect(f.evidence["truncated"]).toBeUndefined();
-      // Five of the 449 are named, which is what keeps ONE row a row.
+      // Five of them are named, which is what keeps ONE row a row.
       expect(f.evidence["closest"]).toHaveLength(5);
     }
   }, 180_000);

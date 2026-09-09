@@ -1936,8 +1936,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `content.near-duplicate-skipped` (info) — the NOT MEASURED marker for the second
     of them, below
   `issue_urls` gives them: `content.near-duplicate` writes one finding per PAGE
-  (`{mainWords, nearDuplicates, closest}` — `nearDuplicates` is the exact number of
-  other pages within the threshold of this one, `mainWords` is how much content this
+  (`{mainWords, nearDuplicates, closest}` — `nearDuplicates` is how many other pages
+  sit within the threshold of this one, exact up to 200 and a FLOOR above it, where
+  `nearDuplicatesAtLeast: true` sits beside it and the honest reading is "200 or
+  more"; `mainWords` is how much content this
   page has of its own, and `closest` names up to five of the partners, nearest first,
   as `{url, hamming, mainWords}`), and `content.exact-duplicate`
   one per identical group (`{contentHash, urls, count, pageTypes}`). For the

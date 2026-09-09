@@ -26,6 +26,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
 import {
   DUPLICATE_SAMPLE_URLS,
+  NEAR_DUPLICATE_COUNT_CAP,
   NEAR_DUPLICATE_HAMMING,
   NEAR_DUPLICATE_CLOSEST,
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
@@ -1013,6 +1014,50 @@ describe("the content rules against the database", () => {
       // One row per page, and never two rows about one page.
       expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(URL_FINDING_CAP);
       for (const f of found) expect(f.evidence["nearDuplicates"]).toBe(URL_FINDING_CAP);
+      // Exactly at `NEAR_DUPLICATE_COUNT_CAP` and therefore EXACT: the probe
+      // runs one row past the cap, so a page with precisely 200 partners is
+      // counted to the end and carries no floor flag. The test below is the
+      // other side of that boundary.
+      for (const f of found) expect(f.evidence["nearDuplicatesAtLeast"]).toBeUndefined();
+    }, 60_000);
+
+    /**
+     * THE COUNT IS BOUNDED PER PAGE, and the boundary is stated rather than
+     * left to the reader. 202 identical pages give every one of them 201
+     * partners — one past `NEAR_DUPLICATE_COUNT_CAP` — which is exactly the
+     * probe's last row, so the count stops there and says so. Reporting 201, or
+     * 200 without the flag, would both be the same defect: a number nothing
+     * counted to the end presented as if it had been.
+     */
+    it("reports a floor, flagged, once a page passes the per-page count cap", async () => {
+      const crawlId = await newCrawl();
+      await addPages(
+        crawlId,
+        Array.from({ length: NEAR_DUPLICATE_COUNT_CAP + 2 }, (_, i) => ({
+          path: `/many/${String(i).padStart(3, "0")}`,
+          text: RETURNS,
+          contentHash: `m${String(i)}`,
+        })),
+      );
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      for (const f of found) {
+        // 200, not 201 and not 202: the cap is what the evidence says, and the
+        // flag beside it is what makes 200 read as "200 or more".
+        expect(f.evidence["nearDuplicates"], String(f.pageUrl)).toBe(NEAR_DUPLICATE_COUNT_CAP);
+        expect(f.evidence["nearDuplicatesAtLeast"], String(f.pageUrl)).toBe(true);
+        // The five closest are unaffected by the count's cap — they come from
+        // their own lateral and are still the nearest five.
+        expect(f.evidence["closest"]).toHaveLength(NEAR_DUPLICATE_CLOSEST);
+      }
+      // The LISTING note is still the exact page total: capping each page's own
+      // count says nothing about how many pages there are, and that number is
+      // still one `count(*) over ()` away.
+      expect(found[URL_FINDING_CAP - 1]!.evidence["truncated"]).toEqual({
+        reported: URL_FINDING_CAP,
+        total: NEAR_DUPLICATE_COUNT_CAP + 2,
+      });
     }, 60_000);
 
     it("refuses a crawl id nothing knows", async () => {
