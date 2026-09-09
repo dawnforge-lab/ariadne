@@ -1271,17 +1271,17 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1099` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:1132` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:1147` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:1173` "tells
+`test/rules/copy.test.ts:1102` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:1135` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:1150` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1176` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1200` "grades nothing: no score, no label, no threshold";
-`test/rules/coverage.test.ts:349` "site.health is filed under the
+`test/rules/copy.test.ts:1203` "grades nothing: no score, no label, no threshold";
+`test/rules/coverage.test.ts:365` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:1913` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:1952` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -1335,11 +1335,14 @@ fixture and the real comparison:
 headUrls == new + persisting        baseUrls == resolved + persisting
 ```
 
-**Near-duplicate URLs are pair representatives.** `content.near-duplicate` finds
-a *pair* of similar pages and files the finding against one of them; the URL in
-this diff is that representative, not "the duplicate". A pair whose
-representative changed reads as one `new` and one `resolved` even though the
-site's duplication is unchanged.
+**Near-duplicate URLs are pages, one row each** (Phase 19 §11). `content.near-
+duplicate` files one finding against every page that has at least one
+near-duplicate, carrying the count and the closest few — so the URL in this diff
+is the page itself, and a page that went from two near-duplicate partners to
+fifty is `persisting` rather than `new`. (Before §11 the rule reported PAIRS and
+filed each against one of the two, so the diff's URL was a representative and a
+cluster could churn between `new` and `resolved` without the site changing. It
+cannot now: a page is its own representative.)
 
 Site-wide findings (no page) compare by **rule presence**: the key is the empty
 string and the drill-down returns `url: null`.
@@ -1644,12 +1647,22 @@ duplicate rules and every hreflang rule now ignore a page canonicalised
 elsewhere (as declarer and as target), because on a real crawl the only
 "duplicates" and the only missing hreflang return links were parameter
 variants each canonicalised to the base. The measurement: `content.near-
-duplicate` pairs on `main_simhash` (migration 0018, the fingerprint of the
-main content — inside `<main>`, else the body minus nav/header/footer/aside)
-with both pages at least 50 words of their own, because the whole-text
-fingerprint was dominated by ~900 words of chrome on every page; a crawl with no
-main-content fingerprint gets `content.near-duplicate-skipped` (marker) rather
-than a silent pass. Added: `links.to-server-error` (critical, the 5xx half of
+duplicate` compares pages on `main_simhash` (migration 0018, the fingerprint of
+the main content — inside `<main>`, else the body, and in both cases minus
+nav/header/footer/aside) with both pages at least 50 words of their own, because
+the whole-text fingerprint was dominated by ~900 words of chrome on every page; a
+crawl with no main-content fingerprint gets `content.near-duplicate-skipped`
+(marker) rather than a silent pass. The §11 amendment, taken at gate time after a
+re-crawl, adds two more facts to the same version: that rule now reports one
+finding per PAGE (`{mainWords, nearDuplicates, closest}`, up to five closest,
+capped by pages with an exact total — so the 500-pair budget and the
+100,000-pair scan ceiling are gone and `findingCap` governs one listing budget),
+and `content.thin` fires on `main_word_count < 150` — the words a page has of
+its own — as a QUERY rule rather than a page rule, with `content.thin-skipped`
+site-scoped beside it, because the column's null means "no main content at all"
+on a 0018 crawl and "never measured" on an older one and only the crawl's census
+tells those apart. The ruleset split is 25 page / 61 query / 14 metric over the
+same 100 rules. Added: `links.to-server-error` (critical, the 5xx half of
 CHECK-11), `hreflang.missing-self-reference` (warning), and the markers
 `hreflang.alternates-not-crawled` and `content.near-duplicate-skipped` (info).
 Copy: 26 entries and all twelve marker reasons, under a rubric test that bans

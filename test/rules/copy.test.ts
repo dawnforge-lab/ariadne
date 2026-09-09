@@ -7,7 +7,6 @@ import {
   HEADING_MAX_STEP,
   META_MAX,
   META_MIN,
-  THIN_WORDS,
   TITLE_MAX,
   TITLE_MIN,
 } from "../../src/rules/page/on-page.js";
@@ -22,6 +21,10 @@ import {
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
   SOFT_404_WORDS,
   TEMPLATE_HAMMING,
+  // `THIN_WORDS` moved here with `content.thin` itself (Phase 19 §11): the
+  // thin-content floor reads a page's main-content word count, whose null only
+  // the crawl's census can read, so the rule is a query rule now.
+  THIN_WORDS,
 } from "../../src/rules/query/content.js";
 import {
   CSR_MIN_ADDED_WORDS,

@@ -2,16 +2,33 @@
  * The content rules: what the site's own text says about pages that are not
  * what they claim to be.
  *
- * Three questions, none of which a page rule can answer, because each of them
- * compares a page against something outside it — the site's 404 template
- * (CHECK-13), or another page of the same site (CHECK-39):
+ * Four questions, none of which a page rule can answer, because each of them
+ * needs something outside the row — the site's 404 template (CHECK-13),
+ * another page of the same site (CHECK-39), or the CRAWL's own census
+ * (CHECK-40, below):
  *
  *  - `content.soft-404`     a page that answers 200 and is a missing page
  *  - `content.exact-duplicate`  byte-identical text at more than one URL
  *  - `content.near-duplicate`   main content that differs only in boilerplate
+ *  - `content.thin`         a page with too little content of its own
  *
- * …and one NOT MEASURED marker, `content.near-duplicate-skipped`, for the crawl
- * on which the third of them cannot be asked at all (see below).
+ * …and two NOT MEASURED markers, `content.near-duplicate-skipped` and
+ * `content.thin-skipped`, for the crawl on which the last two cannot be asked
+ * at all (see below).
+ *
+ * **WHY `content.thin` IS HERE AND NOT IN src/rules/page/on-page.ts** (Phase 19
+ * §11). It was a page rule for eleven phases, reading `renderable_word_count`
+ * off the row it was handed. The amendment moved its floor onto
+ * `main_word_count` — the words that are not the header, navigation, sidebar
+ * and footer — and that column has a null a page rule cannot read: null means
+ * "this page has no main content of its own" on a 0018 crawl and "nothing on
+ * this crawl was ever measured" on an older one. The first is a page that IS
+ * thin (zero words of its own); the second is a page nothing may be concluded
+ * about. A page rule sees one row and cannot tell them apart, so it would have
+ * had to pick one — inventing a finding on every old crawl, or passing every
+ * empty page in silence (hard rule 1). The census that separates them is a
+ * question about the crawl, which makes this a query rule, and its marker one
+ * too. See `thinFindings`.
  *
  * All of them run entirely in SQL over columns the analyzer already wrote
  * (`has_soft404_phrases`, `word_count`, `content_hash`, `simhash`,
@@ -19,13 +36,16 @@
  * nothing here loads a table into memory (hard rule 3), and no rule re-hashes a
  * page: the fingerprints were computed once, during the single streaming parse.
  *
- * **THE CANONICAL IS READ BY BOTH DUPLICATE RULES** (Phase 19 §1). A page whose
+ * **THE CANONICAL IS READ BY EVERY RULE HERE BUT THE SOFT 404** (Phase 19 §1
+ * and §11). A page whose
  * declared canonical names another URL has already handed its signals over, and
  * reporting it as a duplicate reports the remedy as the fault — which is what
- * the crawl behind Phase 19 did, twice, at critical severity. Both rules
- * therefore filter with `CANONICALISED_ELSEWHERE`, the string-level SQL form of
- * `isCanonicalisedElsewhere`, stated once in src/rules/helpers.ts and used from
- * here rather than restated. `content.soft-404` does NOT: a page that is a
+ * the crawl behind Phase 19 did, twice, at critical severity. The two duplicate
+ * rules and `content.thin` therefore filter with `CANONICALISED_ELSEWHERE`, the
+ * string-level SQL form of `isCanonicalisedElsewhere`, stated once in
+ * src/rules/helpers.ts and used from here rather than restated — a parameter
+ * variant of a full page is not a thin page any more than it is a duplicate
+ * one; it is the same page, said once. `content.soft-404` does NOT: a page that is a
  * missing page is a missing page whoever it points at, and a soft 404 under a
  * tracking parameter is still a URL the site should stop serving 200 for.
  *
@@ -39,8 +59,6 @@
  * arrives in the same signed spelling (`NotFoundProbeSample.simhash`), so no
  * conversion happens anywhere between the analyzer and the comparison.
  */
-import { createHash } from "node:crypto";
-
 import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
@@ -56,20 +74,11 @@ import type { RuleCaps } from "../registry/types.js";
 import {
   capsOr,
   limitTo,
-  noteAtLeastTruncation,
   noteTruncation,
   readCrawlEvidence,
   readNotFoundProbe,
   type NotFoundProbeReading,
 } from "./crawl-evidence.js";
-
-/**
- * The near-duplicate PAIR budget, re-exported beside the threshold it belongs
- * with. It is DEFINED in crawl-evidence.ts, with `URL_FINDING_CAP` and the
- * `findingCap` config that now moves both — one place where the cap doctrine
- * lives, rather than two constants that could drift apart.
- */
-export { NEAR_DUPLICATE_PAIR_CAP } from "./crawl-evidence.js";
 
 const CATEGORY = "content" as const;
 
@@ -80,6 +89,8 @@ const NEAR_SKIPPED: RuleIdentity = {
   id: "content.near-duplicate-skipped",
   severity: "info",
 };
+const THIN: RuleIdentity = { id: "content.thin", severity: "warning" };
+const THIN_SKIPPED: RuleIdentity = { id: "content.thin-skipped", severity: "info" };
 
 /**
  * Below this, a page carrying "page not found" wording is reported as one.
@@ -114,9 +125,10 @@ export const NEAR_DUPLICATE_HAMMING = 3;
  * heading and a sentence land inside three bits of each other whenever the
  * heading pattern repeats — and on a templated site that is every empty
  * category, every out-of-stock product and every tag archive. Those pages are a
- * real problem and they have a rule: `content.thin` reports them, at a floor of
- * 150 words a reader can reach. Reporting them a second time as duplicates of
- * one another says nothing new and buries the pairs that are.
+ * real problem and they have a rule: `content.thin`, below in this file, reports
+ * them at a floor of `THIN_WORDS` words of their own. Reporting them a second
+ * time as duplicates of one another says nothing new and buries the pages that
+ * genuinely have near-identical content.
  *
  * It sits BELOW `THIN_WORDS` on purpose, and the gap is the point: a page
  * between 50 and 150 main words is thin AND can still be shown to be a copy of
@@ -124,6 +136,42 @@ export const NEAR_DUPLICATE_HAMMING = 3;
  * does the fingerprint stop carrying enough of the page to compare.
  */
 export const NEAR_DUPLICATE_MIN_MAIN_WORDS = 50;
+
+/**
+ * The thin-content floor: below this many words of its OWN content, an
+ * indexable page is reported (CHECK-40, CHECK-13).
+ *
+ * MOVED HERE FROM src/rules/page/on-page.ts with the rule (Phase 19 §11), so
+ * the floor and the floor beneath it — `NEAR_DUPLICATE_MIN_MAIN_WORDS`, whose
+ * docblock argues the gap between them — are one file apart no longer.
+ * Exported because the client-facing copy quotes the number and
+ * test/rules/copy.test.ts asserts the sentence against this constant.
+ *
+ * The number did not move in Phase 19; the QUANTITY it is applied to did. It
+ * used to be `renderable_word_count` (the words the page's markup does not
+ * hide) and is now `main_word_count` (the words that are not header,
+ * navigation, sidebar or footer). On the crawl that provoked the amendment,
+ * 35 pages have fewer than 150 words of their own and NOT ONE has fewer than
+ * 150 renderable words — every page carries ~900 words of chrome — so the rule
+ * fired on nothing at all while a third of the site's `/pages/*` URLs were
+ * empty templates. That is the always-passes shape hard rule 1 forbids, and
+ * the column is what was wrong with it.
+ */
+export const THIN_WORDS = 150;
+
+/**
+ * How many of a page's near-duplicates one finding names.
+ *
+ * `DUPLICATE_SAMPLE_URLS`'s argument, one size down: the exact count is in the
+ * evidence beside the list, so the list is there to be READ — to see whether
+ * the partners are the same template or a scatter across the site — and a page
+ * in a cluster of forty has forty near-identical URLs of which any five tell
+ * the same story. Five rather than twenty because these carry a distance and a
+ * word count each and are ordered by closeness: the first ones are the ones
+ * worth looking at, and the tail is a repetition of the cluster the count
+ * already sizes.
+ */
+export const NEAR_DUPLICATE_CLOSEST = 5;
 
 /**
  * URLs quoted on a duplicate-GROUP finding. The count beside them is exact.
@@ -424,26 +472,27 @@ async function exactDuplicateFindings(
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
-/** The stable identity of an unordered pair of URLs. */
-function pairKey(urlA: string, urlB: string): string {
-  // Hashed rather than concatenated: a dedupe key is a column, two URLs can run
-  // to a couple of kilobytes together, and the pair's identity is all that is
-  // needed. Sorted first, so the same two pages produce the same key whichever
-  // side of the join they landed on.
-  return createHash("sha256").update(`${urlA}\n${urlB}`).digest("hex");
-}
-
-/** What the gate query below reads, so the rule and its marker share one shape. */
+/**
+ * What the gate query below reads, so the rules and their markers share one
+ * shape.
+ *
+ * READ BY FOUR RULES, not two (Phase 19 §11): `content.near-duplicate` and
+ * `content.thin` both stand on the main-content fingerprint, and each has a
+ * marker that fires exactly where its rule cannot run. The population is the
+ * same one both rules judge — auditable and indexable — so a crawl either
+ * carries this measurement or it does not, and the two pairs never disagree
+ * about which.
+ */
 interface MainFingerprintCensus {
-  /** Pages `content.near-duplicate` would consider at all: auditable, indexable. */
+  /** Pages these rules would consider at all: auditable, indexable. */
   auditable: number;
   /** Whether ANY of them carries a `main_simhash`. */
   anyMainSimhash: boolean;
 }
 
 async function mainFingerprintCensus(db: Db, crawlId: string): Promise<MainFingerprintCensus> {
-  // `bool_or` over the same population the pair join starts from, so the gate
-  // and the rule can never disagree about which pages were in scope. Over zero
+  // `bool_or` over the same population the two rules start from, so the gate
+  // and the rules can never disagree about which pages were in scope. Over zero
   // rows it returns NULL, which `?? false` turns into "no fingerprint" — and
   // the `auditable` count is what keeps that from being read as a skip: an
   // empty crawl has nothing to measure, which is not the same as a crawl whose
@@ -456,16 +505,19 @@ async function mainFingerprintCensus(db: Db, crawlId: string): Promise<MainFinge
   const row = rows.rows[0];
   // An aggregate with no GROUP BY returns exactly one row for any input; no row
   // means the query is not the query this function thinks it is.
-  if (row === undefined) throw new Error(`${NEAR.id}: the main-fingerprint census returned no row`);
+  if (row === undefined) {
+    throw new Error(`content: the main-fingerprint census for ${crawlId} returned no row`);
+  }
   return { auditable: Number(row.auditable), anyMainSimhash: row.any_main ?? false };
 }
 
 /**
- * Whether `content.near-duplicate` can be asked of this crawl at all: false when
- * it can, true when `content.near-duplicate-skipped` is the answer instead.
+ * Whether the main-content measurement exists on this crawl at all: false when
+ * `content.near-duplicate` and `content.thin` can be asked, true when their two
+ * markers are the answer instead.
  *
- * ONE PREDICATE, READ BY BOTH, so the rule's silence and the marker's sentence
- * are the same decision rather than two that happen to agree.
+ * ONE PREDICATE, READ BY ALL FOUR, so each rule's silence and its marker's
+ * sentence are the same decision rather than two that happen to agree.
  *
  * It takes the census rather than fetching one, because the marker needs the
  * `auditable` count for its evidence as well as the verdict: a predicate that
@@ -507,10 +559,11 @@ function mainFingerprintUnavailable(census: MainFingerprintCensus): boolean {
  * `count(*) filter`.
  *
  * Site-scoped: one finding for the crawl, not one per page. The condition is a
- * property of the crawl (`content.thin-skipped`'s condition is a property of a
- * ROW, which is why that one is a page rule and this one is not), and a
- * pre-0018 crawl of fifty thousand pages would otherwise write fifty thousand
- * copies of one sentence.
+ * property of the crawl, and a pre-0018 crawl of fifty thousand pages would
+ * otherwise write fifty thousand copies of one sentence. `content.thin-skipped`
+ * is its twin in every respect since §11 — same census, same scope, same
+ * sentence about a different check — and the two fire together, because a crawl
+ * that never measured main content could not answer either question.
  */
 async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, NEAR_SKIPPED.id);
@@ -536,8 +589,40 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
 }
 
 /**
- * Pairs of indexable 200 pages whose MAIN-CONTENT fingerprints are within
- * `NEAR_DUPLICATE_HAMMING` bits of each other (CHECK-39).
+ * Indexable 200 pages whose MAIN CONTENT sits within `NEAR_DUPLICATE_HAMMING`
+ * bits of at least one OTHER page of the same crawl (CHECK-39).
+ *
+ * **ONE FINDING PER PAGE, NOT PER PAIR** (Phase 19 §11), and the amendment is
+ * an observation rather than a preference. The re-crawl at 0018
+ * (`crawl_9278877e`, 547 pages) produced 500 pairs — the cap — over a cluster
+ * of 79 near-empty `/pages/*` URLs whose main content was one heading and the
+ * theme's footer. Seventy-nine pages are 3,081 pairs, and a findings table
+ * holding 500 arbitrary ones of them says the same sentence five hundred times
+ * about the same 79 URLs. Per page, the same cluster is 79 rows each saying
+ * "78 near-duplicates, here are the five closest", which is one row per
+ * decision a reader actually has to make. Screaming Frog's "Near Duplicates"
+ * column is the precedent for the shape: a count and the closest matches
+ * against each URL.
+ *
+ * It is also what makes the listing bounded by the SITE rather than by the
+ * square of it, and that is hard rule 6 rather than tidiness. The old shape
+ * carried a scan ceiling (`NEAR_DUPLICATE_PAIR_CEILING`, 100,000 pairs) because
+ * an uncapped run over a degenerate site put the process past the 512MB memory
+ * contract at 2,000 pages and exhausted a 4GB heap at 20,000: the findings
+ * ARRAY was quadratic. Aggregating in SQL removes the structure rather than
+ * capping it — the pair set is counted inside Postgres and never crosses the
+ * driver, and what this process holds is at most one finding per page, exactly
+ * like every other listing rule. The ceiling went with it (see
+ * `resolveRuleCaps`). What remains quadratic is the JOIN's own work, which is
+ * Postgres's time rather than our memory, and the four band indexes are what
+ * bound it (below).
+ *
+ * The evidence names the page's own main word count, how many near-duplicates
+ * it has (exact, whatever the `closest` list holds) and the
+ * `NEAR_DUPLICATE_CLOSEST` nearest partners with their distances — nearest
+ * first, ties broken by URL. `pageUrl` is not in the evidence because the
+ * writer puts it there (src/rules/run.ts), on every finding, from the finding's
+ * own `pageUrl`.
  *
  * **WHY `main_simhash` AND NOT `simhash`** (Phase 19 §2). `simhash` is taken
  * over the whole visible text, and on a templated site most of that text is the
@@ -549,19 +634,23 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * templates with nothing to do with one another, every one at a distance of 1
  * or 2. That is not a threshold that was set too wide — it is a fingerprint
  * measuring the furniture. `main_simhash` is the same fingerprint over the text
- * inside `<main>`, or over the body with `<nav>`, `<header>`, `<footer>` and
- * `<aside>` removed when there is no `<main>` (see page-analyzer.ts).
+ * inside `<main>`, or over the body when there is no `<main>`, and in both
+ * cases minus every `<nav>`, `<header>`, `<footer>` and `<aside>` subtree (see
+ * page-analyzer.ts).
  *
  * **THE PAGE MUST HAVE CONTENT OF ITS OWN.** Both sides need
  * `main_word_count >= NEAR_DUPLICATE_MIN_MAIN_WORDS`, for the reason written on
  * that constant: below it the fingerprint is a handful of tokens and every
  * near-empty page on a template is a near-duplicate of every other one.
- * `content.thin` is the rule those pages belong to.
+ * `content.thin` is the rule those pages belong to, and after the amendment it
+ * is the rule that actually names them.
  *
  * **AND NEITHER SIDE MAY BE CANONICALISED ELSEWHERE** (§1) — a parameter
  * variant that points at its base URL is the fix, not the fault. The filter is
- * on both sides of the join, so one canonicalised member removes the pair
- * rather than half of it.
+ * on both sides of the join and again inside the lateral, so a canonicalised
+ * page is neither reported nor counted as somebody else's near-duplicate; a
+ * count and a list that disagreed about what a partner is would be worse than
+ * either.
  *
  * **THE BAND INDEXES COVER THIS COLUMN** (migration 0019).
  * `pages_simhash_band0..3` (migration 0004) index `simhash` and only `simhash`,
@@ -584,6 +673,12 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * `bit_count` in the WHERE clause is the exact verification the bands only
  * approximate.
  *
+ * **The join is SYMMETRIC now** (`b.id <> a.id`, where the pair form said
+ * `a.id < b.id`). A page has to see every partner it has, not the ones with a
+ * larger id, or the count would be an artefact of insertion order. Each pair is
+ * therefore visited twice, once from each end, which is what one row per page
+ * means.
+ *
  * **The sign, again.** `>>` on a Postgres bigint is an arithmetic shift, so the
  * sign bit propagates into the high bits of a shifted negative value — but both
  * sides of every band comparison are shifted identically and then masked with
@@ -594,7 +689,9 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  *
  * Exact duplicates are excluded by `content_hash is distinct from` rather than
  * by distance: two identical pages are 0 bits apart and would otherwise be
- * reported twice, once by each rule, with two different fixes attached.
+ * reported twice, once by each rule, with two different fixes attached. A page
+ * whose only twins are byte-identical therefore has no near-duplicates and no
+ * finding here — `content.exact-duplicate` has it.
  *
  * **The four band predicates below are coupled, textually, to the four
  * expression indexes `pages_main_simhash_band0..3`** (migration 0019; declared
@@ -608,7 +705,19 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * rather than described: `test/db/migration-0019.test.ts` compares these four
  * predicates with the four index definitions and EXPLAINs the join. Perturbing
  * one shift there turns the whole plan into a sequential scan on the inner
- * side, and that is what the test catches.
+ * side, and that is what the test catches. THE LATERAL'S OWN BANDS ARE SPELLED
+ * WITH A TWO-LETTER ALIAS (`cp`/`nb`) ON PURPOSE: that test lifts every
+ * single-letter band predicate out of this file and expects exactly the four
+ * the counting join runs, so the lateral's copies must not answer to the same
+ * regex. Postgres matches the index on the expression, not on the alias.
+ *
+ * **THE CAP COMES BEFORE THE LATERAL**, the exact-duplicate rule's lesson one
+ * file-section up: a `cross join lateral` at the same query level as an
+ * `order by`/`limit` is evaluated for every row the FROM produces. The `capped`
+ * CTE takes the exact `count(*) over ()` total (a window is evaluated over the
+ * whole CTE before its own `order by`/`limit`) and cuts to `caps.listing`
+ * first, so the five-closest lookup runs against at most that many pages rather
+ * than against every page on the site that has a near-duplicate.
  *
  * **What this costs.** Measured on `simhash` while its own indexes covered it,
  * and quoted unchanged because the arithmetic did not change — only which
@@ -622,54 +731,22 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  *    writing 50,000 rows should ANALYZE first or expect the planner to guess.
  *  - 0.11s is the HEALTHY site, whose band values are spread. Band skew — a few
  *    thousand templated pages sharing a band value — measured ~521ms: bounded,
- *    because the `LIMIT` still stops the scan, but not closed.
+ *    because the aggregate visits each candidate pair once and holds a counter
+ *    per page rather than a row per pair, but not closed.
  *
- * One finding per PAIR, capped at `caps.nearDuplicatePairs`. The note on a
- * truncated list says `atLeast`, not a total — and that word is the honest one:
- * counting every pair means computing the whole quadratic join, which is
- * precisely what the cap exists to avoid. For the same reason the query has no
- * ORDER BY (ordering would also force the full join), so which pairs are
- * reported past the cap is not defined — only that they are real pairs.
- *
- * **THE PAIR BUDGET FOLLOWS `findingCap`** (P8-T4), and this is the rule where
- * removing the cap costs the most: uncapped, the `limit` that stops the banding
- * join stops nothing, and the query runs to completion over every candidate pair
- * the four bands admit. That is the price of the honest answer — an audit that
- * says "at least 501 near-duplicate pairs" cannot tell a client whether the real
- * number is 502 or 40,000 — and it is the reason the number is a knob rather
- * than a new default.
- *
- * **AND THE SCAN THEREFORE HAS A CEILING `findingCap` CANNOT LIFT** — see
- * `NEAR_DUPLICATE_PAIR_CEILING`. It is not prudence, it is hard rule 6: without
- * it an uncapped run over a degenerate site puts the process past the 512MB
- * memory contract at 2,000 pages and exhausts a 4GB heap at 20,000. The ceiling
- * restores the contract; `findingCap` governs the REPORTING cap below it.
- *
- * The threshold (`NEAR_DUPLICATE_HAMMING`, 3 bits) is NOT part of the knob and
- * does not move with it: it defines what a near-duplicate IS, and widening it
- * would change the finding rather than the size of the list.
+ * The listing is capped at `caps.listing` pages, ordered by how many
+ * near-duplicates each has and then by URL, with the ordinary `noteTruncation`
+ * note carrying the EXACT total — which the pair shape could not offer, because
+ * counting every pair was the unbounded scan its cap existed to avoid. The
+ * threshold (`NEAR_DUPLICATE_HAMMING`, 3 bits) is not a knob and does not move
+ * with the cap: it defines what a near-duplicate IS, and widening it would
+ * change the finding rather than the size of the list.
  */
 async function nearDuplicateFindings(
   db: Db,
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
-  // THE TWO LIMITS, RESOLVED INTO ONE.
-  //
-  // `caps.nearDuplicatePairs` is what the operator asked to have LISTED, and
-  // `caps.nearDuplicatePairCeiling` is what this process can hold. The scan runs
-  // to the smaller of them, so an uncapped run is uncapped up to the ceiling and
-  // capped by it beyond — which is exactly what a run that hits the ceiling then
-  // says out loud, because the honest `atLeast` note is written either way.
-  //
-  // `+ 1` is what makes that note honest: seeing one more pair than may be listed
-  // is how the rule knows there ARE more without counting them. There is no case
-  // left where the scan is unbounded, so there is no case where the absence of a
-  // note is a guess.
-  const pairs =
-    caps.nearDuplicatePairs === null
-      ? caps.nearDuplicatePairCeiling
-      : Math.min(caps.nearDuplicatePairs, caps.nearDuplicatePairCeiling);
   await readCrawlEvidence(db, crawlId, NEAR.id);
   // THE GATE, ASKED BEFORE THE JOIN. On a crawl with no main-content
   // fingerprint at all the query below would return nothing anyway — every
@@ -680,77 +757,239 @@ async function nearDuplicateFindings(
   // on does not pay for a scan whose answer is already known.
   if (mainFingerprintUnavailable(await mainFingerprintCensus(db, crawlId))) return [];
   const result = await db.execute<{
-    id_a: string;
-    url_a: string;
-    type_a: string | null;
-    main_words_a: number;
-    id_b: string;
-    url_b: string;
-    type_b: string | null;
-    main_words_b: number;
-    hamming: number;
+    id: string;
+    url: string;
+    main_word_count: number;
+    near_count: number;
+    closest: { url: string; hamming: number; mainWords: number }[];
+    total_matches: number;
   }>(sql`
-    select a.id as id_a, a.url as url_a, a.page_type as type_a,
-           a.main_word_count as main_words_a,
-           b.id as id_b, b.url as url_b, b.page_type as type_b,
-           b.main_word_count as main_words_b,
-           bit_count((a.main_simhash # b.main_simhash)::bit(64))::int as hamming
-    from pages a
-    join pages b on b.crawl_id = a.crawl_id and a.id < b.id
-      and a.content_hash is distinct from b.content_hash
-      and ( (a.main_simhash >> 0)  & 65535 = (b.main_simhash >> 0)  & 65535
-         or (a.main_simhash >> 16) & 65535 = (b.main_simhash >> 16) & 65535
-         or (a.main_simhash >> 32) & 65535 = (b.main_simhash >> 32) & 65535
-         or (a.main_simhash >> 48) & 65535 = (b.main_simhash >> 48) & 65535 )
-    where a.crawl_id = ${crawlId} and ${AUDITABLE("a")} and ${AUDITABLE("b")}
-      and not ${CANONICALISED_ELSEWHERE("a")} and not ${CANONICALISED_ELSEWHERE("b")}
-      and a.main_simhash is not null and b.main_simhash is not null
-      and a.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
-      and b.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
-      and bit_count((a.main_simhash # b.main_simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
-    ${limitTo(pairs + 1)}`);
+    with counted as (
+      select a.id, a.url, a.main_simhash, a.content_hash, a.main_word_count,
+             count(*)::int as near_count
+      from pages a
+      join pages b on b.crawl_id = a.crawl_id and b.id <> a.id
+        and a.content_hash is distinct from b.content_hash
+        and ( (a.main_simhash >> 0)  & 65535 = (b.main_simhash >> 0)  & 65535
+           or (a.main_simhash >> 16) & 65535 = (b.main_simhash >> 16) & 65535
+           or (a.main_simhash >> 32) & 65535 = (b.main_simhash >> 32) & 65535
+           or (a.main_simhash >> 48) & 65535 = (b.main_simhash >> 48) & 65535 )
+      where a.crawl_id = ${crawlId} and ${AUDITABLE("a")} and ${AUDITABLE("b")}
+        and not ${CANONICALISED_ELSEWHERE("a")} and not ${CANONICALISED_ELSEWHERE("b")}
+        and a.main_simhash is not null and b.main_simhash is not null
+        and a.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
+        and b.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
+        and bit_count((a.main_simhash # b.main_simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
+      group by a.id, a.url, a.main_simhash, a.content_hash, a.main_word_count
+    ),
+    capped as (
+      select c.id, c.url, c.main_simhash, c.content_hash, c.main_word_count, c.near_count,
+             count(*) over ()::int as total_matches
+      from counted c
+      order by c.near_count desc, c.url
+      ${limitTo(caps.listing)}
+    )
+    select cp.id, cp.url, cp.main_word_count, cp.near_count, cp.total_matches, s.closest
+    from capped cp
+    cross join lateral (
+      select coalesce(
+               json_agg(
+                 json_build_object('url', m.url, 'hamming', m.hamming, 'mainWords', m.main_words)
+                 order by m.hamming, m.url),
+               '[]'::json) as closest
+      from (
+        select nb.url, nb.main_word_count as main_words,
+               bit_count((cp.main_simhash # nb.main_simhash)::bit(64))::int as hamming
+        from pages nb
+        where nb.crawl_id = ${crawlId} and ${AUDITABLE("nb")}
+          and not ${CANONICALISED_ELSEWHERE("nb")}
+          and nb.id <> cp.id
+          and cp.content_hash is distinct from nb.content_hash
+          and nb.main_simhash is not null
+          and nb.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
+          and ( (cp.main_simhash >> 0)  & 65535 = (nb.main_simhash >> 0)  & 65535
+             or (cp.main_simhash >> 16) & 65535 = (nb.main_simhash >> 16) & 65535
+             or (cp.main_simhash >> 32) & 65535 = (nb.main_simhash >> 32) & 65535
+             or (cp.main_simhash >> 48) & 65535 = (nb.main_simhash >> 48) & 65535 )
+          and bit_count((cp.main_simhash # nb.main_simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
+        order by hamming, nb.url
+        limit ${NEAR_DUPLICATE_CLOSEST}
+      ) m
+    ) s
+    order by cp.near_count desc, cp.url`);
 
-  const findings = result.rows.slice(0, pairs).map((row) => {
-    // The join orders the pair by row id, which says nothing to a reader. The
-    // finding is stated in URL order instead, and the page type and the main
-    // word count travel with their own URL rather than with a side of the join.
-    const left = { id: row.id_a, url: row.url_a, type: row.type_a, words: row.main_words_a };
-    const right = { id: row.id_b, url: row.url_b, type: row.type_b, words: row.main_words_b };
-    // Two rows of one crawl cannot share a URL (`pages_crawl_url` is unique),
-    // so the two sides never compare equal and the order is total.
-    const [first, second] = row.url_a < row.url_b ? [left, right] : [right, left];
-    return queryFinding(NEAR, {
-      pageId: first.id,
-      pageUrl: first.url,
+  const findings = result.rows.map((row) =>
+    queryFinding(NEAR, {
+      pageId: row.id,
+      pageUrl: row.url,
       evidence: {
-        urlA: first.url,
-        urlB: second.url,
-        hamming: row.hamming,
-        pageTypeA: first.type,
-        pageTypeB: second.type,
-        // How much content each page has of its own — the quantity the distance
-        // was measured over. Two pages at 60 main words apiece agreeing to
-        // within three bits is a weaker claim than two at 800, and a reader
-        // deciding whether to consolidate them needs to see which one this is.
-        mainWordsA: first.words,
-        mainWordsB: second.words,
+        // How much content this page has of its own — the quantity the
+        // distances were measured over. A page at 60 main words agreeing with
+        // another to within three bits is a weaker claim than one at 800, and a
+        // reader deciding whether to consolidate needs to see which this is.
+        mainWords: row.main_word_count,
+        // EXACT, whatever `closest` holds: the count comes from the aggregate
+        // over the whole join, the list from a five-row lateral.
+        nearDuplicates: row.near_count,
+        closest: row.closest,
       },
-      dedupeKey: pairKey(first.url, second.url),
-    });
-  });
+      dedupeKey: row.url,
+    }),
+  );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
 
-  // `rows.length` is the number of pairs the query SAW — `cap + 1` when the
-  // limit cut it — which is exactly the lower bound this note may claim. The
-  // other two rules in this file hand `noteTruncation` an exact `count(*)`.
-  //
-  // Below the ceiling and inside the reporting cap, `rows.length` and
-  // `findings.length` are the same number and `noteAtLeastTruncation` writes
-  // nothing — the listing was not truncated, and the absence of the note is what
-  // tells a reader the list is the whole of it. The contrapositive is the
-  // load-bearing half and it holds at every setting including uncapped: a note
-  // means the list is incomplete, and only its absence means complete. An
-  // uncapped run that hits the ceiling therefore carries one.
-  return noteAtLeastTruncation(findings, result.rows.length);
+/**
+ * Indexable 200 pages carrying fewer than `THIN_WORDS` words of their OWN
+ * content (CHECK-40, CHECK-13).
+ *
+ * **THE COLUMN, AND WHY IT MOVED TWICE.** Phase 7 moved this floor off
+ * `word_count` (every word the server sent) onto `renderable_word_count` (the
+ * words the page's own markup does not hide), because a home page whose honest
+ * visible content was 281 words counted 1,139 with its mega-menu, currency
+ * picker and closed accordions in it. Phase 19 §11 moves it again, onto
+ * `main_word_count`: the words that are not inside a `<nav>`, `<header>`,
+ * `<footer>` or `<aside>` — the page's own content, whether or not the markup
+ * hides any of it. The evidence for the second move is the same crawl the
+ * phase was written from: 35 of its pages have under 150 words of their own,
+ * NOT ONE has under 150 renderable words, and this rule fired on nothing while
+ * a cluster of empty `/pages/*` templates sat in the index. Renderable words
+ * were the right correction for hidden chrome and the wrong measure for
+ * VISIBLE chrome, which is most of a templated site.
+ *
+ * Both numbers travel in the evidence — the page's own words and the whole
+ * document's — because "94 words of its own, out of 830 on the page" is a
+ * sentence someone can act on, and it names the shape of the problem: a page
+ * that is mostly furniture.
+ *
+ * **THE NULL, AND WHY THIS IS A QUERY RULE** (hard rule 1). `main_word_count`
+ * is null in two situations that must not be answered the same way:
+ *
+ *  - the analyzer found NO main-content text at all — an empty `<main>`, or a
+ *    body that is nothing but navigation and footer. That page has zero words
+ *    of its own, which is thinner than any page this rule reports, and it is
+ *    reported AS zero (`mainWords: 0`, with a `note` saying so, since the
+ *    column itself declines to write a number there). Passing it over would be
+ *    the always-passes hole in its purest form: the emptiest page on the site,
+ *    unjudged, because the measurement of it was "nothing".
+ *  - the crawl predates migration 0018 and NOTHING on it was measured. Nothing
+ *    may be concluded about such a page, and `content.thin-skipped` says so
+ *    once for the crawl.
+ *
+ * A page rule sees one row and cannot tell those apart — which is why this rule
+ * is no longer one. The census (`mainFingerprintCensus`) is a question about
+ * the CRAWL, and it partitions the two cases exactly: on a crawl where some
+ * page carries a fingerprint, a null is the analyzer's answer about that page;
+ * on a crawl where none does, a null is the absence of the analyzer.
+ *
+ * `word_count is not null` is the other guard and it is not redundant: a 200
+ * that served a PDF has no analysis and stores null in EVERY text column, which
+ * is not a page with no main content — it is a page with no text evidence, and
+ * this rule has always been silent about those. `resources.*` and the fetch
+ * classification are what speak for them.
+ *
+ * **A PAGE CANONICALISED ELSEWHERE IS NOT JUDGED** (§1, extended to this rule
+ * by §11). A parameter variant that declares the base URL canonical is not a
+ * thin page: it is the same page as a full one, said a second way, and the
+ * canonical is the fix rather than the fault. Without this filter a site with
+ * faceted URLs reports its whole facet space as thin content the day it does
+ * the right thing.
+ *
+ * The listing is capped at `caps.listing`, THINNEST FIRST rather than
+ * alphabetically, and the order is a decision about what a cut list should
+ * hold: the pages with nothing on them at all are the ones worth the first two
+ * hundred rows, and an alphabetical cut would fill them with whatever the site
+ * happens to name early. The total beside the note is exact (`count(*) over ()`
+ * over the whole match set, evaluated before the limit).
+ */
+async function thinFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+  await readCrawlEvidence(db, crawlId, THIN.id);
+  // The gate, for `nearDuplicateFindings`'s reason and with the same predicate:
+  // on a crawl with no main-content fingerprint every page's `main_word_count`
+  // is null, the query below would call every one of them empty, and every one
+  // of those findings would be an invention. `content.thin-skipped` is what
+  // speaks there.
+  if (mainFingerprintUnavailable(await mainFingerprintCensus(db, crawlId))) return [];
+  const result = await db.execute<{
+    id: string;
+    url: string;
+    main_word_count: number | null;
+    word_count: number;
+    total_matches: number;
+  }>(sql`
+    select p.id, p.url, p.main_word_count, p.word_count,
+           count(*) over ()::int as total_matches
+    from pages p
+    where p.crawl_id = ${crawlId} and ${AUDITABLE("p")}
+      and not ${CANONICALISED_ELSEWHERE("p")}
+      and p.word_count is not null
+      and (p.main_word_count is null or p.main_word_count < ${THIN_WORDS})
+    order by coalesce(p.main_word_count, 0), p.url
+    ${limitTo(caps.listing)}`);
+
+  const findings = result.rows.map((row) =>
+    queryFinding(THIN, {
+      pageId: row.id,
+      pageUrl: row.url,
+      evidence: {
+        // Null is "no main-content text at all" on this crawl (the gate above
+        // is what makes that reading safe), and zero words is what that is. The
+        // note is carried rather than left to the number, because a reader
+        // meeting `mainWords: 0` beside `wordCount: 830` should be told the
+        // engine measured nothing there rather than counted nothing.
+        mainWords: row.main_word_count ?? 0,
+        ...(row.main_word_count === null ? { note: "no main-content text at all" } : {}),
+        wordCount: row.word_count,
+        threshold: THIN_WORDS,
+      },
+      dedupeKey: row.url,
+    }),
+  );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
+/**
+ * The NOT MEASURED marker for the crawl `content.thin` cannot be asked of
+ * (Phase 19 §11, hard rule 1).
+ *
+ * Same census, same predicate and same site scope as
+ * `content.near-duplicate-skipped` — see that rule for why `bool_or` rather
+ * than `count(*) filter`, and for the two crawls the predicate admits. What
+ * differs is only which check goes unanswered: the thin-content floor now reads
+ * `main_word_count`, so a crawl that never wrote that column has no number to
+ * judge a page's own content by, and reading `renderable_word_count` instead
+ * would answer the question with a quantity that includes every word of the
+ * site's navigation and footer — on the crawl behind this phase, a page with 42
+ * words of its own and 940 renderable ones would be reported healthy. That is
+ * the silent wrong answer hard rule 7 forbids, in the direction that hides the
+ * defect.
+ *
+ * **IT REPLACES A PAGE-SCOPED MARKER OF THE SAME NAME.** Until §11 this id was
+ * a page rule firing on a row with a `word_count` and no
+ * `renderable_word_count` — the pre-Phase-7 shape. Every crawl that produced
+ * such a row also predates 0018, so those crawls still get this marker; what
+ * changed is that it is now one finding for the crawl instead of one per page,
+ * and that it also covers a crawl written between Phase 7 and migration 0018,
+ * which has renderable counts, no main-content counts, and had nothing to say
+ * about it at all.
+ */
+async function thinSkippedFindings(db: Db, crawlId: string): Promise<Finding[]> {
+  await readCrawlEvidence(db, crawlId, THIN_SKIPPED.id);
+  const census = await mainFingerprintCensus(db, crawlId);
+  if (!mainFingerprintUnavailable(census)) return [];
+  return [
+    queryFinding(THIN_SKIPPED, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        // The size of what went unjudged, in the word every site-scoped finding
+        // publishes this quantity under.
+        indexablePages: census.auditable,
+        threshold: THIN_WORDS,
+      },
+      dedupeKey: "site",
+    }),
+  ];
 }
 
 export const contentRules: QueryRule[] = [
@@ -811,5 +1050,46 @@ export const contentRules: QueryRule[] = [
       "compared for near-duplicate content; a crawl taken before that fingerprint existed looks " +
       "exactly like this one — re-crawl the site to measure them.",
     run: (db, crawlId) => nearDuplicateSkippedFindings(db, crawlId),
+  }),
+
+  // CHECK-40's floor and CHECK-13's short-page signal, on the words a page has
+  // of its own. A QUERY rule since Phase 19 §11 — it was a page rule until the
+  // floor moved onto `main_word_count`, whose null a page rule cannot read (see
+  // `thinFindings`). Same id, same checks, same severity, same category: what
+  // moved is the kind and the column, and both are recorded in the 0.14.0
+  // entry of the ruleset log.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: THIN.id,
+    checkIds: ["CHECK-40", "CHECK-13"],
+    category: CATEGORY,
+    severity: THIN.severity,
+    ...copyFor(THIN.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => thinFindings(db, crawlId, capsOr(caps)),
+  }),
+
+  // And the crawl that rule cannot be run on. It claims the same two checks as
+  // the rule it stands in for — the `content.thin-skipped` contract, which the
+  // resource markers took from here — and it is site-scoped for its twin's
+  // reason: the condition is a property of the crawl.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: THIN_SKIPPED.id,
+    checkIds: ["CHECK-40", "CHECK-13"],
+    category: CATEGORY,
+    severity: THIN_SKIPPED.severity,
+    ...copyFor(THIN_SKIPPED.id),
+    rulesetVersion: RULESET_VERSION,
+    // States the observation, like its twin above: the predicate also admits a
+    // current crawl on which no page has main content of its own, and a reason
+    // opening "this crawl is old" would assert a cause the census cannot
+    // establish.
+    marker:
+      "No page in this crawl carries a count of its own main content — the words that are not " +
+      "header, navigation, sidebar or footer — so no page could be judged thin or not; a crawl " +
+      "taken before that count existed looks exactly like this one — re-crawl the site to " +
+      "measure it.",
+    run: (db, crawlId) => thinSkippedFindings(db, crawlId),
   }),
 ];

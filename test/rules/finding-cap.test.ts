@@ -21,8 +21,6 @@ import { crawls, issues, pages } from "../../src/db/schema.js";
 import { contentRules } from "../../src/rules/query/content.js";
 import {
   DEFAULT_RULE_CAPS,
-  NEAR_DUPLICATE_PAIR_CAP,
-  NEAR_DUPLICATE_PAIR_CEILING,
   resolveRuleCaps,
   storedFindingCap,
   URL_FINDING_CAP,
@@ -50,45 +48,27 @@ function rule(rules: QueryRule[], id: string): QueryRule {
 }
 
 describe("resolveRuleCaps", () => {
-  it("gives the engine's two defaults when nobody chose", () => {
-    expect(resolveRuleCaps(undefined)).toEqual({
-      listing: URL_FINDING_CAP,
-      nearDuplicatePairs: NEAR_DUPLICATE_PAIR_CAP,
-      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
-    });
+  it("gives the engine's default when nobody chose", () => {
+    expect(resolveRuleCaps(undefined)).toEqual({ listing: URL_FINDING_CAP });
     expect(DEFAULT_RULE_CAPS).toEqual(resolveRuleCaps(undefined));
   });
 
-  it("uncaps both reporting budgets on null — the billed-audit setting", () => {
-    expect(resolveRuleCaps(null)).toEqual({
-      listing: null,
-      nearDuplicatePairs: null,
-      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
-    });
+  it("uncaps the listing on null — the billed-audit setting", () => {
+    expect(resolveRuleCaps(null)).toEqual({ listing: null });
   });
 
-  // The one budget that is not the operator's to remove. It is the memory
-  // contract (hard rule 6) rather than a preference: uncapped, the pair scan
-  // measured 521MB RSS at 2,000 degenerate pages and exhausted a 4GB heap at
-  // 20,000. No `findingCap` reaches it — not null, not a number above it.
-  it("holds the near-duplicate scan ceiling at every findingCap", () => {
-    for (const cap of [undefined, null, 7, NEAR_DUPLICATE_PAIR_CEILING * 10]) {
-      expect(resolveRuleCaps(cap).nearDuplicatePairCeiling, String(cap)).toBe(
-        NEAR_DUPLICATE_PAIR_CEILING,
-      );
-    }
-  });
-
-  // The documented discontinuity: a stated number is a budget for what the
-  // caller will read, and it binds the pair listing too. `findingCap: 200` is
-  // therefore NOT the same as omitting the field, which leaves pairs at 500.
-  it("collapses both budgets onto a stated number, pairs included", () => {
-    expect(resolveRuleCaps(7)).toEqual({
-      listing: 7,
-      nearDuplicatePairs: 7,
-      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
-    });
-    expect(resolveRuleCaps(URL_FINDING_CAP)).not.toEqual(resolveRuleCaps(undefined));
+  // ONE BUDGET SINCE PHASE 19 §11, where there were three. The pair default
+  // (500) and the 100,000-pair scan ceiling existed because
+  // `content.near-duplicate` reported PAIRS — a unit quadratic in the
+  // near-identical cohort, which uncapped measured 521MB RSS at 2,000
+  // degenerate pages. That rule now reports one row per PAGE and counts the
+  // pairs inside Postgres, so its listing is bounded by the site like every
+  // other rule's and there is no quadratic array left to ceiling.
+  it("states one number, and a stated number is that number everywhere", () => {
+    expect(resolveRuleCaps(7)).toEqual({ listing: 7 });
+    // And the discontinuity the pair budget created is gone with it: naming the
+    // default is now the same thing as omitting the field.
+    expect(resolveRuleCaps(URL_FINDING_CAP)).toEqual(resolveRuleCaps(undefined));
   });
 });
 
@@ -250,12 +230,15 @@ describe("the finding cap against the database", () => {
   });
 
   /**
-   * The near-duplicate pair budget follows the same knob.
+   * The near-duplicate listing follows the same knob — and since Phase 19 §11
+   * it follows the SAME budget as every other listing rule, because it reports
+   * pages rather than pairs.
    *
-   * Four pages whose simhashes are one bit apart in a rising chain: every pair
-   * among them is inside `NEAR_DUPLICATE_HAMMING` (3 bits) except the widest,
-   * which is exactly 3 — so all six pairs qualify. Distinct content hashes, so
-   * `content.exact-duplicate` owns none of them.
+   * Four pages whose MAIN-content fingerprints are one bit apart in a rising
+   * chain: every pair among them is inside `NEAR_DUPLICATE_HAMMING` (3 bits)
+   * except the widest, which is exactly 3 — so every page has the other three
+   * as near-duplicates. Distinct content hashes, so `content.exact-duplicate`
+   * owns none of them.
    */
   async function addNearDuplicates(crawlId: string): Promise<void> {
     const bits = [0n, 1n, 3n, 7n];
@@ -270,12 +253,13 @@ describe("the finding cap against the database", () => {
           canonicalHtml: url,
           contentHash: `hash-${String(i)}`,
           simhash: BigInt.asIntN(64, mask),
+          mainSimhash: BigInt.asIntN(64, mask),
         });
       }),
     );
   }
 
-  it("stops the pair listing at the stated cap and says it is a lower bound", async () => {
+  it("stops the near-duplicate listing at the stated cap and quotes the exact total", async () => {
     const crawlId = await newCrawl();
     await addNearDuplicates(crawlId);
 
@@ -285,12 +269,13 @@ describe("the finding cap against the database", () => {
       resolveRuleCaps(2),
     );
     expect(found).toHaveLength(2);
-    // `atLeast`, not `total`: counting every pair means running the whole
-    // quadratic join, which is what the cap exists to avoid.
-    expect(found[1]!.evidence["truncated"]).toEqual({ reported: 2, atLeast: 3 });
+    // `total`, not `atLeast`: the aggregate counted every page before the limit
+    // cut the listing. The pair shape could not offer that number at any price,
+    // because counting pairs was the unbounded scan its cap existed to avoid.
+    expect(found[1]!.evidence["truncated"]).toEqual({ reported: 2, total: 4 });
   });
 
-  it("lists every pair and writes no note when the cap is null and the scan fits", async () => {
+  it("lists every page and writes no note when the cap is null", async () => {
     const crawlId = await newCrawl();
     await addNearDuplicates(crawlId);
 
@@ -299,32 +284,37 @@ describe("the finding cap against the database", () => {
       crawlId,
       resolveRuleCaps(null),
     );
-    // Six unordered pairs out of four pages, all within three bits.
-    expect(found).toHaveLength(6);
-    for (const f of found) expect(f.evidence["truncated"]).toBeUndefined();
-    // Distinct pairs, not the same pair six times.
-    expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(6);
+    // Four pages, each near-duplicating the other three — where the pair shape
+    // reported the same site as six rows.
+    expect(found).toHaveLength(4);
+    for (const f of found) {
+      expect(f.evidence["truncated"]).toBeUndefined();
+      expect(f.evidence["nearDuplicates"]).toBe(3);
+    }
+    // One row per page, not one page reported four times.
+    expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(4);
   });
 
   /**
-   * THE CEILING, AGAINST THE PRODUCTION CONSTANT.
+   * THE CEILING IS GONE, AND THIS IS THE CRAWL THAT PROVES IT DOES NOT NEED TO
+   * BE THERE (Phase 19 §11).
    *
-   * No override seam and no shrunken test value: 450 pages sharing one simhash
-   * are C(450,2) = 101,025 pairs, all at hamming 0 and therefore all inside
-   * `NEAR_DUPLICATE_HAMMING`, which clears the real 100,000 ceiling with 1,025
-   * to spare. Distinct `content_hash` per page, so `content.exact-duplicate`
-   * owns none of them and every pair reaches this rule. The join itself measures
-   * ~40ms; the cost is building the findings, which is the point — that is the
-   * allocation the ceiling exists to bound.
+   * 450 pages sharing one main-content fingerprint are C(450,2) = 101,025
+   * pairs, all at hamming 0 and therefore all inside `NEAR_DUPLICATE_HAMMING`.
+   * Under the pair shape this crawl was the memory contract's worst case: the
+   * findings ARRAY was quadratic in the cohort, an uncapped run measured 521MB
+   * RSS at 2,000 such pages and exhausted a 4GB heap at 20,000, and a hard
+   * 100,000-pair ceiling `findingCap` could not lift was what held it inside
+   * hard rule 6.
    *
-   * The assertion is the ROW COUNT plus the note, which is the ceiling's
-   * observable consequence: the rule holds 100,000 findings rather than 101,025,
-   * and it says out loud that it stopped. At the measured ~500 bytes a finding
-   * that is ~50MB, inside the 512MB contract; asserting bytes here would be
-   * asserting the GC's schedule, so the bound is asserted as the count it is
-   * derived from.
+   * Reporting pages removes the structure instead of bounding it. The same
+   * crawl is 450 findings — one per page, each saying "449 near-duplicates" —
+   * and the 101,025 pairs are counted inside Postgres and never cross the
+   * driver. Uncapped and NOTELESS, which is the assertion that matters: the
+   * listing is complete, and a reader takes completeness from the absence of
+   * the note.
    */
-  it("stops the pair SCAN at the ceiling no findingCap can lift, and says so", async () => {
+  it("reports one row per page on a degenerate cohort, uncapped and complete", async () => {
     const crawlId = await newCrawl({ findingCap: null });
     const rows = [];
     for (let i = 0; i < 450; i++) {
@@ -338,6 +328,7 @@ describe("the finding cap against the database", () => {
           canonicalHtml: url,
           contentHash: `ceil-${String(i)}`,
           simhash: 0n,
+          mainSimhash: 0n,
         }),
       );
     }
@@ -348,14 +339,13 @@ describe("the finding cap against the database", () => {
       crawlId,
       resolveRuleCaps(null),
     );
-    expect(found).toHaveLength(NEAR_DUPLICATE_PAIR_CEILING);
-    // Uncapped, and NOT noteless: the ceiling truncated the listing, so the
-    // listing says it was truncated. A reader takes completeness from the
-    // absence of this note, never from the crawl's `findingCap`.
-    expect(found[NEAR_DUPLICATE_PAIR_CEILING - 1]!.evidence["truncated"]).toEqual({
-      reported: NEAR_DUPLICATE_PAIR_CEILING,
-      atLeast: NEAR_DUPLICATE_PAIR_CEILING + 1,
-    });
+    expect(found).toHaveLength(450);
+    for (const f of found) {
+      expect(f.evidence["nearDuplicates"]).toBe(449);
+      expect(f.evidence["truncated"]).toBeUndefined();
+      // Five of the 449 are named, which is what keeps ONE row a row.
+      expect(f.evidence["closest"]).toHaveLength(5);
+    }
   }, 180_000);
 
   it("takes the cap off the crawl's own row when the caller states none", async () => {
@@ -454,16 +444,8 @@ describe("the finding cap against the database", () => {
     ]);
     clearTimeout(timer);
 
-    expect(seen.get(a)).toEqual({
-      listing: 2,
-      nearDuplicatePairs: 2,
-      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
-    });
-    expect(seen.get(b)).toEqual({
-      listing: null,
-      nearDuplicatePairs: null,
-      nearDuplicatePairCeiling: NEAR_DUPLICATE_PAIR_CEILING,
-    });
+    expect(seen.get(a)).toEqual({ listing: 2 });
+    expect(seen.get(b)).toEqual({ listing: null });
     // And the findings each run wrote are its own crawl's, not the other's.
     expect(ra.byRule["links.orphan"]).toBe(2);
     expect(rb.byRule["links.orphan"]).toBe(6);

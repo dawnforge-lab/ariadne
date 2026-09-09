@@ -5385,8 +5385,10 @@ export const PAGE_FIELDS = {
   /**
    * The same count minus the words the page's own MARKUP says are not shown —
    * `hidden`, inline `display:none`, a closed `<dialog>`, a closed `<details>`'
-   * body. Always <= `wordCount`, and it is the number a thin-content judgement
-   * is actually made on (`content.thin`).
+   * body. Always <= `wordCount`, and the number `content.soft-404`'s length
+   * ceiling is applied to. (`content.thin` judged on it between Phase 7 and
+   * Phase 19 §11 and now judges on the page's MAIN-content count, which its
+   * finding carries as `mainWords`.)
    *
    * BOTH COLUMNS, SIDE BY SIDE, deliberately. The surface used to publish only
    * `wordCount`, which on a page that hides half its markup is a number nobody

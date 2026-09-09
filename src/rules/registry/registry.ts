@@ -44,6 +44,29 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // canonical-variant duplicates (they were never duplicates), gains the two
 // markers where they apply, and keeps every other finding.
 //
+// AMENDED AT GATE TIME (spec §11), after a re-crawl at 0018 showed the theme
+// putting its footer INSIDE `<main>`. Two more facts about what 0.14.0 says,
+// both inside the same version because none of it has shipped:
+//  (5) `content.near-duplicate` reports one finding per PAGE, not per pair:
+//      `{mainWords, nearDuplicates, closest: [{url, hamming, mainWords}]}`, up
+//      to five closest, capped by pages with an exact total. The 500-pair
+//      budget and the 100,000-pair scan ceiling are gone with the unit — the
+//      pair set is now counted inside Postgres — so `findingCap` governs one
+//      listing budget instead of three, and a cluster of 79 empty templates is
+//      79 rows rather than 500 arbitrary pairs out of 3,081.
+//  (6) `content.thin` fires on `main_word_count < 150` — the words a page has
+//      of its OWN — instead of `renderable_word_count`, and is a QUERY rule
+//      where it was a page rule (with its marker `content.thin-skipped`, now
+//      site-scoped too): the column's null means "no main content at all" on a
+//      0018 crawl and "never measured" on an older one, and only the crawl's
+//      census tells those apart. A page with no content of its own is reported
+//      as zero words rather than passed over. The kind change moves the
+//      ruleset split to 25 page / 61 query / 14 metric over the same 100 rules,
+//      and no severity, category or check claim moves with it. On the crawl
+//      behind the phase this rule fired on nothing while 35 pages had under
+//      150 words of their own; that is the always-passes shape hard rule 1
+//      forbids, and the column was what was wrong with it.
+//
 // 0.13.0: Phase 17, on THREE grounds — one rule added, one verdict MOVED, and
 // copy changed. The 5xx re-verification pass
 // (docs/superpowers/specs/2026-09-08-5xx-recheck-design.md) fetches every

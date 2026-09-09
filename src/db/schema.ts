@@ -352,12 +352,15 @@ export const pages = pgTable("pages", {
   //
   // NULLABLE, AND THE NULL IS A GATE. It means "no P7-or-later analyzer wrote
   // this row" — a pre-P7 crawl, whose `word_count` also carries the old
-  // template semantics. The rules that read it (`content.thin`'s floor,
-  // `content.csr-dependent`'s comparison) must SKIP such a page loudly rather
-  // than falling back to `word_count`, which measures a different thing: see
-  // `content.thin-skipped` in src/rules/page/on-page.ts. A page the analyzer
-  // never ran on at all — a PDF, a 404 — stores null in BOTH columns, and that
-  // is a different fact from this one.
+  // template semantics. The rules that read it (`content.soft-404`'s length
+  // ceiling, `content.csr-dependent`'s comparison) must SKIP such a page loudly
+  // rather than falling back to `word_count`, which measures a different thing.
+  // A page the analyzer never ran on at all — a PDF, a 404 — stores null in
+  // BOTH columns, and that is a different fact from this one.
+  //
+  // `content.thin`'s floor read this column between Phase 7 and Phase 19 §11
+  // and now reads `main_word_count` instead: hiding is not the only way a page
+  // ends up mostly furniture, and on a templated site it is not the usual one.
   renderableWordCount: integer("renderable_word_count"),
   // How many links from the crawl's entry point the shortest path to this page
   // is. Nullable; NOT the same thing as `depth`, which is the depth of the
@@ -411,9 +414,15 @@ export const pages = pgTable("pages", {
   //    (hard rule 1), on the `content.thin-skipped` precedent.
   mainSimhash: bigint("main_simhash", { mode: "bigint" }),
   // Words in the text `main_simhash` was taken over. Written with it, null with
-  // it, and read as the floor under a near-duplicate claim: a page with less
-  // main content than a rule's threshold has nothing to be a near-duplicate OF,
-  // and `content.thin` is the check that owns it.
+  // it, and read by two rules: as the floor under a near-duplicate claim (a page
+  // with less main content than the threshold has nothing to be a near-duplicate
+  // OF), and — since Phase 19 §11 — as `content.thin`'s own floor, which is the
+  // check that owns those pages. THE NULL MEANS TWO THINGS AND ONLY THE CRAWL
+  // SAYS WHICH: "this page has no main content at all" on a 0018 crawl, and
+  // "nothing here was ever measured" on an older one. `content.thin` reports
+  // the first as zero words and `content.thin-skipped` reports the second,
+  // which is why both are query rules — the census that separates them is a
+  // question about the crawl.
   mainWordCount: integer("main_word_count"),
   // Up to 160 characters of the visible text around the first "lorem ipsum"
   // match — the EVIDENCE for `has_lorem_ipsum`, which without it reports a URL

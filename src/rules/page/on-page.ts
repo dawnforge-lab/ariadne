@@ -10,7 +10,6 @@ export const TITLE_MIN = 10;
 export const TITLE_MAX = 60;
 export const META_MIN = 70;
 export const META_MAX = 160;
-export const THIN_WORDS = 150;
 /**
  * The largest step a heading outline may take downwards: H2 to H3 is 1 and
  * fine, H2 to H4 is 2 and is the skip `headings.level-skip` reports. Exported
@@ -22,17 +21,21 @@ export const HEADING_MAX_STEP = 1;
 const CATEGORY = "on-page";
 
 /**
- * The two rules in this file that are about the page's BODY rather than its
- * head. They report under `content`, beside the cross-page content rules
- * (`content.soft-404`, `content.exact-duplicate`, `content.near-duplicate`),
- * because the report groups by category and a client reading the content
- * section should find every content finding in it — a thin page and a duplicate
- * page are the same conversation, and the fact that one is decided from a
- * single row and the other from a join is our implementation detail, not theirs.
+ * The one rule in this file that is about the page's BODY rather than its head.
+ * It reports under `content`, beside the cross-page content rules
+ * (`content.soft-404`, `content.exact-duplicate`, `content.near-duplicate`,
+ * `content.thin`), because the report groups by category and a client reading
+ * the content section should find every content finding in it — placeholder
+ * copy and a duplicate page are the same conversation, and the fact that one is
+ * decided from a single row and the other from a join is our implementation
+ * detail, not theirs.
  *
- * They stay in this file: they read a `PageRecord` and nothing else, which is
- * what makes a page rule, and moving them would only put the same code under a
- * different name.
+ * `content.placeholder` stays in this file: it reads a `PageRecord` and nothing
+ * else, which is what makes a page rule. `content.thin` and
+ * `content.thin-skipped` were beside it until Phase 19 §11 moved the
+ * thin-content floor onto `main_word_count`, whose null cannot be read from one
+ * row; both now live in src/rules/query/content.ts with the census that reads
+ * it, and `THIN_WORDS` moved with them.
  */
 const CONTENT = "content";
 
@@ -112,76 +115,6 @@ export const onPageRules: PageRule[] = [
       ? []
       : [finding(self, p, { headingOrder: p.headingOrder, skipAt })];
   }),
-
-  /**
-   * The thin-content floor, read off `renderable_word_count` and NOT off
-   * `word_count` (Phase 7, P7-T1).
-   *
-   * The two columns answer different questions. `word_count` is how many words
-   * the server sent; `renderable_word_count` is how many of those the page's
-   * own markup does not say are hidden. A floor exists to ask "is there enough
-   * here for a reader", so it has to read the second: the diagnosis behind the
-   * change found a real home page whose honest visible content was 281 words
-   * while its raw count said 1,139, because ~740 words of mega-menu, currency
-   * picker and closed accordion ship on every page of that site. The error is
-   * near-constant per template, so it is worst exactly where this rule matters
-   * most — on the thinnest pages.
-   *
-   * Both numbers travel in the evidence. An action plan that says "94 words a
-   * reader can reach, out of 830 in the HTML" is a sentence someone can act
-   * on; either number alone invites the wrong fix.
-   */
-  pageRule("content.thin", ["CHECK-40", "CHECK-13"], CONTENT, "warning", (p, self) =>
-    isAuditable(p) &&
-    p.isIndexable === true &&
-    p.renderableWordCount !== null &&
-    p.renderableWordCount < THIN_WORDS
-      ? [
-          finding(self, p, {
-            renderableWordCount: p.renderableWordCount,
-            wordCount: p.wordCount,
-            threshold: THIN_WORDS,
-          }),
-        ]
-      : [],
-  ),
-
-  /**
-   * The page `content.thin` could not judge, said out loud.
-   *
-   * A row with a `word_count` and no `renderable_word_count` was written by a
-   * pre-Phase-7 analyzer: the page WAS read, and the column the floor now needs
-   * did not exist yet. There are exactly two honest things to do with it, and
-   * falling back to `word_count` is neither — that column measures a different
-   * quantity (see the rule above), so a fallback would answer the thin-content
-   * question with a number that is four times the truth on a chrome-heavy site
-   * and would do it silently, on old crawls only, where nobody would look.
-   *
-   * So the page is SKIPPED and the skip is a finding, on the
-   * `robots.check-skipped` / `links.orphan-skipped` precedent: its own id, its
-   * own copy, `info` severity, and the crawl named as the reason. Re-crawling
-   * is the fix, because a word count cannot be recomputed from a database that
-   * does not store the HTML.
-   *
-   * The guard is `word_count !== null` and not `isAuditable` alone, and that is
-   * the whole precision of this rule: a 200 that served a PDF has no analysis
-   * and stores null in BOTH columns, which is not a skipped check — it is a
-   * page with no text evidence, which `content.thin` was always silent about.
-   */
-  pageRule(
-    "content.thin-skipped",
-    ["CHECK-40", "CHECK-13"],
-    CONTENT,
-    "info",
-    (p, self) =>
-      isAuditable(p) &&
-      p.isIndexable === true &&
-      p.wordCount !== null &&
-      p.renderableWordCount === null
-        ? [finding(self, p, { wordCount: p.wordCount, threshold: THIN_WORDS })]
-        : [],
-    "This page was crawled before the engine counted the words a reader can actually reach, so the thin-content check had no honest number to judge it on; re-crawl the site to measure it.",
-  ),
 
   /**
    * Placeholder copy still in the live page, WITH THE SENTENCE IT SITS IN

@@ -39,8 +39,12 @@ import {
   sitemapUrls,
 } from "../../src/db/schema.js";
 import { buildRegistry } from "../../src/rules/index.js";
-import { THIN_WORDS } from "../../src/rules/page/on-page.js";
-import { SOFT_404_WORDS } from "../../src/rules/query/content.js";
+
+import {
+  NEAR_DUPLICATE_MIN_MAIN_WORDS,
+  SOFT_404_WORDS,
+  THIN_WORDS,
+} from "../../src/rules/query/content.js";
 import { runRules } from "../../src/rules/run.js";
 import type { Registry } from "../../src/rules/registry/registry.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
@@ -145,15 +149,16 @@ function databaseUrl(): string {
  * itself is covered directly by `test/rules/sitemap-query.test.ts`, which builds
  * a crawl whose discovery evidence names no sitemap source.
  *
- * `content.thin-skipped` fires on a page a crawl wrote BEFORE the analyzer
- * computed `renderable_word_count` — a row with a word count and no renderable
- * one. This harness runs the real crawler, and the real crawler writes both
- * columns off one pass for every page it reads, so no fixture can produce that
- * row: making one would mean hand-writing a `pages` row, which is the one thing
- * this file exists not to do. Its behaviour is covered directly by
- * test/rules/on-page.test.ts, which builds the pre-P7 shape and asserts the
- * pair's partition over it. The MEASUREMENT the skip protects is asserted here
- * all the same, from the row `/authored7/hidden-chrome` produced.
+ * `content.thin-skipped` fires on a CRAWL written before the analyzer computed
+ * `main_word_count` — one where not a single page carries a count of its own
+ * content (Phase 19 §11 moved it there from the pre-Phase-7 renderable column,
+ * and made it site-scoped). This harness runs the real crawler, which computes
+ * that count on the same pass as every other column, so the marker's condition
+ * is false BY CONSTRUCTION here: producing the crawl it reports would mean
+ * hand-writing `pages` rows, which is the one thing this file exists not to do.
+ * Its firing, its silence on a current crawl, and its partition with the rule it
+ * stands in for are covered directly in test/rules/content-query.test.ts. The
+ * rule itself, `content.thin`, DOES fire here.
  *
  * `h1.duplicate-skipped` is the same shape as the thin skip, one column over.
  * It fires when a crawl stored H1 counts and no H1 TEXT — a row written before
@@ -1253,31 +1258,34 @@ describe("the fixture site end to end", () => {
     // The click-chain's rungs are one template with a number substituted, so
     // several of them land inside the three-bit band.
     //
-    // **THE SAME THREE PAIRS AFTER P19-T2 MOVED THE FINGERPRINT** from the whole
-    // visible text to the main content, and the reason is a property of this
-    // fixture site rather than a coincidence: `renderDocument` wraps every
+    // **THE SAME RELATIONSHIPS AFTER P19-T2 MOVED THE FINGERPRINT** from the
+    // whole visible text to the main content, and the reason is a property of
+    // this fixture site rather than a coincidence: `renderDocument` wraps every
     // page's whole body in `<main>` and the site has no shared navigation,
     // header or footer at all, so the main-content text IS the visible text and
     // the two fingerprints are the same number. The distances below are
     // therefore unchanged, and they would not have been on a real templated
     // site — which is exactly the divergence the change was made for. The other
-    // new filters do not bite either: each rung clears
+    // filters do not bite either: each rung clears
     // `NEAR_DUPLICATE_MIN_MAIN_WORDS` comfortably while still sitting under
     // `content.thin`'s floor — the two thresholds are 50 and 150, and a page
     // between them is both thin AND comparable, which is what these rungs are —
     // and every fixture page declares a self-referential canonical, so none is
     // canonicalised elsewhere.
     //
-    // Read from the `issues`
-    // rows rather than from `detailsByPath`, which is keyed by path and rule and
-    // therefore keeps only the LAST of the pairs a page belongs to — and the
-    // pair join has no ORDER BY, so which one that is depends on the plan.
+    // **WHAT THE §11 AMENDMENT CHANGED HERE IS THE SHAPE, NOT THE SIMILARITY.**
+    // The rule reported PAIRS and now reports PAGES, so the three pairs
+    // `/deep/2 ~1~ /deep/6`, `/deep/2 ~3~ /deep/4` and `/deep/2 ~3~ /deep/5` are
+    // four findings: `/deep/2`, which has three near-duplicates, and one each on
+    // `/deep/4`, `/deep/5` and `/deep/6`, which have only `/deep/2`. Each row
+    // names its own partners with their distances, so the relationships below
+    // are the same three facts read from four directions — and the assertion is
+    // still about the fingerprints rather than about two pages happening to be
+    // similar.
     //
-    // The SET is deterministic even though the order is not: the cap is nowhere
-    // near, so every pair inside the band is reported. Pinning the pairs and
-    // their distances is what makes this an assertion about the fingerprints
-    // rather than about two pages happening to be similar.
-    const pairs = (
+    // Read from the `issues` rows rather than from `detailsByPath`, which is
+    // keyed by path and rule and would keep only one row per page anyway.
+    const near = (
       await db
         .select()
         .from(issues)
@@ -1286,24 +1294,55 @@ describe("the fixture site end to end", () => {
         )
     )
       .map((row) => {
-        const d = row.details as { urlA: string; urlB: string; hamming: number };
-        return `${d.urlA.replace(app.base, "")} ~${d.hamming}~ ${d.urlB.replace(app.base, "")}`;
+        const d = row.details as {
+          pageUrl: string;
+          nearDuplicates: number;
+          closest: { url: string; hamming: number; mainWords: number }[];
+        };
+        const partners = d.closest
+          .map((c) => `${c.url.replace(app.base, "")}~${String(c.hamming)}`)
+          .join(" ");
+        return `${d.pageUrl.replace(app.base, "")} (${String(d.nearDuplicates)}): ${partners}`;
       })
       .sort();
-    expect(pairs).toEqual([
-      "/deep/2 ~1~ /deep/6",
-      "/deep/2 ~3~ /deep/4",
-      "/deep/2 ~3~ /deep/5",
+    expect(near).toEqual([
+      // Nearest first, ties broken by URL: /deep/6 is one bit away, the other
+      // two are three.
+      "/deep/2 (3): /deep/6~1 /deep/4~3 /deep/5~3",
+      "/deep/4 (1): /deep/2~3",
+      "/deep/5 (1): /deep/2~3",
+      "/deep/6 (1): /deep/2~1",
     ]);
+    // Every page's own main-content length travels with it, and it is the same
+    // number on both sides of a relationship — the rungs are one template.
+    const words = (
+      await db
+        .select()
+        .from(issues)
+        .where(
+          and(eq(issues.crawlId, summary.crawlId), eq(issues.ruleId, "content.near-duplicate")),
+        )
+    ).map((row) => (row.details as { mainWords: number }).mainWords);
+    for (const w of words) {
+      expect(w).toBeGreaterThanOrEqual(NEAR_DUPLICATE_MIN_MAIN_WORDS);
+      expect(w).toBeLessThan(THIN_WORDS);
+    }
 
-    // And nowhere else. A group is reported once, on its first member, and a
-    // pair once, on the first of the two — so a second page carrying either
-    // finding would mean a rule had started reporting per page.
+    // And nowhere else. A GROUP is reported once, on its first member; a page
+    // with a near-duplicate is reported on itself and once — so a fifth
+    // near-duplicate row, or a second exact-duplicate one, would mean a rule had
+    // changed shape.
     const duplicated = [...issuesByPath]
       .filter(([, ids]) => ids.has("content.exact-duplicate") || ids.has("content.near-duplicate"))
       .map(([path]) => path)
       .sort();
-    expect(duplicated).toEqual(["/content/duplicate-a", "/deep/2"]);
+    expect(duplicated).toEqual([
+      "/content/duplicate-a",
+      "/deep/2",
+      "/deep/4",
+      "/deep/5",
+      "/deep/6",
+    ]);
   });
 
   it("the field-level duplicates find the site's repeated titles, descriptions and headings", async () => {

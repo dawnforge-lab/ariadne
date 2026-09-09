@@ -146,8 +146,8 @@ export const FILTER_RENDERED_MIN = 5;
  * — the count is taken while the HTML is being read and the HTML is not stored —
  * so the rule refuses the whole crawl loudly rather than comparing a rendered
  * count against a raw one that measures a different thing (hard rule 7). The
- * page-rule side of the same problem is `content.thin-skipped`, which can skip
- * page by page because it judges one row at a time.
+ * same problem in another column is `content.thin-skipped`, which reports the
+ * crawl whose pages carry no main-content count.
  */
 async function assertRenderedColumns(
   db: Db,

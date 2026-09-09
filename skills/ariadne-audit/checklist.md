@@ -1001,28 +1001,39 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-13"` — three rules:
   - `content.soft-404` (critical) — a 200 response whose text reads as a
     not-found page
-  - `content.thin` (warning) — a 200 page with too little body text to serve any
-    query (the same rule answers CHECK-40)
-  - `content.thin-skipped` (info) — the pages the thin check could not be run on,
-    below
+  - `content.thin` (warning) — a 200 page with too little content OF ITS OWN to
+    serve any query (the same rule answers CHECK-40)
+  - `content.thin-skipped` (info) — the NOT MEASURED marker for the crawl the thin
+    check could not be run on, below
   `issue_urls` per rule; `pages_query` for the word counts beside page type, which
   is how the "% of indexable pages" in the Evaluate line is computed.
 
-  **Both verdict rules judge `renderableWordCount`, not `wordCount`** — the page's
-  words minus the ones its own markup hides (`hidden`, inline `display:none`, a closed
-  `<dialog>` or `<details>`). `pages_query` returns both columns; quote the renderable
-  one, since it is what the verdict was reached on and what a visitor sees.
+  **The thin floor judges the page's OWN content**, not every word the document
+  carries: the text inside the page's `<main>`, or its body with the `<nav>`,
+  `<header>`, `<footer>` and `<aside>` subtrees removed. Its evidence is
+  `{mainWords, wordCount, threshold}` — the page's own words, the whole document's,
+  and 150 — so a page that ships 830 words and says 94 of them itself reads as
+  exactly that. Quote `mainWords`; the whole-document count beside it is context,
+  not the verdict. `content.soft-404`'s length ceiling still reads
+  `renderableWordCount` (the words the markup does not hide), which is a different
+  question about a different page.
 
-  **`content.thin-skipped` is the NOT MEASURED marker** (`links.orphan-skipped` /
-  `robots.check-skipped` precedent): it fires per page where `wordCount` is present
-  and `renderableWordCount` is null — a row a pre-Phase-7 analyzer wrote, where the
-  page WAS read and the column the floor needs did not exist yet. The engine will not
-  fall back to `wordCount` there, because that column measures something else; on a
-  chrome-heavy site the fallback would answer four times high, silently, on old crawls
-  only. Where it fires, the thin count is a floor and a re-crawl is the fix. **Null in
-  BOTH columns is a different thing and not a skip**: no text was ever extracted for
-  that URL — a PDF, a 404, anything with no body — which `content.thin` was always
-  silent about and a re-crawl will not change.
+  A page with NO content of its own — a body that is nothing but navigation and
+  footer — is reported at `mainWords: 0` with `note: "no main-content text at all"`.
+  That is the emptiest page a site can serve and it is named, not passed over.
+  **Null `wordCount` is a different thing and not a finding**: no text was ever
+  extracted for that URL — a PDF, a 404, anything with no body — which `content.thin`
+  has always been silent about.
+
+  **`content.thin-skipped` is the NOT MEASURED marker** (`content.near-duplicate-
+  skipped` / `h1.duplicate-skipped` precedent). It fires once, site-scoped, when the
+  crawl holds auditable indexable pages and NOT ONE of them carries a main-content
+  word count — a crawl taken before migration 0018 introduced it. Evidence
+  `{indexablePages, threshold}`. The engine will not fall back to the whole-document
+  count there, because that column measures something else; on a site whose pages
+  each carry several hundred words of shared menus it calls an empty page healthy.
+  **While it fires, an empty thin list is not a site without thin pages**: the check
+  was not run and a re-crawl is the only thing that answers it.
 - **Evaluate**:
   - FAIL if soft 404s > 0
   - WARN if low content pages > 10% of indexable pages
@@ -1924,11 +1935,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `content.near-duplicate` (warning) — pages alike past the similarity threshold
   - `content.near-duplicate-skipped` (info) — the NOT MEASURED marker for the second
     of them, below
-  `issue_urls` gives them: `content.near-duplicate` writes one finding per PAIR
-  (`{urlA, urlB, hamming, pageTypeA, pageTypeB, mainWordsA, mainWordsB}` — the page
-  types are the pair-type classification the Analysis asks for, already done, and the
-  two word counts say how much content each page has of its own), and
-  `content.exact-duplicate`
+  `issue_urls` gives them: `content.near-duplicate` writes one finding per PAGE
+  (`{mainWords, nearDuplicates, closest}` — `nearDuplicates` is the exact number of
+  other pages within the threshold of this one, `mainWords` is how much content this
+  page has of its own, and `closest` names up to five of the partners, nearest first,
+  as `{url, hamming, mainWords}`), and `content.exact-duplicate`
   one per identical group (`{contentHash, urls, count, pageTypes}`). For the
   template-level view, `metrics_get` with `metricId: "content.template-similarity"`
   says how alike each cohort's pages are on average — a cohort that is uniformly
@@ -1958,13 +1969,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   candidate, the same way a page the analyzer produced no `contentHash` for is not a
   candidate for the exact rule).
 - **Important — Identify the CAUSE, Not Just the Count**: A near-duplicate report can have
-  tens of thousands of pairs. Reporting "76K near-duplicate pairs found" is useless without
+  thousands of pages. Reporting "3K near-duplicate pages found" is useless without
   understanding WHY they're duplicates. The root cause determines the fix — and different
   causes need completely different solutions.
 - **Analysis**:
-  1. **Quantify the scale**: Total pairs, unique URLs involved, similarity distribution
-     (90-92%, 93-95%, 96-98%, 99-100%)
-  2. **Classify pair types**: Group by URL type combination:
+  1. **Quantify the scale**: Total pages reported, how large each page's cluster is
+     (`nearDuplicates`), similarity distribution (the `hamming` values in `closest`)
+  2. **Classify pair types**: group each finding with the pages in its `closest` list,
+     by URL type combination:
      - Product ↔ Product (most common on e-commerce)
      - Collection ↔ Collection
      - Collection ↔ Page
@@ -2014,7 +2026,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      content pairs often map to the same cannibalising query groups there
 - **Evaluate**:
   - FAIL if colour variant pages have identical descriptions (only colour word differs)
-  - WARN if >20% of near-duplicate pairs are from template boilerplate domination
+  - WARN if >20% of near-duplicate pages are from template boilerplate domination
   - WARN if overlapping collections compete for the same queries
   - Record: total pairs, pair type breakdown, **root cause breakdown with examples**,
     browser comparison findings, recommended fix per root cause
@@ -2022,10 +2034,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-40: Thin or placeholder content
 - **Priority**: Medium | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-40"` — `content.thin` (warning, the
-  same rule CHECK-13 reads), `content.thin-skipped` (info, the same marker CHECK-13
-  reads: pages carrying a `wordCount` and no `renderableWordCount`, which a pre-Phase-7
-  crawl wrote and this check cannot be run on — a re-crawl is the fix, and while it
-  fires the thin count is a floor) and `content.placeholder` (critical: the literal
+  same rule CHECK-13 reads: fewer than 150 words of the page's OWN content, evidence
+  `{mainWords, wordCount, threshold}`), `content.thin-skipped` (info, the same marker
+  CHECK-13 reads: one site-scoped finding on a crawl where NO page carries a
+  main-content word count, which is what a crawl taken before migration 0018 looks
+  like — a re-crawl is the fix, and while it fires the thin list is not evidence of
+  anything) and `content.placeholder` (critical: the literal
   phrase "lorem ipsum" left in live copy — no other placeholder wording is detected).
   `content.placeholder`'s evidence is `{wordCount, snippet}`, and **the snippet is the
   point**: quote it in the report rather than the URL alone. The finding is often not
@@ -2038,9 +2052,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `pageType` to say which templates the thin pages belong to, and read
   `content.metrics-by-type` for the distributions behind the threshold — it carries
   `wordCount`, `renderableWordCount` and `textRatio` per template. **The pair is the
-  finding**: a template whose median word count is 900 and whose median renderable
-  count is 200 ships 700 words of furniture on every page, and the thin verdict was
-  reached on the 200.
+  finding**: a template whose median word count is 900 and whose pages each say 100
+  words of their own ships 800 words of furniture on every page, and the thin verdict
+  was reached on the 100 (`mainWords` in the finding; the metric's medians are
+  whole-document numbers and are the context around it, not the verdict).
 - **Evaluate**:
   - FAIL if lorem ipsum > 0 (immediate fix needed)
   - WARN if low content > 10% of indexable pages

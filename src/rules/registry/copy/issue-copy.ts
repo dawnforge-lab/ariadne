@@ -139,22 +139,39 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Re-crawl the site. The heading text is captured while each page is being read and cannot be recovered afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
   },
   "content.thin": {
-    // Accuracy: the count this rule reads excludes text the page's own markup
-    // hides, and does NOT exclude text hidden by a stylesheet — the crawler
-    // does not load CSS. The prose says "the markup hides" for that reason;
-    // do not widen it to a claim about everything a visitor cannot see.
-    title: "Thin page: fewer than 150 words a reader can reach",
+    // Accuracy, and it MOVED in Phase 19 §11. The count is now the page's own
+    // content — the text inside its main region, or its body with the header,
+    // navigation, sidebar and footer subtrees removed — and NOT the "words a
+    // reader can reach" this copy used to describe. Two things follow, and
+    // neither may be quietly widened:
+    //  - text the markup hides is INCLUDED here (the old renderable count
+    //    excluded it, and still does its own job on the soft-404 ceiling). So
+    //    no sentence may promise this is what a visitor sees.
+    //  - the shared furniture is excluded whether or not a visitor sees it,
+    //    which is the whole correction: on the crawl behind the phase every
+    //    page carried ~900 words of chrome and this rule fired on nothing.
+    // The second number in the evidence is the WHOLE document's word count, so
+    // the pair reads "94 of its own, 830 in all" — a page that is mostly
+    // furniture, which is the shape being reported.
+    title: "Fewer than 150 words of own content (excluding header, navigation and footer)",
     explanation:
-      "This indexable page carries fewer than 150 words a reader can actually reach. Text the page's own markup hides is left out of that count — a menu drawer, a closed accordion, a block marked as not displayed, or a template a script clones later — because none of it is on the page a visitor is shown. The finding quotes both numbers, so a page that ships plenty of words and shows very few is visible as exactly that. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees.",
+      "This indexable page carries fewer than 150 words of its own. Its own content means the text inside the page's main region — or, on a page that marks no main region, everything outside its header, navigation, sidebar and footer — so the menus, the footer and the rest of the furniture every page on the site shares are left out of the count. The finding quotes that number beside the word count of the whole document, so a page that ships eight hundred words and says fifty of them itself is visible as exactly that; a page whose own content is nothing at all is reported as zero. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees. A URL that declares a canonical tag pointing at another page is left out: it has said which version counts, and the page it defers to is where the content is judged.",
     howToFix:
-      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the two numbers are far apart, the copy exists but is behind something a reader has to open, so bring the substance into the visible page rather than into a drawer. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
+      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the two numbers are far apart, the page is mostly template: check that its own section is actually being filled in for this record, because a missing field in a CMS looks exactly like this across a whole set of URLs. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
   },
   "content.thin-skipped": {
-    title: "Thin-content check could not be run on this page",
+    // A marker: it reports the limit of this crawl's evidence, never a fault on
+    // the site. Phase 19 §11 / hard rule 1 — the thin-content floor reads the
+    // count of a page's own content, and a crawl taken before that count
+    // existed cannot answer it. Silence would read as "no thin pages", which is
+    // the one thing this must not say. Site-scoped since the same amendment:
+    // the condition is a property of the crawl, and a pre-0018 crawl of fifty
+    // thousand pages would otherwise write this sentence fifty thousand times.
+    title: "Thin-content check could not be run on this crawl",
     explanation:
-      "The thin-content check counts the words a reader can reach, which means it has to know which parts of the page the markup hides. This page was crawled before the engine recorded that, so the number the check needs does not exist for it — only the older count of every word in the HTML, which includes hidden menus, accordions and templates and is often several times larger. The page was therefore left unjudged rather than judged on the wrong number, which on a site with heavy hidden chrome would have called a thin page healthy.",
+      "Judging whether a page is thin needs a count of its own content — the words that are not the header, navigation, sidebar or footer — and not one page in this crawl has one. That is what a crawl taken before the engine started measuring a page's own content separately looks like. The check was therefore left unrun rather than reported as clean, because a site with no thin pages and a crawl that never measured any produce exactly the same empty result, and only one of them is good news. The older count of every word in the document is no substitute and was deliberately not used: on a site whose pages each carry several hundred words of shared menus and footers, it calls an empty page a healthy one. The finding says how many indexable pages went unjudged.",
     howToFix:
-      "Re-crawl the site. The count is taken while the page is being read, so it cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
+      "Re-crawl the site. The count is taken while each page is being read and cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
   },
   "content.placeholder": {
     // Accuracy: the analyzer matches the literal phrase "lorem ipsum" in
@@ -749,11 +766,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // pairs across unrelated templates that shared a header, a menu and a
     // footer. The 50-word floor is stated for the same reason: a reader who
     // knows two thin pages will not be paired here can stop looking for them.
-    title: "Near-duplicate main content: at most 3 of 64 fingerprint bits differ",
+    //
+    // Phase 19 §11: ONE FINDING PER PAGE, not per pair, and the copy has to be
+    // written for a reader looking at one URL and a count. A cluster of 79
+    // near-identical pages is 3,081 pairs and 79 decisions; the row says how
+    // many partners this page has and names the closest of them.
+    title: "Near-duplicate main content (within 3 of 64 fingerprint bits of another page)",
     explanation:
-      "These two pages say almost the same thing. The comparison is made on a fingerprint of each page's main content — what sits inside the page's main region, or the page with its header, navigation, sidebar and footer removed — so two pages are not called similar merely for sharing the same menus and furniture, which on a templated site can be most of the words on the screen. The two fingerprints here differ by at most three bits out of sixty-four: in practice, pages that differ only in a product name, a location or a line of boilerplate. Both pages must carry at least 50 words of their own before they are compared at all, so pages with almost no content are left to the thin-content check instead. This measures how alike the text is and nothing more: it says nothing about who wrote what. What it does mean is that search engines group pages this similar and show one of them, so a set of near-identical pages tends to rank as a single page rather than as many.",
+      "This page says almost the same thing as at least one other page on the site. The comparison is made on a fingerprint of each page's main content — what sits inside the page's main region, or the page with its header, navigation, sidebar and footer removed — so two pages are not called similar merely for sharing the same menus and furniture, which on a templated site can be most of the words on the screen. Fingerprints within three bits out of sixty-four count as near-identical: in practice, pages that differ only in a product name, a location or a line of boilerplate. The finding says how many such pages this one has and lists the closest few with their distances, so a page that belongs to a cluster of forty is reported once, against that page, rather than as forty-odd separate comparisons. Both sides must carry at least 50 words of their own before they are compared at all, so pages with almost no content are left to the thin-content check instead. This measures how alike the text is and nothing more: it says nothing about who wrote what. What it does mean is that search engines group pages this similar and show one of them, so a set of near-identical pages tends to rank as a single page rather than as many.",
     howToFix:
-      "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped. Where the two pages are a base URL and a filtered or parameterised version of it, the fix is a canonical tag on the variant pointing at the base, and pages that already carry one are not reported here.",
+      "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped. Where this page is a filtered or parameterised version of another, the fix is a canonical tag on the variant pointing at the base, and pages that already carry one are neither reported here nor counted as anybody's near-duplicate. Start with the pages that name the most partners: they are usually one template that stopped being filled in.",
   },
   "content.near-duplicate-skipped": {
     // A marker: it reports the limit of this crawl's evidence, never a fault on

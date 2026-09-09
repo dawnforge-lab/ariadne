@@ -27,10 +27,11 @@ import { crawls, pages } from "../../src/db/schema.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_HAMMING,
+  NEAR_DUPLICATE_CLOSEST,
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
-  NEAR_DUPLICATE_PAIR_CAP,
   SOFT_404_WORDS,
   TEMPLATE_HAMMING,
+  THIN_WORDS,
   contentRules,
 } from "../../src/rules/query/content.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
@@ -110,12 +111,16 @@ describe("the test corpus", () => {
 });
 
 describe("contentRules metadata", () => {
-  it("defines the three rules of the plan's table, and Phase 19's marker", () => {
+  it("defines the four content rules and their two markers", () => {
     expect(contentRules.map((r) => r.id).sort()).toEqual([
       "content.exact-duplicate",
       "content.near-duplicate",
       "content.near-duplicate-skipped",
       "content.soft-404",
+      // Phase 19 §11 moved these two here from the page rules: the thin floor
+      // reads `main_word_count`, whose null only the crawl's census can read.
+      "content.thin",
+      "content.thin-skipped",
     ]);
   });
 
@@ -129,6 +134,10 @@ describe("contentRules metadata", () => {
       // The marker claims the check whose near-duplicate half it stands in for,
       // and only that one: the exact-duplicate half of CHECK-39 still runs.
       "content.near-duplicate-skipped": [["CHECK-39"], "info", "content"],
+      // Unchanged by the move: same checks, same severity, same category as
+      // when both were page rules. Only the kind and the column moved.
+      "content.thin": [["CHECK-40", "CHECK-13"], "warning", "content"],
+      "content.thin-skipped": [["CHECK-40", "CHECK-13"], "info", "content"],
     });
   });
 
@@ -137,17 +146,22 @@ describe("contentRules metadata", () => {
   // this file carries it — a second would mean a live rule had quietly become a
   // marker — and the reason names the cause and what answers the check, which is
   // §6's rubric for every marker string.
-  it("declares exactly one marker, whose reason says what would answer the check", () => {
+  it("declares two markers, whose reasons say what would answer each check", () => {
     const markers = contentRules.filter((r) => r.marker !== undefined);
-    expect(markers.map((r) => r.id)).toEqual(["content.near-duplicate-skipped"]);
-    expect(markers[0]!.marker).toContain("re-crawl");
-    // It states what the census OBSERVED. The predicate also fires on a current
-    // crawl whose every page turned out to have no main content, so a reason
-    // opening "This crawl ran before…" asserts a cause the rule never
-    // established; the age of the crawl is offered as the likely explanation
-    // rather than claimed as the finding.
-    expect(markers[0]!.marker).toMatch(/^No page in this crawl carries a fingerprint/);
-    expect(markers[0]!.marker).not.toMatch(/^This crawl ran before/);
+    expect(markers.map((r) => r.id)).toEqual([
+      "content.near-duplicate-skipped",
+      "content.thin-skipped",
+    ]);
+    for (const m of markers) {
+      expect(m.marker, m.id).toContain("re-crawl");
+      // Each states what the census OBSERVED. The predicate also fires on a
+      // current crawl whose every page turned out to have no main content, so a
+      // reason opening "This crawl ran before…" asserts a cause the rule never
+      // established; the age of the crawl is offered as the likely explanation
+      // rather than claimed as the finding.
+      expect(m.marker, m.id).toMatch(/^No page in this crawl carries a/);
+      expect(m.marker, m.id).not.toMatch(/^This crawl ran before/);
+    }
   });
 
   it("every rule is a query rule carrying its own copy and a ruleset version", () => {
@@ -692,7 +706,10 @@ describe("the content rules against the database", () => {
       expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
-    it("reports the pair, the distance, and the two page types", async () => {
+    // Phase 19 §11: ONE FINDING PER PAGE. Two near-identical pages are two
+    // findings — each page's own row, naming the other — where the pair shape
+    // produced one row whose two URLs a reader had to sort out for themselves.
+    it("reports each page, its count and its closest partners", async () => {
       // The whole round trip: `simhash64` in this process, `BigInt.asIntN(64, …)`
       // into a signed bigint column, four band comparisons and a `bit_count`
       // XOR in Postgres — and a distance that agrees with `hammingDistance`.
@@ -703,28 +720,32 @@ describe("the content rules against the database", () => {
       ]);
 
       const found = await run(ID, crawlId);
-      expect(found).toHaveLength(1);
+      expect(found).toHaveLength(2);
+      // Equal counts, so the tie is broken by URL — the order is total and
+      // does not depend on which row the join met first.
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/help/returns"), url("/returns")]);
       expect(found[0]!).toMatchObject({
         ruleId: ID,
         severity: "warning",
-        // The pair is reported in URL order, and lands on the first of them.
         pageId: ids.get("/help/returns"),
         pageUrl: url("/help/returns"),
+        // The page IS the finding's identity now, so it is also the dedupe key.
+        dedupeKey: url("/help/returns"),
       });
       expect(found[0]!.evidence).toEqual({
-        urlA: url("/help/returns"),
-        urlB: url("/returns"),
-        hamming: 3,
-        pageTypeA: "/help/:slug",
-        pageTypeB: "/:slug",
-        // Each page's own main-content length, travelling with its own URL.
-        mainWordsA: wordsIn(RETURNS_EDITED),
-        mainWordsB: wordsIn(RETURNS),
+        mainWords: wordsIn(RETURNS_EDITED),
+        nearDuplicates: 1,
+        closest: [{ url: url("/returns"), hamming: 3, mainWords: wordsIn(RETURNS) }],
       });
-      expect(found[0]!.dedupeKey.length).toBeGreaterThan(0);
+      // And the other end of the same relationship, stated from the other page.
+      expect(found[1]!.evidence).toEqual({
+        mainWords: wordsIn(RETURNS),
+        nearDuplicates: 1,
+        closest: [{ url: url("/help/returns"), hamming: 3, mainWords: wordsIn(RETURNS_EDITED) }],
+      });
     });
 
-    it("gives the same pair the same dedupe key however the rows are ordered", async () => {
+    it("gives one page the same finding however the rows were inserted", async () => {
       const first = await newCrawl();
       const second = await newCrawl();
       await addPages(first, [
@@ -732,7 +753,9 @@ describe("the content rules against the database", () => {
         { path: "/help/returns", text: RETURNS_EDITED },
       ]);
       // Inserted in the other order, so the ids — and therefore the join's
-      // a/b assignment — come out the other way round.
+      // a/b assignment — come out the other way round. The pair form had to
+      // hash a sorted URL pair to survive this; a per-page finding is keyed by
+      // the page and cannot depend on the join's direction at all.
       await addPages(second, [
         { path: "/help/returns", text: RETURNS_EDITED },
         { path: "/returns", text: RETURNS },
@@ -777,8 +800,10 @@ describe("the content rules against the database", () => {
         { path: "/b", text: RETURNS, contentHash: "two" },
       ]);
       const found = await run(ID, crawlId);
-      expect(found).toHaveLength(1);
-      expect(found[0]!.evidence["hamming"]).toBe(0);
+      expect(found).toHaveLength(2);
+      expect(found[0]!.evidence["closest"]).toEqual([
+        { url: url("/b"), hamming: 0, mainWords: wordsIn(RETURNS) },
+      ]);
     });
 
     it("counts only indexable 200 pages", async () => {
@@ -824,8 +849,8 @@ describe("the content rules against the database", () => {
       ]);
 
       const found = await run(ID, crawlId);
-      expect(found).toHaveLength(1);
-      expect(found[0]!.evidence["hamming"]).toBe(3);
+      expect(found).toHaveLength(2);
+      expect(found[0]!.evidence["closest"]).toMatchObject([{ hamming: 3 }]);
     });
 
     it("says nothing about a pair with too little content of its own", async () => {
@@ -844,6 +869,8 @@ describe("the content rules against the database", () => {
     });
 
     it("needs BOTH sides over the floor, not one", async () => {
+      // And neither page is reported: the one under the floor is not a
+      // candidate, and the one over it has nothing left to be similar to.
       const crawlId = await newCrawl();
       await addPages(crawlId, [
         { path: "/a", text: RETURNS, mainWordCount: 400 },
@@ -862,15 +889,20 @@ describe("the content rules against the database", () => {
       ]);
 
       const found = await run(ID, crawlId);
-      expect(found).toHaveLength(1);
+      expect(found).toHaveLength(2);
       expect(found[0]!.evidence).toMatchObject({
-        mainWordsA: NEAR_DUPLICATE_MIN_MAIN_WORDS,
-        mainWordsB: NEAR_DUPLICATE_MIN_MAIN_WORDS,
+        mainWords: NEAR_DUPLICATE_MIN_MAIN_WORDS,
+        closest: [
+          { url: url("/b"), hamming: 3, mainWords: NEAR_DUPLICATE_MIN_MAIN_WORDS },
+        ],
       });
     });
 
     // §1 again, on the rule that reported the same two parameter variants under
-    // its own name. One canonicalised member removes the PAIR, not half of it.
+    // its own name. A canonicalised page is neither reported NOR counted as
+    // anybody else's near-duplicate — one filter on both sides of the join and
+    // a third inside the lateral, so the count and the list agree about what a
+    // partner is.
     it("does not pair a page with the base URL it is canonicalised to", async () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, [
@@ -890,7 +922,7 @@ describe("the content rules against the database", () => {
         { path: "/a", text: RETURNS, canonicalHtml: url("/a") },
         { path: "/b", text: RETURNS_EDITED, canonicalHtml: url("/b") },
       ]);
-      expect(await run(ID, crawlId)).toHaveLength(1);
+      expect(await run(ID, crawlId)).toHaveLength(2);
     });
 
     it("is silent — and does not throw — on a crawl with no main fingerprint", async () => {
@@ -905,34 +937,83 @@ describe("the content rules against the database", () => {
       expect(await run(ID, crawlId)).toHaveLength(0);
     });
 
-    it("caps the pairs and says the list was cut, without inventing a total", async () => {
-      // 33 pages one bit apart from nothing — same text, distinct hashes — are
-      // 528 pairs. The rule reports 500 and says so; it does NOT claim to know
-      // the total, because counting every pair is the unbounded scan the cap
-      // exists to avoid.
+    // THE SHAPE THE AMENDMENT WAS WRITTEN FOR. A cluster of eight templated
+    // pages is 28 pairs and eight decisions; this is what the eight rows say.
+    it("collapses a cluster into one row per page, five closest each", async () => {
       const crawlId = await newCrawl();
       await addPages(
         crawlId,
-        Array.from({ length: 33 }, (_, i) => ({
-          path: `/copy/${String(i).padStart(3, "0")}`,
+        Array.from({ length: 8 }, (_, i) => ({
+          path: `/cluster/${String(i)}`,
           text: RETURNS,
-          contentHash: `h${i}`,
+          // Distinct hashes, so this is the near-duplicate rule's business
+          // rather than the exact rule's.
+          contentHash: `c${String(i)}`,
         })),
       );
 
       const found = await run(ID, crawlId);
-      expect(found).toHaveLength(NEAR_DUPLICATE_PAIR_CAP);
-      expect(found[NEAR_DUPLICATE_PAIR_CAP - 1]!.evidence["truncated"]).toEqual({
-        reported: NEAR_DUPLICATE_PAIR_CAP,
-        atLeast: NEAR_DUPLICATE_PAIR_CAP + 1,
-      });
-      // Every reported pair is a real pair, whatever the join's order was.
+      expect(found).toHaveLength(8);
       for (const f of found) {
-        expect(f.evidence["hamming"]).toBe(0);
-        expect(String(f.evidence["urlA"]) < String(f.evidence["urlB"])).toBe(true);
+        // Every page sees the other seven — the join is symmetric, so a page's
+        // count does not depend on where its id sorts.
+        expect(f.evidence["nearDuplicates"], String(f.pageUrl)).toBe(7);
+        const closest = f.evidence["closest"] as { url: string; hamming: number }[];
+        expect(closest, String(f.pageUrl)).toHaveLength(NEAR_DUPLICATE_CLOSEST);
+        // All at distance 0, so the tie-break is the URL — and the page itself
+        // is never one of its own near-duplicates.
+        expect(closest.map((c) => c.url)).toEqual([...closest.map((c) => c.url)].sort());
+        expect(closest.map((c) => c.url)).not.toContain(f.pageUrl);
       }
-      expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(NEAR_DUPLICATE_PAIR_CAP);
+      expect(found.map((f) => f.pageUrl)).toEqual([...found.map((f) => f.pageUrl)].sort());
+      // No truncation note: eight rows is the whole of it, and the absence of
+      // the note is what says so.
+      for (const f of found) expect(f.evidence["truncated"]).toBeUndefined();
     });
+
+    it("lists the closest partners first, whatever their URLs", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/zulu", text: RETURNS, contentHash: "z" },
+        // 0 bits away, sorts last by URL; 3 bits away, sorts first. Order by
+        // distance, ties by URL — so this list is not the alphabet.
+        { path: "/alpha", text: RETURNS_EDITED },
+        { path: "/yankee", text: RETURNS, contentHash: "y" },
+      ]);
+
+      const found = await run(ID, crawlId);
+      const zulu = found.find((f) => f.pageUrl === url("/zulu"));
+      expect(zulu!.evidence["closest"]).toEqual([
+        { url: url("/yankee"), hamming: 0, mainWords: wordsIn(RETURNS) },
+        { url: url("/alpha"), hamming: 3, mainWords: wordsIn(RETURNS_EDITED) },
+      ]);
+    });
+
+    it("caps the pages, orders the noisiest first and quotes the exact total", async () => {
+      // One more page than the cap: 201 pages of one text with distinct hashes,
+      // so every page has 200 near-duplicates. The listing is cut and the total
+      // is EXACT — the aggregate counted every page, which is what the pair
+      // shape could not do at any price.
+      const crawlId = await newCrawl();
+      await addPages(
+        crawlId,
+        Array.from({ length: URL_FINDING_CAP + 1 }, (_, i) => ({
+          path: `/copy/${String(i).padStart(3, "0")}`,
+          text: RETURNS,
+          contentHash: `h${String(i)}`,
+        })),
+      );
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found[URL_FINDING_CAP - 1]!.evidence["truncated"]).toEqual({
+        reported: URL_FINDING_CAP,
+        total: URL_FINDING_CAP + 1,
+      });
+      // One row per page, and never two rows about one page.
+      expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(URL_FINDING_CAP);
+      for (const f of found) expect(f.evidence["nearDuplicates"]).toBe(URL_FINDING_CAP);
+    }, 60_000);
 
     it("refuses a crawl id nothing knows", async () => {
       await expect(run(ID, "crawl_nope")).rejects.toThrow(/no such crawl/);
@@ -1024,7 +1105,294 @@ describe("the content rules against the database", () => {
 
       expect(await run("content.near-duplicate", old)).toHaveLength(0);
       expect(await run(ID, old)).toHaveLength(1);
-      expect(await run("content.near-duplicate", current)).toHaveLength(1);
+      // Two findings on the current crawl, one per page: the rule reports pages
+      // rather than pairs since §11.
+      expect(await run("content.near-duplicate", current)).toHaveLength(2);
+      expect(await run(ID, current)).toHaveLength(0);
+    });
+
+    it("refuses a crawl id nothing knows", async () => {
+      await expect(run(ID, "crawl_nope")).rejects.toThrow(/no such crawl/);
+    });
+  });
+
+  /**
+   * `content.thin`, a QUERY rule since Phase 19 §11 — it read
+   * `renderable_word_count` off one row until the floor moved onto the words a
+   * page has of its OWN, whose null means two different things and only the
+   * crawl's census says which (see `thinFindings`). Its cases moved here from
+   * test/rules/on-page.test.ts with it.
+   */
+  describe("content.thin", () => {
+    const ID = "content.thin";
+
+    it("is silent on a page with plenty of content of its own", async () => {
+      const crawlId = await newCrawl();
+      // The corpus texts are shorter than the floor (145 and 93 words), so a
+      // page meant to be healthy states its own main count — the fixtures were
+      // written for a similarity threshold, not for this one.
+      await addPages(crawlId, [{ path: "/returns", text: RETURNS, mainWordCount: 400 }]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("boundary: 149 words of its own fire, 150 do not", async () => {
+      expect(THIN_WORDS).toBe(150);
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/thin", text: RETURNS, wordCount: 900, mainWordCount: THIN_WORDS - 1 },
+        { path: "/fine", text: SIZING, wordCount: 900, mainWordCount: THIN_WORDS },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: ID,
+        severity: "warning",
+        pageId: ids.get("/thin"),
+        pageUrl: url("/thin"),
+        dedupeKey: url("/thin"),
+      });
+      expect(found[0]!.evidence).toEqual({
+        mainWords: THIN_WORDS - 1,
+        wordCount: 900,
+        threshold: THIN_WORDS,
+      });
+    });
+
+    // THE DEFECT THE AMENDMENT WAS WRITTEN FOR, in miniature. On the crawl
+    // behind Phase 19 every page carried ~900 words of header, menu and footer
+    // around ~100 words of its own, so no page on the site was ever under the
+    // floor on any whole-page count and this rule fired zero times.
+    it("judges the page's own words, not the whole document's", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/empty-template", text: RETURNS, wordCount: 1005, mainWordCount: 105 },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({ mainWords: 105, wordCount: 1005 });
+      // And the converse: a page whose own content clears the floor is silent
+      // however much furniture the document carries around it.
+      const other = await newCrawl();
+      await addPages(other, [
+        { path: "/real", text: RETURNS, wordCount: 1300, mainWordCount: 400 },
+      ]);
+      expect(await run(ID, other)).toHaveLength(0);
+    });
+
+    // Hard rule 1, the sharpest case of it in this file: a page with NO main
+    // content at all stores null, and null must not be a page that slips
+    // through unjudged. On a crawl that measured main content, null is the
+    // measurement — nothing — and the finding says so in words as well as in
+    // the number, because `mainWords: 0` alone reads as a count.
+    it("reports a page with no main content at all as zero words", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        // A page whose whole body is chrome: the analyzer found nothing to
+        // fingerprint and wrote null in both main columns.
+        { path: "/chrome-only", text: RETURNS, wordCount: 830, mainText: null },
+        // …on a crawl that plainly DID measure main content elsewhere.
+        { path: "/real", text: SIZING, mainWordCount: 400 },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.pageUrl).toBe(url("/chrome-only"));
+      expect(found[0]!.evidence).toEqual({
+        mainWords: 0,
+        note: "no main-content text at all",
+        wordCount: 830,
+        threshold: THIN_WORDS,
+      });
+    });
+
+    it("is silent on the same page when the crawl measured nothing at all", async () => {
+      // The pre-0018 crawl: every row null, and nothing may be concluded about
+      // any of them. `content.thin-skipped` is what speaks here — asserted as a
+      // partition in its own describe below.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainText: null },
+        { path: "/b", text: SIZING, mainText: null },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("says nothing about a page the analyzer never read", async () => {
+      // A 200 that served a PDF: no analysis, null in every text column. That
+      // is a page with no text evidence rather than a page with no content,
+      // and this rule has always been quiet about it — `word_count is not
+      // null` is what keeps the two apart.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        // No `text`: the analyzer never ran, so every text column is null.
+        { path: "/file.pdf" },
+        { path: "/real", text: SIZING, mainWordCount: 400 },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("judges only indexable 200 pages — thin on purpose is fine", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/noindex", text: RETURNS, mainWordCount: 10, robotsMeta: "noindex" },
+        {
+          path: "/gone",
+          text: RETURNS,
+          mainWordCount: 10,
+          statusCode: 404,
+          fetchClass: "client_error",
+        },
+        { path: "/real", text: SIZING, mainWordCount: 400 },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    // §1 extended to this rule by §11: a parameter variant that defers to its
+    // base URL is the same page said twice, and the page it defers to is where
+    // the content is judged. Without this, a faceted site reports its whole
+    // facet space as thin the day it does the right thing.
+    it("does not judge a page canonicalised elsewhere", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        {
+          path: "/collections/sale?srsltid=abc",
+          text: RETURNS,
+          mainWordCount: 20,
+          canonicalHtml: url("/collections/sale"),
+        },
+        { path: "/collections/sale", text: RETURNS, mainWordCount: 400 },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("still judges a page that declares its own URL canonical", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/thin", text: RETURNS, mainWordCount: 20, canonicalHtml: url("/thin") },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(1);
+    });
+
+    it("lists the thinnest pages first and caps with an exact total", async () => {
+      // The order is a decision about what a CUT list should hold: the pages
+      // with nothing on them at all, not whatever the site names early.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/aaa", text: RETURNS, mainWordCount: 120 },
+        { path: "/bbb", text: RETURNS, wordCount: 500, mainText: null },
+        { path: "/ccc", text: RETURNS, mainWordCount: 60 },
+      ]);
+      expect((await run(ID, crawlId)).map((f) => f.pageUrl)).toEqual([
+        url("/bbb"),
+        url("/ccc"),
+        url("/aaa"),
+      ]);
+
+      const big = await newCrawl();
+      await addPages(
+        big,
+        Array.from({ length: URL_FINDING_CAP + 3 }, (_, i) => ({
+          path: `/thin/${String(i).padStart(3, "0")}`,
+          text: RETURNS,
+          mainWordCount: 40,
+        })),
+      );
+      const found = await run(ID, big);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found[URL_FINDING_CAP - 1]!.evidence["truncated"]).toEqual({
+        reported: URL_FINDING_CAP,
+        total: URL_FINDING_CAP + 3,
+      });
+    }, 60_000);
+
+    it("refuses a crawl id nothing knows", async () => {
+      await expect(run(ID, "crawl_nope")).rejects.toThrow(/no such crawl/);
+    });
+  });
+
+  describe("content.thin-skipped", () => {
+    const ID = "content.thin-skipped";
+
+    it("fires once on a crawl where no page carries a main-content count", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainText: null },
+        { path: "/b", text: RETURNS_EDITED, mainText: null },
+        { path: "/c", text: SIZING, mainText: null },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: ID,
+        severity: "info",
+        // Site-scoped since §11: the condition is a property of the crawl, and
+        // a pre-0018 crawl of fifty thousand pages would otherwise write fifty
+        // thousand copies of one sentence.
+        pageId: null,
+        pageUrl: null,
+        dedupeKey: "site",
+      });
+      expect(found[0]!.evidence).toEqual({ indexablePages: 3, threshold: THIN_WORDS });
+    });
+
+    it("is silent on a crawl where the measurement exists", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS },
+        { path: "/b", text: SIZING },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a current crawl where only SOME pages have no main content", async () => {
+      // Those pages were measured — at nothing — and `content.thin` reports
+      // them as zero. A marker here would say the check did not run on a crawl
+      // where it ran and found the worst case it can find.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainWordCount: 400 },
+        { path: "/chrome-only", text: SIZING, mainText: null },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+      expect(await run("content.thin", crawlId)).toHaveLength(1);
+    });
+
+    it("is silent on a crawl with no auditable pages at all", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        {
+          path: "/gone",
+          text: RETURNS,
+          mainText: null,
+          statusCode: 404,
+          fetchClass: "client_error",
+        },
+        { path: "/noindex", text: SIZING, mainText: null, robotsMeta: "noindex" },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    // The pair is a partition, exactly as the near-duplicate pair is: on any
+    // one crawl either the rule ran or the marker fired, and the rule's silence
+    // is never left unexplained.
+    it("partitions with the rule: the marker fires exactly where the rule cannot run", async () => {
+      const old = await newCrawl();
+      await addPages(old, [
+        { path: "/a", text: RETURNS, mainText: null },
+        { path: "/b", text: RETURNS_EDITED, mainText: null },
+      ]);
+      const current = await newCrawl();
+      await addPages(current, [
+        { path: "/a", text: RETURNS, mainWordCount: 20 },
+        { path: "/b", text: RETURNS_EDITED, mainWordCount: 400 },
+      ]);
+
+      expect(await run("content.thin", old)).toHaveLength(0);
+      expect(await run(ID, old)).toHaveLength(1);
+      expect(await run("content.thin", current)).toHaveLength(1);
       expect(await run(ID, current)).toHaveLength(0);
     });
 

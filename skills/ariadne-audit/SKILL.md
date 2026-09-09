@@ -236,33 +236,29 @@ of three ways:
     only thing that licenses reporting it as one.
 
   On the Phase 6 gate site `links.orphan` answered `{count: 200, truncated: true,
-  total: 243}` and `content.near-duplicate` `{count: 500, truncated: true, atLeast:
-  501}`. Quoting the counts would have understated the first by 43 pages and stated
-  the second as a fact nothing had counted. (Where a `pageType` filter is on, `count`
+  total: 243}`: quoting the count would have understated it by 43 pages. Some rules
+  can only give a lower bound (`atLeast` instead of `total`) because counting the
+  rest would mean running the scan the cap exists to stop —
+  `hreflang.alternates-not-crawled` is one — and there the number is not a
+  magnitude, only a floor under one. (Where a `pageType` filter is on, `count`
   is that cohort's rows while `total`/`atLeast` stay the whole rule's magnitude — the
   two are not two ends of one fraction.)
 
 - **A BILLED AUDIT ASKS FOR THE WHOLE PICTURE, NOT A SNAPSHOT: pass
-  `findingCap: null` to `crawl_start`.** The caps above are the default — 200
-  findings per listing rule, 500 near-duplicate pairs — and they exist for a first
-  look at an unknown site, where a bounded answer is the point. They are the wrong
-  setting for work a client is paying for: "243 orphans, here are 200" is a list the
-  client cannot work through to the end, and `atLeast: 501` cannot tell them whether
-  the real number is 502 or 40,000.
+  `findingCap: null` to `crawl_start`.** The cap above is the default — 200
+  findings per listing rule — and it exists for a first look at an unknown site,
+  where a bounded answer is the point. It is the wrong setting for work a client is
+  paying for: "243 orphans, here are 200" is a list the client cannot work through
+  to the end.
 
-  `findingCap: null` uncaps every listing rule and the pair reporting cap together.
-  `findingCap: <n>` sets a number instead — and note that a stated number binds the
-  pairs too, so `findingCap: 200` is not the same as omitting the field (which
-  leaves pairs at 500).
+  `findingCap: null` uncaps every listing rule. `findingCap: <n>` sets a number
+  instead, and it means the same number everywhere — there is one budget, not one
+  per rule family.
 
   **Keep reading the `truncated` note, not the setting.** The rule above does not
   change: a note means the list is incomplete, and only its ABSENCE means it is
-  complete. An uncapped run normally writes none — nothing truncated it — but
-  "uncapped" is not a promise of "noteless". `content.near-duplicate` has a
-  100,000-pair scan ceiling that `findingCap` cannot lift (it is the engine's memory
-  contract, not a preference), so an uncapped run that reaches it carries an
-  `atLeast` note like any other truncated listing. Never infer completeness from the
-  crawl's `findingCap`; infer it from the absence of the note.
+  complete. Never infer completeness from the crawl's `findingCap`; infer it from
+  the absence of the note.
 
   **It is set at `crawl_start` and nowhere else.** `crawl_rules` has no cap argument:
   the choice lives on the crawl row so that re-judging the crawl months later
@@ -280,24 +276,23 @@ of three ways:
   | `meta-description.duplicate` | 200 in 3.0s | 1,000 in 13.7s |
   | `h1.duplicate-text` | 200 in 2.9s | 1,000 in 11.7s |
   | `content.exact-duplicate` | 200 in 4.5s | 1,000 in 18.4s |
-  | `content.near-duplicate` | 500 in 0.02s | 3,000 in 0.20s |
+  | `content.near-duplicate` | 200 in 0.02s | 3,000 in 0.20s |
 
   About a minute of extra wall time on a 20k crawl, at ~116MB RSS. That is the
   billing story: the whole picture is minutes, not hours.
 
-  **The one ceiling `findingCap` cannot lift, and what to do when you meet it.**
-  `content.near-duplicate` is the only rule whose cap bounds a *scan* rather than a
-  listing, and on a site whose pages are near-identical in the thousands the pair
-  count is quadratic. Left uncapped it broke the engine's 512MB memory contract at
-  2,000 degenerate pages (521MB RSS), produced 3,268,808 pairs at 2.0GB at 5,000,
-  and exhausted a 4GB heap at 20,000 — so the SCAN stops at **100,000 pairs** no
-  matter what `findingCap` says, and writes `{reported: 100000, atLeast: 100001}`.
-  Real sites are nowhere near that; the 20k table above is a badly templated one.
-  If you do meet the ceiling, report it as what it is: **the site has no distinct
-  content**, which is a finding in its own right and a far more useful sentence than
-  an enumeration of a hundred thousand pairs. Quote the `atLeast`, say the scan
-  stopped there, and take the magnitude from `content.template-similarity` and the
-  duplicate-group rules rather than from the pair list.
+  **A site whose pages are near-identical in the thousands.**
+  `content.near-duplicate` reports one finding per PAGE — `{mainWords,
+  nearDuplicates, closest}`, where `closest` names up to five partners with their
+  distances — so a cluster of 900 templated pages is 900 rows saying "899
+  near-duplicates", not the 404,550 pairs between them. Do not add the counts up:
+  every member of a cluster reports every other member, so the sum is roughly the
+  square of the thing you want. Sort by `nearDuplicates`, take the cluster, and
+  report it as what it is: **the site has no distinct content on that template**,
+  which is a finding in its own right and a far more useful sentence than an
+  enumeration. Size it with `content.template-similarity` and the duplicate-group
+  rules beside it.
+
 - **Evidence shapes belong to their rules.** `issue_urls` returns `{url, evidence}`
   and the evidence's fields are whatever that rule wrote — read what it gives you
   rather than expecting a fixed set. `url` is null on a site-scoped finding (a fact
@@ -435,25 +430,30 @@ An audit that copies an older findings file forward will under-report all five:
   `h1.duplicate-skipped` (info) is the honest silence: a
   pre-Phase-7 crawl stored no heading text, so the check is NOT MEASURED on it rather
   than clean, and a re-crawl is what answers it.
-- **Words a visitor can actually see.** `pages_query` returns `renderableWordCount`
-  beside `wordCount` — the same count minus the words the page's own markup hides
-  (`hidden`, inline `display:none`, a closed `<dialog>` or `<details>`) — and it is
-  the number `content.thin` judges on. Quote the renderable figure when you report
-  thin content; the gap between the two is the template's furniture, and
-  `content.metrics-by-type` carries both distributions per template so you can size
-  it.
+- **Words a visitor can actually see, and words the page can call its own.**
+  `pages_query` returns `renderableWordCount` beside `wordCount` — the same count
+  minus the words the page's own markup hides (`hidden`, inline `display:none`, a
+  closed `<dialog>` or `<details>`) — and it is the number `content.soft-404`'s
+  length ceiling is applied to. `content.thin` judges a third number, which it
+  carries in its own evidence as `mainWords`: the words inside the page's `<main>`,
+  or its body minus the `<nav>`, `<header>`, `<footer>` and `<aside>` subtrees. That
+  is the count that survives a template — a page can ship 900 words and say 90 of
+  them itself — so quote `mainWords` when you report thin content, with the
+  whole-document count beside it as the size of the furniture.
+  `content.metrics-by-type` carries the whole-document distributions per template so
+  you can size that.
 
-  **The two null shapes are different facts, and only one of them is a gap.** A
-  `wordCount` with a NULL `renderableWordCount` is a row a pre-Phase-7 analyzer
-  wrote: the page was read, the column the floor now needs did not exist yet, and
-  the engine SAYS SO rather than falling back — `content.thin-skipped` (info) fires
-  per page, on the `links.orphan-skipped` / `robots.check-skipped` precedent. That
-  is NOT MEASURED, and a re-crawl is the fix, because a word count cannot be
-  recomputed from a database that does not store the HTML. **Null in BOTH columns is
-  not a skip at all**: the analyzer never produced text for that URL — a PDF, a 404,
-  anything with no body to read — and `content.thin` was always silent about those.
-  A re-crawl changes nothing there, and reporting it as unmeasured content would
-  invent a gap.
+  **Zero is a finding; unmeasured is not.** A page whose body is nothing but
+  navigation and footer is reported at `mainWords: 0` with `note: "no main-content
+  text at all"` — the emptiest page the site serves, named rather than skipped. A
+  crawl where NO page carries the count is a different thing: the check could not be
+  run, `content.thin-skipped` (info) says so once for the crawl, and a re-crawl is
+  the fix, because a word count cannot be recomputed from a database that does not
+  store the HTML. While that marker fires, an empty thin list is not evidence of
+  anything. And a page the analyzer never produced text for at all — a PDF, a 404,
+  anything with no body to read — is not in either group: `content.thin` has always
+  been silent about those, and reporting them as unmeasured content would invent a
+  gap.
 - **Click depth**, immediately below.
 
 **And two numbers that both measure a depth, one of which is not about the site.**
