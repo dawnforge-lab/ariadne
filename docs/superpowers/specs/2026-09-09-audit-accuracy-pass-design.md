@@ -213,3 +213,48 @@ and keeps its edits surgical.
   near-duplicate count with the main-content fingerprint, recorded beside the
   old 500.
 - The banned-word test green over all 100 rules (96 + 4 new).
+
+---
+
+## 11. Amendment at gate time (2026-09-09, after the fresh crawl)
+
+The fresh crawl of the same site at 0018 (`crawl_9278877e`, 547 pages) still
+produced 500 capped near-duplicate pairs, every one between pages whose
+`main_word_count` was 105 to 107 and whose fingerprints differed by 0 to 2
+bits. Fetching three of them shows why: this Shopify theme puts its newsletter
+block and its footer navigation INSIDE `<main>` (one `<footer>` landmark per
+`<main>`), so the "main content" of an empty `/pages/*` page is the heading
+plus 105 words of footer. Two decisions in §2 are therefore amended, and one
+rule the crawl showed to be chrome-blind in the same way is added to the scope.
+
+**§2 amended: chrome is excluded inside `<main>` too.** The fingerprint's
+text is the first rendered `<main>`'s visible text MINUS any `<nav>`,
+`<header>`, `<footer>`, `<aside>` subtree inside it; without a `<main>`, the
+body minus the same four. "A document that says where its content is has said
+so about the nav in it" was the original reasoning; the evidence says themes
+put footers in `<main>`. Same single pass: the chrome depth counter already
+exists, it now applies in both streams. The oracle follows.
+
+**§2 amended: near-duplicate reports pages, not pairs.** One finding per page
+that has at least one near-duplicate (hamming ≤ 3 on the main-content
+fingerprint, both ≥ 50 main words, both non-canonicalised), with evidence
+`{nearDuplicates: N, mainWords, closest: [{url, hamming, mainWords}] (up to 5,
+nearest first)}`. Findings are bounded by pages (cap 200 with `truncated`, the
+listing convention), and a cluster of 40 empty pages reads as 40 rows saying
+"39 near-duplicates" rather than 780 pairs capped at 500. Screaming Frog's
+"Near Duplicates" column is the precedent.
+
+**`content.thin` reads `main_word_count`.** On the fresh crawl 35 pages have
+fewer than 150 words of their own and 0 have fewer than 150 renderable words;
+`content.thin` fired on none. Thin is now `main_word_count < 150` (the floor
+unchanged) on auditable, non-canonicalised pages. On a crawl with no
+main-content fingerprint the existing `content.thin-skipped` marker fires with
+its reason extended to name this cause; the rule is silent there (hard rule
+1). The soft-404 template match keeps the whole-text `simhash`: it compares
+against the 404 probe sample, which is whole-text.
+
+**Expected on the fresh crawl after the amendment:** the empty `/pages/*`
+URLs drop below the 50-word floor (their own content is a heading), so
+`content.near-duplicate` no longer lists them; `content.thin` names them.
+Near-duplicate findings, if any remain, are per page. Recorded in
+`docs/gates/phase-19.md` §5 from a re-crawl.
