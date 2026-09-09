@@ -668,16 +668,22 @@
     }
     host.appendChild(el("h3", null,
       "Not checked on this crawl — " + groups.length + " rule(s)"));
+    // THE DEFINITION, ALWAYS. Above the rows, and above the empty-state line
+    // when there are none: the owner's question on reading this section was
+    // "what does not checked mean? why hasn't it been checked?", and a heading
+    // that only makes sense to whoever built the engine is what provoked it.
+    // A reader who meets the section for the first time — with rows or without
+    // — gets the meaning before they get the list (Phase 19 §6).
+    host.appendChild(el("p", "note",
+      "A check is 'not checked' when the engine could not answer it on this crawl: a " +
+      "setting this crawl ran with, a limit it reached, or something the site did that " +
+      "made the question undecidable. Each row names the check and the reason. " +
+      "Nothing here is a site problem."));
     if (groups.length === 0) {
       host.appendChild(el("p", "note",
         "Every check the engine can make was made on this crawl."));
       return;
     }
-    host.appendChild(el("p", "note",
-      "These rules report that a check COULD NOT BE ANSWERED on this crawl — a page the " +
-      "crawl was refused, a robots.txt it could not read, a pass that was never run. " +
-      "Nothing here is a site issue: each row says what stopped the check, and the " +
-      "checks behind it are unanswered rather than passed."));
     for (var g = 0; g < groups.length; g++) host.appendChild(ruleRow(groups[g], copy));
   }
 
@@ -719,8 +725,14 @@
       // A marker's reason, in the registry's own words, beside its copy: WHY
       // this check has no answer on this crawl. Only a marker carries one, and
       // a row carrying one is only ever rendered in the fourth section.
+      //
+      // "Why:" and not "Not measured:" — the old label was this engine's own
+      // vocabulary for the state, said a second time under a heading that had
+      // already said it, and it left the sentence after it looking like a
+      // verdict on the site. The reason strings themselves are now plain
+      // sentences naming the cause and what would answer the check (§6).
       if (typeof rule.marker === "string") {
-        row.appendChild(el("p", "why", "Not measured: " + rule.marker));
+        row.appendChild(el("p", "why", "Why: " + rule.marker));
       }
     }
 

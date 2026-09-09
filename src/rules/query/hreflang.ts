@@ -881,8 +881,9 @@ export const hreflangRules: QueryRule[] = [
     ...copyFor(NOT_CRAWLED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "alternates on other hosts were not fetched by this crawl; crawl those hosts, or " +
-      "supply them as additional start URLs, to check their return links",
+      "The language alternates these pages name were never requested by this crawl — most of " +
+      "them sit on other domains — so nothing about them was checked; crawl those domains too, " +
+      "or add them as extra starting URLs.",
     run: (db, crawlId) => alternatesNotCrawledFindings(db, crawlId),
   }),
 ];

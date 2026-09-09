@@ -72,8 +72,8 @@ describe("hreflangRules metadata", () => {
     ]);
     const marker = rule("hreflang.alternates-not-crawled").marker!;
     // A reason names the cause AND what would answer the check (Phase 19 §6).
-    expect(marker).toMatch(/not fetched by this crawl/);
-    expect(marker).toMatch(/crawl those hosts/);
+    expect(marker).toMatch(/never requested by this crawl/);
+    expect(marker).toMatch(/crawl those domains/);
   });
 
   it("every rule is a query rule carrying copy and a ruleset version", () => {

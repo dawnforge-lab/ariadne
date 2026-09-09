@@ -559,16 +559,17 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * on both sides of the join, so one canonicalised member removes the pair
  * rather than half of it.
  *
- * **THE BAND INDEXES DO NOT COVER THIS COLUMN, and that is a known open cost.**
- * `pages_simhash_band0..3` (migration 0004) are expression indexes on
- * `simhash`; nothing indexes `main_simhash`, so the four band predicates below
- * no longer match an index and the planner falls back to hashing the bands over
- * a scan of the crawl's pages. The memory contract is untouched — the ceiling
- * below still bounds what the scan may hold (hard rule 6) — but the TIME is not
- * the 0.11s/5,000-pages figure recorded further down, which was measured with
- * the indexes in the plan. Restoring it is a migration adding
- * `pages_main_simhash_band0..3` with exactly the four expressions below, and it
- * is written here rather than left to be discovered as a slow gate crawl.
+ * **THE BAND INDEXES COVER THIS COLUMN** (migration 0019).
+ * `pages_simhash_band0..3` (migration 0004) index `simhash` and only `simhash`,
+ * so when Phase 19 moved this rule onto `main_simhash` the four band predicates
+ * below stopped matching anything and the pair join degraded to the quadratic
+ * nested loop priced further down. `pages_main_simhash_band0..3` are the same
+ * four expressions over the new column, and `test/db/migration-0019.test.ts` is
+ * what proves the planner uses them: it lifts the four predicates below out of
+ * this file, EXPLAINs the pair join over 4,000 rows, and asserts all four
+ * `Bitmap Index Scan`s are in the plan under one `BitmapOr` with no sequential
+ * scan on the inner side. It also compares those predicates with the four
+ * `pg_indexes` definitions, so a change to either spelling fails there.
  *
  * **The banding join.** A self-join over every pair of pages is quadratic, so
  * the candidate set is narrowed first by four 16-bit bands: two hashes are only
@@ -591,26 +592,26 @@ async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Fi
  * by distance: two identical pages are 0 bits apart and would otherwise be
  * reported twice, once by each rule, with two different fixes attached.
  *
- * **The four band predicates below were coupled, textually, to the four
- * expression indexes `pages_simhash_band0..3`** (migration 0004; declared in
- * src/db/schema.ts, where the same warning is written from the other side).
+ * **The four band predicates below are coupled, textually, to the four
+ * expression indexes `pages_main_simhash_band0..3`** (migration 0019; declared
+ * in src/db/schema.ts, where the same warning is written from the other side).
  * Postgres matches an expression index by comparing parse trees, so band 0 must
  * keep saying `(a.main_simhash >> 0) & 65535` — `int8shr(x, 0)` is not folded
  * away, and an index on a simpler spelling would not match it. And a single arm
  * that fails to match takes the WHOLE BitmapOr with it, because Postgres will
  * not use indexes for an OR unless every branch is indexable. That failure is
- * silent: a slow query, not an error. The column moved to `main_simhash` in
- * Phase 19 and the indexes did not follow it, so NONE of the four arms matches
- * today — see the paragraph above. Whoever adds the missing indexes must write
- * these exact four expressions and confirm with EXPLAIN that all four `Bitmap
- * Index Scan`s are in the plan.
+ * silent: a slow query, not an error — which is why the coupling is asserted
+ * rather than described: `test/db/migration-0019.test.ts` compares these four
+ * predicates with the four index definitions and EXPLAINs the join. Perturbing
+ * one shift there turns the whole plan into a sequential scan on the inner
+ * side, and that is what the test catches.
  *
- * **What this costs.** Measured on `simhash` while the indexes still covered
- * it, and quoted unchanged because the arithmetic did not change — only which
- * column it runs over. With the indexes, 5,000 pages measured ~0.11s on a fresh
- * table (against ~2.9s without them, as a quadratic nested loop); the second of
- * those two numbers is the one in force until `main_simhash` is indexed. Two
- * caveats that belong in the 50k gate's expectations rather than in a footnote:
+ * **What this costs.** Measured on `simhash` while its own indexes covered it,
+ * and quoted unchanged because the arithmetic did not change — only which
+ * column it runs over, and 0019 gave the new column the same four bands. With
+ * the indexes, 5,000 pages measured ~0.11s on a fresh table, against ~2.9s
+ * without them as a quadratic nested loop. Two caveats that belong in the 50k
+ * gate's expectations rather than in a footnote:
  *  - expression indexes have no statistics until the table is ANALYZEd, and the
  *    planner will not choose a plan it cannot cost. A freshly loaded `pages` is
  *    exactly that table, so a gate crawl that runs the rules immediately after
@@ -796,8 +797,8 @@ export const contentRules: QueryRule[] = [
     ...copyFor(NEAR_SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "this crawl ran before the main-content fingerprint existed, so near-duplicates " +
-      "could not be measured; re-crawl the site to measure them",
+      "This crawl ran before the engine measured each page's main content separately, so " +
+      "pages could not be compared for near-duplicate content; re-crawl the site to measure them.",
     run: (db, crawlId) => nearDuplicateSkippedFindings(db, crawlId),
   }),
 ];

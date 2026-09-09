@@ -11,6 +11,13 @@ export const TITLE_MAX = 60;
 export const META_MIN = 70;
 export const META_MAX = 160;
 export const THIN_WORDS = 150;
+/**
+ * The largest step a heading outline may take downwards: H2 to H3 is 1 and
+ * fine, H2 to H4 is 2 and is the skip `headings.level-skip` reports. Exported
+ * because the client-facing title states the number and the copy rubric pins
+ * the two together (Phase 19 §7).
+ */
+export const HEADING_MAX_STEP = 1;
 
 const CATEGORY = "on-page";
 
@@ -36,7 +43,7 @@ const CONTENT = "content";
  */
 function firstLevelSkip(order: number[]): number {
   for (let i = 1; i < order.length; i++) {
-    if (order[i]! - order[i - 1]! > 1) return i;
+    if (order[i]! - order[i - 1]! > HEADING_MAX_STEP) return i;
   }
   return -1;
 }
@@ -173,7 +180,7 @@ export const onPageRules: PageRule[] = [
       p.renderableWordCount === null
         ? [finding(self, p, { wordCount: p.wordCount, threshold: THIN_WORDS })]
         : [],
-    "the page the corrected thin-content floor cannot judge",
+    "This page was crawled before the engine counted the words a reader can actually reach, so the thin-content check had no honest number to judge it on; re-crawl the site to measure it.",
   ),
 
   /**
