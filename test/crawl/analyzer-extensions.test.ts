@@ -908,7 +908,7 @@ describe("placeholderSnippet: the evidence for hasLoremIpsum", () => {
     expect(a.placeholderSnippet).toBeNull();
   });
 
-  it("quotes the whole text when the page is shorter than the window", () => {
+  it("quotes the whole remainder when the page is shorter than the window", () => {
     const a = page(`<p>Lorem ipsum dolor sit amet.</p>`);
     expect(a.hasLoremIpsum).toBe(true);
     expect(a.placeholderSnippet).toBe("Lorem ipsum dolor sit amet.");
@@ -942,28 +942,42 @@ describe("placeholderSnippet: the evidence for hasLoremIpsum", () => {
         `<p>${"the real body copy of this post ".repeat(40)}</p></main>`,
     );
     const snippet = a.placeholderSnippet!;
-    expect(snippet).toContain("Lorem ipsum dolor sit amet, consectetur adipiscing elit.");
+    // The quotation OPENS on the placeholder: the 300 words of header chrome
+    // that precede it on the page are not what the reader was sent to find.
+    expect(snippet.startsWith("Lorem ipsum dolor sit amet, consectetur adipiscing elit.")).toBe(true);
+    expect(snippet).not.toContain("the shop brand");
     expect(snippet.length).toBeLessThanOrEqual(160);
-    // Whole words at both ends: a quotation that starts mid-word reads as a
+    // A whole word at the cut end: a quotation that ends mid-word reads as a
     // corruption of the page rather than a quotation from it.
     expect(snippet).toBe(snippet.trim());
     expect(a.wordCount).toBeGreaterThan(300);
   });
 
-  it("centres the window on the match and keeps whole words at both ends", () => {
+  it("starts the window at the match and keeps a whole word at the cut end", () => {
     const before = "alpha ".repeat(60);
     const after = "omega ".repeat(60);
     const a = page(`<p>${before}Lorem ipsum dolor. ${after}</p>`);
     const snippet = a.placeholderSnippet!;
     expect(snippet.length).toBeLessThanOrEqual(160);
-    expect(snippet).toContain("Lorem ipsum dolor.");
-    // Centred: there is text from both sides of the match in the quotation.
-    expect(snippet.startsWith("alpha")).toBe(true);
+    // Zero characters before the match, and the run of text after it.
+    expect(snippet.startsWith("Lorem ipsum dolor.")).toBe(true);
+    expect(snippet).not.toContain("alpha");
     expect(snippet.endsWith("omega")).toBe(true);
     // Whole words: every token in the snippet is one of the page's own.
     for (const word of snippet.split(" ")) {
-      expect(["alpha", "omega", "Lorem", "ipsum", "dolor."]).toContain(word);
+      expect(["omega", "Lorem", "ipsum", "dolor."]).toContain(word);
     }
+  });
+
+  it("quotes from the match even when the whole text would fit in the window", () => {
+    // 120 characters of header chrome precede the placeholder, so a centred
+    // window — or a short-text shortcut that returned `bodyText` whole — would
+    // spend the quotation on the chrome. The window opens at the match.
+    const chrome =
+      "£ NZD $ USD $ Help Center Lavish Alice Cart Close Your bag is empty Blog and some more of the header chrome furniture too";
+    expect(chrome.length).toBe(121);
+    const a = page(`<header><p>${chrome}</p></header><main><p>Lorem ipsum dolor sit amet.</p></main>`);
+    expect(a.placeholderSnippet).toBe("Lorem ipsum dolor sit amet.");
   });
 
   it("quotes the first match when a page carries several", () => {

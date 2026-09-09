@@ -261,8 +261,14 @@
  *    on three 1,000-word blog posts whose only placeholder copy was an excerpt
  *    and a meta description, and reported `{wordCount}` — a true finding a
  *    reader could do nothing with. It is up to 160 characters of the visible
- *    text around the first match, whole words, centred on the match as far as
- *    the text allows, and null exactly when `hasLoremIpsum` is false. Derived
+ *    text STARTING AT the first match — the sentence the placeholder opens,
+ *    not a window around it — cut back to a whole word at the far end, and
+ *    null exactly when `hasLoremIpsum` is false. Starting at the match rather
+ *    than centring on it is itself an evidence lesson from the same crawl: a
+ *    centred window on a blog listing page spent half its 160 characters on
+ *    the header chrome that precedes the article excerpt ("£ NZD $ USD $ Help
+ *    Center … Cart … Your bag is empty") and quoted only the first few words
+ *    of the placeholder sentence a reader was being sent to find. Derived
  *    at the end of the parse from `bodyText`, like the flag itself, so it costs
  *    no second look at the document.
  *
@@ -497,10 +503,13 @@ export interface PageAnalysis {
   /** Words in the text `mainSimhash` was taken over; null on the same terms. */
   mainWordCount: number | null;
   /**
-   * Up to 160 characters of the visible text around the FIRST "lorem ipsum"
-   * match — the evidence for `hasLoremIpsum`, which without it reports a page
-   * and no quotation. Whole words, whitespace already collapsed (it is a slice
-   * of `bodyText`), centred on the match as far as the surrounding text allows.
+   * Up to 160 characters of the visible text STARTING AT the FIRST "lorem
+   * ipsum" match — the evidence for `hasLoremIpsum`, which without it reports
+   * a page and no quotation. Nothing that precedes the match is quoted: the
+   * reader wants the sentence the placeholder sits in, and on a real page the
+   * text before it is header chrome. Whole word at the cut end, whitespace
+   * already collapsed (it is a slice of `bodyText`), trimmed; the whole
+   * remainder of the text when that is shorter than the window.
    *
    * Null exactly when `hasLoremIpsum` is false: the two are one observation
    * reported twice, and a rule may rely on that.
@@ -685,33 +694,32 @@ const PLACEHOLDER_SNIPPET_CHARS = 160;
  *
  * `text` is `bodyText`: already whitespace-collapsed and trimmed, so there is
  * no normalisation left to do and a match cannot straddle markup this never
- * sees. The window is centred on the match and then pulled back to whole words
- * at both ends, because a snippet that starts mid-word reads as a corruption of
- * the page rather than a quotation from it. Shorter than the cap is the normal
- * outcome; a text shorter than the cap is returned whole.
+ * sees. THE WINDOW STARTS AT THE MATCH — zero characters before it, up to 160
+ * after — and is then pulled back to a whole word at the cut end, because a
+ * snippet that ends mid-word reads as a corruption of the page rather than a
+ * quotation from it. Shorter than the cap is the normal outcome; when the text
+ * from the match to its end is shorter than the cap it is returned whole.
  *
- * The one guard: if trimming to whole words would cut the match itself out of
- * the quotation — a single token longer than half the window on one side of it
- * — the untrimmed window is returned instead. A snippet that does not contain
- * what it is evidence for is worse than a ragged one.
+ * Starting at the match is the point of the field. A window centred on it
+ * spends half its budget on whatever precedes the placeholder, which on a real
+ * page is the header, the currency picker and the cart — and the sentence the
+ * reader was sent to find is cut off after a few words.
+ *
+ * The one guard: if trimming to a whole word would cut the match itself out of
+ * the quotation — the match's own tail sitting inside a token longer than the
+ * window — the untrimmed window is returned instead. A snippet that does not
+ * contain what it is evidence for is worse than a ragged one.
  */
 function placeholderSnippetOf(text: string): string | null {
   const match = LOREM_IPSUM.exec(text);
   if (match === null) return null;
-  if (text.length <= PLACEHOLDER_SNIPPET_CHARS) return text;
-  const centre = match.index + match[0].length / 2;
-  let start = Math.round(centre - PLACEHOLDER_SNIPPET_CHARS / 2);
-  if (start < 0) start = 0;
-  if (start + PLACEHOLDER_SNIPPET_CHARS > text.length) {
-    start = text.length - PLACEHOLDER_SNIPPET_CHARS;
-  }
-  const end = start + PLACEHOLDER_SNIPPET_CHARS;
-  const window = text.slice(start, end);
-  // A partial word exists at an edge only where the window really cut the text.
-  const head = start > 0 ? window.indexOf(" ") + 1 : 0;
-  const tailCut = end < text.length ? window.lastIndexOf(" ") : -1;
-  const tail = tailCut === -1 ? window.length : tailCut;
-  const trimmed = window.slice(head, Math.max(head, tail)).trim();
+  const from = text.slice(match.index);
+  if (from.length <= PLACEHOLDER_SNIPPET_CHARS) return from.trim();
+  const window = from.slice(0, PLACEHOLDER_SNIPPET_CHARS);
+  // The far edge is the only cut one, so it is the only one that can hold half
+  // a word; the near edge is the match itself.
+  const tailCut = window.lastIndexOf(" ");
+  const trimmed = (tailCut === -1 ? window : window.slice(0, tailCut)).trim();
   return LOREM_IPSUM.test(trimmed) ? trimmed : window.trim();
 }
 /**

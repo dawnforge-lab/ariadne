@@ -90,8 +90,9 @@
  *    NOT shared is where the text comes from, which is the claim.
  *  - `placeholderSnippet` is a `bodyText` derivation, so by this file's own
  *    rule — the one that strips `hasLoremIpsum` and `contentHash` — it could
- *    have been stripped too. It is kept because it is ARITHMETIC (a window,
- *    centred, pulled back to whole words) rather than a predicate, and a second
+ *    have been stripped too. It is kept because it is ARITHMETIC (a window
+ *    opening at the match, pulled back to a whole word) rather than a
+ *    predicate, and a second
  *    implementation of a windowing rule catches an off-by-one that a boolean
  *    never could. The oracle's copy is written from the field's contract, not
  *    from the port's code.
@@ -236,25 +237,23 @@ function collectContentText(node: DomNode, out: string[]): void {
 }
 
 /**
- * The quotation around the first "lorem ipsum", written from the contract in
- * `PageAnalysis.placeholderSnippet`: up to 160 characters of the visible text,
- * centred on the match as far as the text allows, whole words at both ends, and
- * the whole text when it is shorter than the window.
+ * The quotation opening at the first "lorem ipsum", written from the contract
+ * in `PageAnalysis.placeholderSnippet`: up to 160 characters of the visible
+ * text STARTING AT the match — nothing before it — a whole word at the cut
+ * end, and the whole remainder when it is shorter than the window.
  */
 function placeholderSnippet(text: string): string | null {
   const at = text.search(/lorem ipsum/i);
   if (at < 0) return null;
-  if (text.length <= 160) return text;
-  // The window, clamped so it stays inside the text at both ends.
-  const wanted = Math.round(at + "lorem ipsum".length / 2 - 80);
-  const from = Math.min(Math.max(wanted, 0), text.length - 160);
-  const to = from + 160;
-  const words = text.slice(from, to).split(" ");
-  // A cut edge is the one that may hold half a word; an uncut edge is whole.
-  if (to < text.length) words.pop();
-  if (from > 0) words.shift();
+  // Everything from the match onwards is the candidate; the head is never cut.
+  const rest = text.slice(at);
+  if (rest.length <= 160) return rest.trim();
+  const words = rest.slice(0, 160).split(" ");
+  // The far edge is the only cut one, so it is the only one that may hold half
+  // a word.
+  words.pop();
   const trimmed = words.join(" ").trim();
-  return /lorem ipsum/i.test(trimmed) ? trimmed : text.slice(from, to).trim();
+  return /lorem ipsum/i.test(trimmed) ? trimmed : rest.slice(0, 160).trim();
 }
 
 /**

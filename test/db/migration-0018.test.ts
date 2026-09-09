@@ -35,7 +35,7 @@
  *  3. a page that is nothing but chrome carries NULL in both, beside a non-null
  *     `word_count` — "nothing to fingerprint" is not a measurement of zero;
  *  4. the placeholder page carries the exact sentence a reader will find on it,
- *     inside the 160-character bound;
+ *     STARTING at the placeholder and inside the 160-character bound;
  *  5. a page the analyzer never ran on (a 404, whose body says "lorem ipsum"
  *     into the void) carries null in all three and raises no flag;
  *  6. the pairing itself, asked as SQL over the whole table:
@@ -125,7 +125,7 @@ const SITE: Record<string, string> = {
   // Claim 3: a page with no content of its own at all.
   "/chrome": html(CHROME),
   // Claim 4. The chrome sits AFTER the article here, the way a footer does, so
-  // the words around the excerpt in the quotation are the post's own.
+  // the words the quotation runs into after the excerpt are the post's own.
   "/lorem": html(
     `<main><h1>A post about linen</h1>` +
       `<p class="excerpt">${EXCERPT}</p>` +
@@ -253,14 +253,15 @@ describe("0018 — the main-content fingerprint and the placeholder quotation", 
     const snippet = String(page.placeholderSnippet);
     // THE CLAIM THE COLUMN EXISTS FOR: the evidence names the copy, not the
     // page. The whole sentence is in it, verbatim.
-    expect(snippet).toContain(EXCERPT);
+    expect(snippet.startsWith(EXCERPT)).toBe(true);
     expect(snippet.length).toBeLessThanOrEqual(160);
-    // Pinned whole, because the shape of the quotation is the deliverable: the
-    // heading it sits under, the sentence itself, and the body copy that
-    // follows it — whole words at both ends, 158 characters.
+    // Pinned whole, because the shape of the quotation is the deliverable: it
+    // OPENS on the placeholder sentence — the heading above it is not quoted —
+    // and runs into the body copy that follows, a whole word at the cut end,
+    // 156 characters.
     expect(snippet).toBe(
-      "A post about linen Lorem ipsum dolor sit amet, consectetur adipiscing elit. " +
-        "the real body copy of this post the real body copy of this post the real body copy",
+      "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " +
+        "the real body copy of this post the real body copy of this post the real body copy of this post the",
     );
   });
 
