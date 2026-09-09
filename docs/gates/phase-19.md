@@ -79,16 +79,46 @@ carry no `main_simhash`), re-judged through the branch's demo on 2026-09-09:
 
 Every other rule's count is unchanged.
 
-## 5. The fresh crawl at 0018
+## 5. The fresh crawls at 0018
 
-**[recorded at gate time]**
+Two crawls of the same site through the branch's demo, 2026-09-09. The first
+(`crawl_9278877e`, 547 URLs, 435 OK pages, resources on, 1 h 46 min) was taken
+with the §2 fingerprint as first designed ("chrome inside `<main>` is kept") and
+is what forced spec §11: it still produced 500 capped near-duplicate pairs,
+every one between pages with 105 to 107 main words and fingerprints 0 to 2
+bits apart. Fetching three of them showed the theme's `<footer>` (newsletter
+block plus footer navigation, ~105 words) INSIDE `<main>`, on empty `/pages/*`
+URLs whose only own words are their heading.
+
+The second (`crawl_b49eab7e`, 547 URLs, 435 OK pages, resources off, page
+phase only) was taken after the amendment (chrome excluded inside `<main>`
+too) and judged on the final code:
+
+| | old crawl at 0.13.0 | amended crawl at 0.14.0 |
+|---|---|---|
+| main-content words, median | (whole page 1,064) | 292 |
+| pages with < 150 own words | not measurable | 68 (thin fires on 69 incl. one with no own text at all) |
+| `content.near-duplicate` | 500 capped pairs, 237 across templates | 89 pages, one row each with count and closest (top: `/collections/all`, 13 near-duplicates at 1,297 own words) |
+| `content.thin` | 0 (chrome-blind) | 69: the home page (17 own words), `/apps/wishlist` (0), the blog index (99), the empty `/pages/*` |
+| `content.exact-duplicate` | 2 (canonical variants) | 0 |
+| `hreflang.missing-return-link` | 2 (canonical variants) | 0 |
+| `hreflang.alternates-not-crawled` | — | 1: five hosts, 1,870 alternates |
+| `content.placeholder` | 3, `{wordCount}` | 4, with the snippet |
+| findings / rules | 1,633 / 28 | 1,563 / 28 |
+
+The blog post that read as 1,038 words at 0.13.0 has 46 words of its own at
+0018: on this theme the post is an editorial layout of images with a 36-word
+intro, and the page's other 460 words are the mega-menu inside the site
+header. The fingerprint now measures what a reader would call the page's own
+content. Old crawl re-judged on the final code: 1,132 findings, both
+`content.near-duplicate-skipped` and `content.thin-skipped` fire once.
 
 ## 6. Verification
 
 | | |
 |---|---|
 | `npx tsc --noEmit` | clean |
-| Suite | **80 files / 2,020 tests, 0 failures** (orchestrator's run after the review wave) |
+| Suite | **80 files / 2,033 tests, 0 failures** (orchestrator's run after the §11 amendment; a delta review of the amendment follows) |
 | Review | independent opus review of the nine-commit branch: no blockers; five should-fixes applied, the material one being the SQL canonical twin (fragment / host case / port / param order made a self-canonical read as "elsewhere", which would have silenced the duplicate rules on such pages) |
 
 ## 7. What the machine does NOT cover
@@ -100,6 +130,10 @@ Every other rule's count is unchanged.
   see CSS.
 - `hreflang.alternates-not-crawled` reports that alternates were not fetched;
   it cannot say whether they exist. Crawling the other hosts is the answer.
+- `content.thin` now reads own-content words as served: it lost the Phase 7
+  markup-hidden correction (a page whose own content is a hidden dialog counts
+  its words) and gained the visible-chrome one. One fixture changed verdict on
+  that trade (`/render/csr-content`, 172 own words). Recorded for the owner.
 - The copy rubric bans words and pins thresholds; it cannot judge whether a
   sentence is true. The review spot-checked eight entries against their rule
   source; the `// Accuracy:` notes remain the human contract.
