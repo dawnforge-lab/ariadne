@@ -705,6 +705,29 @@ export const pages = pgTable("pages", {
   index("pages_simhash_band1").on(t.crawlId, sql`((${t.simhash} >> 16) & 65535)`),
   index("pages_simhash_band2").on(t.crawlId, sql`((${t.simhash} >> 32) & 65535)`),
   index("pages_simhash_band3").on(t.crawlId, sql`((${t.simhash} >> 48) & 65535)`),
+  // And the same four bands over `main_simhash` (migration 0019). Phase 19 moved
+  // `content.near-duplicate` off the whole-page fingerprint and onto the
+  // main-content one — the whole-page value on a templated site measures the
+  // header, nav and footer, so unrelated pages landed inside the 3-bit
+  // threshold — and the four indexes above cover `simhash` and only `simhash`.
+  // Without these the rule's band predicates match nothing, the BitmapOr
+  // collapses, and the pair join degrades to the quadratic nested loop the
+  // measurement above prices at ~2.9s per 5,000 pages against ~0.11s.
+  //
+  // The TEXTUAL COUPLING written above applies here word for word, against
+  // `nearDuplicateFindings` (src/rules/query/content.ts) rather than against a
+  // rule that no longer reads `simhash`: band 0 must stay `(main_simhash >> 0)
+  // & 65535` because `int8shr(x, 0)` is not folded away, and one arm that fails
+  // to match takes the whole BitmapOr with it, silently.
+  //
+  // `test/db/migration-0019.test.ts` is what holds the two spellings together:
+  // it reads the four predicates out of the rule's own source, compares them
+  // with the four `pg_indexes` definitions, and EXPLAINs the real pair query to
+  // prove the four `Bitmap Index Scan`s are in the plan.
+  index("pages_main_simhash_band0").on(t.crawlId, sql`((${t.mainSimhash} >> 0) & 65535)`),
+  index("pages_main_simhash_band1").on(t.crawlId, sql`((${t.mainSimhash} >> 16) & 65535)`),
+  index("pages_main_simhash_band2").on(t.crawlId, sql`((${t.mainSimhash} >> 32) & 65535)`),
+  index("pages_main_simhash_band3").on(t.crawlId, sql`((${t.mainSimhash} >> 48) & 65535)`),
   // The three duplicate rules' group aggregate and its sample lateral
   // (`groupFindings`, src/rules/query/field-duplicates.ts): `group by
   // btrim(<field>)` over the indexable cohort, then one `where btrim(<field>)
