@@ -375,13 +375,34 @@ describe("content rules", () => {
     ).toHaveLength(1);
   });
 
-  it("content.placeholder fires on lorem ipsum and reports the word count", () => {
+  it("content.placeholder fires on lorem ipsum and quotes the sentence it found", () => {
+    // Phase 19 §3. The evidence used to be `{wordCount}` alone, which on the
+    // crawl that provoked the change meant three 1,000-word blog posts and no
+    // way to find the words: the placeholder was the post's excerpt and its
+    // meta description, shown on the listing page and in the related-post
+    // cards, and never in the article a reader would go and open.
+    const snippet =
+      "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.";
     const f = rule("content.placeholder").run(
-      mkPage({ hasLoremIpsum: true, wordCount: 320 }),
+      mkPage({ hasLoremIpsum: true, wordCount: 320, placeholderSnippet: snippet }),
     );
     expect(f).toHaveLength(1);
     expect(f[0]!.severity).toBe(rule("content.placeholder").severity);
-    expect(f[0]!.evidence).toMatchObject({ wordCount: 320 });
+    expect(f[0]!.evidence).toEqual({ wordCount: 320, snippet });
+  });
+
+  it("content.placeholder says the snippet is null on a pre-0018 row rather than omitting it", () => {
+    // The flag was stored, the quotation was not, and the text is gone: a
+    // crawl before migration 0018 cannot show a reader where the match is. The
+    // finding still stands — the check ran and the answer is yes — so there is
+    // no marker here, and the honest evidence is an explicit null rather than a
+    // missing key or an invented sentence.
+    const f = rule("content.placeholder").run(
+      mkPage({ hasLoremIpsum: true, wordCount: 1_040, placeholderSnippet: null }),
+    );
+    expect(f).toHaveLength(1);
+    expect(f[0]!.evidence).toEqual({ wordCount: 1_040, snippet: null });
+    expect(Object.keys(f[0]!.evidence)).toContain("snippet");
   });
 
   it("content.placeholder fires regardless of indexability", () => {

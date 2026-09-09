@@ -27,6 +27,7 @@ import { crawls, pages } from "../../src/db/schema.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_HAMMING,
+  NEAR_DUPLICATE_MIN_MAIN_WORDS,
   NEAR_DUPLICATE_PAIR_CAP,
   SOFT_404_WORDS,
   TEMPLATE_HAMMING,
@@ -78,6 +79,9 @@ const SIZING = [
 /** What `PageWriter` puts in the column: the analyzer's value, signed. */
 const stored = (text: string): bigint => BigInt.asIntN(64, simhash64(text));
 
+/** The analyzer's word count, for the main-content column and the assertions. */
+const wordsIn = (text: string): number => text.split(/\s+/).length;
+
 const byId = new Map(contentRules.map((r) => [r.id, r]));
 function rule(id: string): QueryRule {
   const r = byId.get(id);
@@ -106,10 +110,11 @@ describe("the test corpus", () => {
 });
 
 describe("contentRules metadata", () => {
-  it("defines the three rules of the plan's table", () => {
+  it("defines the three rules of the plan's table, and Phase 19's marker", () => {
     expect(contentRules.map((r) => r.id).sort()).toEqual([
       "content.exact-duplicate",
       "content.near-duplicate",
+      "content.near-duplicate-skipped",
       "content.soft-404",
     ]);
   });
@@ -121,7 +126,21 @@ describe("contentRules metadata", () => {
       "content.soft-404": [["CHECK-13"], "critical", "content"],
       "content.exact-duplicate": [["CHECK-39"], "critical", "content"],
       "content.near-duplicate": [["CHECK-39"], "warning", "content"],
+      // The marker claims the check whose near-duplicate half it stands in for,
+      // and only that one: the exact-duplicate half of CHECK-39 still runs.
+      "content.near-duplicate-skipped": [["CHECK-39"], "info", "content"],
     });
+  });
+
+  // A NOT MEASURED marker is declared by the flag, and the flag is what the
+  // identifier guard derives the checklist obligations from. Exactly one rule in
+  // this file carries it — a second would mean a live rule had quietly become a
+  // marker — and the reason names the cause and what answers the check, which is
+  // §6's rubric for every marker string.
+  it("declares exactly one marker, whose reason says what would answer the check", () => {
+    const markers = contentRules.filter((r) => r.marker !== undefined);
+    expect(markers.map((r) => r.id)).toEqual(["content.near-duplicate-skipped"]);
+    expect(markers[0]!.marker).toContain("re-crawl");
   });
 
   it("every rule is a query rule carrying its own copy and a ruleset version", () => {
@@ -145,6 +164,29 @@ describe("the content rules against the database", () => {
     path: string;
     /** The visible text: its simhash and (by default) its hash go in the row. */
     text?: string;
+    /**
+     * The MAIN-content text — what `content.near-duplicate` fingerprints since
+     * Phase 19. Undefined means "the same as `text`", the shape of a page whose
+     * whole body is its content; a different string is a page whose chrome and
+     * whose content say different things, which is the whole reason the second
+     * fingerprint exists. An explicit null writes a null `main_simhash` AND a
+     * null `main_word_count`: the two move together (see the column contract in
+     * src/db/schema.ts), and a crawl where every row is null is the pre-0018
+     * crawl `content.near-duplicate-skipped` reports.
+     */
+    mainText?: string | null;
+    /**
+     * Overrides the main word count derived from `mainText` — how a page gets
+     * too little content of its own to be one half of a pair, without having to
+     * write a forty-nine-word paragraph to say so.
+     */
+    mainWordCount?: number;
+    /**
+     * The declared canonical, verbatim. Undefined leaves the column null (the
+     * page declares none), and a URL other than the page's own is what makes it
+     * canonicalised elsewhere — invisible to both duplicate rules since §1.
+     */
+    canonicalHtml?: string;
     /** Overrides the hash derived from `text` — how two pages become exact duplicates. */
     contentHash?: string | null;
     wordCount?: number;
@@ -193,6 +235,8 @@ describe("the content rules against the database", () => {
       const normalised = normalizeUrl(full);
       if (normalised === null) throw new Error(`${full} does not normalise`);
       const text = s.text ?? null;
+      const mainText = s.mainText === undefined ? text : s.mainText;
+      const words = (v: string): number => v.split(/\s+/).length;
       return {
         id: `page_${randomUUID()}`,
         crawlId,
@@ -215,6 +259,11 @@ describe("the content rules against the database", () => {
             ? (s.wordCount ?? (text === null ? null : text.split(" ").length))
             : s.renderableWordCount,
         hasSoft404Phrases: s.hasSoft404Phrases ?? false,
+        // The main-content pair, written by the same analysis and therefore
+        // both-or-neither, exactly as `PageWriter` writes them.
+        mainSimhash: mainText === null ? null : stored(mainText),
+        mainWordCount: mainText === null ? null : (s.mainWordCount ?? words(mainText)),
+        canonicalHtml: s.canonicalHtml ?? null,
         depth: 1,
         discoveredVia: "link",
       };
@@ -547,6 +596,59 @@ describe("the content rules against the database", () => {
       expect(await run(ID, mine)).toHaveLength(0);
     });
 
+    // Phase 19 §1, the defect this whole exclusion exists for. Both findings on
+    // the crawl that provoked it were a base URL beside a parameter variant of
+    // itself, and the variant declared a canonical to the base — the exact fix
+    // this rule's `howToFix` prescribes, reported back as critical.
+    it("does not report a page against the base URL it is canonicalised to", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/collections/sale", text: RETURNS, contentHash: "same" },
+        {
+          path: "/collections/sale?product-type=dress",
+          text: RETURNS,
+          contentHash: "same",
+          canonicalHtml: url("/collections/sale"),
+        },
+      ]);
+      // One member left after the exclusion, and a group of one is not a group:
+      // the finding vanishes rather than shrinking to a confusing count of one.
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("still reports the members of a group that are not canonicalised away", async () => {
+      // Three identical pages, one of them pointing at another URL. The two that
+      // genuinely compete are still competing, and the count and the URL list
+      // must agree about that — which they only do because the exclusion is on
+      // both the grouping query and the sample lateral.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, contentHash: "same" },
+        { path: "/b", text: RETURNS, contentHash: "same" },
+        { path: "/c", text: RETURNS, contentHash: "same", canonicalHtml: url("/a") },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        urls: [url("/a"), url("/b")],
+        count: 2,
+      });
+    });
+
+    it("keeps a page whose canonical is its own URL", async () => {
+      // The self-referential canonical is the healthy declaration every page
+      // should carry. Reading it as "canonicalised elsewhere" would silence the
+      // rule on a correctly marked-up site, which is the wrong direction to be
+      // wrong in (hard rule 1).
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, contentHash: "same", canonicalHtml: url("/a") },
+        { path: "/b", text: RETURNS, contentHash: "same", canonicalHtml: url("/b") },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(1);
+    });
+
     it("caps the number of groups and still says how many there are", async () => {
       const crawlId = await newCrawl();
       const groups = URL_FINDING_CAP + 2;
@@ -608,6 +710,9 @@ describe("the content rules against the database", () => {
         hamming: 3,
         pageTypeA: "/help/:slug",
         pageTypeB: "/:slug",
+        // Each page's own main-content length, travelling with its own URL.
+        mainWordsA: wordsIn(RETURNS_EDITED),
+        mainWordsB: wordsIn(RETURNS),
       });
       expect(found[0]!.dedupeKey.length).toBeGreaterThan(0);
     });
@@ -686,6 +791,113 @@ describe("the content rules against the database", () => {
       expect(await run(ID, mine)).toHaveLength(0);
     });
 
+    // Phase 19 §2. The fingerprint is the MAIN content's, so a pair whose whole
+    // pages are three bits apart because they share a menu is silent, and a
+    // pair whose main content is three bits apart fires even when the whole
+    // pages are nothing alike. Both directions, because either one alone would
+    // pass against a rule that read the wrong column.
+    it("compares the main content and not the whole visible text", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        // Same whole-page text — chrome and all — and genuinely different
+        // content of their own. The old column called these a near-duplicate.
+        { path: "/returns", text: RETURNS, mainText: RETURNS },
+        { path: "/sizing", text: RETURNS_EDITED, mainText: SIZING, mainWordCount: 95 },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("fires on two pages whose main content matches under unlike chrome", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainText: RETURNS },
+        // Whole-page text 30-odd bits away, main content 3 bits away: the pair
+        // the old fingerprint could not see.
+        { path: "/b", text: SIZING, mainText: RETURNS_EDITED },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence["hamming"]).toBe(3);
+    });
+
+    it("says nothing about a pair with too little content of its own", async () => {
+      // The same two fingerprints as the firing case above — only the word
+      // counts differ — so the silence can only come from the floor. Two pages
+      // this thin are `content.thin`'s finding, and a simhash over a couple of
+      // dozen words would pair every near-empty page on a template with every
+      // other one.
+      expect(NEAR_DUPLICATE_MIN_MAIN_WORDS).toBe(50);
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainWordCount: NEAR_DUPLICATE_MIN_MAIN_WORDS - 1 },
+        { path: "/b", text: RETURNS_EDITED, mainWordCount: NEAR_DUPLICATE_MIN_MAIN_WORDS - 1 },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("needs BOTH sides over the floor, not one", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainWordCount: 400 },
+        { path: "/b", text: RETURNS_EDITED, mainWordCount: NEAR_DUPLICATE_MIN_MAIN_WORDS - 1 },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("reports a pair sitting exactly on the floor", async () => {
+      // The boundary is `>=`, so the floor itself is measurable. Asserted
+      // because an off-by-one here is a silence nobody would notice.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainWordCount: NEAR_DUPLICATE_MIN_MAIN_WORDS },
+        { path: "/b", text: RETURNS_EDITED, mainWordCount: NEAR_DUPLICATE_MIN_MAIN_WORDS },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        mainWordsA: NEAR_DUPLICATE_MIN_MAIN_WORDS,
+        mainWordsB: NEAR_DUPLICATE_MIN_MAIN_WORDS,
+      });
+    });
+
+    // §1 again, on the rule that reported the same two parameter variants under
+    // its own name. One canonicalised member removes the PAIR, not half of it.
+    it("does not pair a page with the base URL it is canonicalised to", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/collections/sale", text: RETURNS },
+        {
+          path: "/collections/sale?srsltid=abc",
+          text: RETURNS_EDITED,
+          canonicalHtml: url("/collections/sale"),
+        },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("still pairs two pages that each declare their own URL", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, canonicalHtml: url("/a") },
+        { path: "/b", text: RETURNS_EDITED, canonicalHtml: url("/b") },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(1);
+    });
+
+    it("is silent — and does not throw — on a crawl with no main fingerprint", async () => {
+      // The pre-0018 crawl. The rule returns nothing, and the silence is not
+      // left to speak for itself: `content.near-duplicate-skipped` is what says
+      // why, and its own describe below asserts that it does.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainText: null },
+        { path: "/b", text: RETURNS_EDITED, mainText: null },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
     it("caps the pairs and says the list was cut, without inventing a total", async () => {
       // 33 pages one bit apart from nothing — same text, distinct hashes — are
       // 528 pairs. The rule reports 500 and says so; it does NOT claim to know
@@ -713,6 +925,100 @@ describe("the content rules against the database", () => {
         expect(String(f.evidence["urlA"]) < String(f.evidence["urlB"])).toBe(true);
       }
       expect(new Set(found.map((f) => f.dedupeKey)).size).toBe(NEAR_DUPLICATE_PAIR_CAP);
+    });
+
+    it("refuses a crawl id nothing knows", async () => {
+      await expect(run(ID, "crawl_nope")).rejects.toThrow(/no such crawl/);
+    });
+  });
+
+  describe("content.near-duplicate-skipped", () => {
+    const ID = "content.near-duplicate-skipped";
+
+    it("fires once on a crawl where no page carries a main fingerprint", async () => {
+      // The pre-0018 crawl: every auditable row null in both main columns,
+      // because nothing computed them. The check cannot be run and the marker is
+      // what says so — a silence here would read as "no near-duplicates", which
+      // is the always-passes hole hard rule 1 forbids.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS, mainText: null },
+        { path: "/b", text: RETURNS_EDITED, mainText: null },
+        { path: "/c", text: SIZING, mainText: null },
+      ]);
+
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: ID,
+        severity: "info",
+        // Site-scoped: the condition is a property of the crawl, not of a page.
+        pageId: null,
+        pageUrl: null,
+        dedupeKey: "site",
+      });
+      expect(found[0]!.evidence).toEqual({
+        indexablePages: 3,
+        minMainWords: NEAR_DUPLICATE_MIN_MAIN_WORDS,
+      });
+    });
+
+    it("is silent on a crawl where every page carries one", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS },
+        { path: "/b", text: SIZING },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    // THE DISTINCTION THE PREDICATE IS FOR. A current crawl writes a null
+    // `main_simhash` for any page with no main content of its own — a gallery, a
+    // menu-only index — and those pages are simply not candidates, exactly as a
+    // page with no `content_hash` is not a candidate for the exact rule. The
+    // check WAS run on this crawl, over the pages that had something to compare,
+    // so the marker must stay quiet: `bool_or`, not `count(*) filter`.
+    it("is silent on a current crawl where only SOME pages carry one", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", text: RETURNS },
+        { path: "/chrome-only", text: SIZING, mainText: null },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a crawl with no auditable pages at all", async () => {
+      // Nothing to measure is not the same as a measurement that could not be
+      // made. A crawl of three 404s has no near-duplicate question to answer,
+      // and a marker here would be a row saying nothing on every failed crawl.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/gone", text: RETURNS, mainText: null, statusCode: 404, fetchClass: "client_error" },
+        { path: "/noindex", text: SIZING, mainText: null, robotsMeta: "noindex" },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    // The pair is a partition: on any one crawl exactly one of "the rule ran"
+    // and "the marker fired" is true, and the rule's silence is never left
+    // unexplained. Both directions on two crawls, in one test, because the
+    // guarantee is about the pair rather than about either half.
+    it("partitions with the rule: the marker fires exactly where the rule cannot run", async () => {
+      const old = await newCrawl();
+      await addPages(old, [
+        { path: "/a", text: RETURNS, mainText: null },
+        { path: "/b", text: RETURNS_EDITED, mainText: null },
+      ]);
+      const current = await newCrawl();
+      await addPages(current, [
+        { path: "/a", text: RETURNS },
+        { path: "/b", text: RETURNS_EDITED },
+      ]);
+
+      expect(await run("content.near-duplicate", old)).toHaveLength(0);
+      expect(await run(ID, old)).toHaveLength(1);
+      expect(await run("content.near-duplicate", current)).toHaveLength(1);
+      expect(await run(ID, current)).toHaveLength(0);
     });
 
     it("refuses a crawl id nothing knows", async () => {

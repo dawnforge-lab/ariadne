@@ -195,6 +195,14 @@ describe("runRules against the database", () => {
       canonicalHtml: url,
       contentHash: digest,
       simhash: BigInt.asIntN(64, BigInt(`0x${digest.slice(0, 16)}`)),
+      // The MAIN-content fingerprint has to be per-row for the same reason the
+      // whole-text one is (P19-T2): `mkPage`'s clean page carries one constant
+      // value, so every row built from it would share a `main_simhash`, land 0
+      // bits apart, and make `content.near-duplicate` fire on a pair of pages
+      // nothing is wrong with — which is exactly what "a clean page contributes
+      // nothing" would then be quietly failing to mean. A second slice of the
+      // same digest, so the two fingerprints are independent of each other.
+      mainSimhash: BigInt.asIntN(64, BigInt(`0x${digest.slice(16, 32)}`)),
       // 21 characters, inside TITLE_MIN..TITLE_MAX.
       title: `A page about ${tag}`,
       // The clean description plus a sentence naming the page: 100 + 20 = 120

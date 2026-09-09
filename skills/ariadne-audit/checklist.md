@@ -328,9 +328,10 @@ answered from, and its verdict is the confidence interval around all of them.
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
   `resources.all-unknown`, `resources.partial-unknown`,
-  `hreflang.alternates-not-crawled`, and the per-page `crawl.blocked`. Each one
-  is the engine saying a check below could not be answered on this crawl. The last
-  four are siblings and never more than one appears: `resources.not-recorded` means
+  `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
+  and the per-page `crawl.blocked`. Each one
+  is the engine saying a check below could not be answered on this crawl. The four
+  resource markers are siblings and never more than one appears: `resources.not-recorded` means
   the crawl holds NO resource records, `resources.not-fetched` means it recorded them
   all and asked the site about none of them, `resources.all-unknown` means it
   asked about (or tried to reach) every file and every one landed in an unknown class
@@ -1918,16 +1919,44 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-39: Near-duplicate content — root cause analysis
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-39"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-39"` — two rules and a marker:
   - `content.exact-duplicate` (critical) — pages whose body content is identical
   - `content.near-duplicate` (warning) — pages alike past the similarity threshold
+  - `content.near-duplicate-skipped` (info) — the NOT MEASURED marker for the second
+    of them, below
   `issue_urls` gives them: `content.near-duplicate` writes one finding per PAIR
-  (`{urlA, urlB, hamming, pageTypeA, pageTypeB}` — the page types are the pair-type
-  classification the Analysis asks for, already done), and `content.exact-duplicate`
+  (`{urlA, urlB, hamming, pageTypeA, pageTypeB, mainWordsA, mainWordsB}` — the page
+  types are the pair-type classification the Analysis asks for, already done, and the
+  two word counts say how much content each page has of its own), and
+  `content.exact-duplicate`
   one per identical group (`{contentHash, urls, count, pageTypes}`). For the
   template-level view, `metrics_get` with `metricId: "content.template-similarity"`
   says how alike each cohort's pages are on average — a cohort that is uniformly
   similar is root cause (b) or (d) below before you open a single page.
+- **What the similarity is measured over, and who is left out.** The near-duplicate
+  fingerprint is taken over each page's MAIN CONTENT — the text inside `<main>`, or
+  the body with `<nav>`, `<header>`, `<footer>` and `<aside>` removed when there is
+  no `<main>` — and not over the whole visible text. On a templated site the whole
+  text is mostly furniture, and comparing it reports unrelated templates as
+  near-identical; the crawl this came from produced 237 such pairs. Two further
+  exclusions, both of which mean a REAL pair may be absent from the list rather than
+  present in it: a page needs at least 50 words of its own before it is compared
+  (below that the fingerprint is a handful of tokens and every near-empty page on a
+  template matches every other — `content.thin` owns those pages), and a page whose
+  declared canonical points at another URL is not compared at all, on either rule,
+  because it has already handed its signals over.
+- **`content.near-duplicate-skipped` is the NOT MEASURED marker** for the
+  near-duplicate half of this check (`content.thin-skipped` / `h1.duplicate-skipped`
+  precedent). It fires once, site-scoped, when the crawl holds auditable indexable
+  pages and NOT ONE of them carries a main-content fingerprint — a crawl taken before
+  migration 0018 introduced it. Evidence `{indexablePages, minMainWords}`. **While it
+  fires, an empty near-duplicate list is not a clean site**: the check was not run and
+  a re-crawl is the only thing that answers it. The exact-duplicate half is
+  unaffected — it groups on the whole-text hash, which every crawl has — so its
+  findings, or its silence, still stand. It does NOT fire on a current crawl where
+  only SOME pages lack the fingerprint (a page with no main content is simply not a
+  candidate, the same way a page the analyzer produced no `contentHash` for is not a
+  candidate for the exact rule).
 - **Important — Identify the CAUSE, Not Just the Count**: A near-duplicate report can have
   tens of thousands of pairs. Reporting "76K near-duplicate pairs found" is useless without
   understanding WHY they're duplicates. The root cause determines the fix — and different
@@ -1996,8 +2025,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   same rule CHECK-13 reads), `content.thin-skipped` (info, the same marker CHECK-13
   reads: pages carrying a `wordCount` and no `renderableWordCount`, which a pre-Phase-7
   crawl wrote and this check cannot be run on — a re-crawl is the fix, and while it
-  fires the thin count is a floor) and `content.placeholder` (critical: lorem ipsum and
-  friends left in live copy). `issue_urls` for all three; filter `issues_list` by
+  fires the thin count is a floor) and `content.placeholder` (critical: the literal
+  phrase "lorem ipsum" left in live copy — no other placeholder wording is detected).
+  `content.placeholder`'s evidence is `{wordCount, snippet}`, and **the snippet is the
+  point**: quote it in the report rather than the URL alone. The finding is often not
+  about the article body — the crawl this came from hit three 1,000-word posts whose
+  placeholder text was the excerpt and the meta description, visible on the listing
+  page and in every related-post card and nowhere on the post itself. `snippet` is
+  null on a crawl taken before the engine quoted the match; the finding still stands,
+  only the quotation is missing, and a re-crawl supplies it.
+  `issue_urls` for all three; filter `issues_list` by
   `pageType` to say which templates the thin pages belong to, and read
   `content.metrics-by-type` for the distributions behind the threshold — it carries
   `wordCount`, `renderableWordCount` and `textRatio` per template. **The pair is the

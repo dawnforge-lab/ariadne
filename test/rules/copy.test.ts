@@ -16,6 +16,7 @@ import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_HAMMING,
+  NEAR_DUPLICATE_MIN_MAIN_WORDS,
   SOFT_404_WORDS,
 } from "../../src/rules/query/content.js";
 import {
@@ -300,6 +301,15 @@ const PHASE_19_HREFLANG_RULE_IDS = [
   "hreflang.alternates-not-crawled",
 ];
 
+/**
+ * Phase 19's content rule: the NOT MEASURED marker for the near-duplicate check,
+ * which cannot be asked of a crawl taken before the main-content fingerprint
+ * existed. Listed here for the same reason as every id above — copy lands with
+ * the rule — and it carries the family's own obligation: it speaks about the
+ * CRAWL, and its copy must not read as a fact about the site.
+ */
+const PHASE_19_CONTENT_RULE_IDS = ["content.near-duplicate-skipped"];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -314,6 +324,7 @@ const ALL_RULE_IDS = [
   ...PHASE_17_RULE_IDS,
   ...PHASE_19_LINK_RULE_IDS,
   ...PHASE_19_HREFLANG_RULE_IDS,
+  ...PHASE_19_CONTENT_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -553,6 +564,54 @@ describe("issue copy", () => {
     expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toContain(
       `${NUMBER_WORDS[NEAR_DUPLICATE_HAMMING]} bits out of sixty-four`,
     );
+    // Phase 19 §2's floor. A reader who does not know that two thin pages are
+    // never paired here will go looking for the pairs that are missing.
+    expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toMatch(
+      new RegExp(`\\b${NEAR_DUPLICATE_MIN_MAIN_WORDS} words\\b`),
+    );
+  });
+
+  // §1, §2 and §3 of the audit accuracy design, pinned in the three places they
+  // changed what a reader is told. Each assertion is against the thing the OLD
+  // copy did not say, because that is what a revert would take back out.
+  it("the content copy says what the duplicate rules now measure and skip", () => {
+    // §2: the fingerprint is over the MAIN content. Copy that still described a
+    // comparison of "each page's visible words" would explain the 237 pairs
+    // across unrelated templates as though they had been correct.
+    const near = ISSUE_COPY["content.near-duplicate"]!;
+    expect(near.explanation).toMatch(/main content/i);
+    expect(near.explanation).toMatch(/header, navigation|navigation.*footer/i);
+
+    // §1, on both duplicate rules: a page that declares a canonical elsewhere
+    // has done the thing the fix asks for and is not reported.
+    expect(ISSUE_COPY["content.exact-duplicate"]!.explanation).toMatch(/canonical/i);
+    expect(`${near.explanation} ${near.howToFix}`).toMatch(/canonical/i);
+
+    // §3: the placeholder finding now carries the sentence it matched, and the
+    // title names the phrase rather than a category of "placeholder text".
+    const placeholder = ISSUE_COPY["content.placeholder"]!;
+    expect(placeholder.title).toContain("lorem ipsum");
+    expect(placeholder.explanation).toMatch(/sentence/i);
+    // The reason the quotation matters: the match is often not in the body.
+    expect(placeholder.explanation).toMatch(/excerpt|summary|meta description/i);
+  });
+
+  // The marker's own contract, the one every member of the family carries: it
+  // reports the limit of a crawl, and nothing in it may read as a fault found on
+  // the site. Negative assertions, because a positive one still passes when a
+  // verdict is appended to text that already says the right thing.
+  it("content.near-duplicate-skipped reports a crawl, never a site fault", () => {
+    const c = ISSUE_COPY["content.near-duplicate-skipped"]!;
+    // What it must say: why the check could not run, and what would answer it.
+    expect(c.explanation).toMatch(/main content/i);
+    expect(c.howToFix).toMatch(/re-crawl/i);
+    // And that an empty list is not a clean site — the always-passes reading
+    // this marker exists to block.
+    expect(c.explanation).toMatch(/rather than reported as clean|not.*clean/i);
+    // What it must not say: any claim about the site's content.
+    const verdict =
+      /the site has|your pages are|these pages are duplicat|near-duplicate content was found|the site is (?:fine|clean|healthy)/i;
+    expect(`${c.title} ${c.explanation} ${c.howToFix}`).not.toMatch(verdict);
   });
 
   // The soft-404 rule fires on EITHER signal. Copy saying both are needed would

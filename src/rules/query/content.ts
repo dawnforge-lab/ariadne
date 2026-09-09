@@ -8,17 +8,31 @@
  *
  *  - `content.soft-404`     a page that answers 200 and is a missing page
  *  - `content.exact-duplicate`  byte-identical text at more than one URL
- *  - `content.near-duplicate`   text that differs only in boilerplate
+ *  - `content.near-duplicate`   main content that differs only in boilerplate
  *
- * All three run entirely in SQL over columns the analyzer already wrote
- * (`has_soft404_phrases`, `word_count`, `content_hash`, `simhash`). Nothing
- * here fetches (hard rule 2), nothing here loads a table into memory (hard
- * rule 3), and no rule re-hashes a page: the fingerprints were computed once,
- * during the single streaming parse.
+ * …and one NOT MEASURED marker, `content.near-duplicate-skipped`, for the crawl
+ * on which the third of them cannot be asked at all (see below).
+ *
+ * All of them run entirely in SQL over columns the analyzer already wrote
+ * (`has_soft404_phrases`, `word_count`, `content_hash`, `simhash`,
+ * `main_simhash`, `main_word_count`). Nothing here fetches (hard rule 2),
+ * nothing here loads a table into memory (hard rule 3), and no rule re-hashes a
+ * page: the fingerprints were computed once, during the single streaming parse.
+ *
+ * **THE CANONICAL IS READ BY BOTH DUPLICATE RULES** (Phase 19 §1). A page whose
+ * declared canonical names another URL has already handed its signals over, and
+ * reporting it as a duplicate reports the remedy as the fault — which is what
+ * the crawl behind Phase 19 did, twice, at critical severity. Both rules
+ * therefore filter with `CANONICALISED_ELSEWHERE`, the string-level SQL form of
+ * `isCanonicalisedElsewhere`, stated once in src/rules/helpers.ts and used from
+ * here rather than restated. `content.soft-404` does NOT: a page that is a
+ * missing page is a missing page whoever it points at, and a soft 404 under a
+ * tracking parameter is still a URL the site should stop serving 200 for.
  *
  * **The signed-bigint contract.** `simhash64` produces a value in the unsigned
- * 64-bit range; `pages.simhash` is a signed Postgres bigint and `PageWriter`
- * stores `BigInt.asIntN(64, …)`. Every comparison below runs on that signed
+ * 64-bit range; `pages.simhash` and `pages.main_simhash` are signed Postgres
+ * bigints and `PageWriter` stores `BigInt.asIntN(64, …)` into both — one
+ * spelling, two columns. Every comparison below runs on that signed
  * value, and that is safe because both operations used are representation-level
  * rather than arithmetic: `#` XORs the two's-complement bit patterns, and
  * `bit_count(…::bit(64))` counts set bits in them. The stored 404 template
@@ -30,7 +44,7 @@ import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { CANONICALISED_ELSEWHERE, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -62,6 +76,10 @@ const CATEGORY = "content" as const;
 const SOFT_404: RuleIdentity = { id: "content.soft-404", severity: "critical" };
 const EXACT: RuleIdentity = { id: "content.exact-duplicate", severity: "critical" };
 const NEAR: RuleIdentity = { id: "content.near-duplicate", severity: "warning" };
+const NEAR_SKIPPED: RuleIdentity = {
+  id: "content.near-duplicate-skipped",
+  severity: "info",
+};
 
 /**
  * Below this, a page carrying "page not found" wording is reported as one.
@@ -85,6 +103,27 @@ export const TEMPLATE_HAMMING = 4;
 
 /** How close two pages may sit before they are near-duplicates of each other. */
 export const NEAR_DUPLICATE_HAMMING = 3;
+
+/**
+ * How much MAIN content a page must have of its own before it can be one half of
+ * a near-duplicate pair. Both sides must clear it.
+ *
+ * Fifty words is the floor under which the question stops being answerable
+ * rather than a judgement about quality. A simhash over a couple of dozen words
+ * is dominated by a handful of tokens, so two pages carrying nothing but a
+ * heading and a sentence land inside three bits of each other whenever the
+ * heading pattern repeats — and on a templated site that is every empty
+ * category, every out-of-stock product and every tag archive. Those pages are a
+ * real problem and they have a rule: `content.thin` reports them, at a floor of
+ * 150 words a reader can reach. Reporting them a second time as duplicates of
+ * one another says nothing new and buries the pairs that are.
+ *
+ * It sits BELOW `THIN_WORDS` on purpose, and the gap is the point: a page
+ * between 50 and 150 main words is thin AND can still be shown to be a copy of
+ * another page, which is a sharper finding than either alone. Only below fifty
+ * does the fingerprint stop carrying enough of the page to compare.
+ */
+export const NEAR_DUPLICATE_MIN_MAIN_WORDS = 50;
 
 /**
  * URLs quoted on a duplicate-GROUP finding. The count beside them is exact.
@@ -273,6 +312,26 @@ async function soft404Findings(db: Db, crawlId: string, caps: RuleCaps): Promise
  * print version) are a different problem from duplicates inside one, and that
  * distinction must not depend on which twenty URLs happened to be quoted.
  *
+ * **A PAGE CANONICALISED ELSEWHERE IS NOT A MEMBER** (Phase 19 §1). The crawl
+ * that provoked this produced exactly two findings and both were the same
+ * mistake: `/collections/sale` beside `/collections/sale?product-type=dress`,
+ * and `/pages/email-signup` beside a `?srsltid=` Google tracking variant. In
+ * each pair the variant declares `<link rel=canonical>` to the base URL — which
+ * is, word for word, the first thing this rule's own `howToFix` tells a reader
+ * to do — and the rule reported the fixed state as critical because it grouped
+ * on `content_hash` and never read the canonical. So the filter goes on BOTH
+ * halves of the query: the `dupes` CTE, which decides whether a group exists
+ * and how big it is, and the `sample` lateral, which decides which URLs are
+ * quoted. One without the other would leave a finding whose count and whose URL
+ * list disagreed about what a member is.
+ *
+ * A group that shrinks below two members by this filter is not a finding at all
+ * — `having count(*) > 1` is applied after it — which is what makes a pair of
+ * parameter variants under one canonical disappear rather than shrink to a
+ * confusing group of one. A group of three whose third member is canonicalised
+ * elsewhere still fires, on the two that are not, and says `count: 2`: the two
+ * URLs that genuinely compete are still competing.
+ *
  * **THE CAP COMES BEFORE THE LATERAL.** A `cross join lateral` under an
  * `order by`/`limit` at the same query level is evaluated for every row the FROM
  * produces — the limit cannot apply until the rows exist — so the twenty-URL
@@ -315,6 +374,7 @@ async function exactDuplicateFindings(
                filter (where p.page_type is not null) as page_types
       from pages p
       where p.crawl_id = ${crawlId} and ${AUDITABLE("p")} and p.content_hash is not null
+        and not ${CANONICALISED_ELSEWHERE("p")}
       group by p.content_hash
       having count(*) > 1
     ),
@@ -334,6 +394,7 @@ async function exactDuplicateFindings(
         select p2.id, p2.url
         from pages p2
         where p2.crawl_id = ${crawlId} and ${AUDITABLE("p2")}
+          and not ${CANONICALISED_ELSEWHERE("p2")}
           and p2.content_hash = c.content_hash
         order by p2.url
         limit ${DUPLICATE_SAMPLE_URLS}
@@ -372,9 +433,142 @@ function pairKey(urlA: string, urlB: string): string {
   return createHash("sha256").update(`${urlA}\n${urlB}`).digest("hex");
 }
 
+/** What the gate query below reads, so the rule and its marker share one shape. */
+interface MainFingerprintCensus {
+  /** Pages `content.near-duplicate` would consider at all: auditable, indexable. */
+  auditable: number;
+  /** Whether ANY of them carries a `main_simhash`. */
+  anyMainSimhash: boolean;
+}
+
+async function mainFingerprintCensus(db: Db, crawlId: string): Promise<MainFingerprintCensus> {
+  // `bool_or` over the same population the pair join starts from, so the gate
+  // and the rule can never disagree about which pages were in scope. Over zero
+  // rows it returns NULL, which `?? false` turns into "no fingerprint" — and
+  // the `auditable` count is what keeps that from being read as a skip: an
+  // empty crawl has nothing to measure, which is not the same as a crawl whose
+  // pages were measured with an older analyzer.
+  const rows = await db.execute<{ auditable: number; any_main: boolean | null }>(sql`
+    select count(*)::int as auditable,
+           bool_or(p.main_simhash is not null) as any_main
+    from pages p
+    where p.crawl_id = ${crawlId} and ${AUDITABLE("p")}`);
+  const row = rows.rows[0];
+  // An aggregate with no GROUP BY returns exactly one row for any input; no row
+  // means the query is not the query this function thinks it is.
+  if (row === undefined) throw new Error(`${NEAR.id}: the main-fingerprint census returned no row`);
+  return { auditable: Number(row.auditable), anyMainSimhash: row.any_main ?? false };
+}
+
 /**
- * Pairs of indexable 200 pages whose simhashes are within
+ * Whether `content.near-duplicate` can be asked of this crawl at all: false when
+ * it can, true when `content.near-duplicate-skipped` is the answer instead.
+ *
+ * ONE PREDICATE, READ BY BOTH, so the rule's silence and the marker's sentence
+ * are the same decision rather than two that happen to agree.
+ */
+async function mainFingerprintUnavailable(db: Db, crawlId: string): Promise<boolean> {
+  const census = await mainFingerprintCensus(db, crawlId);
+  return census.auditable > 0 && !census.anyMainSimhash;
+}
+
+/**
+ * The NOT MEASURED marker for a crawl the main-content fingerprint does not
+ * exist on (Phase 19 §2, hard rule 1).
+ *
+ * **THE PREDICATE, AND WHY IT IS THIS ONE.** It fires when the crawl holds
+ * pages `content.near-duplicate` would have judged — auditable, indexable — and
+ * NOT ONE of them carries a `main_simhash`. Two crawls satisfy that and both
+ * are honestly unmeasurable:
+ *
+ *  - a crawl written before migration 0018, where the column exists and every
+ *    row is null because nothing computed it. This is the case the marker was
+ *    asked for, and the fingerprint cannot be recovered afterwards: it is taken
+ *    from the page's text while the page is being read, and the crawl does not
+ *    store the HTML.
+ *  - a 0018 crawl whose every page turned out to have no main content at all —
+ *    an empty `<main>`, or a body that is nothing but navigation and footer on
+ *    every single URL. Vanishingly rare and not what this was written for, but
+ *    the same sentence is true of it: nothing on this crawl carries the
+ *    fingerprint the check compares, so the check was not run.
+ *
+ * **WHAT MUST NOT FIRE IT** is the ordinary 0018 crawl, where SOME pages carry
+ * no main content — a redirect landing page, an image gallery, a menu-only
+ * index. Those pages are simply not candidates, exactly as a page with no
+ * `content_hash` is not a candidate for the exact-duplicate rule, and the check
+ * WAS run: it ran over the pages that had something to compare. A predicate
+ * written as "any auditable page has a null `main_simhash`" would fire on every
+ * real site and turn a marker that means "this could not be measured" into
+ * noise attached to a crawl that measured it fine. Hence `bool_or`, not
+ * `count(*) filter`.
+ *
+ * Site-scoped: one finding for the crawl, not one per page. The condition is a
+ * property of the crawl (`content.thin-skipped`'s condition is a property of a
+ * ROW, which is why that one is a page rule and this one is not), and a
+ * pre-0018 crawl of fifty thousand pages would otherwise write fifty thousand
+ * copies of one sentence.
+ */
+async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Finding[]> {
+  await readCrawlEvidence(db, crawlId, NEAR_SKIPPED.id);
+  const census = await mainFingerprintCensus(db, crawlId);
+  if (census.auditable === 0 || census.anyMainSimhash) return [];
+  return [
+    queryFinding(NEAR_SKIPPED, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        // The size of what went unjudged, so a reader can weigh the gap: these
+        // are the pages the check would have compared had the fingerprint been
+        // there, and every one of them is unexamined for near-duplicates. Named
+        // `indexablePages` because that is what this quantity is called
+        // everywhere else it is published (`schema.none-on-site`,
+        // `hreflang.coverage`) — the same predicate, the same word.
+        indexablePages: census.auditable,
+        minMainWords: NEAR_DUPLICATE_MIN_MAIN_WORDS,
+      },
+      dedupeKey: "site",
+    }),
+  ];
+}
+
+/**
+ * Pairs of indexable 200 pages whose MAIN-CONTENT fingerprints are within
  * `NEAR_DUPLICATE_HAMMING` bits of each other (CHECK-39).
+ *
+ * **WHY `main_simhash` AND NOT `simhash`** (Phase 19 §2). `simhash` is taken
+ * over the whole visible text, and on a templated site most of that text is the
+ * same header, navigation and footer on every page. The crawl that provoked
+ * this carries a smallest page of 916 words and a median of 1,064, of which
+ * about 900 are chrome: two pages with 150 words of their own therefore agree
+ * on six sevenths of their tokens and land inside three bits of each other
+ * whatever they say. The rule reported 500 pairs (the cap), 237 of them across
+ * templates with nothing to do with one another, every one at a distance of 1
+ * or 2. That is not a threshold that was set too wide — it is a fingerprint
+ * measuring the furniture. `main_simhash` is the same fingerprint over the text
+ * inside `<main>`, or over the body with `<nav>`, `<header>`, `<footer>` and
+ * `<aside>` removed when there is no `<main>` (see page-analyzer.ts).
+ *
+ * **THE PAGE MUST HAVE CONTENT OF ITS OWN.** Both sides need
+ * `main_word_count >= NEAR_DUPLICATE_MIN_MAIN_WORDS`, for the reason written on
+ * that constant: below it the fingerprint is a handful of tokens and every
+ * near-empty page on a template is a near-duplicate of every other one.
+ * `content.thin` is the rule those pages belong to.
+ *
+ * **AND NEITHER SIDE MAY BE CANONICALISED ELSEWHERE** (§1) — a parameter
+ * variant that points at its base URL is the fix, not the fault. The filter is
+ * on both sides of the join, so one canonicalised member removes the pair
+ * rather than half of it.
+ *
+ * **THE BAND INDEXES DO NOT COVER THIS COLUMN, and that is a known open cost.**
+ * `pages_simhash_band0..3` (migration 0004) are expression indexes on
+ * `simhash`; nothing indexes `main_simhash`, so the four band predicates below
+ * no longer match an index and the planner falls back to hashing the bands over
+ * a scan of the crawl's pages. The memory contract is untouched — the ceiling
+ * below still bounds what the scan may hold (hard rule 6) — but the TIME is not
+ * the 0.11s/5,000-pages figure recorded further down, which was measured with
+ * the indexes in the plan. Restoring it is a migration adding
+ * `pages_main_simhash_band0..3` with exactly the four expressions below, and it
+ * is written here rather than left to be discovered as a slow gate crawl.
  *
  * **The banding join.** A self-join over every pair of pages is quadratic, so
  * the candidate set is narrowed first by four 16-bit bands: two hashes are only
@@ -397,20 +591,26 @@ function pairKey(urlA: string, urlB: string): string {
  * by distance: two identical pages are 0 bits apart and would otherwise be
  * reported twice, once by each rule, with two different fixes attached.
  *
- * **The four band predicates below are coupled, textually, to the four
+ * **The four band predicates below were coupled, textually, to the four
  * expression indexes `pages_simhash_band0..3`** (migration 0004; declared in
  * src/db/schema.ts, where the same warning is written from the other side).
  * Postgres matches an expression index by comparing parse trees, so band 0 must
- * keep saying `(a.simhash >> 0) & 65535` — `int8shr(x, 0)` is not folded away,
- * and an index on a simpler spelling would not match it. And a single arm that
- * fails to match takes the WHOLE BitmapOr with it, because Postgres will not use
- * indexes for an OR unless every branch is indexable. That failure is silent: a
- * slow query, not an error. Change a band here, change its index there, and
- * confirm with EXPLAIN that all four `Bitmap Index Scan`s are still in the plan.
+ * keep saying `(a.main_simhash >> 0) & 65535` — `int8shr(x, 0)` is not folded
+ * away, and an index on a simpler spelling would not match it. And a single arm
+ * that fails to match takes the WHOLE BitmapOr with it, because Postgres will
+ * not use indexes for an OR unless every branch is indexable. That failure is
+ * silent: a slow query, not an error. The column moved to `main_simhash` in
+ * Phase 19 and the indexes did not follow it, so NONE of the four arms matches
+ * today — see the paragraph above. Whoever adds the missing indexes must write
+ * these exact four expressions and confirm with EXPLAIN that all four `Bitmap
+ * Index Scan`s are in the plan.
  *
- * **What this costs.** With the indexes, 5,000 pages measured ~0.11s on a fresh
- * table (against ~2.9s without them, as a quadratic nested loop). Two caveats
- * that belong in the 50k gate's expectations rather than in a footnote:
+ * **What this costs.** Measured on `simhash` while the indexes still covered
+ * it, and quoted unchanged because the arithmetic did not change — only which
+ * column it runs over. With the indexes, 5,000 pages measured ~0.11s on a fresh
+ * table (against ~2.9s without them, as a quadratic nested loop); the second of
+ * those two numbers is the one in force until `main_simhash` is indexed. Two
+ * caveats that belong in the 50k gate's expectations rather than in a footnote:
  *  - expression indexes have no statistics until the table is ANALYZEd, and the
  *    planner will not choose a plan it cannot cost. A freshly loaded `pages` is
  *    exactly that table, so a gate crawl that runs the rules immediately after
@@ -466,36 +666,51 @@ async function nearDuplicateFindings(
       ? caps.nearDuplicatePairCeiling
       : Math.min(caps.nearDuplicatePairs, caps.nearDuplicatePairCeiling);
   await readCrawlEvidence(db, crawlId, NEAR.id);
+  // THE GATE, ASKED BEFORE THE JOIN. On a crawl with no main-content
+  // fingerprint at all the query below would return nothing anyway — every
+  // candidate is dropped by `main_simhash is not null` — and an empty result is
+  // exactly what must not be reported as "no near-duplicates" (hard rule 1).
+  // `content.near-duplicate-skipped` is what says so; this rule returns early
+  // so that the two never disagree, and so that a crawl the check cannot be run
+  // on does not pay for a scan whose answer is already known.
+  if (await mainFingerprintUnavailable(db, crawlId)) return [];
   const result = await db.execute<{
     id_a: string;
     url_a: string;
     type_a: string | null;
+    main_words_a: number;
     id_b: string;
     url_b: string;
     type_b: string | null;
+    main_words_b: number;
     hamming: number;
   }>(sql`
     select a.id as id_a, a.url as url_a, a.page_type as type_a,
+           a.main_word_count as main_words_a,
            b.id as id_b, b.url as url_b, b.page_type as type_b,
-           bit_count((a.simhash # b.simhash)::bit(64))::int as hamming
+           b.main_word_count as main_words_b,
+           bit_count((a.main_simhash # b.main_simhash)::bit(64))::int as hamming
     from pages a
     join pages b on b.crawl_id = a.crawl_id and a.id < b.id
       and a.content_hash is distinct from b.content_hash
-      and ( (a.simhash >> 0)  & 65535 = (b.simhash >> 0)  & 65535
-         or (a.simhash >> 16) & 65535 = (b.simhash >> 16) & 65535
-         or (a.simhash >> 32) & 65535 = (b.simhash >> 32) & 65535
-         or (a.simhash >> 48) & 65535 = (b.simhash >> 48) & 65535 )
+      and ( (a.main_simhash >> 0)  & 65535 = (b.main_simhash >> 0)  & 65535
+         or (a.main_simhash >> 16) & 65535 = (b.main_simhash >> 16) & 65535
+         or (a.main_simhash >> 32) & 65535 = (b.main_simhash >> 32) & 65535
+         or (a.main_simhash >> 48) & 65535 = (b.main_simhash >> 48) & 65535 )
     where a.crawl_id = ${crawlId} and ${AUDITABLE("a")} and ${AUDITABLE("b")}
-      and a.simhash is not null and b.simhash is not null
-      and bit_count((a.simhash # b.simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
+      and not ${CANONICALISED_ELSEWHERE("a")} and not ${CANONICALISED_ELSEWHERE("b")}
+      and a.main_simhash is not null and b.main_simhash is not null
+      and a.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
+      and b.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
+      and bit_count((a.main_simhash # b.main_simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
     ${limitTo(pairs + 1)}`);
 
   const findings = result.rows.slice(0, pairs).map((row) => {
     // The join orders the pair by row id, which says nothing to a reader. The
-    // finding is stated in URL order instead, and the page type travels with
-    // its own URL rather than with its side of the join.
-    const left = { id: row.id_a, url: row.url_a, type: row.type_a };
-    const right = { id: row.id_b, url: row.url_b, type: row.type_b };
+    // finding is stated in URL order instead, and the page type and the main
+    // word count travel with their own URL rather than with a side of the join.
+    const left = { id: row.id_a, url: row.url_a, type: row.type_a, words: row.main_words_a };
+    const right = { id: row.id_b, url: row.url_b, type: row.type_b, words: row.main_words_b };
     // Two rows of one crawl cannot share a URL (`pages_crawl_url` is unique),
     // so the two sides never compare equal and the order is total.
     const [first, second] = row.url_a < row.url_b ? [left, right] : [right, left];
@@ -508,6 +723,12 @@ async function nearDuplicateFindings(
         hamming: row.hamming,
         pageTypeA: first.type,
         pageTypeB: second.type,
+        // How much content each page has of its own — the quantity the distance
+        // was measured over. Two pages at 60 main words apiece agreeing to
+        // within three bits is a weaker claim than two at 800, and a reader
+        // deciding whether to consolidate them needs to see which one this is.
+        mainWordsA: first.words,
+        mainWordsB: second.words,
       },
       dedupeKey: pairKey(first.url, second.url),
     });
@@ -559,5 +780,24 @@ export const contentRules: QueryRule[] = [
     ...copyFor(NEAR.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => nearDuplicateFindings(db, crawlId, capsOr(caps)),
+  }),
+
+  // The check above, when the crawl cannot carry it. One site-scoped finding at
+  // info severity: what it reports is the boundary of this crawl's evidence,
+  // not a fault found on the site. It claims CHECK-39, the check whose
+  // near-duplicate half it stands in for — the exact-duplicate half of the same
+  // check still runs, on `content_hash`, which every crawl since 0001 has.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: NEAR_SKIPPED.id,
+    checkIds: ["CHECK-39"],
+    category: CATEGORY,
+    severity: NEAR_SKIPPED.severity,
+    ...copyFor(NEAR_SKIPPED.id),
+    rulesetVersion: RULESET_VERSION,
+    marker:
+      "this crawl ran before the main-content fingerprint existed, so near-duplicates " +
+      "could not be measured; re-crawl the site to measure them",
+    run: (db, crawlId) => nearDuplicateSkippedFindings(db, crawlId),
   }),
 ];

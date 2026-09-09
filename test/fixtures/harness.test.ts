@@ -179,6 +179,23 @@ function databaseUrl(): string {
  */
 const SKIP_HARNESS_CLAIMS: string[] = [
   "content.thin-skipped",
+  // P19-T2's NOT MEASURED marker, unprovokable here for the same reason as the
+  // thin skip above it: its condition is a property of a PRE-0018 CRAWL, not of
+  // a page. It fires when the crawl holds auditable indexable pages and not one
+  // of them carries a `main_simhash` — the main-content fingerprint the
+  // near-duplicate rule compares — and this harness runs the current analyzer,
+  // which computes that fingerprint on the same pass as every other column, for
+  // every page with main content to measure. Every fixture page is served with
+  // its whole body inside `<main>` (see `renderDocument` in test/fixtures/
+  // render.ts), so the column is populated site-wide by the time the rules run
+  // and the marker's condition is false BY CONSTRUCTION. Producing the crawl it
+  // reports would mean hand-writing `pages` rows, which is the one thing this
+  // file exists not to do. Its firing, its silence on a current crawl, its
+  // silence on a crawl where only SOME pages lack the fingerprint, and its
+  // partition with the rule it stands in for are covered directly in
+  // test/rules/content-query.test.ts. The rule itself, `content.near-duplicate`,
+  // DOES fire here — three pairs of the click-chain, pinned by distance below.
+  "content.near-duplicate-skipped",
   // P11-T3's NOT MEASURED marker. It fires when a crawl holds no `resources`
   // rows at all while its pages counted images — a crawl written before
   // migration 0013, or one whose resource extraction never ran. This harness
@@ -1234,7 +1251,24 @@ describe("the fixture site end to end", () => {
     });
 
     // The click-chain's rungs are one template with a number substituted, so
-    // several of them land inside the three-bit band. Read from the `issues`
+    // several of them land inside the three-bit band.
+    //
+    // **THE SAME THREE PAIRS AFTER P19-T2 MOVED THE FINGERPRINT** from the whole
+    // visible text to the main content, and the reason is a property of this
+    // fixture site rather than a coincidence: `renderDocument` wraps every
+    // page's whole body in `<main>` and the site has no shared navigation,
+    // header or footer at all, so the main-content text IS the visible text and
+    // the two fingerprints are the same number. The distances below are
+    // therefore unchanged, and they would not have been on a real templated
+    // site — which is exactly the divergence the change was made for. The other
+    // new filters do not bite either: each rung clears
+    // `NEAR_DUPLICATE_MIN_MAIN_WORDS` comfortably while still sitting under
+    // `content.thin`'s floor — the two thresholds are 50 and 150, and a page
+    // between them is both thin AND comparable, which is what these rungs are —
+    // and every fixture page declares a self-referential canonical, so none is
+    // canonicalised elsewhere.
+    //
+    // Read from the `issues`
     // rows rather than from `detailsByPath`, which is keyed by path and rule and
     // therefore keeps only the LAST of the pairs a page belongs to — and the
     // pair join has no ORDER BY, so which one that is depends on the plan.
@@ -2305,9 +2339,10 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the fourteen `SKIP_HARNESS_CLAIMS` names and
+    // this one crawl, save the fifteen `SKIP_HARNESS_CLAIMS` names and
     // explains (the count was written as nine when the list held nine and has
-    // been carried stale through four phases of markers; P17 corrects it). A
+    // been carried stale through four phases of markers; P17 corrected it and
+    // P19-T2's near-duplicate marker makes fifteen). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     expect(

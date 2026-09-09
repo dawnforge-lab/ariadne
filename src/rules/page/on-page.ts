@@ -176,7 +176,30 @@ export const onPageRules: PageRule[] = [
     "the page the corrected thin-content floor cannot judge",
   ),
 
+  /**
+   * Placeholder copy still in the live page, WITH THE SENTENCE IT SITS IN
+   * (Phase 19 §3).
+   *
+   * The finding used to carry `{wordCount}` and nothing else, and the crawl that
+   * provoked the phase showed what that costs: it fired on three blog posts of a
+   * thousand words each, all of them genuinely carrying "lorem ipsum" — in the
+   * post's excerpt and its `description` meta, shown on the listing page and in
+   * every related-post card. A true finding, and a reader given a URL and a word
+   * count had no way to find the words. `snippet` is the analyzer's quotation of
+   * up to 160 characters around the first match, so the evidence names the thing
+   * it is about.
+   *
+   * `snippet` is `null` on a pre-0018 row: the flag was stored, the quotation
+   * was not, and the text is gone. The evidence SAYS null rather than omitting
+   * the key or inventing a sentence — the finding is still true and still worth
+   * reporting, and a reader meeting a null learns the honest thing, which is
+   * that this crawl cannot show them where. There is no marker here for the same
+   * reason: nothing is unmeasured. The check ran, the answer is yes, and only
+   * the quotation is missing.
+   */
   pageRule("content.placeholder", ["CHECK-40"], CONTENT, "critical", (p, self) =>
-    isAuditable(p) && p.hasLoremIpsum ? [finding(self, p, { wordCount: p.wordCount })] : [],
+    isAuditable(p) && p.hasLoremIpsum
+      ? [finding(self, p, { wordCount: p.wordCount, snippet: p.placeholderSnippet })]
+      : [],
   ),
 ];

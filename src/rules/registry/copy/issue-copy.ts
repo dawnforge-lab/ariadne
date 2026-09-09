@@ -160,11 +160,19 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // Accuracy: the analyzer matches the literal phrase "lorem ipsum" in
     // visible text. It is not a general placeholder detector — do not let this
     // copy imply that "TBC", "TODO" or dummy names are covered.
-    title: "Placeholder text in page content",
+    //
+    // Phase 19 §3: the finding now carries `snippet`, the sentence the match
+    // sits in, and the explanation has to send the reader to it. The crawl that
+    // provoked the change fired on three 1,000-word blog posts whose only
+    // placeholder text was the excerpt and the meta description — invisible on
+    // the post itself, on the listing page and in every related-post card. A
+    // reader told only "this page contains lorem ipsum" went looking in the
+    // article body and found nothing.
+    title: 'Placeholder text ("lorem ipsum") in page content',
     explanation:
-      'The page\'s visible text contains the phrase "lorem ipsum", which almost always means unfinished template copy shipped to production. Search engines index it, readers see it, and it undermines trust in everything else on the page.',
+      'The page\'s visible text contains the phrase "lorem ipsum": unfinished template copy that reached production. The finding quotes the sentence it appears in, which is where to start looking — on a long page the placeholder is often not in the body but in a summary, an excerpt or a meta description, so it shows up on listing pages and in cards elsewhere on the site rather than on the page itself. Search engines index it, visitors see it, and it undermines trust in everything else on the page. On a crawl taken before this engine started quoting the text, the sentence is not recorded and the finding says so rather than guessing.',
     howToFix:
-      "Replace the placeholder with the real copy, or unpublish the page until the copy exists. It is worth grepping the CMS for the same phrase, as placeholder text usually ships in batches.",
+      "Find the quoted sentence on the page and replace it with the real copy, or unpublish the page until that copy exists. Search the CMS for the same phrase before closing it off: placeholder text ships in batches, and the same field on the same template is usually unfilled on several records at once.",
   },
 
   // ----------------------------------------------------------------- status
@@ -713,9 +721,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Decide what the URL should be. If the content is genuinely gone, return a real 404 or 410 status rather than a 200, or 301-redirect it to the closest live page. If it is a real page that happens to be short or to mention the phrase, expand it so it stops resembling the error template — and check what links to it, because a soft 404 usually means something is generating URLs that were never meant to exist.",
   },
   "content.exact-duplicate": {
+    // Phase 19 §1: pages that declare a canonical pointing at another URL are
+    // no longer members of a group, and the explanation says so — the rule used
+    // to report a parameter variant beside its base URL, which is precisely the
+    // state its own howToFix prescribes.
     title: "Identical content at more than one URL",
     explanation:
-      "These URLs return exactly the same visible text. A search engine picks one of them to keep and drops the others, and the links and ranking signals that should have gone to a single page are split between copies that compete with each other. It is also crawl budget spent fetching the same page repeatedly.",
+      "These URLs return exactly the same visible text, and none of them has been told which one to defer to. A search engine picks one to keep and drops the others, and the links and ranking signals that should have gone to a single page are split between copies that compete with each other. It is also crawl budget spent fetching the same page repeatedly. A URL that already declares a canonical tag pointing at another page is left out of this comparison: it has said which version counts, which is the fix rather than the fault.",
     howToFix:
       "Pick the URL that should rank and point the others at it: a rel=canonical on the copies, or a 301 redirect where the duplicates should not exist at all. On templated sites, look for what created them — a print version, a parameter, a category path as well as a flat one — and fix the pattern rather than the individual pages.",
   },
@@ -724,11 +736,30 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // two 64-bit content fingerprints), not a plagiarism, scraping or
     // copy-theft finding, and near-duplicate pages carry no ranking penalty.
     // Do not let this copy imply any of that.
+    //
+    // Phase 19 §2: the fingerprint moved from the whole visible text to the
+    // MAIN content, and the explanation has to say so, because the two produce
+    // very different lists on a templated site — the earlier one reported 237
+    // pairs across unrelated templates that shared a header, a menu and a
+    // footer. The 50-word floor is stated for the same reason: a reader who
+    // knows two thin pages will not be paired here can stop looking for them.
     title: "Near-duplicate content",
     explanation:
-      "These two pages are almost the same text. We compare a fingerprint of each page's visible words, and these two differ by at most three bits out of sixty-four — in practice, pages that differ only in boilerplate, a product name or a location. Search engines group pages this similar and show one of them, so a set of near-identical pages tends to rank as one page rather than as many.",
+      "These two pages say almost the same thing. The comparison is made on a fingerprint of each page's main content — what sits inside the page's main region, or the page with its header, navigation, sidebar and footer removed — so two pages are not called similar merely for sharing the same menus and furniture, which on a templated site can be most of the words on the screen. The two fingerprints here differ by at most three bits out of sixty-four: in practice, pages that differ only in a product name, a location or a line of boilerplate. Both pages must carry at least 50 words of their own before they are compared at all, so pages with almost no content are left to the thin-content check instead. This measures how alike the text is and nothing more: it says nothing about who wrote what. What it does mean is that search engines group pages this similar and show one of them, so a set of near-identical pages tends to rank as a single page rather than as many.",
     howToFix:
-      "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped.",
+      "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped. Where the two pages are a base URL and a filtered or parameterised version of it, the fix is a canonical tag on the variant pointing at the base, and pages that already carry one are not reported here.",
+  },
+  "content.near-duplicate-skipped": {
+    // A marker: it reports the limit of this crawl's evidence, never a fault on
+    // the site. Phase 19 §2 / hard rule 1 — the near-duplicate check reads a
+    // fingerprint of each page's main content, and a crawl taken before that
+    // fingerprint existed cannot answer it. Silence would read as "no
+    // near-duplicates", which is the one thing this must not say.
+    title: "Near-duplicate check could not be run on this crawl",
+    explanation:
+      "Comparing pages for near-duplicate content needs a fingerprint of each page's main content — the part that is not the header, navigation, sidebar and footer — and not one page in this crawl has one. That is what a crawl taken before the engine started measuring main content separately looks like. The check was therefore left unrun rather than reported as clean, because a site with no near-duplicates and a crawl that never measured any produce exactly the same empty result, and only one of them is good news. Nothing here says anything about the site. The identical-content check is unaffected and its findings, or its silence, still stand.",
+    howToFix:
+      "Re-crawl the site. The fingerprint is taken from each page's text while the page is being read and cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page that has main content to measure.",
   },
 
   // -------------------------------------------------------- structured data
