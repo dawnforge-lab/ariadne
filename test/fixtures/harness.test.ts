@@ -671,6 +671,13 @@ describe("the fixture site end to end", () => {
     //    with an HTML error page.
     //  - `schema.breadcrumb-absent`, because no fixture publishes a
     //    `BreadcrumbList` and the site is well past the five-page floor.
+    //  - `hreflang.alternates-not-crawled` (P19-T3), the NOT MEASURED marker
+    //    for alternates this crawl never fetched. Two fixtures name a language
+    //    version on a host that does not exist — `https://de.example/willkommen`
+    //    and `https://en-gb.example/opening-hours` — so the return links and
+    //    indexability of those two URLs are unknown, and the marker says so
+    //    once for the crawl rather than staying silent about it. It is site-
+    //    scoped because the gap is a property of the crawl, not of a page.
     //
     // Everything else must stay off this list. `links.orphan-skipped` and
     // `robots.check-skipped` write null-page findings only when the crawl was
@@ -682,6 +689,7 @@ describe("the fixture site end to end", () => {
     expect([...siteFindings.keys()].sort()).toEqual([
       "host.http-serves-200",
       "host.legacy-host-reachable",
+      "hreflang.alternates-not-crawled",
       // P11-T3. `/img/control-outline.svg` is served with no `cache-control`
       // and no `expires` (test/fixtures/assets.ts, where it says so), and the
       // rule speaks once for the site rather than once per file — which is why
@@ -1036,6 +1044,36 @@ describe("the fixture site end to end", () => {
     expect([
       ...(issuesByPath.get("/authored/hreflang-bad-code") ?? new Set<string>()),
     ]).not.toContain("hreflang.missing-x-default");
+
+    // P19-T3. The self-reference rule fires on exactly one page of this site:
+    // the bad-code fixture, whose single alternate names a page on another host
+    // and therefore publishes a set this page is not a member of. Every other
+    // hreflang fixture names itself, which is why they are silent here and why
+    // this list is one entry rather than six.
+    expect(await findingSet("hreflang.missing-self-reference")).toEqual([
+      {
+        pageUrl: `${app.base}/authored/hreflang-bad-code`,
+        codes: ["english-uk"],
+        targets: ["https://en-gb.example/opening-hours"],
+      },
+    ]);
+
+    // And the marker for the other side of the same gap: the two alternates on
+    // hosts this crawl never fetched, grouped by host. `alternates` counts the
+    // distinct URLs, `pages` the pages of this crawl that name them — one each
+    // here, from two different fixtures — and `total` sums the hosts. No
+    // `hostsTruncated`, because two hosts is nowhere near the fifty the list
+    // stops at.
+    expect(await findingSet("hreflang.alternates-not-crawled")).toEqual([
+      {
+        pageUrl: null,
+        total: 2,
+        hosts: [
+          { host: "de.example", alternates: 1, pages: 1 },
+          { host: "en-gb.example", alternates: 1, pages: 1 },
+        ],
+      },
+    ]);
 
     // The two join rules write one finding per CLUSTER MEMBER, so a page can
     // carry several and `detailsByPath` would keep only the last of them (see

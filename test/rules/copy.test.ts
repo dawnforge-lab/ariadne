@@ -280,6 +280,26 @@ const PHASE_14_RULE_IDS = ["resources.partial-unknown"];
  */
 const PHASE_17_RULE_IDS = ["http.server-error-transient"];
 
+/**
+ * Phase 19's link rule: the 5xx half of CHECK-11, split out when
+ * `links.broken-internal` stopped saying "returns an error" and started naming
+ * its status class. Listed here for the same reason as every id above — copy
+ * lands with the rule — and the split is only worth anything if the two entries
+ * read differently, which the assertions further down pin.
+ */
+const PHASE_19_LINK_RULE_IDS = ["links.to-server-error"];
+
+/**
+ * Phase 19's hreflang pair: the self-reference rule, which reports the half of
+ * reciprocity a single page can be judged on, and the NOT MEASURED marker for
+ * the alternates a crawl never fetched. Listed here for the same reason as
+ * every id above — copy lands with the rule.
+ */
+const PHASE_19_HREFLANG_RULE_IDS = [
+  "hreflang.missing-self-reference",
+  "hreflang.alternates-not-crawled",
+];
+
 const ALL_RULE_IDS = [
   ...PHASE_2_RULE_IDS,
   ...PHASE_3_RULE_IDS,
@@ -292,6 +312,8 @@ const ALL_RULE_IDS = [
   ...PHASE_13_RULE_IDS,
   ...PHASE_14_RULE_IDS,
   ...PHASE_17_RULE_IDS,
+  ...PHASE_19_LINK_RULE_IDS,
+  ...PHASE_19_HREFLANG_RULE_IDS,
 ];
 
 describe("issue copy", () => {
@@ -312,6 +334,30 @@ describe("issue copy", () => {
       expect(c.explanation.length, `${id} explanation`).toBeGreaterThan(40);
       expect(c.howToFix.length, `${id} howToFix`).toBeGreaterThan(30);
     }
+  });
+
+  // §5 of the audit accuracy design, pinned. The owner's complaint was that
+  // "Internal links point to a URL that returns an error" names no error, so
+  // the two link rules have to name their status class in the title and spell
+  // out the members in the explanation. A title that drifts back to "an error"
+  // fails here.
+  it("names the status class in both broken-link titles, and its members in the prose", () => {
+    const fourXx = ISSUE_COPY["links.broken-internal"]!;
+    expect(fourXx.title).toContain("4xx");
+    expect(fourXx.explanation).toMatch(/client[- ]error/i);
+    for (const status of ["404", "410", "403", "401"]) {
+      expect(fourXx.explanation, `4xx explanation names ${status}`).toContain(status);
+    }
+
+    const fiveXx = ISSUE_COPY["links.to-server-error"]!;
+    expect(fiveXx.title).toContain("5xx");
+    expect(fiveXx.explanation).toMatch(/server[- ]error/i);
+    for (const status of ["500", "502", "503", "504"]) {
+      expect(fiveXx.explanation, `5xx explanation names ${status}`).toContain(status);
+    }
+    // The 5xx copy must not re-decide whether the error persisted: the
+    // end-of-crawl second look is the linked page's own finding's subject.
+    expect(fiveXx.explanation).toMatch(/second time|asked again|second request/i);
   });
 
   // The on-page thresholds are asserted against the rule constants themselves,
@@ -378,6 +424,29 @@ describe("issue copy", () => {
   // The rule is per SET now: it fires once per distinct cluster of alternates,
   // not once for the crawl and not once per page. Copy saying "this site" or
   // "this page" would describe the shape the rule used to have.
+  // §4 of the audit accuracy design, pinned. The three hreflang entries have to
+  // agree with what the rules now do: return-link only judges an alternate that
+  // was fetched, the marker asserts nothing about the site, and the
+  // self-reference evidence carries no "own language" URL — the engine stores
+  // no language for a page, so the copy has to say the comparison is between
+  // the declared URLs and the page's own, and nothing more.
+  it("the hreflang copy states which alternates were judged and which were not", () => {
+    const returnLink = ISSUE_COPY["hreflang.missing-return-link"]!;
+    expect(returnLink.explanation).toMatch(/fetched by this crawl/);
+    expect(returnLink.explanation).toMatch(/not counted here/);
+
+    const self = ISSUE_COPY["hreflang.missing-self-reference"]!;
+    expect(self.explanation).toMatch(/its own URL is not one of them/);
+    expect(self.explanation).toMatch(/discard the entire set/);
+    // No claim about which alternate stands in for this page.
+    expect(self.explanation).not.toMatch(/own language code|own-language/i);
+
+    const marker = ISSUE_COPY["hreflang.alternates-not-crawled"]!;
+    expect(marker.explanation).toMatch(/never requested/);
+    expect(marker.explanation).toMatch(/nothing wrong with the site/);
+    expect(marker.howToFix).toMatch(/crawl/i);
+  });
+
   it("hreflang.missing-x-default speaks about a cluster, not a site or a page", () => {
     const c = ISSUE_COPY["hreflang.missing-x-default"]!;
     const wrongScope = /this (?:crawl|site|page)|the whole site|site-wide/i;

@@ -1,4 +1,7 @@
+import { sql, type SQL } from "drizzle-orm";
+
 import type { Db } from "../db/client.js";
+import { normalizeUrl } from "../crawl/parse/url-utils.js";
 import { copyFor } from "./registry/copy/index.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
 import type {
@@ -35,6 +38,138 @@ export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">)
 export function present(value: string | null): value is string {
   return value !== null && value.trim() !== "";
 }
+
+/**
+ * The three columns a canonical declaration is read from.
+ *
+ * A `Pick` rather than a whole `PageRecord`, for `isAuditable`'s reason: the
+ * hreflang and link rules hold a narrow projection of `pages` — four columns
+ * per target, not the row — and they must ask this question through these
+ * functions rather than restating it beside their own row shape.
+ */
+export type CanonicalDeclaration = Pick<
+  PageRecord,
+  "url" | "canonicalHtml" | "canonicalHeader"
+>;
+
+/**
+ * The canonical the page effectively declares. The HTML `<link rel=canonical>`
+ * wins over the HTTP `Link` header because that is the order search engines
+ * apply when both are present; `canonical.html-header-conflict` is what reports
+ * the disagreement, so the other rules can work from one value.
+ *
+ * `present` is what "declares" means here: `<link rel=canonical href="">`
+ * reaches the database as an empty string, and an empty href names no URL.
+ */
+export function effectiveCanonical(page: CanonicalDeclaration): string | null {
+  if (present(page.canonicalHtml)) return page.canonicalHtml;
+  return present(page.canonicalHeader) ? page.canonicalHeader : null;
+}
+
+/**
+ * Where a declared canonical actually points, as a comparable key, or `null`
+ * when the value is not a URL we can resolve at all. Relative values resolve
+ * against the page URL first, so `/x` on `https://example.com/page` is
+ * `https://example.com/x` — the same resolution a browser and a crawler do.
+ *
+ * `normalizeUrl` is the one authority for URL identity in this codebase, and
+ * both sides of every comparison below go through it, so a fragment, a
+ * hostname's case or query-parameter order is never mistaken for a difference.
+ */
+export function resolveCanonical(canonical: string, pageUrl: string): string | null {
+  return normalizeUrl(canonical, pageUrl);
+}
+
+export interface CanonicalTarget {
+  /** The declared value, verbatim, for the evidence. */
+  canonical: string;
+  /** The normalized target, or null when the declared value does not parse. */
+  resolved: string | null;
+  /** True when the canonical resolves to a URL that is not this page. */
+  pointsElsewhere: boolean;
+}
+
+/**
+ * What a page's canonical declaration comes to: the declared value, where it
+ * resolves, and whether that is somewhere other than this page — or `null` when
+ * the page declares no canonical at all.
+ *
+ * MOVED HERE FROM src/rules/page/canonical.ts (Phase 19), which re-exports it
+ * at its old address. It was already shared by the query rules that judge the
+ * canonical's *target* (`canonical.non-200-target`, `canonical.non-indexable-
+ * target`, `url.*`, `pagination.*`); Phase 19 gave it a second class of caller
+ * — every rule that must not judge a page which has handed its signals to
+ * another URL (`isCanonicalisedElsewhere`) — and a resolution the exclusion and
+ * the finding could disagree about is the one thing that pairing must not have.
+ * One resolution, one precedence order (HTML over header), one normalizer.
+ */
+export function resolveEffectiveCanonical(page: CanonicalDeclaration): CanonicalTarget | null {
+  const canonical = effectiveCanonical(page);
+  if (canonical === null) return null;
+  const resolved = resolveCanonical(canonical, page.url);
+  const pageNormalized = normalizeUrl(page.url);
+  return {
+    canonical,
+    resolved,
+    pointsElsewhere: resolved !== null && resolved !== pageNormalized,
+  };
+}
+
+/**
+ * A page that has handed its indexing signals to another URL: it declares a
+ * canonical (HTML first, header second) and that canonical resolves to a URL
+ * which is not this page.
+ *
+ * Such a page is not a page a search engine ranks — it is a request to treat
+ * some other URL as the real one — so the rules that judge what a page SAYS
+ * about itself skip it: a duplicate body under a tracking parameter, an
+ * hreflang block inherited from the template it is a variant of, are the
+ * situation the canonical already fixes, and reporting them is reporting the
+ * remedy as the fault (Phase 19 §1).
+ *
+ * The exclusion is BY THE DECLARATION ONLY. Whether the canonical target is
+ * itself sound — a 200, indexable, not a redirect — is `canonical.*`'s
+ * business and is already reported there, so a page is invisible to the rules
+ * below whether or not the URL it names turns out to be a good one.
+ *
+ * A canonical that does not resolve to a URL at all (`href="not a url"`) is NOT
+ * "elsewhere": it names nowhere, the page keeps its own signals, and
+ * `canonical.points-elsewhere` reports the malformation. Silence is the
+ * expensive mistake here (hard rule 1), so the doubtful case stays visible.
+ */
+export function isCanonicalisedElsewhere(page: CanonicalDeclaration): boolean {
+  return resolveEffectiveCanonical(page)?.pointsElsewhere === true;
+}
+
+/**
+ * `isCanonicalisedElsewhere` for a rule whose question is a GROUP rather than a
+ * row: the same test, in SQL, over an aliased `pages`.
+ *
+ * SQL cannot run `normalizeUrl`, so this is the string-level form of the test.
+ * The two agree exactly on the shape a template emits — an ABSOLUTE canonical
+ * stored in the spelling the page URL is stored in — and where this form cannot
+ * resolve a value it deliberately answers NO: a relative canonical (`/page`) is
+ * never read as "elsewhere" here, because a wrong "yes" SILENCES a rule (hard
+ * rule 1) while a wrong "no" only leaves a finding a reader can dismiss. Both
+ * `url` and `url_normalised` count as "this page", which is what covers a
+ * canonical stored in the spelling the crawler fetched rather than the
+ * normalized one.
+ *
+ * THREE-VALUED LOGIC IS COALESCED AWAY, and that is load-bearing: a page with
+ * no canonical at all leaves the comparison NULL, and `not (NULL)` is NULL, so
+ * an uncoalesced form would drop exactly the pages it is meant to KEEP from
+ * every `and not CANONICALISED_ELSEWHERE(p)` filter. False means "not
+ * canonicalised elsewhere", including "declares nothing".
+ */
+export const CANONICALISED_ELSEWHERE = (alias: string): SQL => {
+  const declared =
+    `coalesce(nullif(btrim(${alias}.canonical_html), ''), ` +
+    `nullif(btrim(${alias}.canonical_header), ''))`;
+  return sql.raw(
+    `coalesce(${declared} ~* '^https?://' ` +
+      `and ${declared} not in (${alias}.url, ${alias}.url_normalised), false)`,
+  );
+};
 
 /**
  * The identity a finding is stamped with. `pageRule` hands this to the rule

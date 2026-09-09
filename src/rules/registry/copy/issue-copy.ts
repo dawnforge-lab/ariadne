@@ -287,11 +287,18 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
 
   // -------------------------------------------------------------------- links
   "links.broken-internal": {
-    title: "Internal links point to a URL that returns an error",
+    title: "Internal links point to a page that answers 4xx (not found, gone, forbidden)",
     explanation:
-      "Pages on this site link to a URL that answered with a 4xx error, so every one of those links is a dead end. Visitors who click get an error page, and the crawler spends a request on nothing and passes no value on to a working page. This is reported once for the broken target, with a count of how many pages link to it and a sample of them, because the fix is at the target, not on each linking page.",
+      "Pages on this site link to a URL whose server answered with a status in the 4xx class — the client-error class, meaning the request cannot be fulfilled as made. A 404 not found says there is no page at that URL, and a search engine drops it from the index. A 410 gone says the same thing deliberately and permanently, and is dropped faster. A 403 forbidden says the page exists but is closed to whoever asked, so a search engine can neither read nor index it. A 401 unauthorised says it sits behind a login, with the same result. Whichever of them it is, every link to that URL is a dead end: a visitor who clicks gets an error screen instead of the page the link promised, each request a search engine spends on it is crawl budget taken from pages that do work, and none of the ranking value those links carry reaches anything. This is reported once for each broken target, with the number of pages linking to it and a sample of them, because the fix is at the target rather than on each linking page — and the exact status it answered with is recorded with the finding.",
     howToFix:
-      "If the URL should exist, restore it or redirect it to its replacement. If it should not, update the links to point at the right page — or remove them. Fixing the target once repairs every link listed here.",
+      "If the URL should exist, restore the page at it, or redirect it with a 301 to the closest live replacement. If it should not exist, edit the links to point at the page that superseded it, or delete them. For a 403 or a 401, decide first whether the page is meant to be public: if it is, fix the access rule or the login gate rather than the link. When one broken target is linked from many pages the link almost always lives in a template — navigation, footer, a promo block, a related-products module — so change it once there instead of page by page. Fixing the target repairs every link listed here at once.",
+  },
+  "links.to-server-error": {
+    title: "Internal links point to a page that answers 5xx (server error)",
+    explanation:
+      "Pages on this site link to a URL whose server answered with a status in the 5xx class — the server-error class, meaning the request was valid and the site failed to answer it. A 500 internal server error is application code that broke. A 502 bad gateway is a front-end server that got an invalid answer from the application behind it. A 503 service unavailable is the site reporting itself overloaded or in maintenance. A 504 gateway timeout is the application taking too long to answer at all. A search engine treats a 5xx as temporary, so it keeps the URL for a while and comes back — but it also slows its crawling of the whole site while the errors continue, and a URL that keeps failing is dropped in the end. Meanwhile a visitor who follows one of these links gets an error screen, and the ranking value the links carry reaches nothing. Every 5xx this crawl met was asked a second time when the crawl finished, and whether it was still failing then is stated on the linked page's own finding — the one about the server error itself, or the one recording that the second request got a page — so read that before deciding the fault is permanent. This is reported once for each failing target, with the number of pages linking to it and a sample of them; the exact status it answered with is recorded with the finding.",
+    howToFix:
+      "This is a server fault rather than a link fault, so start at the target: read the application and upstream server logs for that URL and fix what is erroring — the linked page's own finding carries the timestamps to search around. If the URL is not meant to exist any more, make it answer 404 or 410, or redirect it to the closest live page, so the links stop pointing at a failure. Only once the target is settled is it worth touching the links themselves, and where many pages link to the same failing URL that link is usually in a template, so it changes in one place.",
   },
   // Two rule ids for one check, because copy is looked up by rule id: the
   // orphan finding and the statement that the check could not be run are
@@ -427,11 +434,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       'Add an "x-default" alternate to this cluster, pointing at the fallback version — usually the international English page or a language selector. The annotation belongs on every page in the cluster, alongside the alternates already there, so it is normally a one-line change in the template that generates them.',
   },
   "hreflang.missing-return-link": {
-    title: "Hreflang alternate does not point back",
+    title: "Hreflang alternate was fetched and does not point back",
     explanation:
-      "This page names another page as its language alternate, that page was crawled, and it does not name this one in return. Hreflang annotations are only honoured when they are reciprocal: a one-way annotation is discarded, so the alternate is ignored and visitors keep being served the wrong language version.",
+      "This page names another page as its language alternate, that page was fetched by this crawl, and it does not name this one in return. Hreflang annotations are only honoured when they are reciprocal: a one-way annotation is discarded, so the alternate is ignored and visitors keep being served the wrong language version. This is reported only where both sides were fetched — an alternate on a domain this crawl never visited is not counted here, because what it declares is unknown, and it is listed among the things this crawl could not check instead.",
     howToFix:
-      "Make the annotations symmetrical. Every page in a cluster should declare the same full set of alternates, including itself, so each version confirms the others. Generating the block once from a single mapping and rendering it on every page in the cluster is what stops this recurring.",
+      "Make the annotations symmetrical. Every page in a set should declare the same full list of alternates, including itself, so each version confirms the others. Generating the block once from a single mapping of language to URL and rendering it on every page in the set is what stops this recurring.",
+  },
+  // Phase 19 §4. The other half of reciprocity, and the half that needs no
+  // second page: a set that omits the page it sits on is discarded whole. The
+  // evidence carries no "own language" URL and the copy has to say why — the
+  // site states no language for a page anywhere this engine reads, so naming
+  // which alternate stands in for this page would be a guess.
+  "hreflang.missing-self-reference": {
+    title: "Hreflang set leaves out the page it is on",
+    explanation:
+      "This page declares language alternates and its own URL is not one of them. A set of alternates has to name every version of the page, the one carrying the annotations included; when a page is missing from the set it declares, search engines discard the entire set rather than the one absent entry, so none of the versions listed here are connected and visitors keep being sent to the wrong one. The comparison is between the URLs this page declares and the URL it was fetched at — differences of letter case, ordering of query parameters and any '#' fragment are ignored, so a version declared in a different spelling still counts as itself. Which language this page is meant to be is not part of the comparison: the site states none in a form that could be read here.",
+    howToFix:
+      "Add an alternate naming this page's own URL alongside the ones already declared, with the language and region code this version serves. Where a template generates the block, generate the whole set once from a single mapping of language to URL and render the identical block on every version — hand-written blocks that list only 'the other languages' are what produce this, and they produce it on every page of the set at once.",
+  },
+  // Phase 19 §4. A NOT MEASURED marker: it reports the boundary of what was
+  // fetched, never a fault on the site. Off-domain alternates are the normal
+  // shape of an international setup, so this fires on most of them, and the
+  // copy has to make "we did not look" unmistakable.
+  "hreflang.alternates-not-crawled": {
+    title: "Language alternates were not fetched by this crawl",
+    explanation:
+      "Pages on this site name language alternates whose URLs this crawl never requested — most often because they sit on separate country domains that were not part of what was crawled. Nothing about them was checked: whether they answer at all, whether they name this site back, and whether they are open to indexing are all unknown, and every language-alternate result in this report covers only the URLs that were fetched. The numbers here are the size of that gap: for each domain the unfetched alternates belong to, how many distinct URLs went unfetched and how many pages of this crawl name them. Alternates on separate country domains are the normal shape of an international setup, so this reports nothing wrong with the site — it reports what was not looked at.",
+    howToFix:
+      "To have these checked, cover the domains they sit on: add them as extra starting URLs so one crawl takes in the whole international set, or crawl each domain and read the results together. Where an unfetched alternate is on the domain that was already crawled, the reason it was left out — a robots.txt rule, or a URL the crawl was not allowed to follow — is worth settling first, because search engines are likely to be shut out of it in the same way. A domain that is deliberately out of scope needs nothing done; read the alternate checks as covering the rest.",
   },
   "hreflang.non-indexable-target": {
     title: "Hreflang alternate points to a page search engines cannot serve",

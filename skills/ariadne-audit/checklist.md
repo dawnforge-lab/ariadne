@@ -327,8 +327,8 @@ answered from, and its verdict is the confidence interval around all of them.
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
-  `resources.all-unknown`, `resources.partial-unknown`, and the per-page
-  `crawl.blocked`. Each one
+  `resources.all-unknown`, `resources.partial-unknown`,
+  `hreflang.alternates-not-crawled`, and the per-page `crawl.blocked`. Each one
   is the engine saying a check below could not be answered on this crawl. The last
   four are siblings and never more than one appears: `resources.not-recorded` means
   the crawl holds NO resource records, `resources.not-fetched` means it recorded them
@@ -926,12 +926,18 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-11: Broken internal links (4xx)
 - **Priority**: Critical | **Requires**: Engine + DevTools
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-11"` — `links.broken-internal` (critical):
-     an internal link whose target answered 4xx.
+  1. `issues_list` with `checkId: "CHECK-11"` — TWO rules, split by status class:
+     `links.broken-internal` (critical), an internal link whose target answered
+     4xx (404, 410, 403, 401), and `links.to-server-error` (critical), an
+     internal link whose target answered 5xx (500, 502, 503, 504) — the same
+     finding shape, a different repair, and the failing page's own 5xx finding
+     is CHECK-12's, so both firing on one URL is two facts rather than a
+     duplicate.
   2. `issue_urls` with `ruleId: "links.broken-internal"` — the developer's list.
      Each row's evidence names the broken target and where the link was found, which
      is what the action plan hands over. Follow the cursors, or `export_crawl` with
-     `dataset: "issues"` if the count is in the thousands.
+     `dataset: "issues"` if the count is in the thousands. Repeat it with
+     `ruleId: "links.to-server-error"` for the 5xx half.
   3. `pages_query` with `statusCode: 404` for the 4xx URLs themselves, beside their
      page type — a 404 nothing links to is a different problem from a linked one.
 - **DevTools**: Spot-check 2-3 source pages to verify broken links in context
@@ -1257,13 +1263,34 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      `{pagesWithHreflang, indexablePages, coveragePct}` for the site and for each
      page type (`scope: "page_type"`, `scopeValue` the cohort). A page type at 0%
      coverage while its siblings are at 100% is the gap to report.
+  3. `issues_list` with `checkId: "CHECK-24"` — `hreflang.missing-self-reference`
+     (warning): a page declares alternates and its own URL is not among them. The
+     other half of reciprocity, and the half that needs no second page: a set that
+     omits the page carrying it is discarded whole, so this is usually one template
+     defect repeated across every page it renders. Evidence carries the declared
+     codes and the URLs they name; it carries NO "own language" URL, because the
+     engine stores no language for a page and naming one would be a guess.
+  4. `issues_list` with `checkId: "CHECK-24"` — `hreflang.alternates-not-crawled`
+     (info) is a NOT MEASURED marker, not a finding about the site: it fires once
+     when declared alternates have no page in this crawl, with the count of
+     unfetched alternate URLs per domain and how many pages name them. Off-domain
+     alternates are the normal shape of an international site, so expect it on most
+     of them. **When it is present, the return-link answer above covers only the
+     alternates that were fetched** — mark this check SKIP for the rest rather than
+     reading the silence as reciprocal.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?
   2. If the site has multiple language/market versions, ALL equivalent pages should have hreflang
   3. Cross-reference: total indexable internal pages vs total pages with hreflang — identify the gap
   4. Flag page types missing hreflang that should have it (e.g., products exist in multiple markets but only some have hreflang)
+- **Every hreflang rule ignores a page canonicalised elsewhere.** A page whose
+  declared canonical names another URL is asking for that URL to be treated as the
+  real one, and search engines read hreflang on the canonical, so an inherited
+  alternates block on a tracking-parameter variant is not judged at all. Its
+  canonical is reported by CHECK-17 where it belongs.
 - **Evaluate**:
   - FAIL if missing return links > 0
+  - FAIL if pages missing their own self-reference > 0
   - FAIL if significant coverage gap (many pages that should have hreflang don't)
   - WARN if hreflang only in sitemap (not in HTML)
   - Record: total hreflang URLs, total indexable URLs, coverage %, missing return links, page types without hreflang that should have it, implementation method (HTML/sitemap/both)
@@ -1284,10 +1311,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-26"` —
   `hreflang.non-indexable-target` (critical): an hreflang alternate that points at a
-  page this crawl judged non-indexable (noindexed, canonicalised away, or not a 200).
+  page this crawl fetched and found either redirecting or excluded from the index by
+  a noindex directive. An alternate that canonicalises to another URL is not a
+  cluster member at all (see CHECK-24) and is reported by CHECK-17 instead.
   `issue_urls` gives the source/target pairs and the reason per row. A target the
   crawl never fetched cannot be judged and produces no finding — read it as
-  unmeasured, not as sound.
+  unmeasured, not as sound, and read `hreflang.alternates-not-crawled` (info), the
+  NOT MEASURED marker that says how many such targets there were and which domains
+  they sit on, before recording a verdict here.
 - **Evaluate**:
   - FAIL if hreflang targets are non-200, noindexed, or non-canonical
   - Record: non-200 count, noindex count, non-canonical count, affected URL pairs
