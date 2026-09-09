@@ -37,11 +37,14 @@ function rule(id: string): QueryRule {
 }
 
 describe("linkTargetRules metadata", () => {
-  it("defines exactly the three link/canonical target rules of the Phase 3 table", () => {
+  // Phase 3's three, plus Phase 19's split of "returns an error" into the two
+  // status classes it was hiding (§5 of the audit accuracy design).
+  it("defines exactly the four link/canonical target rules", () => {
     expect(linkTargetRules.map((r) => r.id).sort()).toEqual([
       "canonical.non-200-target",
       "canonical.non-indexable-target",
       "links.broken-internal",
+      "links.to-server-error",
     ]);
   });
 
@@ -49,7 +52,10 @@ describe("linkTargetRules metadata", () => {
     expect(
       Object.fromEntries(linkTargetRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
+      // One check, two rules: CHECK-11 is "internal links whose target does not
+      // answer", and the class the target answered with is what splits them.
       "links.broken-internal": [["CHECK-11"], "critical", "links"],
+      "links.to-server-error": [["CHECK-11"], "critical", "links"],
       "canonical.non-200-target": [["CHECK-19"], "critical", "canonical"],
       "canonical.non-indexable-target": [["CHECK-19"], "critical", "canonical"],
     });
@@ -209,9 +215,11 @@ describe("linkTargetRules against the database", () => {
       expect(await findings("links.broken-internal", crawlId)).toHaveLength(0);
     });
 
-    // A 5xx is a server fault, not a broken link; `http.server-error` reports
-    // it against the page itself. This rule speaks only to 4xx targets.
-    it("does not fire on a link to a server error", async () => {
+    // The two rules are disjoint by construction: each matches one fetch class
+    // exactly. A 5xx target is `links.to-server-error`'s, and reporting it here
+    // would hand the client the 4xx repair (restore or repoint the URL) for a
+    // fault that lives in the server logs.
+    it("does not fire on a link to a server error, which its sibling reports", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [
         { path: "/src" },
@@ -220,6 +228,7 @@ describe("linkTargetRules against the database", () => {
       await addLinks(crawlId, ["/src"], ids, "/boom");
 
       expect(await findings("links.broken-internal", crawlId)).toHaveLength(0);
+      expect(await findings("links.to-server-error", crawlId)).toHaveLength(1);
     });
 
     // O(broken targets) is O(pages) on a site that 404s a whole section, so
@@ -259,6 +268,138 @@ describe("linkTargetRules against the database", () => {
 
       expect(await findings("links.broken-internal", mine)).toHaveLength(0);
       expect(await findings("links.broken-internal", other)).toHaveLength(1);
+    });
+  });
+
+  describe("links.to-server-error", () => {
+    it("reports one finding per failing TARGET, counting every inlink to it", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/s1" },
+        { path: "/s2" },
+        { path: "/boom", fetchClass: "server_error", statusCode: 500 },
+      ]);
+      await addLinks(crawlId, ["/s1", "/s2"], ids, "/boom");
+
+      const found = await findings("links.to-server-error", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: "links.to-server-error",
+        severity: rule("links.to-server-error").severity,
+        pageId: ids.get("/boom"),
+        pageUrl: url("/boom"),
+        dedupeKey: url("/boom"),
+      });
+      // The same evidence shape as its 4xx sibling, so a report writer reads
+      // both with one piece of code — and `statusCode` is what makes the
+      // finding say 502 rather than "an error".
+      expect(found[0]!.evidence).toEqual({
+        targetUrl: url("/boom"),
+        statusCode: 500,
+        inlinkCount: 2,
+        sampleSources: [url("/s1"), url("/s2")],
+      });
+
+      // The 4xx rule is silent: the classes are matched exactly, so one target
+      // can only ever be one of the two rules' business.
+      expect(await findings("links.broken-internal", crawlId)).toHaveLength(0);
+    });
+
+    it("does not fire on a link to a 4xx target, which its sibling reports", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/src" },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+      ]);
+      await addLinks(crawlId, ["/src"], ids, "/gone");
+
+      expect(await findings("links.to-server-error", crawlId)).toHaveLength(0);
+      expect(await findings("links.broken-internal", crawlId)).toHaveLength(1);
+    });
+
+    // A target the crawl never got an answer from is not a broken link of
+    // either class: nothing is known about whether that URL serves a page, and
+    // "unknown" is not a finding (hard rule 1). The crawl summary is where a
+    // fetch that could not complete is reported.
+    it("is silent, as is its sibling, when the target answered with no status at all", async () => {
+      for (const fetchClass of ["timeout", "network_error"]) {
+        const crawlId = await newCrawl();
+        const ids = await addPages(crawlId, [
+          { path: "/src" },
+          { path: "/unreachable", fetchClass, statusCode: null },
+        ]);
+        await addLinks(crawlId, ["/src"], ids, "/unreachable");
+
+        expect(await findings("links.to-server-error", crawlId), fetchClass).toHaveLength(0);
+        expect(await findings("links.broken-internal", crawlId), fetchClass).toHaveLength(0);
+      }
+    });
+
+    it("counts every inlink but samples at most ten sources", async () => {
+      const crawlId = await newCrawl();
+      const sources = Array.from({ length: 14 }, (_, i) => `/from-${String(i).padStart(2, "0")}`);
+      const ids = await addPages(crawlId, [
+        ...sources.map((path) => ({ path })),
+        { path: "/down", fetchClass: "server_error", statusCode: 502 },
+      ]);
+      await addLinks(crawlId, sources, ids, "/down");
+
+      const found = await findings("links.to-server-error", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence.inlinkCount).toBe(14);
+      expect(found[0]!.evidence.sampleSources).toHaveLength(SAMPLE_SOURCES);
+      expect(found[0]!.evidence.statusCode).toBe(502);
+    });
+
+    it("ignores links flagged external, and links to targets that answer", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/src" },
+        { path: "/fine" },
+        { path: "/external-503", fetchClass: "server_error", statusCode: 503 },
+      ]);
+      await addLinks(crawlId, ["/src"], ids, "/fine");
+      await addLinks(crawlId, ["/src"], ids, "/external-503", false);
+
+      expect(await findings("links.to-server-error", crawlId)).toHaveLength(0);
+    });
+
+    // Capped like its sibling and for the same reason: an application that
+    // fails on a whole section is O(pages) findings otherwise, and the count
+    // behind the cap counts distinct TARGETS.
+    it("caps the findings and says so on the last one", async () => {
+      const crawlId = await newCrawl();
+      const total = URL_FINDING_CAP + 1;
+      const down = Array.from({ length: total }, (_, i) => `/down-${String(i).padStart(4, "0")}`);
+      const ids = await addPages(crawlId, [
+        { path: "/src" },
+        ...down.map((path) => ({ path, fetchClass: "server_error", statusCode: 500 })),
+      ]);
+      for (const path of down) await addLinks(crawlId, ["/src"], ids, path);
+
+      const found = await findings("links.to-server-error", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found.map((f) => f.pageUrl)).toEqual(down.slice(0, URL_FINDING_CAP).map(url));
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
+      expect(found[0]!.evidence).not.toHaveProperty("truncated");
+    });
+
+    it("reads only its own crawl", async () => {
+      const other = await newCrawl();
+      const otherIds = await addPages(other, [
+        { path: "/src" },
+        { path: "/boom", fetchClass: "server_error", statusCode: 503 },
+      ]);
+      await addLinks(other, ["/src"], otherIds, "/boom");
+
+      const mine = await newCrawl();
+      const mineIds = await addPages(mine, [{ path: "/src" }, { path: "/ok" }]);
+      await addLinks(mine, ["/src"], mineIds, "/ok");
+
+      expect(await findings("links.to-server-error", mine)).toHaveLength(0);
+      expect(await findings("links.to-server-error", other)).toHaveLength(1);
     });
   });
 
