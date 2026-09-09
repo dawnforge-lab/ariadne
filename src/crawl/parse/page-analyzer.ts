@@ -221,13 +221,26 @@
  *    page's MAIN CONTENT rather than over everything it renders. What "main
  *    content" means here is one rule with a fallback, decided at the END of the
  *    parse: the visible text inside the FIRST `<main>` element when the
- *    document has one, and otherwise the visible text of the body with the
- *    `<nav>`, `<header>`, `<footer>` and `<aside>` subtrees removed. Both
- *    candidate streams are accumulated DURING the one pass and the choice is
- *    made after it, because the fallback cannot be known to be needed until the
- *    document has ended without a `<main>`. That keeps the file's one promise —
- *    one tokenizer pass, no tree, O(text) — and costs two more arrays of
- *    pointers into strings the body accumulator already holds.
+ *    document has one, and otherwise the visible text of the body — and in
+ *    BOTH cases MINUS every `<nav>`, `<header>`, `<footer>` and `<aside>`
+ *    subtree, including the ones inside that `<main>`. Both candidate streams
+ *    are accumulated DURING the one pass and the choice is made after it,
+ *    because the fallback cannot be known to be needed until the document has
+ *    ended without a `<main>`. That keeps the file's one promise — one
+ *    tokenizer pass, no tree, O(text) — and costs two more arrays of pointers
+ *    into strings the body accumulator already holds.
+ *  - CHROME IS EXCLUDED INSIDE `<main>` TOO, and the reason is evidence rather
+ *    than reasoning. The first cut of this stream kept it ("a document that
+ *    says where its content is has said so about the nav in it"); the re-crawl
+ *    at 0018 (`crawl_9278877e`, 547 pages) then produced 500 capped
+ *    near-duplicate pairs, every one between pages whose main word count was
+ *    105 to 107. This Shopify theme puts its newsletter block and its footer
+ *    navigation INSIDE `<main>` — one `<footer>` landmark per `<main>` — so the
+ *    "main content" of an empty `/pages/*` page was its heading plus 105 words
+ *    of footer, identical on 79 pages. The rule is therefore the same on both
+ *    sides of the fallback: chrome is furniture wherever it sits, and a page
+ *    whose `<main>` holds nothing but chrome has no main content at all
+ *    (`null`, below). See the spec's §11 amendment.
  *  - "The first `<main>`" is the first one the ORACLE'S WALK would reach, which
  *    is what makes the two sides comparable: a `<main>` inside a `<template>`,
  *    a `<script>`, an `<svg>` or a `<noscript>` is not it, because the DOM
@@ -470,14 +483,15 @@ export interface PageAnalysis {
   /**
    * `simhash` over the page's MAIN CONTENT instead of over everything it
    * renders: the visible text inside the first `<main>` when the document has
-   * one, else the body's visible text with the `<nav>`, `<header>`, `<footer>`
-   * and `<aside>` subtrees removed. Same unsigned range and the same signed
-   * spelling in the database as `simhash`.
+   * one, else the body's visible text — in either case with the `<nav>`,
+   * `<header>`, `<footer>` and `<aside>` subtrees removed, the ones inside the
+   * `<main>` included. Same unsigned range and the same signed spelling in the
+   * database as `simhash`.
    *
-   * NULL WHEN THERE IS NOTHING TO FINGERPRINT — an empty `<main>`, or a body
-   * that is nothing but chrome — and never `0`. See the module header's Phase
-   * 19 block for the choice rule and for why this stream does not apply
-   * `renderableWordCount`'s markup-hidden exclusion.
+   * NULL WHEN THERE IS NOTHING TO FINGERPRINT — an empty `<main>`, a `<main>`
+   * holding only chrome, or a body that is nothing but chrome — and never `0`.
+   * See the module header's Phase 19 block for the choice rule and for why this
+   * stream does not apply `renderableWordCount`'s markup-hidden exclusion.
    */
   mainSimhash: bigint | null;
   /** Words in the text `mainSimhash` was taken over; null on the same terms. */
@@ -554,8 +568,9 @@ const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
  */
 const TEMPLATE_TAG = "template";
 /**
- * The page furniture the main-content stream leaves out when the document has
- * no `<main>` to be authoritative about it. Four element names, and no
+ * The page furniture the main-content stream leaves out — in the fallback and
+ * inside a `<main>` alike, because real themes put a `<footer>` in there (see
+ * the module header's Phase 19 block). Four element names, and no
  * heuristics beside them: a `class="site-header"` div is chrome to a reader and
  * is not chrome to this file, because guessing from class names is a different
  * (and much less honest) instrument than reading the elements HTML defines for
@@ -958,10 +973,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // THE TWO MAIN-CONTENT CANDIDATES (P19-T1), accumulated together and chosen
   // between at the end of the parse — which is the only place the choice can be
   // made, since "this document has no <main>" is not knowable until it ends.
-  //  - `main*Parts` take the text inside the first `<main>`, chrome and all: a
-  //    document that declares its main content is believed about where it is.
-  //  - `content*Parts` take the body's text minus the CHROME_TAGS subtrees, for
-  //    the document that declares nothing.
+  //  - `main*Parts` take the text inside the first `<main>` MINUS the
+  //    CHROME_TAGS subtrees within it — themes put a `<footer>` in there and it
+  //    is furniture wherever it sits (module header, Phase 19).
+  //  - `content*Parts` take the body's text minus the same CHROME_TAGS
+  //    subtrees, for the document that declares no `<main>` at all.
   // Both mirror the body/fallback split above for the same reason it exists —
   // a fragment with no `<body>` must be measured on the same terms by every
   // stream or the four numbers would not be about one text. Like the renderable
@@ -988,6 +1004,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let mainOpenedAt: number | null = null;
   let mainSeen = false;
   let mainDone = false;
+  // The chrome depth the chosen `<main>` opened AT, so the main stream's gate
+  // is "no chrome has opened since", not "no chrome is open". The oracle starts
+  // its walk at the `<main>` element itself and so never sees the chrome
+  // ENCLOSING it — a `<main>` inside a `<footer>` is malformed, and real, and
+  // its text is still that page's main content on both sides. Only the chrome
+  // the walk would meet on its way DOWN is excluded.
+  let chromeDepthAtMain = 0;
   // Chrome subtrees, one counter over the four names (see CHROME_TAGS).
   // Incremented and decremented on the tag name alone — never on a condition —
   // so the counter cannot drift when the element sits inside a suppressed or
@@ -1140,15 +1163,15 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // text, is what keeps the two counts comparable.
     pushBoundary(inBody ? renderableBodyParts : renderableFallbackParts);
     // The two main-content candidates take a boundary only where they take
-    // text. The chrome gate reads `chromeDepth` as it stands, and the two
-    // handlers bracket it deliberately: a `<nav>` has already INCREMENTED it
-    // when its opening boundary is emitted (skipped) and has already
-    // DECREMENTED it when its closing one is (taken), so a chrome subtree
-    // contributes exactly one separator to this stream — the same one the
-    // oracle's walk pushes where it declines to descend. Words on either side
-    // of a `<nav>` therefore never merge, which is the only thing this has to
-    // get right.
-    if (mainOpenedAt !== null) {
+    // text, and BOTH are now chrome-gated. The gate reads `chromeDepth` as it
+    // stands, and the two handlers bracket it deliberately: a `<nav>` has
+    // already INCREMENTED it when its opening boundary is emitted (skipped) and
+    // has already DECREMENTED it when its closing one is (taken), so a chrome
+    // subtree contributes exactly one separator to either stream — the same one
+    // the oracle's walk pushes where it declines to descend. Words on either
+    // side of a `<nav>` therefore never merge, which is the only thing this has
+    // to get right.
+    if (mainOpenedAt !== null && chromeDepth === chromeDepthAtMain) {
       pushBoundary(inBody ? mainBodyParts : mainFallbackParts);
     }
     if (chromeDepth === 0) {
@@ -1294,6 +1317,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             ) {
               mainOpenedAt = elementDepth;
               mainSeen = true;
+              // Read AFTER this element's own increment would have happened —
+              // `main` is not a chrome name, so `chromeDepth` here is exactly
+              // the chrome open around the `<main>`, which the stream ignores.
+              chromeDepthAtMain = chromeDepth;
             }
             break;
           case "nav":
@@ -1387,7 +1414,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // accumulators above them and take the SAME text nodes — no
         // markup-hidden exclusion, deliberately: this fingerprint is of the
         // main content as served (module header, Phase 19).
-        const inMain = mainOpenedAt !== null;
+        // Chrome is dropped from BOTH candidates: `inMain` is "inside the
+        // chosen `<main>` and under no chrome opened since it", `inChrome` is
+        // the fallback's plain form of the same question.
+        const inMain = mainOpenedAt !== null && chromeDepth === chromeDepthAtMain;
         const inChrome = chromeDepth > 0;
         if (bodyDepth > 0) {
           bodyParts.push(text);
@@ -1472,12 +1502,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const renderableWordCount = renderableText ? renderableText.split(/\s+/).length : 0;
   // THE CHOICE, made here because here is where the document has ended: a page
   // that declared a `<main>` is measured inside it, and a page that declared
-  // none is measured over its body minus the chrome. Both candidates were
+  // none is measured over its whole body. Chrome is out of both. Both were
   // accumulated during the one pass, so this costs a join and a compare.
   // Only the branch taken is joined: on a page that declared a `<main>` the
-  // chrome-stripped fallback was still accumulated (the choice cannot be made
-  // until the document ends) but is never read, and joining it would be one
-  // string built per page for nothing.
+  // body-wide fallback was still accumulated (the choice cannot be made until
+  // the document ends) but is never read, and joining it would be one string
+  // built per page for nothing.
   const mainText = (
     mainSeen
       ? (sawBody ? mainBodyParts : mainFallbackParts).join("")
@@ -1485,9 +1515,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   )
     .replace(/\s+/g, " ")
     .trim();
-  // Zero words is NOT a measurement of zero: an empty `<main>` and a body that
-  // is all chrome both mean "there is nothing here to fingerprint", and a rule
-  // has to be able to tell that from a page it measured. See the field docs.
+  // Zero words is NOT a measurement of zero: an empty `<main>`, a `<main>` that
+  // is nothing but chrome (the empty template page this amendment was written
+  // for) and a body that is all chrome all mean "there is nothing here to
+  // fingerprint", and a rule has to be able to tell that from a page it
+  // measured at zero. See the field docs.
   const mainWordCount = mainText === "" ? null : mainText.split(/\s+/).length;
   const title: string | null = sawTitle ? titleParts.join("").trim() : null;
   const firstH1 = h1s[0];

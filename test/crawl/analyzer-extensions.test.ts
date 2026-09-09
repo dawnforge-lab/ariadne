@@ -781,11 +781,63 @@ describe("mainWordCount / mainSimhash: the main-content fingerprint", () => {
     expect(a.mainSimhash).toBe(simhash64("the first main"));
   });
 
-  it("keeps chrome that sits INSIDE the main content", () => {
-    // A document that says where its content is has said so about the in-page
-    // nav in it too: the exclusion is the FALLBACK's rule, not a filter.
+  it("excludes chrome that sits INSIDE the main content", () => {
+    // INVERTED by the §11 amendment. This case used to expect 4 — the in-page
+    // `<nav>`'s two words plus the article's two — on the reasoning that a
+    // document which says where its content is has said so about the nav in it.
+    // The re-crawl said otherwise (see below), so chrome is furniture wherever
+    // it sits and only "article copy" is measured.
     const a = page(`<header><p>site chrome</p></header><main><nav><a href="/x">jump to</a></nav><p>article copy</p></main>`);
-    expect(a.mainWordCount).toBe(4);
+    expect(a.mainWordCount).toBe(2);
+    expect(a.mainSimhash).toBe(simhash64("article copy"));
+  });
+
+  it("does not let a footer inside <main> fingerprint 79 empty pages alike", () => {
+    // THE §11 DEFECT, reproduced at the size that produced it: a Shopify theme
+    // whose `<main>` carries the newsletter block and the footer navigation
+    // inside a `<footer>` landmark, so 79 empty `/pages/*` URLs each measured
+    // 105 main words — their `<h1>` plus the theme's footer — and the crawl
+    // returned 500 capped near-duplicate pairs at hamming 0 to 2.
+    // 91 words of newsletter block and 14 of footer navigation: 105, the count
+    // every one of those pages reported.
+    const THEME_FOOTER =
+      `<footer><p>${"join our newsletter for offers and news ".repeat(13)}</p>` +
+      `<nav><p>${"about contact delivery returns privacy terms shipping ".repeat(2)}</p></nav></footer>`;
+    const empty = (heading: string) => page(`<main><h1>${heading}</h1>${THEME_FOOTER}</main>`);
+    const a = empty("Size guide");
+    const b = empty("Store finder");
+    // 105 words on the page, 2 of them its own — which is what the fingerprint
+    // now measures, and it is below `content.near-duplicate`'s 50-word floor,
+    // so these pages never reach that rule at all. `content.thin` owns them.
+    expect(a.wordCount).toBe(107);
+    expect(a.mainWordCount).toBe(2);
+    expect(b.mainWordCount).toBe(2);
+    // Read whole they are one bit apart; read over the main content they are
+    // two different two-word headings. No claim about their hamming distance is
+    // made — at two words there is nothing to be a near-duplicate of.
+    expect(hammingDistance(a.simhash, b.simhash)).toBeLessThanOrEqual(3);
+  });
+
+  it("is null when the <main> holds nothing but chrome — not zero", () => {
+    // The empty template page itself: a `/pages/*` whose `<main>` is only the
+    // theme's footer block, with no copy of its own at all. "Nothing to
+    // fingerprint" — the same answer as a body that is all chrome, and the
+    // reason `content.near-duplicate` never sees these rows.
+    const a = page(
+      `<main><footer><p>${"join our newsletter for offers and news ".repeat(15)}</p></footer></main>`,
+    );
+    expect(a.wordCount).toBe(105);
+    expect(a.mainWordCount).toBeNull();
+    expect(a.mainSimhash).toBeNull();
+  });
+
+  it("ignores chrome ENCLOSING the <main>, and excludes chrome below it", () => {
+    // Malformed markup that real templates ship. The measurement starts at the
+    // `<main>`, so the `<footer>` around it is not on the way down and does not
+    // silence the page; the `<nav>` inside it is, and is excluded.
+    const a = page(`<footer><main><p>the page copy</p><nav><p>an in main menu</p></nav></main></footer>`);
+    expect(a.mainWordCount).toBe(3);
+    expect(a.mainSimhash).toBe(simhash64("the page copy"));
   });
 
   it("excludes template text from the main content, as it does from wordCount", () => {

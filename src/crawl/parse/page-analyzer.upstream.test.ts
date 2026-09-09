@@ -83,7 +83,7 @@
  *  - `mainWordCount` and `mainSimhash` are DOM reads in the strongest sense
  *    this file recognises — WHICH SUBTREE the text comes from is the whole
  *    question, and the oracle answers it by walking for the first `<main>` and
- *    otherwise by walking the body while declining to descend into
+ *    otherwise by walking the body — declining, in BOTH walks, to descend into
  *    `CHROME_TAGS`. Two things are shared with the port rather than re-derived,
  *    on the `INLINE_TEXT_TAGS` precedent: the four chrome names (a tag table)
  *    and `simhash64` (a hash of the text, not a reading of the tree). What is
@@ -386,11 +386,11 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   const renderableWordCount = renderableText ? renderableText.split(/\s+/).length : 0;
 
   // The main-content stream: inside the first `<main>` the walk finds, else the
-  // body minus its chrome. Chrome is NOT removed inside a `<main>` — a document
-  // that says where its content is has said so about the `<nav>` in it too.
+  // whole body — and `collectContentText` either way, so chrome is removed
+  // inside a `<main>` as well. Real themes put a `<footer>` in there (spec §11).
   const mainEl = bodyEl ? findMain(bodyEl) : null;
   const mainParts: string[] = [];
-  if (mainEl !== null) collectVisibleText(mainEl, mainParts);
+  if (mainEl !== null) collectContentText(mainEl, mainParts);
   else if (bodyEl) collectContentText(bodyEl, mainParts);
   const mainText = mainParts.join("").replace(/\s+/g, " ").trim();
   const mainWordCount = mainText === "" ? null : mainText.split(/\s+/).length;
@@ -959,10 +959,53 @@ describe("the main-content stream, against the DOM", () => {
     );
   });
 
-  it("agrees on chrome INSIDE a <main> — it is content there", () => {
+  it("agrees on chrome INSIDE a <main> — it is furniture there too", () => {
+    // Inverted by the §11 amendment: this used to assert that a `<nav>` inside
+    // a `<main>` counted as content. The evidence said otherwise.
     expectParity(
       `<html><body><header><p>site chrome</p></header>` +
         `<main><nav><a href="/x">in-article nav</a></nav><p>article copy</p></main></body></html>`,
+    );
+    const { mainWordCount } = analyzeHtml(
+      `<html><body><header><p>site chrome</p></header>` +
+        `<main><nav><a href="/x">in-article nav</a></nav><p>article copy</p></main></body></html>`,
+      PAGE_URL,
+    );
+    expect(mainWordCount).toBe(2);
+  });
+
+  it("agrees that chrome inside a <main> is excluded — the theme's footer", () => {
+    // The defect in miniature: a Shopify theme's `<main>` holds the newsletter
+    // block and the footer navigation, so an otherwise empty page fingerprinted
+    // 105 words of footer. The main content here is the heading and the
+    // paragraph — 5 words — and NOT the 100 words of `<footer>` beside them.
+    const html =
+      `<html><body><main><h1>A dress</h1><p>only these words</p>` +
+      `<footer><p>${"terms delivery returns and ".repeat(25)}</p></footer></main></body></html>`;
+    expectParity(html);
+    const { mainWordCount, wordCount } = analyzeHtml(html, PAGE_URL);
+    expect(mainWordCount).toBe(5);
+    // The whole-text stream still sees all of it — this is a main-content rule,
+    // not a change to `wordCount`.
+    expect(wordCount).toBe(105);
+  });
+
+  it("agrees on a <main> that is nothing but chrome — nothing to fingerprint", () => {
+    // The empty-template-page case: a `/pages/*` with no copy of its own, whose
+    // `<main>` carries only the theme's newsletter block. Null, never 0.
+    const html = `<html><body><main><footer><p>${"terms delivery returns and ".repeat(25)}</p></footer></main></body></html>`;
+    expectParity(html);
+    const { mainWordCount, mainSimhash } = analyzeHtml(html, PAGE_URL);
+    expect(mainWordCount).toBeNull();
+    expect(mainSimhash).toBeNull();
+  });
+
+  it("agrees on a <main> INSIDE a <footer> — enclosing chrome is not descended into", () => {
+    // Malformed, and real. Both sides start at the `<main>`, so the `<footer>`
+    // around it is irrelevant; only chrome BELOW the `<main>` is excluded.
+    expectParity(
+      `<html><body><footer><main><p>the page copy</p>` +
+        `<nav><p>an in-main menu</p></nav></main></footer></body></html>`,
     );
   });
 
