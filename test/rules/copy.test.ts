@@ -15,11 +15,13 @@ import { SLOW_MS } from "../../src/rules/page/technical.js";
 // `DEEP_DEPTH` moved with `structure.deep-page` in Phase 9: the rule reads
 // `click_depth` and therefore lives with the link-graph rules.
 import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
+import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_HAMMING,
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
   SOFT_404_WORDS,
+  TEMPLATE_HAMMING,
 } from "../../src/rules/query/content.js";
 import {
   CSR_MIN_ADDED_WORDS,
@@ -371,6 +373,12 @@ describe("issue copy", () => {
     // The 5xx copy must not re-decide whether the error persisted: the
     // end-of-crawl second look is the linked page's own finding's subject.
     expect(fiveXx.explanation).toMatch(/second time|asked again|second request/i);
+    // Nor may it promise the second look happened. It has a budget
+    // (`MAX_RECHECKS`) and a "not run" state, so "every 5xx was asked again" is
+    // a claim the engine does not keep — the copy says unless, and points at
+    // the finding that records which.
+    expect(fiveXx.explanation).not.toMatch(/\bEvery 5xx\b/);
+    expect(fiveXx.explanation).toMatch(/unless|budget/i);
   });
 
   // The on-page thresholds are asserted against the rule constants themselves,
@@ -563,6 +571,12 @@ describe("issue copy", () => {
     // left this out would describe a rule that fires far less often than it
     // does on exactly the sites where it matters most.
     expect(ISSUE_COPY["content.soft-404"]!.explanation).toMatch(/the markup hides/i);
+    // The OTHER half of the same rule, which either signal can fire on its
+    // own: `TEMPLATE_HAMMING` against the site's own not-found body. "A few
+    // bits" left a reader unable to tell how close "close" is.
+    expect(ISSUE_COPY["content.soft-404"]!.explanation).toContain(
+      `${NUMBER_WORDS[TEMPLATE_HAMMING]} bits out of sixty-four`,
+    );
     expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toContain(
       `${NUMBER_WORDS[NEAR_DUPLICATE_HAMMING]} bits out of sixty-four`,
     );
@@ -1743,6 +1757,12 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "content.near-duplicate": String(NEAR_DUPLICATE_HAMMING),
     "images.oversized": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
     "images.legacy-format": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
+    // Two rules whose ids do not advertise a threshold but whose predicates
+    // are one. `content.soft-404` fires on `SOFT_404_WORDS` OR
+    // `TEMPLATE_HAMMING`; the word count is the half a title can carry, and
+    // the four bits are pinned in the explanation above.
+    "content.soft-404": String(SOFT_404_WORDS),
+    "redirect.chain": String(CHAIN_HOPS),
   };
 
   it("states the number in the title of every rule that fires on one", () => {
@@ -1758,8 +1778,15 @@ describe("copy rubric: a threshold belongs in the title", () => {
   // not listed above is a rule whose title nobody checked. Markers are outside
   // it (a check that could not be run states no threshold), and so are metrics
   // (a distribution has no firing line).
+  //
+  // AN ID IS NOT THE ONLY PROMISE. `content.soft-404` and `redirect.chain` name
+  // no threshold and are both defined by one: 300 words or four bits, and two
+  // hops. They are in the map above and in this pattern, and the pattern is the
+  // reminder that the next rule like them has to be added by hand — the id is
+  // the cheap signal, not the authority.
   it("leaves no threshold rule out of the map", () => {
-    const promises = /too-long|too-short|thin|slow|oversized|deep|level-skip|near-duplicate/;
+    const promises =
+      /too-long|too-short|thin|slow|oversized|deep|level-skip|near-duplicate|soft-404|\.chain$/;
     const missing = buildRegistry()
       .all()
       .filter(

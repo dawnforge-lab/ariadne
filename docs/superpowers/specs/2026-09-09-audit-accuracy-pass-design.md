@@ -196,7 +196,12 @@ and keeps its edits surgical.
 
 ## 10. Gate
 
-- Full suite green, tsc clean, migration 0018 applied.
+- Full suite green, tsc clean, migrations 0018 and 0019 applied. (0019 was not
+  foreseen when this was written: moving the near-duplicate join onto
+  `main_simhash` left 0004's four band indexes on `simhash`, so every band
+  predicate matched nothing and the whole `BitmapOr` collapsed to a sequential
+  scan. 0019 puts the same four bands on `main_simhash`;
+  `test/db/migration-0019.test.ts` holds the plan.)
 - Ruleset 0.14.0; the registry shape test records the new totals.
 - `crawl_9c9292c7` re-judged at 0.14.0: `content.exact-duplicate` 0,
   `hreflang.missing-return-link` 0, `hreflang.missing-self-reference` 0 (the

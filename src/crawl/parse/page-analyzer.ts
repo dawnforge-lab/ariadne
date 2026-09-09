@@ -1474,9 +1474,17 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // that declared a `<main>` is measured inside it, and a page that declared
   // none is measured over its body minus the chrome. Both candidates were
   // accumulated during the one pass, so this costs a join and a compare.
-  const mainRaw = (sawBody ? mainBodyParts : mainFallbackParts).join("");
-  const contentRaw = (sawBody ? contentBodyParts : contentFallbackParts).join("");
-  const mainText = (mainSeen ? mainRaw : contentRaw).replace(/\s+/g, " ").trim();
+  // Only the branch taken is joined: on a page that declared a `<main>` the
+  // chrome-stripped fallback was still accumulated (the choice cannot be made
+  // until the document ends) but is never read, and joining it would be one
+  // string built per page for nothing.
+  const mainText = (
+    mainSeen
+      ? (sawBody ? mainBodyParts : mainFallbackParts).join("")
+      : (sawBody ? contentBodyParts : contentFallbackParts).join("")
+  )
+    .replace(/\s+/g, " ")
+    .trim();
   // Zero words is NOT a measurement of zero: an empty `<main>` and a body that
   // is all chrome both mean "there is nothing here to fingerprint", and a rule
   // has to be able to tell that from a page it measured. See the field docs.

@@ -48,6 +48,7 @@ import { eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages } from "../../src/db/schema.js";
+import { CANONICALISED_ELSEWHERE } from "../../src/rules/helpers.js";
 import {
   NEAR_DUPLICATE_HAMMING,
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
@@ -197,8 +198,13 @@ describe("0019 — the main_simhash band indexes", () => {
     expect(bands).toHaveLength(4);
     const bandClause = bands.join("\n or ");
     // The rest of the pair join, in the rule's shape: the auditable cohort on
-    // both sides, the null guard, the main-word floor, and the exact hamming
-    // verification the bands only approximate.
+    // both sides, the canonical exclusion on both sides, the null guard, the
+    // main-word floor, and the exact hamming verification the bands only
+    // approximate. The canonical exclusion is a string expression over four
+    // columns and is indexable by nothing — which is exactly why it is here: it
+    // is a filter the planner must apply AFTER the bitmap, and a query shape
+    // that made it a reason to abandon the index would be the same silent
+    // collapse this file exists to catch.
     const plan = await db.execute<{ "QUERY PLAN": string }>(sql`
       explain
       select a.id as id_a, b.id as id_b,
@@ -210,6 +216,7 @@ describe("0019 — the main_simhash band indexes", () => {
       where a.crawl_id = ${CRAWL_ID}
         and a.fetch_class = 'ok' and a.status_code = 200 and a.is_indexable = true
         and b.fetch_class = 'ok' and b.status_code = 200 and b.is_indexable = true
+        and not ${CANONICALISED_ELSEWHERE("a")} and not ${CANONICALISED_ELSEWHERE("b")}
         and a.main_simhash is not null and b.main_simhash is not null
         and a.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
         and b.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}

@@ -28,6 +28,21 @@ export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">)
 }
 
 /**
+ * `isAuditable` for a rule that asks the question in SQL, over an aliased
+ * `pages`. The hreflang marker reads its declaring pages this way and judges
+ * the same pages `isAuditable` admits everywhere else in that file, so the two
+ * halves of one rule are one predicate rather than a function and a string that
+ * happen to say the same thing.
+ *
+ * NOT the same predicate as `AUDITABLE` in src/rules/query/content.ts, which
+ * adds `is_indexable = true`: the three content rules judge what a search
+ * engine would index, and an hreflang annotation is worth reading on a page
+ * that is fetched and 200 whether or not it carries a noindex.
+ */
+export const FETCHED_OK = (alias: string): SQL =>
+  sql.raw(`${alias}.fetch_class = 'ok' and ${alias}.status_code = 200`);
+
+/**
  * Whether a stored string actually declares something. A tag that reached the
  * database as `""` or `"   "` — `<title> </title>`, `<link rel=canonical
  * href="">`, an empty robots meta — declares nothing, and reading it as a
@@ -142,18 +157,110 @@ export function isCanonicalisedElsewhere(page: CanonicalDeclaration): boolean {
 }
 
 /**
+ * The declared value with its fragment removed — `normalizeUrl`'s `hash = ""`.
+ * Every step below reads this rather than the raw column.
+ */
+const NO_FRAGMENT = (value: string): string => `split_part(${value}, '#', 1)`;
+
+/**
+ * `scheme://authority` lower-cased with a default port dropped, followed by the
+ * path — everything `normalizeUrl` settles about a URL except its query.
+ *
+ * The authority is the run between `//` and the first `/`, `?` or `#`, and ONLY
+ * that run is lower-cased: a path is case-sensitive on every server that serves
+ * one, so `/Page` and `/page` are two URLs and lower-casing here would answer
+ * "self" for a canonical that genuinely names another. An empty path becomes
+ * `/`, which is what `new URL` does with `https://example.com`.
+ *
+ * The port rule is looser than WHATWG's on purpose: `:80` and `:443` are
+ * dropped from either scheme rather than each from its own. `https://x:80/p` is
+ * therefore read as `https://x/p` where `normalizeUrl` keeps the port — a
+ * disagreement that can only answer "self" where TypeScript answers
+ * "elsewhere", which is the harmless direction (see the doc block below).
+ */
+const ORIGIN_AND_PATH = (value: string): string => {
+  const f = NO_FRAGMENT(value);
+  return (
+    `regexp_replace(lower(substring(${f} from '^[^/?#]*//[^/?#]*')), ':(80|443)$', '')` +
+    ` || coalesce(nullif(split_part(` +
+    `coalesce(substring(${f} from '^[^/?#]*//[^/?#]*(.*)$'), ''), '?', 1), ''), '/')`
+  );
+};
+
+/**
+ * The query string as a SET of `k=v` pairs, which is how the two sides are
+ * compared: `normalizeUrl` calls `searchParams.sort()`, so `?b=2&a=1` and
+ * `?a=1&b=2` are one URL, and a comparison that read the string would answer
+ * "elsewhere" for a page canonicalising to itself — the wrong "yes" hard rule 1
+ * forbids. Set equality rather than a sort because it is one expression with no
+ * correlated subquery, and it errs the same safe way on the case the two forms
+ * differ on (a repeated key, noted below). Empty members are removed so a
+ * trailing `?` or `&` — which `URLSearchParams` drops — is not a difference.
+ */
+const QUERY_SET = (value: string): string =>
+  `array_remove(string_to_array(` +
+  `coalesce(substring(${NO_FRAGMENT(value)} from '[?](.*)$'), ''), '&'), '')`;
+
+/**
+ * Whether the steps above can settle this value at all. Three shapes they
+ * cannot, and each makes the whole test answer NO rather than guess:
+ *
+ *  - anything with a byte outside ASCII (`octet_length <> length`): `new URL`
+ *    punycodes a host and percent-encodes a path, and SQL does neither;
+ *  - whitespace or a backslash: `new URL` strips tabs and newlines and rewrites
+ *    `\` to `/` for http(s), and a raw space becomes `%20`;
+ *  - a dot segment (`/../`, `/./`): `new URL` resolves it away.
+ *
+ * Each of these could otherwise make two spellings of ONE URL compare unequal,
+ * which is the silencing direction. `%2e` as an encoded dot segment is not
+ * caught — see the residuals in the doc block below.
+ */
+const SQL_SETTLEABLE = (value: string): string =>
+  `octet_length(${value}) = length(${value}) ` +
+  `and ${value} !~ '[[:space:]\\\\]' ` +
+  `and ${NO_FRAGMENT(value)} !~ '/[.][.]?(/|$)'`;
+
+/**
  * `isCanonicalisedElsewhere` for a rule whose question is a GROUP rather than a
  * row: the same test, in SQL, over an aliased `pages`.
  *
- * SQL cannot run `normalizeUrl`, so this is the string-level form of the test.
- * The two agree exactly on the shape a template emits — an ABSOLUTE canonical
- * stored in the spelling the page URL is stored in — and where this form cannot
- * resolve a value it deliberately answers NO: a relative canonical (`/page`) is
- * never read as "elsewhere" here, because a wrong "yes" SILENCES a rule (hard
- * rule 1) while a wrong "no" only leaves a finding a reader can dismiss. Both
- * `url` and `url_normalised` count as "this page", which is what covers a
- * canonical stored in the spelling the crawler fetched rather than the
- * normalized one.
+ * SQL cannot run `normalizeUrl`, so this applies `normalizeUrl`'s steps to BOTH
+ * SIDES as SQL expressions — fragment stripped, scheme and host lower-cased,
+ * default port dropped, empty path made `/`, query compared as a set — and
+ * compares the results. It used to compare the declared string to
+ * `pages.url` and `pages.url_normalised` verbatim, which answered "elsewhere"
+ * for a self-canonical carrying a `#top`, an upper-cased host or its query
+ * parameters in another order: a wrong "yes" that drops the page from both
+ * duplicate rules and every hreflang rule without saying so (hard rule 1).
+ *
+ * WHERE IT STILL ANSWERS NO WITHOUT LOOKING. A relative canonical (`/page`) is
+ * never read as "elsewhere" here — SQL has no base URL to resolve against — and
+ * neither is a value `SQL_SETTLEABLE` rejects. The asymmetry is deliberate and
+ * is the same one throughout this file: a wrong "yes" SILENCES a rule, a wrong
+ * "no" only leaves a finding a reader can dismiss.
+ *
+ * WHAT THE TWO FORMS CAN STILL DISAGREE ABOUT, and in which direction. Every
+ * one of these is SQL answering "not elsewhere" where `isCanonicalisedElsewhere`
+ * answers "elsewhere" — the page stays visible to the rules, never the reverse:
+ *
+ *  - a relative canonical, and any value with non-ASCII, whitespace, a
+ *    backslash or a dot segment in it (above);
+ *  - `:80` on https or `:443` on http (the loose port rule above);
+ *  - a query whose keys repeat: `?a=2&a=1` and `?a=1&a=2` are two URLs to
+ *    `searchParams.sort()`, which is stable and so keeps the values in the
+ *    order it met them, and one set here. `?a=1&a=1` and `?a=1` likewise;
+ *  - `%2e%2e` as an encoded dot segment, which `new URL` resolves and the guard
+ *    above does not catch;
+ *  - userinfo (`https://User@host/p`), whose case `new URL` preserves and the
+ *    authority lower-casing here does not.
+ *
+ * `pages.url_normalised` is no longer consulted. It is not `normalizeUrl(url)`
+ * — the writer lower-cases the WHOLE string and strips a trailing slash on top
+ * of it (src/crawl/persist.ts), an analytic key — so a canonical matching it
+ * matched a lossier URL than the TypeScript form compares against, and a page
+ * at `/Page/` canonicalising to `/page` read as self here and as elsewhere
+ * there. `ORIGIN_AND_PATH(url)` is the exact comparison instead, and the two
+ * forms are pinned against each other case by case in test/rules/helpers.test.ts.
  *
  * THREE-VALUED LOGIC IS COALESCED AWAY, and that is load-bearing: a page with
  * no canonical at all leaves the comparison NULL, and `not (NULL)` is NULL, so
@@ -165,9 +272,13 @@ export const CANONICALISED_ELSEWHERE = (alias: string): SQL => {
   const declared =
     `coalesce(nullif(btrim(${alias}.canonical_html), ''), ` +
     `nullif(btrim(${alias}.canonical_header), ''))`;
+  const url = `${alias}.url`;
   return sql.raw(
-    `coalesce(${declared} ~* '^https?://' ` +
-      `and ${declared} not in (${alias}.url, ${alias}.url_normalised), false)`,
+    `coalesce(${declared} ~* '^https?://'` +
+      ` and (${SQL_SETTLEABLE(declared)})` +
+      ` and (${ORIGIN_AND_PATH(declared)} is distinct from ${ORIGIN_AND_PATH(url)}` +
+      ` or not (${QUERY_SET(declared)} <@ ${QUERY_SET(url)}` +
+      ` and ${QUERY_SET(url)} <@ ${QUERY_SET(declared)})), false)`,
   );
 };
 

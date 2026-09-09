@@ -301,11 +301,11 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (100 rows at 0.14.0) rather than by the crawl. The
-catalog is ~122 KB (**124,902 bytes**, re-measured 2026-09-09 at the end of
+catalog is ~122 KB (**125,019 bytes**, re-measured 2026-09-09 at the end of
 Phase 19 over all 100 rows of ruleset 0.14.0 — the copy pass lengthened many
 entries; 111,419 bytes at 96 rows of 0.13.0 — by serialising what `rulesCatalog`
-answers with no crawl id — of which **681 bytes** are the `marker` strings on
-the ten markers; the 109,949 before it was measured earlier in the same phase,
+answers with no crawl id — of which **2,385 bytes** are the `marker` strings on
+the twelve markers; the 109,949 before it was measured earlier in the same phase,
 at 95 rows of 0.12.0 and before `http.server-error` was split in two; the
 103,679 before that at 93 rows of ruleset 0.9.0, and the 100,645 before it at 92
 rows, before `resources.not-fetched` had copy of its own) because it carries
@@ -1271,13 +1271,13 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1085` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:1118` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:1133` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:1159` "tells
+`test/rules/copy.test.ts:1099` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:1132` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:1147` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1173` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1186` "grades nothing: no score, no label, no threshold";
+`test/rules/copy.test.ts:1200` "grades nothing: no score, no label, no threshold";
 `test/rules/coverage.test.ts:349` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);

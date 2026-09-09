@@ -5,6 +5,7 @@ import type { Db } from "../../db/client.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import {
   CANONICALISED_ELSEWHERE,
+  FETCHED_OK,
   isAuditable,
   isCanonicalisedElsewhere,
   queryFinding,
@@ -588,7 +589,7 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
       from hreflang h
       join pages p on p.id = h.page_id
       where h.crawl_id = ${crawlId}
-        and p.fetch_class = 'ok' and p.status_code = 200
+        and ${FETCHED_OK("p")}
         and not ${CANONICALISED_ELSEWHERE("p")}
         and not exists (
           select 1 from pages t
@@ -880,10 +881,15 @@ export const hreflangRules: QueryRule[] = [
     severity: NOT_CRAWLED.severity,
     ...copyFor(NOT_CRAWLED.id),
     rulesetVersion: RULESET_VERSION,
+    // The reason states only what the query established. It used to add "most
+    // of them sit on other domains", which was true of the crawl that provoked
+    // the rule and is not a thing the finding knows: an alternate on THIS host
+    // that robots.txt disallowed, or that no page links to, produces exactly
+    // the same finding. The hosts are in the evidence, so a reader who wants to
+    // know where the alternates sit reads them rather than being told.
     marker:
-      "The language alternates these pages name were never requested by this crawl — most of " +
-      "them sit on other domains — so nothing about them was checked; crawl those domains too, " +
-      "or add them as extra starting URLs.",
+      "The language alternates these pages name were never requested by this crawl, so nothing " +
+      "about them was checked; crawl those domains too, or add them as extra starting URLs.",
     run: (db, crawlId) => alternatesNotCrawledFindings(db, crawlId),
   }),
 ];

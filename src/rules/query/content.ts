@@ -466,9 +466,13 @@ async function mainFingerprintCensus(db: Db, crawlId: string): Promise<MainFinge
  *
  * ONE PREDICATE, READ BY BOTH, so the rule's silence and the marker's sentence
  * are the same decision rather than two that happen to agree.
+ *
+ * It takes the census rather than fetching one, because the marker needs the
+ * `auditable` count for its evidence as well as the verdict: a predicate that
+ * queried for itself would make that function ask the database the same
+ * question twice to answer one question once.
  */
-async function mainFingerprintUnavailable(db: Db, crawlId: string): Promise<boolean> {
-  const census = await mainFingerprintCensus(db, crawlId);
+function mainFingerprintUnavailable(census: MainFingerprintCensus): boolean {
   return census.auditable > 0 && !census.anyMainSimhash;
 }
 
@@ -511,7 +515,7 @@ async function mainFingerprintUnavailable(db: Db, crawlId: string): Promise<bool
 async function nearDuplicateSkippedFindings(db: Db, crawlId: string): Promise<Finding[]> {
   await readCrawlEvidence(db, crawlId, NEAR_SKIPPED.id);
   const census = await mainFingerprintCensus(db, crawlId);
-  if (census.auditable === 0 || census.anyMainSimhash) return [];
+  if (!mainFingerprintUnavailable(census)) return [];
   return [
     queryFinding(NEAR_SKIPPED, {
       pageId: null,
@@ -674,7 +678,7 @@ async function nearDuplicateFindings(
   // `content.near-duplicate-skipped` is what says so; this rule returns early
   // so that the two never disagree, and so that a crawl the check cannot be run
   // on does not pay for a scan whose answer is already known.
-  if (await mainFingerprintUnavailable(db, crawlId)) return [];
+  if (mainFingerprintUnavailable(await mainFingerprintCensus(db, crawlId))) return [];
   const result = await db.execute<{
     id_a: string;
     url_a: string;
@@ -796,9 +800,16 @@ export const contentRules: QueryRule[] = [
     severity: NEAR_SKIPPED.severity,
     ...copyFor(NEAR_SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
+    // The reason states the OBSERVATION, not a cause it cannot establish. The
+    // predicate fires on two crawls (see `nearDuplicateSkippedFindings`), and
+    // the second — a current crawl on which no page turned out to have main
+    // content of its own — was being told it ran before a measurement that in
+    // fact ran on it. What is true of both is the census: nothing here carries
+    // the fingerprint the comparison needs.
     marker:
-      "This crawl ran before the engine measured each page's main content separately, so " +
-      "pages could not be compared for near-duplicate content; re-crawl the site to measure them.",
+      "No page in this crawl carries a fingerprint of its main content, so pages could not be " +
+      "compared for near-duplicate content; a crawl taken before that fingerprint existed looks " +
+      "exactly like this one — re-crawl the site to measure them.",
     run: (db, crawlId) => nearDuplicateSkippedFindings(db, crawlId),
   }),
 ];

@@ -279,7 +279,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
 
   // ---------------------------------------------------------------- redirects
   "redirect.chain": {
-    title: "Redirect chain",
+    // `CHAIN_HOPS` in the title, for the reason every threshold is: "Redirect
+    // chain" is a category, "of two or more hops" is the condition that fired.
+    title: "Redirect chain of 2 or more hops",
     explanation:
       "This URL redirects to another URL that redirects again, so reaching the destination takes several round trips instead of one. Every hop costs the visitor time and the crawler a request, and chains are fragile: remove a middle hop and the whole path breaks. Search engines follow a limited number of hops before giving up on the URL entirely.",
     howToFix:
@@ -304,7 +306,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "links.to-server-error": {
     title: "Internal links point to a page that answers 5xx (server error)",
     explanation:
-      "Pages on this site link to a URL whose server answered with a status in the 5xx class — the server-error class, meaning the request was valid and the site failed to answer it. A 500 internal server error is application code that broke. A 502 bad gateway is a front-end server that got an invalid answer from the application behind it. A 503 service unavailable is the site reporting itself overloaded or in maintenance. A 504 gateway timeout is the application taking too long to answer at all. A search engine treats a 5xx as temporary, so it keeps the URL for a while and comes back — but it also slows its crawling of the whole site while the errors continue, and a URL that keeps failing is dropped in the end. Meanwhile a visitor who follows one of these links gets an error screen, and the ranking value the links carry reaches nothing. Every 5xx this crawl met was asked a second time when the crawl finished, and whether it was still failing then is stated on the linked page's own finding — the one about the server error itself, or the one recording that the second request got a page — so read that before deciding the fault is permanent. This is reported once for each failing target, with the number of pages linking to it and a sample of them; the exact status it answered with is recorded with the finding.",
+      "Pages on this site link to a URL whose server answered with a status in the 5xx class — the server-error class, meaning the request was valid and the site failed to answer it. A 500 internal server error is application code that broke. A 502 bad gateway is a front-end server that got an invalid answer from the application behind it. A 503 service unavailable is the site reporting itself overloaded or in maintenance. A 504 gateway timeout is the application taking too long to answer at all. A search engine treats a 5xx as temporary, so it keeps the URL for a while and comes back — but it also slows its crawling of the whole site while the errors continue, and a URL that keeps failing is dropped in the end. Meanwhile a visitor who follows one of these links gets an error screen, and the ranking value the links carry reaches nothing. Each 5xx this crawl met was asked a second time when the crawl finished, unless the second look ran out of the budget it is given, and the linked page's own finding says which — the one about the server error itself, which states \"confirmed\", \"inconclusive\", \"capped\" or \"not run\", or the one recording that the second request got a page — so read that before deciding the fault is permanent. This is reported once for each failing target, with the number of pages linking to it and a sample of them; the exact status it answered with is recorded with the finding.",
     howToFix:
       "This is a server fault rather than a link fault, so start at the target: read the logs for that URL — the application's own, and those of whatever sits in front of it (a proxy, a load balancer, a CDN) — and fix what is erroring; the linked page's own finding carries the timestamps to search around. If the URL is not meant to exist any more, make it answer 404 or 410, or redirect it to the closest live page, so the links stop pointing at a failure. Only once the target is settled is it worth touching the links themselves, and where many pages link to the same failing URL that link is usually in a template, so it changes in one place.",
   },
@@ -714,9 +716,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // wording plus a short page, or a body that matches what the site serves
     // for a URL that does not exist. Copy implying both are required, or that
     // the page was proved missing, would misdescribe the rule.
-    title: "Soft 404 (a missing page answering 200)",
+    // The title states the firing line, like every other rule that fires on a
+    // number: "Soft 404" alone sent a reader into the finding to learn what we
+    // measured. Both signals are named because either one alone is enough, and
+    // "or" is the word that says so.
+    title: "Soft 404: a 200 page with fewer than 300 words or matching the not-found template",
     explanation:
-      'This page answers with a 200 OK, but it looks like a "page not found" rather than a page. Either signal alone is enough for us to say so: its visible text carries not-found wording and the page shows under 300 words a reader can reach (text the markup hides, such as a menu drawer or a closed accordion, is left out of that count, so a short error message inside a full site shell still reads as short), or its content is within a few bits of the body this site served for a URL that cannot exist. Search engines treat these as errors anyway, so the URL is crawled repeatedly, kept out of the index, and the crawl budget spent on it is wasted.',
+      'This page answers with a 200 OK, but it looks like a "page not found" rather than a page. Either signal alone is enough for us to say so: its visible text carries not-found wording and the page shows under 300 words a reader can reach (text the markup hides, such as a menu drawer or a closed accordion, is left out of that count, so a short error message inside a full site shell still reads as short), or its content is within four bits out of sixty-four of the body this site served for a URL that cannot exist. Search engines treat these as errors anyway, so the URL is crawled repeatedly, kept out of the index, and the crawl budget spent on it is wasted.',
     howToFix:
       "Decide what the URL should be. If the content is genuinely gone, return a real 404 or 410 status rather than a 200, or 301-redirect it to the closest live page. If it is a real page that happens to be short or to mention the phrase, expand it so it stops resembling the error template — and check what links to it, because a soft 404 usually means something is generating URLs that were never meant to exist.",
   },

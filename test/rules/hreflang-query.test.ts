@@ -74,6 +74,10 @@ describe("hreflangRules metadata", () => {
     // A reason names the cause AND what would answer the check (Phase 19 §6).
     expect(marker).toMatch(/never requested by this crawl/);
     expect(marker).toMatch(/crawl those domains/);
+    // And it claims no cause the finding cannot establish: an alternate this
+    // crawl never fetched is not evidence that it sits on another domain — a
+    // same-host alternate that robots.txt disallowed reads identically.
+    expect(marker).not.toMatch(/other domains/);
   });
 
   it("every rule is a query rule carrying copy and a ruleset version", () => {

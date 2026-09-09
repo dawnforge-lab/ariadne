@@ -141,6 +141,13 @@ describe("contentRules metadata", () => {
     const markers = contentRules.filter((r) => r.marker !== undefined);
     expect(markers.map((r) => r.id)).toEqual(["content.near-duplicate-skipped"]);
     expect(markers[0]!.marker).toContain("re-crawl");
+    // It states what the census OBSERVED. The predicate also fires on a current
+    // crawl whose every page turned out to have no main content, so a reason
+    // opening "This crawl ran before…" asserts a cause the rule never
+    // established; the age of the crawl is offered as the likely explanation
+    // rather than claimed as the finding.
+    expect(markers[0]!.marker).toMatch(/^No page in this crawl carries a fingerprint/);
+    expect(markers[0]!.marker).not.toMatch(/^This crawl ran before/);
   });
 
   it("every rule is a query rule carrying its own copy and a ruleset version", () => {

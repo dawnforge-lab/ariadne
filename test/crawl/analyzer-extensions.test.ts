@@ -801,6 +801,26 @@ describe("mainWordCount / mainSimhash: the main-content fingerprint", () => {
     expect(a.mainSimhash).toBe(simhash64("the page's own copy"));
   });
 
+  // The other three subtrees a `<main>` can hide in, and the same rule: the
+  // element is in no rendered document, so it neither claims the page nor
+  // contributes a word. `<template>` above is the fourth. Pinned one by one
+  // because each is suppressed by a DIFFERENT mechanism in the parser — script
+  // and svg by `NON_CONTENT_TAGS`, noscript by the raw-text early return that
+  // sits above the whole open-tag switch — and a change to any of them could
+  // let a `<main>` through while the other two stayed correct.
+  it.each([
+    ["<script>", `<script><main><p>a cloned layout</p></main></script>`],
+    ["<svg>", `<svg><main><p>a drawn layout</p></main></svg>`],
+    ["<noscript>", `<noscript><main><p>a fallback layout</p></main></noscript>`],
+  ])("does not let a <main> inside a %s claim the page", (_label, hidden) => {
+    const a = page(`${hidden}<nav><p>chrome words here</p></nav><p>the page's own copy</p>`);
+    // The fallback ran: body minus the chrome, and the hidden subtree's words
+    // are in neither measurement.
+    expect(a.mainWordCount).toBe(4);
+    expect(a.mainSimhash).toBe(simhash64("the page's own copy"));
+    expect(a.wordCount).toBe(7);
+  });
+
   it("counts markup-hidden text in the main content", () => {
     // Deliberately NOT `renderableWordCount`'s rule: this fingerprint is over
     // the main content AS SERVED, and a hamming distance between two templates
