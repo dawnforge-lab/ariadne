@@ -304,7 +304,20 @@ describe("the demo flow", () => {
       // Why severity cannot do this job: every marker is `info`, so Notices is
       // exactly where these would sit if the page banded on severity alone.
       expect(group.severity, `${group.ruleId} is a marker at a band severity`).toBe("info");
-      expect(String(copy.get(group.ruleId)?.marker).length).toBeGreaterThan(0);
+      const reason = String(copy.get(group.ruleId)?.marker);
+      expect(reason.length).toBeGreaterThan(0);
+      // What the page renders after "Why:" — a plain sentence a client reads,
+      // not the noun phrase with a build-task number in it that used to reach
+      // this screen ("a crawl that recorded no resources (P11-T3)"). The rubric
+      // itself is pinned over the whole registry in test/rules/copy.test.ts;
+      // this asserts the shape SURVIVES the API that serves it.
+      expect(reason[0], `${group.ruleId} marker reason is not a sentence`).toBe(
+        reason[0]!.toUpperCase(),
+      );
+      expect(reason.endsWith("."), `${group.ruleId} marker reason is not a sentence`).toBe(true);
+      expect(reason, `${group.ruleId} marker reason cites a build task`).not.toMatch(
+        /\bP\d+-T\d+\b/,
+      );
     }
 
     // …and the Notices band is what is LEFT of the info groups: strictly fewer,
@@ -375,6 +388,31 @@ describe("the demo flow", () => {
     expect(at("band-not-checked")).toBeGreaterThan(at("band-info"));
     expect(at("band-info")).toBeGreaterThan(at("band-warning"));
     expect(at("band-warning")).toBeGreaterThan(at("band-critical"));
+
+    // THE FOURTH SECTION SAYS WHAT IT MEANS (Phase 19 §6). The owner read the
+    // heading and asked "what does not checked mean? why hasn't it been
+    // checked?", so the definition is written into the page rather than left
+    // to whoever wrote the engine. There is no browser here, so what is
+    // asserted is the source of the sentence and where the code puts it: the
+    // definition is appended before the empty-state branch returns, which is
+    // what makes it show on a crawl with no markers as well as one with them.
+    expect(html, "the definition sentence").toContain(
+      "A check is 'not checked' when the engine could not answer it on this crawl",
+    );
+    expect(html, "and what it rules out").toContain("Nothing here is a site problem.");
+    const definitionAt = html.indexOf("A check is 'not checked' when");
+    const emptyStateAt = html.indexOf("Every check the engine can make was made on this crawl.");
+    expect(emptyStateAt, "the empty-state line is still there").toBeGreaterThan(-1);
+    expect(definitionAt, "the definition is written above the empty-state line")
+      .toBeLessThan(emptyStateAt);
+
+    // The per-row prefix. "Not measured:" was the engine's own label for the
+    // state the heading had already named; the row now says why.
+    expect(html, "the row prefix").toContain('"why", "Why: " + rule.marker');
+    // The engine's old label for the state, asserted at the call rather than
+    // anywhere in the file: the comment above that line still names it, which
+    // is where the reason for the change belongs.
+    expect(html, "the old label is gone").not.toContain('"Not measured: " + rule.marker');
   });
 
   it("asks for nothing off this origin: no external URL in the page", async () => {

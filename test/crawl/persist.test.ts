@@ -93,6 +93,14 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     resourceRefsCapped: false,
     contentHash: "a".repeat(64),
     simhash: 1234567890123n,
+    // The main-content pair (P19-T1): a page with real content of its own, so
+    // both are set and the word count is under the raw one — this analysis's
+    // page has chrome, like every page. A test about the null contract
+    // overrides BOTH, since they are one measurement reported twice.
+    mainSimhash: 9876543210987n,
+    mainWordCount: 260,
+    // Null because `hasLoremIpsum` above is false: the two move together.
+    placeholderSnippet: null,
     ...overrides,
   };
 }

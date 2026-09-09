@@ -177,9 +177,25 @@ const CSR_INJECTED_WORDS = 200;
  *    unreported, which is the false negative §4.9 found in the field, reproduced
  *    here in forty lines of markup.
  *
- * `content.thin` still fires because 132 is under its 150-word floor, and that
- * is honest twice over: the page really is thin as shipped, and the number the
- * floor reads is itself 100 words of chrome above what a reader can see.
+ * **`content.thin` NO LONGER FIRES HERE, and the change is Phase 19 §11's.** The
+ * floor read `renderable_word_count` — 132, under 150 — until the amendment
+ * moved it onto `main_word_count`, the words the page has of its OWN: the text
+ * inside `<main>` (this fixture's whole body, like every fixture's) minus any
+ * `<nav>`, `<header>`, `<footer>` or `<aside>` subtree. The popover and the
+ * drawer are neither; they are divs, so both counts are in, and the page's own
+ * content is 172 words — over the floor.
+ *
+ * THE TRADE IS REAL AND IS WORTH STATING RATHER THAN GLOSSING: `main_word_count`
+ * does not exclude markup-hidden text (see page-analyzer.ts — the main stream
+ * uses the `bodyText` rules deliberately, so a hamming distance between two
+ * pages cannot depend on which of them hides a dialog), so a page whose shipped
+ * words are largely in drawers reads as fuller than a reader would call it. What
+ * the amendment bought for that is the case it was written for: on a real
+ * templated site EVERY page cleared the old floor on ~900 words of visible
+ * header, menu and footer, and the rule fired on nothing at all. Visible chrome
+ * is the common shape and hidden chrome the rare one. This page's real finding
+ * is `content.csr-dependent`, which says the sharper thing anyway: the content
+ * arrives with the JavaScript.
  */
 export const CSR_CHROME_WORDS = 100;
 
@@ -206,12 +222,12 @@ const csrContent: Fixture = {
   path: "/render/csr-content",
   category: RENDER,
   name: "Content that only exists after JavaScript runs",
-  // `content.thin` is not an accident and is not noise: the raw document really
-  // does hold a couple of sentences, and a rule that judges the bytes a server
-  // sent is right to say so. The two findings together are the honest reading —
-  // the page is thin AS SHIPPED, and the reason is that its content arrives
-  // with the JavaScript.
-  expectedIssues: ["content.thin", "content.csr-dependent"],
+  // One finding, since Phase 19 §11 moved the thin floor onto the page's own
+  // content: 172 words of it, over the 150-word floor, because `main_word_count`
+  // counts the 40 words this page's markup hides (the docblock above works the
+  // arithmetic and says what that trade buys). `content.csr-dependent` is the
+  // finding that matters here and it is unaffected.
+  expectedIssues: ["content.csr-dependent"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

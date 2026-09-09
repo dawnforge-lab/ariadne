@@ -26,7 +26,21 @@ export const SAMPLE_SOURCES = 10;
 export const CANONICAL_BATCH = 500;
 
 /**
- * Internal links whose target page answered 4xx, grouped by TARGET.
+ * Internal links whose target page answered with a given failure class,
+ * grouped by TARGET.
+ *
+ * One function, two rules, because the question is the same one asked of two
+ * status classes: `links.broken-internal` reads `client_error` (4xx) and
+ * `links.to-server-error` reads `server_error` (5xx). Splitting them at the
+ * class is what lets each carry copy that names what the status actually means
+ * and a fix that matches it — restore or repoint the URL for a 4xx, read the
+ * server logs for a 5xx — instead of one finding saying "returns an error".
+ *
+ * Both rules report the LINK. The page's own answer is a separate fact reported
+ * separately: `http.server-error` (or `http.server-error-transient`, when the
+ * end-of-crawl second look got a page) fires against the 5xx URL itself. Both
+ * firing on one 5xx URL that is linked to is correct — the page is broken AND
+ * the site links to it — and neither is a duplicate of the other.
  *
  * Target-centric on purpose: one dead URL linked from two hundred pages is one
  * thing to fix, and two hundred findings would bury it. The count is exact and
@@ -35,8 +49,10 @@ export const CANONICAL_BATCH = 500;
  * never builds the full source list either (hard rule 3: the links table is
  * never loaded into memory).
  *
- * 4xx only. A 5xx target is a server fault the page's own `http.server-error`
- * reports; calling it a broken link would point the client at the wrong repair.
+ * The class is matched exactly, never as "not ok": a target with no status code
+ * at all (a timeout, a DNS failure) is a fetch the crawl could not complete and
+ * says nothing about whether that URL serves a page, and a redirect target is
+ * `redirect.*`'s business. Neither is a broken link here.
  *
  * The `targets` CTE is capped at `caps.listing`, so the lateral runs for at
  * most that many targets and the findings list never grows with the site (an
@@ -47,10 +63,11 @@ export const CANONICAL_BATCH = 500;
  * it counts distinct broken TARGETS — the unit of the finding — and the exact
  * total survives the cap (`noteTruncation`).
  */
-async function brokenInternalFindings(
+async function linkTargetClassFindings(
   self: RuleIdentity,
   db: Db,
   crawlId: string,
+  fetchClass: "client_error" | "server_error",
   caps: RuleCaps,
 ): Promise<Finding[]> {
   const result = await db.execute<{
@@ -67,7 +84,7 @@ async function brokenInternalFindings(
              count(*) over ()::int as total_matches
       from links l
       join pages p on p.crawl_id = ${crawlId} and p.url = l.target_url
-      where l.crawl_id = ${crawlId} and l.is_internal and p.fetch_class = 'client_error'
+      where l.crawl_id = ${crawlId} and l.is_internal and p.fetch_class = ${fetchClass}
       group by p.id, p.url, p.status_code
       order by p.url
       ${limitTo(caps.listing)}
@@ -243,6 +260,7 @@ async function canonicalTargetFindings(
 }
 
 const BROKEN: RuleIdentity = { id: "links.broken-internal", severity: "critical" };
+const TO_SERVER_ERROR: RuleIdentity = { id: "links.to-server-error", severity: "critical" };
 const NON_200: RuleIdentity = { id: "canonical.non-200-target", severity: "critical" };
 const NON_INDEXABLE: RuleIdentity = { id: "canonical.non-indexable-target", severity: "critical" };
 
@@ -255,7 +273,29 @@ export const linkTargetRules: QueryRule[] = [
     severity: BROKEN.severity,
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) => brokenInternalFindings(BROKEN, db, crawlId, capsOr(caps)),
+    run: (db, crawlId, caps) =>
+      linkTargetClassFindings(BROKEN, db, crawlId, "client_error", capsOr(caps)),
+  }),
+
+  // The 5xx half of the same question, and a separate rule rather than a wider
+  // condition on the one above: the two status classes have different causes
+  // and different repairs, and a client told "this link is broken" about a 502
+  // would go and edit the link when the server is what failed.
+  //
+  // It shares CHECK-11 with its sibling — the check is "internal links whose
+  // target does not answer" — and reports the LINK. CHECK-12's
+  // `http.server-error` reports the PAGE. Both fire on a 5xx URL the site
+  // links to; that is two facts, not one repeated.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: TO_SERVER_ERROR.id,
+    checkIds: ["CHECK-11"],
+    category: "links",
+    severity: TO_SERVER_ERROR.severity,
+    ...copyFor(TO_SERVER_ERROR.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) =>
+      linkTargetClassFindings(TO_SERVER_ERROR, db, crawlId, "server_error", capsOr(caps)),
   }),
 
   // A canonical names the URL whose ranking signals every duplicate should be

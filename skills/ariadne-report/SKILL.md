@@ -136,12 +136,13 @@ Sweep them: `metrics_get` with `crawlId` and no other filter, following
 - **A number you derived is not a number that was measured.** Percentages, ratios
   and "up from last quarter" are yours; write the arithmetic beside them ("128 of
   4,102 sitemap URLs, 3.1%") so the two source numbers stay visible.
-- **Thin content is reported on the words a visitor can see.** `content.thin` judges
-  `renderableWordCount` — the page's words minus the ones its own markup hides — and
-  `pages_query` publishes that column beside `wordCount`. Quote the renderable figure
-  in the finding; quote both when the gap is the story ("the template ships 900 words,
-  200 of them visible: 700 words of mega-menu on every product page"), which
-  `content.metrics-by-type` sizes per template with a distribution for each.
+- **Thin content is reported on the words the page can call its own.**
+  `content.thin` judges `mainWords` — the words inside the page's `<main>`, or its
+  body minus the header, navigation, sidebar and footer — and carries the
+  whole-document `wordCount` beside it. Quote `mainWords` in the finding; quote both
+  when the gap is the story ("the template ships 900 words, 100 of them the page's
+  own: 800 words of mega-menu and footer on every product page"), which
+  `content.metrics-by-type` sizes per template with a whole-document distribution.
 - An empty metrics sweep means the rules did not run, not that the site has
   nothing worth measuring. The findings file's `crawl.rulesRunAt` — copied there from
   `crawl_status` — is what distinguishes them, with `crawl.rulesRun`'s three scalars

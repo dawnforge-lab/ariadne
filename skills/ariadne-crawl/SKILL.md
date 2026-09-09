@@ -120,7 +120,7 @@ Fields worth setting deliberately:
   pass's sample, stored on the crawl row now and read by the render pass later. Set
   them here if the default sample would not cover the page types you care about.
 - **`findingCap`** — how many findings each listing rule may report when this crawl
-  is judged. Defaults to 200 (and 500 near-duplicate pairs): a bounded first look.
+  is judged. Defaults to 200: a bounded first look.
   **Set `findingCap: null` for a billed audit** — the client is paying for the whole
   picture, and "243 orphans, here are 200" is not a list they can finish. Like the
   render knobs it is stored on the crawl row and spent later, which is why it must
@@ -347,8 +347,8 @@ What the fields mean when you are waiting:
   work**: the cap lives on the crawl row and `crawl_rules` has no argument to restate
   it, so a billed audit started at the default has to be re-crawled, not re-judged.
   A reported `200` does not distinguish an explicit `findingCap: 200` from an absent
-  one; they differ only in the near-duplicate pair budget (200 against the default
-  500).
+  one, and since Phase 19 §11 there is nothing to distinguish: one budget, so the
+  stated default and the absent one judge identically.
 
 Poll every 15-30 seconds early and back off to a minute on a long crawl; there is
 nothing to gain from tighter polling, since the crawl's pace is set by politeness

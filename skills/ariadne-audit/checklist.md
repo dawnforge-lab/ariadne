@@ -327,10 +327,11 @@ answered from, and its verdict is the confidence interval around all of them.
   filter, scanned for the NOT MEASURED family: `content.thin-skipped`,
   `h1.duplicate-skipped`, `links.orphan-skipped`, `robots.check-skipped`,
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
-  `resources.all-unknown`, `resources.partial-unknown`, and the per-page
-  `crawl.blocked`. Each one
-  is the engine saying a check below could not be answered on this crawl. The last
-  four are siblings and never more than one appears: `resources.not-recorded` means
+  `resources.all-unknown`, `resources.partial-unknown`,
+  `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
+  and the per-page `crawl.blocked`. Each one
+  is the engine saying a check below could not be answered on this crawl. The four
+  resource markers are siblings and never more than one appears: `resources.not-recorded` means
   the crawl holds NO resource records, `resources.not-fetched` means it recorded them
   all and asked the site about none of them, `resources.all-unknown` means it
   asked about (or tried to reach) every file and every one landed in an unknown class
@@ -926,12 +927,18 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-11: Broken internal links (4xx)
 - **Priority**: Critical | **Requires**: Engine + DevTools
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-11"` — `links.broken-internal` (critical):
-     an internal link whose target answered 4xx.
+  1. `issues_list` with `checkId: "CHECK-11"` — TWO rules, split by status class:
+     `links.broken-internal` (critical), an internal link whose target answered
+     4xx (404, 410, 403, 401), and `links.to-server-error` (critical), an
+     internal link whose target answered 5xx (500, 502, 503, 504) — the same
+     finding shape, a different repair, and the failing page's own 5xx finding
+     is CHECK-12's, so both firing on one URL is two facts rather than a
+     duplicate.
   2. `issue_urls` with `ruleId: "links.broken-internal"` — the developer's list.
      Each row's evidence names the broken target and where the link was found, which
      is what the action plan hands over. Follow the cursors, or `export_crawl` with
-     `dataset: "issues"` if the count is in the thousands.
+     `dataset: "issues"` if the count is in the thousands. Repeat it with
+     `ruleId: "links.to-server-error"` for the 5xx half.
   3. `pages_query` with `statusCode: 404` for the 4xx URLs themselves, beside their
      page type — a 404 nothing links to is a different problem from a linked one.
 - **DevTools**: Spot-check 2-3 source pages to verify broken links in context
@@ -994,28 +1001,39 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-13"` — three rules:
   - `content.soft-404` (critical) — a 200 response whose text reads as a
     not-found page
-  - `content.thin` (warning) — a 200 page with too little body text to serve any
-    query (the same rule answers CHECK-40)
-  - `content.thin-skipped` (info) — the pages the thin check could not be run on,
-    below
+  - `content.thin` (warning) — a 200 page with too little content OF ITS OWN to
+    serve any query (the same rule answers CHECK-40)
+  - `content.thin-skipped` (info) — the NOT MEASURED marker for the crawl the thin
+    check could not be run on, below
   `issue_urls` per rule; `pages_query` for the word counts beside page type, which
   is how the "% of indexable pages" in the Evaluate line is computed.
 
-  **Both verdict rules judge `renderableWordCount`, not `wordCount`** — the page's
-  words minus the ones its own markup hides (`hidden`, inline `display:none`, a closed
-  `<dialog>` or `<details>`). `pages_query` returns both columns; quote the renderable
-  one, since it is what the verdict was reached on and what a visitor sees.
+  **The thin floor judges the page's OWN content**, not every word the document
+  carries: the text inside the page's `<main>`, or its body with the `<nav>`,
+  `<header>`, `<footer>` and `<aside>` subtrees removed. Its evidence is
+  `{mainWords, wordCount, threshold}` — the page's own words, the whole document's,
+  and 150 — so a page that ships 830 words and says 94 of them itself reads as
+  exactly that. Quote `mainWords`; the whole-document count beside it is context,
+  not the verdict. `content.soft-404`'s length ceiling still reads
+  `renderableWordCount` (the words the markup does not hide), which is a different
+  question about a different page.
 
-  **`content.thin-skipped` is the NOT MEASURED marker** (`links.orphan-skipped` /
-  `robots.check-skipped` precedent): it fires per page where `wordCount` is present
-  and `renderableWordCount` is null — a row a pre-Phase-7 analyzer wrote, where the
-  page WAS read and the column the floor needs did not exist yet. The engine will not
-  fall back to `wordCount` there, because that column measures something else; on a
-  chrome-heavy site the fallback would answer four times high, silently, on old crawls
-  only. Where it fires, the thin count is a floor and a re-crawl is the fix. **Null in
-  BOTH columns is a different thing and not a skip**: no text was ever extracted for
-  that URL — a PDF, a 404, anything with no body — which `content.thin` was always
-  silent about and a re-crawl will not change.
+  A page with NO content of its own — a body that is nothing but navigation and
+  footer — is reported at `mainWords: 0` with `note: "no main-content text at all"`.
+  That is the emptiest page a site can serve and it is named, not passed over.
+  **Null `wordCount` is a different thing and not a finding**: no text was ever
+  extracted for that URL — a PDF, a 404, anything with no body — which `content.thin`
+  has always been silent about.
+
+  **`content.thin-skipped` is the NOT MEASURED marker** (`content.near-duplicate-
+  skipped` / `h1.duplicate-skipped` precedent). It fires once, site-scoped, when the
+  crawl holds auditable indexable pages and NOT ONE of them carries a main-content
+  word count — a crawl taken before migration 0018 introduced it. Evidence
+  `{indexablePages, threshold}`. The engine will not fall back to the whole-document
+  count there, because that column measures something else; on a site whose pages
+  each carry several hundred words of shared menus it calls an empty page healthy.
+  **While it fires, an empty thin list is not a site without thin pages**: the check
+  was not run and a re-crawl is the only thing that answers it.
 - **Evaluate**:
   - FAIL if soft 404s > 0
   - WARN if low content pages > 10% of indexable pages
@@ -1257,13 +1275,34 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      `{pagesWithHreflang, indexablePages, coveragePct}` for the site and for each
      page type (`scope: "page_type"`, `scopeValue` the cohort). A page type at 0%
      coverage while its siblings are at 100% is the gap to report.
+  3. `issues_list` with `checkId: "CHECK-24"` — `hreflang.missing-self-reference`
+     (warning): a page declares alternates and its own URL is not among them. The
+     other half of reciprocity, and the half that needs no second page: a set that
+     omits the page carrying it is discarded whole, so this is usually one template
+     defect repeated across every page it renders. Evidence carries the declared
+     codes and the URLs they name; it carries NO "own language" URL, because the
+     engine stores no language for a page and naming one would be a guess.
+  4. `issues_list` with `checkId: "CHECK-24"` — `hreflang.alternates-not-crawled`
+     (info) is a NOT MEASURED marker, not a finding about the site: it fires once
+     when declared alternates have no page in this crawl, with the count of
+     unfetched alternate URLs per domain and how many pages name them. Off-domain
+     alternates are the normal shape of an international site, so expect it on most
+     of them. **When it is present, the return-link answer above covers only the
+     alternates that were fetched** — mark this check SKIP for the rest rather than
+     reading the silence as reciprocal.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?
   2. If the site has multiple language/market versions, ALL equivalent pages should have hreflang
   3. Cross-reference: total indexable internal pages vs total pages with hreflang — identify the gap
   4. Flag page types missing hreflang that should have it (e.g., products exist in multiple markets but only some have hreflang)
+- **Every hreflang rule ignores a page canonicalised elsewhere.** A page whose
+  declared canonical names another URL is asking for that URL to be treated as the
+  real one, and search engines read hreflang on the canonical, so an inherited
+  alternates block on a tracking-parameter variant is not judged at all. Its
+  canonical is reported by CHECK-17 where it belongs.
 - **Evaluate**:
   - FAIL if missing return links > 0
+  - FAIL if pages missing their own self-reference > 0
   - FAIL if significant coverage gap (many pages that should have hreflang don't)
   - WARN if hreflang only in sitemap (not in HTML)
   - Record: total hreflang URLs, total indexable URLs, coverage %, missing return links, page types without hreflang that should have it, implementation method (HTML/sitemap/both)
@@ -1284,10 +1323,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-26"` —
   `hreflang.non-indexable-target` (critical): an hreflang alternate that points at a
-  page this crawl judged non-indexable (noindexed, canonicalised away, or not a 200).
+  page this crawl fetched and found either redirecting or excluded from the index by
+  a noindex directive. An alternate that canonicalises to another URL is not a
+  cluster member at all (see CHECK-24) and is reported by CHECK-17 instead.
   `issue_urls` gives the source/target pairs and the reason per row. A target the
   crawl never fetched cannot be judged and produces no finding — read it as
-  unmeasured, not as sound.
+  unmeasured, not as sound, and read `hreflang.alternates-not-crawled` (info), the
+  NOT MEASURED marker that says how many such targets there were and which domains
+  they sit on, before recording a verdict here.
 - **Evaluate**:
   - FAIL if hreflang targets are non-200, noindexed, or non-canonical
   - Record: non-200 count, noindex count, non-canonical count, affected URL pairs
@@ -1887,24 +1930,55 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-39: Near-duplicate content — root cause analysis
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-39"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-39"` — two rules and a marker:
   - `content.exact-duplicate` (critical) — pages whose body content is identical
   - `content.near-duplicate` (warning) — pages alike past the similarity threshold
-  `issue_urls` gives them: `content.near-duplicate` writes one finding per PAIR
-  (`{urlA, urlB, hamming, pageTypeA, pageTypeB}` — the page types are the pair-type
-  classification the Analysis asks for, already done), and `content.exact-duplicate`
+  - `content.near-duplicate-skipped` (info) — the NOT MEASURED marker for the second
+    of them, below
+  `issue_urls` gives them: `content.near-duplicate` writes one finding per PAGE
+  (`{mainWords, nearDuplicates, closest}` — `nearDuplicates` is how many other pages
+  sit within the threshold of this one, exact up to 200 and a FLOOR above it, where
+  `nearDuplicatesAtLeast: true` sits beside it and the honest reading is "200 or
+  more"; `mainWords` is how much content this
+  page has of its own, and `closest` names up to five of the partners, nearest first,
+  as `{url, hamming, mainWords}`), and `content.exact-duplicate`
   one per identical group (`{contentHash, urls, count, pageTypes}`). For the
   template-level view, `metrics_get` with `metricId: "content.template-similarity"`
   says how alike each cohort's pages are on average — a cohort that is uniformly
   similar is root cause (b) or (d) below before you open a single page.
+- **What the similarity is measured over, and who is left out.** The near-duplicate
+  fingerprint is taken over each page's MAIN CONTENT — the text inside `<main>`, or
+  the body with `<nav>`, `<header>`, `<footer>` and `<aside>` removed when there is
+  no `<main>` — and not over the whole visible text. On a templated site the whole
+  text is mostly furniture, and comparing it reports unrelated templates as
+  near-identical; the crawl this came from produced 237 such pairs. Two further
+  exclusions, both of which mean a REAL pair may be absent from the list rather than
+  present in it: a page needs at least 50 words of its own before it is compared
+  (below that the fingerprint is a handful of tokens and every near-empty page on a
+  template matches every other — `content.thin` owns those pages), and a page whose
+  declared canonical points at another URL is not compared at all, on either rule,
+  because it has already handed its signals over.
+- **`content.near-duplicate-skipped` is the NOT MEASURED marker** for the
+  near-duplicate half of this check (`content.thin-skipped` / `h1.duplicate-skipped`
+  precedent). It fires once, site-scoped, when the crawl holds auditable indexable
+  pages and NOT ONE of them carries a main-content fingerprint — a crawl taken before
+  migration 0018 introduced it. Evidence `{indexablePages, minMainWords}`. **While it
+  fires, an empty near-duplicate list is not a clean site**: the check was not run and
+  a re-crawl is the only thing that answers it. The exact-duplicate half is
+  unaffected — it groups on the whole-text hash, which every crawl has — so its
+  findings, or its silence, still stand. It does NOT fire on a current crawl where
+  only SOME pages lack the fingerprint (a page with no main content is simply not a
+  candidate, the same way a page the analyzer produced no `contentHash` for is not a
+  candidate for the exact rule).
 - **Important — Identify the CAUSE, Not Just the Count**: A near-duplicate report can have
-  tens of thousands of pairs. Reporting "76K near-duplicate pairs found" is useless without
+  thousands of pages. Reporting "3K near-duplicate pages found" is useless without
   understanding WHY they're duplicates. The root cause determines the fix — and different
   causes need completely different solutions.
 - **Analysis**:
-  1. **Quantify the scale**: Total pairs, unique URLs involved, similarity distribution
-     (90-92%, 93-95%, 96-98%, 99-100%)
-  2. **Classify pair types**: Group by URL type combination:
+  1. **Quantify the scale**: Total pages reported, how large each page's cluster is
+     (`nearDuplicates`), similarity distribution (the `hamming` values in `closest`)
+  2. **Classify pair types**: group each finding with the pages in its `closest` list,
+     by URL type combination:
      - Product ↔ Product (most common on e-commerce)
      - Collection ↔ Collection
      - Collection ↔ Page
@@ -1954,7 +2028,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      content pairs often map to the same cannibalising query groups there
 - **Evaluate**:
   - FAIL if colour variant pages have identical descriptions (only colour word differs)
-  - WARN if >20% of near-duplicate pairs are from template boilerplate domination
+  - WARN if >20% of near-duplicate pages are from template boilerplate domination
   - WARN if overlapping collections compete for the same queries
   - Record: total pairs, pair type breakdown, **root cause breakdown with examples**,
     browser comparison findings, recommended fix per root cause
@@ -1962,17 +2036,28 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-40: Thin or placeholder content
 - **Priority**: Medium | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-40"` — `content.thin` (warning, the
-  same rule CHECK-13 reads), `content.thin-skipped` (info, the same marker CHECK-13
-  reads: pages carrying a `wordCount` and no `renderableWordCount`, which a pre-Phase-7
-  crawl wrote and this check cannot be run on — a re-crawl is the fix, and while it
-  fires the thin count is a floor) and `content.placeholder` (critical: lorem ipsum and
-  friends left in live copy). `issue_urls` for all three; filter `issues_list` by
+  same rule CHECK-13 reads: fewer than 150 words of the page's OWN content, evidence
+  `{mainWords, wordCount, threshold}`), `content.thin-skipped` (info, the same marker
+  CHECK-13 reads: one site-scoped finding on a crawl where NO page carries a
+  main-content word count, which is what a crawl taken before migration 0018 looks
+  like — a re-crawl is the fix, and while it fires the thin list is not evidence of
+  anything) and `content.placeholder` (critical: the literal
+  phrase "lorem ipsum" left in live copy — no other placeholder wording is detected).
+  `content.placeholder`'s evidence is `{wordCount, snippet}`, and **the snippet is the
+  point**: quote it in the report rather than the URL alone. The finding is often not
+  about the article body — the crawl this came from hit three 1,000-word posts whose
+  placeholder text was the excerpt and the meta description, visible on the listing
+  page and in every related-post card and nowhere on the post itself. `snippet` is
+  null on a crawl taken before the engine quoted the match; the finding still stands,
+  only the quotation is missing, and a re-crawl supplies it.
+  `issue_urls` for all three; filter `issues_list` by
   `pageType` to say which templates the thin pages belong to, and read
   `content.metrics-by-type` for the distributions behind the threshold — it carries
   `wordCount`, `renderableWordCount` and `textRatio` per template. **The pair is the
-  finding**: a template whose median word count is 900 and whose median renderable
-  count is 200 ships 700 words of furniture on every page, and the thin verdict was
-  reached on the 200.
+  finding**: a template whose median word count is 900 and whose pages each say 100
+  words of their own ships 800 words of furniture on every page, and the thin verdict
+  was reached on the 100 (`mainWords` in the finding; the metric's medians are
+  whole-document numbers and are the context around it, not the verdict).
 - **Evaluate**:
   - FAIL if lorem ipsum > 0 (immediate fix needed)
   - WARN if low content > 10% of indexable pages

@@ -23,6 +23,54 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.14.0: Phase 19, the audit accuracy pass
+// (docs/superpowers/specs/2026-09-09-audit-accuracy-pass-design.md), on FOUR
+// grounds. (1) Verdicts MOVED: `content.exact-duplicate` and
+// `content.near-duplicate` no longer count a page canonicalised elsewhere, and
+// every hreflang rule ignores such a page as declarer and as target — two
+// parameter variants on a real crawl were reported critical for the state the
+// fix text prescribes. (2) A measurement CHANGED: `content.near-duplicate`
+// pairs on `main_simhash` (the fingerprint of the main content, migration
+// 0018) with both pages at least 50 words of their own, instead of the
+// whole-text `simhash` that ~900 words of chrome dominated; on a crawl with no
+// main-content fingerprint the rule is silent and `content.near-duplicate-
+// skipped` says why. (3) Rules ADDED: `links.to-server-error` (critical),
+// `hreflang.missing-self-reference` (warning), and two NOT MEASURED markers,
+// `hreflang.alternates-not-crawled` and `content.near-duplicate-skipped`
+// (info). 100 rules: 28 critical / 25 warning / 47 info. (4) COPY changed on
+// 26 rules and every marker reason, under the rubric test in
+// test/rules/copy.test.ts; `content.placeholder`'s evidence gains the snippet.
+// Nothing is backfilled: an older crawl re-judged at 0.14.0 loses the
+// canonical-variant duplicates (they were never duplicates), gains the two
+// markers where they apply, and keeps every other finding.
+//
+// AMENDED AT GATE TIME (spec §11), after a re-crawl at 0018 showed the theme
+// putting its footer INSIDE `<main>`. Two more facts about what 0.14.0 says,
+// both inside the same version because none of it has shipped:
+//  (5) `content.near-duplicate` reports one finding per PAGE, not per pair:
+//      `{mainWords, nearDuplicates, closest: [{url, hamming, mainWords}]}`, up
+//      to five closest, capped by pages with an exact total. The 500-pair
+//      budget and the 100,000-pair scan ceiling are gone with the unit — the
+//      partners are now counted inside Postgres — so `findingCap` governs one
+//      listing budget instead of three, and a cluster of 79 empty templates is
+//      79 rows rather than 500 arbitrary pairs out of 3,081. `nearDuplicates`
+//      is exact up to 200 and a stated floor above it (`nearDuplicatesAtLeast:
+//      true`): counting past 200 partners per page is what made the wall clock
+//      quadratic on a degenerate cohort, and no reader needs the difference
+//      between 200 and 3,000 to reach the same verdict about the template.
+//  (6) `content.thin` fires on `main_word_count < 150` — the words a page has
+//      of its OWN — instead of `renderable_word_count`, and is a QUERY rule
+//      where it was a page rule (with its marker `content.thin-skipped`, now
+//      site-scoped too): the column's null means "no main content at all" on a
+//      0018 crawl and "never measured" on an older one, and only the crawl's
+//      census tells those apart. A page with no content of its own is reported
+//      as zero words rather than passed over. The kind change moves the
+//      ruleset split to 25 page / 61 query / 14 metric over the same 100 rules,
+//      and no severity, category or check claim moves with it. On the crawl
+//      behind the phase this rule fired on nothing while 35 pages had under
+//      150 words of their own; that is the always-passes shape hard rule 1
+//      forbids, and the column was what was wrong with it.
+//
 // 0.13.0: Phase 17, on THREE grounds — one rule added, one verdict MOVED, and
 // copy changed. The 5xx re-verification pass
 // (docs/superpowers/specs/2026-09-08-5xx-recheck-design.md) fetches every
@@ -146,7 +194,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.13.0";
+export const RULESET_VERSION = "0.14.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

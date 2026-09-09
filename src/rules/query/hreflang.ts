@@ -3,7 +3,14 @@ import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
-import { isAuditable, queryFinding, type RuleIdentity } from "../helpers.js";
+import {
+  CANONICALISED_ELSEWHERE,
+  FETCHED_OK,
+  isAuditable,
+  isCanonicalisedElsewhere,
+  queryFinding,
+  type RuleIdentity,
+} from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -40,6 +47,43 @@ const INVALID_CODE: RuleIdentity = { id: "hreflang.invalid-code", severity: "cri
 const X_DEFAULT: RuleIdentity = { id: "hreflang.missing-x-default", severity: "info" };
 const RETURN_LINK: RuleIdentity = { id: "hreflang.missing-return-link", severity: "critical" };
 const NON_INDEXABLE: RuleIdentity = { id: "hreflang.non-indexable-target", severity: "critical" };
+const SELF_REFERENCE: RuleIdentity = { id: "hreflang.missing-self-reference", severity: "warning" };
+const NOT_CRAWLED: RuleIdentity = { id: "hreflang.alternates-not-crawled", severity: "info" };
+
+/**
+ * Target hosts the not-crawled marker lists before it stops naming them. The
+ * COUNT it reports is over every host; only the list is cut.
+ *
+ * A site with an alternate per market has a handful of hosts, so this is
+ * insurance against a broken template naming a different host per page rather
+ * than a budget anyone is expected to reach.
+ */
+export const ALTERNATE_HOST_CAP = 50;
+
+// --------------------------------------------------------------------------
+// WHY EVERY RULE IN THIS FILE SKIPS A CANONICALISED PAGE (Phase 19 §4).
+//
+// A page whose declared canonical names another URL is asking search engines to
+// treat that other URL as the real one, and hreflang is evaluated on the
+// canonical: the annotations on such a page are not annotations anyone acts on.
+// On the crawl that motivated this, both missing-return-link findings were a
+// `?product-type=…` and a `?srsltid=…` variant that inherited its template's
+// hreflang block — the block names the base URL, and the base URL, correctly,
+// does not name the tracking variant back. Reporting that is reporting the
+// canonical's own remedy as a fault.
+//
+// So a canonicalised page is invisible to hreflang ENTIRELY, on both sides of
+// every relationship:
+//
+//  - as a DECLARER, its set is dropped before any rule sees it;
+//  - as a TARGET, it is not a member of anyone's cluster — which is what the
+//    return-link rule needs, since demanding a link back from a page whose own
+//    annotations we have decided to ignore is incoherent.
+//
+// Nothing is lost by the second half: a canonicalised alternate that is also
+// broken is reported where it belongs, on that page, by `canonical.*`,
+// `directive.canonical-noindex-conflict` and the crawl's own fetch evidence.
+// --------------------------------------------------------------------------
 
 /**
  * The comparison key for an hreflang target.
@@ -78,10 +122,18 @@ interface DeclarationSet {
   /** The comparison key for `pageUrl`. */
   pageKey: string;
   targets: string[];
+  /** The distinct declared codes, trimmed and sorted — the evidence's `codes`. */
+  codes: string[];
   hasXDefault: boolean;
+  /** `isAuditable` for the DECLARING page: fetched OK as HTML with a 200. */
+  auditable: boolean;
 }
 
-/** A crawled page an alternate points at. */
+/**
+ * A crawled page an alternate points at — one that is a cluster member, so a
+ * page canonicalised elsewhere is never one of these (see the note above the
+ * declaration types).
+ */
 interface TargetPage {
   id: string;
   url: string;
@@ -145,10 +197,16 @@ async function eachDeclarationSet(
     const rows = await db.execute<{
       page_id: string;
       page_url: string;
+      fetch_class: string;
+      status_code: number | null;
+      canonical_html: string | null;
+      canonical_header: string | null;
       hreflang_code: string;
       target_url: string;
     }>(sql`
-      select h.page_id, p.url as page_url, h.hreflang_code, h.target_url
+      select h.page_id, p.url as page_url, p.fetch_class, p.status_code,
+             p.canonical_html, p.canonical_header,
+             h.hreflang_code, h.target_url
       from hreflang h
       join pages p on p.id = h.page_id
       where h.crawl_id = ${crawlId}
@@ -156,20 +214,53 @@ async function eachDeclarationSet(
 
     const sets = new Map<string, DeclarationSet>();
     const members = new Map<string, Set<string>>();
+    const codes = new Map<string, Set<string>>();
+    /** Declaring pages dropped as canonicalised elsewhere, so the test runs once each. */
+    const invisible = new Set<string>();
     for (const row of rows.rows) {
       const pageId = String(row.page_id);
+      if (invisible.has(pageId)) continue;
       let set = sets.get(pageId);
       if (set === undefined) {
         const pageUrl = String(row.page_url);
-        set = { pageId, pageUrl, pageKey: targetKey(pageUrl), targets: [], hasXDefault: false };
+        // The canonical exclusion, applied in TypeScript rather than in the
+        // query: `isCanonicalisedElsewhere` resolves a relative canonical and
+        // normalizes both sides, which is what makes this rule's silence and
+        // `canonical.points-elsewhere`'s finding the same judgement rather than
+        // two string comparisons that agree most of the time.
+        if (
+          isCanonicalisedElsewhere({
+            url: pageUrl,
+            canonicalHtml: row.canonical_html,
+            canonicalHeader: row.canonical_header,
+          })
+        ) {
+          invisible.add(pageId);
+          continue;
+        }
+        set = {
+          pageId,
+          pageUrl,
+          pageKey: targetKey(pageUrl),
+          targets: [],
+          codes: [],
+          hasXDefault: false,
+          auditable: isAuditable({
+            fetchClass: String(row.fetch_class),
+            statusCode: row.status_code === null ? null : Number(row.status_code),
+          }),
+        };
         sets.set(pageId, set);
         members.set(pageId, new Set<string>());
+        codes.set(pageId, new Set<string>());
       }
       members.get(pageId)!.add(targetKey(String(row.target_url)));
+      codes.get(pageId)!.add(String(row.hreflang_code).trim());
       if (isXDefault(String(row.hreflang_code))) set.hasXDefault = true;
     }
     for (const set of sets.values()) {
       set.targets = [...members.get(set.pageId)!].sort();
+      set.codes = [...codes.get(set.pageId)!].sort();
     }
 
     const context = opts.withTargets
@@ -200,12 +291,28 @@ async function targetContext(
     fetch_class: string;
     status_code: number | null;
     is_indexable: boolean | null;
+    canonical_html: string | null;
+    canonical_header: string | null;
   }>(sql`
-    select p.id, p.url, p.fetch_class, p.status_code, p.is_indexable
+    select p.id, p.url, p.fetch_class, p.status_code, p.is_indexable,
+           p.canonical_html, p.canonical_header
     from pages p
     where p.crawl_id = ${crawlId} and p.url = any(${sql.param(wanted)}::text[])`);
   const byUrl = new Map<string, TargetPage>();
   for (const row of targetRows.rows) {
+    // The other half of the canonical exclusion: a target that canonicalises
+    // elsewhere is not a cluster member, so it is left out of this map and
+    // every rule reading it treats the alternate the way it treats one nobody
+    // fetched — as a URL this crawl cannot judge.
+    if (
+      isCanonicalisedElsewhere({
+        url: String(row.url),
+        canonicalHtml: row.canonical_html,
+        canonicalHeader: row.canonical_header,
+      })
+    ) {
+      continue;
+    }
     byUrl.set(String(row.url), {
       id: String(row.id),
       url: String(row.url),
@@ -379,6 +486,166 @@ async function missingXDefaultFindings(
 }
 
 /**
+ * A page that declares alternates and is not one of them.
+ *
+ * An hreflang cluster is a set of equals and every member has to name the WHOLE
+ * set, itself included: Google's documented rule is that a page whose own URL
+ * is absent from the set it declares has its annotations discarded, so the
+ * cluster it was trying to join fails as a whole rather than losing one member.
+ * That makes this a different fault from `hreflang.missing-return-link` — there
+ * the OTHER page is at fault, here the page in front of you is — and the same
+ * check answers both, so it carries the same `checkIds`.
+ *
+ * Gated on `isAuditable` because the claim is about a page that serves content:
+ * a redirect or a 404 that happens to carry an inherited alternates block is
+ * not a version anyone can rank, and its own row already says why. Pages
+ * canonicalised elsewhere are gone before this sees them (the note above).
+ *
+ * The cluster is compared by `targetKey`, so a page declaring itself with a
+ * fragment or with its query parameters in another order still counts as
+ * naming itself.
+ *
+ * One finding per PAGE (the dedupe key is the page URL), capped like every
+ * other URL-scoped rule; the walk runs to the end whatever the cap says, so the
+ * count behind the cap is exact.
+ */
+async function missingSelfReferenceFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  let total = 0;
+  await eachDeclarationSet(db, crawlId, { withTargets: false }, (set) => {
+    if (!set.auditable) return;
+    if (set.targets.includes(set.pageKey)) return;
+    total += 1;
+    if (caps.listing !== null && findings.length >= caps.listing) return;
+    findings.push(
+      queryFinding(SELF_REFERENCE, {
+        pageId: set.pageId,
+        pageUrl: set.pageUrl,
+        // `codes` is what the page declared, `targets` where those codes point.
+        // The page's own URL is NOT repeated here: the runner stamps it onto
+        // every finding's details (`{ pageUrl, ...evidence }` in src/rules/
+        // run.ts), and a second copy would be the same string twice.
+        //
+        // There is NO `ownLanguageTarget` field either: naming the alternate
+        // that stands in for this page would mean knowing the page's own
+        // language, and the crawl stores no language for a page (`pages` has no
+        // `lang` column), so the field would be a guess. The copy says so rather
+        // than the evidence carrying a null nobody can read.
+        evidence: { codes: set.codes, targets: set.targets },
+        dedupeKey: set.pageUrl,
+      }),
+    );
+    return;
+  });
+  return noteTruncation(findings, total);
+}
+
+/**
+ * The NOT MEASURED marker for the alternates this crawl never fetched.
+ *
+ * `hreflang.missing-return-link` reads back-links only from targets that HAVE a
+ * `pages` row, which is right — a URL nobody requested says nothing about what
+ * it declares — but on a multi-market site that is most of the cluster: the
+ * crawl that motivated Phase 19 declared 2,632 alternates, 1,880 of them
+ * against five sibling country domains (1,870 distinct URLs) that were not in
+ * scope and none of which were fetched. Silence there read
+ * as "the return links are fine", which is the always-passes hole hard rule 1
+ * forbids. This is the marker that says it out loud, once per crawl.
+ *
+ * ALL OF IT IS SQL, and deliberately: the answer is a GROUP BY over the
+ * hreflang table, and the alternative — streaming the declarations and counting
+ * hosts in a Map — would hold one entry per distinct target URL in memory.
+ *
+ *  - the declaring page must be auditable (fetched OK with a 200) and not
+ *    canonicalised elsewhere, so the marker counts alternates that a rule would
+ *    otherwise have had to judge;
+ *  - `alternates` is the DISTINCT alternate URLs on that host with no `pages`
+ *    row — what crawling the host would cost;
+ *  - `pages` is how many pages OF THIS CRAWL name at least one of them — how
+ *    much of this audit is resting on the gap;
+ *  - `total` sums `alternates` over every host, listed or not.
+ *
+ * The comparison to `pages.url` is the raw stored target rather than
+ * `targetKey`'s normalized form (SQL cannot run `normalizeUrl`). The two
+ * disagree only where an alternate carries a fragment, an unusual
+ * query-parameter order or an upper-case host, and the direction of the error
+ * is over-reporting a fetched URL as unfetched — a marker that names one host
+ * too many, never a silence.
+ */
+async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Finding[]> {
+  const rows = await db.execute<{
+    host: string;
+    alternates: number;
+    pages: number;
+    host_count: number;
+    total: number;
+  }>(sql`
+    with uncrawled as (
+      select h.target_url, h.page_id
+      from hreflang h
+      join pages p on p.id = h.page_id
+      where h.crawl_id = ${crawlId}
+        and ${FETCHED_OK("p")}
+        and not ${CANONICALISED_ELSEWHERE("p")}
+        and not exists (
+          select 1 from pages t
+          where t.crawl_id = ${crawlId} and t.url = h.target_url)
+    ),
+    by_host as (
+      select
+        -- The authority between "://" and the first "/", "?" or "#", lower-cased.
+        -- A target with no scheme separator at all (a mailto: alternate) has no
+        -- host to group under and keeps its scheme instead, so it is still
+        -- counted and still legible rather than dropped.
+        coalesce(
+          lower(substring(t.target_url from '://([^/?#]+)')),
+          split_part(t.target_url, ':', 1) || ':'
+        ) as host,
+        count(distinct t.target_url)::int as alternates,
+        count(distinct t.page_id)::int as pages
+      from uncrawled t
+      group by 1
+    )
+    select host, alternates, pages,
+           (select count(*) from by_host)::int as host_count,
+           (select coalesce(sum(alternates), 0) from by_host)::int as total
+    from by_host
+    order by alternates desc, host asc
+    limit ${ALTERNATE_HOST_CAP}`);
+
+  if (rows.rows.length === 0) return [];
+  const hostCount = Number(rows.rows[0]!.host_count);
+  const total = Number(rows.rows[0]!.total);
+  const hosts = rows.rows.map((r) => ({
+    host: String(r.host),
+    alternates: Number(r.alternates),
+    pages: Number(r.pages),
+  }));
+  return [
+    queryFinding(NOT_CRAWLED, {
+      pageId: null,
+      pageUrl: null,
+      evidence: {
+        total,
+        hosts,
+        // `hostsTruncated`, not `truncated`: this says the HOST LIST inside one
+        // finding was cut. `truncated` is what a capped LISTING of findings
+        // writes (`noteTruncation`), and one evidence object must not spell two
+        // different facts the same way (the `robots.check-skipped` precedent).
+        ...(hostCount > hosts.length
+          ? { hostsTruncated: { reported: hosts.length, total: hostCount } }
+          : {}),
+      },
+      dedupeKey: "site",
+    }),
+  ];
+}
+
+/**
  * Hreflang rules are `kind: "query"` rather than page rules because hreflang
  * declarations live in their own table, one row per declaration — they are not
  * a column on `pages` a page rule could read.
@@ -402,8 +669,11 @@ export const hreflangRules: QueryRule[] = [
         target_url: string;
         source: string;
         page_url: string;
+        canonical_html: string | null;
+        canonical_header: string | null;
       }>(sql`
-        select h.page_id, h.hreflang_code, h.target_url, h.source, p.url as page_url
+        select h.page_id, h.hreflang_code, h.target_url, h.source, p.url as page_url,
+               p.canonical_html, p.canonical_header
         from hreflang h join pages p on p.id = h.page_id
         where h.crawl_id = ${crawlId}`);
 
@@ -435,15 +705,29 @@ export const hreflangRules: QueryRule[] = [
         sources: Set<string>;
       }
       const groups = new Map<string, Group>();
+      // The canonical exclusion, per page rather than per row: this rule does
+      // not use the declaration-set walk, so it applies the same test itself.
+      const canonicalised = new Map<string, boolean>();
       for (const row of res.rows) {
         const code = String(row.hreflang_code).trim();
         if (isXDefault(code) || HREFLANG_CODE.test(code)) continue;
         const pageUrl = String(row.page_url);
+        const pageId = String(row.page_id);
+        let elsewhere = canonicalised.get(pageId);
+        if (elsewhere === undefined) {
+          elsewhere = isCanonicalisedElsewhere({
+            url: pageUrl,
+            canonicalHtml: row.canonical_html,
+            canonicalHeader: row.canonical_header,
+          });
+          canonicalised.set(pageId, elsewhere);
+        }
+        if (elsewhere) continue;
         const dedupeKey = `${pageUrl}#${code}`;
         let group = groups.get(dedupeKey);
         if (group === undefined) {
           group = {
-            pageId: String(row.page_id),
+            pageId,
             pageUrl,
             code,
             occurrences: 0,
@@ -567,5 +851,45 @@ export const hreflangRules: QueryRule[] = [
             : null,
         capsOr(caps),
       ),
+  }),
+
+  // The other half of reciprocity, and the half a crawl can always answer: a
+  // page's own URL must be in the set it declares. See
+  // `missingSelfReferenceFindings`.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: SELF_REFERENCE.id,
+    checkIds: ["CHECK-24"],
+    category: CATEGORY,
+    severity: SELF_REFERENCE.severity,
+    ...copyFor(SELF_REFERENCE.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => missingSelfReferenceFindings(db, crawlId, capsOr(caps)),
+  }),
+
+  // A check we could not run is visible, never silent (hard rule 7). One
+  // site-scoped finding naming the hosts whose alternates this crawl never
+  // fetched, at info severity: what it reports is the boundary of this crawl's
+  // evidence, not a fault found on the site. It claims both checks that read a
+  // fetched alternate — the return links of CHECK-24 and the indexability of
+  // CHECK-26 — because neither can be answered for a URL nobody requested.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: NOT_CRAWLED.id,
+    checkIds: ["CHECK-24", "CHECK-26"],
+    category: CATEGORY,
+    severity: NOT_CRAWLED.severity,
+    ...copyFor(NOT_CRAWLED.id),
+    rulesetVersion: RULESET_VERSION,
+    // The reason states only what the query established. It used to add "most
+    // of them sit on other domains", which was true of the crawl that provoked
+    // the rule and is not a thing the finding knows: an alternate on THIS host
+    // that robots.txt disallowed, or that no page links to, produces exactly
+    // the same finding. The hosts are in the evidence, so a reader who wants to
+    // know where the alternates sit reads them rather than being told.
+    marker:
+      "The language alternates these pages name were never requested by this crawl, so nothing " +
+      "about them was checked; crawl those domains too, or add them as extra starting URLs.",
+    run: (db, crawlId) => alternatesNotCrawledFindings(db, crawlId),
   }),
 ];

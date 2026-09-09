@@ -145,6 +145,6 @@ export const statusRules: PageRule[] = [
     "info",
     (p, self) =>
       p.fetchClass === "blocked" ? [finding(self, p, { statusCode: p.statusCode })] : [],
-    "a page the crawl was refused (bot challenge or access denial), so nothing on it could be judged",
+    "The site answered this crawler with a bot challenge or an access denial instead of the page, so nothing on it could be read or judged; allow our user agent through the bot protection and crawl again.",
   ),
 ];

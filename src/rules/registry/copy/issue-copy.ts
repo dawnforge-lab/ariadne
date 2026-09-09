@@ -39,19 +39,19 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "The page has no title tag. The title is one of the strongest on-page relevance signals and the headline shown in search results; without one, search engines write their own from page text, usually badly.",
     howToFix:
-      "Add a unique, descriptive title of roughly 30-60 characters that names the page's main topic and, where it reads naturally, the brand.",
+      "Add a unique, descriptive title of roughly 30-60 characters that names the page's main topic and, where it reads naturally, the brand. On a templated section, generate it from the fields that differ between the pages — the product, article or location name — so every page gets one without anybody writing it by hand.",
   },
   "title.too-short": {
-    title: "Title too short",
+    title: "Title shorter than 10 characters",
     explanation:
-      "The title is under 10 characters. Titles that short are almost always too generic to describe the page or to earn a click, and they waste the most valuable text you control in the search result.",
+      "The title tag on this page is under 10 characters long, counted in characters rather than words. Titles that short are almost always too generic to describe the page or to earn a click, and they waste the most valuable text you control in the search result.",
     howToFix:
-      "Expand the title into a descriptive phrase of roughly 30-60 characters stating what the page offers, rather than a single word or a bare brand name.",
+      "Expand the title into a descriptive phrase of roughly 30-60 characters stating what the page offers, rather than a single word or a bare brand name. Where a whole section is this short, the title is coming from one field in the template, so add the rest of the phrase there and every page in the section is fixed at once.",
   },
   "title.too-long": {
-    title: "Title too long",
+    title: "Title longer than 60 characters",
     explanation:
-      "The title is over 60 characters. Long titles do not hurt relevance, but search results truncate them, so the ending is cut off mid-phrase and any message you put at the end is lost.",
+      "The title tag on this page is over 60 characters long. Long titles do not hurt relevance, but search results truncate them, so the ending is cut off mid-phrase and any message you put at the end is lost. The count here is characters, while a search result is cut to fit a width in pixels — so 60 is a working line rather than an exact point of truncation, and a title of wide capitals is cut sooner than a narrow one.",
     howToFix:
       "Shorten the title to 60 characters or fewer, front-loading the words that matter most and moving boilerplate such as the site name to the end (or dropping it).",
   },
@@ -74,16 +74,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Add a meta description of 70-160 characters that summarises the page and gives a reason to click. Write one per page rather than repeating a site-wide default.",
   },
   "meta-description.too-short": {
-    title: "Meta description too short",
+    title: "Meta description shorter than 70 characters",
     explanation:
       "The meta description is under 70 characters. Short descriptions waste the snippet space search results give you, and search engines frequently ignore them in favour of text pulled from the page.",
     howToFix:
-      "Expand the description to 70-160 characters covering what the page is about and why the reader should open it.",
+      "Expand the description to 70-160 characters covering what the page is about and why the reader should open it. Where a section is short across the board, write the pattern in the template from fields that differ per page rather than one default sentence.",
   },
   "meta-description.too-long": {
-    title: "Meta description too long",
+    title: "Meta description longer than 160 characters",
     explanation:
-      "The meta description is over 160 characters, so search engines will truncate the snippet and the closing sentence will not be read.",
+      "The meta description is over 160 characters, so the snippet in the search result is cut short and the closing words are never read. The description is the one line of a result you write yourself, and the part that gets trimmed is usually the reason to click. The count here is characters, while the snippet is cut to fit a width, so 160 is a working line rather than the exact point of truncation.",
     howToFix:
       "Trim the description to 160 characters or fewer, keeping the core message and the call to action in the first sentence.",
   },
@@ -114,9 +114,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "If the extra H1s are accidental, keep one for the page's main heading and demote the rest to H2 or H3; elements that are not headings at all, such as a logo, should use a non-heading element. If the sectioning is deliberate, no change is needed.",
   },
   "headings.level-skip": {
-    title: "Heading levels skip",
+    title: "Heading levels jump by more than 1 (an H4 directly under an H2)",
     explanation:
-      "The heading hierarchy jumps a level, for example an H4 directly under an H2. The outline is how assistive technology and content parsers understand the structure of a page, and a skipped level breaks that outline.",
+      "The page's headings step down more than one level at some point — an H4 directly under an H2, with no H3 between them. The outline is how assistive technology and content parsers understand the structure of a page, and a skipped level breaks that outline.",
     howToFix:
       "Adjust the heading levels so they descend one step at a time. Where a level was skipped for the sake of a smaller font, fix the styling instead of the heading level.",
   },
@@ -139,32 +139,57 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Re-crawl the site. The heading text is captured while each page is being read and cannot be recovered afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
   },
   "content.thin": {
-    // Accuracy: the count this rule reads excludes text the page's own markup
-    // hides, and does NOT exclude text hidden by a stylesheet — the crawler
-    // does not load CSS. The prose says "the markup hides" for that reason;
-    // do not widen it to a claim about everything a visitor cannot see.
-    title: "Thin content",
+    // Accuracy, and it MOVED in Phase 19 §11. The count is now the page's own
+    // content — the text inside its main region, or its body with the header,
+    // navigation, sidebar and footer subtrees removed — and NOT the "words a
+    // reader can reach" this copy used to describe. Two things follow, and
+    // neither may be quietly widened:
+    //  - text the markup hides is INCLUDED here (the old renderable count
+    //    excluded it, and still does its own job on the soft-404 ceiling). So
+    //    no sentence may promise this is what a visitor sees.
+    //  - the shared furniture is excluded whether or not a visitor sees it,
+    //    which is the whole correction: on the crawl behind the phase every
+    //    page carried ~900 words of chrome and this rule fired on nothing.
+    // The second number in the evidence is the WHOLE document's word count, so
+    // the pair reads "94 of its own, 830 in all" — a page that is mostly
+    // furniture, which is the shape being reported.
+    title: "Fewer than 150 words of own content (excluding header, navigation and footer)",
     explanation:
-      "This indexable page carries fewer than 150 words a reader can actually reach. Text the page's own markup hides is left out of that count — a menu drawer, a closed accordion, a block marked as not displayed, or a template a script clones later — because none of it is on the page a visitor is shown. The finding quotes both numbers, so a page that ships plenty of words and shows very few is visible as exactly that. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees.",
+      "This indexable page carries fewer than 150 words of its own. Its own content means the text inside the page's main region — or, on a page that marks no main region, everything outside its header, navigation, sidebar and footer — so the menus, the footer and the rest of the furniture every page on the site shares are left out of the count. The finding quotes that number beside the word count of the whole document, so a page that ships eight hundred words and says fifty of them itself is visible as exactly that; a page whose own content is nothing at all is reported as zero. Thin pages rarely rank on their own, weigh on how the site is assessed as a whole, and on a JavaScript-rendered site often mean the real content never reached the HTML a crawler sees. A URL that declares a canonical tag pointing at another page is left out: it has said which version counts, and the page it defers to is where the content is judged.",
     howToFix:
-      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the two numbers are far apart, the copy exists but is behind something a reader has to open, so bring the substance into the visible page rather than into a drawer. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
+      "Expand the page with content that answers the query it targets, consolidate it into a stronger page, or mark it noindex if it exists for another reason. If the two numbers are far apart, the page is mostly template: check that its own section is actually being filled in for this record, because a missing field in a CMS looks exactly like this across a whole set of URLs. If the copy is there for a browser but not in the HTML, server-render or pre-render it.",
   },
   "content.thin-skipped": {
-    title: "Thin-content check could not be run on this page",
+    // A marker: it reports the limit of this crawl's evidence, never a fault on
+    // the site. Phase 19 §11 / hard rule 1 — the thin-content floor reads the
+    // count of a page's own content, and a crawl taken before that count
+    // existed cannot answer it. Silence would read as "no thin pages", which is
+    // the one thing this must not say. Site-scoped since the same amendment:
+    // the condition is a property of the crawl, and a pre-0018 crawl of fifty
+    // thousand pages would otherwise write this sentence fifty thousand times.
+    title: "Thin-content check could not be run on this crawl",
     explanation:
-      "The thin-content check counts the words a reader can reach, which means it has to know which parts of the page the markup hides. This page was crawled before the engine recorded that, so the number the check needs does not exist for it — only the older count of every word in the HTML, which includes hidden menus, accordions and templates and is often several times larger. The page was therefore left unjudged rather than judged on the wrong number, which on a site with heavy hidden chrome would have called a thin page healthy.",
+      "Judging whether a page is thin needs a count of its own content — the words that are not the header, navigation, sidebar or footer — and not one page in this crawl has one. That is what a crawl taken before the engine started measuring a page's own content separately looks like. The check was therefore left unrun rather than reported as clean, because a site with no thin pages and a crawl that never measured any produce exactly the same empty result, and only one of them is good news. The older count of every word in the document is no substitute and was deliberately not used: on a site whose pages each carry several hundred words of shared menus and footers, it calls an empty page a healthy one. The finding says how many indexable pages went unjudged.",
     howToFix:
-      "Re-crawl the site. The count is taken while the page is being read, so it cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
+      "Re-crawl the site. The count is taken while each page is being read and cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page.",
   },
   "content.placeholder": {
     // Accuracy: the analyzer matches the literal phrase "lorem ipsum" in
     // visible text. It is not a general placeholder detector — do not let this
     // copy imply that "TBC", "TODO" or dummy names are covered.
-    title: "Placeholder text in page content",
+    //
+    // Phase 19 §3: the finding now carries `snippet`, the sentence the match
+    // sits in, and the explanation has to send the reader to it. The crawl that
+    // provoked the change fired on three 1,000-word blog posts whose only
+    // placeholder text was the excerpt and the meta description — invisible on
+    // the post itself, on the listing page and in every related-post card. A
+    // reader told only "this page contains lorem ipsum" went looking in the
+    // article body and found nothing.
+    title: 'Placeholder text ("lorem ipsum") in page content',
     explanation:
-      'The page\'s visible text contains the phrase "lorem ipsum", which almost always means unfinished template copy shipped to production. Search engines index it, readers see it, and it undermines trust in everything else on the page.',
+      'The page\'s visible text contains the phrase "lorem ipsum": unfinished template copy that reached production. The finding quotes the sentence it appears in, which is where to start looking — on a long page the placeholder is often not in the body but in a summary, an excerpt or a meta description, so it shows up on listing pages and in cards elsewhere on the site rather than on the page itself. Search engines index it, visitors see it, and it undermines trust in everything else on the page. On a crawl taken before this engine started quoting the text, the sentence is not recorded and the finding says so rather than guessing.',
     howToFix:
-      "Replace the placeholder with the real copy, or unpublish the page until the copy exists. It is worth grepping the CMS for the same phrase, as placeholder text usually ships in batches.",
+      "Find the quoted sentence on the page and replace it with the real copy, or unpublish the page until that copy exists. Search the CMS for the same phrase before closing it off: placeholder text ships in batches, and the same field on the same template is usually unfilled on several records at once.",
   },
 
   // ----------------------------------------------------------------- status
@@ -180,7 +205,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "The crawl got a 5xx server error from this URL, and the second request it made later in the run got a normal answer instead, so the page is not permanently broken. It failed once all the same: an intermittent 5xx costs crawl rate, because search engines that meet one back off from the whole site for a while, and a visitor who arrives during the same window sees the error page rather than the content.",
     howToFix:
-      "Read the application and upstream logs for the window between the two timestamps in this finding — that is where the cause sits, usually a restart, a deploy, a connection pool exhausted under load, or an upstream timing out. Recurring blips on the same URLs point at a resource limit worth raising rather than at a one-off.",
+      "Read the logs covering the window between the two timestamps in this finding — the application's own, and those of whatever sits in front of it: a proxy, a load balancer or a CDN. That is where the cause sits, usually a restart, a deploy, a connection pool exhausted under load, or a service the application depends on timing out. Recurring blips on the same URLs point at a resource limit worth raising rather than at a one-off.",
   },
   "crawl.blocked": {
     title: "Crawler was blocked — page not audited",
@@ -271,7 +296,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
 
   // ---------------------------------------------------------------- redirects
   "redirect.chain": {
-    title: "Redirect chain",
+    // `CHAIN_HOPS` in the title, for the reason every threshold is: "Redirect
+    // chain" is a category, "of two or more hops" is the condition that fired.
+    title: "Redirect chain of 2 or more hops",
     explanation:
       "This URL redirects to another URL that redirects again, so reaching the destination takes several round trips instead of one. Every hop costs the visitor time and the crawler a request, and chains are fragile: remove a middle hop and the whole path breaks. Search engines follow a limited number of hops before giving up on the URL entirely.",
     howToFix:
@@ -287,11 +314,18 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
 
   // -------------------------------------------------------------------- links
   "links.broken-internal": {
-    title: "Internal links point to a URL that returns an error",
+    title: "Internal links point to a page that answers 4xx (not found, gone, forbidden)",
     explanation:
-      "Pages on this site link to a URL that answered with a 4xx error, so every one of those links is a dead end. Visitors who click get an error page, and the crawler spends a request on nothing and passes no value on to a working page. This is reported once for the broken target, with a count of how many pages link to it and a sample of them, because the fix is at the target, not on each linking page.",
+      "Pages on this site link to a URL whose server answered with a status in the 4xx class — the client-error class, meaning the request cannot be fulfilled as made. A 404 not found says there is no page at that URL, and a search engine drops it from the index. A 410 gone says the same thing deliberately and permanently, and is dropped faster. A 403 forbidden says the page exists but is closed to whoever asked, so a search engine can neither read nor index it. A 401 unauthorised says it sits behind a login, with the same result. Whichever of them it is, every link to that URL is a dead end: a visitor who clicks gets an error screen instead of the page the link promised, each request a search engine spends on it is crawl budget taken from pages that do work, and none of the ranking value those links carry reaches anything. This is reported once for each broken target, with the number of pages linking to it and a sample of them, because the fix is at the target rather than on each linking page — and the exact status it answered with is recorded with the finding.",
     howToFix:
-      "If the URL should exist, restore it or redirect it to its replacement. If it should not, update the links to point at the right page — or remove them. Fixing the target once repairs every link listed here.",
+      "If the URL should exist, restore the page at it, or redirect it with a 301 to the closest live replacement. If it should not exist, edit the links to point at the page that superseded it, or delete them. For a 403 or a 401, decide first whether the page is meant to be public: if it is, fix the access rule or the login gate rather than the link. When one broken target is linked from many pages the link almost always lives in a template — navigation, footer, a promo block, a related-products module — so change it once there instead of page by page. Fixing the target repairs every link listed here at once.",
+  },
+  "links.to-server-error": {
+    title: "Internal links point to a page that answers 5xx (server error)",
+    explanation:
+      "Pages on this site link to a URL whose server answered with a status in the 5xx class — the server-error class, meaning the request was valid and the site failed to answer it. A 500 internal server error is application code that broke. A 502 bad gateway is a front-end server that got an invalid answer from the application behind it. A 503 service unavailable is the site reporting itself overloaded or in maintenance. A 504 gateway timeout is the application taking too long to answer at all. A search engine treats a 5xx as temporary, so it keeps the URL for a while and comes back — but it also slows its crawling of the whole site while the errors continue, and a URL that keeps failing is dropped in the end. Meanwhile a visitor who follows one of these links gets an error screen, and the ranking value the links carry reaches nothing. Each 5xx this crawl met was asked a second time when the crawl finished, unless the second look ran out of the budget it is given, and the linked page's own finding says which — the one about the server error itself, which states \"confirmed\", \"inconclusive\", \"capped\" or \"not run\", or the one recording that the second request got a page — so read that before deciding the fault is permanent. This is reported once for each failing target, with the number of pages linking to it and a sample of them; the exact status it answered with is recorded with the finding.",
+    howToFix:
+      "This is a server fault rather than a link fault, so start at the target: read the logs for that URL — the application's own, and those of whatever sits in front of it (a proxy, a load balancer, a CDN) — and fix what is erroring; the linked page's own finding carries the timestamps to search around. If the URL is not meant to exist any more, make it answer 404 or 410, or redirect it to the closest live page, so the links stop pointing at a failure. Only once the target is settled is it worth touching the links themselves, and where many pages link to the same failing URL that link is usually in a template, so it changes in one place.",
   },
   // Two rule ids for one check, because copy is looked up by rule id: the
   // orphan finding and the statement that the check could not be run are
@@ -427,11 +461,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       'Add an "x-default" alternate to this cluster, pointing at the fallback version — usually the international English page or a language selector. The annotation belongs on every page in the cluster, alongside the alternates already there, so it is normally a one-line change in the template that generates them.',
   },
   "hreflang.missing-return-link": {
-    title: "Hreflang alternate does not point back",
+    title: "Hreflang alternate was fetched and does not point back",
     explanation:
-      "This page names another page as its language alternate, that page was crawled, and it does not name this one in return. Hreflang annotations are only honoured when they are reciprocal: a one-way annotation is discarded, so the alternate is ignored and visitors keep being served the wrong language version.",
+      "This page names another page as its language alternate, that page was fetched by this crawl, and it does not name this one in return. Hreflang annotations are only honoured when they are reciprocal: a one-way annotation is discarded, so the alternate is ignored and visitors keep being served the wrong language version. This is reported only where both sides were fetched — an alternate on a domain this crawl never visited is not counted here, because what it declares is unknown, and it is listed among the things this crawl could not check instead.",
     howToFix:
-      "Make the annotations symmetrical. Every page in a cluster should declare the same full set of alternates, including itself, so each version confirms the others. Generating the block once from a single mapping and rendering it on every page in the cluster is what stops this recurring.",
+      "Make the annotations symmetrical. Every page in a set should declare the same full list of alternates, including itself, so each version confirms the others. Generating the block once from a single mapping of language to URL and rendering it on every page in the set is what stops this recurring.",
+  },
+  // Phase 19 §4. The other half of reciprocity, and the half that needs no
+  // second page: a set that omits the page it sits on is discarded whole. The
+  // evidence carries no "own language" URL and the copy has to say why — the
+  // site states no language for a page anywhere this engine reads, so naming
+  // which alternate stands in for this page would be a guess.
+  "hreflang.missing-self-reference": {
+    title: "Hreflang set leaves out the page it is on",
+    explanation:
+      "This page declares language alternates and its own URL is not one of them. A set of alternates has to name every version of the page, the one carrying the annotations included; when a page is missing from the set it declares, search engines discard the entire set rather than the one absent entry, so none of the versions listed here are connected and visitors keep being sent to the wrong one. The comparison is between the URLs this page declares and the URL it was fetched at — differences of letter case, ordering of query parameters and any '#' fragment are ignored, so a version declared in a different spelling still counts as itself. Which language this page is meant to be is not part of the comparison: the site states none in a form that could be read here.",
+    howToFix:
+      "Add an alternate naming this page's own URL alongside the ones already declared, with the language and region code this version serves. Where a template generates the block, generate the whole set once from a single mapping of language to URL and render the identical block on every version — hand-written blocks that list only 'the other languages' are what produce this, and they produce it on every page of the set at once.",
+  },
+  // Phase 19 §4. A NOT MEASURED marker: it reports the boundary of what was
+  // fetched, never a fault on the site. Off-domain alternates are the normal
+  // shape of an international setup, so this fires on most of them, and the
+  // copy has to make "we did not look" unmistakable.
+  "hreflang.alternates-not-crawled": {
+    title: "Language alternates were not fetched by this crawl",
+    explanation:
+      "Pages on this site name language alternates whose URLs this crawl never requested — most often because they sit on separate country domains that were not part of what was crawled. Nothing about them was checked: whether they answer at all, whether they name this site back, and whether they are open to indexing are all unknown, and every language-alternate result in this report covers only the URLs that were fetched. The numbers here are the size of that gap: for each domain the unfetched alternates belong to, how many distinct URLs went unfetched and how many pages of this crawl name them. Alternates on separate country domains are the normal shape of an international setup, so this reports nothing wrong with the site — it reports what was not looked at.",
+    howToFix:
+      "To have these checked, cover the domains they sit on: add them as extra starting URLs so one crawl takes in the whole international set, or crawl each domain and read the results together. Where an unfetched alternate is on the domain that was already crawled, the reason it was left out — a robots.txt rule, or a URL the crawl was not allowed to follow — is worth settling first, because search engines are likely to be shut out of it in the same way. A domain that is deliberately out of scope needs nothing done; read the alternate checks as covering the rest.",
   },
   "hreflang.non-indexable-target": {
     title: "Hreflang alternate points to a page search engines cannot serve",
@@ -485,26 +542,26 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // assert that layout shift is actually happening.
     title: "Images missing width or height attributes",
     explanation:
-      "One or more images on the page are missing a width or height attribute. Without dimensions in the HTML, the browser cannot reserve space for the image before it loads, and the page can shift under the reader as images arrive — unless the space is already reserved in CSS.",
+      "One or more images on the page are missing a width or height attribute, and the finding says how many of the page's images that is out of how many it carries. Without dimensions in the HTML, the browser cannot reserve space for the image before it loads, and the page can shift under the reader as images arrive — unless the space is already reserved in CSS. Only images named in the HTML the server sent are counted, and an attribute that exists but is empty counts as present.",
     howToFix:
       "Set width and height attributes on img elements to the image's intrinsic pixel dimensions; CSS can still resize it. An equivalent aspect-ratio in CSS also reserves the space, so verify against the rendered page before treating this as a defect.",
   },
   "images.missing-alt": {
     title: "Images missing alt text",
     explanation:
-      "One or more images on the page have no alt attribute. Alt text is what screen-reader users get in place of the image and it is the main way search engines understand what an image shows, so a missing attribute is both an accessibility failure and a lost signal.",
+      "One or more images on the page have no alt attribute at all, and the finding says how many of the page's images that is out of how many it carries. Alt text is what screen-reader users get in place of the image, and it is the main way search engines understand what an image shows, so a missing attribute is both an accessibility failure and a lost signal. Only images named in the HTML the server sent are counted: an image a script adds after the page loads is outside this count rather than counted as fine.",
     howToFix:
       'Give every meaningful image alt text describing what it conveys. Use an empty alt ("") for purely decorative ones — that is the correct value, and it is not the same as omitting the attribute.',
   },
   "performance.slow-response": {
-    title: "Slow server response",
+    title: "Server took more than 1500ms to start answering",
     explanation:
-      "The HTML response took more than 1500ms to arrive. Every downstream loading metric starts from that number, so a slow first byte delays everything the reader sees, and on large sites it directly reduces how much a search engine crawls per visit.",
+      "This page took more than 1500ms to start answering: the time from the request being sent to the server's response arriving, measured once, from the machine this crawl ran on. Every downstream loading metric starts from that number, so a slow first response delays everything the reader sees, and on large sites it directly reduces how much a search engine crawls per visit. One timing is one timing — a cold cache, a warming instance or a busy moment shows up here exactly like a slow route does, which is why the fix below starts with re-testing.",
     howToFix:
       "Look at server and database time for this route rather than at the front end: serving cached or statically generated HTML usually fixes it. Rule out a cold cache or an unwarmed instance by re-testing before investing in the route.",
   },
   "structure.deep-page": {
-    title: "Page is deep in the site structure",
+    title: "Page is more than 5 links from the home page",
     explanation:
       "Following internal links from the home page, the shortest route to this indexable page is more than 5 links deep. Depth is one of the ways crawlers and readers judge importance: deep pages get crawled less often, receive less internal link equity, and are harder to browse to. Being listed in the sitemap does not shorten that route. Pages excluded from the index are not reported here — their depth costs nothing — and a page with no link path at all is reported as an orphan instead.",
     howToFix:
@@ -530,11 +587,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // own policy refused, one robots.txt disallowed and one whose host could not
     // tell us its robots rules at all are UNKNOWN and are counted separately;
     // copy calling any of them broken would accuse a client of our silence.
-    title: "The page references files that could not be loaded",
+    title: "Files the page references answered with an error (4xx or 5xx)",
     explanation:
       "This page points at one or more files — images, stylesheets or scripts — that the server answered with an error instead of the file. The finding says how many, and lists up to ten of them with the status each one returned and, where the server gave a reason, that reason beside it: a status of 200 with a refusal reason next to it is a bot-protection challenge answering in place of the file, which is a different problem from a 404 and needs the reason to be read at all. Only files the server actually answered are counted here. A reference the crawl never got to ask about, one our own policy refused, one the site's robots.txt disallowed, one whose host could not tell us its rules at all because its robots.txt was unreachable while the crawl ran, and one whose request never completed are all reported as unknown instead, with their own count on the finding, because none of them is evidence that anything is wrong. The unreachable case is worth separating in your head from the rest: it usually means a third party's server was briefly down, not that anything about this site is misconfigured. What the reader sees depends on the file: a missing image leaves a gap, a missing stylesheet leaves the page unstyled, and a missing script leaves whatever it did undone. Only files named in the HTML the server sent are checked, so assets a script fetches later are outside this finding entirely.",
     howToFix:
-      "Take the listed URLs and request them yourself. A 404 usually means a file was renamed or deleted while a template kept the old path, and the fix is in the template rather than on the page. A 5xx means the file exists and its server is failing, which is worth checking before anything else. A status with a refusal reason beside it means bot protection answered instead of the file, so the file is probably fine for a browser and the thing to change is the protection rule — the same allowlist question a blocked page raises. Where the unknown count is high, the resource pass did not finish or was not allowed to ask, and re-running the crawl is what turns those into answers.",
+      "Take the listed URLs and request them yourself. A 404 usually means a file was renamed or deleted while a template kept the old path, and the fix is in the template rather than on the page. A 5xx means the file exists and its server is failing, which is worth checking before anything else. A status with a refusal reason beside it means bot protection answered instead of the file, so the file is probably fine for a browser and the thing to change is the protection rule — the same allowlist question a blocked page raises. Where the unknown count is high, the crawl did not finish asking about the files, or was not allowed to ask, and re-running it is what turns those into answers.",
   },
   "images.oversized": {
     // Accuracy: this is the TRANSFERRED size the server reported or we counted.
@@ -550,7 +607,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // Accuracy: a format is a CHOICE and this is info, never a defect. The type
     // compared is the one the SERVER SENT, not the URL's extension, so a CDN
     // already negotiating WebP from a .jpg path is correctly silent.
-    title: "Heavy image served as PNG or JPEG",
+    title: "Image over 100,000 bytes served as PNG or JPEG",
     explanation:
       "This image is over 100,000 bytes and the server sent it as a PNG or a JPEG. Both formats predate WebP and AVIF, which typically carry the same picture in a good deal fewer bytes, so a heavy file in one of them is a candidate for conversion. It is not a fault: a format is a choice, PNG is the right answer for screenshots and flat graphics with sharp edges, and some pipelines produce nothing else. Only images already past the weight line are named, because converting a small file saves nothing worth the work. The type compared is the one the server actually sent rather than the file extension, so a site whose CDN already negotiates a modern format for the same URL is silent here even where the path still ends in .jpg. Only images named in the HTML the server sent are looked at, and only the ones the crawl actually got an answer for: an image a script loads later, or one the crawl never got to ask about, is unknown rather than fine.",
     howToFix:
@@ -560,14 +617,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // Accuracy: the crawl reads `Cache-Control` and `Expires` and nothing else.
     // It cannot see a CDN's own edge caching or an ETag-based revalidation, so
     // no copy here may say the files are re-downloaded every time.
-    title: "Fetched files carry no caching headers",
+    title: "Files served with no caching instructions (no Cache-Control, no Expires)",
     explanation:
-      "Some of the files this crawl fetched came back with neither a Cache-Control nor an Expires header, so nothing in the response tells a browser how long it may keep them. The finding counts them, says how many files were fetched altogether, and lists up to twenty of the ones with no header. Files the crawl never asked about — because the resource pass did not reach them, our own policy refused them, robots.txt disallowed them, their host's robots.txt was unreachable while the crawl ran, or the request failed — are counted separately as unknown and are not part of the uncached number: a file nobody asked for has no missing header. Two headers is all this reads, so a CDN doing its own edge caching, or a server revalidating with an ETag, is invisible here — what the finding says is that the response itself gave no instruction, which is the part a browser on a repeat visit acts on. Only files named in the HTML the server sent are asked for at all, so assets a script loads later are outside this count.",
+      "Some of the files this crawl fetched came back with neither a Cache-Control nor an Expires header, so nothing in the response tells a browser how long it may keep them. The finding counts them, says how many files were fetched altogether, and lists up to twenty of the ones with no header. Files the crawl never asked about — because it did not reach them, our own policy refused them, robots.txt disallowed them, their host's robots.txt was unreachable while the crawl ran, or the request failed — are counted separately as unknown and are not part of the uncached number: a file nobody asked for has no missing header. Two headers is all this reads, so a CDN doing its own edge caching, or a server revalidating with an ETag, is invisible here — what the finding says is that the response itself gave no instruction, which is the part a browser on a repeat visit acts on. Only files named in the HTML the server sent are asked for at all, so assets a script loads later are outside this count.",
     howToFix:
       "Set a long max-age on the assets whose URL changes when their content does — anything with a content hash in its filename can safely be cached for a year — and a short one, or a revalidation instruction, on the rest. This is normally a few lines in the web server, the CDN or the framework's static-file configuration rather than a change to the site, and it is one of the cheapest improvements available for repeat visitors.",
   },
   "resources.not-recorded": {
-    title: "Resource checks could not be run on this crawl",
+    title: "Checks on images, stylesheets and scripts could not be run on this crawl",
     explanation:
       "The checks about images, stylesheets and scripts — broken files, image weight, image format, caching headers, and the page-weight table beside them — all read the files a crawl recorded from each page's HTML. This crawl recorded none, and its pages did carry images, which is what a crawl performed before the engine started reading resources looks like. The checks were therefore left unrun rather than reported as clean, because a site whose files are all healthy and a crawl that never looked produce exactly the same silence, and only one of them is good news. The finding says how many resource records this crawl holds, which is none, how many of its pages counted at least one image, and how many pages it read in all.",
     howToFix:
@@ -580,9 +637,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // describe the opposite crawl.
     title: "The site's files were listed but never asked about",
     explanation:
-      "This crawl recorded every image, stylesheet and script the pages it read point at — everything named in the HTML the server sent — and it requested none of them. The census is real. The asking never happened. So nothing here says whether any of those files is missing, oversized, in a dated format, or served without caching instructions, and the page-weight table beside these checks counts each page's HTML and nothing else. The finding names which of three things happened. The crawl may have been started with the resource fetch turned off (fetchResources: false), which is a decision an operator takes rather than an error. The pass may have sent no request at all, which is a crawl interrupted before it started asking. Or the resource budget may have claimed every file before anything was asked, in which case the number to raise is the one the crawl was started with. The finding also carries the counts: files recorded, files left unasked — the same number here — and pages read. The silence of the resource checks is a limit of this crawl rather than a clean bill of health for the site.",
+      "This crawl recorded every image, stylesheet and script the pages it read point at — everything named in the HTML the server sent — and it requested none of them. The list of files is real. The asking never happened. So nothing here says whether any of those files is missing, oversized, in a dated format, or served without caching instructions, and the page-weight table beside these checks counts each page's HTML and nothing else. The finding names which of three things happened. The crawl may have been started with the resource fetch turned off (fetchResources: false), which is a decision an operator takes rather than an error. It may have sent no request at all, which is a crawl interrupted before it started asking. Or the resource budget may have claimed every file before anything was asked, in which case the number to raise is the one the crawl was started with. The finding also carries the counts: files recorded, files left unasked — the same number here — and pages read. The silence of the resource checks is a limit of this crawl rather than a clean bill of health for the site.",
     howToFix:
-      "Re-run the crawl with the resource fetch left on — it is on by default — or resume the interrupted one, which asks about the files it never reached. Nothing about the files can be recovered from what is stored: the census records which URLs the pages point at, not what a server would say about them.",
+      "Re-run the crawl with the resource fetch left on — it is on by default — or resume the interrupted one, which asks about the files it never reached. Nothing about the files can be recovered from what is stored: the record says which URLs the pages point at, not what a server would say about them.",
   },
   "resources.all-unknown": {
     // Accuracy: this reports a CRAWL, never a site — the third marker, and the
@@ -594,9 +651,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // carrying even one broken row is outside this marker.
     title: "Every file the crawl asked about answered nothing usable",
     explanation:
-      "The checks about images, stylesheets and scripts — broken files, image weight, image format, caching headers, and the page-weight table beside them — read what a server said about each file the pages point at. This crawl asked about, or tried to reach, every file it recorded and not one of them came back with a usable answer: each landed in one of four states that all mean we do not know, rather than a verdict about the file. Our own policy refused the request (a reserved address or a scheme we do not follow); the site's robots.txt disallowed it; the host could not tell us its robots rules at all, because its robots.txt was unreachable while the crawl ran, which we treat as a complete disallow; or the request never completed — a timeout, a DNS failure, a connection reset. The finding gives the census: how many files were seen, how many fell into each of those four states, and which state was the largest. Because not one file came back healthy, the broken-file, image-weight, image-format and caching checks all found nothing to judge and the page-weight table counts each page's HTML and nothing else — a site that looks light and clean and was in truth never measured. This is a limit of this crawl's evidence, not a clean bill of health for the site: a wall of unreachable-robots results is usually a third party's CDN briefly down, and a wall of refusals or robots disallows is a decision rather than a fault. Only files named in the HTML the server sent are asked about at all, so assets a script loads later are outside this entirely.",
+      "The checks about images, stylesheets and scripts — broken files, image weight, image format, caching headers, and the page-weight table beside them — read what a server said about each file the pages point at. This crawl asked about, or tried to reach, every file it recorded and not one of them came back with a usable answer: each landed in one of four states that all mean we do not know, rather than a verdict about the file. Our own policy refused the request (a reserved address or a scheme we do not follow); the site's robots.txt disallowed it; the host could not tell us its robots rules at all, because its robots.txt was unreachable while the crawl ran, which we treat as a complete disallow; or the request never completed — a timeout, a DNS failure, a connection reset. The finding gives the counts: how many files were seen, how many fell into each of those four states, and which state was the largest. Because not one file came back healthy, the broken-file, image-weight, image-format and caching checks all found nothing to judge and the page-weight table counts each page's HTML and nothing else — a site that looks light and clean and was in truth never measured. This is a limit of this crawl's evidence, not a clean bill of health for the site: a wall of unreachable-robots results is usually a third party's CDN briefly down, and a wall of refusals or robots disallows is a decision rather than a fault. Only files named in the HTML the server sent are asked about at all, so assets a script loads later are outside this entirely.",
     howToFix:
-      "Re-run the crawl, ideally after reading which state dominated the census. A wall of unreachable-robots or failed requests usually means a CDN or a bot-protection layer was blocking our crawler during the window, and the same URLs may answer normally to a browser or on a later crawl — the same allowlist question a blocked page raises. Where our own policy refused them, the references point somewhere we will not follow, which is a fact about the references rather than a fault to fix. Where a robots.txt disallowed them, that is the site's instruction and honouring it is deliberate. Nothing about the files can be recovered from what is stored: the census records the class each file landed in, not what a healthy fetch would have said.",
+      "Re-run the crawl, ideally after reading which of the four states most of the files fell into. A wall of unreachable-robots or failed requests usually means a CDN or a bot-protection layer was blocking our crawler during the window, and the same URLs may answer normally to a browser or on a later crawl — the same allowlist question a blocked page raises. Where our own policy refused them, the references point somewhere we will not follow, which is a fact about the references rather than a fault to fix. Where a robots.txt disallowed them, that is the site's instruction and honouring it is deliberate. Nothing about the files can be recovered from what is stored: the record says which state each file landed in, not what a successful request would have found.",
   },
   "resources.partial-unknown": {
     // Accuracy: this reports a CRAWL, never a site — the fourth marker, for a
@@ -609,9 +666,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // would accuse a client of our own incomplete crawl.
     title: "The crawl only partly reached the files, and reached nothing usable",
     explanation:
-      "The checks about images, stylesheets and scripts — broken files, image weight, image format, caching headers, and the page-weight table beside them — read what a server said about each file the pages point at. This crawl asked about only some of the files it recorded, and every one it did reach came back with no usable answer, while the rest were never asked about at all. Each file it reached landed in one of four states that all mean we do not know rather than a verdict about the file: our own policy refused the request (a reserved address or a scheme we do not follow); the site's robots.txt disallowed it; the host could not tell us its robots rules at all because its robots.txt was unreachable while the crawl ran, which we treat as a complete disallow; or the request never completed — a timeout, a DNS failure, a connection reset. The finding gives both halves of the census: how many files were seen, how many were never reached, how many fell into each of those four states, and which state was the largest. Because not one file came back usable, the broken-file, image-weight, image-format and caching checks all found nothing to judge and the page-weight table counts each page's HTML and nothing else — a site that looks light and clean and was in truth only partly measured. This is a limit of this crawl's evidence rather than a clean bill of health for the site: a pass that reached only some files and got only unknowns from them is a crawl that was interrupted or throttled mid-way, not a verdict on anything. Only files named in the HTML the server sent are asked about at all, so assets a script loads later are outside this entirely.",
+      "The checks about images, stylesheets and scripts — broken files, image weight, image format, caching headers, and the page-weight table beside them — read what a server said about each file the pages point at. This crawl asked about only some of the files it recorded, and every one it did reach came back with no usable answer, while the rest were never asked about at all. Each file it reached landed in one of four states that all mean we do not know rather than a verdict about the file: our own policy refused the request (a reserved address or a scheme we do not follow); the site's robots.txt disallowed it; the host could not tell us its robots rules at all because its robots.txt was unreachable while the crawl ran, which we treat as a complete disallow; or the request never completed — a timeout, a DNS failure, a connection reset. The finding gives both halves of the count: how many files were seen, how many were never reached, how many fell into each of those four states, and which state was the largest. Because not one file came back usable, the broken-file, image-weight, image-format and caching checks all found nothing to judge and the page-weight table counts each page's HTML and nothing else — a site that looks light and clean and was in truth only partly measured. This is a limit of this crawl's evidence rather than a clean bill of health for the site: a crawl that reached only some of the files and got only unknowns from those is one that was interrupted or throttled mid-way, not a verdict on anything. Only files named in the HTML the server sent are asked about at all, so assets a script loads later are outside this entirely.",
     howToFix:
-      "Re-run the crawl to ask about every file afresh — both the ones it never reached and the ones that answered with an unknown; resuming the interrupted crawl instead asks only about the files it never reached, because a file that already landed in a class keeps it and is not tried again on a resume. It is worth reading which state dominated the census first: a wall of unreachable-robots or failed requests usually means a CDN or a bot-protection layer was blocking our crawler during the window, and the same URLs may answer normally to a browser or on a later crawl. Where our own policy refused them, the references point somewhere we will not follow, and where a robots.txt disallowed them, honouring it is deliberate. Nothing about the files can be recovered from what is stored: the census records the state each file reached, or that it was never reached, not what a healthy fetch would have said.",
+      "Re-run the crawl to ask about every file afresh — both the ones it never reached and the ones that answered with an unknown; resuming the interrupted crawl instead asks only about the files it never reached, because a file that already landed in a class keeps it and is not tried again on a resume. It is worth reading which of the four states most of them fell into first: a wall of unreachable-robots or failed requests usually means a CDN or a bot-protection layer was blocking our crawler during the window, and the same URLs may answer normally to a browser or on a later crawl. Where our own policy refused them, the references point somewhere we will not follow, and where a robots.txt disallowed them, honouring it is deliberate. Nothing about the files can be recovered from what is stored: the record says which state each file reached, or that it was never reached, not what a successful request would have found.",
   },
 
   // -------------------------------------------------------------------- url
@@ -633,7 +690,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Strip the tracking parameters from internal links and point them at the clean URL. Where the tags exist to measure an internal promotion, use an analytics feature meant for that — internal campaign or content-group tracking — rather than the parameters reserved for external campaigns.",
   },
   "url.parameter-pages-indexable": {
-    title: "Parameterised URL invites indexing of itself",
+    title: "URL with query parameters is indexable and canonical to itself",
     explanation:
       "This URL carries query parameters, returns a 200, is not excluded from the index, and names itself as its own canonical. On a filterable listing that is how a handful of pages becomes thousands of near-identical indexable URLs, one per combination of filters, each competing with the clean page. It is sometimes the right call — a search or feed page that should rank — which is why this is a statement to check rather than a fault.",
     howToFix:
@@ -663,11 +720,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "If the domain is genuinely retired, 301-redirect it to the matching URL on the live site, page by page rather than everything to the homepage, and keep the redirects in place indefinitely. If it is meant to stay a separate site, make sure it is not serving the same content.",
   },
   "host.probe-skipped": {
-    title: "Host variants were not checked",
+    title: "The site's other addresses (http, www, a former domain) were not checked",
     explanation:
-      "This crawl did not probe the site's other spellings, so nothing here says whether the http version redirects, whether www and the bare domain both serve the site, or whether a former domain is still reachable. That is a limit of this crawl rather than a finding about the site: the probe is skipped when a crawl is started with host probing turned off.",
+      "This crawl did not request the site's other addresses, so nothing here says whether the http version redirects to https, whether www and the bare domain both serve the site, or whether a former domain is still reachable. That is a limit of this crawl rather than a finding about the site: those extra requests are made only when a crawl is started with the host checks turned on, and this one was not.",
     howToFix:
-      "Re-run the crawl with host probing enabled to answer these checks. In the meantime the same questions can be answered by hand: request each spelling of the domain and follow the redirects, confirming they all end on the canonical https host.",
+      "Re-run the crawl with the host checks turned on to answer them. In the meantime the same questions can be answered by hand: request each spelling of the domain and follow the redirects, confirming they all end on the canonical https host.",
   },
 
   // ---------------------------------------------------------------- content
@@ -676,16 +733,24 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // wording plus a short page, or a body that matches what the site serves
     // for a URL that does not exist. Copy implying both are required, or that
     // the page was proved missing, would misdescribe the rule.
-    title: "Soft 404 (a missing page answering 200)",
+    // The title states the firing line, like every other rule that fires on a
+    // number: "Soft 404" alone sent a reader into the finding to learn what we
+    // measured. Both signals are named because either one alone is enough, and
+    // "or" is the word that says so.
+    title: "Soft 404: a 200 page with fewer than 300 words or matching the not-found template",
     explanation:
-      'This page answers with a 200 OK, but it looks like a "page not found" rather than a page. Either signal alone is enough for us to say so: its visible text carries not-found wording and the page shows under 300 words a reader can reach (text the markup hides, such as a menu drawer or a closed accordion, is left out of that count, so a short error message inside a full site shell still reads as short), or its content is within a few bits of the body this site served for a URL that cannot exist. Search engines treat these as errors anyway, so the URL is crawled repeatedly, kept out of the index, and the crawl budget spent on it is wasted.',
+      'This page answers with a 200 OK, but it looks like a "page not found" rather than a page. Either signal alone is enough for us to say so: its visible text carries not-found wording and the page shows under 300 words a reader can reach (text the markup hides, such as a menu drawer or a closed accordion, is left out of that count, so a short error message inside a full site shell still reads as short), or its content is within four bits out of sixty-four of the body this site served for a URL that cannot exist. Search engines treat these as errors anyway, so the URL is crawled repeatedly, kept out of the index, and the crawl budget spent on it is wasted.',
     howToFix:
       "Decide what the URL should be. If the content is genuinely gone, return a real 404 or 410 status rather than a 200, or 301-redirect it to the closest live page. If it is a real page that happens to be short or to mention the phrase, expand it so it stops resembling the error template — and check what links to it, because a soft 404 usually means something is generating URLs that were never meant to exist.",
   },
   "content.exact-duplicate": {
+    // Phase 19 §1: pages that declare a canonical pointing at another URL are
+    // no longer members of a group, and the explanation says so — the rule used
+    // to report a parameter variant beside its base URL, which is precisely the
+    // state its own howToFix prescribes.
     title: "Identical content at more than one URL",
     explanation:
-      "These URLs return exactly the same visible text. A search engine picks one of them to keep and drops the others, and the links and ranking signals that should have gone to a single page are split between copies that compete with each other. It is also crawl budget spent fetching the same page repeatedly.",
+      "These URLs return exactly the same visible text, and none of them has been told which one to defer to. A search engine picks one to keep and drops the others, and the links and ranking signals that should have gone to a single page are split between copies that compete with each other. It is also crawl budget spent fetching the same page repeatedly. A URL that already declares a canonical tag pointing at another page is left out of this comparison: it has said which version counts, which is the fix rather than the fault.",
     howToFix:
       "Pick the URL that should rank and point the others at it: a rel=canonical on the copies, or a 301 redirect where the duplicates should not exist at all. On templated sites, look for what created them — a print version, a parameter, a category path as well as a flat one — and fix the pattern rather than the individual pages.",
   },
@@ -694,11 +759,35 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     // two 64-bit content fingerprints), not a plagiarism, scraping or
     // copy-theft finding, and near-duplicate pages carry no ranking penalty.
     // Do not let this copy imply any of that.
-    title: "Near-duplicate content",
+    //
+    // Phase 19 §2: the fingerprint moved from the whole visible text to the
+    // MAIN content, and the explanation has to say so, because the two produce
+    // very different lists on a templated site — the earlier one reported 237
+    // pairs across unrelated templates that shared a header, a menu and a
+    // footer. The 50-word floor is stated for the same reason: a reader who
+    // knows two thin pages will not be paired here can stop looking for them.
+    //
+    // Phase 19 §11: ONE FINDING PER PAGE, not per pair, and the copy has to be
+    // written for a reader looking at one URL and a count. A cluster of 79
+    // near-identical pages is 3,081 pairs and 79 decisions; the row says how
+    // many partners this page has and names the closest of them.
+    title: "Near-duplicate main content (within 3 of 64 fingerprint bits of another page)",
     explanation:
-      "These two pages are almost the same text. We compare a fingerprint of each page's visible words, and these two differ by at most three bits out of sixty-four — in practice, pages that differ only in boilerplate, a product name or a location. Search engines group pages this similar and show one of them, so a set of near-identical pages tends to rank as one page rather than as many.",
+      "This page says almost the same thing as at least one other page on the site. The comparison is made on a fingerprint of each page's main content — what sits inside the page's main region, or the page with its header, navigation, sidebar and footer removed — so two pages are not called similar merely for sharing the same menus and furniture, which on a templated site can be most of the words on the screen. Fingerprints within three bits out of sixty-four count as near-identical: in practice, pages that differ only in a product name, a location or a line of boilerplate. The finding says how many such pages this one has — counted exactly up to 200, and stated as 200 or more beyond that — and lists the closest few with their distances, so a page that belongs to a cluster of forty is reported once, against that page, rather than as forty-odd separate comparisons. Both sides must carry at least 50 words of their own before they are compared at all, so pages with almost no content are left to the thin-content check instead. This measures how alike the text is and nothing more: it says nothing about who wrote what. What it does mean is that search engines group pages this similar and show one of them, so a set of near-identical pages tends to rank as a single page rather than as many.",
     howToFix:
-      "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped.",
+      "Decide whether these should be one page or several. If they exist to cover variations of the same subject, consolidate them into a single stronger page and redirect the rest. If they must stay separate — locations, product variants — give each one substantive content that only applies to it, rather than a template with a few words swapped. Where this page is a filtered or parameterised version of another, the fix is a canonical tag on the variant pointing at the base, and pages that already carry one are neither reported here nor counted as anybody's near-duplicate. Start with the pages that name the most partners: they are usually one template that stopped being filled in.",
+  },
+  "content.near-duplicate-skipped": {
+    // A marker: it reports the limit of this crawl's evidence, never a fault on
+    // the site. Phase 19 §2 / hard rule 1 — the near-duplicate check reads a
+    // fingerprint of each page's main content, and a crawl taken before that
+    // fingerprint existed cannot answer it. Silence would read as "no
+    // near-duplicates", which is the one thing this must not say.
+    title: "Near-duplicate check could not be run on this crawl",
+    explanation:
+      "Comparing pages for near-duplicate content needs a fingerprint of each page's main content — the part that is not the header, navigation, sidebar and footer — and not one page in this crawl has one. That is what a crawl taken before the engine started measuring main content separately looks like. The check was therefore left unrun rather than reported as clean, because a site with no near-duplicates and a crawl that never measured any produce exactly the same empty result, and only one of them is good news. Nothing here says anything about the site. The identical-content check is unaffected and its findings, or its silence, still stand.",
+    howToFix:
+      "Re-crawl the site. The fingerprint is taken from each page's text while the page is being read and cannot be worked out afterwards from what was stored, and any crawl from this version of the engine onwards records it for every page that has main content to measure.",
   },
 
   // -------------------------------------------------------- structured data
@@ -836,7 +925,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "structure.click-depth-distribution": {
     title: "Click depth from the home page",
     explanation:
-      "How many clicks from the home page each indexable page sits — the shortest chain of internal links that reaches it — summarised as a distribution: how many pages were measured, the shallowest and deepest, the mean, the quartiles, and the 95th percentile, the depth only the deepest one page in twenty is buried past. The home page itself is 0. Alongside them is the number that matters most: how many pages NO chain of links reaches at all, counted separately as unreachable rather than being given a depth of zero. Those are the pages that exist only in the sitemap or only in a search engine's memory — the worst case in the table, worse than the deepest page in it, because nothing on the site leads to them. The count covers every page in the cohort, the unreachable ones included, and the statistics beside it describe only the pages that have a depth. Links are followed as the site publishes them: internal links only, and a link that lands on a redirect leads no further, so a page reachable only through a redirect is counted as unreachable and the redirect is the thing to fix. Only pages that returned 200 and are indexable are measured — a buried noindex page costs nothing. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
+      "How many clicks from the home page each indexable page sits — the shortest chain of internal links that reaches it — summarised as a distribution: how many pages were measured, the shallowest and deepest, the mean, the quartiles, and the 95th percentile, the depth only the deepest one page in twenty is buried past. The home page itself is 0. Alongside them is the number that matters most: how many pages NO chain of links reaches at all, counted separately as unreachable rather than being given a depth of zero. Those are the pages that exist only in the sitemap or only in a search engine's memory — the worst case in the table, worse than the deepest page in it, because nothing on the site leads to them. The count covers every page measured, the unreachable ones included, and the statistics beside it describe only the pages that have a depth. Links are followed as the site publishes them: internal links only, and a link that lands on a redirect leads no further, so a page reachable only through a redirect is counted as unreachable and the redirect is the thing to fix. Only pages that returned 200 and are indexable are measured — a buried noindex page costs nothing. The site row covers all of them; each other row is one page type, with pages the crawler could not assign a template to grouped under (untyped).",
     howToFix:
       "Start with the unreachable pages: a page no link path reaches receives no internal link equity, is crawled rarely, and depends entirely on the sitemap being read. Give each one a home — a category, a hub, a related-products block — or, where the page should not exist, remove it from the sitemap. Then read the upper quartiles: pages deep in the structure are crawled less often and compete from behind, so a template whose median depth is high is one to shorten the path to with a hub or a navigation entry, rather than treating each deep page individually.",
   },
@@ -889,16 +978,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "render.coverage": {
     title: "How much of the crawl was rendered in a browser",
     explanation:
-      "How much of this crawl was opened a second time in a real browser, and what the selection that chose those pages had to work with. Rendering is expensive, so it is never run over a whole site: the numbers here are what makes the JavaScript findings quotable, because they say how large the sample behind them was. The first number is how many pages the crawl read in total. Then whether a render pass left any trace on this crawl at all — a page recorded as rendered, a render that failed, a list of pages somebody named, a count the pass stamped, or a page still waiting for a browser. Where there is none of that, everything after it is the selection a pass WOULD make if one were run now, and not a record of one that was: read those numbers as a plan rather than as a history, and read no absence of rendered pages as a fact about the site. A pass that ran and rendered something is always told apart from one that never ran, which is what this is for. The one thing it cannot tell apart is a pass that chose no pages at all — that pass writes nothing anywhere, and on such a crawl the numbers here are zeroes either way, which is what it would have reported. Then the selection mode, which says who chose the pages and governs everything after it: automatic, meaning the engine picked them from the crawl's own evidence, or explicit, meaning an auditor named the pages worth a browser. Then the selection, in the order it was made: the budget, how many pages the render pass was allowed to open, which is a percentage of the crawl capped by an absolute ceiling; how many candidates were suspects, pages whose HTML looked incomplete — a long document with almost no words in it, a page with no title, a page carrying a front-end framework marker, or a page that links nowhere; how many were sampled, pages taken from each template regardless of suspicion so that a template nothing looked wrong about is still represented, with a page that is both counted once as a suspect; how many were selected in the end, which is the budget or the number of candidates, whichever is smaller; and whether the selection was truncated, meaning a candidate was dropped for want of a seat, in which case the number selected is the budget rather than the need. On an explicit selection those four are empty rather than zero, because no automatic decision was taken: there was no budget, nothing was suspected, nothing was sampled and nothing was cut, and the number selected is simply the length of the list. Last, what came of it: how many pages are recorded as rendered, and how many render failures were recorded, a render that was attempted and produced nothing, kept as a row rather than dropped. Those last two need not add up to the number selected, and a difference is not an error: a crawl selected more than once keeps the earlier pass's rendered pages, which were measured even though this selection does not name them.",
+      "How much of this crawl was opened a second time in a real browser, and what the selection that chose those pages had to work with. Rendering is expensive, so it is never run over a whole site: the numbers here are what makes the JavaScript findings quotable, because they say how large the sample behind them was. The first number is how many pages the crawl read in total. Then whether a rendering run left any trace on this crawl at all — a page recorded as rendered, a render that failed, a list of pages somebody named, a count the run stamped, or a page still waiting for a browser. Where there is none of that, everything after it is the selection a rendering run WOULD make if one were made now, and not a record of one that was: read those numbers as a plan rather than as a history, and read no absence of rendered pages as a fact about the site. A run that opened pages in a browser is always told apart from one that never happened, which is what this is for. The one thing it cannot tell apart is a run that chose no pages at all — such a run writes nothing anywhere, and on such a crawl the numbers here are zeroes either way, which is what it would have reported. Then the selection mode, which says who chose the pages and governs everything after it: automatic, meaning the engine picked them from the crawl's own evidence, or explicit, meaning an auditor named the pages worth a browser. Then the selection, in the order it was made: the budget, how many pages the rendering run was allowed to open, which is a percentage of the crawl capped by an absolute ceiling; how many candidates were suspects, pages whose HTML looked incomplete — a long document with almost no words in it, a page with no title, a page carrying the signature of a front-end framework, or a page that links nowhere; how many were sampled, pages taken from each template regardless of suspicion so that a template nothing looked wrong about is still represented, with a page that is both counted once as a suspect; how many were selected in the end, which is the budget or the number of candidates, whichever is smaller; and whether the selection was truncated, meaning a candidate was dropped for want of a seat, in which case the number selected is the budget rather than the need. On an explicit selection those four are empty rather than zero, because no automatic decision was taken: there was no budget, nothing was suspected, nothing was sampled and nothing was cut, and the number selected is simply the length of the list. Last, what came of it: how many pages are recorded as rendered, and how many render failures were recorded, a render that was attempted and produced nothing, kept as a row rather than dropped. Those last two need not add up to the number selected, and a difference is not an error: a crawl selected more than once keeps the earlier run's rendered pages, which were measured even though this selection does not name them.",
     howToFix:
-      "Read this table before quoting any of the JavaScript findings, and read the two sides of it against each other. Where no render pass has left a trace, stop there and say the site was never opened in a browser: the JavaScript findings are silent because nothing was measured, and the selection numbers are what a pass would cost rather than what one found. Read the mode next: an automatic selection is a sample of the site and the numbers beside it say how it was drawn, while an explicit one is a list somebody chose, so what it covers is a question about that list and not about a budget. Pages rendered against pages crawled is the sample size: a handful of renders over a large site means the findings are examples of a problem rather than a count of it, and the absence of a finding says nothing about the pages nobody opened. A truncated selection means the budget, not the site, decided where the pass stopped — raise it and re-run if the sample looks too thin to argue from. Suspects far above the budget is itself a signal worth quoting: it means a large part of the site looks, from its HTML alone, like it is not the whole page. Render failures are worth a look on their own, since a page a browser could not finish loading is a page a search engine may struggle with too.",
+      "Read this table before quoting any of the JavaScript findings, and read the two sides of it against each other. Where no rendering run has left a trace, stop there and say the site was never opened in a browser: the JavaScript findings are silent because nothing was measured, and the selection numbers are what a run would cost rather than what one found. Read the mode next: an automatic selection is a sample of the site and the numbers beside it say how it was drawn, while an explicit one is a list somebody chose, so what it covers is a question about that list and not about a budget. Pages rendered against pages crawled is the sample size: a handful of renders over a large site means the findings are examples of a problem rather than a count of it, and the absence of a finding says nothing about the pages nobody opened. A truncated selection means the budget, not the site, decided where the run stopped — raise it and re-run if the sample looks too thin to argue from. Suspects far above the budget is itself a signal worth quoting: it means a large part of the site looks, from its HTML alone, like it is not the whole page. Render failures are worth a look on their own, since a page a browser could not finish loading is a page a search engine may struggle with too.",
   },
   "site.health": {
     title: "Pages carrying a finding, by worst severity",
     explanation:
-      "How this crawl's own findings spread across the pages it judged. The first number is how many auditable pages there are: pages the crawler fetched OK that answered 200 with HTML. Then four counts, each page appearing in exactly one of them, at the WORST severity it carries — a page with a critical finding and three warnings is counted once, as critical: how many pages carry a critical finding, how many carry a warning and no critical, how many carry only informational findings, and how many carry no finding of any severity. The four add up to the auditable page count exactly. Last is the clean ratio, the pages carrying no finding divided by the auditable pages, to four decimal places; it is empty rather than zero or one when the crawl has no auditable pages at all, since a ratio of nothing describes nothing. THE FOUR COUNTS ARE THE AUTHORITY AND THE RATIO IS A CONVENIENCE: four decimal places is not enough of them on a large crawl, where one clean page in fifty thousand rounds to 0.0000 and one page carrying a finding in fifty thousand rounds to 1.0000 — neither of which means what it appears to. Work any percentage out from the counts rather than from the ratio, whatever the size of the crawl. Alongside them is how many pages the crawl fetched that this census leaves out — everything else: redirects, pages that answered 4xx or 5xx, requests that failed or were refused, responses that were not HTML such as a PDF or an image, and any other status that is not 200. The counts above are about pages whose content could be read, and the rest of them are not all covered elsewhere either: the redirect table counts the redirects and the status findings judge the error responses, but a 200 that was not HTML is counted by neither, which is the other reason this number is here. Add the two together and you have every page of the crawl. Findings that name no page — the sitemap, robots.txt and host-level ones — are about the site rather than about any page, so they appear in none of these counts. THE RATIO IS OF REPORTED FINDINGS, which matters on a crawl whose findings were capped: a capped run stops listing at its cap and records the exact total in a note beside the last finding it wrote, so pages past the cap carry no finding row and are counted here as clean. On such a run the clean ratio is a floor of what is known rather than a fact about the site — the count of findings, not this table, is where the magnitude is. An uncapped run has no such note and no such caveat. THE CHECK THIS TABLE CARRIES IS THE ONE IT IS ABOUT: how far the audit's judgement reached over this site, which is the engine-coverage check the audit answers before any other. Read it there and nowhere else — it is evidence about the crawl, so no verdict on any other check may be reached from it, and anything grouping rules by check should show it under coverage rather than beside a finding about the site. There is no grade here, no label and no threshold: what counts as healthy belongs to whoever reads it, and this table gives them the numbers to decide with.",
+      "How this crawl's own findings spread across the pages it judged. The first number is how many pages the audit could judge: pages the crawler fetched OK that answered 200 with HTML. Then four counts, each page appearing in exactly one of them, at the WORST severity it carries — a page with a critical finding and three warnings is counted once, as critical: how many pages carry a critical finding, how many carry a warning and no critical, how many carry only informational findings, and how many carry no finding of any severity. The four add up to that first number exactly. Last is the clean ratio, the pages carrying no finding divided by the pages the audit could judge, to four decimal places; it is empty rather than zero or one when the crawl could judge no page at all, since a ratio of nothing describes nothing. THE FOUR COUNTS ARE THE AUTHORITY AND THE RATIO IS A CONVENIENCE: four decimal places is not enough of them on a large crawl, where one clean page in fifty thousand rounds to 0.0000 and one page carrying a finding in fifty thousand rounds to 1.0000 — neither of which means what it appears to. Work any percentage out from the counts rather than from the ratio, whatever the size of the crawl. Alongside them is how many pages the crawl fetched that these counts leave out — everything else: redirects, pages that answered 4xx or 5xx, requests that failed or were refused, responses that were not HTML such as a PDF or an image, and any other status that is not 200. The counts above are about pages whose content could be read, and the rest of them are not all covered elsewhere either: the redirect table counts the redirects and the status findings judge the error responses, but a 200 that was not HTML is counted by neither, which is the other reason this number is here. Add the two together and you have every page of the crawl. Findings that name no page — the sitemap, robots.txt and host-level ones — are about the site rather than about any page, so they appear in none of these counts. THE RATIO IS OF REPORTED FINDINGS, which matters on a crawl whose findings were capped: a capped run stops listing at its cap and records the exact total in a note beside the last finding it wrote, so pages past the cap carry no finding row and are counted here as clean. On such a run the clean ratio is a floor of what is known rather than a fact about the site — the count of findings, not this table, is where the magnitude is. An uncapped run has no such note and no such caveat. THE CHECK THIS TABLE CARRIES IS THE ONE IT IS ABOUT: how far the audit's judgement reached over this site, which is the engine-coverage check the audit answers before any other. Read it there and nowhere else — it is evidence about the crawl, so no verdict on any other check may be reached from it, and anything grouping rules by check should show it under coverage rather than beside a finding about the site. There is no grade here, no label and no threshold: what counts as healthy belongs to whoever reads it, and this table gives them the numbers to decide with.",
     howToFix:
-      "Read the four counts as the shape of the work rather than as a score. The critical count is where a client's attention goes first, and it is a count of PAGES, not of findings, so it says how much of the site is affected while the issue listing says how many things are wrong on it. Read the clean count next to the auditable count: a site whose pages are nearly all clean has a short, specific list, while a site where almost every page carries a warning usually has a handful of TEMPLATE-level causes behind it — one missing meta description on a template is one finding per page it renders. That is why the per-rule counts are the better guide to effort: this table says how widely the judgement spread, the issue listing says what it was. Check whether the run was capped before quoting the ratio anywhere a client will read it, and quote the pages left out of the census alongside it, since a crawl of mostly redirects can show a comfortable ratio over the few pages that were readable.",
+      "Read the four counts as the shape of the work rather than as a score. The critical count is where a client's attention goes first, and it is a count of PAGES, not of findings, so it says how much of the site is affected while the issue listing says how many things are wrong on it. Read the clean count next to the number of pages judged: a site whose pages are nearly all clean has a short, specific list, while a site where almost every page carries a warning usually has a handful of TEMPLATE-level causes behind it — one missing meta description on a template is one finding per page it renders. That is why the per-rule counts are the better guide to effort: this table says how widely the judgement spread, the issue listing says what it was. Check whether the run was capped before quoting the ratio anywhere a client will read it, and quote the pages left out of these counts alongside it, since a crawl of mostly redirects can show a comfortable ratio over the few pages that were readable.",
   },
   "page.weight": {
     title: "Page weight by template",

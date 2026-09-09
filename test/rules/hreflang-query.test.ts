@@ -5,7 +5,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, hreflang, pages } from "../../src/db/schema.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
-import { hreflangRules } from "../../src/rules/query/hreflang.js";
+import { ALTERNATE_HOST_CAP, hreflangRules } from "../../src/rules/query/hreflang.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 
@@ -25,10 +25,12 @@ function rule(id: string): QueryRule {
 }
 
 describe("hreflangRules metadata", () => {
-  it("defines exactly the four hreflang rules of the Phase 2 and Phase 3 tables", () => {
+  it("defines exactly the six hreflang rules of the Phase 2, 3 and 19 tables", () => {
     expect(hreflangRules.map((r) => r.id).sort()).toEqual([
+      "hreflang.alternates-not-crawled",
       "hreflang.invalid-code",
       "hreflang.missing-return-link",
+      "hreflang.missing-self-reference",
       "hreflang.missing-x-default",
       "hreflang.non-indexable-target",
     ]);
@@ -39,7 +41,12 @@ describe("hreflangRules metadata", () => {
       "hreflang.invalid-code": ["CHECK-25"],
       "hreflang.missing-x-default": ["CHECK-25"],
       "hreflang.missing-return-link": ["CHECK-24"],
+      // The other half of reciprocity: one check, two faults.
+      "hreflang.missing-self-reference": ["CHECK-24"],
       "hreflang.non-indexable-target": ["CHECK-26"],
+      // Both checks that read a FETCHED alternate: neither can be answered for
+      // a URL nobody requested.
+      "hreflang.alternates-not-crawled": ["CHECK-24", "CHECK-26"],
     });
   });
 
@@ -48,8 +55,29 @@ describe("hreflangRules metadata", () => {
       "hreflang.invalid-code": "critical",
       "hreflang.missing-x-default": "info",
       "hreflang.missing-return-link": "critical",
+      "hreflang.missing-self-reference": "warning",
       "hreflang.non-indexable-target": "critical",
+      // A NOT MEASURED marker reports a hole in OUR evidence, never a fault of
+      // the site, so it can only be info.
+      "hreflang.alternates-not-crawled": "info",
     });
+  });
+
+  // The marker flag is the single source of truth for "which rules are
+  // markers" (RuleMeta.marker), and the identifier guard derives the checklist
+  // obligations from it. Exactly one rule here carries it.
+  it("flags the alternates marker, and nothing else in this family", () => {
+    expect(hreflangRules.filter((r) => r.marker !== undefined).map((r) => r.id)).toEqual([
+      "hreflang.alternates-not-crawled",
+    ]);
+    const marker = rule("hreflang.alternates-not-crawled").marker!;
+    // A reason names the cause AND what would answer the check (Phase 19 §6).
+    expect(marker).toMatch(/never requested by this crawl/);
+    expect(marker).toMatch(/crawl those domains/);
+    // And it claims no cause the finding cannot establish: an alternate this
+    // crawl never fetched is not evidence that it sits on another domain — a
+    // same-host alternate that robots.txt disallowed reads identically.
+    expect(marker).not.toMatch(/other domains/);
   });
 
   it("every rule is a query rule carrying copy and a ruleset version", () => {
@@ -69,6 +97,9 @@ describe("hreflangRules against the database", () => {
 
   interface PageSpec extends IndexabilitySpec {
     path: string;
+    /** A declared canonical, as the analyzer stored it — absolute or relative. */
+    canonicalHtml?: string;
+    canonicalHeader?: string;
   }
 
   async function newCrawl(): Promise<string> {
@@ -101,6 +132,8 @@ describe("hreflangRules against the database", () => {
       fetchClass: s.fetchClass ?? "ok",
       statusCode: s.statusCode === undefined ? 200 : s.statusCode,
       isIndexable: writerIndexable(s),
+      canonicalHtml: s.canonicalHtml ?? null,
+      canonicalHeader: s.canonicalHeader ?? null,
       robotsMeta: s.robotsMeta ?? null,
       xRobotsTag: s.xRobotsTag ?? null,
       depth: 1,
@@ -664,6 +697,314 @@ describe("hreflangRules against the database", () => {
 
       expect(await findings("hreflang.non-indexable-target", mine)).toHaveLength(0);
       expect(await findings("hreflang.non-indexable-target", other)).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Phase 19 §4. Search engines read hreflang on the canonical, so a page that
+   * hands its signals to another URL is not a version of anything: its
+   * annotations are not evaluated, and it is not a member of anyone else's
+   * cluster either. Both `hreflang.missing-return-link` findings on the crawl
+   * that motivated this were parameter variants inheriting their template's
+   * block — the block names the base URL, and the base URL, correctly, does not
+   * name a tracking variant back.
+   */
+  describe("pages canonicalised elsewhere", () => {
+    it("reports no missing return link for a variant that inherits the template's block", async () => {
+      const crawlId = await newCrawl();
+      const variants = ["/en?product-type=dress", "/en?srsltid=AfmBOo"];
+      const ids = await addPages(crawlId, [
+        "/en",
+        "/fr",
+        // The two shapes the real crawl found: a filter parameter and a Google
+        // tracking parameter, each canonicalised to the base URL.
+        ...variants.map((path) => ({ path, canonicalHtml: url("/en") })),
+      ]);
+      const cluster: Array<[string, string]> = [
+        ["en", url("/en")],
+        ["fr", url("/fr")],
+      ];
+      for (const path of ["/en", "/fr", ...variants]) {
+        await addHreflang(crawlId, ids.get(path)!, cluster);
+      }
+
+      expect(await findings("hreflang.missing-return-link", crawlId)).toHaveLength(0);
+    });
+
+    // The exhaustive form of the claim: one canonicalised page carrying one of
+    // every fault this file knows how to report, and every rule silent. A rule
+    // added to `hreflangRules` without the exclusion fails here rather than in
+    // whichever crawl meets a parameter variant first.
+    it("is invisible to every rule in the family, whatever it declares", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/variant?utm=1", canonicalHtml: url("/base") },
+        "/base",
+        { path: "/de", robotsMeta: "noindex" },
+        "/uk",
+      ]);
+      // An invalid code, a target that does not point back, a non-indexable
+      // target, no x-default, and no self-reference — five findings, from a
+      // page nobody is asked to rank.
+      await addHreflang(crawlId, ids.get("/variant?utm=1")!, [
+        ["english-uk", url("/uk")],
+        ["en", url("/base")],
+        ["de", url("/de")],
+      ]);
+
+      for (const r of hreflangRules) {
+        expect(await r.run(db, crawlId), r.id).toHaveLength(0);
+      }
+    });
+
+    // The other side of the same rule: a canonicalised page is not a cluster
+    // MEMBER either, so nothing is demanded of it and nothing is reported about
+    // it here. What is wrong with that page is reported on that page, by the
+    // canonical rules.
+    it("is no member of anyone else's cluster, even when it is noindexed", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        "/en",
+        { path: "/fr", canonicalHtml: url("/fr-base"), robotsMeta: "noindex" },
+        "/fr-base",
+      ]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["en", url("/en")],
+        ["fr", url("/fr")],
+      ]);
+
+      expect(await findings("hreflang.missing-return-link", crawlId)).toHaveLength(0);
+      expect(await findings("hreflang.non-indexable-target", crawlId)).toHaveLength(0);
+    });
+  });
+
+  describe("hreflang.missing-self-reference", () => {
+    it("fires on a page whose declared set leaves the page itself out", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/en-gb", "/fr"]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["en-gb", url("/en-gb")],
+        ["fr", url("/fr")],
+      ]);
+
+      const found = await findings("hreflang.missing-self-reference", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: "hreflang.missing-self-reference",
+        severity: rule("hreflang.missing-self-reference").severity,
+        pageId: ids.get("/en"),
+        pageUrl: url("/en"),
+        dedupeKey: url("/en"),
+      });
+      // No `pageUrl` in the evidence: the runner already stamps it on every
+      // finding's details blob, so carrying it here would be the same string
+      // twice.
+      expect(found[0]!.evidence).toEqual({
+        codes: ["en-gb", "fr"],
+        targets: [url("/en-gb"), url("/fr")],
+      });
+    });
+
+    it("is silent on a page that names itself among its alternates", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/fr"]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["en", url("/en")],
+        ["fr", url("/fr")],
+      ]);
+
+      expect(await findings("hreflang.missing-self-reference", crawlId)).toHaveLength(0);
+    });
+
+    // Both sides of the comparison go through `targetKey`, so a self-reference
+    // written with a fragment is still a self-reference.
+    it("accepts a self-reference declared in a spelling normalisation settles", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/fr"]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["en", `${url("/en")}#top`],
+        ["fr", url("/fr")],
+      ]);
+
+      expect(await findings("hreflang.missing-self-reference", crawlId)).toHaveLength(0);
+    });
+
+    // The claim is about a page that serves a version someone could rank. A 404
+    // carrying an inherited alternates block is reported as a 404.
+    it("is silent on a page that did not answer 200", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+        "/fr",
+      ]);
+      await addHreflang(crawlId, ids.get("/gone")!, [["fr", url("/fr")]]);
+
+      expect(await findings("hreflang.missing-self-reference", crawlId)).toHaveLength(0);
+    });
+
+    it("reads only its own crawl", async () => {
+      const other = await newCrawl();
+      const otherIds = await addPages(other, ["/en", "/fr"]);
+      await addHreflang(other, otherIds.get("/en")!, [["fr", url("/fr")]]);
+
+      const mine = await newCrawl();
+      const mineIds = await addPages(mine, ["/en", "/fr"]);
+      await addHreflang(mine, mineIds.get("/en")!, [
+        ["en", url("/en")],
+        ["fr", url("/fr")],
+      ]);
+
+      expect(await findings("hreflang.missing-self-reference", mine)).toHaveLength(0);
+      expect(await findings("hreflang.missing-self-reference", other)).toHaveLength(1);
+    });
+  });
+
+  /**
+   * The NOT MEASURED marker. `hreflang.missing-return-link` reads back-links
+   * only from targets that have a `pages` row, which on a multi-market site is
+   * a minority of the cluster; the silence over the rest used to read as "the
+   * return links are fine". One site-scoped finding says how big that gap is.
+   */
+  describe("hreflang.alternates-not-crawled", () => {
+    it("fires once, grouped by target host, ordered by how many alternates each holds", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/en-2"]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["en", url("/en")], // fetched: not part of the gap
+        ["fr", "https://fr.example/a"],
+        ["de", "https://de.example/a"],
+        ["de-at", "https://de.example/b"],
+      ]);
+      await addHreflang(crawlId, ids.get("/en-2")!, [
+        ["en", url("/en-2")],
+        ["de", "https://de.example/c"],
+      ]);
+
+      const found = await findings("hreflang.alternates-not-crawled", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: "hreflang.alternates-not-crawled",
+        severity: "info",
+        pageId: null,
+        pageUrl: null,
+        dedupeKey: "site",
+      });
+      expect(found[0]!.evidence).toEqual({
+        total: 4,
+        hosts: [
+          // `alternates` is distinct unfetched URLs on the host; `pages` is how
+          // many pages of this crawl name at least one of them.
+          { host: "de.example", alternates: 3, pages: 2 },
+          { host: "fr.example", alternates: 1, pages: 1 },
+        ],
+      });
+    });
+
+    it("is silent when every declared alternate was fetched", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en", "/fr"]);
+      const cluster: Array<[string, string]> = [
+        ["en", url("/en")],
+        ["fr", url("/fr")],
+      ];
+      await addHreflang(crawlId, ids.get("/en")!, cluster);
+      await addHreflang(crawlId, ids.get("/fr")!, cluster);
+
+      expect(await findings("hreflang.alternates-not-crawled", crawlId)).toHaveLength(0);
+    });
+
+    // The same exclusion the rules apply: a page canonicalised elsewhere
+    // declares nothing anyone acts on, so its alternates are not a gap in this
+    // crawl's evidence.
+    it("counts nothing declared by a page canonicalised elsewhere", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        "/en",
+        { path: "/en?utm=1", canonicalHtml: url("/en") },
+      ]);
+      await addHreflang(crawlId, ids.get("/en")!, [["en", url("/en")]]);
+      await addHreflang(crawlId, ids.get("/en?utm=1")!, [
+        ["en", url("/en")],
+        ["fr", "https://fr.example/a"],
+      ]);
+
+      expect(await findings("hreflang.alternates-not-crawled", crawlId)).toHaveLength(0);
+    });
+
+    it("counts nothing declared by a page that did not answer 200", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+      ]);
+      await addHreflang(crawlId, ids.get("/gone")!, [["fr", "https://fr.example/a"]]);
+
+      expect(await findings("hreflang.alternates-not-crawled", crawlId)).toHaveLength(0);
+    });
+
+    // A target `normalizeUrl` refuses is still an alternate nobody fetched. It
+    // has no host to group under, so it groups under its scheme rather than
+    // disappearing from the count.
+    it("groups an alternate that is not a web address under its scheme", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en"]);
+      await addHreflang(crawlId, ids.get("/en")!, [
+        ["en", url("/en")],
+        ["fr", "mailto:bonjour@example.com"],
+      ]);
+
+      const found = await findings("hreflang.alternates-not-crawled", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        total: 1,
+        hosts: [{ host: "mailto:", alternates: 1, pages: 1 }],
+      });
+    });
+
+    // The list is capped; the COUNT behind it is not. `hostsTruncated`, not
+    // `truncated`: the latter is what a capped listing of findings writes, and
+    // one evidence object must not spell two different facts the same way.
+    it("caps the host list and says how many hosts there really are", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ["/en"]);
+      const hosts = Array.from(
+        { length: ALTERNATE_HOST_CAP + 1 },
+        (_, i) => `h${String(i).padStart(2, "0")}.example`,
+      );
+      await addHreflang(
+        crawlId,
+        ids.get("/en")!,
+        hosts.map((host) => ["fr", `https://${host}/a`] as [string, string]),
+      );
+
+      const found = await findings("hreflang.alternates-not-crawled", crawlId);
+      expect(found).toHaveLength(1);
+      const evidence = found[0]!.evidence as {
+        total: number;
+        hosts: { host: string }[];
+        hostsTruncated: unknown;
+      };
+      expect(evidence.total).toBe(ALTERNATE_HOST_CAP + 1);
+      expect(evidence.hosts).toHaveLength(ALTERNATE_HOST_CAP);
+      // Every host holds one alternate, so the tie-break is the host name: the
+      // listed fifty are deterministic rather than whatever Postgres returned.
+      expect(evidence.hosts.map((h) => h.host)).toEqual(hosts.slice(0, ALTERNATE_HOST_CAP));
+      expect(evidence.hostsTruncated).toEqual({
+        reported: ALTERNATE_HOST_CAP,
+        total: ALTERNATE_HOST_CAP + 1,
+      });
+    });
+
+    it("reads only its own crawl", async () => {
+      const other = await newCrawl();
+      const otherIds = await addPages(other, ["/en"]);
+      await addHreflang(other, otherIds.get("/en")!, [["fr", "https://fr.example/a"]]);
+
+      const mine = await newCrawl();
+      const mineIds = await addPages(mine, ["/en"]);
+      await addHreflang(mine, mineIds.get("/en")!, [["en", url("/en")]]);
+
+      expect(await findings("hreflang.alternates-not-crawled", mine)).toHaveLength(0);
+      expect(await findings("hreflang.alternates-not-crawled", other)).toHaveLength(1);
     });
   });
 });

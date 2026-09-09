@@ -300,7 +300,10 @@ describe("crawl.blocked", () => {
     // the marker contract requires (see registry.test.ts "severity shape").
     const r = rule("crawl.blocked");
     expect(r.severity).toBe("info");
-    expect(r.marker).toMatch(/refused/);
+    // The reason names the cause AND what would answer the check (Phase 19 §6),
+    // in one sentence a client reads under "Why:" on the demo row.
+    expect(r.marker).toMatch(/bot challenge or an access denial/);
+    expect(r.marker).toMatch(/crawl again/);
   });
 
   it("is silent on other fetch classes, including 5xx", () => {

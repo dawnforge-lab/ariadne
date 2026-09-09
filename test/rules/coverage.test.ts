@@ -262,14 +262,40 @@ describe("checklist coverage", () => {
   //   page    26 + 1 = 27
   //   total   95 + 1 = 96
   //
+  // Phase 19 adds FOUR query rules and no page rule: `links.to-server-error`
+  // (the 5xx half of the broken-link question), `hreflang.missing-self-
+  // reference`, and the two NOT MEASURED markers `hreflang.alternates-not-
+  // crawled` and `content.near-duplicate-skipped`. No new check is claimed:
+  // each lands on a check its sibling already claimed (CHECK-11, CHECK-24/26,
+  // CHECK-39).
+  //
+  //   query   55 + 4 = 59
+  //   total   96 + 4 = 100
+  //
   // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE: both rules claim CHECK-12, which
   // `http.server-error` already claimed. A check answered in two bands is not a
   // new claim.
-  it("pins the ruleset split the gate doc reports: 96 rules = 27 page + 55 query + 14 metric", () => {
+  //
+  // Phase 19 §11 MOVES TWO RULES BETWEEN KINDS and adds none. `content.thin`
+  // and `content.thin-skipped` become query rules: the thin-content floor now
+  // reads `main_word_count`, whose null means "this page has no content of its
+  // own" on a 0018 crawl and "nothing here was ever measured" on an older one,
+  // and only a census of the CRAWL tells those apart — which a page rule,
+  // handed one row, cannot ask (`structure.deep-page`'s move in Phase 9 Task 2
+  // is the precedent: same rule, same check, honest kind).
+  //
+  //   page    27 - 2 = 25
+  //   query   59 + 2 = 61
+  //   total   100 + 0 = 100
+  //
+  // The claimed-check arithmetic does not move, and that is the test of whether
+  // this was a MOVE: same ids, same CHECK-40 + CHECK-13, same severities, same
+  // category.
+  it("pins the ruleset split the gate doc reports: 100 rules = 25 page + 61 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(96);
-    expect(registry.byKind("page")).toHaveLength(27);
-    expect(registry.byKind("query")).toHaveLength(55);
+    expect(registry.all()).toHaveLength(100);
+    expect(registry.byKind("page")).toHaveLength(25);
+    expect(registry.byKind("query")).toHaveLength(61);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

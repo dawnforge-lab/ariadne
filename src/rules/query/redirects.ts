@@ -44,7 +44,7 @@ const CATEGORY = "redirects";
 export const MAX_REDIRECT_HOPS = 10;
 
 /** A chain is worth reporting from this many redirect hops up. */
-const CHAIN_HOPS = 2;
+export const CHAIN_HOPS = 2;
 
 /**
  * One terminal row of a walk: the last page reached from a given seed, with the

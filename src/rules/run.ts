@@ -170,11 +170,14 @@ export async function runRules(
   // Phase 4 built this table append-only and said why: an issue is EVIDENCE, it
   // happened, and `onConflictDoNothing` over the `issues_dedupe` index absorbs
   // a re-run. That argument holds only while every rule is DETERMINISTIC, and
-  // one of them is not. `content.near-duplicate` stops listing at
-  // `NEAR_DUPLICATE_PAIR_CAP` pairs with NO `ORDER BY` — deliberately, because
-  // ordering would force the whole quadratic join the cap exists to avoid — so
-  // *which* 500 real pairs it reports is undefined. A second run therefore laid
-  // a different arbitrary 500 on top of the first, and nothing collided.
+  // one of them was not. `content.near-duplicate` used to stop listing at 500
+  // PAIRS with NO `ORDER BY` — deliberately, because ordering would have forced
+  // the whole quadratic join the cap existed to avoid — so *which* 500 real
+  // pairs it reported was undefined. (Phase 19 §11 made it count in SQL and
+  // report one ordered row per page, so the shape below no longer has a live
+  // example; the delete stays, because the invariant is about what a capped
+  // listing IS, not about which rule last violated it.) A second run laid a
+  // different arbitrary 500 on top of the first, and nothing collided.
   // Measured on the P6 gate crawl: two runs, each reporting 500 near-duplicate
   // findings, left 751 rows in the table — 1565 issue rows against a summary
   // saying 1314. The agent surface (`GET /crawls/:id/issues`) reads the TABLE,

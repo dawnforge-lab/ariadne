@@ -977,7 +977,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Not paginated: the ruleset is a fixed list that does not grow with the " +
         "size of a crawl — but it is not small, and there is no cursor to take it " +
         "in pieces. Every rule's full copy is tens of kilobytes in one answer " +
-        "(about 109KB, roughly 27k tokens, at this ruleset), so spend the context " +
+        "(about 122KB, roughly 30k tokens, at this ruleset), so spend the context " +
         "deliberately: if you only need the rules that FOUND something, " +
         "issues_list is a fraction of the size.",
       inputSchema: z.strictObject({
@@ -1026,9 +1026,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "of the CONTENT it found, which changes the moment the site edits a word, so " +
         "diffing on it would report an unchanged problem as one fixed and one new. " +
         "The consequence is that a rule which can fire more than once on a page " +
-        "COLLAPSES TO PER-URL PRESENCE here: on the reference site " +
-        "content.near-duplicate wrote 16,789 findings across 281 URLs, and this tool " +
-        "sees 281 things. That is why every row carries both numbers — baseCount and " +
+        "COLLAPSES TO PER-URL PRESENCE here: images.oversized files one finding per " +
+        "IMAGE and wrote 833 of them across 157 URLs on the reference site, and this " +
+        "tool sees 157 things. That is why every row carries both numbers — baseCount and " +
         "headCount are the finding ROWS (the numbers issues_list reports), baseUrls " +
         "and headUrls are the distinct URLs the diff is actually over — and why the " +
         "arithmetic that always holds is stated in URLs: headUrls = new + " +
@@ -1337,17 +1337,14 @@ function crawlStartShape() {
       .nullable()
       .describe(
         "How many findings each listing rule may report when this crawl is judged. " +
-          "Defaults to 200 (and 500 near-duplicate pairs) — a bounded first look. Pass " +
+          "Defaults to 200 — a bounded first look. Pass " +
           "null for a BILLED AUDIT: every orphan, every duplicate group, every blocked " +
           "sitemap entry, listed in full. It costs wall time on a large site and it is " +
           "the whole picture rather than a snapshot. It is read when the RULES run, not " +
           "while crawling, so it must be set here — crawl_rules has no cap argument of " +
-          "its own. Uncapped listings normally carry no 'and N more' note, but keep " +
+          "its own. Uncapped listings carry no 'and N more' note, but keep " +
           "reading the note rather than the setting: a note means the list is " +
-          "incomplete and its absence means complete. content.near-duplicate has a " +
-          "100,000-pair scan ceiling that findingCap cannot lift (it is the engine's " +
-          "memory contract), and a site that reaches it gets the usual 'at least' note " +
-          "— which is itself the finding: that site has no distinct content.",
+          "incomplete and its absence means complete.",
       )
       .optional(),
     fetchResources: z

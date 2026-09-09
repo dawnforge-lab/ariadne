@@ -209,6 +209,69 @@
  *    whitespace, strip trailing commas — so a comma INSIDE a URL (Cloudinary's
  *    `w_100,h_200`) survives, which splitting on commas would not.
  *
+ * Phase 19 (P19-T1) added a THIRD text stream beside those two, and a quotation
+ * from the first. Both come from the audit-accuracy diagnosis of a real crawl
+ * (docs/superpowers/specs/2026-09-09-audit-accuracy-pass-design.md §2 and §3),
+ * which measured a site whose smallest page carries 916 words and whose median
+ * carries 1,064 — about 900 of them the same header, navigation and footer on
+ * every page. A `simhash` over the whole visible text says two pages with 150
+ * words of their own are the same page, which is exactly what it said: 500
+ * near-duplicate findings, 237 of them across unrelated templates.
+ *  - **`mainWordCount` / `mainSimhash`** are the same two derivations over the
+ *    page's MAIN CONTENT rather than over everything it renders. What "main
+ *    content" means here is one rule with a fallback, decided at the END of the
+ *    parse: the visible text inside the FIRST `<main>` element when the
+ *    document has one, and otherwise the visible text of the body — and in
+ *    BOTH cases MINUS every `<nav>`, `<header>`, `<footer>` and `<aside>`
+ *    subtree, including the ones inside that `<main>`. Both candidate streams
+ *    are accumulated DURING the one pass and the choice is made after it,
+ *    because the fallback cannot be known to be needed until the document has
+ *    ended without a `<main>`. That keeps the file's one promise — one
+ *    tokenizer pass, no tree, O(text) — and costs two more arrays of pointers
+ *    into strings the body accumulator already holds.
+ *  - CHROME IS EXCLUDED INSIDE `<main>` TOO, and the reason is evidence rather
+ *    than reasoning. The first cut of this stream kept it ("a document that
+ *    says where its content is has said so about the nav in it"); the re-crawl
+ *    at 0018 (`crawl_9278877e`, 547 pages) then produced 500 capped
+ *    near-duplicate pairs, every one between pages whose main word count was
+ *    105 to 107. This Shopify theme puts its newsletter block and its footer
+ *    navigation INSIDE `<main>` — one `<footer>` landmark per `<main>` — so the
+ *    "main content" of an empty `/pages/*` page was its heading plus 105 words
+ *    of footer, identical on 79 pages. The rule is therefore the same on both
+ *    sides of the fallback: chrome is furniture wherever it sits, and a page
+ *    whose `<main>` holds nothing but chrome has no main content at all
+ *    (`null`, below). See the spec's §11 amendment.
+ *  - "The first `<main>`" is the first one the ORACLE'S WALK would reach, which
+ *    is what makes the two sides comparable: a `<main>` inside a `<template>`,
+ *    a `<script>`, an `<svg>` or a `<noscript>` is not it, because the DOM
+ *    reference never walks into those subtrees either. A `<main>` nested inside
+ *    that first one is invalid HTML and is counted as part of it (the depth
+ *    idiom below), never as a second candidate.
+ *  - The main stream uses the `bodyText` accumulator's rules and NOT
+ *    `renderableWordCount`'s markup-hidden exclusion. The fingerprint is over
+ *    the main content AS SERVED — that is the thing two templates share or do
+ *    not share — and adding a second, differently-scoped exclusion to it would
+ *    make a hamming distance between two pages depend on which of them hides a
+ *    dialog. `renderableWordCount` answers a different question and keeps it.
+ *  - Both outputs are `null` when the chosen stream has NO words: an empty
+ *    `<main>`, or a body that is nothing but chrome. Null is "nothing to
+ *    fingerprint", never `0` — a rule must be able to tell a page it could not
+ *    measure from a page it measured at zero.
+ *  - **`placeholderSnippet`** is the EVIDENCE for `hasLoremIpsum`, which fired
+ *    on three 1,000-word blog posts whose only placeholder copy was an excerpt
+ *    and a meta description, and reported `{wordCount}` — a true finding a
+ *    reader could do nothing with. It is up to 160 characters of the visible
+ *    text STARTING AT the first match — the sentence the placeholder opens,
+ *    not a window around it — cut back to a whole word at the far end, and
+ *    null exactly when `hasLoremIpsum` is false. Starting at the match rather
+ *    than centring on it is itself an evidence lesson from the same crawl: a
+ *    centred window on a blog listing page spent half its 160 characters on
+ *    the header chrome that precedes the article excerpt ("£ NZD $ USD $ Help
+ *    Center … Cart … Your bag is empty") and quoted only the first few words
+ *    of the placeholder sentence a reader was being sent to find. Derived
+ *    at the end of the parse from `bodyText`, like the flag itself, so it costs
+ *    no second look at the document.
+ *
  * ONE KNOWN, PERMANENT DIVERGENCE, and it is a property of the port rather
  * than a defect in it. An `<a href>` left open across a container boundary —
  * `<a href="/x"><nav><a href="/y">y</a></nav></a>` — makes the DOM report 2
@@ -423,6 +486,35 @@ export interface PageAnalysis {
    * persistence stores `BigInt.asIntN(64, simhash)` (see simhash.ts).
    */
   simhash: bigint;
+  /**
+   * `simhash` over the page's MAIN CONTENT instead of over everything it
+   * renders: the visible text inside the first `<main>` when the document has
+   * one, else the body's visible text — in either case with the `<nav>`,
+   * `<header>`, `<footer>` and `<aside>` subtrees removed, the ones inside the
+   * `<main>` included. Same unsigned range and the same signed spelling in the
+   * database as `simhash`.
+   *
+   * NULL WHEN THERE IS NOTHING TO FINGERPRINT — an empty `<main>`, a `<main>`
+   * holding only chrome, or a body that is nothing but chrome — and never `0`.
+   * See the module header's Phase 19 block for the choice rule and for why this
+   * stream does not apply `renderableWordCount`'s markup-hidden exclusion.
+   */
+  mainSimhash: bigint | null;
+  /** Words in the text `mainSimhash` was taken over; null on the same terms. */
+  mainWordCount: number | null;
+  /**
+   * Up to 160 characters of the visible text STARTING AT the FIRST "lorem
+   * ipsum" match — the evidence for `hasLoremIpsum`, which without it reports
+   * a page and no quotation. Nothing that precedes the match is quoted: the
+   * reader wants the sentence the placeholder sits in, and on a real page the
+   * text before it is header chrome. Whole word at the cut end, whitespace
+   * already collapsed (it is a slice of `bodyText`), trimmed; the whole
+   * remainder of the text when that is shorter than the window.
+   *
+   * Null exactly when `hasLoremIpsum` is false: the two are one observation
+   * reported twice, and a rule may rely on that.
+   */
+  placeholderSnippet: string | null;
 }
 
 /**
@@ -484,6 +576,23 @@ const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
  * as it did before Phase 7 and reaches neither word-count accumulator.
  */
 const TEMPLATE_TAG = "template";
+/**
+ * The page furniture the main-content stream leaves out — in the fallback and
+ * inside a `<main>` alike, because real themes put a `<footer>` in there (see
+ * the module header's Phase 19 block). Four element names, and no
+ * heuristics beside them: a `class="site-header"` div is chrome to a reader and
+ * is not chrome to this file, because guessing from class names is a different
+ * (and much less honest) instrument than reading the elements HTML defines for
+ * the purpose.
+ *
+ * Tracked by ONE depth counter, on the `navDepth` idiom, and note that
+ * `navDepth` and `footerDepth` stay where they are: those two count anchors for
+ * CHECK-34 and are read at element level, this one gates a text accumulator.
+ * Merging them would tie a link count to a word count.
+ *
+ * Exported so the parity oracle names the same four rather than a copy of them.
+ */
+export const CHROME_TAGS = new Set(["nav", "header", "footer", "aside"]);
 /**
  * An inline `display:none`, matched against the `style` ATTRIBUTE STRING.
  *
@@ -572,6 +681,47 @@ const MAX_LD_JSON_DEPTH = 5;
  * apart here even when an element boundary separates them in the markup.
  */
 const LOREM_IPSUM = /lorem ipsum/i;
+/**
+ * How much text `placeholderSnippet` quotes. 160 characters is a meta
+ * description's own upper bound and about a sentence and a half of prose —
+ * enough for a reader to recognise the sentence on the page and short enough to
+ * sit in a finding's evidence beside the URL.
+ */
+const PLACEHOLDER_SNIPPET_CHARS = 160;
+
+/**
+ * The sentence `hasLoremIpsum` fired on, quoted out of the visible text.
+ *
+ * `text` is `bodyText`: already whitespace-collapsed and trimmed, so there is
+ * no normalisation left to do and a match cannot straddle markup this never
+ * sees. THE WINDOW STARTS AT THE MATCH — zero characters before it, up to 160
+ * after — and is then pulled back to a whole word at the cut end, because a
+ * snippet that ends mid-word reads as a corruption of the page rather than a
+ * quotation from it. Shorter than the cap is the normal outcome; when the text
+ * from the match to its end is shorter than the cap it is returned whole.
+ *
+ * Starting at the match is the point of the field. A window centred on it
+ * spends half its budget on whatever precedes the placeholder, which on a real
+ * page is the header, the currency picker and the cart — and the sentence the
+ * reader was sent to find is cut off after a few words.
+ *
+ * The one guard: if trimming to a whole word would cut the match itself out of
+ * the quotation — the match's own tail sitting inside a token longer than the
+ * window — the untrimmed window is returned instead. A snippet that does not
+ * contain what it is evidence for is worse than a ragged one.
+ */
+function placeholderSnippetOf(text: string): string | null {
+  const match = LOREM_IPSUM.exec(text);
+  if (match === null) return null;
+  const from = text.slice(match.index);
+  if (from.length <= PLACEHOLDER_SNIPPET_CHARS) return from.trim();
+  const window = from.slice(0, PLACEHOLDER_SNIPPET_CHARS);
+  // The far edge is the only cut one, so it is the only one that can hold half
+  // a word; the near edge is the match itself.
+  const tailCut = window.lastIndexOf(" ");
+  const trimmed = (tailCut === -1 ? window : window.slice(0, tailCut)).trim();
+  return LOREM_IPSUM.test(trimmed) ? trimmed : window.trim();
+}
 /**
  * The wording of a "not found" page, matched against the visible text on the
  * same terms as LOREM_IPSUM (never the raw HTML, and whitespace is already
@@ -827,6 +977,53 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // the first stream, so the memory contract is untouched.
   const renderableBodyParts: string[] = [];
   const renderableFallbackParts: string[] = [];
+
+  // THE TWO MAIN-CONTENT CANDIDATES (P19-T1), accumulated together and chosen
+  // between at the end of the parse — which is the only place the choice can be
+  // made, since "this document has no <main>" is not knowable until it ends.
+  //  - `main*Parts` take the text inside the first `<main>` MINUS the
+  //    CHROME_TAGS subtrees within it — themes put a `<footer>` in there and it
+  //    is furniture wherever it sits (module header, Phase 19).
+  //  - `content*Parts` take the body's text minus the same CHROME_TAGS
+  //    subtrees, for the document that declares no `<main>` at all.
+  // Both mirror the body/fallback split above for the same reason it exists —
+  // a fragment with no `<body>` must be measured on the same terms by every
+  // stream or the four numbers would not be about one text. Like the renderable
+  // pair, these hold references to the strings the body accumulator already
+  // holds: one pointer per text node, so O(page) and the memory contract is
+  // untouched.
+  const mainBodyParts: string[] = [];
+  const mainFallbackParts: string[] = [];
+  const contentBodyParts: string[] = [];
+  const contentFallbackParts: string[] = [];
+  // The chosen `<main>`, identified by the `elementDepth` it opened at rather
+  // than by a counter, exactly as `hiddenOpenedAt` identifies a hidden element:
+  // a nested `<main>` (invalid HTML, and real) closes at a deeper depth and so
+  // cannot end the outer one, and a stray `</main>` matches nothing.
+  //
+  // FIRST-MAIN-WINS, and "first" means the first one the DOM oracle's text walk
+  // would reach: `mainOpenedAt` is only ever set from inside the switch below,
+  // which `noscript` returns before, and only when no suppressed subtree
+  // (`<script>`, `<style>`, `<svg>`) and no `<template>` is open. A `<main>` in
+  // any of those is in no rendered document, contributes no text on either
+  // side, and must not shadow the real one. `mainSeen` is the flag the
+  // end-of-parse choice reads; `mainDone` retires the first main so a second
+  // sibling `<main>` is not appended to it.
+  let mainOpenedAt: number | null = null;
+  let mainSeen = false;
+  let mainDone = false;
+  // The chrome depth the chosen `<main>` opened AT, so the main stream's gate
+  // is "no chrome has opened since", not "no chrome is open". The oracle starts
+  // its walk at the `<main>` element itself and so never sees the chrome
+  // ENCLOSING it — a `<main>` inside a `<footer>` is malformed, and real, and
+  // its text is still that page's main content on both sides. Only the chrome
+  // the walk would meet on its way DOWN is excluded.
+  let chromeDepthAtMain = 0;
+  // Chrome subtrees, one counter over the four names (see CHROME_TAGS).
+  // Incremented and decremented on the tag name alone — never on a condition —
+  // so the counter cannot drift when the element sits inside a suppressed or
+  // template subtree, which is what a text gate must never do.
+  let chromeDepth = 0;
   // Markup-hidden tracking, on the `titleDepth` / `navDepth` idiom and for the
   // same reasons — containers nest, and malformed markup must not be able to
   // silence the rest of the document. Two of the three are STACKS OF ELEMENT
@@ -973,6 +1170,21 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // boundaries. See the accumulators' comment — identical structure, less
     // text, is what keeps the two counts comparable.
     pushBoundary(inBody ? renderableBodyParts : renderableFallbackParts);
+    // The two main-content candidates take a boundary only where they take
+    // text, and BOTH are now chrome-gated. The gate reads `chromeDepth` as it
+    // stands, and the two handlers bracket it deliberately: a `<nav>` has
+    // already INCREMENTED it when its opening boundary is emitted (skipped) and
+    // has already DECREMENTED it when its closing one is (taken), so a chrome
+    // subtree contributes exactly one separator to either stream — the same one
+    // the oracle's walk pushes where it declines to descend. Words on either
+    // side of a `<nav>` therefore never merge, which is the only thing this has
+    // to get right.
+    if (mainOpenedAt !== null && chromeDepth === chromeDepthAtMain) {
+      pushBoundary(inBody ? mainBodyParts : mainFallbackParts);
+    }
+    if (chromeDepth === 0) {
+      pushBoundary(inBody ? contentBodyParts : contentFallbackParts);
+    }
   };
 
   // `<template>` joins the stripped subtrees here as well: the oracle's DOM
@@ -1028,6 +1240,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // return below so its close (which is handled just as early) can never
         // be missed. Only the text accumulators read it.
         if (name === TEMPLATE_TAG) templateDepth += 1;
+        // Chrome, counted on the name alone and above the noscript return so
+        // its close (handled just as early) can never be missed — the
+        // `templateDepth` precedent exactly. Only the main-content stream reads
+        // it.
+        if (CHROME_TAGS.has(name)) chromeDepth += 1;
         if (name === "noscript") noscriptDepth += 1;
         if (noscriptDepth > 0) return;
         switch (name) {
@@ -1093,6 +1310,27 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             }
             break;
           }
+          case "main":
+            // The first `<main>` a rendered document has, and the switch is
+            // where it is claimed rather than the block above precisely so the
+            // three subtrees that are in no document cannot claim it: the
+            // `noscript` return sits above this, and the two guards name the
+            // other two. `elementDepth` is the identity, not a counter — see
+            // `mainOpenedAt`.
+            if (
+              !mainDone &&
+              mainOpenedAt === null &&
+              suppressDepth === 0 &&
+              templateDepth === 0
+            ) {
+              mainOpenedAt = elementDepth;
+              mainSeen = true;
+              // Read AFTER this element's own increment would have happened —
+              // `main` is not a chrome name, so `chromeDepth` here is exactly
+              // the chrome open around the `<main>`, which the stream ignores.
+              chromeDepthAtMain = chromeDepth;
+            }
+            break;
           case "nav":
             navDepth += 1;
             break;
@@ -1180,12 +1418,25 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // it did before Phase 7), and neither accumulator below it does.
         if (templateDepth > 0) return;
         const hidden = renderableHidden();
+        // The two main-content candidates ride the same gate as the two
+        // accumulators above them and take the SAME text nodes — no
+        // markup-hidden exclusion, deliberately: this fingerprint is of the
+        // main content as served (module header, Phase 19).
+        // Chrome is dropped from BOTH candidates: `inMain` is "inside the
+        // chosen `<main>` and under no chrome opened since it", `inChrome` is
+        // the fallback's plain form of the same question.
+        const inMain = mainOpenedAt !== null && chromeDepth === chromeDepthAtMain;
+        const inChrome = chromeDepth > 0;
         if (bodyDepth > 0) {
           bodyParts.push(text);
           if (!hidden) renderableBodyParts.push(text);
+          if (inMain) mainBodyParts.push(text);
+          if (!inChrome) contentBodyParts.push(text);
         } else if (headDepth === 0) {
           fallbackParts.push(text);
           if (!hidden) renderableFallbackParts.push(text);
+          if (inMain) mainFallbackParts.push(text);
+          if (!inChrome) contentFallbackParts.push(text);
         }
       },
       onclosetag(name) {
@@ -1201,10 +1452,22 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           closedDetailsOpenedAt.pop();
         }
         if (name === "summary" && summaryDepth > 0) summaryDepth -= 1;
+        // The chosen `<main>` ends at the depth it opened at, and nowhere else:
+        // read BEFORE the decrement, like the two pops above and for the same
+        // reason. `mainDone` retires it so a later sibling `<main>` — invalid,
+        // but a thing pages do — cannot append itself to the first one's text.
+        if (name === "main" && mainOpenedAt === elementDepth) {
+          mainOpenedAt = null;
+          mainDone = true;
+        }
         if (elementDepth > 0) elementDepth -= 1;
         if (NON_CONTENT_TAGS.has(name) && suppressDepth > 0) {
           suppressDepth -= 1;
         }
+        // Above the noscript returns below, where its increment is: a `<nav>`
+        // inside a `<noscript>` must not leave this counter stuck open, which
+        // would empty the main-content stream for the rest of the document.
+        if (CHROME_TAGS.has(name) && chromeDepth > 0) chromeDepth -= 1;
         if (name === TEMPLATE_TAG && templateDepth > 0) templateDepth -= 1;
         if (name === "noscript" && noscriptDepth > 0) {
           noscriptDepth -= 1;
@@ -1245,6 +1508,27 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const renderableRaw = (sawBody ? renderableBodyParts : renderableFallbackParts).join("");
   const renderableText = renderableRaw.replace(/\s+/g, " ").trim();
   const renderableWordCount = renderableText ? renderableText.split(/\s+/).length : 0;
+  // THE CHOICE, made here because here is where the document has ended: a page
+  // that declared a `<main>` is measured inside it, and a page that declared
+  // none is measured over its whole body. Chrome is out of both. Both were
+  // accumulated during the one pass, so this costs a join and a compare.
+  // Only the branch taken is joined: on a page that declared a `<main>` the
+  // body-wide fallback was still accumulated (the choice cannot be made until
+  // the document ends) but is never read, and joining it would be one string
+  // built per page for nothing.
+  const mainText = (
+    mainSeen
+      ? (sawBody ? mainBodyParts : mainFallbackParts).join("")
+      : (sawBody ? contentBodyParts : contentFallbackParts).join("")
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  // Zero words is NOT a measurement of zero: an empty `<main>`, a `<main>` that
+  // is nothing but chrome (the empty template page this amendment was written
+  // for) and a body that is all chrome all mean "there is nothing here to
+  // fingerprint", and a rule has to be able to tell that from a page it
+  // measured at zero. See the field docs.
+  const mainWordCount = mainText === "" ? null : mainText.split(/\s+/).length;
   const title: string | null = sawTitle ? titleParts.join("").trim() : null;
   const firstH1 = h1s[0];
   const h1Text =
@@ -1304,6 +1588,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     structuredDataParseErrors,
     contentHash: createHash("sha256").update(bodyText).digest("hex"),
     simhash: simhash64(bodyText),
+    mainSimhash: mainWordCount === null ? null : simhash64(mainText),
+    mainWordCount,
+    placeholderSnippet: placeholderSnippetOf(bodyText),
     bodyText,
     h1s,
     hasStructuredData,
@@ -1362,5 +1649,8 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     structuredDataParseErrors: raw.structuredDataParseErrors,
     contentHash: raw.contentHash,
     simhash: raw.simhash,
+    mainSimhash: raw.mainSimhash,
+    mainWordCount: raw.mainWordCount,
+    placeholderSnippet: raw.placeholderSnippet,
   };
 }

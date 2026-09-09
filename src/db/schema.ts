@@ -352,12 +352,15 @@ export const pages = pgTable("pages", {
   //
   // NULLABLE, AND THE NULL IS A GATE. It means "no P7-or-later analyzer wrote
   // this row" — a pre-P7 crawl, whose `word_count` also carries the old
-  // template semantics. The rules that read it (`content.thin`'s floor,
-  // `content.csr-dependent`'s comparison) must SKIP such a page loudly rather
-  // than falling back to `word_count`, which measures a different thing: see
-  // `content.thin-skipped` in src/rules/page/on-page.ts. A page the analyzer
-  // never ran on at all — a PDF, a 404 — stores null in BOTH columns, and that
-  // is a different fact from this one.
+  // template semantics. The rules that read it (`content.soft-404`'s length
+  // ceiling, `content.csr-dependent`'s comparison) must SKIP such a page loudly
+  // rather than falling back to `word_count`, which measures a different thing.
+  // A page the analyzer never ran on at all — a PDF, a 404 — stores null in
+  // BOTH columns, and that is a different fact from this one.
+  //
+  // `content.thin`'s floor read this column between Phase 7 and Phase 19 §11
+  // and now reads `main_word_count` instead: hiding is not the only way a page
+  // ends up mostly furniture, and on a templated site it is not the usual one.
   renderableWordCount: integer("renderable_word_count"),
   // How many links from the crawl's entry point the shortest path to this page
   // is. Nullable; NOT the same thing as `depth`, which is the depth of the
@@ -384,6 +387,55 @@ export const pages = pgTable("pages", {
   // The bit pattern — all a hamming distance cares about — is identical either
   // way, so the round trip is lossless. See src/crawl/parse/simhash.ts.
   simhash: bigint("simhash", { mode: "bigint" }),
+  // The same fingerprint over the page's MAIN CONTENT instead of over
+  // everything it renders: the visible text inside the first <main> when the
+  // document has one, else the body's visible text with the <nav>, <header>,
+  // <footer> and <aside> subtrees removed. Written by the crawl (`PageWriter`)
+  // off the same single pass as `simhash`, and stored on exactly the contract
+  // stated on `simhash` above — unsigned analyzer value, signed column,
+  // `BigInt.asIntN(64, …)` in and `BigInt.asUintN(64, …)` out.
+  //
+  // WHY IT EXISTS (migration 0018, Phase 19). `simhash` reads the whole visible
+  // text, and on a templated site most of that text is the same header,
+  // navigation and footer on every page: the crawl that provoked this carries
+  // ~900 words of chrome around a median of ~150 words of content, so two
+  // unrelated templates landed 3 bits apart and `content.near-duplicate`
+  // reported 500 findings, 237 of them across pages with nothing to do with
+  // each other. This column is what that rule compares now; `simhash` keeps its
+  // meaning and its readers.
+  //
+  // NULLABLE, AND THE NULL IS A GATE, twice over:
+  //  - "nothing to fingerprint" — an empty <main>, or a body that is nothing
+  //    but chrome. Never `0` and never a hash of the empty string.
+  //  - "this row predates 0018". PRE-0018 ROWS ARE NULL AND ARE NOT
+  //    BACKFILLED: the text cannot be recomputed without the HTML, which the
+  //    crawl does not store. A rule meeting a crawl with no main fingerprint
+  //    must SAY SO rather than pass — `content.near-duplicate-skipped` is how
+  //    (hard rule 1), on the `content.thin-skipped` precedent.
+  mainSimhash: bigint("main_simhash", { mode: "bigint" }),
+  // Words in the text `main_simhash` was taken over. Written with it, null with
+  // it, and read by two rules: as the floor under a near-duplicate claim (a page
+  // with less main content than the threshold has nothing to be a near-duplicate
+  // OF), and — since Phase 19 §11 — as `content.thin`'s own floor, which is the
+  // check that owns those pages. THE NULL MEANS TWO THINGS AND ONLY THE CRAWL
+  // SAYS WHICH: "this page has no main content at all" on a 0018 crawl, and
+  // "nothing here was ever measured" on an older one. `content.thin` reports
+  // the first as zero words and `content.thin-skipped` reports the second,
+  // which is why both are query rules — the census that separates them is a
+  // question about the crawl.
+  mainWordCount: integer("main_word_count"),
+  // Up to 160 characters of the visible text around the first "lorem ipsum"
+  // match — the EVIDENCE for `has_lorem_ipsum`, which without it reports a URL
+  // and a word count. The finding that provoked it was true and unusable: three
+  // 1,000-word blog posts whose placeholder copy was the card excerpt and the
+  // meta description, which no reader could find from `{wordCount}`.
+  //
+  // NULL EXACTLY WHEN `has_lorem_ipsum` IS FALSE. The two are one observation
+  // written twice — the flag and the quotation behind it — and the invariant is
+  // asserted as SQL over the table in test/db/migration-0018.test.ts. Pre-0018
+  // rows carry a flag and no snippet and are not backfilled, for the same
+  // reason as the pair above: the text is gone.
+  placeholderSnippet: text("placeholder_snippet"),
   // JSON-LD blocks on this page that would not parse (invalid JSON, or over
   // the analyzer's per-block cap). A count, not a silence: a page whose
   // structured data does not parse is an audit finding.
@@ -662,6 +714,29 @@ export const pages = pgTable("pages", {
   index("pages_simhash_band1").on(t.crawlId, sql`((${t.simhash} >> 16) & 65535)`),
   index("pages_simhash_band2").on(t.crawlId, sql`((${t.simhash} >> 32) & 65535)`),
   index("pages_simhash_band3").on(t.crawlId, sql`((${t.simhash} >> 48) & 65535)`),
+  // And the same four bands over `main_simhash` (migration 0019). Phase 19 moved
+  // `content.near-duplicate` off the whole-page fingerprint and onto the
+  // main-content one — the whole-page value on a templated site measures the
+  // header, nav and footer, so unrelated pages landed inside the 3-bit
+  // threshold — and the four indexes above cover `simhash` and only `simhash`.
+  // Without these the rule's band predicates match nothing, the BitmapOr
+  // collapses, and the pair join degrades to the quadratic nested loop the
+  // measurement above prices at ~2.9s per 5,000 pages against ~0.11s.
+  //
+  // The TEXTUAL COUPLING written above applies here word for word, against
+  // `nearDuplicateFindings` (src/rules/query/content.ts) rather than against a
+  // rule that no longer reads `simhash`: band 0 must stay `(main_simhash >> 0)
+  // & 65535` because `int8shr(x, 0)` is not folded away, and one arm that fails
+  // to match takes the whole BitmapOr with it, silently.
+  //
+  // `test/db/migration-0019.test.ts` is what holds the two spellings together:
+  // it reads the four predicates out of the rule's own source, compares them
+  // with the four `pg_indexes` definitions, and EXPLAINs the real pair query to
+  // prove the four `Bitmap Index Scan`s are in the plan.
+  index("pages_main_simhash_band0").on(t.crawlId, sql`((${t.mainSimhash} >> 0) & 65535)`),
+  index("pages_main_simhash_band1").on(t.crawlId, sql`((${t.mainSimhash} >> 16) & 65535)`),
+  index("pages_main_simhash_band2").on(t.crawlId, sql`((${t.mainSimhash} >> 32) & 65535)`),
+  index("pages_main_simhash_band3").on(t.crawlId, sql`((${t.mainSimhash} >> 48) & 65535)`),
   // The three duplicate rules' group aggregate and its sample lateral
   // (`groupFindings`, src/rules/query/field-duplicates.ts): `group by
   // btrim(<field>)` over the indexable cohort, then one `where btrim(<field>)

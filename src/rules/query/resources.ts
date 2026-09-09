@@ -1115,7 +1115,8 @@ export const resourceRules: QueryRule[] = [
     severity: NOT_RECORDED.severity,
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
-    marker: "a crawl that recorded no resources (P11-T3)",
+    marker:
+      "This crawl recorded none of the images, stylesheets and scripts the pages point at, so no check about those files could be answered; re-crawl the site to record them.",
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
   }),
 
@@ -1131,7 +1132,8 @@ export const resourceRules: QueryRule[] = [
     severity: NOT_FETCHED.severity,
     ...copyFor(NOT_FETCHED.id),
     rulesetVersion: RULESET_VERSION,
-    marker: "a crawl that recorded its resources and asked about none (P12-T2)",
+    marker:
+      "This crawl listed the images, stylesheets and scripts the pages point at and requested none of them, so nothing is known about any of those files; re-run the crawl with the file check left on, or resume the interrupted one.",
     run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
   }),
 
@@ -1149,7 +1151,8 @@ export const resourceRules: QueryRule[] = [
     severity: ALL_UNKNOWN.severity,
     ...copyFor(ALL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
-    marker: "a crawl whose every resource landed in an unknown class (P13-T2)",
+    marker:
+      "Every file this crawl asked about came back with no usable answer — refused, disallowed, or never answered at all — so no check about those files could be answered; crawl again once whatever blocked the requests has cleared.",
     run: (db, crawlId) => allUnknownFindings(ALL_UNKNOWN, db, crawlId),
   }),
 
@@ -1169,7 +1172,8 @@ export const resourceRules: QueryRule[] = [
     severity: PARTIAL_UNKNOWN.severity,
     ...copyFor(PARTIAL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
-    marker: "a partial pass whose decided rows are all unknown and the rest unasked (P14-T1)",
+    marker:
+      "This crawl reached only some of the site's files and every one it reached answered nothing usable, so no check about those files could be answered; re-run the crawl to ask about all of them afresh.",
     run: (db, crawlId) => partialUnknownFindings(PARTIAL_UNKNOWN, db, crawlId),
   }),
 ];

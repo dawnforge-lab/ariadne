@@ -1,4 +1,7 @@
+import { sql, type SQL } from "drizzle-orm";
+
 import type { Db } from "../db/client.js";
+import { normalizeUrl } from "../crawl/parse/url-utils.js";
 import { copyFor } from "./registry/copy/index.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
 import type {
@@ -25,6 +28,21 @@ export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">)
 }
 
 /**
+ * `isAuditable` for a rule that asks the question in SQL, over an aliased
+ * `pages`. The hreflang marker reads its declaring pages this way and judges
+ * the same pages `isAuditable` admits everywhere else in that file, so the two
+ * halves of one rule are one predicate rather than a function and a string that
+ * happen to say the same thing.
+ *
+ * NOT the same predicate as `AUDITABLE` in src/rules/query/content.ts, which
+ * adds `is_indexable = true`: the three content rules judge what a search
+ * engine would index, and an hreflang annotation is worth reading on a page
+ * that is fetched and 200 whether or not it carries a noindex.
+ */
+export const FETCHED_OK = (alias: string): SQL =>
+  sql.raw(`${alias}.fetch_class = 'ok' and ${alias}.status_code = 200`);
+
+/**
  * Whether a stored string actually declares something. A tag that reached the
  * database as `""` or `"   "` — `<title> </title>`, `<link rel=canonical
  * href="">`, an empty robots meta — declares nothing, and reading it as a
@@ -35,6 +53,234 @@ export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">)
 export function present(value: string | null): value is string {
   return value !== null && value.trim() !== "";
 }
+
+/**
+ * The three columns a canonical declaration is read from.
+ *
+ * A `Pick` rather than a whole `PageRecord`, for `isAuditable`'s reason: the
+ * hreflang and link rules hold a narrow projection of `pages` — four columns
+ * per target, not the row — and they must ask this question through these
+ * functions rather than restating it beside their own row shape.
+ */
+export type CanonicalDeclaration = Pick<
+  PageRecord,
+  "url" | "canonicalHtml" | "canonicalHeader"
+>;
+
+/**
+ * The canonical the page effectively declares. The HTML `<link rel=canonical>`
+ * wins over the HTTP `Link` header because that is the order search engines
+ * apply when both are present; `canonical.html-header-conflict` is what reports
+ * the disagreement, so the other rules can work from one value.
+ *
+ * `present` is what "declares" means here: `<link rel=canonical href="">`
+ * reaches the database as an empty string, and an empty href names no URL.
+ */
+export function effectiveCanonical(page: CanonicalDeclaration): string | null {
+  if (present(page.canonicalHtml)) return page.canonicalHtml;
+  return present(page.canonicalHeader) ? page.canonicalHeader : null;
+}
+
+/**
+ * Where a declared canonical actually points, as a comparable key, or `null`
+ * when the value is not a URL we can resolve at all. Relative values resolve
+ * against the page URL first, so `/x` on `https://example.com/page` is
+ * `https://example.com/x` — the same resolution a browser and a crawler do.
+ *
+ * `normalizeUrl` is the one authority for URL identity in this codebase, and
+ * both sides of every comparison below go through it, so a fragment, a
+ * hostname's case or query-parameter order is never mistaken for a difference.
+ */
+export function resolveCanonical(canonical: string, pageUrl: string): string | null {
+  return normalizeUrl(canonical, pageUrl);
+}
+
+export interface CanonicalTarget {
+  /** The declared value, verbatim, for the evidence. */
+  canonical: string;
+  /** The normalized target, or null when the declared value does not parse. */
+  resolved: string | null;
+  /** True when the canonical resolves to a URL that is not this page. */
+  pointsElsewhere: boolean;
+}
+
+/**
+ * What a page's canonical declaration comes to: the declared value, where it
+ * resolves, and whether that is somewhere other than this page — or `null` when
+ * the page declares no canonical at all.
+ *
+ * MOVED HERE FROM src/rules/page/canonical.ts (Phase 19), which re-exports it
+ * at its old address. It was already shared by the query rules that judge the
+ * canonical's *target* (`canonical.non-200-target`, `canonical.non-indexable-
+ * target`, `url.*`, `pagination.*`); Phase 19 gave it a second class of caller
+ * — every rule that must not judge a page which has handed its signals to
+ * another URL (`isCanonicalisedElsewhere`) — and a resolution the exclusion and
+ * the finding could disagree about is the one thing that pairing must not have.
+ * One resolution, one precedence order (HTML over header), one normalizer.
+ */
+export function resolveEffectiveCanonical(page: CanonicalDeclaration): CanonicalTarget | null {
+  const canonical = effectiveCanonical(page);
+  if (canonical === null) return null;
+  const resolved = resolveCanonical(canonical, page.url);
+  const pageNormalized = normalizeUrl(page.url);
+  return {
+    canonical,
+    resolved,
+    pointsElsewhere: resolved !== null && resolved !== pageNormalized,
+  };
+}
+
+/**
+ * A page that has handed its indexing signals to another URL: it declares a
+ * canonical (HTML first, header second) and that canonical resolves to a URL
+ * which is not this page.
+ *
+ * Such a page is not a page a search engine ranks — it is a request to treat
+ * some other URL as the real one — so the rules that judge what a page SAYS
+ * about itself skip it: a duplicate body under a tracking parameter, an
+ * hreflang block inherited from the template it is a variant of, are the
+ * situation the canonical already fixes, and reporting them is reporting the
+ * remedy as the fault (Phase 19 §1).
+ *
+ * The exclusion is BY THE DECLARATION ONLY. Whether the canonical target is
+ * itself sound — a 200, indexable, not a redirect — is `canonical.*`'s
+ * business and is already reported there, so a page is invisible to the rules
+ * below whether or not the URL it names turns out to be a good one.
+ *
+ * A canonical that does not resolve to a URL at all (`href="not a url"`) is NOT
+ * "elsewhere": it names nowhere, the page keeps its own signals, and
+ * `canonical.points-elsewhere` reports the malformation. Silence is the
+ * expensive mistake here (hard rule 1), so the doubtful case stays visible.
+ */
+export function isCanonicalisedElsewhere(page: CanonicalDeclaration): boolean {
+  return resolveEffectiveCanonical(page)?.pointsElsewhere === true;
+}
+
+/**
+ * The declared value with its fragment removed — `normalizeUrl`'s `hash = ""`.
+ * Every step below reads this rather than the raw column.
+ */
+const NO_FRAGMENT = (value: string): string => `split_part(${value}, '#', 1)`;
+
+/**
+ * `scheme://authority` lower-cased with a default port dropped, followed by the
+ * path — everything `normalizeUrl` settles about a URL except its query.
+ *
+ * The authority is the run between `//` and the first `/`, `?` or `#`, and ONLY
+ * that run is lower-cased: a path is case-sensitive on every server that serves
+ * one, so `/Page` and `/page` are two URLs and lower-casing here would answer
+ * "self" for a canonical that genuinely names another. An empty path becomes
+ * `/`, which is what `new URL` does with `https://example.com`.
+ *
+ * The port rule is looser than WHATWG's on purpose: `:80` and `:443` are
+ * dropped from either scheme rather than each from its own. `https://x:80/p` is
+ * therefore read as `https://x/p` where `normalizeUrl` keeps the port — a
+ * disagreement that can only answer "self" where TypeScript answers
+ * "elsewhere", which is the harmless direction (see the doc block below).
+ */
+const ORIGIN_AND_PATH = (value: string): string => {
+  const f = NO_FRAGMENT(value);
+  return (
+    `regexp_replace(lower(substring(${f} from '^[^/?#]*//[^/?#]*')), ':(80|443)$', '')` +
+    ` || coalesce(nullif(split_part(` +
+    `coalesce(substring(${f} from '^[^/?#]*//[^/?#]*(.*)$'), ''), '?', 1), ''), '/')`
+  );
+};
+
+/**
+ * The query string as a SET of `k=v` pairs, which is how the two sides are
+ * compared: `normalizeUrl` calls `searchParams.sort()`, so `?b=2&a=1` and
+ * `?a=1&b=2` are one URL, and a comparison that read the string would answer
+ * "elsewhere" for a page canonicalising to itself — the wrong "yes" hard rule 1
+ * forbids. Set equality rather than a sort because it is one expression with no
+ * correlated subquery, and it errs the same safe way on the case the two forms
+ * differ on (a repeated key, noted below). Empty members are removed so a
+ * trailing `?` or `&` — which `URLSearchParams` drops — is not a difference.
+ */
+const QUERY_SET = (value: string): string =>
+  `array_remove(string_to_array(` +
+  `coalesce(substring(${NO_FRAGMENT(value)} from '[?](.*)$'), ''), '&'), '')`;
+
+/**
+ * Whether the steps above can settle this value at all. Three shapes they
+ * cannot, and each makes the whole test answer NO rather than guess:
+ *
+ *  - anything with a byte outside ASCII (`octet_length <> length`): `new URL`
+ *    punycodes a host and percent-encodes a path, and SQL does neither;
+ *  - whitespace or a backslash: `new URL` strips tabs and newlines and rewrites
+ *    `\` to `/` for http(s), and a raw space becomes `%20`;
+ *  - a dot segment (`/../`, `/./`): `new URL` resolves it away.
+ *
+ * Each of these could otherwise make two spellings of ONE URL compare unequal,
+ * which is the silencing direction. `%2e` as an encoded dot segment is not
+ * caught — see the residuals in the doc block below.
+ */
+const SQL_SETTLEABLE = (value: string): string =>
+  `octet_length(${value}) = length(${value}) ` +
+  `and ${value} !~ '[[:space:]\\\\]' ` +
+  `and ${NO_FRAGMENT(value)} !~ '/[.][.]?(/|$)'`;
+
+/**
+ * `isCanonicalisedElsewhere` for a rule whose question is a GROUP rather than a
+ * row: the same test, in SQL, over an aliased `pages`.
+ *
+ * SQL cannot run `normalizeUrl`, so this applies `normalizeUrl`'s steps to BOTH
+ * SIDES as SQL expressions — fragment stripped, scheme and host lower-cased,
+ * default port dropped, empty path made `/`, query compared as a set — and
+ * compares the results. It used to compare the declared string to
+ * `pages.url` and `pages.url_normalised` verbatim, which answered "elsewhere"
+ * for a self-canonical carrying a `#top`, an upper-cased host or its query
+ * parameters in another order: a wrong "yes" that drops the page from both
+ * duplicate rules and every hreflang rule without saying so (hard rule 1).
+ *
+ * WHERE IT STILL ANSWERS NO WITHOUT LOOKING. A relative canonical (`/page`) is
+ * never read as "elsewhere" here — SQL has no base URL to resolve against — and
+ * neither is a value `SQL_SETTLEABLE` rejects. The asymmetry is deliberate and
+ * is the same one throughout this file: a wrong "yes" SILENCES a rule, a wrong
+ * "no" only leaves a finding a reader can dismiss.
+ *
+ * WHAT THE TWO FORMS CAN STILL DISAGREE ABOUT, and in which direction. Every
+ * one of these is SQL answering "not elsewhere" where `isCanonicalisedElsewhere`
+ * answers "elsewhere" — the page stays visible to the rules, never the reverse:
+ *
+ *  - a relative canonical, and any value with non-ASCII, whitespace, a
+ *    backslash or a dot segment in it (above);
+ *  - `:80` on https or `:443` on http (the loose port rule above);
+ *  - a query whose keys repeat: `?a=2&a=1` and `?a=1&a=2` are two URLs to
+ *    `searchParams.sort()`, which is stable and so keeps the values in the
+ *    order it met them, and one set here. `?a=1&a=1` and `?a=1` likewise;
+ *  - `%2e%2e` as an encoded dot segment, which `new URL` resolves and the guard
+ *    above does not catch;
+ *  - userinfo (`https://User@host/p`), whose case `new URL` preserves and the
+ *    authority lower-casing here does not.
+ *
+ * `pages.url_normalised` is no longer consulted. It is not `normalizeUrl(url)`
+ * — the writer lower-cases the WHOLE string and strips a trailing slash on top
+ * of it (src/crawl/persist.ts), an analytic key — so a canonical matching it
+ * matched a lossier URL than the TypeScript form compares against, and a page
+ * at `/Page/` canonicalising to `/page` read as self here and as elsewhere
+ * there. `ORIGIN_AND_PATH(url)` is the exact comparison instead, and the two
+ * forms are pinned against each other case by case in test/rules/helpers.test.ts.
+ *
+ * THREE-VALUED LOGIC IS COALESCED AWAY, and that is load-bearing: a page with
+ * no canonical at all leaves the comparison NULL, and `not (NULL)` is NULL, so
+ * an uncoalesced form would drop exactly the pages it is meant to KEEP from
+ * every `and not CANONICALISED_ELSEWHERE(p)` filter. False means "not
+ * canonicalised elsewhere", including "declares nothing".
+ */
+export const CANONICALISED_ELSEWHERE = (alias: string): SQL => {
+  const declared =
+    `coalesce(nullif(btrim(${alias}.canonical_html), ''), ` +
+    `nullif(btrim(${alias}.canonical_header), ''))`;
+  const url = `${alias}.url`;
+  return sql.raw(
+    `coalesce(${declared} ~* '^https?://'` +
+      ` and (${SQL_SETTLEABLE(declared)})` +
+      ` and (${ORIGIN_AND_PATH(declared)} is distinct from ${ORIGIN_AND_PATH(url)}` +
+      ` or not (${QUERY_SET(declared)} <@ ${QUERY_SET(url)}` +
+      ` and ${QUERY_SET(url)} <@ ${QUERY_SET(declared)})), false)`,
+  );
+};
 
 /**
  * The identity a finding is stamped with. `pageRule` hands this to the rule

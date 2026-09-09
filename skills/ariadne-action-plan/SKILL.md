@@ -522,11 +522,15 @@ The tab body is the URL plus the rule's own evidence, flattened.
     `{contentHash, urls, count, pageTypes}`. Same idea, different key: the URL
     sample is `urls`, not `pages`, and `pageTypes` names the templates the group
     spans, which is usually the fix's shape.
-  - **`content.near-duplicate`** — one finding per PAIR of similar pages:
-    `{urlA, urlB, hamming, pageTypeA, pageTypeB}`. **No `count`, no URL list.** A
-    50-row tab is 50 pairs, and the pages involved are however many distinct URLs
-    those pairs mention — count them, do not assume two per row, and do not write
-    "50 duplicate pages".
+  - **`content.near-duplicate`** — one finding per PAGE that has at least one
+    near-duplicate: `{mainWords, nearDuplicates, closest}`, where `nearDuplicates`
+    is the number of other pages within the threshold — exact up to 200, and a
+    FLOOR above it, which `nearDuplicatesAtLeast: true` beside it is what says
+    (write those cells as "200+") — and `closest` names up
+    to five of them as `{url, hamming, mainWords}`. A 50-row tab is 50 pages, and
+    the cluster behind them is usually far smaller than the sum of the counts —
+    every page of a cluster of forty reports the other thirty-nine. Sort by
+    `nearDuplicates` and fix the template, not the row.
 
   For the group shapes, column 1 is the group's first URL, the URL list stays as its
   own JSON column under its own key, and the description row carries both numbers

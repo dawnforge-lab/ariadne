@@ -1,69 +1,26 @@
-import { normalizeUrl } from "../../crawl/parse/url-utils.js";
-import { finding, isAuditable, pageRule, present } from "../helpers.js";
-import type { PageRecord, PageRule } from "../registry/types.js";
+import {
+  effectiveCanonical,
+  finding,
+  isAuditable,
+  pageRule,
+  present,
+  resolveCanonical,
+  resolveEffectiveCanonical,
+} from "../helpers.js";
+import type { PageRule } from "../registry/types.js";
 import { hasNoindex } from "./indexability.js";
 
+/**
+ * Re-exported at the address it was defined at until Phase 19. The resolution
+ * itself now lives in `src/rules/helpers.ts`, beside `isCanonicalisedElsewhere`
+ * — the exclusion the content and hreflang rules apply before they judge a page
+ * at all — so that "where does this page canonicalise to?" has one answer for
+ * the rule that REPORTS it and the rules that act on it. The three query rules
+ * that import it from here keep working unchanged.
+ */
+export { resolveEffectiveCanonical, type CanonicalTarget } from "../helpers.js";
+
 const CATEGORY = "canonical";
-
-/**
- * The canonical the page effectively declares. The HTML `<link rel=canonical>`
- * wins over the HTTP `Link` header because that is the order search engines
- * apply when both are present; `canonical.html-header-conflict` is what reports
- * the disagreement, so the other rules can work from one value.
- *
- * `present` is what "declares" means here: `<link rel=canonical href="">`
- * reaches the database as an empty string, and an empty href names no URL.
- */
-function effectiveCanonical(page: PageRecord): string | null {
-  if (present(page.canonicalHtml)) return page.canonicalHtml;
-  return present(page.canonicalHeader) ? page.canonicalHeader : null;
-}
-
-/**
- * Where a declared canonical actually points, as a comparable key, or `null`
- * when the value is not a URL we can resolve at all. Relative values resolve
- * against the page URL first, so `/x` on `https://example.com/page` is
- * `https://example.com/x` — the same resolution a browser and a crawler do.
- *
- * `normalizeUrl` is the one authority for URL identity in this codebase, and
- * both sides of every comparison below go through it, so a fragment, a
- * hostname's case or query-parameter order is never mistaken for a difference.
- */
-function resolveCanonical(canonical: string, pageUrl: string): string | null {
-  return normalizeUrl(canonical, pageUrl);
-}
-
-export interface CanonicalTarget {
-  /** The declared value, verbatim, for the evidence. */
-  canonical: string;
-  /** The normalized target, or null when the declared value does not parse. */
-  resolved: string | null;
-  /** True when the canonical resolves to a URL that is not this page. */
-  pointsElsewhere: boolean;
-}
-
-/**
- * What a page's canonical declaration comes to: the declared value, where it
- * resolves, and whether that is somewhere other than this page — or `null` when
- * the page declares no canonical at all.
- *
- * Exported because the query rules that judge the canonical's *target*
- * (`canonical.non-200-target`, `canonical.non-indexable-target`) need the same
- * answer these page rules work from. One resolution, one precedence order
- * (HTML over header), one normalizer — a second copy in the query layer would
- * be free to disagree with this one about what a page canonicalises to.
- */
-export function resolveEffectiveCanonical(page: PageRecord): CanonicalTarget | null {
-  const canonical = effectiveCanonical(page);
-  if (canonical === null) return null;
-  const resolved = resolveCanonical(canonical, page.url);
-  const pageNormalized = normalizeUrl(page.url);
-  return {
-    canonical,
-    resolved,
-    pointsElsewhere: resolved !== null && resolved !== pageNormalized,
-  };
-}
 
 export const canonicalRules: PageRule[] = [
   pageRule("canonical.missing", ["CHECK-16"], CATEGORY, "warning", (p, self) =>

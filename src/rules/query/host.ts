@@ -263,7 +263,8 @@ export const hostRules: QueryRule[] = [
     severity: SKIPPED.severity,
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
-    marker: "a crawl started with host probing off",
+    marker:
+      "This crawl was started with the host checks turned off, so the site's other addresses — http, www, a former domain — were never requested; re-run the crawl with those checks on.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const evidence = await readHostProbe(db, crawlId, SKIPPED.id);
       if (evidence.probe !== null) return [];

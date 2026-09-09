@@ -281,27 +281,40 @@ const noindexConflict: Fixture = {
 // ---------------------------------------------------------------------------
 
 /**
- * One declaration whose code is not a language code. `hreflang.invalid-code`
- * writes one finding per bad declaration, attached to the page that declared it.
+ * One declaration, and two faults in it. `hreflang.invalid-code` writes one
+ * finding per bad declaration, attached to the page that declared it; and
+ * because that one declaration names a page on ANOTHER site rather than this
+ * one, the set this page publishes does not contain this page, which is
+ * `hreflang.missing-self-reference` (Phase 19).
+ *
+ * The second fault is here rather than on a fixture of its own because the two
+ * arrive together in life — a block written by hand, listing "the other
+ * languages" — and because every other hreflang fixture has to keep naming
+ * itself: `hreflang.missing-x-default` attaches its finding to the lexically
+ * first member of the set, and on `/authored/hreflang-no-xdefault` that member
+ * is the fixture's own URL, which is what puts the finding on the page the
+ * harness expects it on. A page cannot both omit itself and be the URL its
+ * cluster's finding lands on.
  */
 const hreflangBadCode: Fixture = {
   path: "/authored/hreflang-bad-code",
   category: HREFLANG,
-  name: "hreflang with an invalid language code",
-  expectedIssues: ["hreflang.invalid-code"],
+  name: "hreflang with an invalid language code, naming everything but itself",
+  expectedIssues: ["hreflang.invalid-code", "hreflang.missing-self-reference"],
   exact: true,
   handler: (req, res) =>
-    serve(req, res, (self) => ({
+    serve(req, res, () => ({
       title: "An hreflang code that is not one",
       metaDescription:
-        "This page declares a language alternate with the value english-uk, which is not a language code any search engine parses.",
-      headExtra: `<link rel="alternate" hreflang="english-uk" href="${self}">`,
+        "This page declares one language alternate: the code english-uk, which no search engine parses, pointing at another site rather than at this page.",
+      headExtra:
+        '<link rel="alternate" hreflang="english-uk" href="https://en-gb.example/opening-hours">',
       bodyHtml: healthyBody({
         h1: "A language alternate nobody can read",
-        lede: "The alternate in the head of this page spells its language out in English instead of writing it as a code.",
-        what: "An hreflang value has to be a language code, optionally with a region: en, en-gb, pt-br, es-419. This page declares english-uk, which is neither, so the annotation names a language no parser recognises and is dropped on the floor.",
-        why: "An invalid code does not fail loudly. The link tag is well-formed, the page renders, and the search engine simply ignores the annotation it cannot parse. The cluster of translated pages this alternate was supposed to join stays broken, visitors keep landing on the wrong language version, and the site looks like it has hreflang implemented when effectively it does not.",
-        fix: "Validate the codes at build time against the same small grammar the engines use: two or three letters for the language, and an optional region that is either two letters or three digits. Anything else is a typo, and a typo caught in the template is one that never reaches production.",
+        lede: "The alternate in the head of this page spells its language out in English instead of writing it as a code, and the set it declares leaves this page out.",
+        what: "An hreflang value has to be a language code, optionally with a region: en, en-gb, pt-br, es-419. This page declares english-uk, which is neither, so the annotation names a language no parser recognises and is dropped on the floor. The one alternate it names is a page on another site, so the set of versions this page publishes does not include this page.",
+        why: "An invalid code does not fail loudly. The link tag is well-formed, the page renders, and the search engine simply ignores the annotation it cannot parse. The missing self-reference does not fail loudly either, and it is worse: a set that does not name the page carrying it is discarded whole, so even the annotations that DO parse stop counting. Between them the site looks like it has hreflang implemented when effectively it does not.",
+        fix: "Validate the codes at build time against the same small grammar the engines use: two or three letters for the language, and an optional region that is either two letters or three digits. Generate the whole set from one mapping of language to URL and render it identically on every version, this one included, so no page can publish a set it is not a member of.",
       }),
     })),
 };

@@ -1,8 +1,18 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 18 (ruleset 0.13.0, migrations 0000–0017,
+**Status:** the contract as of Phase 19 (ruleset 0.14.0, migrations 0000–0019,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
+
+**What Phase 19 changed here: the ruleset is 0.14.0 and the words are for
+clients.** No served field or shape changed. Four rules joined (100 rows in
+`rules_catalog`, two of them markers, so `marker` now appears on twelve rows),
+two verdicts moved (duplicates and hreflang respect the canonical), one
+measurement changed (near-duplicate on the main-content fingerprint, migration
+0018, with 0019's band indexes behind it), and every `title` / `explanation` /
+`howToFix` / `marker` string passed a rubric that bans engine vocabulary — an
+agent pasting catalog copy into a tenant-facing report no longer has to
+translate it. §11 has the account.
 
 **What Phase 18 changed here: `crawl_status` says why a failed crawl failed.**
 One field was ADDED to the crawl detail and nothing changed type.
@@ -290,11 +300,12 @@ validator before the handler runs (`test/api/mcp.test.ts:790` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (96 rows at 0.13.0) rather than by the crawl. The
-catalog is ~109 KB (**111,419 bytes**, re-measured 2026-09-08 at the end of
-Phase 17 over all 96 rows of ruleset 0.13.0, by serialising what `rulesCatalog`
-answers with no crawl id — of which **681 bytes** are the `marker` strings on
-the ten markers; the 109,949 before it was measured earlier in the same phase,
+bounded by the **ruleset** (100 rows at 0.14.0) rather than by the crawl. The
+catalog is ~122 KB (**125,019 bytes**, re-measured 2026-09-09 at the end of
+Phase 19 over all 100 rows of ruleset 0.14.0 — the copy pass lengthened many
+entries; 111,419 bytes at 96 rows of 0.13.0 — by serialising what `rulesCatalog`
+answers with no crawl id — of which **2,385 bytes** are the `marker` strings on
+the twelve markers; the 109,949 before it was measured earlier in the same phase,
 at 95 rows of 0.12.0 and before `http.server-error` was split in two; the
 103,679 before that at 93 rows of ruleset 0.9.0, and the 100,645 before it at 92
 rows, before `resources.not-fetched` had copy of its own) because it carries
@@ -1260,17 +1271,17 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:955` "names every column, and says the ratio is of
-reported findings", `test/rules/copy.test.ts:988` "remainder is open-ended and
-names the case nothing else counts", `test/rules/copy.test.ts:1003` "says the
-counts are the authority, not the ratio", `test/rules/copy.test.ts:1029` "tells
+`test/rules/copy.test.ts:1111` "names every column, and says the ratio is of
+reported findings", `test/rules/copy.test.ts:1144` "remainder is open-ended and
+names the case nothing else counts", `test/rules/copy.test.ts:1159` "says the
+counts are the authority, not the ratio", `test/rules/copy.test.ts:1185` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
-`test/rules/copy.test.ts:1056` "grades nothing: no score, no label, no threshold";
-`test/rules/coverage.test.ts:339` "site.health is filed under the
+`test/rules/copy.test.ts:1212` "grades nothing: no score, no label, no threshold";
+`test/rules/coverage.test.ts:365` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:1841` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:1952` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -1309,10 +1320,12 @@ incompatible shapes — a content hash moves when the site edits a word, and a
 change.
 
 **The cost, stated because a consumer must state it too: a rule that fires more
-than once on a page collapses to per-URL presence.** On the reference crawl the
-comparison sees 281 near-duplicate URLs, not 16,789 rows, and a page that went
-from two near-duplicate partners to fifty is `persisting`, not `new`. So every
-row carries four counts:
+than once on a page collapses to per-URL presence.** `images.oversized` files one
+finding per IMAGE, so on the reference crawl the comparison sees its 157 URLs,
+not its 833 rows, and a page that went from one oversized image to nine is
+`persisting`, not `new`. (This paragraph's example was `content.near-duplicate`
+while that rule reported PAIRS; §11 below is what changed it.) So every row
+carries four counts:
 
 - `baseCount` / `headCount` — finding ROWS, the numbers `issues_list` reports;
 - `baseUrls` / `headUrls` — the distinct URLs the diff is actually over.
@@ -1324,11 +1337,14 @@ fixture and the real comparison:
 headUrls == new + persisting        baseUrls == resolved + persisting
 ```
 
-**Near-duplicate URLs are pair representatives.** `content.near-duplicate` finds
-a *pair* of similar pages and files the finding against one of them; the URL in
-this diff is that representative, not "the duplicate". A pair whose
-representative changed reads as one `new` and one `resolved` even though the
-site's duplication is unchanged.
+**Near-duplicate URLs are pages, one row each** (Phase 19 §11). `content.near-
+duplicate` files one finding against every page that has at least one
+near-duplicate, carrying the count and the closest few — so the URL in this diff
+is the page itself, and a page that went from two near-duplicate partners to
+fifty is `persisting` rather than `new`. (Before §11 the rule reported PAIRS and
+filed each against one of the two, so the diff's URL was a representative and a
+cluster could churn between `new` and `resolved` without the site changing. It
+cannot now: a page is its own representative.)
 
 Site-wide findings (no page) compare by **rule presence**: the key is the empty
 string and the drill-down returns `url: null`.
@@ -1568,7 +1584,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.13.0** as of Phase 17) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.14.0** as of Phase 19) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1626,6 +1642,42 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 19 bumped to 0.14.0 on four grounds: two verdicts MOVE, one measurement
+CHANGES, four rules are added, and copy changes on 26.** The moves: the two
+duplicate rules and every hreflang rule now ignore a page canonicalised
+elsewhere (as declarer and as target), because on a real crawl the only
+"duplicates" and the only missing hreflang return links were parameter
+variants each canonicalised to the base. The measurement: `content.near-
+duplicate` compares pages on `main_simhash` (migration 0018, the fingerprint of
+the main content — inside `<main>`, else the body, and in both cases minus
+nav/header/footer/aside) with both pages at least 50 words of their own, because
+the whole-text fingerprint was dominated by ~900 words of chrome on every page; a
+crawl with no main-content fingerprint gets `content.near-duplicate-skipped`
+(marker) rather than a silent pass. The §11 amendment, taken at gate time after a
+re-crawl, adds two more facts to the same version: that rule now reports one
+finding per PAGE (`{mainWords, nearDuplicates, closest}`, up to five closest,
+capped by pages with an exact total — so the 500-pair budget and the
+100,000-pair scan ceiling are gone and `findingCap` governs one listing budget;
+`nearDuplicates` itself is exact to 200 and a stated floor above it,
+`nearDuplicatesAtLeast: true`, which is what keeps the rule's wall time off the
+square of the site on a degenerate cohort — 16.5 s where the exact count took
+101.9 s over 5,000 identical fingerprints, 98.7 s against 950.1 s over 20,000),
+and `content.thin` fires on `main_word_count < 150` — the words a page has of
+its own — as a QUERY rule rather than a page rule, with `content.thin-skipped`
+site-scoped beside it, because the column's null means "no main content at all"
+on a 0018 crawl and "never measured" on an older one and only the crawl's census
+tells those apart. The ruleset split is 25 page / 61 query / 14 metric over the
+same 100 rules. Added: `links.to-server-error` (critical, the 5xx half of
+CHECK-11), `hreflang.missing-self-reference` (warning), and the markers
+`hreflang.alternates-not-crawled` and `content.near-duplicate-skipped` (info).
+Copy: 26 entries and all twelve marker reasons, under a rubric test that bans
+engine vocabulary from every client-facing string (§5.1's `marker` reasons
+included). **Nothing is backfilled**: an older crawl re-judged at 0.14.0 loses
+the canonical-variant duplicates (they were never duplicates), gains the two
+markers where they apply, and keeps every other finding; the near-duplicate
+count on a pre-0018 crawl is not comparable across the boundary because the
+rule cannot run there at all — the marker is what says so.
 
 **Phase 17 bumped to 0.13.0 on three grounds, and one of them MOVES a verdict.**
 First, a rule added: `http.server-error-transient` (`warning`), which fires on a
