@@ -155,4 +155,4 @@ content. Old crawl re-judged on the final code: 1,132 findings, both
 
 ## 8. Integration
 
-**[recorded at merge]**
+Integrated 2026-09-09 as **PR #17** from `worktree-phase-19` (rebased onto main), on the owner's word for this phase ("go"). CI: green first try on 4575c06 (run 34361450665, 4m58s).
