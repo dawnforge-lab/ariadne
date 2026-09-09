@@ -262,14 +262,24 @@ describe("checklist coverage", () => {
   //   page    26 + 1 = 27
   //   total   95 + 1 = 96
   //
+  // Phase 19 adds FOUR query rules and no page rule: `links.to-server-error`
+  // (the 5xx half of the broken-link question), `hreflang.missing-self-
+  // reference`, and the two NOT MEASURED markers `hreflang.alternates-not-
+  // crawled` and `content.near-duplicate-skipped`. No new check is claimed:
+  // each lands on a check its sibling already claimed (CHECK-11, CHECK-24/26,
+  // CHECK-39).
+  //
+  //   query   55 + 4 = 59
+  //   total   96 + 4 = 100
+  //
   // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE: both rules claim CHECK-12, which
   // `http.server-error` already claimed. A check answered in two bands is not a
   // new claim.
-  it("pins the ruleset split the gate doc reports: 96 rules = 27 page + 55 query + 14 metric", () => {
+  it("pins the ruleset split the gate doc reports: 100 rules = 27 page + 59 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(96);
+    expect(registry.all()).toHaveLength(100);
     expect(registry.byKind("page")).toHaveLength(27);
-    expect(registry.byKind("query")).toHaveLength(55);
+    expect(registry.byKind("query")).toHaveLength(59);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

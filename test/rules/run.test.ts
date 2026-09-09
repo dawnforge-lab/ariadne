@@ -110,7 +110,11 @@ describe("buildRegistry", () => {
     // And Phase 17 Task 3's other half of the 5xx split: the server error a
     // second observation cleared, which used to be reported as a permanent one.
     expect(ids).toContain("http.server-error-transient");
-    expect(ids.length).toBe(96);
+    // Phase 19: the 5xx half of the broken-link question, and the marker that
+    // says the main-content fingerprint was not there to measure.
+    expect(ids).toContain("links.to-server-error");
+    expect(ids).toContain("content.near-duplicate-skipped");
+    expect(ids.length).toBe(100);
   });
 
   it("registers every kind the runner drives", () => {

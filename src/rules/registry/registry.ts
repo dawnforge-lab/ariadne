@@ -23,6 +23,27 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// 0.14.0: Phase 19, the audit accuracy pass
+// (docs/superpowers/specs/2026-09-09-audit-accuracy-pass-design.md), on FOUR
+// grounds. (1) Verdicts MOVED: `content.exact-duplicate` and
+// `content.near-duplicate` no longer count a page canonicalised elsewhere, and
+// every hreflang rule ignores such a page as declarer and as target — two
+// parameter variants on a real crawl were reported critical for the state the
+// fix text prescribes. (2) A measurement CHANGED: `content.near-duplicate`
+// pairs on `main_simhash` (the fingerprint of the main content, migration
+// 0018) with both pages at least 50 words of their own, instead of the
+// whole-text `simhash` that ~900 words of chrome dominated; on a crawl with no
+// main-content fingerprint the rule is silent and `content.near-duplicate-
+// skipped` says why. (3) Rules ADDED: `links.to-server-error` (critical),
+// `hreflang.missing-self-reference` (warning), and two NOT MEASURED markers,
+// `hreflang.alternates-not-crawled` and `content.near-duplicate-skipped`
+// (info). 100 rules: 28 critical / 25 warning / 47 info. (4) COPY changed on
+// 26 rules and every marker reason, under the rubric test in
+// test/rules/copy.test.ts; `content.placeholder`'s evidence gains the snippet.
+// Nothing is backfilled: an older crawl re-judged at 0.14.0 loses the
+// canonical-variant duplicates (they were never duplicates), gains the two
+// markers where they apply, and keeps every other finding.
+//
 // 0.13.0: Phase 17, on THREE grounds — one rule added, one verdict MOVED, and
 // copy changed. The 5xx re-verification pass
 // (docs/superpowers/specs/2026-09-08-5xx-recheck-design.md) fetches every
@@ -146,7 +167,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.13.0";
+export const RULESET_VERSION = "0.14.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

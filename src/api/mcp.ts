@@ -977,7 +977,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Not paginated: the ruleset is a fixed list that does not grow with the " +
         "size of a crawl — but it is not small, and there is no cursor to take it " +
         "in pieces. Every rule's full copy is tens of kilobytes in one answer " +
-        "(about 109KB, roughly 27k tokens, at this ruleset), so spend the context " +
+        "(about 122KB, roughly 30k tokens, at this ruleset), so spend the context " +
         "deliberately: if you only need the rules that FOUND something, " +
         "issues_list is a fraction of the size.",
       inputSchema: z.strictObject({

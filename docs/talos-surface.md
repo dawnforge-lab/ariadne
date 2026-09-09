@@ -1,8 +1,18 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 18 (ruleset 0.13.0, migrations 0000–0019,
+**Status:** the contract as of Phase 19 (ruleset 0.14.0, migrations 0000–0019,
 16 MCP tools / 16 HTTP routes). `docs/talos-integration.md` says *why* the seam
 exists and what obligations bind it; this document says *what the seam is*.
+
+**What Phase 19 changed here: the ruleset is 0.14.0 and the words are for
+clients.** No served field or shape changed. Four rules joined (100 rows in
+`rules_catalog`, two of them markers, so `marker` now appears on twelve rows),
+two verdicts moved (duplicates and hreflang respect the canonical), one
+measurement changed (near-duplicate on the main-content fingerprint, migration
+0018, with 0019's band indexes behind it), and every `title` / `explanation` /
+`howToFix` / `marker` string passed a rubric that bans engine vocabulary — an
+agent pasting catalog copy into a tenant-facing report no longer has to
+translate it. §11 has the account.
 
 **What Phase 18 changed here: `crawl_status` says why a failed crawl failed.**
 One field was ADDED to the crawl detail and nothing changed type.
@@ -290,9 +300,10 @@ validator before the handler runs (`test/api/mcp.test.ts:790` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (96 rows at 0.13.0) rather than by the crawl. The
-catalog is ~109 KB (**111,419 bytes**, re-measured 2026-09-08 at the end of
-Phase 17 over all 96 rows of ruleset 0.13.0, by serialising what `rulesCatalog`
+bounded by the **ruleset** (100 rows at 0.14.0) rather than by the crawl. The
+catalog is ~122 KB (**124,902 bytes**, re-measured 2026-09-09 at the end of
+Phase 19 over all 100 rows of ruleset 0.14.0 — the copy pass lengthened many
+entries; 111,419 bytes at 96 rows of 0.13.0 — by serialising what `rulesCatalog`
 answers with no crawl id — of which **681 bytes** are the `marker` strings on
 the ten markers; the 109,949 before it was measured earlier in the same phase,
 at 95 rows of 0.12.0 and before `http.server-error` was split in two; the
@@ -1267,7 +1278,7 @@ counts are the authority, not the ratio", `test/rules/copy.test.ts:1159` "tells
 its consumer which check it is evidence for" (which also asserts that the retired
 filing disclaimer is GONE rather than merely superseded),
 `test/rules/copy.test.ts:1186` "grades nothing: no score, no label, no threshold";
-`test/rules/coverage.test.ts:339` "site.health is filed under the
+`test/rules/coverage.test.ts:349` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
 `test/fixtures/harness.test.ts:1913` "the health rollup agrees with a
@@ -1568,7 +1579,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.13.0** as of Phase 17) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.14.0** as of Phase 19) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1626,6 +1637,28 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 19 bumped to 0.14.0 on four grounds: two verdicts MOVE, one measurement
+CHANGES, four rules are added, and copy changes on 26.** The moves: the two
+duplicate rules and every hreflang rule now ignore a page canonicalised
+elsewhere (as declarer and as target), because on a real crawl the only
+"duplicates" and the only missing hreflang return links were parameter
+variants each canonicalised to the base. The measurement: `content.near-
+duplicate` pairs on `main_simhash` (migration 0018, the fingerprint of the
+main content — inside `<main>`, else the body minus nav/header/footer/aside)
+with both pages at least 50 words of their own, because the whole-text
+fingerprint was dominated by ~900 words of chrome on every page; a crawl with no
+main-content fingerprint gets `content.near-duplicate-skipped` (marker) rather
+than a silent pass. Added: `links.to-server-error` (critical, the 5xx half of
+CHECK-11), `hreflang.missing-self-reference` (warning), and the markers
+`hreflang.alternates-not-crawled` and `content.near-duplicate-skipped` (info).
+Copy: 26 entries and all twelve marker reasons, under a rubric test that bans
+engine vocabulary from every client-facing string (§5.1's `marker` reasons
+included). **Nothing is backfilled**: an older crawl re-judged at 0.14.0 loses
+the canonical-variant duplicates (they were never duplicates), gains the two
+markers where they apply, and keeps every other finding; the near-duplicate
+count on a pre-0018 crawl is not comparable across the boundary because the
+rule cannot run there at all — the marker is what says so.
 
 **Phase 17 bumped to 0.13.0 on three grounds, and one of them MOVES a verdict.**
 First, a rule added: `http.server-error-transient` (`warning`), which fires on a

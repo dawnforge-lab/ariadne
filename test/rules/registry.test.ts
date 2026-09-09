@@ -243,7 +243,12 @@ describe("check universe", () => {
     // stored finding was produced by, and two numbers inside one phase would
     // claim a difference between rules that shipped together. Phase 9's bump is
     // T2's, above; the phase's other tasks verify rather than bump again.
-    expect(RULESET_VERSION).toBe("0.13.0");
+    //
+    // 0.14.0: Phase 19, the audit accuracy pass — verdicts moved (duplicates
+    // and hreflang respect the canonical), a measurement changed (near-
+    // duplicate on the main-content fingerprint), four rules added, copy on 26
+    // rules; registry.ts's entry carries the grounds.
+    expect(RULESET_VERSION).toBe("0.14.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -297,23 +302,25 @@ describe("check annotations", () => {
  * `docs/superpowers/specs/2026-09-08-severity-recalibration-design.md` §1, whose
  * §2 table carries the per-rule reasoning, plus Phase 17's one addition at
  * 0.13.0: `http.server-error-transient` (warning), the 5xx a second observation
- * cleared. The critical list below is UNCHANGED by that bump —
+ * cleared, and Phase 19's four at 0.14.0: `links.to-server-error` (critical,
+ * the one addition to the list below), `hreflang.missing-self-reference`
+ * (warning) and two markers. The critical list was UNCHANGED by the 0.13.0 bump —
  * `http.server-error` is still critical and still fires on every 5xx the
  * recheck did not clear — which is the whole of the "no old crawl silently
  * loses an Error" claim, read off the severity shape. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
- * the ten markers, which report a hole in OUR evidence and never a fault of
+ * the twelve markers, which report a hole in OUR evidence and never a fault of
  * the site.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 27 critical, 24 warning and 45 info rules", () => {
+  it("holds 28 critical, 25 warning and 47 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 27, warning: 24, info: 45 });
-    expect(all).toHaveLength(96);
+    expect(counts).toEqual({ critical: 28, warning: 25, info: 47 });
+    expect(all).toHaveLength(100);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -335,6 +342,7 @@ describe("severity shape of the ruleset", () => {
       "http.server-error",
       "indexability.meta-header-conflict",
       "links.broken-internal",
+      "links.to-server-error",
       "mobile.viewport-missing",
       "nav.js-only",
       "redirect.js",

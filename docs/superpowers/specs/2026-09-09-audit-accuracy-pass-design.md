@@ -199,8 +199,10 @@ and keeps its edits surgical.
 - Full suite green, tsc clean, migration 0018 applied.
 - Ruleset 0.14.0; the registry shape test records the new totals.
 - `crawl_9c9292c7` re-judged at 0.14.0: `content.exact-duplicate` 0,
-  `hreflang.missing-return-link` 0, `hreflang.missing-self-reference` 2,
-  `hreflang.alternates-not-crawled` 1 (5 hosts, 1,880 alternates),
+  `hreflang.missing-return-link` 0, `hreflang.missing-self-reference` 0 (the
+  only two pages omitting themselves are the canonicalised variants, which are
+  invisible to hreflang entirely — corrected at build time),
+  `hreflang.alternates-not-crawled` 1 (5 hosts, 1,870 distinct alternates),
   `content.near-duplicate-skipped` 1 (pre-0018 crawl), `links.broken-internal`
   91 with the 4xx title. A fresh crawl of the same site at 0018 shows the
   near-duplicate count with the main-content fingerprint, recorded beside the
