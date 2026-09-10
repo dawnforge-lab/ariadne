@@ -98,19 +98,31 @@ export const statusRules: PageRule[] = [
   // marker means a check could not be ANSWERED, and CHECK-12 was answered — the
   // site returned a server error. Persistence is a qualifier on that answer, not
   // the absence of one, and under-reporting a broken page is the worse mistake.
-  pageRule("http.server-error", ["CHECK-12"], CATEGORY, "critical", (p, self) =>
-    p.fetchClass === "server_error" && !recheckCleared(p)
-      ? [
-          finding(self, p, {
-            statusCode: p.statusCode,
-            recheck: recheckState(p),
-            recheckStatusCode: p.recheckStatusCode,
-            recheckFetchClass: p.recheckFetchClass,
-            recheckReason: p.recheckReason,
-            gapSeconds: gapSeconds(p),
-          }),
-        ]
-      : [],
+  pageRule(
+    "http.server-error",
+    ["CHECK-12"],
+    CATEGORY,
+    "critical",
+    [
+      { key: "recheck", label: "Recheck" },
+      { key: "recheckStatusCode", label: "Recheck Status Code" },
+      { key: "recheckFetchClass", label: "Recheck Fetch Class" },
+      { key: "recheckReason", label: "Recheck Reason" },
+      { key: "gapSeconds", label: "Recheck Gap (s)" },
+    ],
+    (p, self) =>
+      p.fetchClass === "server_error" && !recheckCleared(p)
+        ? [
+            finding(self, p, {
+              statusCode: p.statusCode,
+              recheck: recheckState(p),
+              recheckStatusCode: p.recheckStatusCode,
+              recheckFetchClass: p.recheckFetchClass,
+              recheckReason: p.recheckReason,
+              gapSeconds: gapSeconds(p),
+            }),
+          ]
+        : [],
   ),
 
   // The same 5xx after the site answered the second request with something that
@@ -118,17 +130,27 @@ export const statusRules: PageRule[] = [
   // because the page serves now and rather than `info` because an intermittent
   // 5xx still costs crawl rate — and never a marker, because this is a fact
   // about the SITE that two observations settled, not a hole in our evidence.
-  pageRule("http.server-error-transient", ["CHECK-12"], CATEGORY, "warning", (p, self) =>
-    p.fetchClass === "server_error" && recheckCleared(p)
-      ? [
-          finding(self, p, {
-            statusCode: p.statusCode,
-            recheckStatusCode: p.recheckStatusCode,
-            recheckFetchClass: p.recheckFetchClass,
-            gapSeconds: gapSeconds(p),
-          }),
-        ]
-      : [],
+  pageRule(
+    "http.server-error-transient",
+    ["CHECK-12"],
+    CATEGORY,
+    "warning",
+    [
+      { key: "recheckStatusCode", label: "Recheck Status Code" },
+      { key: "recheckFetchClass", label: "Recheck Fetch Class" },
+      { key: "gapSeconds", label: "Recheck Gap (s)" },
+    ],
+    (p, self) =>
+      p.fetchClass === "server_error" && recheckCleared(p)
+        ? [
+            finding(self, p, {
+              statusCode: p.statusCode,
+              recheckStatusCode: p.recheckStatusCode,
+              recheckFetchClass: p.recheckFetchClass,
+              gapSeconds: gapSeconds(p),
+            }),
+          ]
+        : [],
   ),
 
   // A NOT MEASURED marker, not a site defect. A 401/403/429 or a challenge page
@@ -143,8 +165,18 @@ export const statusRules: PageRule[] = [
     ["CHECK-05"],
     CATEGORY,
     "info",
+    [{ key: "fetchReason", label: "Block Reason" }],
+    // `fetchReason` is the evidence's own column (Phase 20): the standard
+    // columns already carry the URL, the status and "Non-Indexable / Client
+    // Error", and what they cannot say is WHICH wall this was — a `cf-mitigated`
+    // header, a 401/403/429, a challenge body on a 503. `pages.fetch_reason` is
+    // the sentence the fetch layer wrote from the response itself, and it is the
+    // difference between "ask the client to allowlist our user agent" and "this
+    // URL is behind a login".
     (p, self) =>
-      p.fetchClass === "blocked" ? [finding(self, p, { statusCode: p.statusCode })] : [],
-    "The site answered this crawler with a bot challenge or an access denial instead of the page, so nothing on it could be read or judged; allow our user agent through the bot protection and crawl again.",
+      p.fetchClass === "blocked"
+        ? [finding(self, p, { statusCode: p.statusCode, fetchReason: p.fetchReason })]
+        : [],
+    "The site answered the crawler with a bot challenge or access denial, so this page was not read; allowlist the crawler's user agent and crawl again.",
   ),
 ];

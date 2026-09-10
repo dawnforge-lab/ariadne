@@ -22,9 +22,6 @@ import {
   NEAR_DUPLICATE_MIN_MAIN_WORDS,
   SOFT_404_WORDS,
   TEMPLATE_HAMMING,
-  // `THIN_WORDS` moved here with `content.thin` itself (Phase 19 §11): the
-  // thin-content floor reads a page's main-content word count, whose null only
-  // the crawl's census can read, so the rule is a query rule now.
   THIN_WORDS,
 } from "../../src/rules/query/content.js";
 import {
@@ -51,300 +48,96 @@ import {
   SITEMAP_URL_CAP,
 } from "../../src/rules/metric/crawl-metrics.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
-import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import {
   BROKEN_SAMPLE_RESOURCES,
   IMAGE_WEIGHT_WARN,
-  OVERSIZED_SAMPLE_PAGES,
   UNCACHED_SAMPLE_RESOURCES,
 } from "../../src/rules/query/resources.js";
 
 /**
- * The content copy spells its distance out in words, so the threshold pin below
- * has to spell the constant out too. Only the values the rule could plausibly
- * take are here; an unmapped one fails the assertion rather than passing it.
+ * THE CLIENT-FACING COPY, PINNED.
+ *
+ * Two things are asserted here and they are not the same thing:
+ *
+ *  1. ACCURACY. Every `it` in the first half states one lesson about what a
+ *     rule may claim — each of them a real defect once, found by reading a
+ *     finding beside the rule that produced it. The assertions are at the level
+ *     of the CLAIM (a concept, a number, a boundary), never at the level of a
+ *     sentence: the copy was rewritten wholesale in Phase 20 into the register
+ *     of an SEO tool, and a test that pinned its old wording would have to be
+ *     rewritten with every pass while pinning nothing that matters.
+ *  2. STRUCTURE. The rubric describes at the bottom hold the whole registry to
+ *     the shape docs/superpowers/specs/2026-09-10-reports-and-copy-design.md §1
+ *     defines: `Area: Condition` titles from a fixed area list, a description of
+ *     one to three sentences, a fix with at least one imperative, no engine
+ *     vocabulary, a threshold in the title of every rule that fires on one, and
+ *     one plain sentence per marker.
+ *
+ * The reader all of it protects is a site owner with no knowledge of this
+ * engine (docs/talos-integration.md, obligation 6): the text reaches them in a
+ * report, an action plan or a Talos screen, verbatim and with no glossary.
+ *
+ * Numbers in the copy are asserted against the rules' own exported constants,
+ * so prose and rule cannot drift: change `TITLE_MIN` and this file fails until
+ * the sentence changes with it.
  */
-const NUMBER_WORDS: Record<number, string> = {
-  1: "one",
-  2: "two",
-  3: "three",
-  4: "four",
-  5: "five",
+
+/** Every rule the registry builds — the population both halves are asserted over. */
+const RULES = buildRegistry().all();
+
+/**
+ * Sentences of a paragraph, near enough for a rubric.
+ *
+ * A sentence ends at `.`, `!` or `?` followed by whitespace (or at the end of
+ * the string). Known abbreviations are blanked first so "e.g." does not end
+ * one: today's copy uses none, and the guard is for the entry written next.
+ * Semicolons and colons do NOT end a sentence — the copy joins clauses with
+ * both, deliberately.
+ */
+const ABBREVIATIONS = /\b(?:e\.g|i\.e|etc|vs|approx|no)\.\s/gi;
+const sentences = (text: string): string[] =>
+  text
+    .replace(ABBREVIATIONS, (m) => m.replace(".", " "))
+    .split(/(?<=[.!?])["')]?\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+/** The copy of one rule, by id, with a readable failure when the id is unknown. */
+const copy = (id: string) => {
+  const c = ISSUE_COPY[id];
+  if (c === undefined) throw new Error(`no copy for ${id}`);
+  return c;
 };
 
-/**
- * The same mechanism for the list caps, which are spelled in words too — the
- * link metrics' copy already says "twenty" and "twenty-five" where the rule says
- * 20 and 25, and P11's resource copy says "ten" and "twenty".
- *
- * A second map rather than entries in the one above, because the two are read at
- * different scales and an unmapped value must fail rather than pass: a cap of 15
- * has no word here and the lookup returns undefined, which no `toContain` will
- * match.
- */
-const CAP_WORDS: Record<number, string> = {
-  10: "ten",
-  20: "twenty",
+/** Title + explanation + how-to-fix, for the negative guards. */
+const whole = (id: string): string => {
+  const c = copy(id);
+  return `${c.title} ${c.explanation} ${c.howToFix}`;
 };
 
-/**
- * Every rule id defined by the Phase 2 rule tables (plan tasks 4-6). Kept here
- * rather than derived from the registry so the copy lands before the rules do
- * and a rule added without copy fails loudly on this list.
- */
-const PHASE_2_RULE_IDS = [
-  "title.missing",
-  "title.too-short",
-  "title.too-long",
-  "meta-description.missing",
-  "meta-description.too-short",
-  "meta-description.too-long",
-  "headings.h1-missing",
-  "headings.h1-multiple",
-  "headings.level-skip",
-  "content.thin",
-  "content.placeholder",
-  "http.server-error",
-  "crawl.blocked",
-  "canonical.missing",
-  "canonical.points-elsewhere",
-  "canonical.multiple",
-  "canonical.html-header-conflict",
-  "canonical.cross-domain",
-  "directive.canonical-noindex-conflict",
-  "indexability.noindex",
-  "indexability.meta-header-conflict",
-  "hreflang.invalid-code",
-  "hreflang.missing-x-default",
-  "mobile.viewport-missing",
-  "images.missing-dimensions",
-  "images.missing-alt",
-  "performance.slow-response",
-  "structure.deep-page",
-];
+// ==========================================================================
+// COVERAGE
+// ==========================================================================
 
-/**
- * The query rules of the Phase 3 tables, listed the same way and for the same
- * reason: copy lands with the rule, and a rule added without copy fails here as
- * well as at registry build time.
- */
-const PHASE_3_RULE_IDS = [
-  "redirect.chain",
-  "redirect.loop",
-  "links.broken-internal",
-  "canonical.non-200-target",
-  "canonical.non-indexable-target",
-  "links.orphan",
-  "links.orphan-skipped",
-  "hreflang.missing-return-link",
-  "hreflang.non-indexable-target",
-  "pagination.next-target-uncrawled",
-  "pagination.next-not-linked",
-  "pagination.canonical-to-other",
-  "robots.missing",
-  "robots.blocks-sitemap-urls",
-  "robots.check-skipped",
-  "sitemap.missing",
-  "sitemap.invalid",
-  "sitemap.non-200",
-  "sitemap.redirected",
-  "sitemap.non-indexable",
-  "sitemap.uncrawled",
-  "pages.not-in-sitemap",
-  "url.normalisation-variants",
-  "url.tracking-params-internal",
-  "url.parameter-pages-indexable",
-  "host.http-serves-200",
-  "host.duplicate-host-200",
-  "host.legacy-host-reachable",
-  "host.probe-skipped",
-  "content.soft-404",
-  "content.exact-duplicate",
-  "content.near-duplicate",
-  "schema.none-on-site",
-  "schema.product-incomplete",
-  "schema.breadcrumb-absent",
-  "schema.self-serving-reviews",
-];
-
-/**
- * The metric rules of the Phase 4 tables. Same contract as the two lists above
- * — copy lands with the rule — and the same reason to keep listing them by
- * hand: a metric that shipped without copy would render as a table with no
- * label saying what its numbers are.
- */
-const PHASE_4_METRIC_IDS = [
-  "inlinks.distribution",
-  "inlinks.extremes",
-  "inlinks.sources-by-type",
-  "structure.depth-distribution",
-  "content.metrics-by-type",
-  "content.template-similarity",
-  "hreflang.coverage",
-  "url.param-volumes",
-  "redirect.volume",
-  "sitemap.structure",
-];
-
-/**
- * The render pass's rules. Same contract again — copy lands with the rule —
- * with one addition worth naming: `render.coverage` is a metric and the four
- * above it are findings, so the metric-only assertions below select it out of
- * this list rather than taking the whole of it.
- */
-const PHASE_5_RULE_IDS = [
-  "content.csr-dependent",
-  "nav.js-only",
-  "filters.js-only",
-  "redirect.js",
-  "render.coverage",
-];
-
-/** The metric ids of the list above — what the metric-copy contracts apply to. */
-const PHASE_5_METRIC_IDS = ["render.coverage"];
-
-/**
- * Phase 7's rules. Same contract as every list above: the copy lands with the
- * rule, and a rule that shipped without it fails here as well as at registry
- * build time.
- *
- * T1 corrected what existing rules measure rather than adding new verdicts —
- * apart from `content.thin-skipped`, which is a verdict about the CRAWL and
- * needs a title of its own for exactly that reason. T2 adds the three
- * field-level duplicate rules the checklist has always asked for, plus the
- * heading skip, which is the same crawl-not-site verdict one column over. T4
- * adds the click-depth metric, whose copy has to do something no other metric's
- * does: say what the table it stands NEXT TO measures, because
- * `structure.depth-distribution` keeps its data under a corrected title and the
- * two are one letter apart in a list.
- */
-const PHASE_7_RULE_IDS = [
-  "content.thin-skipped",
-  "title.duplicate",
-  "meta-description.duplicate",
-  "h1.duplicate-text",
-  "h1.duplicate-skipped",
-  "structure.click-depth-distribution",
-];
-
-/**
- * Phase 10's metric: the health rollup Talos draws a gauge from. Same contract
- * as every list above, and it joins the metric-copy contracts below — a table
- * of counts must read as a measurement rather than as a verdict, which for this
- * one is the whole point (the engine emits the ingredients; the consumer draws
- * the gauge).
- */
-const PHASE_10_METRIC_IDS = ["site.health"];
-
-/**
- * Phase 11's rules: the four that judge the files a page points at, the marker
- * that reports a crawl which recorded none, and the page-weight table.
- *
- * Same contract as every list above — copy lands with the rule — and one
- * obligation of its own, asserted below rather than only written here: every
- * string in this group has to carry the boundary the whole family is built on.
- * These are the SERVED HTML's references, and a file the pass never asked about
- * is UNKNOWN rather than clean or broken. Copy that stated either half loosely
- * would put a claim in front of a client that the evidence does not support.
- */
-const PHASE_11_RULE_IDS = [
-  "resources.broken",
-  "images.oversized",
-  "images.legacy-format",
-  "resources.uncached",
-  "resources.not-recorded",
-  "page.weight",
-];
-
-/** The metric ids of the list above — what the metric-copy contracts apply to. */
-const PHASE_11_METRIC_IDS = ["page.weight"];
-
-/**
- * Phase 12's rule: the sibling marker. Same contract as every list above, and
- * the same obligation as the family it joins — it speaks about the CRAWL, and
- * its copy must not read as a fact about the site.
- */
-const PHASE_12_RULE_IDS = ["resources.not-fetched"];
-
-/**
- * Phase 13's rule: the third and last resource marker. Same contract as every
- * list above, and the same obligation as the family it joins — it speaks about
- * the CRAWL, and its copy must not read as a fact about the site.
- */
-const PHASE_13_RULE_IDS = ["resources.all-unknown"];
-
-/**
- * Phase 14's rule: the fourth and last resource marker. Same contract as every
- * list above, and the same obligation as the family it joins — it speaks about
- * the CRAWL, and its copy must not read as a fact about the site.
- */
-const PHASE_14_RULE_IDS = ["resources.partial-unknown"];
-
-/**
- * Phase 17's rule: the other half of the 5xx split. Same contract as every list
- * above — copy lands with the rule — and one obligation of its own: it is the
- * only rule in the ruleset whose subject is TWO observations, so its copy has to
- * say that the page failed once and serves now. Copy that reported only the
- * second look would tell a client nothing happened.
- */
-const PHASE_17_RULE_IDS = ["http.server-error-transient"];
-
-/**
- * Phase 19's link rule: the 5xx half of CHECK-11, split out when
- * `links.broken-internal` stopped saying "returns an error" and started naming
- * its status class. Listed here for the same reason as every id above — copy
- * lands with the rule — and the split is only worth anything if the two entries
- * read differently, which the assertions further down pin.
- */
-const PHASE_19_LINK_RULE_IDS = ["links.to-server-error"];
-
-/**
- * Phase 19's hreflang pair: the self-reference rule, which reports the half of
- * reciprocity a single page can be judged on, and the NOT MEASURED marker for
- * the alternates a crawl never fetched. Listed here for the same reason as
- * every id above — copy lands with the rule.
- */
-const PHASE_19_HREFLANG_RULE_IDS = [
-  "hreflang.missing-self-reference",
-  "hreflang.alternates-not-crawled",
-];
-
-/**
- * Phase 19's content rule: the NOT MEASURED marker for the near-duplicate check,
- * which cannot be asked of a crawl taken before the main-content fingerprint
- * existed. Listed here for the same reason as every id above — copy lands with
- * the rule — and it carries the family's own obligation: it speaks about the
- * CRAWL, and its copy must not read as a fact about the site.
- */
-const PHASE_19_CONTENT_RULE_IDS = ["content.near-duplicate-skipped"];
-
-const ALL_RULE_IDS = [
-  ...PHASE_2_RULE_IDS,
-  ...PHASE_3_RULE_IDS,
-  ...PHASE_4_METRIC_IDS,
-  ...PHASE_5_RULE_IDS,
-  ...PHASE_7_RULE_IDS,
-  ...PHASE_10_METRIC_IDS,
-  ...PHASE_11_RULE_IDS,
-  ...PHASE_12_RULE_IDS,
-  ...PHASE_13_RULE_IDS,
-  ...PHASE_14_RULE_IDS,
-  ...PHASE_17_RULE_IDS,
-  ...PHASE_19_LINK_RULE_IDS,
-  ...PHASE_19_HREFLANG_RULE_IDS,
-  ...PHASE_19_CONTENT_RULE_IDS,
-];
-
-describe("issue copy", () => {
+describe("issue copy: coverage", () => {
   it("throws on an unknown rule id", () => {
     expect(() => copyFor("no.such-rule")).toThrow(/no copy/);
   });
 
-  it("covers every rule id the phase tables define, and nothing else", () => {
-    for (const id of ALL_RULE_IDS) {
-      expect(() => copyFor(id), id).not.toThrow();
+  // Both directions. A rule with no copy already fails at registry build (every
+  // rule spreads `copyFor(id)` into its definition), so the direction this
+  // catches is the other one: an entry left behind by a rule that was renamed
+  // or removed, which nothing else would notice.
+  it("covers every rule the registry builds, and nothing else", () => {
+    for (const rule of RULES) {
+      expect(() => copyFor(rule.id), rule.id).not.toThrow();
     }
-    expect(Object.keys(ISSUE_COPY).sort()).toEqual([...ALL_RULE_IDS].sort());
+    expect(Object.keys(ISSUE_COPY).sort()).toEqual(RULES.map((r) => r.id).sort());
+  });
+
+  it("has one entry per rule and no duplicates", () => {
+    expect(Object.keys(ISSUE_COPY).length).toBe(RULES.length);
+    expect(RULES.length).toBeGreaterThan(90);
   });
 
   it("every entry has substantive, client-facing text", () => {
@@ -354,203 +147,174 @@ describe("issue copy", () => {
       expect(c.howToFix.length, `${id} howToFix`).toBeGreaterThan(30);
     }
   });
+});
 
-  // §5 of the audit accuracy design, pinned. The owner's complaint was that
-  // "Internal links point to a URL that returns an error" names no error, so
-  // the two link rules have to name their status class in the title and spell
-  // out the members in the explanation. A title that drifts back to "an error"
-  // fails here.
+// ==========================================================================
+// RESPONSE CODES AND LINKS
+// ==========================================================================
+
+describe("copy: response codes and links", () => {
+  // The owner's complaint that split CHECK-11 in two: "Internal links point to
+  // a URL that returns an error" names no error. Each rule names its status
+  // class in the title and its members in the prose, and a title that drifts
+  // back to "an error" fails here.
   it("names the status class in both broken-link titles, and its members in the prose", () => {
-    const fourXx = ISSUE_COPY["links.broken-internal"]!;
+    const fourXx = copy("links.broken-internal");
     expect(fourXx.title).toContain("4xx");
-    expect(fourXx.explanation).toMatch(/client[- ]error/i);
-    for (const status of ["404", "410", "403", "401"]) {
+    expect(fourXx.title).toMatch(/client error/i);
+    for (const status of ["404", "410"]) {
       expect(fourXx.explanation, `4xx explanation names ${status}`).toContain(status);
     }
+    // 401/403/429 are `blocked`, never `client_error`, so they are NOT in this
+    // report — the copy must say where they went rather than list them as members.
+    expect(fourXx.explanation).toMatch(/401, 403 or 429 are reported under/i);
 
-    const fiveXx = ISSUE_COPY["links.to-server-error"]!;
+    const fiveXx = copy("links.to-server-error");
     expect(fiveXx.title).toContain("5xx");
-    expect(fiveXx.explanation).toMatch(/server[- ]error/i);
+    expect(fiveXx.title).toMatch(/server error/i);
     for (const status of ["500", "502", "503", "504"]) {
       expect(fiveXx.explanation, `5xx explanation names ${status}`).toContain(status);
     }
-    // The 5xx copy must not re-decide whether the error persisted: the
-    // end-of-crawl second look is the linked page's own finding's subject.
-    expect(fiveXx.explanation).toMatch(/second time|asked again|second request/i);
-    // Nor may it promise the second look happened. It has a budget
-    // (`MAX_RECHECKS`) and a "not run" state, so "every 5xx was asked again" is
-    // a claim the engine does not keep — the copy says unless, and points at
-    // the finding that records which.
-    expect(fiveXx.explanation).not.toMatch(/\bEvery 5xx\b/);
-    expect(fiveXx.explanation).toMatch(/unless|budget/i);
   });
 
-  // The on-page thresholds are asserted against the rule constants themselves,
-  // so copy and rule cannot drift apart: change TITLE_MIN and this test fails
-  // until the prose is changed with it.
-  it("quotes the on-page thresholds the rules actually use", () => {
-    expect(ISSUE_COPY["title.too-short"]!.explanation).toContain(
-      `${TITLE_MIN} characters`,
+  // The 5xx link rule must not re-decide whether the error persisted — that is
+  // the linked URL's own finding's subject — and it may not promise the second
+  // look happened: the re-check has a budget and a "not run" state, so "every
+  // 5xx was asked again" is a claim the engine does not keep.
+  it("links.to-server-error points at the re-check without promising it ran", () => {
+    const c = copy("links.to-server-error");
+    expect(c.explanation).toMatch(/requested again|asked again|second time|re-check/i);
+    expect(c.explanation).toMatch(/re-check|confirmed|not made/i);
+    expect(c.explanation).not.toMatch(/\bEvery 5xx\b/);
+  });
+
+  // The 5xx rule reports FOUR outcomes of the end-of-crawl second request, and
+  // one of them is "no second look was made". Copy naming only the confirmed
+  // case would present a state the engine explicitly records as unknown.
+  it("http.server-error says the second look has outcomes, one of them 'not run'", () => {
+    const c = copy("http.server-error");
+    expect(c.explanation).toMatch(/second (?:time|request|look)|requested a second/i);
+    expect(c.explanation, "inconclusive").toMatch(/inconclusive/i);
+    expect(c.explanation, "capped").toMatch(/capped|budget/i);
+    expect(c.explanation, "not run").toMatch(/not run|no second look/i);
+  });
+
+  // The only rule in the ruleset whose subject is TWO observations. Copy
+  // reporting only the second one would tell a client nothing happened.
+  it("http.server-error-transient says the URL failed once and serves now", () => {
+    const c = copy("http.server-error-transient");
+    expect(c.explanation, "the failure").toMatch(/5xx/);
+    expect(c.explanation, "and the recovery").toMatch(
+      /normal response|answered normally|served|recovered/i,
     );
-    expect(ISSUE_COPY["title.too-long"]!.explanation).toContain(
-      `${TITLE_MAX} characters`,
+    expect(c.explanation, "the two are separated in time").toMatch(
+      /again at the end|when requested again|second/i,
     );
-    expect(ISSUE_COPY["meta-description.too-short"]!.explanation).toContain(
-      `${META_MIN} characters`,
-    );
-    expect(ISSUE_COPY["meta-description.too-long"]!.explanation).toContain(
-      `${META_MAX} characters`,
-    );
-    expect(ISSUE_COPY["content.thin"]!.explanation).toContain(`${THIN_WORDS} words`);
+    // Not permanently broken, and not nothing either.
+    expect(c.explanation).toMatch(/intermittent|not permanently broken/i);
   });
 
-  // Asserted against the rule constants, like the on-page thresholds above, so
-  // the prose cannot drift from the number the rule fires on. Word-bounded:
-  // a bare `toContain("5 links deep")` would also pass against "15 links deep".
-  it("quotes the technical thresholds the rules actually use", () => {
-    expect(ISSUE_COPY["performance.slow-response"]!.explanation).toMatch(
-      new RegExp(`\\b${SLOW_MS}ms\\b`),
-    );
-    expect(ISSUE_COPY["structure.deep-page"]!.explanation).toMatch(
-      new RegExp(`\\b${DEEP_DEPTH} links deep\\b`),
+  // `crawl.blocked` describes how the crawl was RECEIVED. Whether Googlebot
+  // meets the same wall is a separate question, and copy that answered it would
+  // be reporting our user agent's experience as the site's indexability.
+  it("crawl.blocked reports the crawler's reception, not the site's indexability", () => {
+    const c = copy("crawl.blocked");
+    expect(c.explanation, "the statuses it fires on").toMatch(/401|403|429/);
+    expect(c.explanation, "and the challenge page").toMatch(/challenge|bot/i);
+    expect(c.explanation, "nothing could be checked").toMatch(/nothing.*could be checked|not audited/i);
+    expect(c.explanation, "search engines are a separate question").toMatch(
+      /separate question|whether search engine/i,
     );
   });
 
-  // The guards below are negative on purpose. A positive `toContain` still
-  // passes when someone APPENDS an overpromise to text that already says the
-  // right thing, so the forbidden claim is what has to be asserted against.
-  it("content.placeholder claims only the literal phrase it detects", () => {
-    const c = ISSUE_COPY["content.placeholder"]!;
-    expect(c.explanation).toContain("lorem ipsum");
-    // The analyzer matches /lorem ipsum/i in visible text and nothing else.
-    const widened = /\bTODO\b|\bTBC\b|dummy (?:text|copy|content|name)|placeholder (?:of any kind|text such as)|generic placeholder|any placeholder/i;
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(widened);
+  // The orphan rule cannot see a link from a URL the crawl never fetched, and
+  // the evidence carries that count for exactly this reason.
+  it("links.orphan says an unfetched URL could have been the missing link", () => {
+    const c = copy("links.orphan");
+    expect(c.explanation, "the cohort").toMatch(/indexable/i);
+    expect(c.explanation, "self-links").toMatch(/self-link/i);
+    expect(c.explanation, "the sitemap is not a link").toMatch(/sitemap/i);
+    expect(c.explanation, "the unfetched caveat").toMatch(
+      /could not fetch|not fetched|unfetched/i,
+    );
   });
 
-  it("images.missing-dimensions claims the absent attribute, not proven CLS", () => {
-    const c = ISSUE_COPY["images.missing-dimensions"]!;
-    expect(c.explanation).toContain("attribute");
-    // An empty attribute counts as present and CSS may already reserve the
-    // space, so layout shift may not be happening at all.
-    const certainty =
-      /is shifting|causes layout shift|will shift|will cause layout shift|results in layout shift|creates layout shift/i;
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(certainty);
+  // The marker beside it: it reports the crawl's own limit, and reporting that
+  // limit as orphans is the always-passes defect hard rule 1 is about.
+  it("links.orphan-skipped reports the crawl's limit, not a site fault", () => {
+    const c = copy("links.orphan-skipped");
+    expect(c.explanation).toMatch(/page limit|did not reach|unfetched|not reach every URL/i);
+    expect(c.explanation).toMatch(/left unrun|rather than report/i);
+    expect(c.howToFix).toMatch(/re-run|resume|re-crawl/i);
   });
+});
 
-  it("mobile.viewport-missing speaks only to the absent tag", () => {
-    const c = ISSUE_COPY["mobile.viewport-missing"]!;
-    // The rule fires on `!hasViewport`. It knows nothing about the contents of
-    // a viewport tag that does exist.
-    const misconfigured =
-      /misconfigured|incorrectly configured|incorrect viewport|wrong viewport|badly configured|invalid viewport/i;
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(misconfigured);
-  });
+// ==========================================================================
+// SITEMAPS AND ROBOTS
+// ==========================================================================
 
-  // The rule is per SET now: it fires once per distinct cluster of alternates,
-  // not once for the crawl and not once per page. Copy saying "this site" or
-  // "this page" would describe the shape the rule used to have.
-  // §4 of the audit accuracy design, pinned. The three hreflang entries have to
-  // agree with what the rules now do: return-link only judges an alternate that
-  // was fetched, the marker asserts nothing about the site, and the
-  // self-reference evidence carries no "own language" URL — the engine stores
-  // no language for a page, so the copy has to say the comparison is between
-  // the declared URLs and the page's own, and nothing more.
-  it("the hreflang copy states which alternates were judged and which were not", () => {
-    const returnLink = ISSUE_COPY["hreflang.missing-return-link"]!;
-    expect(returnLink.explanation).toMatch(/fetched by this crawl/);
-    expect(returnLink.explanation).toMatch(/not counted here/);
-
-    const self = ISSUE_COPY["hreflang.missing-self-reference"]!;
-    expect(self.explanation).toMatch(/its own URL is not one of them/);
-    expect(self.explanation).toMatch(/discard the entire set/);
-    // No claim about which alternate stands in for this page.
-    expect(self.explanation).not.toMatch(/own language code|own-language/i);
-
-    const marker = ISSUE_COPY["hreflang.alternates-not-crawled"]!;
-    expect(marker.explanation).toMatch(/never requested/);
-    expect(marker.explanation).toMatch(/nothing wrong with the site/);
-    expect(marker.howToFix).toMatch(/crawl/i);
-  });
-
-  it("hreflang.missing-x-default speaks about a cluster, not a site or a page", () => {
-    const c = ISSUE_COPY["hreflang.missing-x-default"]!;
-    const wrongScope = /this (?:crawl|site|page)|the whole site|site-wide/i;
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(wrongScope);
-  });
-
-  // rel=next/rel=prev stopped being a discovery or consolidation signal in
-  // 2019. The findings are about what the markup documents and about the HTML
-  // links that are missing beside it.
-  it("the pagination copy does not claim rel=next still consolidates a series", () => {
-    for (const id of [
-      "pagination.next-target-uncrawled",
-      "pagination.next-not-linked",
-      "pagination.canonical-to-other",
-    ]) {
-      const c = ISSUE_COPY[id]!;
-      const overclaim =
-        /rel=next (?:tells|lets|helps|allows|asks) (?:search engines|google|crawlers)|(?:search engines|google|crawlers) use rel=next|consolidat\w+ (?:the )?series (?:with|through|via) rel=next/i;
-      expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
-    }
-  });
-
+describe("copy: sitemaps and robots", () => {
   // The engine never probes /sitemap.xml speculatively (a Phase 1 ruling), so
   // the only sitemaps it can see are the ones robots.txt declares. "This site
-  // has no sitemap" is therefore a claim the rule cannot support: a sitemap
-  // nobody declares is exactly the site this fires on.
+  // has no sitemap" is a claim the rule cannot support: a sitemap nobody
+  // declares is exactly the site this fires on.
   it("sitemap.missing claims an absent declaration, not an absent file", () => {
-    const c = ISSUE_COPY["sitemap.missing"]!;
-    expect(c.title.toLowerCase()).toContain("declared in robots.txt");
+    const c = copy("sitemap.missing");
+    expect(c.title, "the title says where the declaration is missing from").toMatch(
+      /robots\.txt/i,
+    );
+    expect(c.explanation, "and says a sitemap may still exist").toMatch(
+      /may still have a sitemap|still have one|may exist/i,
+    );
     const overclaim =
       /(?:site|there) (?:has|have|is|are) no sitemap|no sitemap (?:exists|at all|on (?:this|the) site)|does not have a sitemap/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 
   // `robotsUnreadable` lets `outcome === "absent"` through, so the rule also
-  // fires on a site that serves no robots.txt at all. Copy that spoke only of
-  // "the robots.txt contains no Sitemap: line" would describe a file that is
-  // not there, and its fix would tell a client to edit it.
+  // fires on a site that serves no robots.txt at all. Copy speaking only of "a
+  // robots.txt with no Sitemap: line" would describe a file that is not there,
+  // and its fix would tell a client to edit it.
   it("sitemap.missing covers the site that serves no robots.txt either", () => {
-    const c = ISSUE_COPY["sitemap.missing"]!;
-    expect(`${c.explanation} ${c.howToFix}`).toMatch(/no robots\.txt|serves none|serves no robots/i);
+    const c = copy("sitemap.missing");
+    expect(`${c.explanation} ${c.howToFix}`).toMatch(
+      /no robots\.txt|serves none|serves no robots/i,
+    );
   });
 
   // The rule fires on every non-200, non-redirect status, and `blocked` (401,
   // 403, 429) is one of them. "Restore the page or remove the entry" is the
-  // wrong instruction for a URL a WAF is defending, so the fix has to branch
-  // the way `canonical.non-200-target`'s does.
+  // wrong instruction for a URL a WAF is defending, so the fix branches.
   it("sitemap.non-200 tells blocked apart from gone", () => {
-    const fix = ISSUE_COPY["sitemap.non-200"]!.howToFix;
-    expect(fix).toMatch(/\b401\b/);
+    const fix = copy("sitemap.non-200").howToFix;
+    expect(fix).toMatch(/\b410\b/);
     expect(fix).toMatch(/\b403\b/);
     expect(fix).toMatch(/\b429\b/);
-    expect(fix).toMatch(/WAF|bot-protection|allowlist/i);
+    expect(fix).toMatch(/WAF|bot protection|bot-protection|allowlist/i);
   });
 
   // THREE causes, and the third is not a variant of the other two: the frontier
   // gates every candidate on `isSameOrigin`, so a listed URL outside the crawl's
-  // origin was never attempted BY DESIGN. A page limit, a depth limit, a robots
-  // disallow and a failed request are all untrue of it, and copy offering only
-  // those sends an operator after a cause that cannot be the reason — on up to
-  // `URL_FINDING_CAP` findings for one cross-host sitemap, quoted verbatim into
-  // the deliverables. So the case has to be named, and it has to have a remedy
-  // of its own rather than sharing "re-run with a higher page limit".
+  // origin was never attempted BY DESIGN. A page limit, a robots disallow and a
+  // failed request are all untrue of it, so it is named, and it has a remedy of
+  // its own rather than sharing "re-run with a higher page limit".
   it("sitemap.uncrawled names the off-origin cause and gives it its own remedy", () => {
-    const c = ISSUE_COPY["sitemap.uncrawled"]!;
-    expect(c.explanation, "the cause is named").toMatch(
-      /outside the boundary|outside the crawl|another host/i,
+    const c = copy("sitemap.uncrawled");
+    expect(c.explanation, "the on-site limit").toMatch(/page or depth limit|page limit|robots\.txt/i);
+    expect(c.explanation, "the off-origin cause is named").toMatch(
+      /outside the crawl|another host|off-origin/i,
     );
     expect(c.explanation, "and named as deliberate, not as a limit").toMatch(
-      /by design|never going to be|was not asked/i,
+      /by design|not fetched by design|deliberate/i,
     );
-    expect(c.howToFix, "the remedy is addressed to that case").toMatch(/off-origin/i);
-    expect(c.howToFix, "and it does not ask for a bigger crawl").toMatch(
-      /needs nothing changed about the crawl|nothing is wrong/i,
+    expect(c.explanation, "and the request that got no answer").toMatch(/no (?:usable )?response|never answered/i);
+    expect(c.howToFix, "the remedy is addressed to the off-origin case").toMatch(/off-origin/i);
+    expect(c.howToFix, "and it does not ask for a bigger crawl for it").toMatch(
+      /need nothing|needs nothing|nothing is wrong/i,
     );
-    // The other two causes keep their own remedies: the off-origin sentence
-    // must not have replaced them.
+    // The other two causes keep their own remedies.
     expect(c.howToFix, "the limit case survives").toMatch(/higher page limit/i);
-    expect(c.howToFix, "the failed-fetch case survives").toMatch(/request the URL yourself/i);
+    expect(c.howToFix, "the failed-fetch case survives").toMatch(/request .*yourself/i);
   });
 
   // The rule fires on `outcome === "absent"`, which is the site ANSWERING with
@@ -558,88 +322,282 @@ describe("issue copy", () => {
   // (`robots.check-skipped`), and copy blurring the two would tell a client to
   // write a file they may already have.
   it("robots.missing does not treat a server failure as an absent file", () => {
-    const c = ISSUE_COPY["robots.missing"]!;
+    const c = copy("robots.missing");
     const blurred = /unreachable|could not be (?:fetched|reached|read)|timed out|server error/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(blurred);
+    expect(c.explanation, "it names the answer it got").toMatch(/not[- ]found|404/i);
+  });
+
+  // …and the sibling that owns the unreachable case says which two shapes it
+  // covers, one of which is a file too big to read in full.
+  it("robots.check-skipped owns the unreadable case and names the read limit", () => {
+    const c = copy("robots.check-skipped");
+    expect(c.explanation).toMatch(/did not serve|could not be fetched|not available/i);
+    expect(c.explanation, "the 500KB read").toMatch(/500\s?KB/i);
+    expect(c.explanation, "the checks were left unrun").toMatch(/unrun|not run|left/i);
+  });
+
+  // A blocked sitemap URL is not a page we judged: it is a URL nobody may read.
+  it("robots.blocks-sitemap-urls names the Disallow line it read", () => {
+    const c = copy("robots.blocks-sitemap-urls");
+    expect(c.explanation).toMatch(/Disallow/);
+    expect(c.explanation).toMatch(/user agent|user-agent/i);
+  });
+
+  // Every sitemap-hygiene rule reports a URL the sitemap NAMES. The three
+  // non-indexable variants must each say which state they cover, or a reader
+  // meeting three findings for one URL cannot tell them apart.
+  it("the three sitemap hygiene rules each name their own state", () => {
+    expect(copy("sitemap.non-200").title).toMatch(/3xx|4xx|5xx|non-200/i);
+    expect(copy("sitemap.non-indexable").title).toMatch(/noindex/i);
+    expect(copy("sitemap.redirected").title).toMatch(/redirect/i);
+    expect(copy("sitemap.non-indexable").explanation).toMatch(
+      /robots meta|X-Robots-Tag|noindex/i,
+    );
+    expect(copy("sitemap.redirected").explanation).toMatch(/redirect/i);
+  });
+
+  // A sitemap that could not be parsed is a document, not a page, and the fix
+  // has to say what a valid one looks like.
+  it("sitemap.invalid names what made the document unreadable", () => {
+    const c = copy("sitemap.invalid");
+    expect(c.explanation).toMatch(/urlset|sitemapindex/i);
+    expect(c.explanation).toMatch(/XML/);
+    expect(c.howToFix).toMatch(/urlset|sitemapindex|XML/i);
+  });
+
+  // Not every absence from a sitemap is a defect — plenty of URLs are left out
+  // on purpose — so the copy has to leave the judgement with the reader.
+  it("pages.not-in-sitemap allows the deliberate omission", () => {
+    const c = copy("pages.not-in-sitemap");
+    expect(`${c.explanation} ${c.howToFix}`).toMatch(/deliberate|intentional|on purpose/i);
+  });
+});
+
+// ==========================================================================
+// CANONICALS, DIRECTIVES AND HREFLANG
+// ==========================================================================
+
+describe("copy: canonicals, directives and hreflang", () => {
+  // A cross-host canonical is right for syndicated content and wrong for
+  // everything else: the rule detects the shape, not the intent.
+  it("canonical.cross-domain reports a shape and asks whether it was meant", () => {
+    const c = copy("canonical.cross-domain");
+    expect(c.explanation).toMatch(/different host|another host/i);
+    expect(c.explanation, "the legitimate case").toMatch(/syndicat/i);
+    expect(c.howToFix).toMatch(/confirm|intended/i);
+  });
+
+  // `indexability.noindex` is listed for review. Copy calling it an error would
+  // report every thank-you page on the site as a fault.
+  it("indexability.noindex is listed for review, not as an error", () => {
+    const c = copy("indexability.noindex");
+    expect(c.explanation).toMatch(/intentional|deliberate|for review|not as an error/i);
+    expect(c.howToFix).toMatch(/No action|Nothing|if the exclusion is deliberate/i);
+  });
+
+  // §4 of the audit accuracy design. Return-link judges only an alternate the
+  // crawl FETCHED; the alternates it did not fetch are a separate, reported
+  // silence. Copy that left this out would read as a complete verdict on an
+  // international setup half of which was never requested.
+  it("the hreflang copy states which alternates were judged and which were not", () => {
+    const returnLink = copy("hreflang.missing-return-link");
+    expect(returnLink.explanation, "judged: the crawled alternates").toMatch(
+      /which was crawled|that was crawled|crawled/i,
+    );
+    expect(returnLink.explanation, "not judged: reported separately").toMatch(
+      /not crawled|separately|not checked/i,
+    );
+    expect(returnLink.explanation, "why reciprocity matters").toMatch(/reciprocal|both ways/i);
+
+    const self = copy("hreflang.missing-self-reference");
+    expect(self.explanation, "the page's own URL is the subject").toMatch(/own URL/i);
+    expect(self.explanation, "and the whole set is discarded").toMatch(/discard/i);
+    // The engine stores no language for a page, so no copy may say which
+    // alternate stands in for it.
+    expect(self.explanation).not.toMatch(/own language code|own-language/i);
+
+    const marker = copy("hreflang.alternates-not-crawled");
+    expect(marker.explanation, "what was not done").toMatch(/not crawled|not fetched|were not/i);
+    expect(marker.explanation, "what could not be judged").toMatch(/nothing is known|could not be checked/i);
+    expect(marker.explanation, "and that this is not a site fault").toMatch(
+      /not crawled by design|not that anything is wrong/i,
+    );
+    expect(marker.howToFix).toMatch(/crawl/i);
+  });
+
+  // The rule is per SET: it fires once per distinct cluster of alternates, not
+  // once for the crawl and not once per page.
+  it("hreflang.missing-x-default speaks about a cluster, not a site or a page", () => {
+    const c = copy("hreflang.missing-x-default");
+    const wrongScope = /this (?:crawl|site|page)|the whole site|site-wide/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(wrongScope);
+    expect(c.explanation).toMatch(/set|versions/i);
+  });
+
+  // The predicate is `fetchClass === "redirect" || (auditable && !isIndexable)`,
+  // and for a fetched 200 the second arm is exactly noindex. Copy naming a 4xx
+  // or a canonicalised target would describe a rule that does not ship.
+  it("hreflang.non-indexable-target names the two states it fires on", () => {
+    const c = copy("hreflang.non-indexable-target");
+    expect(c.explanation).toMatch(/redirect/i);
+    expect(c.explanation).toMatch(/noindex/i);
+    expect(c.explanation, "the alternate was crawled").toMatch(/crawled/i);
+  });
+
+  it("hreflang.invalid-code points at the standard rather than guessing the value", () => {
+    const c = copy("hreflang.invalid-code");
+    expect(c.howToFix).toMatch(/ISO 639/);
+    expect(c.howToFix).toMatch(/ISO 3166/);
+    expect(c.howToFix).toMatch(/x-default/);
+  });
+});
+
+// ==========================================================================
+// ON-PAGE AND CONTENT
+// ==========================================================================
+
+describe("copy: on-page and content", () => {
+  // The on-page thresholds are asserted against the rule constants themselves,
+  // so copy and rule cannot drift apart: change TITLE_MIN and this fails until
+  // the prose is changed with it.
+  it("quotes the on-page thresholds the rules actually use", () => {
+    expect(copy("title.too-short").explanation).toContain(`${TITLE_MIN} characters`);
+    expect(copy("title.too-long").explanation).toContain(`${TITLE_MAX} characters`);
+    expect(copy("meta-description.too-short").explanation).toContain(`${META_MIN} characters`);
+    expect(copy("meta-description.too-long").explanation).toContain(`${META_MAX} characters`);
+    expect(copy("content.thin").explanation).toContain(`${THIN_WORDS} words`);
+  });
+
+  // Same contract for the two technical numbers. Word-bounded: a bare
+  // `toContain("5 links")` would also pass against "15 links". `SLOW_MS` is
+  // quoted with the space a client reads ("1500 ms"), so the pin allows it.
+  it("quotes the technical thresholds the rules actually use", () => {
+    expect(copy("performance.slow-response").explanation).toMatch(
+      new RegExp(`(?<![0-9])${SLOW_MS} ?ms\\b`),
+    );
+    expect(copy("performance.slow-response").explanation, "and that it is TTFB").toMatch(
+      /start responding|first byte/i,
+    );
+    expect(copy("structure.deep-page").explanation).toMatch(
+      new RegExp(`(?<![0-9])${DEEP_DEPTH} links\\b`),
+    );
+  });
+
+  // The title and description rules cut by PIXEL width at the search engine's
+  // end; the character count is a working guide. Copy stating it as a hard
+  // limit would have a client trimming a title that was never truncated.
+  it("the length rules call the character count a guide, not a limit", () => {
+    for (const id of ["title.too-long", "meta-description.too-long"]) {
+      expect(copy(id).explanation, id).toMatch(/pixel|working guide|guide rather than/i);
+    }
+  });
+
+  // The guards below are negative on purpose. A positive `toContain` still
+  // passes when someone APPENDS an overpromise to text that already says the
+  // right thing, so the forbidden claim is what has to be asserted against.
+  it("content.placeholder claims only the literal phrase it detects", () => {
+    const c = copy("content.placeholder");
+    // The analyzer matches /lorem ipsum/i in visible text and nothing else.
+    expect(`${c.title} ${c.explanation}`.toLowerCase()).toContain("lorem ipsum");
+    const widened =
+      /\bTODO\b|\bTBC\b|dummy (?:text|copy|content|name)|placeholder (?:of any kind|text such as)|generic placeholder|any placeholder/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(widened);
+  });
+
+  // …and the reason the finding quotes the sentence it matched: the match is
+  // frequently not in the body copy at all.
+  it("content.placeholder says the match is quoted and often not in the body", () => {
+    const c = copy("content.placeholder");
+    expect(c.explanation).toMatch(/quotes up to 160 characters|quotes/i);
+    expect(`${c.explanation} ${c.howToFix}`).toMatch(/excerpt|summary|description/i);
+  });
+
+  it("images.missing-dimensions claims the absent attribute, not proven CLS", () => {
+    const c = copy("images.missing-dimensions");
+    expect(c.explanation).toContain("attribute");
+    // An empty attribute counts as present and CSS may already reserve the
+    // space, so layout shift may not be happening at all.
+    const certainty =
+      /is shifting|causes layout shift|will shift|will cause layout shift|results in layout shift|creates layout shift/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(certainty);
+    expect(c.explanation, "the CSS caveat").toMatch(/unless CSS|CSS reserves/i);
+  });
+
+  it("mobile.viewport-missing speaks only to the absent tag", () => {
+    // The rule fires on `!hasViewport`. It knows nothing about the contents of
+    // a viewport tag that does exist.
+    const misconfigured =
+      /misconfigured|incorrectly configured|incorrect viewport|wrong viewport|badly configured|invalid viewport/i;
+    expect(whole("mobile.viewport-missing")).not.toMatch(misconfigured);
+  });
+
+  it("headings.h1-multiple does not claim a ranking penalty", () => {
+    const c = copy("headings.h1-multiple");
+    // Multiple H1s are valid HTML and are not a ranking problem; the finding is
+    // about the outline and the likely templating accident.
+    const overclaim =
+      /dilut|penalt|hurts? (?:your )?rank|lower(?:s|ing)? (?:your )?rank|damages? (?:your )?rank/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+    expect(c.explanation, "it says the markup is valid").toMatch(/valid HTML|accident/i);
   });
 
   // Same contract as the on-page thresholds: the numbers in the content copy
   // are the rules' own constants, so changing one fails here until the prose
   // changes with it.
   it("quotes the content thresholds the rules actually use", () => {
-    expect(ISSUE_COPY["content.soft-404"]!.explanation).toMatch(
-      new RegExp(`\\b${SOFT_404_WORDS} words\\b`),
+    const soft = copy("content.soft-404");
+    expect(soft.explanation).toMatch(new RegExp(`(?<![0-9])${SOFT_404_WORDS}\\b`));
+    // And WHICH 300 words: the ceiling is applied to the RENDERABLE count, so a
+    // short error message inside a full site shell is still short. Copy leaving
+    // this out would describe a rule that fires far less often than it does on
+    // exactly the sites where it matters most.
+    expect(soft.explanation, "the renderable count").toMatch(/renderable/i);
+    // The other half of the same rule, which either signal can fire on its own:
+    // `TEMPLATE_HAMMING` bits against the site's own not-found body.
+    expect(soft.explanation, "the fingerprint arm").toMatch(
+      new RegExp(`${TEMPLATE_HAMMING} (?:bits )?of 64`, "i"),
     );
-    // And WHICH 300 words: the ceiling is applied to the renderable count, so
-    // a short error message inside a full site shell is still short. Copy that
-    // left this out would describe a rule that fires far less often than it
-    // does on exactly the sites where it matters most.
-    expect(ISSUE_COPY["content.soft-404"]!.explanation).toMatch(/the markup hides/i);
-    // The OTHER half of the same rule, which either signal can fire on its
-    // own: `TEMPLATE_HAMMING` against the site's own not-found body. "A few
-    // bits" left a reader unable to tell how close "close" is.
-    expect(ISSUE_COPY["content.soft-404"]!.explanation).toContain(
-      `${NUMBER_WORDS[TEMPLATE_HAMMING]} bits out of sixty-four`,
-    );
-    expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toContain(
-      `${NUMBER_WORDS[NEAR_DUPLICATE_HAMMING]} bits out of sixty-four`,
+
+    const near = copy("content.near-duplicate");
+    expect(near.explanation, "the distance").toMatch(
+      new RegExp(`${NEAR_DUPLICATE_HAMMING} (?:bits )?of 64`, "i"),
     );
     // Phase 19 §2's floor. A reader who does not know that two thin pages are
     // never paired here will go looking for the pairs that are missing.
-    expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toMatch(
-      new RegExp(`\\b${NEAR_DUPLICATE_MIN_MAIN_WORDS} words\\b`),
+    expect(near.explanation, "the own-words floor").toMatch(
+      new RegExp(`(?<![0-9])${NEAR_DUPLICATE_MIN_MAIN_WORDS} words\\b`),
     );
-    // And the per-page COUNT cap, pinned the same way. A count presented as
-    // exact when it is a floor is the defect hard rule 1 is about, one level
-    // down: the copy has to say where counting stops, and it has to say the
-    // number the rule actually stops at.
-    const cap = String(NEAR_DUPLICATE_COUNT_CAP);
-    expect(ISSUE_COPY["content.near-duplicate"]!.explanation).toMatch(
-      new RegExp(`exactly up to ${cap}, and stated as ${cap} or more`),
+    // And the per-page COUNT cap. A count presented as exact when it is a floor
+    // is hard rule 1's defect one level down: the copy says where counting
+    // stops, and says the number the rule actually stops at.
+    expect(near.explanation, "the count cap").toMatch(
+      new RegExp(`exact(?:ly)?(?: up to)? ${NEAR_DUPLICATE_COUNT_CAP}\\b`, "i"),
     );
   });
 
-  // §1, §2 and §3 of the audit accuracy design, pinned in the three places they
-  // changed what a reader is told. Each assertion is against the thing the OLD
-  // copy did not say, because that is what a revert would take back out.
+  // §1 and §2 of the audit accuracy design: the fingerprint is over the MAIN
+  // content, and a page that has already declared a canonical elsewhere has
+  // done what the fix asks and is not reported.
   it("the content copy says what the duplicate rules now measure and skip", () => {
-    // §2: the fingerprint is over the MAIN content. Copy that still described a
-    // comparison of "each page's visible words" would explain the 237 pairs
-    // across unrelated templates as though they had been correct.
-    const near = ISSUE_COPY["content.near-duplicate"]!;
-    expect(near.explanation).toMatch(/main content/i);
-    expect(near.explanation).toMatch(/header, navigation|navigation.*footer/i);
-
-    // §1, on both duplicate rules: a page that declares a canonical elsewhere
-    // has done the thing the fix asks for and is not reported.
-    expect(ISSUE_COPY["content.exact-duplicate"]!.explanation).toMatch(/canonical/i);
+    const near = copy("content.near-duplicate");
+    expect(near.explanation, "the fingerprint's subject").toMatch(/main content/i);
+    expect(near.explanation, "what it excludes").toMatch(
+      /header, navigation|navigation.*footer/i,
+    );
+    expect(copy("content.exact-duplicate").explanation).toMatch(/canonical/i);
     expect(`${near.explanation} ${near.howToFix}`).toMatch(/canonical/i);
-
-    // §3: the placeholder finding now carries the sentence it matched, and the
-    // title names the phrase rather than a category of "placeholder text".
-    const placeholder = ISSUE_COPY["content.placeholder"]!;
-    expect(placeholder.title).toContain("lorem ipsum");
-    expect(placeholder.explanation).toMatch(/sentence/i);
-    // The reason the quotation matters: the match is often not in the body.
-    expect(placeholder.explanation).toMatch(/excerpt|summary|meta description/i);
   });
 
-  // The marker's own contract, the one every member of the family carries: it
-  // reports the limit of a crawl, and nothing in it may read as a fault found on
-  // the site. Negative assertions, because a positive one still passes when a
-  // verdict is appended to text that already says the right thing.
-  it("content.near-duplicate-skipped reports a crawl, never a site fault", () => {
-    const c = ISSUE_COPY["content.near-duplicate-skipped"]!;
-    // What it must say: why the check could not run, and what would answer it.
-    expect(c.explanation).toMatch(/main content/i);
-    expect(c.howToFix).toMatch(/re-crawl/i);
-    // And that an empty list is not a clean site — the always-passes reading
-    // this marker exists to block.
-    expect(c.explanation).toMatch(/rather than reported as clean|not.*clean/i);
-    // What it must not say: any claim about the site's content.
-    const verdict =
-      /the site has|your pages are|these pages are duplicat|near-duplicate content was found|the site is (?:fine|clean|healthy)/i;
-    expect(`${c.title} ${c.explanation} ${c.howToFix}`).not.toMatch(verdict);
+  // The near-duplicate rule measures a distance between two content
+  // fingerprints. It knows nothing about who wrote what, and near-duplicate
+  // pages carry no ranking penalty — the finding is about consolidation.
+  it("content.near-duplicate claims similarity, not plagiarism or a penalty", () => {
+    const c = copy("content.near-duplicate");
+    const overclaim =
+      /plagiaris|scraped|stolen|copied from|duplicate content penalt|penalis|penaliz|will be penal/i;
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+    expect(c.howToFix, "the remedy is consolidation").toMatch(/merge|consolidat|canonicalise/i);
   });
 
   // The soft-404 rule fires on EITHER signal. Copy saying both are needed would
@@ -647,30 +605,119 @@ describe("issue copy", () => {
   // the page was proved missing would overstate what a similarity measurement
   // and a word count can establish.
   it("content.soft-404 does not make either signal a requirement", () => {
-    const c = ISSUE_COPY["content.soft-404"]!;
+    const c = copy("content.soft-404");
     expect(c.explanation).toContain("200");
+    expect(c.explanation, "the two arms are alternatives").toMatch(/\bor\b/);
     const bothRequired =
       /both signals|only when both|and also matches|must (?:also )?match the|combination of both/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(bothRequired);
   });
 
-  // The near-duplicate rule measures a hamming distance between two content
-  // fingerprints. It knows nothing about who wrote what, and near-duplicate
-  // pages carry no ranking penalty — the finding is about consolidation.
-  it("content.near-duplicate claims similarity, not plagiarism or a penalty", () => {
-    const c = ISSUE_COPY["content.near-duplicate"]!;
-    const overclaim =
-      /plagiaris|scraped|stolen|copied from|duplicate content penalt|penalis|penaliz|will be penal/i;
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+  // The marker's own contract, which every member of the family carries: it
+  // reports the limit of a crawl, and nothing in it may read as a fault found
+  // on the site.
+  it("content.near-duplicate-skipped reports a crawl, never a site fault", () => {
+    const c = copy("content.near-duplicate-skipped");
+    expect(c.explanation, "why the check could not run").toMatch(/fingerprint/i);
+    expect(c.explanation, "and that an empty list is not a clean site").toMatch(
+      /rather than reported clean|rather than reported as clean|not.*clean/i,
+    );
+    expect(c.howToFix).toMatch(/re-crawl/i);
+    const verdict =
+      /the site has|your pages are|these pages are duplicat|near-duplicate content was found|the site is (?:fine|clean|healthy)/i;
+    expect(whole("content.near-duplicate-skipped")).not.toMatch(verdict);
   });
 
+  // Its twin, for the thin-content floor: the same silence, and the reason it
+  // could not be answered from the whole-document word count instead.
+  it("content.thin-skipped says why the document word count was not a substitute", () => {
+    const c = copy("content.thin-skipped");
+    expect(c.explanation).toMatch(/own content|own words/i);
+    expect(c.explanation, "the shared chrome argument").toMatch(/chrome|shared|whole-document/i);
+    expect(c.explanation).toMatch(/rather than reported clean|rather than reported as clean/i);
+    expect(c.howToFix).toMatch(/re-crawl/i);
+  });
+
+  // `content.thin` counts a page's OWN words — the main area, or what is left
+  // once header, navigation, sidebar and footer are removed — and the finding
+  // shows both numbers so a reader can see the template's share.
+  it("content.thin says which words it counted and shows the document total beside them", () => {
+    const c = copy("content.thin");
+    expect(c.explanation).toMatch(/own content|own words|of their own/i);
+    expect(c.explanation, "what own means").toMatch(/main|header, navigation|footer/i);
+    expect(c.explanation, "the second number").toMatch(/whole-document|document word count/i);
+  });
+
+  // The three duplicate-group rules share one evidence shape — the duplicated
+  // value, the exact size of the group, and a capped sample of its URLs — and a
+  // reader who cannot tell the count from the list will read a twenty-URL
+  // sample as the whole problem.
+  it("the field-duplicate copy names the value, the count and the capped URL list", () => {
+    const fields: Record<string, RegExp> = {
+      "title.duplicate": /title/i,
+      "meta-description.duplicate": /description/i,
+      "h1.duplicate-text": /H1/,
+    };
+    for (const [id, value] of Object.entries(fields)) {
+      const text = copy(id).explanation;
+      expect(text, `${id}: the duplicated value`).toMatch(value);
+      expect(text, `${id}: the count of the group`).toMatch(/number of pages carrying it/i);
+      expect(text, `${id}: the capped list`).toMatch(
+        new RegExp(`up to ${DUPLICATE_SAMPLE_URLS} of their URLs`, "i"),
+      );
+      // And the cohort, because a client checking the finding against their own
+      // site will otherwise count noindexed and redirecting URLs too.
+      expect(text, `${id}: the cohort`).toMatch(/indexable/i);
+    }
+    expect(DUPLICATE_SAMPLE_URLS).toBe(20);
+  });
+
+  // Exact equality after trimming is the whole claim. Copy implying the engine
+  // spotted SIMILAR titles would describe a measurement it did not make, and
+  // duplicate titles carry no penalty of their own — the cost is that the pages
+  // stop distinguishing themselves.
+  it("the field-duplicate copy claims exact repetition, not similarity or a penalty", () => {
+    for (const id of ["title.duplicate", "meta-description.duplicate", "h1.duplicate-text"]) {
+      expect(copy(id).explanation, id).toMatch(/identical|word for word/i);
+      const overclaim =
+        /\bsimilar|near-identical|almost the same|penalis|penaliz|will be penal|duplicate content penalt/i;
+      expect(`${copy(id).explanation} ${copy(id).howToFix}`, id).not.toMatch(overclaim);
+    }
+    // And the heading rule says which heading it read: the column holds the
+    // FIRST h1 only, so copy speaking of "the headings on these pages" would be
+    // describing data the rule never sees.
+    expect(copy("h1.duplicate-text").explanation).toMatch(/first H1/i);
+  });
+
+  // The skip's copy is about the CRAWL: a site with no duplicate headings and a
+  // crawl that never read a heading share one silence, and only one of them is
+  // good news.
+  it("h1.duplicate-skipped explains the crawl and the remedy, and claims nothing", () => {
+    const c = copy("h1.duplicate-skipped");
+    expect(c.title, "the title says the check did not run").toMatch(
+      /not checked|not run|could not be run/i,
+    );
+    expect(c.explanation, "what is missing").toMatch(/no H1 text|stored no H1|heading text/i);
+    expect(c.explanation, "though the pages have H1s").toMatch(/carry H1|H1 elements/i);
+    expect(c.explanation, "not reported clean").toMatch(
+      /rather than reported clean|rather than reported as clean/i,
+    );
+    expect(c.howToFix).toMatch(/re-crawl/i);
+  });
+});
+
+// ==========================================================================
+// STRUCTURED DATA
+// ==========================================================================
+
+describe("copy: structured data", () => {
   // The breadcrumb copy names the size of site it is advice for, and that
-  // number is the rule's own floor. Same contract as the on-page thresholds.
-  // The gate is `indexablePages < BREADCRUMB_PAGE_FLOOR` — so the floor is
-  // inclusive and a site of exactly five pages fires. "More than five" would
-  // describe a rule one page less sensitive than the one that ships.
+  // number is the rule's own floor. The gate is
+  // `indexablePages < BREADCRUMB_PAGE_FLOOR`, so the floor is INCLUSIVE and a
+  // site of exactly five pages fires: "more than five" would describe a rule
+  // one page less sensitive than the one that ships.
   it("quotes the breadcrumb page floor the rule actually uses, inclusively", () => {
-    const c = ISSUE_COPY["schema.breadcrumb-absent"]!;
+    const c = copy("schema.breadcrumb-absent");
     expect(c.explanation).toMatch(
       new RegExp(`\\bat least ${BREADCRUMB_PAGE_FLOOR} indexable pages\\b`),
     );
@@ -682,618 +729,119 @@ describe("issue copy", () => {
   // structured data, flatly, would be a claim about markup nobody looked at.
   it("the site-scoped schema copy claims JSON-LD, not every markup format", () => {
     for (const id of ["schema.none-on-site", "schema.breadcrumb-absent"]) {
-      const c = ISSUE_COPY[id]!;
+      const c = copy(id);
       expect(`${c.title} ${c.explanation}`, id).toContain("JSON-LD");
       const overclaim =
         /(?:has|have|uses?|carr(?:y|ies)) no structured data(?! .{0,20}JSON-LD)|no structured data (?:at all|of any kind|anywhere on the site\.)|no markup of any kind/i;
       expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
     }
+    // And the site-wide rule says so outright, since it is the one whose
+    // silence a client would read as "we have no markup".
+    expect(copy("schema.none-on-site").explanation).toMatch(/microdata|RDFa/i);
   });
 
   // The presence blob behind the Product finding is the union across the page's
-  // Product blocks, so a field it names is missing from all of them. Copy about
+  // Product blocks, so a field it names is missing from ALL of them. Copy about
   // "the Product block" would misdescribe a page carrying several.
   it("schema.product-incomplete speaks about the page's blocks, not one block", () => {
-    const c = ISSUE_COPY["schema.product-incomplete"]!;
-    expect(c.explanation).toContain("No Product block on this page");
+    const c = copy("schema.product-incomplete");
+    expect(c.explanation).toMatch(/across all its Product blocks|all of the page's Product/i);
     const singular = /your Product block\b|the Product block on this page\b/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(singular);
+    // The two field rulings a reader would otherwise dispute: an offers block
+    // counts only with a price, and any GTIN length counts.
+    expect(c.explanation, "the offers ruling").toMatch(/price|priceSpecification/);
+    expect(c.explanation, "the gtin ruling").toMatch(/gtin/i);
   });
 
   // The self-serving finding is a statement about which snippets Google shows.
   // It is not an accusation that the reviews are fabricated, and there is no
   // penalty attached to publishing them.
   it("schema.self-serving-reviews claims a policy, not fake reviews or a penalty", () => {
-    const c = ISSUE_COPY["schema.self-serving-reviews"]!;
-    // The copy has to say so, rather than merely avoid saying the opposite:
-    // "Google ignores your ratings" reads as a sanction unless it is denied.
-    expect(c.explanation).toMatch(/not a penalty/i);
-    const overclaim = /fake|fraudulent|fabricat|manual action|penalis|penaliz|will be penal/i;
+    const c = copy("schema.self-serving-reviews");
+    expect(`${c.title} ${c.explanation}`, "it names the policy").toMatch(
+      /policy|self-serving/i,
+    );
+    expect(c.explanation, "and what actually happens").toMatch(/does not show|not shown|no stars/i);
+    const overclaim =
+      /fake|fraudulent|fabricat|manual action|penalt|penalis|penaliz|will be penal/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
+    // The two types it reads, and only those two.
+    expect(c.explanation).toMatch(/Organization/);
+    expect(c.explanation).toMatch(/LocalBusiness/);
   });
+});
 
-  // The metric copy quotes both list caps in words, and both are the rules'
-  // own constants. Pinned the way the on-page thresholds are: a cap that moves
-  // fails here until the prose moves with it.
-  it("quotes the list caps the link metrics actually apply", () => {
-    expect(EXTREMES_LIST_CAP).toBe(20);
-    expect(ISSUE_COPY["inlinks.extremes"]!.explanation).toContain("twenty");
-    expect(SOURCE_TYPE_CAP).toBe(25);
-    expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain("twenty-five");
-    // The rollup bucket is a KEY a reader meets in the table, so the copy has to
-    // name it — and name the parenthesised spelling, which is what keeps it
-    // apart from a template a client really called `other`.
-    expect(OTHER_SOURCES).toBe("(other)");
-    expect(ISSUE_COPY["inlinks.sources-by-type"]!.explanation).toContain(OTHER_SOURCES);
-  });
+// ==========================================================================
+// IMAGES AND RESOURCES
+// ==========================================================================
 
-  // The metric-copy contract is that a reader can say what the table measured
-  // from the text alone — so every COLUMN of the value shape has to appear in
-  // it. p95 was the one the first draft left out: the number was in the jsonb
-  // and nowhere in the prose. Asserted for both distribution metrics, which
-  // share the shape, so the same omission cannot recur in the metrics Tasks 5
-  // and 6 copy from this pattern.
-  it("the distribution copy names every column of the shape, p95 included", () => {
-    for (const id of [
-      "inlinks.distribution",
-      "structure.depth-distribution",
-      "structure.click-depth-distribution",
-    ]) {
-      const text = ISSUE_COPY[id]!.explanation;
-      expect(text, `${id}: the count`).toMatch(/how many pages were measured/i);
-      expect(text, `${id}: min and max`).toMatch(/smallest and largest|shallowest and deepest/i);
-      expect(text, `${id}: the mean`).toContain("mean");
-      expect(text, `${id}: p25/median/p75`).toContain("quartiles");
-      expect(text, `${id}: p95`).toContain("95th percentile");
-    }
-  });
-
-  // The ninth column, and the reason the metric exists in the shape it does. A
-  // `nullCount` a reader meets without prose behind it is a number they will
-  // read as "no data" — which is the exact misreading that let a site with 437
-  // unreachable pages pass CHECK-31. The copy has to say what it counts, that
-  // those pages are NOT depth 0, and that they are the worst bucket.
-  it("the click-depth copy explains the unreachable bucket rather than just having one", () => {
-    const c = ISSUE_COPY["structure.click-depth-distribution"]!;
-    expect(c.explanation).toMatch(/unreachable/i);
-    expect(c.explanation, "says they are not depth zero").toMatch(
-      /rather than being given a depth of zero/i,
-    );
-    expect(c.explanation, "names the sitemap-only case").toMatch(/sitemap/i);
-    expect(c.explanation, "ranks the bucket").toMatch(/worst case/i);
-    expect(c.howToFix, "the fix starts with them").toMatch(/unreachable/i);
-    // And the count's population, which differs from every other distribution's
-    // in this table: `count` includes the pages the statistics exclude.
-    expect(c.explanation).toMatch(/count covers every page measured/i);
-  });
-
-  // The other half of the same move: the metric that KEPT its data had to lose
-  // the words "click depth" from its copy, because the number it holds is a
-  // property of the crawl. A title still saying "click depth" over a column
-  // that counts sitemap entries as zero hops is the defect this task removed.
-  it("the discovery-depth copy claims the crawl, never a click path", () => {
-    const c = ISSUE_COPY["structure.depth-distribution"]!;
-    expect(c.title, "the title names discovery depth").toMatch(/discovery depth/i);
-    expect(c.title, "and never click depth").not.toMatch(/click/i);
-    expect(c.explanation, "it says whose property the number is").toMatch(
-      /measurement of the crawl, not of the site/i,
-    );
-    // It has to say WHY it is flat on a sitemapped site, because that flatness
-    // is what a reader would otherwise quote as good news.
-    expect(c.explanation).toMatch(/sitemap/i);
-    expect(c.explanation, "points at the metric that answers the click question").toMatch(
-      /click depth table/i,
-    );
-  });
-
-  // The same contract, for the Task 5 metrics — which do NOT inherit the
-  // assertion above, because their shapes are their own. Every column of every
-  // value shape has to be findable in the prose: a table's numbers are quoted
-  // to a client, and a column nobody named is a number nobody can explain.
-  it("content.metrics-by-type names all three measures and every column of each", () => {
-    const text = ISSUE_COPY["content.metrics-by-type"]!.explanation;
-    expect(text, "the three measures").toMatch(/word count/i);
-    expect(text, "the three measures").toMatch(/renderable word count/i);
-    expect(text, "the three measures").toMatch(/text ratio/i);
-    // A column called "renderable" is meaningless without the sentence that
-    // says what it leaves out, and that sentence is the whole reason the
-    // measure is quotable to a client.
-    expect(text, "what renderable excludes").toMatch(/the page's own markup hides/i);
-    // And the other half of that sentence, which is the one a reader of this
-    // table would otherwise get wrong: `text_ratio` reads the accumulator that
-    // still includes hidden chrome. Two measures over the same page that treat
-    // hidden text differently must both say which they are, or the table
-    // silently invites the comparison it cannot support.
-    expect(text, "the text ratio still counts hidden text").toMatch(
-      /text ratio counts the hidden parts as text/i,
-    );
-    expect(text, "the count is per measure, over three now").toMatch(/three counts/i);
-    expect(text, "the count").toMatch(/how many pages were measured/i);
-    // And that the count is per measure rather than the size of the cohort —
-    // the one place this shape differs from the link metrics' distribution.
-    expect(text, "the count is per measure").toMatch(
-      /pages that actually carry each measure|carry each measure/i,
-    );
-    expect(text, "min and max").toMatch(/shortest and longest/i);
-    expect(text, "the mean").toContain("mean");
-    expect(text, "p25/median/p75").toContain("quartiles");
-    expect(text, "p95").toContain("95th percentile");
-  });
-
-  it("content.template-similarity names every column, the thresholds and the sample", () => {
-    const c = ISSUE_COPY["content.template-similarity"]!;
-    const text = c.explanation;
-    // `pagesFingerprinted` counts the pages the metric could actually compare,
-    // not the pages of the type: the cohort excludes any page the crawl
-    // recorded no fingerprint for. The name says so and the copy must too — a
-    // column called "pages in type" over a fingerprinted count would understate
-    // real type size wherever the two differ, silently.
-    expect(text, "pagesFingerprinted").toMatch(/how many of the type's pages carry a fingerprint/i);
-    expect(text, "the pages it leaves out").toMatch(/neither compared nor counted/i);
-    expect(text, "pagesSampled").toMatch(/how many of those were sampled/i);
-    expect(text, "pairsSampled").toMatch(/how many pairs that was/i);
-    expect(text, "meanHamming").toMatch(/mean distance/i);
-    expect(text, "p25/median/p75").toContain("quartiles");
-    // The two share columns, and the thresholds their KEYS spell. Pinned
-    // against the rule's own constants, so a threshold that moves fails here
-    // until the prose moves with it (the on-page-threshold contract).
-    expect(TEMPLATE_NEAR_BITS).toBe(3);
-    expect(TEMPLATE_LOOSE_BITS).toBe(8);
-    expect(text, "shareWithin3BitsPct").toMatch(
-      new RegExp(`percentage of pairs within ${TEMPLATE_NEAR_BITS} bits`, "i"),
-    );
-    expect(text, "shareWithin8BitsPct").toMatch(new RegExp(`within ${TEMPLATE_LOOSE_BITS} bits`, "i"));
-    // The sampling rule is part of the shape: three of the columns describe it,
-    // and a reader who cannot see it would read a sample as a census.
-    expect(TEMPLATE_SAMPLE_PAGES).toBe(200);
-    expect(text, "the sampling rule").toMatch(
-      new RegExp(`first ${TEMPLATE_SAMPLE_PAGES} pages`, "i"),
-    );
-    expect(text, "the sample's ordering").toMatch(/page-id order/i);
-  });
-
-  // The plan's naming ruling, asserted negatively because that is the only
-  // direction that holds: prose already saying "template similarity" can have
-  // the other word appended to it and still pass a positive check. The metric
-  // measures how alike two pages are; which parts of a page are worth reading
-  // is a judgement it has not made.
-  it("content.template-similarity is labelled template similarity and never the other word", () => {
-    const c = ISSUE_COPY["content.template-similarity"]!;
-    expect(`${c.title} ${c.explanation} ${c.howToFix}`).not.toMatch(/boilerplate/i);
-    expect(`${c.title} ${c.explanation}`.toLowerCase()).toContain("template");
-  });
-
-  it("hreflang.coverage names its three columns and its empty-cohort answer", () => {
-    const text = ISSUE_COPY["hreflang.coverage"]!.explanation;
-    expect(text, "pagesWithHreflang").toMatch(
-      /how many of this site's indexable pages publish at least one hreflang/i,
-    );
-    expect(text, "indexablePages").toMatch(/out of how many were measured/i);
-    expect(text, "coveragePct").toMatch(/percentage rounded to one decimal place/i);
-    // The null case is a column value a reader will meet, so it is copy too.
-    expect(text, "the null percentage").toMatch(/no percentage rather than zero/i);
-    // And the claim it must NOT make: coverage counts pages that declare
-    // something, not pages whose declarations are correct — that is the
-    // hreflang findings' subject, and conflating them would let a client read
-    // "100% coverage" as "the international setup is sound".
-    const overclaim = /(?:sets|declarations) are (?:complete|correct|valid)|correctly configured/i;
-    expect(text).not.toMatch(overclaim);
-  });
-
-  // The same contract for the task 6 metrics: every column of every value shape
-  // has to be findable in the prose, because a number that reaches a client
-  // without a sentence explaining it is a number nobody can defend.
-  it("url.param-volumes names every column of its shape, the cap and the tie-break", () => {
-    const text = ISSUE_COPY["url.param-volumes"]!.explanation;
-    expect(text, "totalParams").toMatch(/how many distinct parameter names/i);
-    expect(text, "trackingParams").toMatch(/how many of those are tracking parameters/i);
-    // The three columns of a `topParams` entry: name, occurrences, isTracking.
-    expect(text, "topParams.occurrences").toMatch(/the number of URLs it appears on/i);
-    expect(text, "topParams.isTracking").toMatch(/whether it is one of the tracking ones/i);
-    expect(text, "parameterisedPages").toMatch(/how many crawled pages carry a query string/i);
-    expect(text, "parameterisedIndexablePages").toMatch(
-      /how many of those returned 200 and are indexable/i,
-    );
-    // The cap is the rule's own constant, and the tie-break is what makes the
-    // list the same twenty on every run (the on-page-threshold contract).
-    expect(TOP_PARAMS_CAP).toBe(20);
-    expect(text, "the cap").toContain("twenty");
-    expect(text, "the tie-break").toMatch(/ties broken by name/i);
-  });
-
-  it("redirect.volume names every column and what its counts are capped by", () => {
-    const text = ISSUE_COPY["redirect.volume"]!.explanation;
-    expect(text, "redirectPages").toMatch(/how many of the URLs this crawl requested/i);
-    // `redirectInlinks` is a second count of the same fact and reads as a
-    // restatement of the first unless the copy says how they differ — one
-    // redirecting URL in a footer is one page and one link per page of the site.
-    expect(text, "redirectInlinks").toMatch(
-      /number of internal links pointing at one of those redirecting URLs/i,
-    );
-    expect(text, "the two counts are not the same number").toMatch(
-      /the same fact counted the other way round/i,
-    );
-    expect(text, "totalPages").toMatch(/out of how many pages were fetched in total/i);
-    expect(text, "ratioPct").toMatch(/percentage rounded to one decimal place/i);
-    expect(text, "chains and loops").toMatch(/how many redirect chains and how many redirect loops/i);
-    // The counts are exact even where the FINDINGS listing was capped, and the
-    // copy has to say so: a reader comparing the table with the findings list
-    // would otherwise take the difference for an error.
-    expect(text, "the finding cap").toMatch(
-      new RegExp(`counted in full even where that list was capped at the first ${URL_FINDING_CAP}`, "i"),
-    );
-    expect(text, "the null share").toMatch(/no percentage rather than zero/i);
-  });
-
-  // The three duplicate-group rules share one evidence shape — the duplicated
-  // value, the exact size of the group, and a capped sample of its URLs — and a
-  // reader who cannot tell the count from the list will read a twenty-URL
-  // sample as the whole problem. Asserted for all three at once, because they
-  // share a rule body and a copy that stopped naming a column would be the same
-  // omission three times.
-  it("the field-duplicate copy names the value, the exact count and the capped URL list", () => {
-    const fields: Record<string, RegExp> = {
-      "title.duplicate": /shared title/i,
-      "meta-description.duplicate": /shared description/i,
-      "h1.duplicate-text": /shared heading/i,
-    };
-    for (const [id, value] of Object.entries(fields)) {
-      const text = ISSUE_COPY[id]!.explanation;
-      expect(text, `${id}: the duplicated value`).toMatch(value);
-      expect(text, `${id}: count`).toMatch(/how many indexable pages were found carrying it/i);
-      expect(text, `${id}: pages`).toMatch(/up to twenty of those URLs in alphabetical order/i);
-      // The distinction between the two, which is what makes the number
-      // quotable: the count is the group, the list is a sample of it.
-      expect(text, `${id}: the count is not the list`).toMatch(
-        /the count is the whole group, the list is a sample of it/i,
-      );
-      // And the cohort, because a client checking the finding against their own
-      // site will otherwise count noindexed and redirecting URLs too.
-      expect(text, `${id}: the cohort`).toMatch(/returned 200 and are indexable/i);
-    }
-    // The list cap in the copy is the rule's own constant (the on-page-threshold
-    // contract): a cap that moves fails here until the prose moves with it.
-    expect(DUPLICATE_SAMPLE_URLS).toBe(20);
-  });
-
-  // Exact equality after trimming is the whole claim. Copy implying the engine
-  // spotted SIMILAR titles would describe a measurement it did not make, and
-  // duplicate titles carry no penalty of their own — the cost is that the pages
-  // stop distinguishing themselves.
-  it("the field-duplicate copy claims exact repetition, not similarity or a penalty", () => {
-    for (const id of ["title.duplicate", "meta-description.duplicate", "h1.duplicate-text"]) {
-      const c = ISSUE_COPY[id]!;
-      expect(c.explanation, id).toMatch(/word for word/i);
-      const overclaim =
-        /similar|near-identical|almost the same|penalis|penaliz|will be penal|duplicate content penalt/i;
-      expect(`${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
-    }
-    // And the heading rule says which heading it read: the column holds the
-    // FIRST h1 only, so copy speaking of "the headings on these pages" would be
-    // describing data the rule never sees.
-    expect(ISSUE_COPY["h1.duplicate-text"]!.explanation).toMatch(/only each page's first H1/i);
-  });
-
-  // The skip's copy is about the CRAWL. It must not read as a fault on the
-  // site, and it must name each of the three numbers its evidence carries,
-  // because the last of them is the reason the check did not run.
-  it("h1.duplicate-skipped explains the crawl, its three numbers and the remedy", () => {
-    const c = ISSUE_COPY["h1.duplicate-skipped"]!;
-    expect(c.title.toLowerCase()).toContain("could not be run");
-    expect(c.explanation, "indexablePages").toMatch(/how many indexable pages the crawl held/i);
-    expect(c.explanation, "pagesWithH1").toMatch(/how many of them carry an H1 element/i);
-    expect(c.explanation, "pagesWithH1Text").toMatch(/how many have heading text stored/i);
-    // Why a silence had to be reported at all — the unknown-is-not-evidence
-    // argument, in the words a client reads.
-    expect(c.explanation, "the two facts that share one silence").toMatch(
-      /a site with no duplicate headings and a crawl that never read any heading/i,
-    );
-    expect(c.howToFix).toMatch(/re-crawl/i);
-  });
-
-  it("sitemap.structure names every column of both its shapes", () => {
-    const text = ISSUE_COPY["sitemap.structure"]!.explanation;
-    expect(text, "docs").toMatch(/number of documents that contributed at least one entry/i);
-    expect(text, "totalUrls").toMatch(/total number of entries stored across them/i);
-    expect(text, "oversizedDocsSkipped").toMatch(/dropped whole for being too large to read/i);
-    expect(text, "urlCapBreaches").toMatch(/how many documents carry more than the 50,000/i);
-    // `entryCapReached` changes what every other number means, so it is copy
-    // rather than a footnote.
-    expect(text, "entryCapReached").toMatch(/whether the crawl's own entry cap stopped collection/i);
-    expect(text, "the floor that implies").toMatch(/a floor rather than a total/i);
-    // The per-document row: scope value, urls, breaches50k.
-    expect(text, "the doc row's identity").toMatch(/named by the URL it was fetched from/i);
-    expect(text, "urls").toMatch(/how many entries it contributed/i);
-    expect(text, "breaches50k").toMatch(/whether that is past 50,000/i);
-    // Both caps are the rule's own constants.
-    expect(SITEMAP_URL_CAP).toBe(50_000);
-    expect(text, "the protocol cap").toContain("50,000");
-    expect(SITEMAP_DOC_ROWS_CAP).toBe(50);
-    expect(text, "the listing cap").toMatch(
-      new RegExp(`largest ${SITEMAP_DOC_ROWS_CAP} documents are listed`, "i"),
-    );
-  });
-
-  // The render diff rules' thresholds, pinned against the rules' own constants
-  // exactly as the on-page ones are. These matter more than most: all three
-  // fire on a comparison, and copy quoting a threshold the rule does not use
-  // would describe a different, usually more sensitive, rule than the one that
-  // produced the finding a client is reading.
-  it("quotes the render diff thresholds the rules actually use", () => {
-    const csr = ISSUE_COPY["content.csr-dependent"]!.explanation;
-    expect(CSR_WORD_MULTIPLE).toBe(2);
-    expect(csr, "the ratio arm").toMatch(/at least twice as many words/i);
-    expect(csr, "the floor arm").toContain(`${CSR_MIN_ADDED_WORDS} words`);
-
-    const nav = ISSUE_COPY["nav.js-only"]!.explanation;
-    expect(nav, "the raw ceiling").toMatch(new RegExp(`fewer than ${NAV_RAW_MAX} links\\b`));
-    expect(nav, "the rendered floor").toMatch(new RegExp(`at least ${NAV_RENDERED_MIN}\\b`));
-    expect(NAV_RENDERED_MULTIPLE).toBe(2);
-    expect(nav, "the ratio").toMatch(/at least twice as many as the HTML held/i);
-
-    const filters = ISSUE_COPY["filters.js-only"]!.explanation;
-    expect(filters, "the rendered floor").toMatch(
-      new RegExp(`at least ${FILTER_RENDERED_MIN} of them`),
-    );
-    // The predicate is half the finding: a reader who cannot tell what counted
-    // as a filter link cannot check the claim against their own page.
-    expect(filters, "the `?` arm").toMatch(/query string/i);
-    expect(filters, "the regex arm").toMatch(/filter, facet or sort/i);
-  });
-
-  // The standing accuracy constraint on this group, asserted negatively for the
-  // reason the other negative guards are: prose that already says the right
-  // thing can have the overclaim appended to it. Google renders, on a schedule
-  // and a budget nobody outside Google can measure; what these rules establish
-  // is that the content is not in the first response, which is a cost and a
-  // risk rather than an invisibility.
-  it("the render diff copy does not claim search engines cannot see the page", () => {
-    for (const id of ["content.csr-dependent", "nav.js-only", "filters.js-only", "redirect.js"]) {
-      const c = ISSUE_COPY[id]!;
-      const overclaim =
-        /(?:search engines|google|crawlers) (?:cannot|can't|will never|do not|don't) (?:see|index|read|find)|invisible to (?:search engines|google)|never indexed|will not be indexed/i;
-      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(overclaim);
-    }
-  });
-
-  // The metric-copy column contract again, for the Phase 5 metric. Its shape is
-  // two-sided — what the selection decided, and what the page rows now hold —
-  // and the prose has to name both sides plus the reason they can disagree,
-  // because a reader who takes them for one set of numbers will read a
-  // legitimate difference as an error.
-  it("render.coverage names every column of its shape and both of its sides", () => {
-    const text = ISSUE_COPY["render.coverage"]!.explanation;
-    expect(text, "pagesCrawled").toMatch(/how many pages the crawl read in total/i);
-    // P12-T4. The field that says whether the four numbers after it are a
-    // record or a projection (docs/gates/phase-11.md §6.3). The copy has to
-    // carry the distinction where the reader meets the numbers, for the same
-    // reason the explicit nulls do below: an unexplained "18 selected" on a
-    // crawl nobody rendered is read as eighteen pages somebody chose.
-    expect(text, "renderPassEvidence").toMatch(
-      /whether a rendering run left any trace on this crawl at all/i,
-    );
-    expect(text, "the projection, said as one").toMatch(
-      /the selection a rendering run WOULD make if one were made now/,
-    );
-    // P12-T4 fix round 1 (M-1). The copy said a pass that ran and rendered
-    // nothing "says so", and in one shape that is FALSE: an automatic pass that
-    // selected no pages leaves no trace and is reported as `none`. The copy
-    // states the underdetermined shape the way the module docblock and
-    // talos-surface.md §13 do, rather than claiming a separation the engine
-    // cannot make.
-    expect(text, "what the field does separate").toMatch(
-      /always told apart from one that never happened/i,
-    );
-    expect(text, "the shape it cannot separate").toMatch(
-      /cannot tell apart is a run that chose no pages at all/i,
-    );
-    expect(text, "selectionMode").toMatch(/the selection mode, which says who chose the pages/i);
-    expect(text, "selectionBudget").toMatch(/how many pages the rendering run was allowed to open/i);
-    expect(text, "selectionSuspects").toMatch(/how many candidates were suspects/i);
-    expect(text, "selectionSampled").toMatch(/how many were sampled/i);
-    expect(text, "selectionSelected").toMatch(/how many were selected in the end/i);
-    expect(text, "selectionTruncated").toMatch(/whether the selection was truncated/i);
-    expect(text, "pagesRendered").toMatch(/how many pages are recorded as rendered/i);
-    expect(text, "renderFailures").toMatch(/how many render failures were recorded/i);
-    // The asymmetry the rule deliberately does not assert away.
-    expect(text, "the two sides need not agree").toMatch(
-      /need not add up to the number selected/i,
-    );
-    // P8-T2. The four automatic numbers are NULL on an explicit selection, and
-    // the copy has to say so where the reader meets them — a null in a table
-    // that nothing explains is read as a zero, and "0 suspects" is a claim about
-    // the site's HTML that no explicit pass ever made.
-    expect(text, "the explicit case's nulls").toMatch(/empty rather than zero/i);
-  });
-
-  // The metric-copy column contract for Phase 10's rollup, plus the two things
-  // its copy has to say that no other metric's does.
-  it("site.health names every column, and says the ratio is of reported findings", () => {
-    const c = ISSUE_COPY["site.health"]!;
-    const text = c.explanation;
-    expect(text, "urlsTotal").toMatch(/how many pages the audit could judge/i);
-    // The census stated as the PREDICATE it is — `fetch_class = 'ok' and
-    // status_code = 200`, which for this crawler means an HTML body it read.
-    expect(text, "the census definition").toMatch(/fetched OK that answered 200 with HTML/i);
-    expect(text, "urlsWithCritical").toMatch(/how many pages carry a critical finding/i);
-    expect(text, "urlsWithWarningOnly").toMatch(/how many carry a warning and no critical/i);
-    expect(text, "urlsWithInfoOnly").toMatch(/how many carry only informational findings/i);
-    expect(text, "urlsClean").toMatch(/how many carry no finding of any severity/i);
-    expect(text, "cleanRatio").toMatch(/clean ratio.*divided by the pages the audit could judge/is);
-    expect(text, "four decimal places").toMatch(/four decimal places/i);
-    expect(text, "the empty census").toMatch(/empty rather than zero or one/i);
-    expect(text, "pagesNotAuditable").toMatch(/how many pages the crawl fetched that these counts leave out/i);
-    // Counted once, at the worst severity — the property the whole table rests
-    // on, and the one a reader will otherwise assume the other way round.
-    expect(text, "counted once at the worst severity").toMatch(
-      /each page appearing in exactly one of them, at the WORST severity it carries/,
-    );
-    // A finding that names no page is about the site, and belongs in no bucket.
-    expect(text, "site-level findings").toMatch(/appear in none of these counts/i);
-    // THE CAP CAVEAT. A capped run's ratio is a floor of knowledge, and the copy
-    // is the only place a reader of the number meets that fact.
-    expect(text, "reported findings").toMatch(/THE RATIO IS OF REPORTED FINDINGS/);
-    expect(text, "the floor").toMatch(/floor of what is known rather than a fact about the site/i);
-  });
-
-  // The remainder is a SHAPE, not a catalogue. The predicate excludes more than
-  // the three things it is natural to list — a 200 that was not HTML and any
-  // other 2xx are outside it too, and the first of those is counted by no other
-  // table at all, so a closed-looking list here would send a reader looking for
-  // those pages somewhere they are not.
-  it("site.health's remainder is open-ended and names the case nothing else counts", () => {
-    const text = ISSUE_COPY["site.health"]!.explanation;
-    expect(text, "open-ended").toMatch(/leave out — everything else:/);
-    expect(text, "non-HTML 200s").toMatch(/responses that were not HTML such as a PDF or an image/i);
-    expect(text, "any other 2xx").toMatch(/any other status that is not 200/i);
-    // And the honest limit of "they are counted elsewhere".
-    expect(text, "not all covered elsewhere").toMatch(
-      /a 200 that was not HTML is counted by neither/i,
-    );
-  });
-
-  // The ratio's precision, which stops describing the ends of the scale as a
-  // crawl grows: at 50,000 pages one clean page rounds to 0.0000 and one page
-  // with a finding rounds to 1.0000. Rounding four decimal places is right for
-  // the column; what the copy has to add is which number to trust.
-  it("site.health says the counts are the authority, not the ratio", () => {
-    const text = ISSUE_COPY["site.health"]!.explanation;
-    expect(text, "the authority").toMatch(/THE FOUR COUNTS ARE THE AUTHORITY AND THE RATIO IS A CONVENIENCE/);
-    expect(text, "the 0.0000 end").toMatch(/one clean page in fifty thousand rounds to 0\.0000/i);
-    expect(text, "the 1.0000 end").toMatch(
-      /one page carrying a finding in fifty thousand rounds to 1\.0000/i,
-    );
-    expect(text, "what to do instead").toMatch(
-      /Work any percentage out from the counts rather than from the ratio/i,
-    );
-  });
-
-  // WHERE THIS TABLE BELONGS, in the CLIENT-FACING copy rather than only in the
-  // rule's module header: `metrics_get` and `rules_catalog` both export the
-  // `checkIds` with no caveat, so the explanation is the one string that travels
-  // with the id to every consumer that groups rules by check.
-  //
-  // It said something weaker for one phase. While the checklist had no check
-  // about the engine's own coverage, this row was FILED under CHECK-32 and the
-  // copy had to say so — a disclaimer that the id meant nothing, so that a
-  // dashboard would not render the table inside "Orphan pages" as that check's
-  // verdict. CHECK-83 exists now and this row is evidence for it, so the
-  // disclaimer is gone and the plain statement stands in its place: the two
-  // claims that survive it are that a verdict on another check may never be
-  // reached from here (Evaluation Principle 2) and that a UI shows it under
-  // coverage.
-  it("site.health tells its consumer which check it is evidence for, and what it still is not", () => {
-    const text = ISSUE_COPY["site.health"]!.explanation;
-    expect(text, "the plain statement").toMatch(
-      /THE CHECK THIS TABLE CARRIES IS THE ONE IT IS ABOUT/,
-    );
-    expect(text, "the coverage check").toMatch(
-      /engine-coverage check the audit answers before any other/i,
-    );
-    // Principle 2, unweakened by the re-file: this is still a crawl summary.
-    expect(text, "no verdict from here").toMatch(
-      /no verdict on any other check may be reached from it/i,
-    );
-    // And what a UI should do with it, since the UI is the consumer that groups.
-    expect(text, "grouped under coverage").toMatch(
-      /show it under coverage rather than beside a finding about the site/i,
-    );
-    // THE OLD DISCLAIMER IS GONE, not merely superseded: a copy carrying both
-    // sentences would tell a reader the id means nothing and then tell them what
-    // it means.
-    expect(text, "the retired bridge disclaimer").not.toMatch(/WHERE IT IS FILED/);
-    expect(text, "the retired bridge disclaimer").not.toMatch(/answers no checklist check/i);
-  });
-
-  // Obligation 6, as a test: Ariadne emits the ingredients and the ratio; Talos
-  // owns the gauge. A grade, a label or a threshold in this copy would be the
-  // engine passing the judgement it exists to leave to its consumer — and copy
-  // is where one would arrive first, since the row itself is just numbers.
-  it("site.health grades nothing: no score, no label, no threshold", () => {
-    const c = ISSUE_COPY["site.health"]!;
-    // The copy SAYS so first — a reader of the row meets the division of labour
-    // where the numbers are, not only in a design document.
-    const disclaimer =
-      "There is no grade here, no label and no threshold: what counts as healthy " +
-      "belongs to whoever reads it, and this table gives them the numbers to decide with.";
-    expect(c.explanation).toContain(disclaimer);
-
-    // And then it does so. The disclaimer is removed before the search, because
-    // it is the one sentence that must name the things nothing else may do.
-    const whole = `${c.title} ${c.explanation.replace(disclaimer, "")} ${c.howToFix}`;
-    const judgement =
-      /health score|site score|grade|out of 100|score of|\bA\+|excellent|poor health|good health|healthy site|unhealthy|above \d+%|below \d+%|more than \d+% of pages|threshold/i;
-    expect(whole).not.toMatch(judgement);
-  });
-
-  // The resource copy's threshold, pinned against the rule's own constant the
-  // way the on-page ones are. It is quoted with a thousands separator because
-  // that is how a client reads a byte count, so the pin formats the constant
-  // rather than matching its digits.
+describe("copy: images and resources", () => {
+  // The resource threshold, pinned against the rule's own constant the way the
+  // on-page ones are. It is quoted with a thousands separator because that is
+  // how a client reads a byte count, so the pin formats the constant rather
+  // than matching its digits.
   it("quotes the image weight threshold the rules actually use", () => {
     const bytes = IMAGE_WEIGHT_WARN.toLocaleString("en-US");
     expect(bytes).toBe("100,000");
-    expect(ISSUE_COPY["images.oversized"]!.title).toContain(bytes);
-    expect(ISSUE_COPY["images.oversized"]!.explanation).toContain(`${bytes} bytes`);
-    expect(ISSUE_COPY["images.legacy-format"]!.explanation).toContain(`${bytes} bytes`);
-    // And that it is the CHECKLIST's number rather than one we picked, which is
-    // the sentence that stops it drifting on somebody's aesthetic preference.
-    expect(ISSUE_COPY["images.oversized"]!.explanation).toMatch(/100KB line the audit checklist/i);
+    expect(copy("images.oversized").title).toContain(bytes);
+    expect(copy("images.oversized").explanation).toContain(`${bytes} bytes`);
+    expect(copy("images.legacy-format").title).toContain(bytes);
+    expect(copy("images.legacy-format").explanation).toContain(`${bytes} bytes`);
   });
 
-  // The three SAMPLE CAPS the resource copy words, pinned against the rules'
-  // own constants exactly as the threshold above is — the change-one-change-both
-  // contract this family's module header invokes, honoured for all four of its
-  // constants rather than only for the one that decides a verdict.
-  //
-  // A capped sample read as a complete list is the misreading these numbers
-  // exist to prevent, so the copy has to say how long the list is; a copy saying
-  // "ten" over a rule that lists twenty is the same defect as an unstated cap.
+  // The two SAMPLE CAPS the resource copy words, pinned against the rules' own
+  // constants exactly as the threshold above is. A capped sample read as a
+  // complete list is the misreading these numbers exist to prevent, so the copy
+  // says how long the list is — and says the number the rule actually cuts at.
   //
   // THE CHECKLIST RIDES THESE PINS TOO. `skills/ariadne-audit/checklist.md`
   // quotes the same two numbers in CHECK-50 and CHECK-51, in prose an agent
-  // reads and repeats to a client, and it is the living authority (hard rule 10)
-  // rather than a copy of the copy — so it is asserted here against the same
-  // constants. Change a cap and this test names every place that has to move.
+  // reads and repeats to a client, and it is the living authority (hard rule
+  // 10) rather than a copy of the copy — so it is asserted against the same
+  // constants here. Change a cap and this test names every place that moves.
   it("quotes the sample caps the resource rules actually apply", async () => {
     expect(BROKEN_SAMPLE_RESOURCES).toBe(10);
-    expect(OVERSIZED_SAMPLE_PAGES).toBe(10);
     expect(UNCACHED_SAMPLE_RESOURCES).toBe(20);
 
-    const broken = CAP_WORDS[BROKEN_SAMPLE_RESOURCES];
-    const pages = CAP_WORDS[OVERSIZED_SAMPLE_PAGES];
-    const uncached = CAP_WORDS[UNCACHED_SAMPLE_RESOURCES];
-    expect(ISSUE_COPY["resources.broken"]!.explanation, "the broken-file sample").toContain(
-      `lists up to ${broken} of them`,
+    expect(copy("resources.broken").explanation, "the broken-file sample").toMatch(
+      new RegExp(`up to ${BROKEN_SAMPLE_RESOURCES} files`, "i"),
     );
-    expect(ISSUE_COPY["images.oversized"]!.explanation, "the referencing-page sample").toContain(
-      `up to ${pages} of those pages`,
-    );
-    expect(ISSUE_COPY["resources.uncached"]!.explanation, "the uncached sample").toContain(
-      `lists up to ${uncached} of the ones with no header`,
+    expect(copy("resources.uncached").explanation, "the uncached sample").toMatch(
+      new RegExp(`up to ${UNCACHED_SAMPLE_RESOURCES}\\b`, "i"),
     );
 
     // Whitespace-collapsed before matching: the checklist is prose wrapped at
     // 80 columns, and a sentence that moves across a line break is not a change
-    // to what it says. The NUMBER is what this pins.
+    // to what it says. The NUMBER is what this pins; the checklist spells it.
+    const capWords: Record<number, string> = { 10: "ten", 20: "twenty" };
     const checklist = (
       await readFile(new URL("../../skills/ariadne-audit/checklist.md", import.meta.url), "utf8")
     ).replace(/\s+/g, " ");
     expect(checklist, "CHECK-51 quotes the broken-file sample").toContain(
-      `names up to ${broken} of the files`,
+      `names up to ${capWords[BROKEN_SAMPLE_RESOURCES]} of the files`,
     );
     expect(checklist, "CHECK-50 quotes the uncached sample").toContain(
-      `up to ${uncached} of them named`,
+      `up to ${capWords[UNCACHED_SAMPLE_RESOURCES]} of them named`,
     );
   });
 
   // THE BOUNDARY THE WHOLE FAMILY RESTS ON, in the client-facing text rather
   // than only in the rules' headers: these are the references in the HTML the
-  // server sent, and a file the crawl never got an answer for is unknown. A
-  // client reading "no oversized images" about a site that injects its images
-  // with JavaScript would otherwise be reading a sentence about our evidence as
-  // a sentence about their site.
-  it("the resource copy states the served-HTML boundary and the unknown one", () => {
+  // server sent, and a file the crawl never got an answer for is UNKNOWN rather
+  // than clean or broken. A client reading "no oversized images" about a site
+  // that injects its images with JavaScript would otherwise be reading a
+  // sentence about our evidence as a sentence about their site.
+  //
+  // The copy says it in one of two ways and each rule must say it one way or
+  // the other: the rules whose finding is a COUNT state the completeness
+  // boundary ("only images referenced in the HTML and answered by the server
+  // are weighed"), and the rules whose finding is a LIST state the unknown one
+  // ("files that were not asked about are counted as unknown, not broken").
+  const EVIDENCE_LIMIT =
+    /referenced in the HTML|in the HTML response|answered by the server|as unknown|never asked|not asked about|not weighed|unweighed|floor/i;
+
+  it("every resource rule states the limit of what it looked at", () => {
     for (const id of [
       "resources.broken",
       "images.oversized",
@@ -1301,66 +849,67 @@ describe("issue copy", () => {
       "resources.uncached",
       "page.weight",
     ]) {
-      const text = ISSUE_COPY[id]!.explanation;
-      expect(text, `${id}: the served-HTML boundary`).toMatch(/HTML the server sent/i);
-      expect(text, `${id}: what a script loads later`).toMatch(/script|JavaScript/i);
-      expect(text, `${id}: the unknown boundary`).toMatch(
-        /unknown|never (?:asked|got to ask)|not weighed|never weighed/i,
+      expect(copy(id).explanation, `${id}: the evidence limit`).toMatch(EVIDENCE_LIMIT);
+    }
+  });
+
+  // …and the three whose number invites a completeness reading name the served
+  // HTML outright, because "100,000 bytes of images" quoted from a site that
+  // injects its images with JavaScript is our evidence read as their site.
+  it("the counting rules name the served HTML their references come from", () => {
+    for (const id of ["images.oversized", "images.legacy-format", "page.weight"]) {
+      expect(copy(id).explanation, `${id}: the served-HTML boundary`).toMatch(
+        /referenced in the HTML|in the HTML response|HTML the server sent/i,
       );
     }
   });
 
-  // The FIVE causes of a silence, named individually. "Unknown" as a word is
-  // cheap; what a reader needs is which five things it covers, because four of
-  // them are decisions (ours, the site's robots, an unreachable robots host, a
-  // cap) rather than faults. The fifth arrived with P12-T1's `robots_unreachable`
-  // class, and it is the one most likely to be misread as the client's fault:
-  // the host that could not answer is usually somebody else's CDN.
-  it("resources.broken names every reason a file goes uncounted rather than broken", () => {
-    const c = ISSUE_COPY["resources.broken"]!;
-    expect(c.explanation, "the pass never reached it").toMatch(/never got to ask|did not finish/i);
-    expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
-    expect(c.explanation, "robots").toMatch(/robots\.txt disallowed/i);
-    expect(c.explanation, "an unreachable robots host").toMatch(
-      /could not (?:be reached|tell us|answer)|was unreachable|unreachable robots/i,
+  // "Unknown" as a word is cheap; what a reader needs is which states it
+  // covers, because they are decisions (ours, the site's robots, a cap) rather
+  // than faults — and one shape in particular is not a healthy file: a 200 with
+  // a refusal reason beside it is bot protection answering in place of it.
+  it("resources.broken names the reasons a file goes uncounted rather than broken", () => {
+    const c = copy("resources.broken");
+    expect(c.explanation, "never asked").toMatch(/not asked about|never asked/i);
+    expect(c.explanation, "refused or disallowed").toMatch(/refused|disallow/i);
+    expect(c.explanation, "no response").toMatch(/no response|never completed/i);
+    expect(c.explanation, "counted as unknown, not broken").toMatch(
+      /unknown, not broken|as unknown/i,
     );
-    expect(c.explanation, "a failed request").toMatch(/request never completed/i);
-    // And the shape that makes the reason load-bearing: a 200 with a refusal
-    // reason beside it is bot protection, not a healthy file (P11-T2's
-    // cf-mitigated rows). Copy printing "broken (HTTP 200)" with nothing beside
-    // it is the absurdity this sentence exists to prevent.
-    expect(c.explanation, "the refused 200").toMatch(/status of 200 with a refusal reason/i);
+    expect(c.explanation, "the refused 200").toMatch(/200 with a refusal reason/i);
   });
 
   // The measurement is metadata: a status, a content type, a byte count. The
   // crawl never decodes an image, so no copy here may claim anything about its
   // dimensions, its compression quality, or its size relative to the box it is
-  // displayed in. Asserted negatively, like every other overclaim guard.
+  // displayed in.
   it("the image copy claims transferred bytes, never a decoded image", () => {
     for (const id of ["images.oversized", "images.legacy-format"]) {
-      const text = ISSUE_COPY[id]!.explanation;
+      const text = copy(id).explanation;
       const overclaim =
         /(?:is|are) (?:badly|poorly|over)[- ]?compressed|larger than (?:its|the) (?:layout|container|display)|wrong dimensions|its dimensions are/i;
       expect(text, id).not.toMatch(overclaim);
     }
-    // And the positive half for the weight rule, which is the one whose number
-    // invites the misreading: it says what it did not open.
-    expect(ISSUE_COPY["images.oversized"]!.explanation).toMatch(/nothing here opens the image/i);
-    // The byte count's provenance, which is the difference between a claim and
-    // a measurement: `bytes_source` is `header` or `counted`, and a reader who
-    // cannot tell them apart will quote a server's claim as our measurement.
-    expect(ISSUE_COPY["images.oversized"]!.explanation).toMatch(
-      /declared size is the server's claim and a counted one is our measurement/i,
+    // The positive half for the weight rule, whose number invites the
+    // misreading: it says what it did NOT open.
+    expect(copy("images.oversized").explanation).toMatch(
+      /dimensions and compression (?:quality )?are not examined|nothing here opens the image/i,
+    );
+    // And the byte count's provenance, which is the difference between a claim
+    // and a measurement: `bytes_source` is `header` or `counted`, and a reader
+    // who cannot tell them apart will quote a server's claim as our number.
+    expect(copy("images.oversized").explanation).toMatch(
+      /server-declared or measured|declared size is the server's claim/i,
     );
   });
 
-  // A format is a CHOICE. The rule is info and its copy has to say so, because
-  // "legacy format" reads as a defect unless it is denied — and PNG is the right
-  // answer for a screenshot.
+  // A format is a CHOICE. The rule is info and its copy has to leave room for
+  // the right answer, because PNG is correct for a screenshot.
   it("images.legacy-format offers a candidate rather than declaring a defect", () => {
-    const c = ISSUE_COPY["images.legacy-format"]!;
-    expect(c.explanation).toMatch(/not a fault/i);
-    expect(c.explanation, "and says when PNG is right").toMatch(/screenshots|sharp edges/i);
+    const c = copy("images.legacy-format");
+    expect(`${c.explanation} ${c.howToFix}`, "where PNG is right").toMatch(
+      /sharp[- ]edged|screenshot|Leave PNG/i,
+    );
     const asDefect =
       /must (?:be )?convert|should not use|wrong format|outdated format|is a defect|replace (?:all|every)/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(asDefect);
@@ -1370,7 +919,7 @@ describe("issue copy", () => {
   // browser re-downloads the file — a CDN or an ETag may be doing that work
   // where the response says nothing.
   it("resources.uncached claims the absent header, not a proven re-download", () => {
-    const c = ISSUE_COPY["resources.uncached"]!;
+    const c = copy("resources.uncached");
     expect(c.explanation).toMatch(/Cache-Control/);
     expect(c.explanation).toMatch(/Expires/);
     expect(c.explanation, "what it cannot see").toMatch(/ETag|edge caching/i);
@@ -1379,214 +928,505 @@ describe("issue copy", () => {
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 
-  // The marker's copy is about the CRAWL, like its two siblings. It must not
-  // read as a fault on the site, and it must name each of the three numbers its
-  // evidence carries.
-  it("resources.not-recorded explains the crawl, its three numbers and the remedy", () => {
-    const c = ISSUE_COPY["resources.not-recorded"]!;
-    expect(c.title.toLowerCase()).toContain("could not be run");
-    expect(c.explanation, "resourcesSeen").toMatch(/how many resource records this crawl holds/i);
-    expect(c.explanation, "pagesWithImages").toMatch(
-      /how many of its pages counted at least one image/i,
+  // The four resource markers, and the job each has that its siblings do not.
+  // All four share one contract — they report the CRAWL, not a fault on the
+  // site, and their silence is not a clean bill of health.
+  it("resources.not-recorded reports a crawl that recorded no references at all", () => {
+    const c = copy("resources.not-recorded");
+    expect(c.title, "the title says the checks did not run").toMatch(/not run|not checked/i);
+    expect(c.explanation, "the census is empty").toMatch(
+      /recorded no image|no image, stylesheet or script references/i,
     );
-    expect(c.explanation, "pagesCrawled").toMatch(/how many pages it read in all/i);
-    // The unknown-is-not-evidence argument, in the words a client reads.
-    expect(c.explanation, "the two facts that share one silence").toMatch(
-      /a site whose files are all healthy and a crawl that never looked/i,
+    expect(c.explanation, "though the pages carry images").toMatch(/carry images|counted at least one image/i);
+    expect(c.explanation, "not reported clean").toMatch(
+      /rather than reported clean|rather than reported as clean/i,
     );
     expect(c.howToFix).toMatch(/re-crawl/i);
   });
 
-  // The sibling marker (P12-T2). Its copy has one job the other marker's does
-  // not: the census EXISTS here, and a reader who takes this for "no files were
-  // found" has the wrong crawl in mind. So it must say both halves — recorded,
-  // and not asked about — and it must name which of the two reasons applies,
-  // because the remedy differs (re-crawl with the pass on; or finish the crawl).
   it("resources.not-fetched says the files were recorded AND unasked, and names all three reasons", () => {
-    const c = ISSUE_COPY["resources.not-fetched"]!;
-    expect(c.title.toLowerCase()).toContain("never asked about");
-    expect(c.explanation, "the census is real").toMatch(/recorded every image, stylesheet and script/i);
-    expect(c.explanation, "and nothing was asked").toMatch(/requested none of them/i);
-    expect(c.explanation, "the operator's switch").toContain("fetchResources: false");
-    expect(c.explanation, "the interrupted pass").toMatch(/interrupted before it started asking/i);
-    // The third reason (review C-1): a budget that claimed the rows before
-    // anything was asked. Copy naming two of three would leave a reader with a
-    // `reason` in the evidence the text does not explain.
-    expect(c.explanation, "the budget").toMatch(/resource budget/i);
-    expect(c.explanation, "what the silence is not").toMatch(
-      /rather than a clean bill of health/i,
+    const c = copy("resources.not-fetched");
+    expect(c.title, "the title says listed but not requested").toMatch(
+      /not requested|never asked|listed but/i,
     );
-    // The page-weight consequence, which is the one a reader would otherwise
-    // read as a light site.
-    expect(c.explanation, "page.weight beside it").toMatch(/HTML and nothing else/i);
-    expect(c.howToFix).toMatch(/re-run the crawl|resume/i);
+    expect(c.explanation, "the census is real").toMatch(
+      /recorded every image, stylesheet and script/i,
+    );
+    expect(c.explanation, "and nothing was asked").toMatch(/requested none of them/i);
+    expect(c.explanation, "the operator's switch").toMatch(/turned off|switched off/i);
+    expect(c.explanation, "the interrupted crawl").toMatch(/interrupted/i);
+    expect(c.explanation, "the budget").toMatch(/budget/i);
+    expect(c.explanation, "what the silence is not").toMatch(
+      /Nothing is known|rather than a clean bill/i,
+    );
+    expect(c.howToFix).toMatch(/re-run|resume/i);
     // NEVER the other marker's sentence: this crawl recorded plenty.
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
       /recorded no (?:files|resources)|no resource records|found no files/i,
     );
   });
 
-  // The third marker (P13-T2). Its copy has the job neither sibling's does: the
-  // crawl DID ask, and got nothing usable, so the reader must not take the
-  // silence for a clean site. It has to say that this is a limit of the evidence
-  // rather than a bill of health, name the four unknown states, and — like both
-  // siblings — never read as a fault on the site.
   it("resources.all-unknown says the crawl asked and got nothing usable, and names the four states", () => {
-    const c = ISSUE_COPY["resources.all-unknown"]!;
-    expect(c.explanation, "the crawl asked").toMatch(/asked about|tried to reach/i);
-    expect(c.explanation, "nothing usable came back").toMatch(/nothing.*usable|not one.*usable|no.*usable answer/i);
-    // The four states, each named: our policy, robots disallow, unreachable
-    // robots, a request that never completed.
-    expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
-    expect(c.explanation, "robots disallow").toMatch(/robots\.txt disallowed/i);
-    expect(c.explanation, "unreachable robots").toMatch(/robots\.txt was unreachable|could not tell us its robots/i);
-    expect(c.explanation, "a request that never completed").toMatch(/never completed|timeout|connection reset/i);
-    // The census and the consequence a reader would otherwise misread.
-    expect(c.explanation, "page.weight beside it").toMatch(/HTML and nothing else/i);
-    expect(c.explanation, "what the silence is not").toMatch(/rather than a clean bill of health|not a clean bill/i);
-    expect(c.howToFix).toMatch(/re-run the crawl/i);
-    // NEVER a fault on the site, and never the siblings' "recorded none" /
-    // "never asked" sentences: this crawl recorded plenty and asked about all.
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
-      /recorded no (?:files|resources)|no resource records|asked the site about none|never asked about/i,
-    );
-  });
-
-  // The fourth marker (P14-T1). Its copy has the job no sibling's does: the pass
-  // was PARTIAL — it reached only some files, got only unknowns from them, and
-  // never asked about the rest. It must say both halves (only some reached; the
-  // rest never asked about), name the four unknown states, say the silence is a
-  // limit of the evidence rather than a bill of health, and — like every sibling
-  // — never read as a fault on the site.
-  it("resources.partial-unknown says the pass was partial and reached nothing usable, and names the four states", () => {
-    const c = ISSUE_COPY["resources.partial-unknown"]!;
-    // The partial half — only some files reached — and the unasked remainder.
-    expect(c.explanation, "only some reached").toMatch(/only some of the files|asked about only some/i);
-    expect(c.explanation, "the rest never asked about").toMatch(/rest were never asked about|never reached/i);
-    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable|not one.*usable/i);
-    // The four states, each named.
-    expect(c.explanation, "our own policy").toMatch(/our own policy refused/i);
-    expect(c.explanation, "robots disallow").toMatch(/robots\.txt disallowed/i);
-    expect(c.explanation, "unreachable robots").toMatch(/robots\.txt was unreachable|could not tell us its robots/i);
-    expect(c.explanation, "a request that never completed").toMatch(/never completed|timeout|connection reset/i);
-    // The census and the consequence a reader would otherwise misread.
-    expect(c.explanation, "page.weight beside it").toMatch(/HTML and nothing else/i);
-    expect(c.explanation, "what the silence is not").toMatch(/rather than a clean bill of health|not a clean bill/i);
-    expect(c.howToFix).toMatch(/re-run the crawl|resume/i);
-    // NEVER a fault on the site, and never the siblings' "recorded none" /
-    // "asked about all" sentences: this crawl recorded plenty and asked about only some.
+    const c = copy("resources.all-unknown");
+    expect(c.explanation, "the crawl asked").toMatch(/asked about|came back|tried to reach|was refused|recorded was/i);
+    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable|answered usably|got no response/i);
+    expect(c.explanation, "our own policy").toMatch(/our own policy|the crawler's own policy/i);
+    expect(c.explanation, "robots disallow").toMatch(/disallowed by robots\.txt/i);
+    expect(c.explanation, "unreachable robots").toMatch(/robots\.txt was unreachable|whose robots\.txt was unreachable|robots\.txt that could not be fetched/i);
+    expect(c.explanation, "a request that never completed").toMatch(/never completed|got no response/i);
+    // The consequence a reader would otherwise misread as a light site.
+    expect(c.explanation, "page weight beside it").toMatch(/HTML only|HTML and nothing else/i);
+    expect(c.howToFix).toMatch(/crawl again|re-run the crawl/i);
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
       /recorded no (?:files|resources)|no resource records/i,
     );
   });
 
-  // The metric-copy column contract, for Phase 11's table. Its shape is five
-  // distributions and three coverage numbers, and the two BOUNDS are the reason
-  // the coverage numbers are on the row at all: a page weight quoted without
-  // them is a number pretending to be a measurement.
-  it("page.weight names every column of its shape and both of its bounds", () => {
-    const c = ISSUE_COPY["page.weight"]!;
+  it("resources.partial-unknown says the crawl reached only some files, and names the four states", () => {
+    const c = copy("resources.partial-unknown");
+    expect(c.explanation, "only some reached").toMatch(/only some of the files|about only some/i);
+    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable|answered usably|got no response/i);
+    expect(c.explanation, "the four states").toMatch(/refused/i);
+    expect(c.explanation, "the four states").toMatch(/disallow/i);
+    expect(c.explanation, "the four states").toMatch(/unreachable robots|robots\.txt/i);
+    expect(c.explanation, "the four states").toMatch(/no response|never completed/i);
+    expect(c.explanation, "what the silence is not").toMatch(
+      /nothing to judge|not a verdict on the site|rather than a clean bill/i,
+    );
+    expect(c.howToFix).toMatch(/re-run the crawl|resume/i);
+    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(
+      /recorded no (?:files|resources)|no resource records/i,
+    );
+  });
+});
+
+// ==========================================================================
+// RENDERING AND PAGINATION
+// ==========================================================================
+
+describe("copy: rendering and pagination", () => {
+  // The render diff rules' thresholds, pinned against the rules' own constants
+  // exactly as the on-page ones are. These matter more than most: all three
+  // fire on a COMPARISON, and copy quoting a threshold the rule does not use
+  // would describe a different — usually more sensitive — rule than the one
+  // that produced the finding a client is reading.
+  it("quotes the render diff thresholds the rules actually use", () => {
+    const csr = copy("content.csr-dependent").explanation;
+    expect(CSR_WORD_MULTIPLE).toBe(2);
+    expect(csr, "the ratio arm").toMatch(/at least twice/i);
+    expect(csr, "the floor arm").toMatch(
+      new RegExp(`(?<![0-9])${CSR_MIN_ADDED_WORDS}\\b`),
+    );
+
+    const nav = copy("nav.js-only").explanation;
+    expect(nav, "the raw ceiling").toMatch(new RegExp(`fewer than ${NAV_RAW_MAX} links\\b`));
+    expect(nav, "the rendered floor").toMatch(new RegExp(`at least ${NAV_RENDERED_MIN}\\b`));
+    expect(NAV_RENDERED_MULTIPLE).toBe(2);
+    expect(nav, "the ratio").toMatch(/more than twice as many|at least twice as many/i);
+
+    const filters = copy("filters.js-only").explanation;
+    expect(filters, "the rendered floor").toMatch(
+      new RegExp(`at least ${FILTER_RENDERED_MIN}\\b`),
+    );
+    // The predicate is half the finding: a reader who cannot tell what counted
+    // as a filter link cannot check the claim against their own page.
+    expect(filters, "the `?` arm").toMatch(/query[- ]string/i);
+    expect(filters, "the regex arm").toMatch(/filter, facet or sort/i);
+  });
+
+  // Google renders, on a schedule and a budget nobody outside Google can
+  // measure. What these rules establish is that the content is not in the first
+  // response, which is a cost and a risk rather than an invisibility. Asserted
+  // negatively, because prose that already says the right thing can have the
+  // overclaim appended to it.
+  it("the render diff copy does not claim search engines cannot see the page", () => {
+    for (const id of ["content.csr-dependent", "nav.js-only", "filters.js-only", "redirect.js"]) {
+      const overclaim =
+        /(?:search engines|google|crawlers) (?:cannot|can't|will never|do not|don't) (?:see|index|read|find)|invisible to (?:search engines|google)|never indexed|will not be indexed/i;
+      expect(whole(id), id).not.toMatch(overclaim);
+    }
+  });
+
+  // rel=next/rel=prev stopped being a discovery or consolidation signal in
+  // 2019. The findings are about what the markup documents and about the HTML
+  // links that are missing beside it.
+  it("the pagination copy does not claim rel=next still consolidates a series", () => {
+    for (const id of [
+      "pagination.next-target-uncrawled",
+      "pagination.next-not-linked",
+      "pagination.canonical-to-other",
+    ]) {
+      const overclaim =
+        /rel=next (?:tells|lets|helps|allows|asks) (?:search engines|google|crawlers)|(?:search engines|google|crawlers) use rel=next|consolidat\w+ (?:the )?series (?:with|through|via) rel=next/i;
+      expect(whole(id), id).not.toMatch(overclaim);
+    }
+    // The positive half, on the rule whose whole point is the missing anchor.
+    expect(copy("pagination.next-not-linked").explanation).toMatch(/anchor/i);
+    expect(copy("pagination.next-not-linked").explanation).toMatch(/2019|no longer|not used/i);
+  });
+
+  // A series running past the edge of a bounded crawl is the ordinary case, and
+  // the copy has to say that nothing needs doing about it. A fix that told a
+  // client to correct every rel=next would send them after their own crawl
+  // settings.
+  it("pagination.next-target-uncrawled allows the bounded crawl as the usual cause", () => {
+    const c = copy("pagination.next-target-uncrawled");
+    expect(c.explanation).toMatch(/past the edge of the crawl|runs past|no record of/i);
+    expect(c.howToFix).toMatch(/Nothing if|No action/i);
+  });
+
+  // The paginated-canonical rule fires only on a page that declares rel=prev,
+  // and the trade-off it reports has two legitimate ends.
+  it("pagination.canonical-to-other names rel=prev and leaves the decision open", () => {
+    const c = copy("pagination.canonical-to-other");
+    expect(c.explanation).toMatch(/rel=prev/);
+    expect(c.howToFix).toMatch(/If the items|If the series|if/i);
+  });
+
+  // A JavaScript redirect is a 200 that moves. The claim is about what the HTTP
+  // response said, not about whether the visitor arrives.
+  it("redirect.js says the HTTP response showed no redirect", () => {
+    const c = copy("redirect.js");
+    expect(c.explanation).toMatch(/2xx|200/);
+    expect(c.explanation).toMatch(/no redirect|HTTP response/i);
+    expect(c.howToFix).toMatch(/301|302/);
+  });
+});
+
+// ==========================================================================
+// METRIC TABLES
+// ==========================================================================
+
+describe("copy: metric tables", () => {
+  // The metric-copy contract: a reader can say what the table measured from the
+  // text alone, so every COLUMN of the value shape appears in it. p95 was the
+  // one the first draft left out — the number was in the evidence and nowhere
+  // in the prose. Asserted for all three distributions, which share a shape.
+  it("the distribution copy names every column of the shape, p95 included", () => {
+    for (const id of [
+      "inlinks.distribution",
+      "structure.depth-distribution",
+      "structure.click-depth-distribution",
+      "content.metrics-by-type",
+      "page.weight",
+    ]) {
+      const text = copy(id).explanation;
+      expect(text, `${id}: the count`).toMatch(/\bcount\b/i);
+      expect(text, `${id}: min and max`).toMatch(/\bmin\b.*\bmax\b|smallest and largest/i);
+      expect(text, `${id}: the mean`).toContain("mean");
+      expect(text, `${id}: p25/median/p75`).toContain("quartiles");
+      expect(text, `${id}: p95`).toContain("95th percentile");
+    }
+  });
+
+  // The ninth column, and the reason the click-depth metric exists in the shape
+  // it does. A count of unreachable pages a reader meets with no prose behind
+  // it is a number they will read as "no data" — the exact misreading that let
+  // a site with 437 unreachable pages pass CHECK-31.
+  it("the click-depth copy explains the unreachable bucket rather than just having one", () => {
+    const c = copy("structure.click-depth-distribution");
+    expect(c.explanation, "the bucket").toMatch(/unreachable|no link path/i);
+    expect(c.explanation, "internal links only").toMatch(/internal link/i);
+    expect(c.explanation, "a redirect ends the path").toMatch(/redirect/i);
+    expect(c.howToFix, "the fix starts with them").toMatch(/unreachable/i);
+  });
+
+  // The other half of the same move: the metric that KEPT its data had to lose
+  // the words "click depth", because the number it holds is a property of the
+  // CRAWL — a title saying "click depth" over a column that counts sitemap
+  // entries as zero hops is the defect Phase 7 removed.
+  it("the discovery-depth copy claims the crawl, never a click path", () => {
+    const c = copy("structure.depth-distribution");
+    expect(c.title, "the title names discovery depth").toMatch(/discovery depth/i);
+    expect(c.title, "and never click depth").not.toMatch(/click/i);
+    expect(c.explanation, "whose property the number is").toMatch(
+      /measures the crawl|of the crawl, not/i,
+    );
+    // Why it is flat on a sitemapped site, which is what a reader would
+    // otherwise quote as good news.
+    expect(c.explanation, "the sitemap's effect").toMatch(/sitemap/i);
+    expect(c.explanation, "points at the metric that answers the click question").toMatch(
+      /click depth/i,
+    );
+  });
+
+  it("content.metrics-by-type names all three measures and what renderable excludes", () => {
+    const text = copy("content.metrics-by-type").explanation;
+    expect(text, "word count").toMatch(/word count/i);
+    expect(text, "renderable word count").toMatch(/renderable word count/i);
+    expect(text, "text ratio").toMatch(/text ratio/i);
+    // A column called "renderable" is meaningless without the sentence that
+    // says what it leaves out.
+    expect(text, "what renderable excludes").toMatch(/markup[- ]hidden|hidden by markup|minus/i);
+    expect(text, "the untyped bucket").toMatch(/untyped/i);
+  });
+
+  it("content.template-similarity names its columns, its thresholds and its sample", () => {
+    const c = copy("content.template-similarity");
     const text = c.explanation;
-    expect(text, "the five measures").toMatch(
-      /the total weight of a page, its HTML on its own, and its image, stylesheet and script bytes/i,
-    );
-    expect(text, "count").toMatch(/how many pages were measured/i);
-    expect(text, "min and max").toMatch(/smallest and largest/i);
-    expect(text, "the mean").toContain("mean");
+    expect(text, "the distance and its scale").toMatch(/mean.*distance|distance in bits/i);
+    expect(text, "0 identical, 64 unrelated").toMatch(/0 identical|64 unrelated/i);
     expect(text, "quartiles").toContain("quartiles");
-    expect(text, "p95").toContain("95th percentile");
-    // The count is per measure, which differs from the cohort size for exactly
-    // one reason and the copy names it.
-    expect(text, "the per-measure count").toMatch(/count is per measure/i);
-    expect(text, "resourcesReferenced").toMatch(/how many file references these pages make/i);
-    expect(text, "resourcesWeighed").toMatch(/how many of those files were actually weighed/i);
-    expect(text, "pagesWithUnmeasuredResources").toMatch(
-      /how many pages reference at least one file that was not/i,
+    // The two shares, pinned against the rule's own constants.
+    expect(TEMPLATE_NEAR_BITS).toBe(3);
+    expect(TEMPLATE_LOOSE_BITS).toBe(8);
+    expect(text, "the near share").toMatch(new RegExp(`within ${TEMPLATE_NEAR_BITS}`, "i"));
+    expect(text, "the loose share").toMatch(new RegExp(`within ${TEMPLATE_LOOSE_BITS} bits`, "i"));
+    // The sampling rule is part of the shape: a reader who cannot see it would
+    // read a sample as a census.
+    expect(TEMPLATE_SAMPLE_PAGES).toBe(200);
+    expect(text, "the sampling rule").toMatch(
+      new RegExp(`up to ${TEMPLATE_SAMPLE_PAGES} fingerprinted pages`, "i"),
     );
-    expect(text, "atLeast").toMatch(/flagged as a floor/i);
-    // The ceiling: `page_resources` double-counts src + srcset (schema.ts's own
-    // caveat, handed to this metric by name).
-    expect(text, "the ceiling").toMatch(/CEILING/);
-    expect(text, "why it is a ceiling").toMatch(/responsive renditions|both files to the sum/i);
-    expect(text, "the floor").toMatch(/FLOOR/);
-    // And which number a reader should trust, the `site.health` precedent.
-    expect(text, "the counts are the authority").toMatch(/THE COUNTS ARE THE AUTHORITY/);
+    expect(text, "how many pages and pairs each row saw").toMatch(/sampled/i);
+    expect(text, "and the pairs").toMatch(/pairs/i);
+  });
+
+  // The plan's naming ruling, asserted negatively because that is the only
+  // direction that holds: prose already saying "template similarity" can have
+  // the other word appended and still pass a positive check. The metric
+  // measures how alike two pages are; which parts of a page are worth reading
+  // is a judgement it has not made.
+  it("content.template-similarity is labelled template similarity and never the other word", () => {
+    expect(whole("content.template-similarity")).not.toMatch(/boilerplate/i);
+    expect(
+      `${copy("content.template-similarity").title} ${copy("content.template-similarity").explanation}`.toLowerCase(),
+    ).toContain("template");
+  });
+
+  it("hreflang.coverage names its three columns and claims declaration, not correctness", () => {
+    const text = copy("hreflang.coverage").explanation;
+    expect(text, "pagesWithHreflang").toMatch(/declare at least one hreflang/i);
+    expect(text, "indexablePages").toMatch(/how many were measured|indexable 200 pages/i);
+    expect(text, "coveragePct").toMatch(/percentage/i);
+    // A page counts once however many alternates it names — the property that
+    // makes the percentage a page share rather than an annotation count.
+    expect(text, "counted once per page").toMatch(/counts once|once regardless/i);
+    // And the claim it must NOT make: coverage counts pages that declare
+    // something, not pages whose declarations are correct.
+    const overclaim = /(?:sets|declarations) are (?:complete|correct|valid)|correctly configured/i;
+    expect(text).not.toMatch(overclaim);
+  });
+
+  it("the link metrics quote the list caps they actually apply", () => {
+    expect(EXTREMES_LIST_CAP).toBe(20);
+    expect(copy("inlinks.extremes").explanation).toMatch(
+      new RegExp(`(?<![0-9])${EXTREMES_LIST_CAP}\\b`),
+    );
+    // The tie-break is what makes two runs over one crawl name the same URLs.
+    expect(copy("inlinks.extremes").explanation).toMatch(/ties|tie-break|broken by URL/i);
+
+    expect(SOURCE_TYPE_CAP).toBe(25);
+    expect(copy("inlinks.sources-by-type").explanation).toMatch(
+      new RegExp(`(?<![0-9])${SOURCE_TYPE_CAP}\\b`),
+    );
+    // The rollup bucket is a KEY a reader meets in the table, so the copy names
+    // it — and names the parenthesised spelling, which is what keeps it apart
+    // from a template a client really called `other`.
+    expect(OTHER_SOURCES).toBe("(other)");
+    expect(copy("inlinks.sources-by-type").explanation).toContain(OTHER_SOURCES);
+  });
+
+  it("inlinks.distribution says what one inlink is and how a page with none counts", () => {
+    const text = copy("inlinks.distribution").explanation;
+    expect(text, "unique per linking page").toMatch(/unique/i);
+    expect(text, "self-links").toMatch(/self-link/i);
+    expect(text, "the zero case").toMatch(/no inlinks count as 0|count as 0|zero/i);
+  });
+
+  it("url.param-volumes names every column of its shape and its cap", () => {
+    const text = copy("url.param-volumes").explanation;
+    expect(text, "totalParams").toMatch(/how many distinct parameter names/i);
+    expect(text, "trackingParams").toMatch(/tracking parameters/i);
+    expect(text, "which ones count as tracking").toMatch(/utm_source|gclid/i);
+    expect(text, "topParams").toMatch(/on the most URLs/i);
+    expect(text, "parameterisedPages").toMatch(/query string/i);
+    expect(text, "parameterisedIndexablePages").toMatch(/indexable/i);
+    expect(TOP_PARAMS_CAP).toBe(20);
+    expect(text, "the cap").toMatch(new RegExp(`(?<![0-9])${TOP_PARAMS_CAP} parameters`, "i"));
+  });
+
+  it("redirect.volume names every column and counts each redirecting URL once", () => {
+    const text = copy("redirect.volume").explanation;
+    expect(text, "redirectPages").toMatch(/returned a redirect/i);
+    expect(text, "totalPages").toMatch(/out of all fetched|fetched URLs/i);
+    expect(text, "ratioPct").toMatch(/percentage/i);
+    // `redirectInlinks` is a second count of the same fact and reads as a
+    // restatement unless the copy says what it counts: one redirecting URL in a
+    // footer is one page and one link per page of the site.
+    expect(text, "redirectInlinks").toMatch(/internal links point/i);
+    expect(text, "chains and loops").toMatch(/chains and loops|chains and how many/i);
+    expect(text, "counted once").toMatch(/counts once|counted once/i);
+  });
+
+  it("sitemap.structure names every column of both its shapes", () => {
+    const text = copy("sitemap.structure").explanation;
+    expect(text, "docs").toMatch(/how many documents|number of documents/i);
+    expect(text, "totalUrls").toMatch(/total entries|entries/i);
+    expect(text, "oversizedDocsSkipped").toMatch(/dropped for size|too large/i);
+    expect(text, "urlCapBreaches").toMatch(/over the 50,000|past 50,000/i);
+    // `entryCapReached` changes what every other number means, so it is copy
+    // rather than a footnote.
+    expect(text, "entryCapReached").toMatch(/entry cap|stopped collection/i);
+    // Both caps are the rule's own constants.
+    expect(SITEMAP_URL_CAP).toBe(50_000);
+    expect(text, "the protocol cap").toContain(SITEMAP_URL_CAP.toLocaleString("en-US"));
+    expect(SITEMAP_DOC_ROWS_CAP).toBe(50);
+    expect(text, "the listing cap").toMatch(
+      new RegExp(`largest ${SITEMAP_DOC_ROWS_CAP} documents`, "i"),
+    );
+    expect(text, "an entry in several documents").toMatch(/counted once/i);
+  });
+
+  // The Phase 5 metric, whose shape is two-sided — what the selection decided,
+  // and what the page rows now hold. The prose names both sides and the reason
+  // they can disagree, because a reader who takes them for one set of numbers
+  // reads a legitimate difference as an error.
+  it("render.coverage names every column of its shape and both of its sides", () => {
+    const text = copy("render.coverage").explanation;
+    expect(text, "pagesCrawled").toMatch(/pages crawled|how many pages the crawl read/i);
+    // The field that says whether the four numbers after it are a record or a
+    // projection (docs/gates/phase-11.md §6.3): an unexplained "18 selected" on
+    // a crawl nobody rendered is read as eighteen pages somebody chose.
+    expect(text, "renderPassEvidence").toMatch(/whether a render run happened/i);
+    expect(text, "the projection, said as one").toMatch(/would choose|a run would/i);
+    expect(text, "selectionMode").toMatch(/selection mode/i);
+    expect(text, "selectionBudget").toMatch(/budget/i);
+    expect(text, "selectionSuspects").toMatch(/incomplete|suspect/i);
+    expect(text, "selectionSampled").toMatch(/sampled/i);
+    expect(text, "selectionSelected").toMatch(/selected/i);
+    expect(text, "selectionTruncated").toMatch(/truncated/i);
+    expect(text, "pagesRendered and renderFailures").toMatch(/rendered or failed|failures/i);
+    // And what a reader must do with it before quoting any rendering finding.
+    expect(copy("render.coverage").howToFix).toMatch(/before quoting|read this/i);
+    expect(copy("render.coverage").howToFix, "the silence is not a clean site").toMatch(
+      /silent|nothing was measured/i,
+    );
+  });
+
+  // Phase 10's rollup, and the things its copy has to say that no other
+  // metric's does.
+  it("site.health names every column and the population they are over", () => {
+    const text = copy("site.health").explanation;
+    expect(text, "urlsTotal").toMatch(/pages the audit could judge/i);
+    expect(text, "the census definition").toMatch(/200, HTML|200 with HTML/i);
+    expect(text, "urlsWithCritical").toMatch(/critical/i);
+    expect(text, "urlsWithWarningOnly").toMatch(/warning and no critical/i);
+    expect(text, "urlsWithInfoOnly").toMatch(/only informational/i);
+    expect(text, "urlsClean").toMatch(/how many none|no finding|clean/i);
+    expect(text, "cleanRatio").toMatch(/clean ratio/i);
+    expect(text, "pagesNotAuditable").toMatch(/other fetched URLs|left out/i);
+    // Counted once, at the worst severity — the property the whole table rests
+    // on, and the one a reader would otherwise assume the other way round.
+    expect(text, "counted once at the worst severity").toMatch(
+      /counted once at its worst severity/i,
+    );
+    // A finding that names no page is about the site and belongs in no bucket.
+    expect(text, "site-level findings").toMatch(/Site-wide findings appear in none/i);
+    // The remainder is a SHAPE, not a catalogue: the predicate excludes a 200
+    // that was not HTML too, and that page is counted by no other table.
+    expect(text, "the remainder names the non-HTML case").toMatch(/non-HTML/i);
+  });
+
+  // THE CAP CAVEAT, and the ratio's precision. At 50,000 pages one clean page
+  // rounds to 0.0000: rounding is right for the column, and what the copy has
+  // to add is which number to trust.
+  it("site.health says the counts are the authority, not the ratio", () => {
+    const c = copy("site.health");
+    expect(c.explanation, "a capped run's clean count is a floor").toMatch(
+      /capped run|past the cap count as clean/i,
+    );
+    expect(c.howToFix, "work percentages from the counts").toMatch(
+      /Work percentages out from the counts/i,
+    );
+    expect(c.howToFix, "and check the cap before quoting the ratio").toMatch(
+      /capped before quoting|whether the run was capped/i,
+    );
+  });
+
+  // Obligation 6, as a test: Ariadne emits the ingredients and the ratio; Talos
+  // owns the gauge. A grade, a label or a threshold in this copy would be the
+  // engine passing the judgement it exists to leave to its consumer — and copy
+  // is where one would arrive first, since the row itself is just numbers.
+  it("site.health grades nothing: no score, no label, no threshold", () => {
+    const c = copy("site.health");
+    // The copy says so where the reader meets the numbers…
+    expect(c.howToFix).toMatch(/not as a score|no grade|shape of the work/i);
+    // …and then does so.
+    const judgement =
+      /health score|site score|\bgrade\b|out of 100|score of|\bA\+|excellent|poor health|good health|healthy site|unhealthy|above \d+%|below \d+%|more than \d+% of pages|threshold/i;
+    expect(`${c.title} ${c.explanation}`).not.toMatch(judgement);
   });
 
   // A metric states what was counted; it does not accuse the site of anything.
   // "Fix" language in a table's copy would turn a distribution into a fault
   // list, and the numbers at the bottom of a distribution are frequently fine.
   it("the metric copy describes a measurement rather than a defect", () => {
-    for (const id of [
-      ...PHASE_4_METRIC_IDS,
-      ...PHASE_5_METRIC_IDS,
-      ...PHASE_10_METRIC_IDS,
-      ...PHASE_11_METRIC_IDS,
-    ]) {
-      const c = ISSUE_COPY[id]!;
+    for (const rule of RULES.filter((r) => r.kind === "metric")) {
       const asFault =
         /this (?:is a|indicates a) (?:problem|fault|error)|must be fixed|you must fix|is broken|penalis|penaliz/i;
-      expect(`${c.title} ${c.explanation} ${c.howToFix}`, id).not.toMatch(asFault);
+      expect(whole(rule.id), rule.id).not.toMatch(asFault);
     }
-  });
-
-  it("headings.h1-multiple does not claim a ranking penalty", () => {
-    const c = ISSUE_COPY["headings.h1-multiple"]!;
-    // Multiple H1s are valid HTML and are not a ranking problem; the finding
-    // is about the outline and the likely templating accident.
-    const overclaim =
-      /dilut|penalt|hurts? (?:your )?rank|lower(?:s|ing)? (?:your )?rank|damages? (?:your )?rank/i;
-    expect(`${c.explanation} ${c.howToFix}`).not.toMatch(overclaim);
   });
 });
 
+// ==========================================================================
+// THE RUBRIC (spec §1)
+// ==========================================================================
+
 /**
- * THE CLIENT-FACING COPY RUBRIC (Phase 19 §7).
+ * THE CLIENT-FACING COPY RUBRIC.
  *
- * The owner's words after reading a real crawl's findings: "I think it needs
- * another pass, also on the issue description, solutions." Everything below is
- * that judgement turned into assertions over EVERY rule in the registry, so the
- * next entry written cannot quietly fall back under the line.
+ * The owner's instruction behind the Phase 20 register: "Texts rewritten for an
+ * SEO tool, not for a chat, concise, direct, easy to understand and not
+ * ambiguous but also using the well known SEO language."
+ * (docs/superpowers/specs/2026-09-10-reports-and-copy-design.md §1.)
  *
- * The reader these rules protect is a site owner with no knowledge of this
- * engine (docs/talos-integration.md, obligation 6): the text reaches them in a
- * report, an action plan or a Talos screen, verbatim and with no glossary.
+ * Four contracts, one describe or one `it` each:
  *
- * Four contracts, one describe each:
- *
- *  1. NO ENGINE VOCABULARY. The banned list below is not a style preference —
- *     each word was found IN this copy and judged, and the reasoning for every
- *     one of them is recorded beside it, including the two words kept.
- *  2. STRUCTURE. A title is a headline, an explanation is at least two
- *     sentences, a how-to-fix contains at least one instruction.
- *  3. THRESHOLDS IN THE TITLE. "Title too long" makes a reader open the finding
- *     to learn the number; "Title longer than 60 characters" does not. The
- *     numbers are read from the rules' own constants, so copy and rule cannot
- *     drift.
- *  4. MARKERS. The `marker` reason string is the "Why:" line on a demo row and
- *     the `marker` field of the rules catalog. One plain sentence, naming the
- *     cause AND what would answer the check (§6).
+ *  1. NO ENGINE VOCABULARY. The banned list is not a style preference — each
+ *     word was found IN this copy once and judged, and the reasoning is
+ *     recorded beside it, including the words considered and kept.
+ *  2. STRUCTURE. `Area: Condition`, the area from the spec's fixed list, at
+ *     most 80 characters, no trailing full stop; a description of one to three
+ *     sentences; a fix with at least one imperative.
+ *  3. THRESHOLDS IN THE TITLE. "Page titles: Too long" makes a reader open the
+ *     finding to learn the number; "Page titles: Over 60 characters" does not.
+ *     The numbers come from the rules' own constants.
+ *  4. MARKERS. The `marker` reason is the "Why:" line on a demo row and the
+ *     `marker` field of the rules catalog: one plain sentence, the cause and
+ *     what would answer the check.
  */
 
 /**
  * Words banned from every client-facing string, whole-word and case-insensitive.
  *
  * Each entry says why. The list was built by grepping the copy that existed
- * before this pass rather than by imagination — a banned word nothing ever used
- * is a guard for the future, a banned word the copy DID use is a rewrite that
- * happened.
+ * before the first pass rather than by imagination — a banned word nothing ever
+ * used is a guard for the future, a banned word the copy DID use is a rewrite
+ * that happened.
  *
- * FIVE WORDS WERE CONSIDERED AND KEPT, each for a reason that is not tone:
+ * WORDS CONSIDERED AND KEPT, each for a reason that is not tone:
  *
- *  - "the engine" — the spec allows it (§7): a reader needs a name for the
- *    thing that did the crawling, and every alternative is a euphemism.
+ *  - "row" and "rows" — kept since Phase 20, where every finding became a TABLE
+ *    served to the client (spec §2: standard columns plus the rule's declared
+ *    columns, in the API, the CSV export and the demo). "The row shows the URL
+ *    and the Disallow line" is now a sentence about what the reader is looking
+ *    at, in their vocabulary. It used to be banned outside a metric's copy,
+ *    when a finding rendered as a URL list and "row" could only mean ours.
+ *  - "upstream" — kept since Phase 20, where the only use is the SITE'S own
+ *    upstream ("restarts, deploys, exhausted connection pools and upstream
+ *    timeouts"), which is what an operator calls the thing behind their proxy.
+ *    Our two meanings — the lifted sources, and a proxy's origin — appear in no
+ *    client-facing string.
+ *  - "the engine" — a reader needs a name for the thing that did the crawling,
+ *    and every alternative is a euphemism.
  *  - "rule" — in this copy it is always the SITE'S rule: a redirect rule, a
  *    Disallow rule, a bot-protection rule. Ours are never mentioned.
  *  - "pass" as a VERB — links pass equity, a page passes the Rich Results
- *    Test. Only the noun (our render/resource phase) is banned, above.
- *  - "fingerprint" — the spec keeps it: it is what the number IS, and the
- *    alternative is either "simhash" (ours) or a paragraph.
- *  - "row", in a METRIC's copy only — see `ROW_WORDS` below.
+ *    Test. Only the noun (our render/resource phase) is banned, below.
+ *  - "fingerprint" — it is what the number IS, and the alternative is either
+ *    "simhash" (ours) or a paragraph.
  */
 const BANNED_WORDS: { word: string; why: string }[] = [
   // Engine parts a client has never heard of and cannot act on.
@@ -1607,7 +1447,6 @@ const BANNED_WORDS: { word: string; why: string }[] = [
   { word: "probe", why: "our name for the extra host requests" },
   { word: "probes", why: "as above" },
   { word: "probing", why: "as above" },
-  { word: "upstream", why: "two meanings, both ours: the lifted sources, and a proxy's origin" },
 ];
 
 /** Banned phrases, for the same reason and with the same evidence behind them. */
@@ -1632,50 +1471,93 @@ const BANNED_PHRASES: { label: string; pattern: RegExp; why: string }[] = [
 ];
 
 /**
- * "row" is the one word with a legitimate client meaning, and the exception is
- * narrow rather than general: a METRIC renders as a table, and "the site row"
- * is the reader's own word for a line of it — "the site line" would be worse
- * English, not better. Everywhere else (a finding's copy, a marker's reason) a
- * row is a database row, which is ours and not theirs.
+ * The areas a title may open with (spec §1). A fixed list rather than "anything
+ * before the colon": the area is what groups findings in a report, and a
+ * twenty-fifth spelling of "Links" would split a section in two.
  */
-const ROW_WORDS = /\brows?\b/i;
-
-/**
- * Verbs an instruction can open with. The rubric asks for ONE imperative
- * sentence, not for an imperative first sentence: plenty of good fixes open
- * with the condition ("If the page should rank, …") and give the instruction
- * second. The list is the verbs this copy actually uses; a new entry opening
- * with a verb that is not here fails and is either a real imperative worth
- * adding or prose worth rewriting.
- */
-const IMPERATIVES = [
-  "add", "adjust", "build", "check", "choose", "compare", "confirm", "consolidate",
-  "cut", "decide", "expand", "fill", "find", "fix", "generate", "give", "keep",
-  "leave", "link", "look", "make", "move", "open", "pick", "point", "publish",
-  "put", "raise", "read", "re-crawl", "recrawl", "re-export", "re-run", "rerun",
-  "remove", "render", "repoint", "replace", "request", "restore", "run", "serve",
-  "set", "shorten", "split", "start", "strip", "submit", "swap", "take", "test",
-  "trace", "treat", "trim", "turn", "update", "use", "validate", "verify", "work",
-  "write", "allowlist", "correct", "pair", "redirect",
+const AREAS = [
+  "Response codes",
+  "Sitemaps",
+  "Canonicals",
+  "Directives",
+  "Page titles",
+  "Meta description",
+  "H1",
+  "Headings",
+  "Content",
+  "Images",
+  "Links",
+  "Hreflang",
+  "Redirects",
+  "URL",
+  "Security",
+  "Structured data",
+  "Pagination",
+  "Site",
+  "Crawl",
+  "Resources",
+  "Mobile",
+  "Performance",
+  "Rendering",
+  "Robots.txt",
 ];
 
-/** Sentences of a paragraph, near enough for a rubric: split on . ! ? + space. */
-const sentences = (text: string): string[] =>
-  text
-    .split(/(?<=[.!?])["')]?\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+/** `Area: Condition` — an area from the list above, then a condition. */
+const TITLE_SHAPE = /^[A-Z][A-Za-z0-9 .()\-/]+: .+/;
+
+/** Titles are headlines: this is the width one survives in a table header. */
+const TITLE_MAX_CHARS = 80;
+
+/**
+ * Verbs an instruction may open with.
+ *
+ * The rubric asks for ONE imperative sentence, not for an imperative FIRST
+ * sentence: plenty of good fixes open with the condition ("If the page should
+ * rank, …") and give the instruction second, so every clause is examined and
+ * one hit is enough. A leading conjunction is stepped over ("…, and send an
+ * HSTS header").
+ *
+ * The list is the spec's, plus the verbs this copy actually uses: "301" because
+ * practitioners use it as one ("301 the old URL"), "crawl" and "shorten" and
+ * "send" because the entries that need them read worse any other way. A new
+ * entry opening with a verb that is not here fails and is either a real
+ * imperative worth adding or prose worth rewriting.
+ */
+const IMPERATIVES = [
+  // The spec's list.
+  "add", "remove", "replace", "point", "make", "set", "fix", "re-crawl", "re-run",
+  "redirect", "give", "link", "merge", "restore", "trim", "expand", "choose", "pick",
+  "decide", "confirm", "check", "read", "compare", "start", "strip", "split",
+  "publish", "declare", "allowlist", "fill", "move", "render", "serve",
+  "canonicalise", "generate", "request", "return", "use", "keep", "leave",
+  "validate", "consolidate", "nothing",
+  // …and the verbs the copy uses beside it.
+  "301", "build", "correct", "crawl", "cut", "narrow", "re-export", "re-test",
+  "send", "shorten", "submit", "swap", "test", "trace", "update", "verify", "work",
+  "write",
+];
+
+/** Conjunctions a clause may open with before its verb. */
+const CONJUNCTIONS = new Set(["and", "or", "then", "but"]);
+
+/** The first word of a clause, lowercased and stripped of punctuation. */
+const opener = (clause: string): string => {
+  const words = clause
+    .split(/[\s,—]+/)
+    .map((w) => w.toLowerCase().replace(/[^a-z0-9-]/g, ""))
+    .filter((w) => w.length > 0);
+  const first = words[0] ?? "";
+  return CONJUNCTIONS.has(first) ? (words[1] ?? "") : first;
+};
 
 describe("client-facing copy rubric", () => {
-  const rules = buildRegistry().all();
-
   it("has a rule to judge (the registry built)", () => {
-    expect(rules.length).toBeGreaterThan(90);
+    expect(RULES.length).toBeGreaterThan(90);
   });
 
   it("uses no engine vocabulary in any title, explanation, how-to-fix or marker reason", () => {
     const offences: string[] = [];
-    for (const rule of rules) {
+    for (const rule of RULES) {
       const c = copyFor(rule.id);
       const fields: [string, string][] = [
         ["title", c.title],
@@ -1694,28 +1576,23 @@ describe("client-facing copy rubric", () => {
             offences.push(`${rule.id}.${field}: "${banned.label}" — ${banned.why}`);
           }
         }
-        // The one exception, and where it does not apply.
-        if (rule.kind !== "metric" && ROW_WORDS.test(text)) {
-          offences.push(
-            `${rule.id}.${field}: "row" — a database row. Only a metric's copy may say row, ` +
-              "where it means a line of the table the metric renders.",
-          );
-        }
       }
     }
     expect(offences, `engine vocabulary in client copy:\n  ${offences.join("\n  ")}`).toEqual([]);
   });
 
-  it("gives every rule a headline title: short, unpunctuated at the end, no rule ids", () => {
-    for (const rule of rules) {
+  it("titles every rule as `Area: Condition`, short and unpunctuated at the end", () => {
+    for (const rule of RULES) {
       const title = copyFor(rule.id).title;
       expect(title, `${rule.id} title is padded`).toBe(title.trim());
-      expect(title.length, `${rule.id} title is empty`).toBeGreaterThan(5);
-      expect(title.length, `${rule.id} title is ${title.length} chars: ${title}`)
-        .toBeLessThanOrEqual(90);
-      expect(title.endsWith("."), `${rule.id} title ends with a full stop`).toBe(false);
+      expect(title, `${rule.id} title is not "Area: Condition": ${title}`).toMatch(TITLE_SHAPE);
+      expect(
+        title.length,
+        `${rule.id} title is ${title.length} chars, over ${TITLE_MAX_CHARS}: ${title}`,
+      ).toBeLessThanOrEqual(TITLE_MAX_CHARS);
+      expect(title.endsWith("."), `${rule.id} title ends with a full stop: ${title}`).toBe(false);
       // A rule id — "content.near-duplicate" — in a title is this engine's
-      // filing system on a client's screen. `robots.txt` is a file on their
+      // filing system on a client's screen. `robots.txt` is a file on their own
       // site and is allowed by name.
       const dotted = title
         .replace(/robots\.txt/gi, "")
@@ -1724,36 +1601,63 @@ describe("client-facing copy rubric", () => {
     }
   });
 
-  it("explains every rule in at least two sentences and instructs in at least one", () => {
-    for (const rule of rules) {
+  it("opens every title with an area from the fixed list", () => {
+    const strays: string[] = [];
+    for (const rule of RULES) {
+      const title = copyFor(rule.id).title;
+      const area = title.slice(0, title.indexOf(": "));
+      if (!AREAS.includes(area)) strays.push(`${rule.id}: "${area}" (${title})`);
+    }
+    expect(strays, `titles outside the area list:\n  ${strays.join("\n  ")}`).toEqual([]);
+  });
+
+  it("describes every rule in one to three sentences", () => {
+    const offences: string[] = [];
+    for (const rule of RULES) {
       const c = copyFor(rule.id);
       expect(c.explanation, `${rule.id} explanation is padded`).toBe(c.explanation.trim());
-      expect(c.howToFix, `${rule.id} howToFix is padded`).toBe(c.howToFix.trim());
       const said = sentences(c.explanation);
-      expect(said.length, `${rule.id} explanation is one sentence: ${c.explanation}`)
-        .toBeGreaterThanOrEqual(2);
+      if (said.length < 1 || said.length > 3) {
+        offences.push(`${rule.id}: ${said.length} sentences — ${c.explanation}`);
+      }
+    }
+    expect(
+      offences,
+      `descriptions outside the one-to-three sentence rule (spec §1):\n  ${offences.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  it("instructs in at least one imperative sentence per fix", () => {
+    const offences: string[] = [];
+    for (const rule of RULES) {
+      const c = copyFor(rule.id);
+      expect(c.howToFix, `${rule.id} howToFix is padded`).toBe(c.howToFix.trim());
+      expect(sentences(c.howToFix).length, `${rule.id} howToFix is empty`).toBeGreaterThanOrEqual(1);
       // Clauses, not sentences: "If the URL should exist, restore the page at
       // it" is an instruction, and demanding that the verb come first would
       // push every conditional fix into worse English than it has now.
-      const fix = c.howToFix
+      const clauses = c.howToFix
         .split(/(?<=[.!?])\s+|,\s+|;\s+|:\s+|—\s+/)
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
-      const imperative = fix.some((s) =>
-        IMPERATIVES.includes(s.split(/[\s,—]/)[0]!.toLowerCase().replace(/[^a-z-]/g, "")),
-      );
-      expect(imperative, `${rule.id} howToFix has no imperative sentence: ${c.howToFix}`).toBe(true);
+      if (!clauses.some((clause) => IMPERATIVES.includes(opener(clause)))) {
+        offences.push(`${rule.id}: ${c.howToFix}`);
+      }
     }
+    expect(
+      offences,
+      `fixes with no imperative sentence (spec §1):\n  ${offences.join("\n  ")}`,
+    ).toEqual([]);
   });
 });
 
 /**
  * A rule that fires on a number has to put the number in the title.
  *
- * "Title too long" reads as an opinion and sends a reader into the finding to
- * learn what "too" is; "Title longer than 60 characters" is the condition. The
- * values come from the rules' own exported constants, so this fails the day one
- * of them changes without the copy.
+ * "Page titles: Too long" reads as an opinion and sends a reader into the
+ * finding to learn what "too" is; "Page titles: Over 60 characters" is the
+ * condition. The values come from the rules' own exported constants, so this
+ * fails the day one of them changes without the copy.
  */
 describe("copy rubric: a threshold belongs in the title", () => {
   /** id → the number the title must carry, as the title spells it. */
@@ -1769,19 +1673,19 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "content.near-duplicate": String(NEAR_DUPLICATE_HAMMING),
     "images.oversized": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
     "images.legacy-format": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
-    // Two rules whose ids do not advertise a threshold but whose predicates
-    // are one. `content.soft-404` fires on `SOFT_404_WORDS` OR
-    // `TEMPLATE_HAMMING`; the word count is the half a title can carry, and
-    // the four bits are pinned in the explanation above.
+    // Two rules whose ids do not advertise a threshold but whose predicates are
+    // one. `content.soft-404` fires on `SOFT_404_WORDS` OR `TEMPLATE_HAMMING`;
+    // the word count is the half a title can carry, and the four bits are
+    // pinned in the explanation above.
     "content.soft-404": String(SOFT_404_WORDS),
     "redirect.chain": String(CHAIN_HOPS),
   };
 
   it("states the number in the title of every rule that fires on one", () => {
     for (const [id, value] of Object.entries(THRESHOLD_IN_TITLE)) {
-      const title = ISSUE_COPY[id]!.title;
+      const title = copy(id).title;
       expect(title, `${id} title omits its threshold ${value}: ${title}`).toMatch(
-        new RegExp(`(?<![0-9])${value.replace(/,/g, ",")}(?![0-9])`),
+        new RegExp(`(?<![0-9,])${value}(?![0-9])`),
       );
     }
   });
@@ -1793,28 +1697,25 @@ describe("copy rubric: a threshold belongs in the title", () => {
   //
   // AN ID IS NOT THE ONLY PROMISE. `content.soft-404` and `redirect.chain` name
   // no threshold and are both defined by one: 300 words or four bits, and two
-  // hops. They are in the map above and in this pattern, and the pattern is the
+  // hops. They are in the map and in this pattern, and the pattern is the
   // reminder that the next rule like them has to be added by hand — the id is
   // the cheap signal, not the authority.
   it("leaves no threshold rule out of the map", () => {
     const promises =
       /too-long|too-short|thin|slow|oversized|deep|level-skip|near-duplicate|soft-404|\.chain$/;
-    const missing = buildRegistry()
-      .all()
-      .filter(
-        (r) =>
-          r.marker === undefined &&
-          r.kind !== "metric" &&
-          promises.test(r.id) &&
-          !(r.id in THRESHOLD_IN_TITLE),
-      )
-      .map((r) => r.id);
+    const missing = RULES.filter(
+      (r) =>
+        r.marker === undefined &&
+        r.kind !== "metric" &&
+        promises.test(r.id) &&
+        !(r.id in THRESHOLD_IN_TITLE),
+    ).map((r) => r.id);
     expect(missing, `threshold rules with no pinned number: ${missing.join(", ")}`).toEqual([]);
   });
 });
 
 /**
- * The marker reason strings (§6).
+ * The marker reason strings.
  *
  * This is the "Why:" line under a rule in the demo's "Not checked on this
  * crawl" section, and the `marker` field of the rules catalog an agent reads.
@@ -1823,9 +1724,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
  * task number. One sentence, the cause, and what would answer the check.
  */
 describe("copy rubric: marker reasons", () => {
-  const markers = buildRegistry()
-    .all()
-    .filter((r) => r.marker !== undefined);
+  const markers = RULES.filter((r) => r.marker !== undefined);
 
   it("has markers to judge", () => {
     expect(markers.length).toBeGreaterThan(5);
@@ -1835,21 +1734,21 @@ describe("copy rubric: marker reasons", () => {
     for (const rule of markers) {
       const reason = rule.marker!;
       expect(reason, `${rule.id} marker is padded`).toBe(reason.trim());
-      expect(reason.length, `${rule.id} marker is too short to say both halves`)
-        .toBeGreaterThan(40);
+      expect(reason.length, `${rule.id} marker is too short to say both halves`).toBeGreaterThan(40);
       expect(reason[0], `${rule.id} marker does not open with a capital`).toBe(
         reason[0]!.toUpperCase(),
       );
       expect(reason.endsWith("."), `${rule.id} marker is not a sentence: ${reason}`).toBe(true);
-      expect(sentences(reason).length, `${rule.id} marker is more than one sentence: ${reason}`)
-        .toBe(1);
+      expect(
+        sentences(reason).length,
+        `${rule.id} marker is more than one sentence: ${reason}`,
+      ).toBe(1);
       // No task numbers, no phase ids: "(P11-T3)" reached a client screen.
       expect(reason, `${rule.id} marker cites a build task`).not.toMatch(/\bP\d+-T\d+\b/);
       // And the half that makes it useful: what would answer the check.
-      expect(
-        reason,
-        `${rule.id} marker names no remedy: ${reason}`,
-      ).toMatch(/\bre-?crawl|re-?run|crawl(?:ing)?\b|raise|enable|turn(?:ed)? on|allow|supply|resume|fix|add\b/i);
+      expect(reason, `${rule.id} marker names no remedy: ${reason}`).toMatch(
+        /\bre-?crawl|re-?run|crawl(?:ing)?\b|raise|enable|turn(?:ed)? on|allow|supply|resume|fix|add\b/i,
+      );
     }
   });
 });

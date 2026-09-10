@@ -183,6 +183,11 @@ export const paginationRules: QueryRule[] = [
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: NEXT_UNCRAWLED.severity,
+    columns: [
+      { key: "relNext", label: "rel=\"next\"" },
+      { key: "resolvedTo", label: "Expected Link" },
+      { key: "unparseable", label: "Unparseable", optional: true },
+    ],
     ...copyFor(NEXT_UNCRAWLED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -213,6 +218,10 @@ export const paginationRules: QueryRule[] = [
     checkIds: ["CHECK-22"],
     category: CATEGORY,
     severity: NEXT_NOT_LINKED.severity,
+    columns: [
+      { key: "relNext", label: "rel=\"next\"" },
+      { key: "resolvedTo", label: "Expected Link" },
+    ],
     ...copyFor(NEXT_NOT_LINKED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -240,6 +249,11 @@ export const paginationRules: QueryRule[] = [
     checkIds: ["CHECK-23"],
     category: CATEGORY,
     severity: CANONICAL_TO_OTHER.severity,
+    columns: [
+      { key: "canonical", label: "Canonical Link Element" },
+      { key: "resolvedTo", label: "Canonical Target" },
+      { key: "relPrev", label: "rel=\"prev\"" },
+    ],
     ...copyFor(CANONICAL_TO_OTHER.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>

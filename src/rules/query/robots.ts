@@ -203,6 +203,10 @@ export const robotsRules: QueryRule[] = [
     checkIds: ["CHECK-03"],
     category: "crawl",
     severity: MISSING.severity,
+    columns: [
+      { key: "outcome", label: "robots.txt Outcome" },
+      { key: "note", label: "Note" },
+    ],
     ...copyFor(MISSING.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
@@ -225,6 +229,10 @@ export const robotsRules: QueryRule[] = [
     checkIds: ["CHECK-03"],
     category: "crawl",
     severity: BLOCKS.severity,
+    columns: [
+      { key: "userAgent", label: "User Agent" },
+      { key: "matchedBy", label: "Matched Rule", optional: true },
+    ],
     ...copyFor(BLOCKS.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => blockedFindings(db, crawlId, capsOr(caps)),
@@ -239,10 +247,15 @@ export const robotsRules: QueryRule[] = [
     checkIds: ["CHECK-03"],
     category: "crawl",
     severity: SKIPPED.severity,
+    columns: [
+      { key: "skipped", label: "Reason" },
+      { key: "outcome", label: "robots.txt Outcome" },
+      { key: "robotsTruncated", label: "robots.txt Truncated" },
+    ],
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl could not read the whole of robots.txt — the server did not serve it, or the file is larger than the 500KB this crawler reads — so nothing in it could be judged; fix the file or the server and crawl again.",
+      "The robots.txt was truncated at the 500 KB read, could not be fetched, or was fetched empty, so robots.txt checks were not run; fix the file or the server and crawl again.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const { discovery } = await readCrawlEvidence(db, crawlId, SKIPPED.id);
       const skipped = robotsUnreadable(discovery);

@@ -2752,7 +2752,7 @@ through an empty listing rests on that timestamp.
 | Tool | Answers | Use it for |
 |------|---------|-----------|
 | `issues_list` | one row per rule that found something: `{ruleId, checkIds, severity, category, title, count, sampleUrls}` | the verdict on a check, and its size |
-| `issue_urls` | one row per finding: `{url, evidence}` | the URL list a developer gets, and the per-page evidence |
+| `issue_urls` | one row per finding: `{url, address, statusCode, indexability, indexabilityStatus, evidence}`, with the response's own `columns` saying how to print them | the report a developer gets: the URL, whether it is indexable and why not, and the rule's own evidence |
 | `metrics_get` | `{metricId, scope, scopeValue, value, title, explanation, checkIds, category}` | every number a report quotes |
 | `robots_get` | `{crawlId, robotsUrl, outcome, raw, truncated, crawlDelaySec, note, sitemapSources, suppliedSitemaps, userAgent}` | the robots.txt this crawl obeyed, as stored (CHECK-03, CHECK-06) |
 

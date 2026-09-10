@@ -428,6 +428,7 @@ describe("the finding cap against the database", () => {
       explanation: "Records the caps its run was given, so two runs can be compared.",
       howToFix: "Do not ship it.",
       rulesetVersion: RULESET_VERSION,
+      columns: [],
       run: async (_db, crawlId, caps): Promise<Finding[]> => {
         seen.set(crawlId, caps);
         // Both runs park here until the other has recorded its own caps, so the

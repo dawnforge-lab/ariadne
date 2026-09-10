@@ -365,6 +365,11 @@ export const fieldDuplicateRules: QueryRule[] = [
     checkIds: ["CHECK-35"],
     category: CATEGORY,
     severity: TITLE.severity,
+    columns: [
+      { key: "title", label: "Title 1" },
+      { key: "count", label: "Occurrences" },
+      { key: "pages", label: "Addresses" },
+    ],
     ...copyFor(TITLE.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -377,6 +382,11 @@ export const fieldDuplicateRules: QueryRule[] = [
     checkIds: ["CHECK-36"],
     category: CATEGORY,
     severity: META.severity,
+    columns: [
+      { key: "metaDescription", label: "Meta Description 1" },
+      { key: "count", label: "Occurrences" },
+      { key: "pages", label: "Addresses" },
+    ],
     ...copyFor(META.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -414,6 +424,11 @@ export const fieldDuplicateRules: QueryRule[] = [
     checkIds: ["CHECK-37"],
     category: CATEGORY,
     severity: H1.severity,
+    columns: [
+      { key: "h1Text", label: "H1-1" },
+      { key: "count", label: "Occurrences" },
+      { key: "pages", label: "Addresses" },
+    ],
     ...copyFor(H1.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -431,10 +446,16 @@ export const fieldDuplicateRules: QueryRule[] = [
     checkIds: ["CHECK-37"],
     category: CATEGORY,
     severity: H1_SKIPPED.severity,
+    columns: [
+      { key: "skipped", label: "Reason" },
+      { key: "indexablePages", label: "Indexable Pages" },
+      { key: "pagesWithH1", label: "Pages With An H1" },
+      { key: "pagesWithH1Text", label: "Pages With H1 Text" },
+    ],
     ...copyFor(H1_SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl stored no heading text, so the same H1 appearing on several pages could not be detected; re-crawl the site to record the headings.",
+      "This crawl stored no H1 text, so duplicate H1s could not be checked; re-crawl the site.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const coverage = await h1Coverage(db, crawlId, H1_SKIPPED.id);
       const skipped = h1TextUnavailable(coverage);

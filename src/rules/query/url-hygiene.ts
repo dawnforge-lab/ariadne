@@ -256,10 +256,12 @@ async function trackingFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
  * which is how a catalogue of two hundred products becomes forty thousand
  * indexable URLs.
  *
- * Info, not a warning: parameterised pages are legitimately indexable on plenty
- * of sites (a search results page a client wants ranking, a paginated feed),
- * and the `url_params` inventory beside this finding is what tells the agent
- * which parameters are involved.
+ * Warning, not critical: parameterised pages are legitimately indexable on
+ * plenty of sites (a search results page a client wants ranking, a paginated
+ * feed), so the finding is not a verdict — but the failure mode it names is
+ * how a catalogue of two hundred products becomes forty thousand indexable
+ * URLs, which is more than a note. The `url_params` inventory beside this
+ * finding is what tells the agent which parameters are involved.
  *
  * Batched by page id, and the canonical is resolved in JavaScript by the same
  * `resolveEffectiveCanonical` the canonical page rules use — a canonical can be
@@ -328,6 +330,11 @@ export const urlHygieneRules: QueryRule[] = [
     checkIds: ["CHECK-30"],
     category: CATEGORY,
     severity: VARIANTS.severity,
+    columns: [
+      { key: "count", label: "Occurrences" },
+      { key: "variants", label: "Addresses" },
+      { key: "urlNormalised", label: "Normalised Address" },
+    ],
     ...copyFor(VARIANTS.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => variantFindings(db, crawlId, capsOr(caps)),
@@ -339,6 +346,10 @@ export const urlHygieneRules: QueryRule[] = [
     checkIds: ["CHECK-28"],
     category: CATEGORY,
     severity: TRACKING.severity,
+    columns: [
+      { key: "params", label: "Parameters" },
+      { key: "inlinkCount", label: "Inlinks" },
+    ],
     ...copyFor(TRACKING.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => trackingFindings(db, crawlId, capsOr(caps)),
@@ -350,6 +361,7 @@ export const urlHygieneRules: QueryRule[] = [
     checkIds: ["CHECK-27"],
     category: CATEGORY,
     severity: PARAM_PAGES.severity,
+    columns: [{ key: "params", label: "Parameters" }],
     ...copyFor(PARAM_PAGES.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => parameterPageFindings(db, crawlId, capsOr(caps)),

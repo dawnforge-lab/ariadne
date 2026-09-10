@@ -375,6 +375,11 @@ export const linkGraphRules: QueryRule[] = [
     checkIds: ["CHECK-32"],
     category: "links",
     severity: ORPHAN.severity,
+    columns: [
+      { key: "discoveredVia", label: "Discovered Via" },
+      { key: "inSitemap", label: "In Sitemap" },
+      { key: "caveat", label: "Caveat", optional: true },
+    ],
     ...copyFor(ORPHAN.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
@@ -393,10 +398,18 @@ export const linkGraphRules: QueryRule[] = [
     checkIds: ["CHECK-32"],
     category: "links",
     severity: SKIPPED.severity,
+    columns: [
+      { key: "skipped", label: "Reason" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+      { key: "maxPages", label: "Page Limit" },
+      { key: "pending", label: "Pending URLs" },
+      { key: "leased", label: "Leased URLs" },
+      { key: "failed", label: "Failed URLs" },
+    ],
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl did not reach every URL it knew about, so a page nothing appears to link to may simply be linked from a page that was never fetched; re-run or resume the crawl, raising the page limit if it stopped at one.",
+      "The crawl left URLs unfetched, stopped at its page limit, or stored no page limit, so a page with no inlinks may be linked from an unfetched page; re-run or resume the crawl with a page limit above the site's page count.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const state = await completeness(db, crawlId, SKIPPED.id);
       const skipped = skipReason(state);
@@ -425,6 +438,11 @@ export const linkGraphRules: QueryRule[] = [
     checkIds: ["CHECK-31"],
     category: "technical",
     severity: DEEP.severity,
+    columns: [
+      { key: "clickDepth", label: "Crawl Depth" },
+      { key: "threshold", label: "Threshold" },
+      { key: "caveat", label: "Caveat", optional: true },
+    ],
     ...copyFor(DEEP.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {

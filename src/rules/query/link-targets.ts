@@ -271,6 +271,10 @@ export const linkTargetRules: QueryRule[] = [
     checkIds: ["CHECK-11"],
     category: "links",
     severity: BROKEN.severity,
+    columns: [
+      { key: "inlinkCount", label: "Inlinks" },
+      { key: "sampleSources", label: "Sample Sources" },
+    ],
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -292,6 +296,10 @@ export const linkTargetRules: QueryRule[] = [
     checkIds: ["CHECK-11"],
     category: "links",
     severity: TO_SERVER_ERROR.severity,
+    columns: [
+      { key: "inlinkCount", label: "Inlinks" },
+      { key: "sampleSources", label: "Sample Sources" },
+    ],
     ...copyFor(TO_SERVER_ERROR.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -318,6 +326,12 @@ export const linkTargetRules: QueryRule[] = [
     checkIds: ["CHECK-19"],
     category: "canonical",
     severity: NON_200.severity,
+    columns: [
+      { key: "canonical", label: "Canonical Link Element" },
+      { key: "resolvedTo", label: "Canonical Target" },
+      { key: "targetStatus", label: "Target Status Code" },
+      { key: "targetFetchClass", label: "Target Fetch Class" },
+    ],
     ...copyFor(NON_200.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -348,6 +362,12 @@ export const linkTargetRules: QueryRule[] = [
     checkIds: ["CHECK-19"],
     category: "canonical",
     severity: NON_INDEXABLE.severity,
+    columns: [
+      { key: "canonical", label: "Canonical Link Element" },
+      { key: "resolvedTo", label: "Canonical Target" },
+      { key: "targetRobotsMeta", label: "Target Meta Robots" },
+      { key: "targetXRobotsTag", label: "Target X-Robots-Tag" },
+    ],
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>

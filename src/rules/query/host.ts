@@ -192,10 +192,12 @@ function duplicateHost200(probe: HostProbeResult, siteUrl: string): Finding[] {
  * instead would mean re-deriving the same strings from operator input a second
  * time, and disagreeing with the probe if either ever changed.
  *
- * Info, not a warning: a reachable legacy domain is sometimes deliberate (a
- * brand kept alive, a regional site), and the fault — duplicate content under
- * two brands, or link equity stranded on the old name — is the agent's call
- * with the redirect map in front of it.
+ * Warning, not critical: a reachable legacy domain is sometimes deliberate (a
+ * brand kept alive, a regional site), so it is not an automatic fault the way
+ * the two rules above are — but the usual cost, duplicate content under two
+ * brands or link equity stranded on the old name, is real enough that it is
+ * not a note either. Which of the two this site has is the agent's call with
+ * the redirect map in front of it.
  */
 function legacyHostReachable(probe: HostProbeResult, siteUrl: string): Finding[] {
   const own = siteSpellings(siteUrl);
@@ -227,6 +229,10 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-14"],
     category: CATEGORY,
     severity: HTTP_200.severity,
+    columns: [
+      { key: "variant", label: "Host Variant" },
+      { key: "hops", label: "Chain" },
+    ],
     ...copyFor(HTTP_200.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => withProbe(db, crawlId, HTTP_200, httpServes200),
@@ -238,6 +244,10 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-15"],
     category: CATEGORY,
     severity: DUPLICATE.severity,
+    columns: [
+      { key: "variants", label: "Host Variants" },
+      { key: "finals", label: "Final Addresses" },
+    ],
     ...copyFor(DUPLICATE.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => withProbe(db, crawlId, DUPLICATE, duplicateHost200),
@@ -249,6 +259,10 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-15"],
     category: CATEGORY,
     severity: LEGACY.severity,
+    columns: [
+      { key: "variant", label: "Host Variant" },
+      { key: "hops", label: "Chain" },
+    ],
     ...copyFor(LEGACY.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => withProbe(db, crawlId, LEGACY, legacyHostReachable),
@@ -261,10 +275,14 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-14", "CHECK-15"],
     category: CATEGORY,
     severity: SKIPPED.severity,
+    columns: [
+      { key: "skipped", label: "Reason" },
+      { key: "siteUrl", label: "Site" },
+    ],
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl was started with the host checks turned off, so the site's other addresses — http, www, a former domain — were never requested; re-run the crawl with those checks on.",
+      "This crawl has no host-check record (host checks off, or the crawl ended before they ran), so the HTTP, www, non-www and former-domain variants were not checked; re-run with host checks on.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const evidence = await readHostProbe(db, crawlId, SKIPPED.id);
       if (evidence.probe !== null) return [];

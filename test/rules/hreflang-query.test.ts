@@ -72,7 +72,7 @@ describe("hreflangRules metadata", () => {
     ]);
     const marker = rule("hreflang.alternates-not-crawled").marker!;
     // A reason names the cause AND what would answer the check (Phase 19 §6).
-    expect(marker).toMatch(/never requested by this crawl/);
+    expect(marker).toMatch(/not requested by this crawl/);
     expect(marker).toMatch(/crawl those domains/);
     // And it claims no cause the finding cannot establish: an alternate this
     // crawl never fetched is not evidence that it sits on another domain — a

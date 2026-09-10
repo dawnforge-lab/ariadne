@@ -104,6 +104,11 @@ export const renderRedirectRules: QueryRule[] = [
     checkIds: ["CHECK-10"],
     category: "redirects",
     severity: JS_REDIRECT.severity,
+    columns: [
+      { key: "toUrl", label: "Redirect URL" },
+      { key: "rendered", label: "Rendered" },
+      { key: "renderError", label: "Render Error" },
+    ],
     ...copyFor(JS_REDIRECT.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => jsRedirectFindings(db, crawlId, capsOr(caps)),

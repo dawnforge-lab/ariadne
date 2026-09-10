@@ -299,6 +299,97 @@ const SKIP_HARNESS_CLAIMS: string[] = [
 const RENDER_SETTLE_MS = 500;
 
 /**
+ * THE RULES THE FIXTURE CRAWL ACTUALLY TRIPS, named.
+ *
+ * The column guard below can only speak for rules that wrote a finding on this
+ * crawl — 71 of the 86 that find, the remainder being the site-scoped markers
+ * and the rules `SKIP_HARNESS_CLAIMS` explains. It used to assert only "at
+ * least twenty of them", which is a floor a fixture could fall fifty rules
+ * through without going red.
+ *
+ * So the floor is this LIST. It is derived, not designed: it is what the crawl
+ * produced when it was written, and it is checked as a SUBSET of what fires —
+ * a rule joining the list is a fixture doing more and needs no edit here, a
+ * rule leaving it is the guard going quiet about a rule and fails by name. The
+ * static half of the same claim, over all 86 whether they fire or not, is
+ * test/rules/registry.test.ts ("every declared column names a key its own
+ * rule's source writes").
+ */
+const FIXTURE_COLUMN_RULES: readonly string[] = [
+  "canonical.cross-domain",
+  "canonical.html-header-conflict",
+  "canonical.missing",
+  "canonical.multiple",
+  "canonical.non-200-target",
+  "canonical.non-indexable-target",
+  "canonical.points-elsewhere",
+  "content.csr-dependent",
+  "content.exact-duplicate",
+  "content.near-duplicate",
+  "content.placeholder",
+  "content.soft-404",
+  "content.thin",
+  "crawl.blocked",
+  "directive.canonical-noindex-conflict",
+  "filters.js-only",
+  "h1.duplicate-text",
+  "headings.h1-missing",
+  "headings.h1-multiple",
+  "headings.level-skip",
+  "host.http-serves-200",
+  "host.legacy-host-reachable",
+  "hreflang.alternates-not-crawled",
+  "hreflang.invalid-code",
+  "hreflang.missing-return-link",
+  "hreflang.missing-self-reference",
+  "hreflang.missing-x-default",
+  "hreflang.non-indexable-target",
+  "http.server-error",
+  "images.legacy-format",
+  "images.missing-alt",
+  "images.missing-dimensions",
+  "images.oversized",
+  "indexability.meta-header-conflict",
+  "indexability.noindex",
+  "links.broken-internal",
+  "links.orphan",
+  "links.to-server-error",
+  "meta-description.duplicate",
+  "meta-description.missing",
+  "meta-description.too-long",
+  "meta-description.too-short",
+  "mobile.viewport-missing",
+  "nav.js-only",
+  "pages.not-in-sitemap",
+  "pagination.canonical-to-other",
+  "pagination.next-not-linked",
+  "pagination.next-target-uncrawled",
+  "performance.slow-response",
+  "redirect.chain",
+  "redirect.js",
+  "redirect.loop",
+  "resources.broken",
+  "resources.uncached",
+  "robots.blocks-sitemap-urls",
+  "schema.breadcrumb-absent",
+  "schema.product-incomplete",
+  "schema.self-serving-reviews",
+  "sitemap.invalid",
+  "sitemap.non-200",
+  "sitemap.non-indexable",
+  "sitemap.redirected",
+  "sitemap.uncrawled",
+  "structure.deep-page",
+  "title.duplicate",
+  "title.missing",
+  "title.too-long",
+  "title.too-short",
+  "url.normalisation-variants",
+  "url.parameter-pages-indexable",
+  "url.tracking-params-internal",];
+
+
+/**
  * The render budget this harness runs with: 100% of the crawl, both other knobs
  * at their production defaults.
  *
@@ -889,7 +980,153 @@ describe("the fixture site end to end", () => {
     // over almost nothing.
     const fired = await db.execute<{ n: number }>(sql`
       select count(distinct rule_id)::int as n from issues where crawl_id = ${summary.crawlId}`);
-    expect(Number(fired.rows[0]?.n ?? 0)).toBeGreaterThanOrEqual(20);
+    expect(Number(fired.rows[0]?.n ?? 0)).toBeGreaterThanOrEqual(
+      FIXTURE_COLUMN_RULES.length,
+    );
+  });
+
+  /**
+   * EVERY COLUMN A RULE DECLARES IS A COLUMN THAT EXISTS, AND EVERY EVIDENCE
+   * KEY IS A COLUMN SOMEBODY SEES.
+   *
+   * `RuleMeta.columns` is a claim about what a rule writes, and `defineRule`
+   * cannot check it: a declaration is metadata and the evidence only exists
+   * once a rule has run over a real crawl. This is where it is checked, in both
+   * directions, because both directions are a real failure:
+   *
+   *  - a declared column that never appears is a HEADING WITH NOTHING UNDER IT
+   *    — a report that promises a fact the rule cannot produce;
+   *  - an evidence key no column names is a COLUMN NOBODY SEES. Evidence is the
+   *    report now: a rule that measured something and did not declare it has
+   *    put the answer where only a JSON reader will find it.
+   *
+   * ## The three keys a rule may write without declaring, and why each
+   *
+   *  - `pageUrl` — `runRules` writes it, not the rule (and the test above
+   *    forbids a rule from writing one at all). It is the `address` column.
+   *  - `truncated` — the CAP MACHINERY writes it onto the last finding of a
+   *    capped run (`noteOnLast`, src/rules/query/crawl-evidence.ts). It is not a
+   *    fact about the page in that row; every surface reads it as the listing's
+   *    own note, and the CSV gives it a fixed trailing column of its own.
+   *  - `statusCode` — nine rules record the status of the page their finding
+   *    names, and the standard `Status Code` column already prints it FROM THE
+   *    PAGE ROW. Declaring it would put two columns under one heading, filled
+   *    from two sources. That exemption is only sound if the two sources always
+   *    agree, so the second assertion below checks exactly that rather than
+   *    trusting the paragraph.
+   *
+   * And one key a rule may write without declaring BECAUSE IT IS MEASURED to be
+   * the address: a rule whose evidence restates the URL its finding is filed
+   * against (`targetUrl` on the link rules, `url` on the sitemap rules,
+   * `variant` on the host probes, `fromUrl` on the JavaScript redirect). The
+   * exemption is not a list — it is computed from the rows: a key qualifies
+   * only if EVERY finding of that rule has it equal to that finding's own
+   * `pageUrl`. A rule whose key sometimes differs is a rule that is saying
+   * something new, and it needs a column.
+   */
+  it("declares a column for every evidence key it writes, and writes every column it declares", async () => {
+    const FRAMEWORK_KEYS = new Set(["pageUrl", "truncated", "statusCode"]);
+
+    const rows = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.crawlId, summary.crawlId));
+    const byRule = new Map<string, Record<string, unknown>[]>();
+    for (const row of rows) {
+      const blob = row.details as Record<string, unknown>;
+      const list = byRule.get(row.ruleId);
+      if (list === undefined) byRule.set(row.ruleId, [blob]);
+      else list.push(blob);
+    }
+    // The guard speaks for the rules that FIRED, and this is the list of them —
+    // named, not counted, because "at least twenty" was true of a fixture that
+    // had stopped tripping fifty. A rule that falls out of the fixture fails
+    // here by name; a rule that joins it is welcome and does not (the coverage
+    // sweep at the end of this file is what makes joining compulsory).
+    expect(
+      [...byRule.keys()].sort(),
+      "these rules used to write findings on the fixture crawl and no longer do — " +
+        "the column guard is now silent about them",
+    ).toEqual(expect.arrayContaining([...FIXTURE_COLUMN_RULES]));
+    expect(byRule.size).toBeGreaterThanOrEqual(FIXTURE_COLUMN_RULES.length);
+
+    const undeclared: string[] = [];
+    const unwritten: string[] = [];
+    for (const [ruleId, blobs] of byRule) {
+      const rule = registry.all().find((r) => r.id === ruleId);
+      if (rule === undefined) throw new Error(`no registry rule '${ruleId}'`);
+      const declared = new Map((rule.columns ?? []).map((c) => [c.key, c]));
+
+      const written = new Set<string>();
+      for (const blob of blobs) for (const key of Object.keys(blob)) written.add(key);
+
+      for (const key of written) {
+        if (declared.has(key) || FRAMEWORK_KEYS.has(key)) continue;
+        // Measured, not listed: does this key just restate the finding's URL?
+        const restatesAddress = blobs.every(
+          (blob) => !(key in blob) || blob[key] === blob["pageUrl"],
+        );
+        if (restatesAddress) continue;
+        undeclared.push(`${ruleId}.${key}`);
+      }
+      for (const [key, column] of declared) {
+        if (column.optional === true) continue;
+        if (!blobs.some((blob) => key in blob)) unwritten.push(`${ruleId}.${key}`);
+      }
+    }
+
+    expect(
+      undeclared.sort(),
+      "these evidence keys are columns nobody sees — declare them in the rule's " +
+        "`columns`, or stop writing them",
+    ).toEqual([]);
+    expect(
+      unwritten.sort(),
+      "these declared columns are headings with nothing under them — the rule " +
+        "never writes the key. Fix the key, or mark the column `optional: true` " +
+        "if the rule writes it only sometimes",
+    ).toEqual([]);
+  });
+
+  /**
+   * THE EXEMPTION ABOVE, CHECKED RATHER THAN ASSERTED: a rule's own
+   * `statusCode` is the status of the page its finding names.
+   *
+   * The standard `Status Code` column is read off the `pages` row through the
+   * left join, and nine rules ALSO record a `statusCode` in their evidence. The
+   * column-check above lets them, on the ground that the two are the same
+   * number by construction. If they ever were not, the report would print one
+   * of them and silently drop the other — so the ground is a query, not a
+   * comment.
+   */
+  it("never lets a rule's own statusCode disagree with the page row the finding names", async () => {
+    const disagreed = await db.execute<{ rule_id: string; page: number | null; said: string }>(sql`
+      select i.rule_id, p.status_code as page, i.details_jsonb->>'statusCode' as said
+        from issues i
+        join pages p on p.id = i.page_id
+       where i.crawl_id = ${summary.crawlId}
+         and i.details_jsonb ? 'statusCode'
+         and i.details_jsonb->>'statusCode' is distinct from p.status_code::text`);
+    expect(disagreed.rows).toEqual([]);
+
+    // THE OTHER HALF OF THE SAME EXEMPTION: a finding with no page row. The
+    // join above cannot see one, and the standard `Status Code` column is null
+    // beside it by construction (§4.4: null means NOBODY FETCHED IT). An
+    // evidence `statusCode` there would be a number with nothing to check it
+    // against, printed under a heading the surface says is null — so the rule
+    // is that a page-less finding carries no status of its own. A null or
+    // absent key is fine; it says the same nothing the column does.
+    const unanchored = await db.execute<{ rule_id: string; said: string }>(sql`
+      select i.rule_id, i.details_jsonb->>'statusCode' as said
+        from issues i
+       where i.crawl_id = ${summary.crawlId}
+         and i.page_id is null
+         and i.details_jsonb->>'statusCode' is not null`);
+    expect(
+      unanchored.rows,
+      "these findings name no page row, so nothing can check the status they " +
+        "record — drop the key, or file the finding against the page",
+    ).toEqual([]);
   });
 
   it("the sitemap's deliberate mistakes land on the URLs that carry them", () => {

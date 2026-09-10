@@ -160,7 +160,7 @@ describe("contentRules metadata", () => {
       // reason opening "This crawl ran before…" asserts a cause the rule never
       // established; the age of the crawl is offered as the likely explanation
       // rather than claimed as the finding.
-      expect(m.marker, m.id).toMatch(/^No page in this crawl carries a/);
+      expect(m.marker, m.id).toMatch(/^No page in this crawl has a/);
       expect(m.marker, m.id).not.toMatch(/^This crawl ran before/);
     }
   });

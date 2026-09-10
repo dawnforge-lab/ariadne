@@ -589,6 +589,24 @@ export const renderDiffRules: QueryRule[] = [
     checkIds: ["CHECK-01"],
     category: "content",
     severity: CSR.severity,
+    // THE SUBTRACTION FIRST, THE CONTEXT AFTER. The two renderable counts and
+    // their difference are the finding; the two whole counts follow so a reader
+    // can see the chrome on each side and watch it cancel.
+    //
+    // "Rendered" in these headings means MEASURED ON THE RENDERED DOM, the same
+    // way it does in `Rendered Renderable Word Count` — so `Word Count` and
+    // `Rendered Word Count` are the analyzer's whole count of each document.
+    // Neither is `pages.rendered_word_count`, the browser's `innerText`, which
+    // this rule deliberately does not read (see the evidence comment above);
+    // that column is never printed under a heading by any rule, so there is no
+    // report in which the two could be confused for each other.
+    columns: [
+      { key: "renderableWordCount", label: "Renderable Word Count" },
+      { key: "renderedRenderableWordCount", label: "Rendered Renderable Word Count" },
+      { key: "addedWords", label: "Words Added By JavaScript" },
+      { key: "rawWordCount", label: "Word Count" },
+      { key: "renderedAnalyzerWordCount", label: "Rendered Word Count" },
+    ],
     ...copyFor(CSR.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => csrDependentFindings(db, crawlId, capsOr(caps)),
@@ -600,6 +618,14 @@ export const renderDiffRules: QueryRule[] = [
     checkIds: ["CHECK-34"],
     category: "technical",
     severity: NAV.severity,
+    columns: [
+      { key: "rawLinks", label: "Nav And Footer Links" },
+      { key: "renderedLinks", label: "Rendered Nav And Footer Links" },
+      { key: "rawNavLinks", label: "Nav Links" },
+      { key: "renderedNavLinks", label: "Rendered Nav Links" },
+      { key: "rawFooterLinks", label: "Footer Links" },
+      { key: "renderedFooterLinks", label: "Rendered Footer Links" },
+    ],
     ...copyFor(NAV.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => navJsOnlyFindings(db, crawlId, capsOr(caps)),
@@ -611,6 +637,10 @@ export const renderDiffRules: QueryRule[] = [
     checkIds: ["CHECK-02"],
     category: "url",
     severity: FILTERS.severity,
+    columns: [
+      { key: "rawFilterLinks", label: "Filter Links" },
+      { key: "renderedFilterLinks", label: "Rendered Filter Links" },
+    ],
     ...copyFor(FILTERS.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => filtersJsOnlyFindings(db, crawlId, capsOr(caps)),

@@ -447,7 +447,10 @@ export const pages = pgTable("pages", {
   domSize: integer("dom_size"),
   imagesTotal: integer("images_total").notNull().default(0),
   imagesMissingAlt: integer("images_missing_alt").notNull().default(0),
-  // <img> without both width and height — the CLS signal (CHECK-49).
+  // <img> missing EITHER width or height — the CLS signal (CHECK-49). One
+  // image counts once however many of the two it is missing: the browser
+  // cannot reserve the box without both, so one attribute is the same
+  // layout-shift defect as none (src/crawl/parse/page-analyzer.ts).
   imagesMissingDimensions: integer("images_missing_dimensions").notNull().default(0),
   hasAmp: boolean("has_amp").notNull().default(false),
   // <meta name=viewport> present — the mobile-readiness signal (CHECK-52).

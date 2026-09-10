@@ -26,11 +26,40 @@ import {
   EVIDENCE_MAX_CELL,
   EVIDENCE_MAX_LEAVES,
   EVIDENCE_MAX_VALUE,
+  TRUNCATED_LABEL,
   csvCell,
   csvRecord,
+  evidenceCell,
   flattenEvidence,
+  type CsvViewContext,
   type CsvViewName,
 } from "../../src/api/csv.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import { columnsFor } from "../../src/api/service.js";
+
+/**
+ * The read-time join a view is handed, over the real registry.
+ *
+ * Real rather than a stub, because the thing being checked is that a view's
+ * header and its cells come from the SAME column list — and a stub would be a
+ * third list that could agree with neither.
+ */
+function ruleCtx(): CsvViewContext {
+  const registry = buildRegistry();
+  return {
+    rule: (ruleId) => {
+      const rule = registry.all().find((r) => r.id === ruleId);
+      if (rule === undefined) throw new Error(`no rule ${ruleId}`);
+      return {
+        title: rule.title,
+        category: rule.category,
+        checkIds: rule.checkIds,
+        columns: columnsFor(rule),
+      };
+    },
+    evidence: (value) => value as Record<string, unknown>,
+  };
+}
 
 describe("csvCell — the injection guard", () => {
   it("prefixes the four spreadsheet formula leaders with an apostrophe", () => {
@@ -161,21 +190,47 @@ describe("the view definitions", () => {
       CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
     ).sql;
 
-  it("defines exactly the seven views the surface advertises", () => {
+  it("defines exactly the eight views the surface advertises", () => {
     expect(Object.keys(CSV_VIEW_DEFS).sort()).toEqual([...CSV_VIEWS].sort());
-    // Seven since P11-T4 added `resources`. The count moves with the vocabulary
-    // deliberately: a view defined and never advertised, or advertised and never
-    // defined, fails the line above, and a view SILENTLY DELETED fails this one.
-    expect(CSV_VIEWS).toHaveLength(7);
+    // Eight since P20-T1 added `links_to_5xx` beside `links_to_4xx`. The count
+    // moves with the vocabulary deliberately: a view defined and never
+    // advertised, or advertised and never defined, fails the line above, and a
+    // view SILENTLY DELETED fails this one.
+    expect(CSV_VIEWS).toHaveLength(8);
   });
 
   it("gives every view a header, a keyset and a start cursor of matching arity", () => {
+    // The header is a FUNCTION of the request since P20-T1 — `issue_urls`'
+    // columns are the rule's — so it is asked for a rule rather than read as a
+    // constant. `links.orphan` is a rule that finds, which is all any view here
+    // needs of it.
+    const ctx = ruleCtx();
     for (const view of CSV_VIEWS) {
       const def = CSV_VIEW_DEFS[view];
-      expect(def.header.length, `${view} has no header`).toBeGreaterThan(0);
+      const ruleId = def.needsRuleId ? "links.orphan" : null;
+      expect(def.header(ruleId, ctx).length, `${view} has no header`).toBeGreaterThan(0);
       expect(def.keyset.length, `${view} names no keyset`).toBeGreaterThan(0);
       expect(def.start.length, `${view}'s start cursor is the wrong arity`).toBe(def.keyset.length);
     }
+  });
+
+  /**
+   * A NON-EMPTY HEADER IS NOT ENOUGH FOR `issue_urls`: its cells are read key by
+   * key out of the same column list its header is printed from, so a header and
+   * a row that came from different lists would be a table whose values are under
+   * the wrong headings — the one failure a "length > 0" check cannot see.
+   */
+  it("heads the issue_urls view with the rule's own columns, in the rule's own order", () => {
+    const ctx = ruleCtx();
+    const header = CSV_VIEW_DEFS.issue_urls.header("links.orphan", ctx);
+    expect(header).toEqual([
+      ...ctx.rule("links.orphan").columns.map((column) => column.label),
+      TRUNCATED_LABEL,
+    ]);
+    // The four standard columns lead, always, whatever the rule declares.
+    expect(header.slice(0, 4)).toEqual([
+      "Address", "Status Code", "Indexability", "Indexability Status",
+    ]);
   });
 
   // THE MEMORY CONTRACT, PINNED AT THE SQL. Hard rule 3 says the links table is

@@ -38,7 +38,14 @@
  *                                      appear when the rule capped its listing,
  *                                      and their absence means the count is the
  *                                      whole number (see `listIssues`).
- *   GET  /crawls/:id/issues/:rule/urls one rule's findings, URL by URL
+ *   GET  /crawls/:id/issues/:rule/urls one rule's findings as a table:
+ *                                      `{columns, items, nextCursor}`, each row
+ *                                      the four standard columns plus the rule's
+ *                                      own evidence
+ *   GET  /crawls/:id/issues/:rule/inlinks the links that point at what the two
+ *                                      link rules found — Source, Destination,
+ *                                      Anchor, Status Code. 404 for any other
+ *                                      rule: it has no inlinks report
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
@@ -350,6 +357,22 @@ function buildRoutes(): Route[] {
       handler: async (service, ctx) => ({
         status: 200,
         body: await service.listIssueUrls(param(ctx, "id"), param(ctx, "ruleId"), {
+          ...optionalNumber(ctx.query, "limit"),
+          ...optionalString(ctx.query, "cursor"),
+        }),
+      }),
+    },
+    // THE COMPANION INLINKS REPORT, for the two rules that report a TARGET the
+    // site links to. Every other rule reports the page itself and is refused
+    // here with a 404 naming the two that are not — never an empty page, which
+    // would read as "nothing links to it" (see `listIssueInlinks`).
+    {
+      method: "GET",
+      pattern: ["crawls", id, "issues", { param: "ruleId" }, "inlinks"],
+      query: PAGINATION_PARAMS,
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.listIssueInlinks(param(ctx, "id"), param(ctx, "ruleId"), {
           ...optionalNumber(ctx.query, "limit"),
           ...optionalString(ctx.query, "cursor"),
         }),

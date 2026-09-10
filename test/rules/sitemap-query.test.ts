@@ -464,7 +464,9 @@ describe("the sitemap rules against the database", () => {
       // copy sends the reader to this field.
       offOrigin: false,
       fetchClass: "timeout",
-      statusCode: null,
+      // And no `statusCode`: the rule only ever selects rows with a null
+      // status, so the key could carry nothing, and the standard `Status Code`
+      // column prints the page row's own (null) value beside it either way.
     });
   });
 

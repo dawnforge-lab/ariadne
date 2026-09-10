@@ -1044,6 +1044,11 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-51"],
     category: CATEGORY,
     severity: BROKEN.severity,
+    columns: [
+      { key: "brokenCount", label: "Broken Resources" },
+      { key: "resources", label: "Resources" },
+      { key: "unknownResources", label: "Unknown Resources" },
+    ],
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => brokenFindings(BROKEN, db, crawlId, capsOr(caps)),
@@ -1058,6 +1063,15 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-49"],
     category: CATEGORY,
     severity: OVERSIZED.severity,
+    columns: [
+      { key: "resourceUrl", label: "Image URL" },
+      { key: "contentType", label: "Content Type" },
+      { key: "bytes", label: "Size (Bytes)" },
+      { key: "bytesSource", label: "Size Source" },
+      { key: "threshold", label: "Threshold (Bytes)" },
+      { key: "referencingPages", label: "IMG Inlinks" },
+      { key: "samplePages", label: "Source" },
+    ],
     ...copyFor(OVERSIZED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -1076,6 +1090,15 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-49"],
     category: CATEGORY,
     severity: LEGACY.severity,
+    columns: [
+      { key: "resourceUrl", label: "Image URL" },
+      { key: "contentType", label: "Content Type" },
+      { key: "bytes", label: "Size (Bytes)" },
+      { key: "bytesSource", label: "Size Source" },
+      { key: "threshold", label: "Threshold (Bytes)" },
+      { key: "referencingPages", label: "IMG Inlinks" },
+      { key: "samplePages", label: "Source" },
+    ],
     ...copyFor(LEGACY.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -1098,6 +1121,12 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-50"],
     category: CATEGORY,
     severity: UNCACHED.severity,
+    columns: [
+      { key: "uncachedResources", label: "Uncached Resources" },
+      { key: "fetchedResources", label: "Fetched Resources" },
+      { key: "unknownResources", label: "Unknown Resources" },
+      { key: "sampleResources", label: "Resources" },
+    ],
     ...copyFor(UNCACHED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => uncachedFindings(UNCACHED, db, crawlId),
@@ -1113,10 +1142,15 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: NOT_RECORDED.severity,
+    columns: [
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "pagesWithImages", label: "Pages With Images" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl recorded none of the images, stylesheets and scripts the pages point at, so no check about those files could be answered; re-crawl the site to record them.",
+      "This crawl recorded no image, stylesheet or script references, so file checks were not run; re-crawl the site.",
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
   }),
 
@@ -1130,10 +1164,17 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: NOT_FETCHED.severity,
+    columns: [
+      { key: "reason", label: "Reason" },
+      { key: "notAsked", label: "Explanation" },
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "resourcesSkipped", label: "Resources Skipped" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(NOT_FETCHED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl listed the images, stylesheets and scripts the pages point at and requested none of them, so nothing is known about any of those files; re-run the crawl with the file check left on, or resume the interrupted one.",
+      "The files the pages reference were listed but not requested (file check off, crawl interrupted, or budget spent), so file checks were not run; re-run with the file check on or resume the crawl.",
     run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
   }),
 
@@ -1149,10 +1190,16 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: ALL_UNKNOWN.severity,
+    columns: [
+      { key: "dominantClass", label: "Dominant Fetch Class" },
+      { key: "census", label: "Fetch Class Census" },
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(ALL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "Every file this crawl asked about came back with no usable answer — refused, disallowed, or never answered at all — so no check about those files could be answered; crawl again once whatever blocked the requests has cleared.",
+      "Every file the crawl recorded was refused, disallowed, behind an unreachable robots.txt or unanswered, so file checks were not run; crawl again once the block has cleared.",
     run: (db, crawlId) => allUnknownFindings(ALL_UNKNOWN, db, crawlId),
   }),
 
@@ -1170,10 +1217,17 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: PARTIAL_UNKNOWN.severity,
+    columns: [
+      { key: "dominantClass", label: "Dominant Fetch Class" },
+      { key: "census", label: "Fetch Class Census" },
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "resourcesUnfetched", label: "Resources Unfetched" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(PARTIAL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl reached only some of the site's files and every one it reached answered nothing usable, so no check about those files could be answered; re-run the crawl to ask about all of them afresh.",
+      "Only some files were tried and none answered usably, so file checks were not run; re-run the crawl to try all files afresh.",
     run: (db, crawlId) => partialUnknownFindings(PARTIAL_UNKNOWN, db, crawlId),
   }),
 ];

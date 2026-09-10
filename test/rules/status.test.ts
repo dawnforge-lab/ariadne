@@ -302,7 +302,7 @@ describe("crawl.blocked", () => {
     expect(r.severity).toBe("info");
     // The reason names the cause AND what would answer the check (Phase 19 §6),
     // in one sentence a client reads under "Why:" on the demo row.
-    expect(r.marker).toMatch(/bot challenge or an access denial/);
+    expect(r.marker).toMatch(/bot challenge or access denial/);
     expect(r.marker).toMatch(/crawl again/);
   });
 

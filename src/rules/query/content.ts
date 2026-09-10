@@ -1106,6 +1106,12 @@ export const contentRules: QueryRule[] = [
     checkIds: ["CHECK-13"],
     category: CATEGORY,
     severity: SOFT_404.severity,
+    columns: [
+      { key: "signals", label: "Signals" },
+      { key: "wordCount", label: "Word Count" },
+      { key: "renderableWordCount", label: "Renderable Word Count" },
+      { key: "hammingToTemplate", label: "Distance To 404 Template", optional: true },
+    ],
     ...copyFor(SOFT_404.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => soft404Findings(db, crawlId, capsOr(caps)),
@@ -1117,6 +1123,12 @@ export const contentRules: QueryRule[] = [
     checkIds: ["CHECK-39"],
     category: CATEGORY,
     severity: EXACT.severity,
+    columns: [
+      { key: "count", label: "Occurrences" },
+      { key: "urls", label: "Addresses" },
+      { key: "pageTypes", label: "Page Types" },
+      { key: "contentHash", label: "Hash" },
+    ],
     ...copyFor(EXACT.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => exactDuplicateFindings(db, crawlId, capsOr(caps)),
@@ -1128,6 +1140,12 @@ export const contentRules: QueryRule[] = [
     checkIds: ["CHECK-39"],
     category: CATEGORY,
     severity: NEAR.severity,
+    columns: [
+      { key: "nearDuplicates", label: "No. Near Duplicates" },
+      { key: "closest", label: "Closest Near Duplicate Match" },
+      { key: "mainWords", label: "Main Content Word Count" },
+      { key: "nearDuplicatesAtLeast", label: "Count Is A Floor", optional: true },
+    ],
     ...copyFor(NEAR.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => nearDuplicateFindings(db, crawlId, capsOr(caps)),
@@ -1144,6 +1162,10 @@ export const contentRules: QueryRule[] = [
     checkIds: ["CHECK-39"],
     category: CATEGORY,
     severity: NEAR_SKIPPED.severity,
+    columns: [
+      { key: "indexablePages", label: "Indexable Pages" },
+      { key: "minMainWords", label: "Minimum Main Content Word Count" },
+    ],
     ...copyFor(NEAR_SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     // The reason states the OBSERVATION, not a cause it cannot establish. The
@@ -1153,9 +1175,7 @@ export const contentRules: QueryRule[] = [
     // fact ran on it. What is true of both is the census: nothing here carries
     // the fingerprint the comparison needs.
     marker:
-      "No page in this crawl carries a fingerprint of its main content, so pages could not be " +
-      "compared for near-duplicate content; a crawl taken before that fingerprint existed looks " +
-      "exactly like this one — re-crawl the site to measure them.",
+      "No page in this crawl has a main-content fingerprint, so near duplicates could not be checked; re-crawl the site.",
     run: (db, crawlId) => nearDuplicateSkippedFindings(db, crawlId),
   }),
 
@@ -1171,6 +1191,12 @@ export const contentRules: QueryRule[] = [
     checkIds: ["CHECK-40", "CHECK-13"],
     category: CATEGORY,
     severity: THIN.severity,
+    columns: [
+      { key: "mainWords", label: "Main Content Word Count" },
+      { key: "wordCount", label: "Word Count" },
+      { key: "threshold", label: "Threshold" },
+      { key: "note", label: "Note", optional: true },
+    ],
     ...copyFor(THIN.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => thinFindings(db, crawlId, capsOr(caps)),
@@ -1186,6 +1212,10 @@ export const contentRules: QueryRule[] = [
     checkIds: ["CHECK-40", "CHECK-13"],
     category: CATEGORY,
     severity: THIN_SKIPPED.severity,
+    columns: [
+      { key: "indexablePages", label: "Indexable Pages" },
+      { key: "threshold", label: "Threshold" },
+    ],
     ...copyFor(THIN_SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     // States the observation, like its twin above: the predicate also admits a
@@ -1193,10 +1223,7 @@ export const contentRules: QueryRule[] = [
     // opening "this crawl is old" would assert a cause the census cannot
     // establish.
     marker:
-      "No page in this crawl carries a count of its own main content — the words that are not " +
-      "header, navigation, sidebar or footer — so no page could be judged thin or not; a crawl " +
-      "taken before that count existed looks exactly like this one — re-crawl the site to " +
-      "measure it.",
+      "No page in this crawl has an own-content word count, so low content could not be checked; re-crawl the site.",
     run: (db, crawlId) => thinSkippedFindings(db, crawlId),
   }),
 ];

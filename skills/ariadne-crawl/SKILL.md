@@ -70,6 +70,7 @@ same JSON:
 | `crawl_mark_failed` | `POST /crawls/:id/fail` |
 | `issues_list` | `GET /crawls/:id/issues` |
 | `issue_urls` | `GET /crawls/:id/issues/:ruleId/urls` |
+| `issue_inlinks` | `GET /crawls/:id/issues/:ruleId/inlinks` |
 | `metrics_get` | `GET /crawls/:id/metrics` |
 | `pages_query` | `GET /crawls/:id/pages` |
 | `robots_get` | `GET /crawls/:id/robots` |
