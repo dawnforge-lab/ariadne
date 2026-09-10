@@ -17,6 +17,17 @@
  * results" and a renamed id that nobody notices until an operator sees a blank
  * panel. Renaming an id is a red test, not a drift.
  *
+ * THE DRILL-DOWN IS A TABLE (Phase 20), and it is asserted at both levels for
+ * that reason. On the API side: the listing carries `columns`, the four standard
+ * headings lead it, and the keys beyond them are on the row's `evidence` and
+ * never on the row — which is exactly the split the page reads a cell by. On the
+ * page side: the header is built by walking `columns`, no column LABEL is
+ * spelled in the source at all, and the CSV link is built at the shape the
+ * export route answers — the same URL this file fetches through the proxy a few
+ * lines earlier. The inlinks control is the one place the page carries a list of
+ * rule ids, and the test pins both halves of why: the map has two entries, and
+ * the engine 404s every other rule by name.
+ *
  * THE FOURTH SECTION'S ROUTING IS ASSERTED AT THIS FILE'S OWN LEVEL. A NOT
  * MEASURED marker reports that a check could not be answered on this crawl, and
  * every marker is `info` — so without a key of its own the page would file them
@@ -333,15 +344,88 @@ describe("the demo flow", () => {
       );
     }
 
-    // The drill-down the "show URLs" toggle fetches, first page only.
+    // The drill-down the "Show URLs" toggle fetches, first page only — and
+    // since Phase 20 a TABLE, whose header the engine hands over with the rows.
     const first = issues.items[0];
     if (first === undefined) throw new Error("no issue group to drill into");
     const urls = (await json(
       await fetch(`${base}/api/crawls/${crawlId}/issues/${encodeURIComponent(first.ruleId)}/urls?limit=25`),
       "issue urls",
-    )) as unknown as { items: { url: string | null; evidence: Record<string, unknown> }[] };
+    )) as unknown as {
+      columns: { key: string; label: string; optional?: boolean }[];
+      items: {
+        url: string | null;
+        address: string | null;
+        statusCode: number | null;
+        indexability: string | null;
+        indexabilityStatus: string | null;
+        evidence: Record<string, unknown>;
+      }[];
+    };
     expect(urls.items.length).toBeGreaterThan(0);
     expect(typeof urls.items[0]?.evidence).toBe("object");
+
+    // THE HEADER IS ON THE RESPONSE. The page prints these labels in this
+    // order and invents none, so a listing without them is a table the demo
+    // cannot draw.
+    expect(Array.isArray(urls.columns), "the listing carries no columns").toBe(true);
+    for (const column of urls.columns) {
+      expect(typeof column.key).toBe("string");
+      expect(column.label.length).toBeGreaterThan(0);
+    }
+    expect(urls.columns.slice(0, 4).map((column) => column.label)).toEqual([
+      "Address",
+      "Status Code",
+      "Indexability",
+      "Indexability Status",
+    ]);
+
+    // …and the SPLIT the page reads cells by: the four standard keys are on the
+    // row itself, every other column's key is on the row's `evidence` and never
+    // on the row. That is the whole of `issueCellText`, and if the surface ever
+    // flattened evidence into the row the page would read a rule's own
+    // `statusCode` under a heading derived from the page table (§4.4).
+    const standard = ["address", "statusCode", "indexability", "indexabilityStatus"];
+    const row = urls.items[0];
+    if (row === undefined) throw new Error("no finding row to read cells off");
+    for (const key of standard) expect(row).toHaveProperty(key);
+    for (const column of urls.columns) {
+      if (standard.includes(column.key)) continue;
+      expect(row, `${column.key} is on the row, not in the evidence`).not.toHaveProperty(
+        column.key,
+      );
+    }
+
+    // THE CSV LINK BESIDE THE TABLE, at the URL the page builds (`exportHref`),
+    // headed with the same labels. A link shape that drifts from the route is a
+    // download that 400s in a browser and nowhere else.
+    const csv = await fetch(
+      `${base}/api/crawls/${crawlId}/export?format=csv&view=issue_urls&ruleId=${encodeURIComponent(first.ruleId)}`,
+    );
+    expect(csv.status).toBe(200);
+    expect(csv.headers.get("content-type")).toContain("text/csv");
+    // Named for the rule, not for the view — what a Downloads folder shows.
+    expect(csv.headers.get("content-disposition")).toContain(`${first.ruleId}.csv`);
+    const header = (await csv.text()).split("\r\n")[0];
+    expect(header).toBe([...urls.columns.map((column) => column.label), "Truncated"].join(","));
+
+    // THE INLINKS CONTROL IS SHOWN FOR TWO RULES, and this is why the page
+    // decides from a list of its own rather than by asking: every other rule is
+    // a 404, and offering the control everywhere would be one refusal per rule
+    // on every results page. The refusal names the two the page carries.
+    const noReport = issues.items.find(
+      (group) =>
+        group.ruleId !== "links.broken-internal" && group.ruleId !== "links.to-server-error",
+    );
+    if (noReport === undefined) throw new Error("no rule without an inlinks report");
+    const refused = await fetch(
+      `${base}/api/crawls/${crawlId}/issues/${encodeURIComponent(noReport.ruleId)}/inlinks`,
+    );
+    expect(refused.status).toBe(404);
+    const refusal = String(((await refused.json()) as Record<string, unknown>)["error"]);
+    expect(refusal).toContain("has no inlinks report");
+    expect(refusal).toContain("links.broken-internal");
+    expect(refusal).toContain("links.to-server-error");
 
     const metrics = (await json(
       await fetch(`${base}/api/crawls/${crawlId}/metrics`),
@@ -413,6 +497,88 @@ describe("the demo flow", () => {
     // anywhere in the file: the comment above that line still names it, which
     // is where the reason for the change belongs.
     expect(html, "the old label is gone").not.toContain('"Not measured: " + rule.marker');
+  });
+
+  /**
+   * The drill-down as a TABLE, read out of the source it is built by.
+   *
+   * There is no browser here, so the assertions are on the CODE PATHS — the same
+   * discipline the id contract above follows. The new controls carry classes
+   * rather than ids on purpose: there is one of each per rule in a results
+   * panel, and an id has to be unique, so `.drill`, `.dl`, `.scroll` and
+   * `table.report` are what a change would have to rename. The one thing worth
+   * asserting negatively is a header this page wrote itself: the labels live in
+   * the registry and reach the page on the response, and a column list spelled
+   * here would be the demo deciding what a rule reports.
+   */
+  it("builds the findings table from the engine's columns, and never from a list of its own", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+
+    // The header comes from `columns`, cell by cell, in the engine's order.
+    expect(html, "the header cell is read off the column").toContain(
+      'head.appendChild(el("th", null, String(columns[c].label)));',
+    );
+    expect(html, "a row's cells are read by the column's key").toContain(
+      'tr.appendChild(el("td", null, cellText(items[i], String(columns[k].key))));',
+    );
+    // And the listing has to bring them: a table this page headed itself would
+    // be a heading nobody can trace to a rule (hard rule 7).
+    expect(html, "a listing without columns is a shape error").toContain(
+      "without a columns array",
+    );
+
+    // NO COLUMN LIST IN THE PAGE. The four standard KEYS are here — they are the
+    // reading rule, row versus evidence — but not one LABEL, which is what a
+    // hard-coded header would look like.
+    for (const label of ["Address", "Status Code", "Indexability", "Indexability Status"]) {
+      expect(html, `the page spells the column label ${label}`).not.toContain(`"${label}"`);
+    }
+    expect(html, "the standard keys, as the reading rule").toContain(
+      'var STANDARD_ISSUE_KEYS = ["address", "statusCode", "indexability", "indexabilityStatus"];',
+    );
+    expect(html, "standard off the row, everything else off the evidence").toContain(
+      'STANDARD_ISSUE_KEYS.indexOf(key) === -1 ? item.evidence[key] : item[key]',
+    );
+
+    // The table, its class, and the box that scrolls INSTEAD OF THE PAGE. These
+    // four classes are the id contract's counterpart for the drill-down — one of
+    // each per rule, so a class rather than an id — and each is asserted at the
+    // element that builds it AND at the rule that styles it, because a rename on
+    // one side alone is a control that still works and no longer looks like one.
+    expect(html).toContain('el("div", "drill")');
+    expect(html).toContain('el("a", "dl", linkText)');
+    expect(html).toContain('el("table", "report")');
+    expect(html).toContain('el("div", "scroll")');
+    expect(html).toContain(".drill { overflow: hidden;");
+    expect(html).toContain(".drill .dl { float: right;");
+    expect(html).toContain("table.report td {");
+    expect(html).toContain(".scroll { overflow-x: auto; }");
+    // A site-scoped finding names no page, and the Address cell says so.
+    expect(html).toContain('if (key === "address" && item.address === null) return "(site-wide)";');
+    // The paging note the list version had, kept: a slice presented as the whole
+    // is the failure this page exists not to make.
+    expect(html).toContain('"The first " + items.length + " of more');
+
+    // THE CSV LINK, at the shape the API serves (asserted against the live route
+    // in the flow test above): the export route, `format=csv`, the view, and a
+    // rule only where the view takes one.
+    expect(html).toContain('"/export?format=csv&view=" + encodeURIComponent(view)');
+    expect(html).toContain('"&ruleId=" + encodeURIComponent(ruleId)');
+    expect(html).toContain('"Download CSV"');
+    expect(html).toContain('"Download inlinks CSV"');
+
+    // THE INLINKS CONTROL, on two rules and by name. The engine 404s every other
+    // rule, so the page asks only where there is an answer — and the gate is
+    // membership in this two-entry map, not a request per rule.
+    expect(html).toContain('"links.broken-internal": "links_to_4xx"');
+    expect(html).toContain('"links.to-server-error": "links_to_5xx"');
+    expect(html).toContain("var inlinkView = INLINK_VIEWS[group.ruleId];");
+    expect(html).toContain("if (inlinkView !== undefined) {");
+    // And no third inlinks view is named anywhere in the page — prose included:
+    // the map is the whole list, and a rule that gains a report is a line in it.
+    expect(new Set(html.match(/links_to_\dxx/g))).toEqual(
+      new Set(["links_to_4xx", "links_to_5xx"]),
+    );
   });
 
   it("asks for nothing off this origin: no external URL in the page", async () => {

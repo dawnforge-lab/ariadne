@@ -47,6 +47,14 @@
   (`#band-not-checked`), which is rendered after the three. The routing key is
   the registry's flag as the catalog serves it (`CatalogRule.marker`) and
   nothing else: this page keeps no list of which rules are markers.
+
+  A FINDING IS A TABLE, AND THE ENGINE OWNS ITS HEADINGS. Every drill-down
+  answers `columns: [{key, label}]` beside its rows (docs/talos-surface.md
+  §4.4), so this page prints those labels in that order and reads each cell by
+  that key — the four standard keys off the row itself, every other key off the
+  row's own `evidence`. It invents no column, renames none and drops none: a
+  heading that reads wrong here is wrong in the registry, and the CSV link
+  beside each table downloads the same rows under the same headings.
 -->
 <style>
   :root {
@@ -121,9 +129,30 @@
   .rule .why { color: var(--muted); font-style: italic; }
   details { margin-top: .5rem; }
   summary { cursor: pointer; color: var(--info); }
-  .urls { margin: .5rem 0 0; padding-left: 1.1rem; }
-  .urls li { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; word-break: break-all; }
   .note { color: var(--muted); font-size: .87rem; margin-top: .4rem; }
+  /*
+    ONE REPORT: the toggle that fetches it, the download link beside it, and the
+    table itself inside a box that scrolls on its own. The link is floated (and
+    written first) so it sits on the summary's line; `.scroll` is what keeps a
+    rule with a dozen columns from making the PAGE scroll sideways — a table
+    that widens the document moves every other panel with it.
+  */
+  .drill { overflow: hidden; margin-top: .5rem; }
+  .drill details { margin-top: 0; }
+  .drill .dl { float: right; color: var(--info); font-size: .87rem; }
+  .scroll { overflow-x: auto; }
+  table.report { width: auto; min-width: 100%; }
+  /*
+    `break-word` and not `anywhere`: the second lets the table's own sizing
+    squeeze a URL column to one character and stack a URL down the page, which
+    is what `.scroll` exists to avoid. This one breaks a token only when it
+    cannot fit at all, so a column is as wide as its longest URL and the BOX
+    scrolls instead of the cell folding.
+  */
+  table.report td {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .82rem; overflow-wrap: break-word;
+  }
   table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
   th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
@@ -212,6 +241,33 @@
    * skipped" is a sentence on the page rather than an absence to interpret.
    */
   var NOT_CHECKED_ID = "band-not-checked";
+  /**
+   * The four keys every finding row begins with (docs/talos-surface.md §4.4).
+   *
+   * NOT a column list — the header is always the engine's `columns`, in the
+   * engine's order — but the READING RULE for a cell: these four keys are read
+   * off the row itself, where the surface derives them from the `pages` row the
+   * finding names, and every other key is read off the row's `evidence`. The
+   * distinction is the contract's, and it is the only thing about a table this
+   * page knows before it asks.
+   */
+  var STANDARD_ISSUE_KEYS = ["address", "statusCode", "indexability", "indexabilityStatus"];
+  /**
+   * The two rules that have a companion inlinks report, and the CSV view that
+   * holds the same rows (docs/talos-surface.md §4.4a, §12).
+   *
+   * A two-entry map rather than a request per rule: `/issues/:rule/inlinks`
+   * answers 404 for every other rule — correctly, since "this rule has no
+   * inlinks report" is not "nothing links to it" — and offering the control on
+   * ninety-odd rules to discover that would be ninety-odd refusals per results
+   * page. It mirrors `INLINK_REPORT_CLASSES` (src/api/service.ts); a third rule
+   * gaining a report is a line here, and until then the control is shown only
+   * where the engine has an answer.
+   */
+  var INLINK_VIEWS = {
+    "links.broken-internal": "links_to_4xx",
+    "links.to-server-error": "links_to_5xx"
+  };
 
   var byId = function (id) { return document.getElementById(id); };
 
@@ -736,59 +792,237 @@
       }
     }
 
-    var details = el("details");
-    details.appendChild(el("summary", null, "Show URLs"));
-    var slot = el("div");
-    details.appendChild(slot);
-    var loaded = false;
     // The crawl is captured HERE, not read from the module's `crawlId` when the
     // toggle fires: these rows outlive the run that made them, and a drill-down
     // opened after a second crawl started must not ask the new crawl about the
     // old crawl's rule.
     var forCrawl = crawlId;
-    details.addEventListener("toggle", function () {
-      if (!details.open || loaded) return;
-      loaded = true;
-      loadUrls(forCrawl, group.ruleId, slot);
-    });
-    row.appendChild(details);
+    // THE RULE'S OWN TABLE, and the same rows as a file. The toggle fetches one
+    // slice; the link downloads the export, which is the whole of it.
+    row.appendChild(report(
+      "Show URLs", "Download CSV",
+      exportHref(forCrawl, "issue_urls", group.ruleId),
+      function (slot) {
+        loadReport(slot,
+          "the URLs for " + group.ruleId + " could not be read",
+          "/crawls/" + encodeURIComponent(forCrawl) + "/issues/" +
+            encodeURIComponent(group.ruleId) + "/urls?limit=" + PAGE_SIZE,
+          issueCellText,
+          "The engine returned no URLs for this rule.");
+      }));
+    // THE COMPANION REPORT, on the two rules that have one. They report the
+    // TARGET — one dead URL linked from two hundred pages is one thing to fix —
+    // while the fix is made in the markup of the pages that link to it, and
+    // that list is this table (docs/talos-surface.md §4.4a).
+    var inlinkView = INLINK_VIEWS[group.ruleId];
+    if (inlinkView !== undefined) {
+      row.appendChild(report(
+        "Show inlinks", "Download inlinks CSV",
+        exportHref(forCrawl, inlinkView, null),
+        function (slot) {
+          loadReport(slot,
+            "the inlinks for " + group.ruleId + " could not be read",
+            "/crawls/" + encodeURIComponent(forCrawl) + "/issues/" +
+              encodeURIComponent(group.ruleId) + "/inlinks?limit=" + PAGE_SIZE,
+            inlinkCellText,
+            "The engine returned no internal links pointing at what this rule found.");
+        }));
+    }
     return row;
   }
 
-  /** The drill-down: FIRST PAGE ONLY, and it says so when there was more. */
-  async function loadUrls(forCrawl, ruleId, slot) {
+  /**
+   * One report's two controls: a toggle that fetches the table on first open,
+   * and a link that downloads the same rows as CSV.
+   *
+   * The link is written BEFORE the details and floated, so it sits on the
+   * summary's line rather than under the table. It is a plain `<a href>` — the
+   * proxy serves the export like every other `/api` call, and the browser saves
+   * it under the filename the engine's `Content-Disposition` gives it.
+   */
+  function report(summaryText, linkText, href, load) {
+    var box = el("div", "drill");
+    var link = el("a", "dl", linkText);
+    link.href = href;
+    box.appendChild(link);
+    var details = el("details");
+    details.appendChild(el("summary", null, summaryText));
+    var slot = el("div");
+    details.appendChild(slot);
+    var loaded = false;
+    details.addEventListener("toggle", function () {
+      if (!details.open || loaded) return;
+      loaded = true;
+      load(slot);
+    });
+    box.appendChild(details);
+    return box;
+  }
+
+  /**
+   * The CSV export for one report, through the proxy (docs/talos-surface.md §12).
+   *
+   * `issue_urls` is the only view that takes a rule — it is named for the rule
+   * in the file's name too — and the two inlinks views are rule-shaped without
+   * being rule-scoped: `links_to_4xx` IS `links.broken-internal`'s inlinks.
+   */
+  function exportHref(forCrawl, view, ruleId) {
+    return "/api/crawls/" + encodeURIComponent(forCrawl) +
+      "/export?format=csv&view=" + encodeURIComponent(view) +
+      (ruleId === null ? "" : "&ruleId=" + encodeURIComponent(ruleId));
+  }
+
+  /**
+   * The drill-down: FIRST PAGE ONLY, and it says so when there was more.
+   *
+   * The header is the engine's `columns` or there is no table: a page that
+   * headed its own columns would be deciding what a rule reports, and a listing
+   * that arrived without them is a shape error worth seeing (rule 7). The whole
+   * render is inside the try for the same reason — a row that does not have the
+   * shape the columns promise lands in the error box, not in a half-built table.
+   */
+  async function loadReport(slot, step, path, cellText, emptyLine) {
     clear(slot);
     slot.appendChild(el("p", "note", "loading…"));
-    var body;
     try {
-      body = await call("/crawls/" + encodeURIComponent(forCrawl) + "/issues/" +
-        encodeURIComponent(ruleId) + "/urls?limit=" + PAGE_SIZE);
+      var body = await call(path);
+      if (!Array.isArray(body.columns)) {
+        throw new Error("the engine answered " + path + " without a columns array");
+      }
+      var items = Array.isArray(body.items) ? body.items : [];
+      clear(slot);
+      if (items.length === 0) {
+        slot.appendChild(el("p", "note", emptyLine));
+        return;
+      }
+      slot.appendChild(reportTable(body.columns, items, cellText));
+      if (typeof body.nextCursor === "string" && body.nextCursor !== "") {
+        slot.appendChild(el("p", "note",
+          "The first " + items.length + " of more — this page asks for one slice per rule."));
+      }
     } catch (error) {
       clear(slot);
       var box = el("div", "error");
-      box.appendChild(el("span", "step", "the URLs for " + ruleId + " could not be read"));
+      box.appendChild(el("span", "step", step));
       box.appendChild(el("span", "said", error.message));
       slot.appendChild(box);
-      return;
     }
-    clear(slot);
-    var items = Array.isArray(body.items) ? body.items : [];
-    if (items.length === 0) {
-      slot.appendChild(el("p", "note", "The engine returned no URLs for this rule."));
-      return;
+  }
+
+  /**
+   * The table itself: the engine's labels as the header, one row per item, one
+   * cell per column, all of it `textContent`.
+   *
+   * The wrapper is what scrolls when the table is wider than the panel; the
+   * page never does.
+   */
+  function reportTable(columns, items, cellText) {
+    var wrap = el("div", "scroll");
+    var table = el("table", "report");
+    var head = el("tr");
+    for (var c = 0; c < columns.length; c++) {
+      head.appendChild(el("th", null, String(columns[c].label)));
     }
-    var list = el("ul", "urls");
+    table.appendChild(head);
     for (var i = 0; i < items.length; i++) {
-      // A site-wide finding has no URL — that is a fact about the crawl, and
-      // the row says so rather than showing an empty bullet.
-      list.appendChild(el("li", null,
-        items[i].url === null ? "(site-wide — this finding is about the crawl, not a page)" : String(items[i].url)));
+      var tr = el("tr");
+      for (var k = 0; k < columns.length; k++) {
+        tr.appendChild(el("td", null, cellText(items[i], String(columns[k].key))));
+      }
+      table.appendChild(tr);
     }
-    slot.appendChild(list);
-    if (typeof body.nextCursor === "string" && body.nextCursor !== "") {
-      slot.appendChild(el("p", "note",
-        "The first " + items.length + " of more — this page asks for one slice per rule."));
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  /** One cell of a findings table: standard key off the row, everything else off the evidence. */
+  function issueCellText(item, key) {
+    // A site-wide finding names no page — a fact about the crawl, not a missing
+    // value — so the Address cell says so rather than sitting empty beside the
+    // three nulls that follow from it.
+    if (key === "address" && item.address === null) return "(site-wide)";
+    return valueText(
+      STANDARD_ISSUE_KEYS.indexOf(key) === -1 ? item.evidence[key] : item[key]);
+  }
+
+  /** One cell of the inlinks table, whose four columns are all on the row itself. */
+  function inlinkCellText(item, key) { return valueText(item[key]); }
+
+  /**
+   * One value as one cell — the browser's twin of the CSV writer's
+   * `evidenceCell` (src/api/csv.ts), so the table and the download read alike.
+   *
+   *  - `null`, `undefined` and a missing key are an EMPTY CELL. Under a heading,
+   *    a blank already says "no value here"; what an empty `Status Code` means
+   *    (nobody fetched it — never "it was fine") is the surface's §5, not this
+   *    page's to spell.
+   *  - an ARRAY OF SCALARS is its members, comma-joined. An empty one is an
+   *    empty cell, for the reason a null is.
+   *  - anything with an OBJECT in it — `closest`, `hosts`, `resources` — is
+   *    flattened to its `path=value` leaves, keys sorted, joined with "; ". A
+   *    structured fact still has to fit a rectangle, and raw JSON in a cell is
+   *    a thing nobody reads.
+   *
+   * The one deliberate difference from the CSV: no cap. That writer bounds a
+   * cell at twelve leaves and 500 characters because a spreadsheet cell cannot
+   * grow; this table wraps, and clipping the engine's evidence in the surface
+   * an operator is looking at would hide exactly what they opened it for.
+   */
+  function valueText(value) {
+    if (value === null || value === undefined) return "";
+    if (Array.isArray(value)) {
+      if (value.length === 0) return "";
+      if (isScalarList(value)) return value.map(scalarText).join(", ");
+    } else if (typeof value !== "object") {
+      return scalarText(value);
     }
+    var out = [];
+    leaves(value, "", out);
+    return out.join("; ");
+  }
+
+  function isScalarList(value) {
+    for (var i = 0; i < value.length; i++) {
+      if (value[i] !== null && typeof value[i] === "object") return false;
+    }
+    return true;
+  }
+
+  /** A structured value as `path=value` leaves — the CSV writer's `walk`, in the page. */
+  function leaves(value, path, out) {
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        out.push(path + "=[]");
+        return;
+      }
+      if (isScalarList(value)) {
+        out.push(path + "=" + value.map(scalarText).join(", "));
+        return;
+      }
+      for (var i = 0; i < value.length; i++) leaves(value[i], path + "[" + i + "]", out);
+      return;
+    }
+    if (value !== null && typeof value === "object") {
+      var keys = Object.keys(value).sort();
+      if (keys.length === 0) {
+        // `{}` is a leaf only where it sits UNDER a heading's own value; an
+        // evidence object with nothing in it is an empty cell, not the string
+        // "={}" (the CSV writer's `walk` draws the same line at the same place).
+        if (path !== "") out.push(path + "={}");
+        return;
+      }
+      for (var k = 0; k < keys.length; k++) {
+        leaves(value[keys[k]], path === "" ? keys[k] : path + "." + keys[k], out);
+      }
+      return;
+    }
+    out.push(path + "=" + scalarText(value));
+  }
+
+  /** One leaf: whitespace collapsed so a cell is a cell, `null` spelled where it is a member. */
+  function scalarText(value) {
+    if (value === null || value === undefined) return "null";
+    return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : String(value);
   }
 
   function renderMetrics(metrics) {
