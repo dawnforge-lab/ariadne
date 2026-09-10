@@ -689,8 +689,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "old name and goes away next release), statusCode, indexability " +
         "('Indexable' or 'Non-Indexable') and indexabilityStatus, which is why " +
         "it is not indexable: '' when it is, else Noindex, Canonicalised, " +
-        "Redirected, Client Error, Server Error, Blocked by robots.txt, No " +
-        "Response or Not HTML. Quote that word rather than re-deriving it. All " +
+        "Redirected, Client Error, Server Error, Blocked by robots.txt, " +
+        "Blocked by bot protection, No Response or Not HTML. Quote that word " +
+        "rather than re-deriving it. All " +
         "three are NULL when the crawl has no page row for the URL — a site-wide " +
         "finding, a host variant that was probed but never crawled, a sitemap " +
         "URL the frontier never reached. Null there means NOBODY FETCHED IT, " +
@@ -749,7 +750,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "page — an empty page here would read as 'nothing links to it'.\n\n" +
         "It reads the links, not the findings, so it answers before crawl_rules " +
         "has ever run and a rule that CAPPED its findings still gets a complete " +
-        "report here.\n\n" +
+        "report here — which is also where the two reports stop lining up: on a " +
+        "capped run this one can name a destination issue_urls never listed, " +
+        "because the rule's listing stopped before reaching it.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A site with many broken links has thousands ` +
         "of rows — follow the cursors, or export the links_to_4xx / links_to_5xx " +
@@ -1050,7 +1053,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Not paginated: the ruleset is a fixed list that does not grow with the " +
         "size of a crawl — but it is not small, and there is no cursor to take it " +
         "in pieces. Every rule's full copy is tens of kilobytes in one answer " +
-        "(about 122KB, roughly 30k tokens, at this ruleset), so spend the context " +
+        "(about 92KB, roughly 23k tokens, at this ruleset), so spend the context " +
         "deliberately: if you only need the rules that FOUND something, " +
         "issues_list is a fraction of the size.",
       inputSchema: z.strictObject({

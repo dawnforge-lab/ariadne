@@ -532,6 +532,7 @@ describe("indexabilityOf", () => {
     expect(status("redirect", 301)).toBe("Redirected");
     expect(status("client_error", 404)).toBe("Client Error");
     expect(status("server_error", 500)).toBe("Server Error");
+    expect(status("blocked", 403)).toBe("Blocked by bot protection");
     expect(status("disallowed", null)).toBe("Blocked by robots.txt");
     expect(status("timeout", null)).toBe("No Response");
     expect(status("network_error", null)).toBe("No Response");
@@ -544,22 +545,31 @@ describe("indexabilityOf", () => {
     expect(status("unsupported_encoding", 200)).toBe("Not HTML");
   });
 
-  it("reads a block off the wire status and never calls it a robots.txt block", () => {
+  it("names a block a block, whatever status the challenge was served with", () => {
     // A block is the site refusing THIS CLIENT — a cf-mitigated header, a
-    // 401/403/429, a challenge body on a 503. robots.txt said nothing, and we
-    // did get an answer, so it is neither of those two statuses.
-    expect(indexabilityOf(notOk("blocked", { statusCode: 403 })).status).toBe("Client Error");
-    expect(indexabilityOf(notOk("blocked", { statusCode: 429 })).status).toBe("Client Error");
-    expect(indexabilityOf(notOk("blocked", { statusCode: 503 })).status).toBe("Server Error");
-    // A challenge served with a 200, and a block with no status at all: the
-    // refusal is about the client either way.
-    expect(indexabilityOf(notOk("blocked", { statusCode: 200 })).status).toBe("Client Error");
-    expect(indexabilityOf(notOk("blocked", { statusCode: null })).status).toBe("Client Error");
+    // 401/403/429, a challenge body on a 200 or a 503. robots.txt said nothing,
+    // and we did get an answer, so it is neither of those two statuses; and it
+    // is not read off the wire status either, because a 200 challenge printed
+    // as `Client Error` contradicts the status column beside it on the very
+    // rule (crawl.blocked) whose subject is that distinction.
+    for (const statusCode of [403, 429, 401, 200, 503, null]) {
+      expect(
+        indexabilityOf(notOk("blocked", { statusCode })).status,
+        `blocked ${String(statusCode)} was not read as a block`,
+      ).toBe("Blocked by bot protection");
+    }
   });
 
   it("reads an ok row that is not a 200 as no HTML to judge", () => {
     expect(indexabilityOf(mkPage({ statusCode: 204, isIndexable: false })).status).toBe(
       "Not HTML",
+    );
+    // And it is checked against the stored column like every other `ok` row:
+    // the writer requires the 200 too, so a `true` beside a 204 is the same
+    // writer defect as a `true` beside a noindex, not a row that escapes the
+    // audit because it returned early.
+    expect(() => indexabilityOf(mkPage({ statusCode: 204, isIndexable: true }))).toThrow(
+      /must agree about indexability/,
     );
   });
 

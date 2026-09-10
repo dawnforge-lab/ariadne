@@ -51,8 +51,9 @@ MCP `issue_urls`, and the `issue_urls` CSV view) carries, in order:
    a page (`page_id` not null): `address` (the URL), `statusCode`,
    `indexability` (`Indexable` | `Non-Indexable`), `indexabilityStatus`
    (`""` when indexable; else one of `Noindex`, `Canonicalised`, `Redirected`,
-   `Client Error`, `Server Error`, `Blocked by robots.txt`, `No Response`,
-   `Not HTML`), computed by ONE helper `indexabilityOf(page)` in
+   `Client Error`, `Server Error`, `Blocked by bot protection` (added at review:
+   a challenge is routinely served with a 200), `Blocked by robots.txt`, `No
+   Response`, `Not HTML`), computed by ONE helper `indexabilityOf(page)` in
    `src/rules/helpers.ts` from `fetch_class`, `status_code`, `robots_meta` /
    `x_robots_tag`, the effective canonical (`isCanonicalisedElsewhere`) and
    `is_indexable`. When several apply the order above wins (a redirect is

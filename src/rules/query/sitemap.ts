@@ -398,7 +398,12 @@ export const sitemapRules: QueryRule[] = [
             // about. `assertNormalisedSitemap` has already refused a crawl
             // whose rows carry the empty-string default, so this is a URL.
             offOrigin: !isSameOrigin(row.url_normalised, siteUrl),
-            ...(row.page_id === null ? {} : { fetchClass: row.fetch_class, statusCode: null }),
+            // `fetchClass` only, and no `statusCode`: this rule selects rows
+            // whose status is null by construction (`p.id is null or
+            // p.status_code is null`), so a `statusCode` key here could only
+            // ever be null — a heading over an empty cell, and one the
+            // standard `Status Code` column already prints from the page row.
+            ...(row.page_id === null ? {} : { fetchClass: row.fetch_class }),
           },
           dedupeKey: row.url,
         }),

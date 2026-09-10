@@ -192,10 +192,12 @@ function duplicateHost200(probe: HostProbeResult, siteUrl: string): Finding[] {
  * instead would mean re-deriving the same strings from operator input a second
  * time, and disagreeing with the probe if either ever changed.
  *
- * Info, not a warning: a reachable legacy domain is sometimes deliberate (a
- * brand kept alive, a regional site), and the fault — duplicate content under
- * two brands, or link equity stranded on the old name — is the agent's call
- * with the redirect map in front of it.
+ * Warning, not critical: a reachable legacy domain is sometimes deliberate (a
+ * brand kept alive, a regional site), so it is not an automatic fault the way
+ * the two rules above are — but the usual cost, duplicate content under two
+ * brands or link equity stranded on the old name, is real enough that it is
+ * not a note either. Which of the two this site has is the agent's call with
+ * the redirect map in front of it.
  */
 function legacyHostReachable(probe: HostProbeResult, siteUrl: string): Finding[] {
   const own = siteSpellings(siteUrl);

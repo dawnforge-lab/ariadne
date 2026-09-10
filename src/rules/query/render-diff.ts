@@ -589,6 +589,17 @@ export const renderDiffRules: QueryRule[] = [
     checkIds: ["CHECK-01"],
     category: "content",
     severity: CSR.severity,
+    // THE SUBTRACTION FIRST, THE CONTEXT AFTER. The two renderable counts and
+    // their difference are the finding; the two whole counts follow so a reader
+    // can see the chrome on each side and watch it cancel.
+    //
+    // "Rendered" in these headings means MEASURED ON THE RENDERED DOM, the same
+    // way it does in `Rendered Renderable Word Count` — so `Word Count` and
+    // `Rendered Word Count` are the analyzer's whole count of each document.
+    // Neither is `pages.rendered_word_count`, the browser's `innerText`, which
+    // this rule deliberately does not read (see the evidence comment above);
+    // that column is never printed under a heading by any rule, so there is no
+    // report in which the two could be confused for each other.
     columns: [
       { key: "renderableWordCount", label: "Renderable Word Count" },
       { key: "renderedRenderableWordCount", label: "Rendered Renderable Word Count" },

@@ -742,7 +742,7 @@ function saysNoindex(value: string | null): boolean {
  * a redirect, a 404, a blocked page, a page with no HTML — is not indexable,
  * which is why the fetch class is part of the test and not just the status.
  *
- * MIRRORED BY `saysNoindex` (src/rules/page/indexability.ts), which asks the
+ * MIRRORED BY `saysNoindex` (src/rules/helpers.ts), which asks the
  * same question of the stored columns when the rules run. The two must agree —
  * a page the rule layer calls noindex and this column calls indexable is a
  * contradiction the report cannot resolve. Change one, change the other.

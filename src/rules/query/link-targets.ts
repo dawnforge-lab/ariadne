@@ -273,7 +273,7 @@ export const linkTargetRules: QueryRule[] = [
     severity: BROKEN.severity,
     columns: [
       { key: "inlinkCount", label: "Inlinks" },
-      { key: "sampleSources", label: "Source" },
+      { key: "sampleSources", label: "Sample Sources" },
     ],
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
@@ -298,7 +298,7 @@ export const linkTargetRules: QueryRule[] = [
     severity: TO_SERVER_ERROR.severity,
     columns: [
       { key: "inlinkCount", label: "Inlinks" },
-      { key: "sampleSources", label: "Source" },
+      { key: "sampleSources", label: "Sample Sources" },
     ],
     ...copyFor(TO_SERVER_ERROR.id),
     rulesetVersion: RULESET_VERSION,

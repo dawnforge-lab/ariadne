@@ -351,6 +351,7 @@ export type IndexabilityStatus =
   | "Client Error"
   | "Server Error"
   | "Blocked by robots.txt"
+  | "Blocked by bot protection"
   | "No Response"
   | "Not HTML";
 
@@ -376,7 +377,7 @@ export type IndexabilityStatus =
  *  1. `redirect`            -> `Redirected`             (the URL is not a page)
  *  2. `client_error`        -> `Client Error`
  *  3. `server_error`        -> `Server Error`
- *  4. `blocked`             -> `Client Error` / `Server Error` by status
+ *  4. `blocked`             -> `Blocked by bot protection`
  *  5. `disallowed`          -> `Blocked by robots.txt`
  *  6. `timeout`, `network_error` -> `No Response`
  *  7. `non_html`, `too_large`, `unsupported_encoding` -> `Not HTML`
@@ -389,14 +390,20 @@ export type IndexabilityStatus =
  * choice between members of a closed vocabulary rather than a place to invent
  * a value:
  *
- *  - **`blocked` is read off the wire status.** The class means the site
- *    refused THIS CLIENT — a WAF challenge, a 401/403/429, a `cf-mitigated`
- *    header on any status — so it is never `No Response` (we did get an answer)
- *    and never `Blocked by robots.txt` (robots.txt said nothing). A 5xx
- *    challenge is reported as the server error the wire said it was; everything
- *    else, including a 200 challenge page and a block with no status at all, is
- *    `Client Error`: the request was refused, and the refusal is about the
- *    client.
+ *  - **`blocked` is its own status, whatever the wire said.** The class means
+ *    the site refused THIS CLIENT — a WAF challenge, a 401/403/429, a
+ *    `cf-mitigated` header on any status — so it is never `No Response` (we did
+ *    get an answer) and never `Blocked by robots.txt` (robots.txt said
+ *    nothing). It is not read off the status code either: a challenge is
+ *    routinely served with a 200, and printing `Status Code: 200 |
+ *    Indexability Status: Client Error` contradicts itself on the very rule
+ *    (`crawl.blocked`) whose subject is that distinction. The status code is
+ *    already its own column and `crawl.blocked`'s `fetchReason` (headed `Block
+ *    Reason`) names the mechanism, so this
+ *    column says the one thing neither of those says: the answer we got was a
+ *    refusal, not a page. Every `blocked` row reads `Blocked by bot
+ *    protection` — including the 5xx challenge, which is a block wearing a
+ *    server error's clothes, not an outage.
  *  - **`too_large` and `unsupported_encoding` join `non_html`.** All three mean
  *    the same thing to a reader: the response arrived and produced no HTML this
  *    engine could read, so there is nothing to judge indexability FROM. The
@@ -413,7 +420,8 @@ export type IndexabilityStatus =
  * The column is the crawler's own stamp (`isIndexable`, src/crawl/persist.ts):
  * a 200, fetched ok, with no noindex on either channel. That is exactly cases
  * 8-11 above minus the canonical, so this function computes the same answer
- * from the same columns and uses the stored boolean as a CHECK on itself: a row
+ * from the same columns and — on every `ok` row, the non-200s included — uses
+ * the stored boolean as a CHECK on itself: a row
  * where the two disagree — `is_indexable = true` on a page this function calls
  * `Noindex`, say — is a writer defect or a hand-edited row, and it throws
  * rather than printing one of the two answers and dropping the other (hard rule
@@ -422,8 +430,13 @@ export type IndexabilityStatus =
  * right: a canonicalised page IS crawled and indexable, it has simply handed
  * its signals elsewhere, which is why the check exempts it.
  *
- * A `null` `is_indexable` asserts nothing — the column is null on a page that
- * was never fetched as HTML, which is every case above 8.
+ * A `null` `is_indexable` asserts nothing, and no crawl this engine writes
+ * produces one: `PageWriter` computes a boolean for every row it inserts
+ * (src/crawl/persist.ts), including the ones that were never fetched as HTML,
+ * where the answer is simply `false`. The column is nullable in the schema and
+ * the null branch here is defensive for that reason alone — a hand-edited row,
+ * a row from a future writer, a projection that lost the column — and it
+ * declines to assert rather than inventing an agreement it cannot check.
  */
 export function indexabilityOf(page: IndexabilityInput): {
   indexability: Indexability;
@@ -442,9 +455,7 @@ export function indexabilityOf(page: IndexabilityInput): {
     case "server_error":
       return nonIndexable("Server Error");
     case "blocked":
-      return nonIndexable(
-        page.statusCode !== null && page.statusCode >= 500 ? "Server Error" : "Client Error",
-      );
+      return nonIndexable("Blocked by bot protection");
     case "disallowed":
       return nonIndexable("Blocked by robots.txt");
     case "timeout":
@@ -468,13 +479,18 @@ export function indexabilityOf(page: IndexabilityInput): {
       );
   }
 
-  if (page.statusCode !== 200) return nonIndexable("Not HTML");
-
-  const answer = hasNoindex(page)
-    ? nonIndexable("Noindex")
-    : isCanonicalisedElsewhere(page)
-      ? nonIndexable("Canonicalised")
-      : { indexability: "Indexable" as const, status: "" as const };
+  // An `ok` row that is not a 200 goes through the same check as the rest: the
+  // writer requires the 200 too, so `is_indexable = true` beside a 204 is the
+  // same class of writer defect as a `true` beside a noindex, and returning
+  // early here would be the one `ok` row that escaped its own audit.
+  const answer =
+    page.statusCode !== 200
+      ? nonIndexable("Not HTML")
+      : hasNoindex(page)
+        ? nonIndexable("Noindex")
+        : isCanonicalisedElsewhere(page)
+          ? nonIndexable("Canonicalised")
+          : { indexability: "Indexable" as const, status: "" as const };
 
   // The stored column as a check on this computation, never as its source. The
   // canonical is invisible to `is_indexable`, so a `Canonicalised` row is the
@@ -484,8 +500,9 @@ export function indexabilityOf(page: IndexabilityInput): {
     if (page.isIndexable !== expected) {
       throw new Error(
         `indexabilityOf: '${page.url}' stores is_indexable=${String(page.isIndexable)} ` +
-          `but its robots directives read '${answer.status || "Indexable"}' — the crawl ` +
-          "writer (src/crawl/persist.ts) and this function must agree about noindex",
+          `but its status and robots directives read '${answer.status || "Indexable"}' — ` +
+          "the crawl writer (src/crawl/persist.ts) and this function must agree about " +
+          "indexability",
       );
     }
   }

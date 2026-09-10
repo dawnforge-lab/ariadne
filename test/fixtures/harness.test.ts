@@ -299,6 +299,97 @@ const SKIP_HARNESS_CLAIMS: string[] = [
 const RENDER_SETTLE_MS = 500;
 
 /**
+ * THE RULES THE FIXTURE CRAWL ACTUALLY TRIPS, named.
+ *
+ * The column guard below can only speak for rules that wrote a finding on this
+ * crawl — 71 of the 86 that find, the remainder being the site-scoped markers
+ * and the rules `SKIP_HARNESS_CLAIMS` explains. It used to assert only "at
+ * least twenty of them", which is a floor a fixture could fall fifty rules
+ * through without going red.
+ *
+ * So the floor is this LIST. It is derived, not designed: it is what the crawl
+ * produced when it was written, and it is checked as a SUBSET of what fires —
+ * a rule joining the list is a fixture doing more and needs no edit here, a
+ * rule leaving it is the guard going quiet about a rule and fails by name. The
+ * static half of the same claim, over all 86 whether they fire or not, is
+ * test/rules/registry.test.ts ("every declared column names a key its own
+ * rule's source writes").
+ */
+const FIXTURE_COLUMN_RULES: readonly string[] = [
+  "canonical.cross-domain",
+  "canonical.html-header-conflict",
+  "canonical.missing",
+  "canonical.multiple",
+  "canonical.non-200-target",
+  "canonical.non-indexable-target",
+  "canonical.points-elsewhere",
+  "content.csr-dependent",
+  "content.exact-duplicate",
+  "content.near-duplicate",
+  "content.placeholder",
+  "content.soft-404",
+  "content.thin",
+  "crawl.blocked",
+  "directive.canonical-noindex-conflict",
+  "filters.js-only",
+  "h1.duplicate-text",
+  "headings.h1-missing",
+  "headings.h1-multiple",
+  "headings.level-skip",
+  "host.http-serves-200",
+  "host.legacy-host-reachable",
+  "hreflang.alternates-not-crawled",
+  "hreflang.invalid-code",
+  "hreflang.missing-return-link",
+  "hreflang.missing-self-reference",
+  "hreflang.missing-x-default",
+  "hreflang.non-indexable-target",
+  "http.server-error",
+  "images.legacy-format",
+  "images.missing-alt",
+  "images.missing-dimensions",
+  "images.oversized",
+  "indexability.meta-header-conflict",
+  "indexability.noindex",
+  "links.broken-internal",
+  "links.orphan",
+  "links.to-server-error",
+  "meta-description.duplicate",
+  "meta-description.missing",
+  "meta-description.too-long",
+  "meta-description.too-short",
+  "mobile.viewport-missing",
+  "nav.js-only",
+  "pages.not-in-sitemap",
+  "pagination.canonical-to-other",
+  "pagination.next-not-linked",
+  "pagination.next-target-uncrawled",
+  "performance.slow-response",
+  "redirect.chain",
+  "redirect.js",
+  "redirect.loop",
+  "resources.broken",
+  "resources.uncached",
+  "robots.blocks-sitemap-urls",
+  "schema.breadcrumb-absent",
+  "schema.product-incomplete",
+  "schema.self-serving-reviews",
+  "sitemap.invalid",
+  "sitemap.non-200",
+  "sitemap.non-indexable",
+  "sitemap.redirected",
+  "sitemap.uncrawled",
+  "structure.deep-page",
+  "title.duplicate",
+  "title.missing",
+  "title.too-long",
+  "title.too-short",
+  "url.normalisation-variants",
+  "url.parameter-pages-indexable",
+  "url.tracking-params-internal",];
+
+
+/**
  * The render budget this harness runs with: 100% of the crawl, both other knobs
  * at their production defaults.
  *
@@ -889,7 +980,9 @@ describe("the fixture site end to end", () => {
     // over almost nothing.
     const fired = await db.execute<{ n: number }>(sql`
       select count(distinct rule_id)::int as n from issues where crawl_id = ${summary.crawlId}`);
-    expect(Number(fired.rows[0]?.n ?? 0)).toBeGreaterThanOrEqual(20);
+    expect(Number(fired.rows[0]?.n ?? 0)).toBeGreaterThanOrEqual(
+      FIXTURE_COLUMN_RULES.length,
+    );
   });
 
   /**
@@ -945,10 +1038,17 @@ describe("the fixture site end to end", () => {
       if (list === undefined) byRule.set(row.ruleId, [blob]);
       else list.push(blob);
     }
-    // The guard speaks for the rules that FIRED; the coverage sweep at the end
-    // of this file is what holds "which rules fire" honest, so a fixture that
-    // stopped tripping a rule fails there rather than weakening this silently.
-    expect(byRule.size).toBeGreaterThanOrEqual(20);
+    // The guard speaks for the rules that FIRED, and this is the list of them —
+    // named, not counted, because "at least twenty" was true of a fixture that
+    // had stopped tripping fifty. A rule that falls out of the fixture fails
+    // here by name; a rule that joins it is welcome and does not (the coverage
+    // sweep at the end of this file is what makes joining compulsory).
+    expect(
+      [...byRule.keys()].sort(),
+      "these rules used to write findings on the fixture crawl and no longer do — " +
+        "the column guard is now silent about them",
+    ).toEqual(expect.arrayContaining([...FIXTURE_COLUMN_RULES]));
+    expect(byRule.size).toBeGreaterThanOrEqual(FIXTURE_COLUMN_RULES.length);
 
     const undeclared: string[] = [];
     const unwritten: string[] = [];
@@ -1008,6 +1108,25 @@ describe("the fixture site end to end", () => {
          and i.details_jsonb ? 'statusCode'
          and i.details_jsonb->>'statusCode' is distinct from p.status_code::text`);
     expect(disagreed.rows).toEqual([]);
+
+    // THE OTHER HALF OF THE SAME EXEMPTION: a finding with no page row. The
+    // join above cannot see one, and the standard `Status Code` column is null
+    // beside it by construction (§4.4: null means NOBODY FETCHED IT). An
+    // evidence `statusCode` there would be a number with nothing to check it
+    // against, printed under a heading the surface says is null — so the rule
+    // is that a page-less finding carries no status of its own. A null or
+    // absent key is fine; it says the same nothing the column does.
+    const unanchored = await db.execute<{ rule_id: string; said: string }>(sql`
+      select i.rule_id, i.details_jsonb->>'statusCode' as said
+        from issues i
+       where i.crawl_id = ${summary.crawlId}
+         and i.page_id is null
+         and i.details_jsonb->>'statusCode' is not null`);
+    expect(
+      unanchored.rows,
+      "these findings name no page row, so nothing can check the status they " +
+        "record — drop the key, or file the finding against the page",
+    ).toEqual([]);
   });
 
   it("the sitemap's deliberate mistakes land on the URLs that carry them", () => {

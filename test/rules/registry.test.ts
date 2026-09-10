@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { buildRegistry } from "../../src/rules/index.js";
+import { TRUNCATED_LABEL } from "../../src/api/csv.js";
+import { STANDARD_ISSUE_COLUMNS } from "../../src/api/service.js";
 import {
   AGENT_CHECKS,
   CRAWL_CHECK_IDS,
@@ -135,6 +140,41 @@ describe("defineRule", () => {
         () => defineRule({ ...validPageRule, columns: [{ key, label: "Mine" }] }),
         key,
       ).toThrow(/standard column the surface already prints/);
+    }
+  });
+  // A HEADING IS AS UNIQUE AS A KEY, and unlike a duplicate key it is invisible
+  // in the JSON: only the printed report — the CSV header, the demo's table —
+  // has headings, so two columns under one word is a table whose reader cannot
+  // tell which column is which.
+  it("throws on two columns that share a heading", () => {
+    expect(() =>
+      defineRule({
+        ...validPageRule,
+        columns: [
+          { key: "title", label: "Title 1" },
+          { key: "titleLength", label: "title 1" },
+        ],
+      }),
+    ).toThrow(/repeats the heading 'title 1'/);
+  });
+  // The other end of the reservation above: a rule may not print a heading the
+  // SURFACE prints. `Truncated` is there for the same reason from a different
+  // file — the `issue_urls` CSV always ends with that column.
+  it("throws on a column headed like one the surface prints itself", () => {
+    for (const label of [
+      "Address",
+      "Status Code",
+      "Indexability",
+      "Indexability Status",
+      "Truncated",
+      // Case and padding do not save it: a header collision is what the eye
+      // sees, not what `===` sees.
+      " status code ",
+    ]) {
+      expect(
+        () => defineRule({ ...validPageRule, columns: [{ key: "mine", label }] }),
+        label,
+      ).toThrow(/which the surface prints itself/);
     }
   });
   it("throws on an `optional` that is not exactly true", () => {
@@ -439,5 +479,132 @@ describe("severity shape of the ruleset", () => {
       if (r.kind === "metric") expect(r.severity, r.id).toBe("info");
       if (r.marker) expect(r.severity, r.id).toBe("info");
     }
+  });
+});
+
+/**
+ * THE RESERVED HEADINGS, PINNED TO THE SURFACES THAT PRINT THEM.
+ *
+ * `RESERVED_COLUMN_LABELS` (src/rules/registry/registry.ts) is a copy: the
+ * registry cannot import `STANDARD_ISSUE_COLUMNS` from src/api/service.ts or
+ * `TRUNCATED_LABEL` from src/api/csv.ts, because both of those depend on the
+ * registry and not the other way round. A copy that nothing compares is a copy
+ * that drifts, and the drift here is silent in the worst way — a heading stops
+ * being reserved and a rule is free to collide with it.
+ */
+describe("the reserved headings are exactly the ones the surface prints itself", () => {
+  it("refuses every standard heading and the cap column, and nothing else", () => {
+    const surface = [...STANDARD_ISSUE_COLUMNS.map((c) => c.label), TRUNCATED_LABEL];
+    for (const label of surface) {
+      expect(
+        () => defineRule({ ...validPageRule, columns: [{ key: "mine", label }] }),
+        label,
+      ).toThrow(/which the surface prints itself/);
+    }
+    // And the reservation is no WIDER than the surface: a heading nobody prints
+    // is a rule's to use, and a set that quietly grew would forbid a legitimate
+    // column with no error a reader could trace.
+    for (const label of ["Inlinks", "Meta Robots", "Fetch Class", "Source", "Word Count"]) {
+      expect(
+        defineRule({ ...validPageRule, columns: [{ key: "mine", label }] }),
+        label,
+      ).toBeDefined();
+    }
+  });
+});
+
+/**
+ * EVERY DECLARED COLUMN NAMES A KEY ITS OWN RULE WRITES — STATICALLY, OVER ALL
+ * 86 RULES THAT FIND.
+ *
+ * The harness (test/fixtures/harness.test.ts, "declares a column for every
+ * evidence key it writes…") is the strong form of this claim and the one that
+ * catches a wrong VALUE, but it can only speak for the rules the fixture site
+ * actually trips. This is the cheap form that speaks for ALL of them: read the
+ * source file that defines the rule and require every declared key to appear in
+ * it as an identifier.
+ *
+ * ## What it proves, and exactly what it does not
+ *
+ * The column declaration is stripped before the search (`key: "…"` is removed),
+ * so a key satisfies this test only by appearing SOMEWHERE ELSE in the file —
+ * which, for every rule in this repository, is the evidence object it is
+ * written into. A key misspelled in the declaration and spelled correctly in
+ * the evidence fails here on the day the rule is written rather than on the day
+ * a fixture happens to trip it.
+ *
+ * What it cannot see: that the key appears in the RIGHT place (a key mentioned
+ * only in a comment satisfies it), and it is weak for short common names —
+ * `url`, `title` — which appear in almost any rule file for other reasons. It
+ * is a spelling guard, not the evidence check; the harness remains that.
+ *
+ * The owning file is DERIVED, not listed: exactly one file under `src/rules`
+ * (outside `registry/`, where the copy map is keyed by rule id) contains each
+ * rule's id as a string literal, and the test asserts that uniqueness first —
+ * a rule split across two files would make the search ambiguous rather than
+ * wrong, and this is where that would be noticed.
+ */
+describe("every declared column names a key its own rule's source writes", () => {
+  const RULES_DIR = fileURLToPath(new URL("../../src/rules", import.meta.url));
+
+  const sources = (): Map<string, string> => {
+    const out = new Map<string, string>();
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        // `registry/` holds the copy map, which is keyed by every rule id and
+        // would make every rule's owner ambiguous. It declares no columns.
+        if (entry.isDirectory()) {
+          if (entry.name !== "registry") walk(path);
+        } else if (entry.name.endsWith(".ts")) {
+          out.set(path, readFileSync(path, "utf8"));
+        }
+      }
+    };
+    walk(RULES_DIR);
+    return out;
+  };
+
+  it("finds one defining file per rule, and the key spelled inside it", () => {
+    const files = sources();
+    expect(files.size, "no rule sources were read at all").toBeGreaterThan(20);
+
+    const ambiguous: string[] = [];
+    const missing: string[] = [];
+    let checked = 0;
+    for (const rule of buildRegistry().all()) {
+      const columns = rule.columns ?? [];
+      if (columns.length === 0) continue;
+      const owners = [...files].filter(([, text]) => text.includes(`"${rule.id}"`));
+      if (owners.length !== 1) {
+        ambiguous.push(`${rule.id} (${owners.length} files)`);
+        continue;
+      }
+      // The declaration itself must not be what satisfies the search.
+      const body = owners[0]![1].replace(/key:\s*"[^"]*"/g, "");
+      for (const column of columns) {
+        checked += 1;
+        if (!new RegExp(`\\b${column.key}\\b`).test(body)) {
+          missing.push(`${rule.id}.${column.key}`);
+        }
+      }
+    }
+
+    expect(
+      ambiguous.sort(),
+      "a rule id that is not a string literal in exactly one source file — this " +
+        "test cannot tell which file declares its evidence",
+    ).toEqual([]);
+    expect(
+      missing.sort(),
+      "these declared column keys are spelled nowhere else in the file that " +
+        "defines the rule — the heading names an evidence field the rule does " +
+        "not write",
+    ).toEqual([]);
+    // The sweep is over the WHOLE ruleset, not the fixture's share of it: 231
+    // columns over the 86 rules that find. A number that falls is a rule that
+    // stopped declaring, which is the thing this file exists to notice.
+    expect(checked, "the column sweep saw far fewer columns than the ruleset has")
+      .toBeGreaterThanOrEqual(200);
   });
 });

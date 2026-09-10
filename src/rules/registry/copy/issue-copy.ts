@@ -171,7 +171,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "crawl.blocked": {
     title: "Response codes: Blocked by bot protection (not audited)",
     explanation:
-      "URLs that answered the crawler with an access denial or a bot challenge (401, 403, 429, a challenge page served on a 503, or a Cloudflare cf-mitigated header on any status) instead of the page; the Block Reason column names which. Nothing on them could be checked. This describes how the crawl was received, not the page; whether search engine crawlers meet the same block is a separate question.",
+      "URLs that answered the crawler with an access denial or a bot challenge (401, 403, 429, a challenge page served on a 503, or a Cloudflare cf-mitigated header on any status) instead of the page; the Block Reason column names which, and the Indexability Status column reads Blocked by bot protection whatever status code the challenge carried. Nothing on them could be checked. This describes how the crawl was received, not the page; whether search engine crawlers meet the same block is a separate question.",
     howToFix:
       "Allowlist the crawler's user agent (AriadneBot unless overridden) in the WAF or bot-protection settings and crawl again. If the block is deliberate and applies to search engines too, confirm those URLs are meant to be unreachable.",
   },

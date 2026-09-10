@@ -58,7 +58,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 //  2. ONE RULE'S EVIDENCE SHAPE CHANGED. `crawl.blocked` gains `fetchReason`,
 //     the sentence `pages.fetch_reason` holds: the standard columns already say
-//     the URL, the status and "Non-Indexable / Client Error", and what they
+//     the URL, the status and "Non-Indexable / Blocked by bot protection", and what they
 //     cannot say is WHICH wall this was — a `cf-mitigated` header, a 401/403/429,
 //     a challenge body on a 503. That is the difference between "allowlist our
 //     user agent" and "this URL is behind a login". No other rule's evidence
@@ -329,6 +329,40 @@ const RESERVED_COLUMN_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The HEADINGS the surface already prints, which is the same reservation read
+ * from the other end.
+ *
+ * A rule cannot declare the standard KEYS, but nothing stopped it declaring a
+ * different key under one of their LABELS — and a report with two columns
+ * headed `Status Code`, one from the page row and one from the evidence, is a
+ * table a reader cannot use. Labels are compared case-insensitively and
+ * whitespace-trimmed because a header collision is what the EYE sees, not what
+ * `===` sees.
+ *
+ * `Truncated` is here for the same reason and from the other surface: the
+ * `issue_urls` CSV always ends with that column (`TRUNCATED_LABEL`,
+ * src/api/csv.ts), so a rule heading a column of its own that way would put two
+ * `Truncated` columns on one export.
+ *
+ * Spelled here rather than imported: `STANDARD_ISSUE_COLUMNS` lives in
+ * src/api/service.ts and `TRUNCATED_LABEL` in src/api/csv.ts, both of which
+ * depend on this registry and not the other way round. They are pinned to this
+ * set by a test (test/rules/registry.test.ts, "the reserved headings are
+ * exactly the ones the surface prints itself"), so the copy cannot drift in
+ * silence.
+ */
+const RESERVED_COLUMN_LABELS: ReadonlySet<string> = new Set([
+  "address",
+  "status code",
+  "indexability",
+  "indexability status",
+  "truncated",
+]);
+
+/** A label as a header collision sees it: trimmed, case-folded. */
+const headingKey = (label: string): string => label.trim().toLowerCase();
+
+/**
  * `RuleMeta.columns`, checked as far as a definition can be checked here.
  *
  * WHAT IS CHECKED IS THE DECLARATION, NOT THE EVIDENCE. Whether a declared key
@@ -338,6 +372,11 @@ const RESERVED_COLUMN_KEYS: ReadonlySet<string> = new Set([
  * key no column names. `defineRule` sees a rule's metadata and not one finding,
  * so what it can hold is the shape: present on the kinds that find, absent on
  * the kind that measures, and every entry a usable heading.
+ *
+ * A HEADING IS AS UNIQUE AS A KEY. Two columns of one rule sharing a label, or
+ * a rule borrowing a heading the surface prints itself, is a table whose reader
+ * cannot tell which column is which — and unlike a duplicate key it is invisible
+ * in the JSON, because only the printed report has headings.
  */
 function validateColumns(rule: AnyRule, fail: (msg: string) => never): void {
   const columns = rule.columns;
@@ -357,6 +396,7 @@ function validateColumns(rule: AnyRule, fail: (msg: string) => never): void {
     );
   }
   const seen = new Set<string>();
+  const seenLabels = new Set<string>();
   for (const column of columns) {
     if (column === null || typeof column !== "object" || Array.isArray(column))
       fail("every column must be an object {key, label}");
@@ -369,6 +409,15 @@ function validateColumns(rule: AnyRule, fail: (msg: string) => never): void {
       fail(`column '${key}' is a standard column the surface already prints`);
     if (seen.has(key)) fail(`column '${key}' is declared twice`);
     seen.add(key);
+    const heading = headingKey(label);
+    if (RESERVED_COLUMN_LABELS.has(heading))
+      fail(
+        `column '${key}' is headed '${label}', which the surface prints itself — ` +
+          "two columns under one heading, filled from two sources",
+      );
+    if (seenLabels.has(heading))
+      fail(`column '${key}' repeats the heading '${label}' of an earlier column`);
+    seenLabels.add(heading);
     const optional = (column as { optional?: unknown }).optional;
     if (optional !== undefined && optional !== true)
       fail(`column '${key}': optional, when present, must be exactly true`);

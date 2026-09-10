@@ -195,18 +195,36 @@ export function flattenEvidence(evidence: Record<string, unknown>): string {
  * top-level `pageUrl` is the row's own `url` column; a `pageUrl` key inside a
  * column's object would be a different fact, and dropping it because it sits at
  * depth zero of that value would delete evidence for a coincidence of nesting.
+ *
+ * `listSeparator` is the caller's, for the same reason `evidenceCell` and
+ * `flattenEvidence` disagree about it at the top level: the flattened
+ * `evidence` column of the older views is a cell somebody splits back out (a
+ * pipe survives "Text to Columns"), and a report cell under its own heading is
+ * a cell somebody READS (a comma is what English uses). A nested scalar array
+ * is the same value either way, so it takes the separator of the view it is
+ * being printed into — and the demo's `leaves` (src/demo/index.html), which is
+ * this function in the page, joins with the comma because the only view it
+ * renders is `issue_urls`.
  */
-function walk(value: unknown, path: string, out: string[], dropPageUrl = true): void {
+function walk(
+  value: unknown,
+  path: string,
+  out: string[],
+  dropPageUrl = true,
+  listSeparator: string = LIST_SEPARATOR,
+): void {
   if (Array.isArray(value)) {
     if (value.length === 0) {
       out.push(`${path}=[]`);
       return;
     }
     if (value.every((item) => item === null || typeof item !== "object")) {
-      out.push(`${path}=${value.map(scalar).join(LIST_SEPARATOR)}`);
+      out.push(`${path}=${value.map(scalar).join(listSeparator)}`);
       return;
     }
-    value.forEach((item, index) => walk(item, `${path}[${index}]`, out, dropPageUrl));
+    value.forEach((item, index) =>
+      walk(item, `${path}[${index}]`, out, dropPageUrl, listSeparator),
+    );
     return;
   }
   if (value !== null && typeof value === "object") {
@@ -220,7 +238,7 @@ function walk(value: unknown, path: string, out: string[], dropPageUrl = true): 
       return;
     }
     for (const [key, child] of entries)
-      walk(child, path === "" ? key : `${path}.${key}`, out, dropPageUrl);
+      walk(child, path === "" ? key : `${path}.${key}`, out, dropPageUrl, listSeparator);
     return;
   }
   out.push(`${path}=${scalar(value)}`);
@@ -345,9 +363,13 @@ export const TRUNCATED_LABEL = "Truncated";
  * fixed column whose whole value is a list a reader will want to split back out
  * (`checkIds`, a redirect chain in the `redirects` view), and a pipe survives
  * "Text to Columns" where a comma would need the cell unquoted. A report cell
- * is read, not split: `sampleSources` under a heading that says `Source` is
- * three URLs a person's eye runs down, and a comma is what English uses. RFC
- * 4180 quoting makes the comma safe either way.
+ * is read, not split: `sampleSources` under a heading that says `Sample
+ * Sources` is three URLs a person's eye runs down, and a comma is what English
+ * uses. RFC 4180 quoting makes the comma safe either way.
+ *
+ * It reaches `walk` too, so a scalar array NESTED inside a column's object is
+ * joined the same way as one at the top of it — one cell, one separator — and
+ * the page's `valueText` (src/demo/index.html) prints the identical string.
  */
 const CELL_SEPARATOR = ", ";
 
@@ -415,7 +437,9 @@ function standardCells(row: IssueRow & IndexabilityRow): Record<string, string> 
  *    looked like an empty string; under a heading of its own an empty cell
  *    already reads as "nothing", which is the file-wide convention.)
  *  - an ARRAY OF SCALARS is its members, comma-joined — `sampleSources` under
- *    `Source` is the list of pages that link to the broken URL. An EMPTY array
+ *    `Sample Sources` is the list of pages that link to the broken URL, up to
+ *    ten of however many there are, which is why the heading says sample. An
+ *    EMPTY array
  *    is an empty cell for the same reason a null is: under a heading, "nothing"
  *    is what a blank says. (`flattenEvidence` spells it `key=[]`, because there
  *    a leaf with no value would have looked like an empty string.)
@@ -445,7 +469,9 @@ export function evidenceCell(value: unknown): string {
  */
 function boundedLeaves(value: object): string {
   const leaves: string[] = [];
-  walk(value, "", leaves, false);
+  // `CELL_SEPARATOR`, not the pipe: this is a report cell, and a scalar array
+  // nested inside a column's object is the same list as one at the top of it.
+  walk(value, "", leaves, false, CELL_SEPARATOR);
   const shown: string[] = [];
   let length = 0;
   for (const leaf of leaves) {
@@ -902,8 +928,12 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
  * A view's `text/csv` filename, deterministic per (crawl, view, rule).
  *
  * A RULE-SCOPED EXPORT IS NAMED FOR ITS RULE and not for its view (Phase 20):
- * `ariadne_b49eab7e-links.broken-internal.csv`, where it used to carry
- * `-issue_urls-` in the middle. The file lands in a Downloads folder beside a
+ * `crawl_e36211fc-82ad-459b-a67f-d625ee7732ca-links.broken-internal.csv`, where
+ * it used to carry `-issue_urls-` in the middle. The crawl component is the
+ * WHOLE id — `slug` (src/api/service.ts) only replaces characters a filename
+ * cannot hold, and a `crawl_<uuid>` has none — so the name is long, and that is
+ * the trade: it is the id a client pastes back into the API. The file lands in
+ * a Downloads folder beside a
  * dozen others and what a person is looking for there is the rule; `issue_urls`
  * is the engine's word for "one rule's findings" and says nothing a reader of
  * the filename needs. It is unambiguous because `issue_urls` is the only view

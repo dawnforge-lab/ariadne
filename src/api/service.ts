@@ -3438,6 +3438,12 @@ export class ApiService {
    * ever run — and a rule that CAPPED its findings still gets a complete inlinks
    * report, because the cap is on how many targets were listed and this is
    * about the links.
+   *
+   * THE PRICE OF THAT, STATED: on a capped run this report can name a
+   * destination that has no row in `/urls` at all, because the rule's listing
+   * stopped before reaching it. The two answers are the same crawl read through
+   * different limits, not a disagreement — but a client joining one to the other
+   * has to expect destinations the findings page never showed it.
    */
   async listIssueInlinks(
     crawlId: string,

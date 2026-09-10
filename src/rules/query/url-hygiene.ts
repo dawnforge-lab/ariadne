@@ -256,10 +256,12 @@ async function trackingFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
  * which is how a catalogue of two hundred products becomes forty thousand
  * indexable URLs.
  *
- * Info, not a warning: parameterised pages are legitimately indexable on plenty
- * of sites (a search results page a client wants ranking, a paginated feed),
- * and the `url_params` inventory beside this finding is what tells the agent
- * which parameters are involved.
+ * Warning, not critical: parameterised pages are legitimately indexable on
+ * plenty of sites (a search results page a client wants ranking, a paginated
+ * feed), so the finding is not a verdict — but the failure mode it names is
+ * how a catalogue of two hundred products becomes forty thousand indexable
+ * URLs, which is more than a note. The `url_params` inventory beside this
+ * finding is what tells the agent which parameters are involved.
  *
  * Batched by page id, and the canonical is resolved in JavaScript by the same
  * `resolveEffectiveCanonical` the canonical page rules use — a canonical can be

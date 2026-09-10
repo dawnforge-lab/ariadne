@@ -17,7 +17,7 @@ FINDS declares its own columns after those four, and `rules_catalog` serves them
 that point at what the two link rules found, for the reason those rules report
 the target and the fix is made in the source (§4.4a). The CSV half moves with
 them: `issue_urls` is now the rule's own table with its labels as the header and
-a trailing `Truncated` column, named `<crawl>-<ruleId>.csv`; `links_to_4xx`'s
+a trailing `Truncated` column, named `crawl_<uuid>-<ruleId>.csv`; `links_to_4xx`'s
 columns are re-headed to the inlinks vocabulary and `links_to_5xx` joins it
 (§12). **The one breaking change is in the CSV, not the JSON**: a consumer
 parsing `issue_urls` or `links_to_4xx` by column POSITION or by lower-case
@@ -323,11 +323,16 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (100 rows at 0.15.0) rather than by the crawl. The
-catalog is ~122 KB (**125,019 bytes**, re-measured 2026-09-09 at the end of
-Phase 19 over all 100 rows of ruleset 0.14.0 — the copy pass lengthened many
-entries; 111,419 bytes at 96 rows of 0.13.0 — by serialising what `rulesCatalog`
-answers with no crawl id — of which **2,385 bytes** are the `marker` strings on
-the twelve markers; the 109,949 before it was measured earlier in the same phase,
+catalog is ~92 KB (**93,778 bytes**, re-measured 2026-09-10 at the end of
+Phase 20 over all 100 rows of ruleset 0.15.0 — by serialising what
+`rulesCatalog` answers with no crawl id — of which **1,813 bytes** are the
+`marker` strings on the twelve markers. **It SHRANK by 31,241 bytes** across
+Phase 20 even though every rule that finds gained a `columns` array: the copy
+rewrite traded long explanatory prose for the SEO-tool register, and the
+register is shorter than the essay it replaced. The 125,019 before it was
+measured 2026-09-09 at the end of Phase 19, over 100 rows of 0.14.0 whose copy
+pass had lengthened many entries; 111,419 bytes at 96 rows of 0.13.0; the
+109,949 before that was measured earlier in the same phase,
 at 95 rows of 0.12.0 and before `http.server-error` was split in two; the
 103,679 before that at 93 rows of ruleset 0.9.0, and the 100,645 before it at 92
 rows, before `resources.not-fetched` had copy of its own) because it carries
@@ -780,8 +785,7 @@ read:
 | `redirect` | Non-Indexable | `Redirected` |
 | `client_error` | Non-Indexable | `Client Error` |
 | `server_error` | Non-Indexable | `Server Error` |
-| `blocked`, 5xx | Non-Indexable | `Server Error` |
-| `blocked`, anything else | Non-Indexable | `Client Error` |
+| `blocked` (any status, or none) | Non-Indexable | `Blocked by bot protection` |
 | `disallowed` | Non-Indexable | `Blocked by robots.txt` |
 | `timeout`, `network_error` | Non-Indexable | `No Response` |
 | `non_html`, `too_large`, `unsupported_encoding` | Non-Indexable | `Not HTML` |
@@ -793,10 +797,14 @@ read:
 The order is the order in the table, most decisive first: a redirect is never
 indexed whatever its HTML says, and a 200's own directives only matter once
 there is a 200. Three groupings are decisions rather than readings and are
-stated so a consumer does not re-derive them differently: **a `blocked` page is
-read off the wire status** (the site refused *this client* — never `No Response`,
-because there was an answer, and never `Blocked by robots.txt`, because
-robots.txt said nothing); **`too_large` and `unsupported_encoding` join
+stated so a consumer does not re-derive them differently: **a `blocked` page
+carries its own status whatever the wire said** (the site refused *this client* —
+never `No Response`, because there was an answer, and never `Blocked by
+robots.txt`, because robots.txt said nothing; and not the status code's word
+either, because a challenge is routinely served with a 200 and `Status Code: 200
+| Indexability Status: Client Error` contradicts itself — the status code is its
+own column and `crawl.blocked`'s `fetchReason` names the mechanism); **`too_large` and
+`unsupported_encoding` join
 `non_html`** (the response arrived and produced no HTML this engine could read,
 so there is nothing to judge from — `fetchClass` on `pages_query` is where a
 reader finds out which of the three it was); and an **indexable row's status is
@@ -823,10 +831,12 @@ Pinned: `test/api/query.test.ts:1176` "returns the URL slice with the evidence a
 stored", `test/api/query.test.ts:1291` "never leaks a column the projection did
 not name", `test/api/query.test.ts:1299` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:528` "maps each fetch class to the status
-a reader acts on", `test/rules/helpers.test.ts:547` "reads a block off the wire
-status and never calls it a robots.txt block",
-`test/fixtures/harness.test.ts:934` "declares a column for every evidence key it
-writes, and writes every column it declares".
+a reader acts on", `test/rules/helpers.test.ts:548` "names a block a block,
+whatever status the challenge was served with",
+`test/fixtures/harness.test.ts:1027` "declares a column for every evidence key it
+writes, and writes every column it declares",
+`test/rules/registry.test.ts:568` "finds one defining file per rule, and the key
+spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
 
@@ -858,8 +868,11 @@ not invent one.
 
 It reads the `links` table, not the findings, so it answers before `crawl_rules`
 has ever run, and a rule that CAPPED its findings still gets a complete report
-here. The same rows are the `links_to_4xx` / `links_to_5xx` CSV views (§12), in
-the same four columns and the same order.
+here — which is also the one place the two reports do not line up: **on a capped
+run this report can name a `destination` that has no row in `/urls`**, because
+the rule's listing stopped before reaching it. The same rows are the
+`links_to_4xx` / `links_to_5xx` CSV views (§12), in the same four columns and
+the same order.
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
 
@@ -1411,14 +1424,14 @@ null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1306` "names every column and the population they are
-over", `test/rules/copy.test.ts:1331` "says the counts are the authority, not the
-ratio", `test/rules/copy.test.ts:1348` "grades nothing: no score, no label, no
+`test/rules/copy.test.ts:1309` "names every column and the population they
+are over", `test/rules/copy.test.ts:1334` "says the counts are the authority, not the
+ratio", `test/rules/copy.test.ts:1351` "grades nothing: no score, no label, no
 threshold";
 `test/rules/coverage.test.ts:365` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2070` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2189` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -1893,7 +1906,8 @@ Semantics a consumer must repeat to its own users:
   `Truncated`** and is filled only on the one row carrying a cap note: a table
   has nowhere else to put it, and a capped export that looked complete is the
   silent failure hard rule 7 forbids. The file is named for the rule —
-  `<crawl>-<ruleId>.csv` — and not for the view.
+  `crawl_<uuid>-<ruleId>.csv`, the WHOLE crawl id and not an abbreviation of it
+  — and not for the view.
 - **`links_to_4xx` and `links_to_5xx` are INTERNAL links only.** The status
   comes from the target's own crawled row, and an external target is never
   fetched — so **an external 4xx is absent from this file rather than clean**.
