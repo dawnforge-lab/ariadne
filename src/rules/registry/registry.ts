@@ -23,10 +23,22 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
-// PHASE 20 T1 — GROUNDS FOR THE NEXT BUMP, NOT YET STAMPED. The version constant
-// below is still 0.14.0; the orchestrator bumps it to 0.15.0 at T4 and folds
-// this block into the 0.15.0 note beside its own copy grounds. What T1 changed
-// that a version has to carry:
+// 0.15.0: Phase 20, the reports-and-copy pass
+// (docs/superpowers/specs/2026-09-10-reports-and-copy-design.md), on THREE
+// grounds. (1) COPY: every rule's title, explanation and howToFix rewritten by
+// hand in the register of an SEO tool ("Area: Condition", one to three
+// sentences, an imperative fix) and every marker reason as one sentence; the
+// rubric in test/rules/copy.test.ts pins the shape and the accuracy claims.
+// (2) REPORT COLUMNS: every rule that finds declares `columns` — the evidence
+// fields a reader sees and the heading each is printed under — served by
+// rules_catalog and by every listing beside the four standard columns
+// (Address, Status Code, Indexability, Indexability Status) derived from the
+// page row. (3) EVIDENCE: crawl.blocked gains fetchReason. No verdict,
+// severity or finding moves; an older crawl re-judged at 0.15.0 reports the
+// same rows under the new headings. The T1 note that follows records the
+// mechanics.
+//
+// Phase 20 T1, the mechanics behind ground (2) and (3):
 //
 //  1. EVERY RULE THAT FINDS NOW DECLARES ITS REPORT. `RuleMeta.columns`
 //     (`ReadonlyArray<{key, label, optional?}>`) names the evidence fields a
@@ -237,7 +249,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.14.0";
+export const RULESET_VERSION = "0.15.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

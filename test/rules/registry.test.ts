@@ -322,7 +322,11 @@ describe("check universe", () => {
     // and hreflang respect the canonical), a measurement changed (near-
     // duplicate on the main-content fingerprint), four rules added, copy on 26
     // rules; registry.ts's entry carries the grounds.
-    expect(RULESET_VERSION).toBe("0.14.0");
+    //
+    // 0.15.0: Phase 20 — copy rewritten by hand in SEO-tool register, report
+    // columns declared on every finding rule and served with every listing,
+    // crawl.blocked gains fetchReason; registry.ts carries the grounds.
+    expect(RULESET_VERSION).toBe("0.15.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

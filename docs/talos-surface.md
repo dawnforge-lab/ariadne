@@ -1,8 +1,8 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 20 (migrations 0000–0019, 17 MCP tools /
-17 HTTP routes; the ruleset version is the orchestrator's to stamp at the end of
-the phase — every column label in this document is served with it).
+**Status:** the contract as of Phase 20 (ruleset 0.15.0, migrations 0000–0019,
+17 MCP tools / 17 HTTP routes; every column label in this document is served
+under that ruleset version).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
 
@@ -322,7 +322,7 @@ validator before the handler runs (`test/api/mcp.test.ts:791` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (100 rows at 0.14.0) rather than by the crawl. The
+bounded by the **ruleset** (100 rows at 0.15.0) rather than by the crawl. The
 catalog is ~122 KB (**125,019 bytes**, re-measured 2026-09-09 at the end of
 Phase 19 over all 100 rows of ruleset 0.14.0 — the copy pass lengthened many
 entries; 111,419 bytes at 96 rows of 0.13.0 — by serialising what `rulesCatalog`
@@ -1721,7 +1721,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.14.0** as of Phase 19) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.15.0** as of Phase 20) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1779,6 +1779,15 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 20 bumped to 0.15.0 on three grounds, none of which moves a verdict.**
+Every rule's client-facing copy was rewritten by hand in the register of an SEO
+tool (`Area: Condition` titles, one to three sentences, an imperative fix, one
+sentence per marker reason); every rule that finds declares `columns`, served
+by `rules_catalog` and beside every listing's four standard columns (§4.4);
+and `crawl.blocked` gains `fetchReason`. An older crawl re-judged at 0.15.0
+reports the same rows under the new headings; nothing is backfilled and no
+count changes.
 
 **Phase 19 bumped to 0.14.0 on four grounds: two verdicts MOVE, one measurement
 CHANGES, four rules are added, and copy changes on 26.** The moves: the two
