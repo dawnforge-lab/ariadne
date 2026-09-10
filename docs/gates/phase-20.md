@@ -113,4 +113,4 @@ claimed as covered.
 
 ## 6. Integration
 
-**[recorded at merge]**
+Integrated 2026-09-10 as **PR #18** from `worktree-phase-20` (rebased onto main), on the owner's word for this phase ("go"). CI: green first try on 4007835 (run 34481193921, 4m40s).
