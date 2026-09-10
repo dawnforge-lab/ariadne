@@ -1150,7 +1150,7 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl recorded no image, stylesheet or script references (crawl taken before they were recorded), so file checks were not run; re-crawl the site.",
+      "This crawl recorded no image, stylesheet or script references, so file checks were not run; re-crawl the site.",
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
   }),
 
@@ -1199,7 +1199,7 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(ALL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "Every file requested came back refused, disallowed or unanswered, so file checks were not run; crawl again once the block has cleared.",
+      "Every file the crawl recorded was refused, disallowed, behind an unreachable robots.txt or unanswered, so file checks were not run; crawl again once the block has cleared.",
     run: (db, crawlId) => allUnknownFindings(ALL_UNKNOWN, db, crawlId),
   }),
 
@@ -1227,7 +1227,7 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(PARTIAL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "Only some files were requested and none answered usably, so file checks were not run; re-run the crawl to request all files afresh.",
+      "Only some files were tried and none answered usably, so file checks were not run; re-run the crawl to try all files afresh.",
     run: (db, crawlId) => partialUnknownFindings(PARTIAL_UNKNOWN, db, crawlId),
   }),
 ];

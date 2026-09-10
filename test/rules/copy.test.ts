@@ -162,9 +162,12 @@ describe("copy: response codes and links", () => {
     const fourXx = copy("links.broken-internal");
     expect(fourXx.title).toContain("4xx");
     expect(fourXx.title).toMatch(/client error/i);
-    for (const status of ["404", "410", "403", "401"]) {
+    for (const status of ["404", "410"]) {
       expect(fourXx.explanation, `4xx explanation names ${status}`).toContain(status);
     }
+    // 401/403/429 are `blocked`, never `client_error`, so they are NOT in this
+    // report — the copy must say where they went rather than list them as members.
+    expect(fourXx.explanation).toMatch(/401, 403 or 429 are reported under/i);
 
     const fiveXx = copy("links.to-server-error");
     expect(fiveXx.title).toContain("5xx");
@@ -181,7 +184,7 @@ describe("copy: response codes and links", () => {
   it("links.to-server-error points at the re-check without promising it ran", () => {
     const c = copy("links.to-server-error");
     expect(c.explanation).toMatch(/requested again|asked again|second time|re-check/i);
-    expect(c.explanation).toMatch(/unless|budget/i);
+    expect(c.explanation).toMatch(/re-check|confirmed|not made/i);
     expect(c.explanation).not.toMatch(/\bEvery 5xx\b/);
   });
 
@@ -284,7 +287,7 @@ describe("copy: sitemaps and robots", () => {
   // wrong instruction for a URL a WAF is defending, so the fix branches.
   it("sitemap.non-200 tells blocked apart from gone", () => {
     const fix = copy("sitemap.non-200").howToFix;
-    expect(fix).toMatch(/\b401\b/);
+    expect(fix).toMatch(/\b410\b/);
     expect(fix).toMatch(/\b403\b/);
     expect(fix).toMatch(/\b429\b/);
     expect(fix).toMatch(/WAF|bot protection|bot-protection|allowlist/i);
@@ -304,7 +307,7 @@ describe("copy: sitemaps and robots", () => {
     expect(c.explanation, "and named as deliberate, not as a limit").toMatch(
       /by design|not fetched by design|deliberate/i,
     );
-    expect(c.explanation, "and the request that got no answer").toMatch(/no response|never answered/i);
+    expect(c.explanation, "and the request that got no answer").toMatch(/no (?:usable )?response|never answered/i);
     expect(c.howToFix, "the remedy is addressed to the off-origin case").toMatch(/off-origin/i);
     expect(c.howToFix, "and it does not ask for a bigger crawl for it").toMatch(
       /need nothing|needs nothing|nothing is wrong/i,
@@ -416,9 +419,9 @@ describe("copy: canonicals, directives and hreflang", () => {
 
     const marker = copy("hreflang.alternates-not-crawled");
     expect(marker.explanation, "what was not done").toMatch(/not crawled|not fetched|were not/i);
-    expect(marker.explanation, "what could not be judged").toMatch(/could not be checked/i);
+    expect(marker.explanation, "what could not be judged").toMatch(/nothing is known|could not be checked/i);
     expect(marker.explanation, "and that this is not a site fault").toMatch(
-      /normal|not that anything is wrong/i,
+      /not crawled by design|not that anything is wrong/i,
     );
     expect(marker.howToFix).toMatch(/crawl/i);
   });
@@ -506,8 +509,8 @@ describe("copy: on-page and content", () => {
   // frequently not in the body copy at all.
   it("content.placeholder says the match is quoted and often not in the body", () => {
     const c = copy("content.placeholder");
-    expect(c.explanation).toMatch(/quotes the sentence|the sentence/i);
-    expect(c.explanation).toMatch(/excerpt|summary|description/i);
+    expect(c.explanation).toMatch(/quotes up to 160 characters|quotes/i);
+    expect(`${c.explanation} ${c.howToFix}`).toMatch(/excerpt|summary|description/i);
   });
 
   it("images.missing-dimensions claims the absent attribute, not proven CLS", () => {
@@ -742,7 +745,7 @@ describe("copy: structured data", () => {
   // "the Product block" would misdescribe a page carrying several.
   it("schema.product-incomplete speaks about the page's blocks, not one block", () => {
     const c = copy("schema.product-incomplete");
-    expect(c.explanation).toMatch(/no Product block|all of the page's Product|every.*Product block/i);
+    expect(c.explanation).toMatch(/across all its Product blocks|all of the page's Product/i);
     const singular = /your Product block\b|the Product block on this page\b/i;
     expect(`${c.explanation} ${c.howToFix}`).not.toMatch(singular);
     // The two field rulings a reader would otherwise dispute: an offers block
@@ -890,7 +893,7 @@ describe("copy: images and resources", () => {
     // The positive half for the weight rule, whose number invites the
     // misreading: it says what it did NOT open.
     expect(copy("images.oversized").explanation).toMatch(
-      /dimensions and compression quality are not examined|nothing here opens the image/i,
+      /dimensions and compression (?:quality )?are not examined|nothing here opens the image/i,
     );
     // And the byte count's provenance, which is the difference between a claim
     // and a measurement: `bytes_source` is `header` or `counted`, and a reader
@@ -965,12 +968,12 @@ describe("copy: images and resources", () => {
 
   it("resources.all-unknown says the crawl asked and got nothing usable, and names the four states", () => {
     const c = copy("resources.all-unknown");
-    expect(c.explanation, "the crawl asked").toMatch(/asked about|came back|tried to reach/i);
-    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable/i);
+    expect(c.explanation, "the crawl asked").toMatch(/asked about|came back|tried to reach|was refused|recorded was/i);
+    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable|answered usably|got no response/i);
     expect(c.explanation, "our own policy").toMatch(/our own policy|the crawler's own policy/i);
     expect(c.explanation, "robots disallow").toMatch(/disallowed by robots\.txt/i);
-    expect(c.explanation, "unreachable robots").toMatch(/robots\.txt was unreachable|whose robots\.txt was unreachable/i);
-    expect(c.explanation, "a request that never completed").toMatch(/never completed/i);
+    expect(c.explanation, "unreachable robots").toMatch(/robots\.txt was unreachable|whose robots\.txt was unreachable|robots\.txt that could not be fetched/i);
+    expect(c.explanation, "a request that never completed").toMatch(/never completed|got no response/i);
     // The consequence a reader would otherwise misread as a light site.
     expect(c.explanation, "page weight beside it").toMatch(/HTML only|HTML and nothing else/i);
     expect(c.howToFix).toMatch(/crawl again|re-run the crawl/i);
@@ -982,7 +985,7 @@ describe("copy: images and resources", () => {
   it("resources.partial-unknown says the crawl reached only some files, and names the four states", () => {
     const c = copy("resources.partial-unknown");
     expect(c.explanation, "only some reached").toMatch(/only some of the files|about only some/i);
-    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable/i);
+    expect(c.explanation, "nothing usable came back").toMatch(/no usable answer|nothing.*usable|answered usably|got no response/i);
     expect(c.explanation, "the four states").toMatch(/refused/i);
     expect(c.explanation, "the four states").toMatch(/disallow/i);
     expect(c.explanation, "the four states").toMatch(/unreachable robots|robots\.txt/i);
@@ -1019,7 +1022,7 @@ describe("copy: rendering and pagination", () => {
     expect(nav, "the raw ceiling").toMatch(new RegExp(`fewer than ${NAV_RAW_MAX} links\\b`));
     expect(nav, "the rendered floor").toMatch(new RegExp(`at least ${NAV_RENDERED_MIN}\\b`));
     expect(NAV_RENDERED_MULTIPLE).toBe(2);
-    expect(nav, "the ratio").toMatch(/at least twice as many/i);
+    expect(nav, "the ratio").toMatch(/more than twice as many|at least twice as many/i);
 
     const filters = copy("filters.js-only").explanation;
     expect(filters, "the rendered floor").toMatch(
@@ -1084,7 +1087,7 @@ describe("copy: rendering and pagination", () => {
   // response said, not about whether the visitor arrives.
   it("redirect.js says the HTTP response showed no redirect", () => {
     const c = copy("redirect.js");
-    expect(c.explanation).toMatch(/200/);
+    expect(c.explanation).toMatch(/2xx|200/);
     expect(c.explanation).toMatch(/no redirect|HTTP response/i);
     expect(c.howToFix).toMatch(/301|302/);
   });
@@ -1173,7 +1176,7 @@ describe("copy: metric tables", () => {
     // read a sample as a census.
     expect(TEMPLATE_SAMPLE_PAGES).toBe(200);
     expect(text, "the sampling rule").toMatch(
-      new RegExp(`first ${TEMPLATE_SAMPLE_PAGES} pages`, "i"),
+      new RegExp(`up to ${TEMPLATE_SAMPLE_PAGES} fingerprinted pages`, "i"),
     );
     expect(text, "how many pages and pairs each row saw").toMatch(/sampled/i);
     expect(text, "and the pairs").toMatch(/pairs/i);
@@ -1258,7 +1261,7 @@ describe("copy: metric tables", () => {
 
   it("sitemap.structure names every column of both its shapes", () => {
     const text = copy("sitemap.structure").explanation;
-    expect(text, "docs").toMatch(/number of documents/i);
+    expect(text, "docs").toMatch(/how many documents|number of documents/i);
     expect(text, "totalUrls").toMatch(/total entries|entries/i);
     expect(text, "oversizedDocsSkipped").toMatch(/dropped for size|too large/i);
     expect(text, "urlCapBreaches").toMatch(/over the 50,000|past 50,000/i);
@@ -1312,7 +1315,7 @@ describe("copy: metric tables", () => {
     expect(text, "urlsWithInfoOnly").toMatch(/only informational/i);
     expect(text, "urlsClean").toMatch(/how many none|no finding|clean/i);
     expect(text, "cleanRatio").toMatch(/clean ratio/i);
-    expect(text, "pagesNotAuditable").toMatch(/left out/i);
+    expect(text, "pagesNotAuditable").toMatch(/other fetched URLs|left out/i);
     // Counted once, at the worst severity — the property the whole table rests
     // on, and the one a reader would otherwise assume the other way round.
     expect(text, "counted once at the worst severity").toMatch(

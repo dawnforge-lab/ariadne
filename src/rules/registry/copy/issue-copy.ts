@@ -62,14 +62,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "canonical.multiple": {
     title: "Canonicals: Multiple canonical tags",
     explanation:
-      "Pages that declare more than one canonical URL. Search engines cannot tell which is meant and usually ignore all of them.",
+      "Pages with more than one rel=canonical link element in the HTML, whether or not they name the same URL; the HTTP Link header is not counted. Search engines cannot tell which is meant and usually ignore all of them.",
     howToFix:
       "Leave exactly one canonical on the page. Duplicates usually come from a theme and a plugin each emitting one; remove it at the layer that should not own it.",
   },
   "canonical.non-200-target": {
     title: "Canonicals: Canonical points to a non-200 URL",
     explanation:
-      "Pages whose canonical URL was crawled and returned something other than 200: a redirect, a 4xx or a 5xx. Signals consolidate into a URL that does not serve a page, so both URLs can drop out of the index.",
+      "Pages whose canonical URL was crawled and did not return 200: a redirect, a 4xx or a 5xx. Signals consolidate into a URL that does not serve a page, so both URLs can drop out of the index.",
     howToFix:
       "Point the canonical at the URL that serves the content with a 200. If the target redirects, canonicalise to its destination; if it is gone, canonicalise to the page itself or to the closest live replacement.",
   },
@@ -83,9 +83,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "canonical.points-elsewhere": {
     title: "Canonicals: Canonicalised",
     explanation:
-      "Pages whose canonical names a different URL, so search engines index that URL instead of this one. Correct for parameter and syndicated variants; a problem when the page was meant to rank on its own.",
+      "Pages whose canonical names a different URL, so search engines index that URL instead of this one; correct for parameter and syndicated variants, a problem when the page was meant to rank on its own. A canonical that could not be parsed as a URL is listed with Unparseable set and points nowhere.",
     howToFix:
-      "If the page should rank, make the canonical self-referencing. If the canonical is intentional, check that its target returns 200 and is itself canonical.",
+      "If the page should rank, make the canonical self-referencing. If the canonical is intentional, check that its target returns 200 and is itself canonical. Replace an unparseable canonical with an absolute URL.",
   },
   "directive.canonical-noindex-conflict": {
     title: "Canonicals: Canonical and noindex on the same page",
@@ -99,47 +99,47 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "content.csr-dependent": {
     title: "Rendering: Main content only in rendered HTML",
     explanation:
-      "Pages where rendering in a browser produced at least twice the words the HTML response contains, and at least 150 more. The content is assembled by JavaScript, so crawlers receive a shell first and the text only after rendering, which search engines do later and on a budget.",
+      "Pages where the rendered page has at least twice the renderable words of the HTML response, and at least 150 more (markup-hidden text is excluded on both sides). The content is assembled by JavaScript, so crawlers receive a shell first and the text only after rendering, which search engines do later and on a budget. Only pages the render run opened can be checked.",
     howToFix:
       "Serve the main content in the HTML response: server-side rendering, static generation or a pre-rendered snapshot, starting with the templates that earn traffic.",
   },
   "content.exact-duplicate": {
     title: "Content: Exact duplicates",
     explanation:
-      "Groups of URLs that return identical visible text, none of them canonicalised to another URL. Search engines index one and drop the rest, and the links and signals meant for one page are split between copies. Pages already canonicalised to another URL are excluded because they have declared which version counts.",
+      "Groups of indexable 200 pages that return identical visible text, none of them canonicalised to another URL; each row gives the exact page count and up to 20 of the URLs. Search engines index one and drop the rest, and the links and signals meant for one page are split between copies.",
     howToFix:
       "Pick the URL that should rank and canonicalise or 301 the copies to it. On templated sites fix the pattern that creates them: a print view, a parameter, a second path to the same page.",
   },
   "content.metrics-by-type": {
     title: "Content: Word count by template",
     explanation:
-      "For the site and for each page template: word count, renderable word count (the same text minus markup-hidden parts) and text ratio, each as count, min, max, mean, quartiles and 95th percentile over indexable 200 pages. Pages without a template are grouped as (untyped).",
+      "For the site and for each page template: word count, renderable word count (the same text minus markup-hidden parts) and text ratio (visible-text bytes as a share of HTML bytes), each as count, min, max, mean, quartiles and 95th percentile over indexable 200 pages. Pages without a template are grouped as (untyped).",
     howToFix:
       "Compare each template with the site row and with the template's purpose; a listing carries less text than an article. A large gap between word count and renderable word count is hidden template chrome on every page of that template.",
   },
   "content.near-duplicate": {
     title: "Content: Near duplicates (main content within 3 of 64 fingerprint bits)",
     explanation:
-      "Pages whose main content is near-identical to at least one other page: fingerprints within 3 bits of 64, compared on the content area with header, navigation, sidebar and footer excluded, both pages carrying at least 50 words of their own, neither canonicalised elsewhere. Each page is listed once with how many near duplicates it has (exact up to 200) and the closest ones. Search engines group pages this similar and show one.",
+      "Indexable 200 pages whose main content is near-identical to at least one other such page: fingerprints within 3 bits of 64, compared on the content area with header, navigation, sidebar and footer excluded, both pages carrying at least 50 words of their own, neither canonicalised elsewhere. Each page is listed once with how many near duplicates it has (exact up to 200) and the closest five. Search engines group pages this similar and show one.",
     howToFix:
       "Merge near-duplicate pages into one stronger page and redirect the rest, or give each page substantive content of its own. Canonicalise filtered and parameterised variants to the base page.",
   },
   "content.near-duplicate-skipped": {
     title: "Content: Near duplicates not checked on this crawl",
     explanation:
-      "No page in this crawl carries a main-content fingerprint, so pages could not be compared. A crawl taken before that fingerprint existed looks like this; the check was left unrun rather than reported clean.",
+      "No page in this crawl carries a main-content fingerprint, so pages could not be compared; the check was left unrun rather than reported clean.",
     howToFix:
-      "Re-crawl the site. The fingerprint is taken while each page is read and is recorded on every crawl from this version onwards.",
+      "Re-crawl the site. The fingerprint is recorded for every page with main content on crawls from this version onwards.",
   },
   "content.placeholder": {
     title: "Content: Lorem ipsum placeholder text",
     explanation:
-      "Pages whose visible text contains \"lorem ipsum\". The finding quotes the sentence; on long pages the placeholder is often an excerpt, a summary or a description shown on listing pages rather than in the body. Search engines index it and visitors see it.",
+      "Pages whose visible text contains \"lorem ipsum\". The row quotes up to 160 characters of visible text from the match (empty on crawls taken before the quote was recorded). Search engines index it and visitors see it.",
     howToFix:
-      "Replace the quoted text with real copy or unpublish the page. Search the CMS for the phrase: placeholder text usually sits in the same field on several records.",
+      "Replace the quoted text with real copy or unpublish the page. Check excerpts, summaries and descriptions as well as the body, and search the CMS for the phrase: placeholder text usually sits in the same field on several records.",
   },
   "content.soft-404": {
-    title: "Content: Soft 404 (200 page under 300 words or matching the not-found template)",
+    title: "Content: Soft 404 (not-found wording under 300 words, or the not-found template)",
     explanation:
       "Pages that return 200 but look like an error page: not-found wording with fewer than 300 renderable words, or content within 4 of 64 fingerprint bits of the site's real not-found page. Search engines treat them as errors, keep them out of the index and keep re-crawling them.",
     howToFix:
@@ -148,95 +148,95 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "content.template-similarity": {
     title: "Content: Similarity within each template",
     explanation:
-      "For each page template, how alike its pages are: mean fingerprint distance in bits (0 identical, 64 unrelated), quartiles, and the share of pairs within 3 and within 8 bits, over a sample of the first 200 pages per template. Each row states how many pages were sampled and how many pairs were compared.",
+      "For each page template, how alike its pages are: mean fingerprint distance in bits (0 identical, 64 unrelated), quartiles, and the share of pairs within 3 and within 8 bits, over a sample of up to 200 fingerprinted pages per template chosen arbitrarily but stably. Each row states how many pages carry a fingerprint, how many were sampled and how many pairs were compared; a template with fewer than two fingerprinted pages has no row.",
     howToFix:
-      "A high share within 3 bits means most pages of that template are interchangeable to a search engine: consolidate them or give each page content of its own. A wide spread usually means the template is really two.",
+      "Consolidate a template whose share within 3 bits is high, or give each page content of its own; a wide spread means the template is really two.",
   },
   "content.thin": {
     title: "Content: Low content pages (under 150 words of own content)",
     explanation:
-      "Indexable pages with fewer than 150 words of their own content: the text inside the page's main area, or outside its header, navigation, sidebar and footer where no main area is marked. Each row shows own words beside the whole-document word count; a page with no own text shows 0. Pages canonicalised to another URL are excluded.",
+      "Indexable pages with fewer than 150 words of their own content: the text inside the page's main area, or the whole body where none is marked, in both cases with header, navigation, sidebar and footer excluded. Each row shows own words beside the whole-document word count; a page with no own text shows 0. Pages canonicalised to another URL are excluded.",
     howToFix:
       "Add content that answers the page's query, consolidate the page into a stronger one, or noindex it if it exists for another reason. If own words are far below the document total, check that the template's content field is being filled for this record.",
   },
   "content.thin-skipped": {
     title: "Content: Low content pages not checked on this crawl",
     explanation:
-      "No page in this crawl carries a count of its own content, so no page could be judged thin. A crawl taken before that count existed looks like this; the check was left unrun rather than reported clean, because the whole-document word count would call an empty page healthy on a site with heavy shared chrome.",
+      "No page in this crawl carries a count of its own content, so no page could be judged thin; the check was left unrun rather than reported clean, because the whole-document word count would call an empty page healthy on a site with heavy shared chrome.",
     howToFix:
-      "Re-crawl the site. The count is taken while each page is read and is recorded on every crawl from this version onwards.",
+      "Re-crawl the site. The count is recorded for every page with main content on crawls from this version onwards.",
   },
 
   // ------------------------------------------------------------------ crawl
   "crawl.blocked": {
     title: "Response codes: Blocked by bot protection (not audited)",
     explanation:
-      "URLs that answered the crawler with a bot challenge or an access denial (401, 403, 429 or a challenge page) instead of the page. Nothing on them could be checked. This describes how the crawl was received, not the page; whether search engine crawlers meet the same block is a separate question.",
+      "URLs that answered the crawler with an access denial or a bot challenge (401, 403, 429, a challenge page served on a 503, or a Cloudflare cf-mitigated header on any status) instead of the page; the Block Reason column names which. Nothing on them could be checked. This describes how the crawl was received, not the page; whether search engine crawlers meet the same block is a separate question.",
     howToFix:
       "Allowlist the crawler's user agent (AriadneBot unless overridden) in the WAF or bot-protection settings and crawl again. If the block is deliberate and applies to search engines too, confirm those URLs are meant to be unreachable.",
   },
   "http.server-error": {
     title: "Response codes: Internal server error (5xx)",
     explanation:
-      "URLs that returned a 5xx server error. Each was requested a second time at the end of the crawl; the row says whether the error was confirmed, the second request got no answer (inconclusive), the re-check budget ran out (capped) or no second look was made (not run). Repeated 5xx responses slow crawling of the whole site and eventually drop the URLs from the index.",
+      "URLs that returned a 5xx server error. Each was requested a second time at the end of the crawl; the row says whether the error was confirmed, the second request got no answer about the page (timeout, network error, a bot block, or not made because robots.txt or the crawler's policy refused it: inconclusive), the re-check budget ran out (capped) or no second look was made (not run). Repeated 5xx responses slow crawling of the whole site and eventually drop the URLs from the index.",
     howToFix:
-      "Check the server and application logs for the URL around the timestamps in the row and fix the error. If the page is gone, return 404 or 410, or 301 to the closest live page.",
+      "Check the server and application logs for the URL around the crawl time and fix the error. If the page is gone, return 404 or 410, or 301 to the closest live page.",
   },
   "http.server-error-transient": {
     title: "Response codes: Intermittent server error (5xx cleared on re-check)",
     explanation:
-      "URLs that returned a 5xx during the crawl and a normal response when requested again at the end of it. The page is not permanently broken, but an intermittent 5xx makes search engines back off the whole site and shows visitors an error page during the outage.",
+      "URLs that returned a 5xx during the crawl and a non-5xx response when requested again at the end of it; the Recheck Status Code column shows what the second request got. A 200 there means the page recovered; a 4xx or a redirect means the URL is broken in a different way, not fixed. An intermittent 5xx makes search engines back off the whole site and shows visitors an error page during the outage.",
     howToFix:
-      "Read the application, proxy, load balancer and CDN logs for the window between the two timestamps in the row. Restarts, deploys, exhausted connection pools and upstream timeouts are the usual causes.",
+      "Read the application, proxy, load balancer and CDN logs around the crawl time; the row gives the seconds between the two requests. Restarts, deploys, exhausted connection pools and upstream timeouts are the usual causes.",
   },
   "render.coverage": {
     title: "Rendering: Browser render coverage",
     explanation:
-      "How much of the crawl was rendered in a browser: pages crawled, whether a render run happened, the selection mode (automatic or explicit), the render budget, how many pages looked incomplete from their HTML, how many were sampled per template, how many were selected, whether the selection was truncated, and how many pages rendered or failed. When no render run happened, the selection numbers show what a run would choose.",
+      "How much of the crawl was rendered in a browser: pages crawled, whether a render run happened, the selection mode (automatic or explicit), the render budget, how many pages looked incomplete from their HTML, how many were sampled site-wide, how many were selected, whether the selection was truncated, and how many pages rendered or failed. In explicit mode the budget, suspect, sample and truncation numbers are empty; when no render run happened, the selection numbers show what a run would choose.",
     howToFix:
       "Read this before quoting any rendering finding. If no run happened, the rendering findings are silent because nothing was measured. Rendered against crawled is the sample size; a truncated selection means the budget, not the site, decided where the run stopped.",
   },
   "robots.blocks-sitemap-urls": {
     title: "Robots.txt: Sitemap URLs blocked by robots.txt",
     explanation:
-      "URLs listed in the sitemap that robots.txt disallows for the crawler's user agent. The row shows the URL and the Disallow line. A blocked URL cannot be read, so at best it is indexed as a bare URL with no title or description.",
+      "URLs listed in the sitemap that robots.txt disallows for the crawler's user agent; the row shows the URL and, where it can be named, the Disallow line. A blocked URL cannot be read, so at best it is indexed as a bare URL with no title or description.",
     howToFix:
       "If the pages should be found, narrow or remove the Disallow rule. If they should not, remove them from the sitemap; to keep them out of the index rather than the crawl, use noindex on the page instead.",
   },
   "robots.check-skipped": {
     title: "Robots.txt: Robots.txt checks not run on this crawl",
     explanation:
-      "The whole robots.txt was not available to this crawl: the server did not serve it, or the file is larger than the 500 KB read. The sitemap-blocking and sitemap-declaration checks were left unrun rather than answered from a partial file.",
+      "The robots.txt was truncated at the 500 KB read, could not be fetched, or was fetched empty, so the sitemap-blocking and sitemap-declaration checks were left unrun rather than answered from an incomplete file.",
     howToFix:
       "If robots.txt is over 500 KB, cut it down: search engines apply their own size limits and ignore rules past them. If it could not be fetched, fix the server and crawl again.",
   },
   "robots.missing": {
     title: "Robots.txt: No robots.txt",
     explanation:
-      "The site returned a not-found response for /robots.txt. Crawlers may then fetch everything, which is valid, but there is nowhere to declare the sitemap or exclude sections that should not be crawled.",
+      "The site returned a not-found response for /robots.txt. Crawlers then fetch everything, which is valid, but there is nowhere to declare the sitemap or exclude sections that should not be crawled.",
     howToFix:
       "Add a robots.txt at the site root with at least a Sitemap: line pointing at the XML sitemap. Keep crawling rules permissive unless a section genuinely should not be fetched.",
   },
   "site.health": {
     title: "Site: Pages by worst finding severity",
     explanation:
-      "Of the pages the audit could judge (200, HTML), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio and the number of fetched URLs left out (redirects, errors, non-HTML). Site-wide findings appear in none of the counts, and on a capped run pages past the cap count as clean. This table is the evidence for the engine-coverage check, not a finding about the site.",
+      "Of the pages the audit could judge (200, HTML), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio and the number of other fetched URLs (redirects, errors, blocked, failed, non-HTML and every other status). Site-wide findings appear in none of the counts, and on a capped run pages past the cap count as clean. This table is the evidence for the engine-coverage check, not a finding about the site.",
     howToFix:
-      "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, the per-rule counts say what is wrong. Work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
+      "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, and the issue list says what is wrong. Work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
   },
 
   // ------------------------------------------------------------------ hosts
   "host.duplicate-host-200": {
     title: "URL: www and non-www both serve the site",
     explanation:
-      "Both the www and the non-www host return pages with no redirect between them. Every URL exists twice, and links, rankings and crawl budget are split across two hosts serving the same content.",
+      "Both the https www and https non-www hosts return pages with no redirect between them. Every URL exists twice, and links, rankings and crawl budget are split across two hosts serving the same content.",
     howToFix:
       "Choose one host and 301 the other to it, path and query intact. Update internal links, the sitemap and canonical tags to the chosen host.",
   },
   "host.http-serves-200": {
     title: "Security: HTTP URLs served without redirect to HTTPS",
     explanation:
-      "A host variant serves pages over HTTP instead of redirecting to HTTPS. Browsers flag the page as not secure and search engines can index the HTTP version as a separate URL that competes with the secure one.",
+      "Host variants whose redirect chain ends on an HTTP URL returning 200; the Address column is the variant that was requested and the row shows the hops. Browsers flag the page as not secure and search engines can index the HTTP version as a separate URL that competes with the secure one.",
     howToFix:
       "301 every HTTP URL to its HTTPS equivalent in a single hop, preserving path and query, and send an HSTS header on the HTTPS response.",
   },
@@ -250,7 +250,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "host.probe-skipped": {
     title: "URL: Host variants not checked on this crawl",
     explanation:
-      "The crawl was started with host checks off, so the HTTP, www, non-www and former-domain variants were not requested. Whether they redirect to the canonical HTTPS host is unknown for this crawl.",
+      "This crawl has no host-check record: host checks were off, or the crawl ended before they ran. Whether the HTTP, www, non-www and former-domain variants redirect to the canonical HTTPS host is unknown for this crawl.",
     howToFix:
       "Re-run the crawl with host checks on. Meanwhile, request each host variant by hand and follow the redirects to confirm they end on the canonical HTTPS host.",
   },
@@ -259,7 +259,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.alternates-not-crawled": {
     title: "Hreflang: Alternate URLs not crawled",
     explanation:
-      "Hreflang alternates declared by pages in this crawl whose URLs were not fetched, grouped by host with the number of URLs and of declaring pages. Their return links and indexability could not be checked; every other hreflang finding covers fetched URLs only. Alternates on separate country domains are normal and mean the domains were outside the crawl, not that anything is wrong.",
+      "Hreflang alternates declared by pages in this crawl whose URLs were not fetched, grouped by host with the number of URLs and of declaring pages. The return-link and indexability checks cover fetched URLs only, so nothing is known about these. A host outside the crawl's start URL is not crawled by design; an uncrawled alternate on the crawled host was excluded by robots.txt or a crawl limit.",
     howToFix:
       "Add the alternate domains as extra start URLs so one crawl covers the whole international set, or crawl each domain and read the results together. For an uncrawled alternate on the crawled domain, check the robots.txt rule or crawl limit that excluded it.",
   },
@@ -273,35 +273,35 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.invalid-code": {
     title: "Hreflang: Invalid language or region code",
     explanation:
-      "Pages with an hreflang value that is not a valid language or language-region code. Search engines ignore annotations they cannot parse, so the alternate is not served.",
+      "Pages with an hreflang value that is not in language or language-region form (en, en-gb, es-419); whether the code exists is not checked. Search engines ignore annotations they cannot parse, so the alternate is not served.",
     howToFix:
       "Use a valid ISO 639-1 language code, optionally with an ISO 3166-1 region: en, en-gb, es-419. x-default is the only special value.",
   },
   "hreflang.missing-return-link": {
     title: "Hreflang: Missing return link",
     explanation:
-      "Pages that name an alternate which was crawled and does not name this page back. Hreflang is only honoured when reciprocal, so the one-way annotation is ignored. Alternates that were not crawled are reported separately as not checked.",
+      "Pages that name an alternate which was crawled and does not name this page back. Hreflang is only honoured when reciprocal, so the one-way annotation is ignored. Pages canonicalised to another URL are ignored as declarers and as alternates; alternates that were not crawled are reported separately as not checked.",
     howToFix:
       "Make the annotations reciprocal: every page in the set declares the same full list of alternates, itself included. Generate the block from one language-to-URL mapping and render it on every page in the set.",
   },
   "hreflang.missing-self-reference": {
     title: "Hreflang: Missing self-reference",
     explanation:
-      "Pages that declare hreflang alternates without including their own URL. Search engines discard a set that omits the page it is on, so none of the listed versions are connected. URLs are compared ignoring case, query order and fragments.",
+      "Pages that declare hreflang alternates without including their own URL; pages canonicalised to another URL are ignored. Search engines discard a set that omits the page it is on, so none of the listed versions are connected. URLs are compared ignoring host case, query order and fragments.",
     howToFix:
       "Add an alternate for the page's own URL with its language and region code. Generate the whole set from one mapping and render the identical block on every version.",
   },
   "hreflang.missing-x-default": {
     title: "Hreflang: Missing x-default",
     explanation:
-      "Hreflang sets with two or more versions and no x-default. Visitors who match no listed language or region are sent to whichever version the search engine guesses.",
+      "Hreflang sets (one per declaring page) with two or more versions and no x-default. Visitors who match no listed language or region are sent to whichever version the search engine guesses.",
     howToFix:
       "Add an x-default alternate pointing at the fallback version, usually the international English page or a language selector, on every page in the set.",
   },
   "hreflang.non-indexable-target": {
-    title: "Hreflang: Alternate points to a non-indexable URL",
+    title: "Hreflang: Alternate points to a redirect or noindex URL",
     explanation:
-      "Pages that name an alternate which was crawled and either redirects or is noindex. An alternate that cannot be served at its own URL cannot be chosen, and the annotation is dropped.",
+      "Pages that name an alternate which was crawled and either redirects or is noindex; alternates that returned 4xx or 5xx are not reported here. An alternate that cannot be served at its own URL cannot be chosen, and the annotation is dropped.",
     howToFix:
       "Point the annotation at the URL that serves that language version with a 200. If the target is deliberately excluded from the index, remove the annotation.",
   },
@@ -310,14 +310,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "indexability.meta-header-conflict": {
     title: "Directives: Robots meta and X-Robots-Tag conflict",
     explanation:
-      "Pages whose robots meta tag and X-Robots-Tag header give different indexing instructions. Search engines take the most restrictive, so the page is most likely treated as noindex.",
+      "Pages where one of the robots meta tag and the X-Robots-Tag header says noindex and the other does not. Search engines take the most restrictive directive, so the page is treated as noindex.",
     howToFix:
       "Set the robots directive in one place, template or server configuration, and remove the other.",
   },
   "indexability.noindex": {
     title: "Directives: Noindex",
     explanation:
-      "Pages with a noindex directive in the robots meta tag or X-Robots-Tag header. Often intentional for admin, thank-you and filtered pages; listed for review, not as an error.",
+      "Pages with noindex (or none) in the robots meta tag or the X-Robots-Tag header; the Directive Source column says which. Often intentional for admin, thank-you and filtered pages; listed for review, not as an error.",
     howToFix:
       "No action if the exclusion is deliberate. If the page should rank, remove the noindex and request re-indexing.",
   },
@@ -326,7 +326,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "inlinks.distribution": {
     title: "Links: Inlinks per page by template",
     explanation:
-      "For the site and for each template: the number of unique internal inlinks per indexable page, as count, min, max, mean, quartiles and 95th percentile. A page counts once per linking page; self-links are not counted; pages with no inlinks count as 0.",
+      "For the site and for each template: the number of unique internal inlinks per indexable 200 page, as count, min, max, mean, quartiles and 95th percentile. A page counts once per linking page; self-links are not counted; pages with no inlinks count as 0.",
     howToFix:
       "Read the bottom quartile first: those pages are barely supported by internal linking. A template whose median sits well below the site's has been left out of the linking.",
   },
@@ -340,37 +340,37 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "inlinks.sources-by-type": {
     title: "Links: Inlink sources by template",
     explanation:
-      "For each destination template, how many unique internal links reach it from each source template. Destinations are indexable 200 pages; sources are every crawled page. More than 25 source templates are summed into (other).",
+      "For each destination template, how many unique internal links reach it from each source template; the 25 largest sources per destination are kept and the rest summed into (other), and pages without a template appear as (untyped) on both sides. Destinations are indexable 200 pages; sources are every crawled page.",
     howToFix:
       "Read each row as a sentence about site structure: a commercial template reached from only one source template depends entirely on that template being crawled; one with no sources is reachable only from the sitemap.",
   },
   "links.broken-internal": {
     title: "Response codes: Internal client error (4xx)",
     explanation:
-      "Internal links to URLs that return a 4xx: 404 not found, 410 gone, 403 forbidden, 401 unauthorised. Each broken URL is listed once with the number of pages linking to it and a sample of them. Visitors and crawlers reach a dead end and no link value passes.",
+      "Internal links to URLs that return a 4xx, most often 404 not found or 410 gone. URLs that answered 401, 403 or 429 are reported under Response codes: Blocked by bot protection instead. Each broken URL is listed once with the number of pages linking to it and up to 10 of them; visitors and crawlers reach a dead end and no link value passes.",
     howToFix:
       "Restore the page or 301 it to the closest live URL, then update or remove the links pointing at it. When many pages link to the same URL the link is in a template; fix it there once.",
   },
   "links.orphan": {
     title: "Links: Orphan pages",
     explanation:
-      "Indexable pages that were crawled and that no other page links to; self-links do not count, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
+      "Indexable pages that were crawled and that no other page links to; self-links do not count, the start URL is excluded, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
     howToFix:
       "Link to the page from a hub, category, navigation or related content. If nothing on the site has a reason to link to it, consolidate or remove it.",
   },
   "links.orphan-skipped": {
     title: "Links: Orphan pages not checked on this crawl",
     explanation:
-      "The crawl did not reach every URL it knew about (unfetched URLs, or a crawl stopped at its page limit), so a page nothing appears to link to may be linked from a page that was never fetched. The check was left unrun rather than reporting the crawl's own limits as orphans.",
+      "The check needs a crawl that reached every URL it knew about and a recorded page limit to compare against; this crawl left URLs unfetched, stopped at its page limit, or stored no page limit. A page nothing appears to link to may be linked from a page that was never fetched, so the check was left unrun rather than reporting the crawl's own limits as orphans.",
     howToFix:
-      "Re-run or resume the crawl so the queue drains, raising the page limit above the site's page count if the crawl stopped at it.",
+      "Re-run or resume the crawl so the queue drains, with a page limit above the site's page count.",
   },
   "links.to-server-error": {
     title: "Response codes: Internal server error (5xx) linked internally",
     explanation:
-      "Internal links to URLs that return a 5xx: 500 internal server error, 502 bad gateway, 503 service unavailable, 504 gateway timeout. Each failing URL is listed once with the number of pages linking to it and a sample. Each 5xx was requested again at the end of the crawl unless the re-check budget ran out; the URL's own server-error row says whether it persisted.",
+      "Internal links to URLs that returned a 5xx on the crawl's first request: 500 internal server error, 502 bad gateway, 503 service unavailable, 504 gateway timeout. Each URL is listed once with the number of pages linking to it and up to 10 of them. The URL's own server-error row says whether the re-check at the end of the crawl confirmed the error, found it cleared, or was not made.",
     howToFix:
-      "Fix the server error at the target first, using the application, proxy and CDN logs around the timestamps in the URL's own row. If the URL is retired, return 404 or 410 or 301 it, then update the links.",
+      "Fix the server error at the target first, using the application, proxy and CDN logs around the crawl time. If the URL is retired, return 404 or 410 or 301 it, then update the links.",
   },
 
   // ---------------------------------------------------------------- on-page
@@ -384,49 +384,49 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "h1.duplicate-text": {
     title: "H1: Duplicate",
     explanation:
-      "Groups of indexable pages whose first H1 is identical. Each row names the H1, the number of pages carrying it and up to 20 of their URLs. Pages with the same H1 claim to be about the same thing.",
+      "Groups of indexable 200 pages whose first H1 is identical, pages canonicalised to another URL included. Each row names the H1, the number of pages carrying it and up to 20 of their URLs. Pages with the same H1 claim to be about the same thing.",
     howToFix:
       "Generate the H1 from the fields that make each page different. Where a layout puts the section name in the H1 and the real headline in a styled div, swap them.",
   },
   "headings.h1-missing": {
     title: "H1: Missing",
     explanation:
-      "Pages with no H1. The H1 states the page's main topic for search engines and is the first landmark screen-reader users jump to.",
+      "Pages whose HTML response has no H1. The H1 states the page's main topic for search engines and is the first landmark screen-reader users jump to.",
     howToFix:
       "Add one H1 that states the page's main topic, consistent with the title. If the visual headline is a styled div or span, change the element rather than adding a second heading.",
   },
   "headings.h1-multiple": {
     title: "H1: Multiple",
     explanation:
-      "Pages with more than one H1. Valid HTML, but on most templates an accident (a logo and a headline both marked up as H1) that leaves no single heading naming the page's subject.",
+      "Pages with more than one H1. Valid HTML, but on most templates an accident such as a logo and a headline both marked up as H1, leaving no single heading that names the page's subject.",
     howToFix:
       "Keep one H1 for the main heading and demote the rest to H2 or H3; mark up a logo with a non-heading element.",
   },
   "headings.level-skip": {
     title: "Headings: Non-sequential levels (skip of more than 1)",
     explanation:
-      "Pages whose headings step down more than one level, such as an H4 directly under an H2. Assistive technology and parsers read the heading outline, and a skipped level breaks it.",
+      "Pages whose headings step down more than one level, such as an H4 directly under an H2; the row shows the first skip. Assistive technology and parsers read the heading outline, and a skipped level breaks it.",
     howToFix:
       "Make heading levels descend one step at a time. Where a level was skipped for a smaller font, fix the CSS instead.",
   },
   "meta-description.duplicate": {
     title: "Meta description: Duplicate",
     explanation:
-      "Groups of indexable pages with an identical meta description. Each row names the description, the number of pages carrying it and up to 20 of their URLs. Duplicate descriptions are usually replaced by search engines with text from the page.",
+      "Groups of indexable 200 pages with an identical meta description, pages canonicalised to another URL included. Each row names the description, the number of pages carrying it and up to 20 of their URLs. Duplicate descriptions are replaced by search engines with text from the page.",
     howToFix:
       "Write the description in the template from fields that differ per page. Where a section has nothing distinct to say, leave the description off rather than repeating one.",
   },
   "meta-description.missing": {
     title: "Meta description: Missing",
     explanation:
-      "Pages with no meta description. Search engines then build the snippet from page text, which is usually less compelling and lowers click-through rate.",
+      "Pages whose HTML response has no meta description, or an empty one. Search engines then build the snippet from page text, which is less compelling and lowers click-through rate.",
     howToFix:
       "Add a unique meta description of 70 to 160 characters that summarises the page and gives a reason to click.",
   },
   "meta-description.too-long": {
     title: "Meta description: Over 160 characters",
     explanation:
-      "Pages whose meta description exceeds 160 characters. Search results truncate it, so the closing words are cut off. The cut is by pixel width, so 160 is a working guide rather than an exact limit.",
+      "Pages whose meta description exceeds 160 characters. Search results cut descriptions by pixel width, so the closing words are lost.",
     howToFix:
       "Trim the description to 160 characters or fewer, keeping the core message and the reason to click in the first sentence.",
   },
@@ -440,21 +440,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "title.duplicate": {
     title: "Page titles: Duplicate",
     explanation:
-      "Groups of indexable pages with an identical title. Each row names the title, the number of pages carrying it and up to 20 of their URLs. Duplicate titles make pages indistinguishable in search results and are usually a template writing the same string for every item.",
+      "Groups of indexable 200 pages with an identical title, pages canonicalised to another URL included. Each row names the title, the number of pages carrying it and up to 20 of their URLs. Duplicate titles make pages indistinguishable in search results and are typically a template writing the same string for every item.",
     howToFix:
-      "Build the title in the template from the fields that differ between pages (product, article, location, page number) with the shared part short and last. If the pages are the same page at several URLs, canonicalise or redirect them instead.",
+      "Build the title in the template from the fields that differ between pages (product, article, location, page number) with the shared part short and last. If the pages are the same page at several URLs, redirect or noindex the copies.",
   },
   "title.missing": {
     title: "Page titles: Missing",
     explanation:
-      "Pages with no title tag. The title is a primary relevance signal and the headline of the search result; without one, search engines write their own from page text.",
+      "Pages whose HTML response has no title tag, or an empty one. The title is a primary relevance signal and the headline of the search result; without one, search engines write their own from page text.",
     howToFix:
-      "Add a unique, descriptive title of 30 to 60 characters naming the page's main topic, generated in the template from the fields that differ per page.",
+      "Add a unique, descriptive title naming the page's main topic (30 to 60 characters is the usual target), generated in the template from the fields that differ per page.",
   },
   "title.too-long": {
     title: "Page titles: Over 60 characters",
     explanation:
-      "Pages whose title exceeds 60 characters. Search results truncate it and the ending is lost. The cut is by pixel width, so 60 is a working guide rather than an exact limit.",
+      "Pages whose title exceeds 60 characters. Search results cut titles by pixel width, so long titles lose their ending and a title under 60 characters can still be cut.",
     howToFix:
       "Shorten the title to 60 characters or fewer, front-loading the important words and moving or dropping the site name.",
   },
@@ -463,21 +463,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "Pages whose title is under 10 characters. Titles this short are too generic to describe the page or earn a click.",
     howToFix:
-      "Expand the title to a descriptive 30 to 60 character phrase. Where a whole section is short, add the missing part in the template.",
+      "Expand the title to a descriptive phrase (the flag clears at 10 characters; 30 to 60 is the usual target). Where a whole section is short, add the missing part in the template.",
   },
 
   // -------------------------------------------------------------- redirects
   "redirect.chain": {
     title: "Redirects: Redirect chain (2 or more hops)",
     explanation:
-      "URLs that redirect to a URL that redirects again. Each hop costs a request, chains break when a middle hop is removed, and search engines stop following after a limited number of hops.",
+      "URLs that redirect to a URL that redirects again; the row lists the chain and the final status. Chains are followed up to 10 hops; a chain marked truncated is longer than that and may be a loop. Each hop costs a request, chains break when a middle hop is removed, and search engines stop following after a limited number of hops.",
     howToFix:
       "Point the first redirect straight at the final destination, then update internal links, sitemap entries and canonicals that still name the old URL.",
   },
   "redirect.js": {
     title: "Redirects: JavaScript redirect",
     explanation:
-      "URLs that return 200 and then navigate elsewhere once JavaScript runs. The HTTP response shows no redirect, so links to the URL pass no signal onward and search engines must render the page to learn the content has moved.",
+      "Pages that returned a 2xx HTML response and then navigated elsewhere once JavaScript ran in the render run; the row shows the destination and whether the render completed (a render stopped by an off-site destination is the commonest shape). The HTTP response shows no redirect, so links to the URL pass no signal onward and search engines must render the page to learn the content has moved. Only pages the render run opened can be checked.",
     howToFix:
       "Replace the script with a server-side 301 (permanent) or 302 (temporary). For conditional redirects such as language or country selection, serve the chosen page directly for that request.",
   },
@@ -507,7 +507,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.invalid": {
     title: "Sitemaps: Sitemap could not be read",
     explanation:
-      "Sitemap documents that could not be parsed: a server error, a non-XML response such as an HTML error page served with 200, or a root element that is neither urlset nor sitemapindex. Their URLs are invisible to search engines.",
+      "Sitemap documents that could not be read: a 4xx or 5xx, no response, a document over the size limit, an unsupported encoding, a non-XML response such as an HTML page served with 200, or a root element that is neither urlset nor sitemapindex. Up to 50 failures are listed and the count is exact. Their URLs are invisible to search engines.",
     howToFix:
       "Request each listed sitemap URL and check the response. A sitemap must be well-formed XML with a urlset or sitemapindex root, served with 200 and an XML content type; remove index entries pointing at sitemaps that no longer exist.",
   },
@@ -519,21 +519,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Publish an XML sitemap and add a Sitemap: line with its absolute URL to robots.txt. Submit it in Search Console as well.",
   },
   "sitemap.non-200": {
-    title: "Sitemaps: Non-indexable URLs in sitemap (3xx, 4xx or 5xx)",
+    title: "Sitemaps: Sitemap URLs returning 4xx or 5xx",
     explanation:
-      "URLs listed in the sitemap that returned something other than 200 when crawled; the row shows the status code. Sitemaps should only list indexable, canonical URLs. Error URLs waste crawl budget and lower search engines' trust in the file.",
+      "URLs listed in the sitemap that returned a 4xx or 5xx status when crawled, including 401, 403 and 429 answers to the crawler; the row shows the status code. Redirecting URLs and URLs that got no response are reported separately. Sitemaps should only list indexable, canonical URLs; error URLs waste crawl budget and lower search engines' trust in the file.",
     howToFix:
-      "Remove 404 and 410 URLs from the sitemap or restore the pages. For 401, 403 and 429, allowlist the crawler in the bot protection and re-check before deleting the entry. Generate the sitemap from the same source as the pages.",
+      "Remove 404 and 410 URLs from the sitemap or restore the pages, and fix a 5xx at the server. For 401, 403 and 429, allowlist the crawler in the bot protection and re-check before deleting the entry. Generate the sitemap from the same source as the pages.",
   },
   "sitemap.non-indexable": {
-    title: "Sitemaps: Non-indexable URLs in sitemap (noindex)",
+    title: "Sitemaps: Sitemap URLs with noindex",
     explanation:
-      "URLs listed in the sitemap whose page carries noindex in its robots meta tag or X-Robots-Tag header. The sitemap asks for indexing and the page refuses; search engines follow the page.",
+      "URLs listed in the sitemap whose page returns 200 and carries noindex in its robots meta tag or X-Robots-Tag header. The sitemap asks for indexing and the page refuses; search engines follow the page.",
     howToFix:
       "Remove the noindex if the page should rank, otherwise remove the URL from the sitemap. Filtered, paginated and thank-you pages usually belong in the second group.",
   },
   "sitemap.redirected": {
-    title: "Sitemaps: Non-indexable URLs in sitemap (redirect)",
+    title: "Sitemaps: Sitemap URLs that redirect",
     explanation:
       "URLs listed in the sitemap that redirect. A sitemap should name the destination URL that returns 200, so crawlers reach it in one request and the file agrees with the canonical tags.",
     howToFix:
@@ -542,14 +542,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.structure": {
     title: "Sitemaps: Sitemap structure",
     explanation:
-      "How sitemap entries are distributed across sitemap documents: the number of documents, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection, and the largest 50 documents with their entry counts. An entry in several documents is counted once.",
+      "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), and the largest 50 documents with their entry counts. An entry in several documents is counted once.",
     howToFix:
       "Split sitemaps by content type so stale sections can be seen and submitted separately. Split any document over 50,000 entries; entries past the limit are not read.",
   },
   "sitemap.uncrawled": {
     title: "Sitemaps: URLs in sitemap not crawled",
     explanation:
-      "URLs listed in the sitemap that this crawl has no usable record of: on this site but not reached (page or depth limit, robots.txt), outside the crawl's origin (another host, port or scheme, not fetched by design), or requested with no response. The row says which.",
+      "URLs listed in the sitemap that this crawl has no usable record of: on this site but not reached (page or depth limit, robots.txt), outside the crawl's origin (another host, port or scheme, not fetched by design), or requested with no usable response. The row says which.",
     howToFix:
       "Off-origin entries need nothing unless they do not belong in this site's sitemap. For on-site URLs, check they are linked from the site and allowed by robots.txt, and re-run with a higher page limit if the crawl stopped short. Request a URL that got no response yourself.",
   },
@@ -572,14 +572,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "schema.product-incomplete": {
     title: "Structured data: Product markup missing required fields",
     explanation:
-      "Pages where no Product block provides every field a product rich result needs. Each row lists the fields missing from all of the page's Product markup. An offers block counts only with a price or priceSpecification; any GTIN length counts as gtin, and mpn is separate.",
+      "Pages whose Product markup, taken across all its Product blocks, lacks a field a product rich result needs; each row lists the missing fields. An offers block counts only with a price or priceSpecification; gtin, ean and any GTIN length count as a GTIN, and mpn is counted separately.",
     howToFix:
-      "Fill in name, image and a priced offers block from the product data the page renders, then add currency, availability, GTIN or MPN, description, SKU and brand. Confirm the page in the Rich Results Test.",
+      "Fill in name, image and a priced offers block from the product data the page renders, then add currency, availability, a GTIN and an MPN where they exist, description, SKU and brand. Confirm the page in the Rich Results Test.",
   },
   "schema.self-serving-reviews": {
-    title: "Structured data: Self-serving reviews on Organization markup",
+    title: "Structured data: Self-serving reviews on Organization or LocalBusiness markup",
     explanation:
-      "Pages whose Organization or LocalBusiness markup carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
+      "Pages whose markup typed exactly Organization or LocalBusiness carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
     howToFix:
       "Move the ratings to the type they are about (Product, Service, Course, Recipe) and let independent review platforms carry the business-level rating.",
   },
@@ -588,28 +588,28 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "images.legacy-format": {
     title: "Images: Over 100,000 bytes served as PNG or JPEG",
     explanation:
-      "Images over 100,000 bytes whose server-sent content type is PNG or JPEG, listed per file with size, content type, the number of referencing pages and up to 10 of them. WebP and AVIF usually carry the same picture in far fewer bytes. Only images referenced in the HTML and answered by the server are checked.",
+      "Images over 100,000 bytes whose server-sent content type is PNG or JPEG, listed per file with size, size source, content type, the number of referencing pages and up to 10 of them. WebP and AVIF usually carry the same picture in far fewer bytes. Only img src references in the HTML response that the server answered successfully are checked.",
     howToFix:
       "Add WebP or AVIF renditions for photographs and let the browser choose via a picture element or CDN negotiation, keeping the original as fallback. Leave PNG where sharp-edged graphics need it.",
   },
   "images.missing-alt": {
     title: "Images: Missing alt text",
     explanation:
-      "Pages with images that have no alt attribute; each row shows how many of the page's images. Alt text is what screen readers announce and the main way search engines understand an image. Only images in the HTML response are counted.",
+      "Pages with images that have no alt attribute; each row shows how many of the page's images. Alt text is what screen readers announce and the main way search engines understand an image. Only img elements in the HTML response are counted.",
     howToFix:
       "Give every meaningful image alt text describing what it conveys, and an empty alt (alt=\"\") to purely decorative images.",
   },
   "images.missing-dimensions": {
     title: "Images: Missing size attributes",
     explanation:
-      "Pages with images that lack a width or height attribute; each row shows how many of the page's images. Without dimensions the browser cannot reserve space, and the layout shifts as images load unless CSS reserves it. An attribute that exists but is empty counts as present.",
+      "Pages with images that lack a width or a height attribute; each row shows how many of the page's images. Without dimensions the browser cannot reserve space, and the layout shifts as images load unless CSS reserves it. Only img elements in the HTML response are counted, and an attribute that exists but is empty counts as present.",
     howToFix:
       "Set width and height attributes to the image's intrinsic pixel dimensions, or set an aspect-ratio in CSS. Verify against the rendered page before treating it as a defect.",
   },
   "images.oversized": {
     title: "Images: Over 100,000 bytes",
     explanation:
-      "Images that transfer more than 100,000 bytes, listed per file with size, how the size was established (server-declared or measured), content type, the number of referencing pages and up to 10 of them. Only images referenced in the HTML and answered by the server are weighed; dimensions and compression quality are not examined.",
+      "Images that transfer more than 100,000 bytes, listed per file with size, how the size was established (server-declared or measured), content type, the number of referencing pages and up to 10 of them. Only img src references in the HTML response that the server answered successfully are weighed; CSS backgrounds and later srcset renditions are not, and dimensions and compression are not examined.",
     howToFix:
       "Start with the images referenced by the most pages. Re-export at the displayed size, compress, and serve a modern format. Link to files that must stay large instead of embedding them.",
   },
@@ -625,14 +625,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "nav.js-only": {
     title: "Rendering: Navigation links only in rendered HTML",
     explanation:
-      "Pages whose HTML response carries fewer than 5 links in nav and footer while the rendered page has at least 10 and at least twice as many. The navigation is built by JavaScript, so a crawler reading the response finds almost no way onward.",
+      "Pages whose HTML response carries fewer than 5 links in nav and footer while the rendered page has at least 10 and more than twice as many. The navigation is built by JavaScript, so a crawler reading the response finds almost no way onward. Only pages the render run opened can be checked.",
     howToFix:
       "Render the primary navigation and footer server-side as anchors with real href attributes and let JavaScript enhance them. Check by loading the page with JavaScript disabled.",
   },
   "page.weight": {
     title: "Performance: Page weight by template",
     explanation:
-      "For the site and for each template: total page weight, HTML bytes, and image, stylesheet and script bytes, each as count, min, max, mean, quartiles and 95th percentile over indexable 200 pages, with how many files were referenced, how many were weighed and how many pages have unweighed files. The totals are a ceiling (responsive image renditions are all counted) and a floor where files were not weighed. Only files referenced in the HTML response are counted.",
+      "For the site and for each template: total page weight, HTML bytes, and image, stylesheet and script bytes, each as count, min, max, mean, quartiles and 95th percentile over indexable 200 pages, with how many file references the pages make, how many of those were weighed, and how many pages have an unweighed file; rows with unweighed files are flagged as a floor. Totals are a ceiling where responsive image renditions are all counted. Only img src, stylesheet and script references in the HTML response are counted.",
     howToFix:
       "Read script bytes against total weight first; a template whose median script weight is a large share of the total is a build problem. Compare templates with the site row, and check the weighed count against the referenced count before quoting a figure.",
   },
@@ -646,14 +646,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "resources.all-unknown": {
     title: "Resources: No file answered usably on this crawl",
     explanation:
-      "Every image, stylesheet and script the crawl asked about came back with no usable answer: refused by the crawler's own policy, disallowed by robots.txt, a host whose robots.txt was unreachable, or a request that never completed. The rows give the counts per state. Broken-file, image and caching checks found nothing to judge and page weight counts HTML only.",
+      "Every image, stylesheet and script the crawl recorded was refused by the crawler's own policy, disallowed by robots.txt, behind a robots.txt that could not be fetched, or got no response; the row gives the counts per state. Broken-file, image and caching checks found nothing to judge and page weight counts HTML only.",
     howToFix:
       "Crawl again once the block has cleared. A wall of unreachable-robots or failed requests usually means a CDN or bot protection was blocking the crawler during the window.",
   },
   "resources.broken": {
-    title: "Resources: Files returning 4xx or 5xx",
+    title: "Resources: Files returning an error (4xx, 5xx or a bot challenge)",
     explanation:
-      "Pages that reference images, stylesheets or scripts which the server answered with an error, listed with up to 10 files and their status codes; only files referenced in the HTML response are checked. A 200 with a refusal reason beside it is a bot-protection challenge answering in place of the file. Files that were not asked about, were refused or disallowed, or got no response are counted as unknown, not broken.",
+      "Pages that reference images, stylesheets or scripts which the server answered with an error, listed with up to 10 files and their status codes; a 200 with a refusal reason beside it is a bot-protection challenge answering in place of the file. Files that were not asked about, were refused or disallowed, or got no response are counted as unknown, not broken. Only img src, stylesheet and script references in the HTML response are checked.",
     howToFix:
       "Request the listed files. A 404 is usually a renamed or deleted file behind a stale template path; a 5xx is the file server failing; a refusal reason is bot protection to allowlist.",
   },
@@ -667,42 +667,42 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "resources.not-recorded": {
     title: "Resources: File checks not run on this crawl",
     explanation:
-      "The crawl recorded no image, stylesheet or script references although its pages carry images, which is what a crawl taken before resources were recorded looks like. The file checks were left unrun rather than reported clean.",
+      "The crawl recorded no image, stylesheet or script references although its pages carry images, so the file checks were left unrun rather than reported clean.",
     howToFix:
       "Re-crawl the site. References and file responses are recorded on every crawl from this version onwards.",
   },
   "resources.partial-unknown": {
     title: "Resources: Files partly requested, none answered usably",
     explanation:
-      "The crawl asked about only some of the files it recorded, and every one it reached came back with no usable answer (refused, disallowed, unreachable robots.txt or no response). The rows give both counts. The file checks found nothing to judge; this is an interrupted or throttled crawl, not a verdict on the site.",
+      "Only some of the files the crawl recorded were tried, and every one tried was refused by the crawler's own policy, disallowed by robots.txt, behind a robots.txt that could not be fetched, or got no response; the row gives both counts. The file checks found nothing to judge; this is an interrupted or throttled crawl, not a verdict on the site.",
     howToFix:
-      "Re-run the crawl so every file is asked about afresh. Read which state most files landed in first: unreachable-robots or failed requests point at a CDN or bot protection blocking the crawler.",
+      "Re-run the crawl so every file is tried afresh. Read which state most files landed in first: unreachable-robots or failed requests point at a CDN or bot protection blocking the crawler.",
   },
   "resources.uncached": {
     title: "Resources: Files without cache headers",
     explanation:
-      "Files referenced in the HTML response and served with neither Cache-Control nor Expires, so browsers are not told how long to keep them; each row counts them and lists up to 20. Files never asked about are counted as unknown. Only those two headers are read, so edge caching or ETag revalidation is not detected.",
+      "Files fetched with neither Cache-Control nor Expires, so browsers are not told how long to keep them; each row counts them and lists up to 20. Files never asked about, refused, disallowed, behind an unreachable robots.txt or without a response are counted as unknown. Only those two headers are read, so edge caching or ETag revalidation is not detected, and only img src, stylesheet and script references in the HTML response are checked, third-party hosts included.",
     howToFix:
-      "Set a long max-age on assets whose URL changes with their content (hashed filenames can be cached for a year) and a short max-age or revalidation on the rest, in the web server, CDN or framework static-file configuration.",
+      "Set a long max-age on assets whose URL changes with their content (hashed filenames can be cached for a year) and a short max-age or revalidation on the rest, in the web server, CDN or framework static-file configuration; third-party files are their host's to fix.",
   },
   "structure.click-depth-distribution": {
     title: "Links: Click depth by template",
     explanation:
-      "For the site and for each template: the shortest link path from the home page to each indexable page, as count, min, max, mean, quartiles and 95th percentile, plus how many pages no link path reaches. Internal links only; a link landing on a redirect leads no further.",
+      "For the site and for each template: the shortest link path from the home page to each indexable 200 page, as count, min, max, mean, quartiles and 95th percentile, plus how many pages no link path reaches. Internal links only; a link landing on a redirect leads no further.",
     howToFix:
       "Start with the unreachable pages and give each a home in a category, hub or related block, or remove it from the sitemap. Shorten the path to templates whose median depth is high with a hub or navigation entry.",
   },
   "structure.deep-page": {
     title: "Links: Crawl depth over 5",
     explanation:
-      "Indexable pages whose shortest internal link path from the home page is more than 5 links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path are reported as orphans instead.",
+      "Indexable pages whose shortest internal link path from the home page is more than 5 links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
     howToFix:
       "Link to the page from a category, landing page or navigation entry closer to the home page. If it is not worth linking from higher up, consolidate or remove it.",
   },
   "structure.depth-distribution": {
     title: "Crawl: Discovery depth by template",
     explanation:
-      "For the site and for each template: how deep into the crawl each indexable page was first found, as count, min, max, mean, quartiles and 95th percentile. Sitemap URLs are discovered at depth 0, so this measures the crawl, not the site's link structure; read click depth for that.",
+      "For the site and for each template: how deep into the crawl each indexable 200 page was first found, as count, min, max, mean, quartiles and 95th percentile. Sitemap URLs are discovered at depth 0, so this measures the crawl, not the site's link structure; read click depth for that.",
     howToFix:
       "Compare with the click depth table. Discovery depth far shallower than click depth means the sitemap is doing the work internal linking should do.",
   },
@@ -711,14 +711,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "filters.js-only": {
     title: "Rendering: Filter links only in rendered HTML",
     explanation:
-      "Listing pages whose HTML response contains no filter links (no query-string URLs, no filter, facet or sort in the path) while the rendered page has at least 5. Faceted navigation built by JavaScript is invisible to a crawler reading the response, and if rendered can expand into far more URLs than the site has pages.",
+      "Pages whose HTML response contains no filter links (no query-string URLs, and no filter, facet or sort anywhere in a link URL) while the rendered page has at least 5. Faceted navigation built by JavaScript is invisible to a crawler reading the response, and if rendered can expand into far more URLs than the site has pages. Only pages the render run opened can be checked.",
     howToFix:
       "Give filtered views worth ranking a real link with a real URL that serves that view. Keep the rest out of the crawl deliberately with a canonical to the unfiltered listing or a robots.txt rule for the parameter.",
   },
   "pagination.canonical-to-other": {
     title: "Pagination: Paginated page canonicalised to another URL",
     explanation:
-      "Pages in a series (they declare rel=prev) whose canonical names a different URL, usually page 1. Consolidating onto page 1 asks search engines to ignore what the later pages list; a self-referencing canonical keeps them indexable at the cost of near-duplicate listings.",
+      "Pages in a series (they declare rel=prev) whose canonical names a different URL, shown in the row. Consolidating onto page 1 asks search engines to ignore what the later pages list; a self-referencing canonical keeps them indexable at the cost of near-duplicate listings.",
     howToFix:
       "If the items on deeper pages should be findable, canonicalise each page to itself. If the series only browses one collection, keep the canonical on page 1 and make sure the items have indexable pages of their own.",
   },
@@ -732,14 +732,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "pagination.next-target-uncrawled": {
     title: "Pagination: Next page not crawled",
     explanation:
-      "Pages whose rel=next names a URL this crawl has no record of. Usually the series runs past the edge of the crawl; otherwise a stale rel=next after the series shrank, or a value that is not a usable URL.",
+      "Pages whose rel=next names a URL this crawl has no record of; the Unparseable column marks a value that is not a usable URL. The series may simply run past the edge of the crawl, or the rel=next is stale after the series shrank.",
     howToFix:
       "Nothing if the crawl was bounded and the series continues. If the URL is wrong or gone, correct the rel=next in the template that generates the series.",
   },
   "url.normalisation-variants": {
     title: "URL: Same page served at several URLs (case or trailing slash)",
     explanation:
-      "URLs that differ only in capitalisation or a trailing slash and each return a page instead of redirecting to one version. Search engines treat each spelling as a separate URL and split the signals between them.",
+      "URLs that differ only in capitalisation or a trailing slash and each return a page instead of redirecting to one version; each row gives the exact count and up to 10 of the variants. Search engines treat each spelling as a separate URL and split the signals between them.",
     howToFix:
       "Pick one spelling, emit only that one in links, sitemap and canonicals, and 301 the other spellings to it.",
   },
@@ -753,14 +753,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "url.parameter-pages-indexable": {
     title: "URL: Parameter URL indexable and self-canonical",
     explanation:
-      "URLs with query parameters that return 200, carry no noindex and canonicalise to themselves. On a filterable listing this is how a few pages become thousands of near-identical indexable URLs. Occasionally intended, for a search or feed page that should rank.",
+      "URLs with query parameters that return 200, carry no noindex and declare a canonical to themselves; parameter pages with no canonical are not included. On a filterable listing this is how a few pages become thousands of near-identical indexable URLs. Occasionally intended, for a search or feed page that should rank.",
     howToFix:
       "Canonicalise parameter combinations that should not be pages to the clean URL and keep them out of the sitemap and internal links. Sort, view and session parameters should never produce indexable URLs.",
   },
   "url.tracking-params-internal": {
     title: "URL: Internal links with tracking parameters",
     explanation:
-      "Internal links pointing at URLs tagged with campaign or ad-click parameters (utm_source, gclid and similar). They create a second indexable URL per page and overwrite the visit's real traffic source in analytics.",
+      "Internal links pointing at URLs tagged with campaign or ad-click parameters (utm_source, gclid and similar). They create a second crawlable URL per page and overwrite the visit's real traffic source in analytics.",
     howToFix:
       "Strip tracking parameters from internal links and point them at the clean URL. Measure internal promotions with the analytics feature built for it.",
   },

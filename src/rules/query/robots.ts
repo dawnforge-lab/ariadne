@@ -255,7 +255,7 @@ export const robotsRules: QueryRule[] = [
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "The robots.txt could not be read in full (not served, or over the 500 KB read), so robots.txt checks were not run; fix the file or the server and crawl again.",
+      "The robots.txt was truncated at the 500 KB read, could not be fetched, or was fetched empty, so robots.txt checks were not run; fix the file or the server and crawl again.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const { discovery } = await readCrawlEvidence(db, crawlId, SKIPPED.id);
       const skipped = robotsUnreadable(discovery);

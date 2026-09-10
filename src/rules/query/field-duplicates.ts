@@ -455,7 +455,7 @@ export const fieldDuplicateRules: QueryRule[] = [
     ...copyFor(H1_SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl stored no H1 text (crawl taken before it was recorded), so duplicate H1s could not be checked; re-crawl the site.",
+      "This crawl stored no H1 text, so duplicate H1s could not be checked; re-crawl the site.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const coverage = await h1Coverage(db, crawlId, H1_SKIPPED.id);
       const skipped = h1TextUnavailable(coverage);

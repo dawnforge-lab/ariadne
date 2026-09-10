@@ -280,7 +280,7 @@ export const hostRules: QueryRule[] = [
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "Host checks were off for this crawl, so the HTTP, www and former-domain variants were not requested; re-run with host checks on.",
+      "This crawl has no host-check record (host checks off, or the crawl ended before they ran), so the HTTP, www, non-www and former-domain variants were not checked; re-run with host checks on.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const evidence = await readHostProbe(db, crawlId, SKIPPED.id);
       if (evidence.probe !== null) return [];

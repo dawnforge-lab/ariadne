@@ -409,7 +409,7 @@ export const linkGraphRules: QueryRule[] = [
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "The crawl did not reach every URL it knew about, so a page with no inlinks may be linked from an unfetched page; re-run or resume the crawl with a higher page limit.",
+      "The crawl left URLs unfetched, stopped at its page limit, or stored no page limit, so a page with no inlinks may be linked from an unfetched page; re-run or resume the crawl with a page limit above the site's page count.",
     run: async (db, crawlId): Promise<Finding[]> => {
       const state = await completeness(db, crawlId, SKIPPED.id);
       const skipped = skipReason(state);
