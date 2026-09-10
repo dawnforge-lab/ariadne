@@ -917,8 +917,7 @@ export const hreflangRules: QueryRule[] = [
     // the same finding. The hosts are in the evidence, so a reader who wants to
     // know where the alternates sit reads them rather than being told.
     marker:
-      "The language alternates these pages name were never requested by this crawl, so nothing " +
-      "about them was checked; crawl those domains too, or add them as extra starting URLs.",
+      "The hreflang alternates these pages declare were not requested by this crawl, so their return links and indexability were not checked; crawl those domains or add them as start URLs.",
     run: (db, crawlId) => alternatesNotCrawledFindings(db, crawlId),
   }),
 ];

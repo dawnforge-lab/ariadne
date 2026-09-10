@@ -1150,7 +1150,7 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl recorded none of the images, stylesheets and scripts the pages point at, so no check about those files could be answered; re-crawl the site to record them.",
+      "This crawl recorded no image, stylesheet or script references (crawl taken before they were recorded), so file checks were not run; re-crawl the site.",
     run: (db, crawlId) => notRecordedFindings(NOT_RECORDED, db, crawlId),
   }),
 
@@ -1174,7 +1174,7 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(NOT_FETCHED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl listed the images, stylesheets and scripts the pages point at and requested none of them, so nothing is known about any of those files; re-run the crawl with the file check left on, or resume the interrupted one.",
+      "The files the pages reference were listed but not requested (file check off, crawl interrupted, or budget spent), so file checks were not run; re-run with the file check on or resume the crawl.",
     run: (db, crawlId) => notFetchedFindings(NOT_FETCHED, db, crawlId),
   }),
 
@@ -1199,7 +1199,7 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(ALL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "Every file this crawl asked about came back with no usable answer — refused, disallowed, or never answered at all — so no check about those files could be answered; crawl again once whatever blocked the requests has cleared.",
+      "Every file requested came back refused, disallowed or unanswered, so file checks were not run; crawl again once the block has cleared.",
     run: (db, crawlId) => allUnknownFindings(ALL_UNKNOWN, db, crawlId),
   }),
 
@@ -1227,7 +1227,7 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(PARTIAL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:
-      "This crawl reached only some of the site's files and every one it reached answered nothing usable, so no check about those files could be answered; re-run the crawl to ask about all of them afresh.",
+      "Only some files were requested and none answered usably, so file checks were not run; re-run the crawl to request all files afresh.",
     run: (db, crawlId) => partialUnknownFindings(PARTIAL_UNKNOWN, db, crawlId),
   }),
 ];

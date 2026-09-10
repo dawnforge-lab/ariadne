@@ -1175,9 +1175,7 @@ export const contentRules: QueryRule[] = [
     // fact ran on it. What is true of both is the census: nothing here carries
     // the fingerprint the comparison needs.
     marker:
-      "No page in this crawl carries a fingerprint of its main content, so pages could not be " +
-      "compared for near-duplicate content; a crawl taken before that fingerprint existed looks " +
-      "exactly like this one — re-crawl the site to measure them.",
+      "No page in this crawl has a main-content fingerprint (crawl taken before it existed), so near duplicates could not be checked; re-crawl the site.",
     run: (db, crawlId) => nearDuplicateSkippedFindings(db, crawlId),
   }),
 
@@ -1225,10 +1223,7 @@ export const contentRules: QueryRule[] = [
     // opening "this crawl is old" would assert a cause the census cannot
     // establish.
     marker:
-      "No page in this crawl carries a count of its own main content — the words that are not " +
-      "header, navigation, sidebar or footer — so no page could be judged thin or not; a crawl " +
-      "taken before that count existed looks exactly like this one — re-crawl the site to " +
-      "measure it.",
+      "No page in this crawl has an own-content word count (crawl taken before it existed), so low content could not be checked; re-crawl the site.",
     run: (db, crawlId) => thinSkippedFindings(db, crawlId),
   }),
 ];
