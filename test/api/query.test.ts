@@ -27,7 +27,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import {
   crawls, issues, links, metrics, pageResources, pages, resources,
 } from "../../src/db/schema.js";
-import { MARKED_FAILED_REASON } from "../../src/api/service.js";
+import { MARKED_FAILED_REASON, columnsFor } from "../../src/api/service.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { CSV_VIEWS, CSV_VIEW_DEFS, csvRecord } from "../../src/api/csv.js";
 import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
@@ -39,6 +39,22 @@ import { RECHECK_CAP_REASON } from "../../src/crawl/recheck/recheck-server-error
 // could not do.
 import { RECHECK_CLEARED } from "../../src/rules/page/status.js";
 import { buildRegistry } from "../../src/rules/index.js";
+
+/**
+ * The registry's own copy, for the three assertions below that are about the
+ * JOIN and not about the words.
+ *
+ * A rule's title is `issue-copy.ts`'s to change, and the claim these tests make
+ * is that the surface serves whatever it says — not that it says any particular
+ * sentence, which `test/rules/copy.test.ts` is what holds. Reading it from the
+ * registry keeps the join pinned while leaving the copy free to be rewritten.
+ */
+const REGISTRY_COPY = new Map(buildRegistry().all().map((rule) => [rule.id, rule]));
+function titleOf(ruleId: string): string {
+  const rule = REGISTRY_COPY.get(ruleId);
+  if (rule === undefined) throw new Error(`no registry rule '${ruleId}'`);
+  return rule.title;
+}
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
 const TOKEN = "test-token-0123456789abcdef";
@@ -699,6 +715,14 @@ beforeAll(async () => {
     slug: "csv-gone", pageType: null, statusCode: 404, isIndexable: null, rendered: false,
     depth: 1, wordCount: null, fetchClass: "client_error",
   });
+  // A 5xx target, so the `links_to_5xx` worksheet and the `issue_inlinks`
+  // report for `links.to-server-error` have a row of their own (P20-T1): a
+  // 502 is fixed by reading the server's logs and a 404 by editing the markup,
+  // which is why the two are separate rules and separate files.
+  await seedPage(crawlF, {
+    slug: "csv-boom", pageType: null, statusCode: 502, isIndexable: null, rendered: false,
+    depth: 1, wordCount: null, fetchClass: "server_error",
+  });
   // A two-hop chain: r1 -> r2 -> end.
   await seedPage(crawlF, {
     slug: "csv-r1", pageType: null, statusCode: 301, isIndexable: false, rendered: false,
@@ -734,6 +758,11 @@ beforeAll(async () => {
     {
       crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-gone`,
       targetPageId: null, anchor: "Broken, right?", rel: null, isInternal: true, position: 0,
+    },
+    {
+      crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-boom`,
+      targetPageId: null, anchor: "Server, are you there?", rel: null,
+      isInternal: true, position: 100_000,
     },
     {
       crawlId: crawlF, sourcePageId: csvHome, targetUrl: `${SITE}/csv-end`,
@@ -834,10 +863,17 @@ beforeAll(async () => {
       length: 2, finalStatus: 200, chainTruncated: false,
     },
   });
+  // NAMES ITS PAGE, as `links.orphan` really does: the four standard columns of
+  // a finding row are read off `issues.page_id -> pages`, so a hand-seeded row
+  // with a null page id would exercise only the "no page row" half of the join.
   await seedIssue(crawlF, {
-    ruleId: "links.orphan", severity: "warning", pageId: null,
+    ruleId: "links.orphan", severity: "warning", pageId: `${crawlF}_page_csv-quoted`,
     pageUrl: `${SITE}/csv-quoted`, dedupeKey: `${SITE}/csv-quoted`,
-    evidence: { inSitemap: false, discoveredVia: "sitemap", note: "n".repeat(400) },
+    evidence: {
+      inSitemap: false,
+      discoveredVia: "sitemap",
+      caveat: { failedPages: 3, note: "n".repeat(400) },
+    },
   });
 
   // ------------------------------------------------- the recheck fixture
@@ -951,7 +987,7 @@ describe("GET /crawls/:id/issues", () => {
     expect(orphan?.["count"]).toBe(7);
     expect(orphan?.["category"]).toBe("links");
     expect(orphan?.["checkIds"]).toEqual(["CHECK-32"]);
-    expect(orphan?.["title"]).toBe("Page has no internal links pointing to it");
+    expect(orphan?.["title"]).toBe(titleOf("links.orphan"));
     // The sample is a sample: five at most, and the same five every time.
     expect(orphan?.["sampleUrls"]).toEqual([
       `${SITE}/o1`, `${SITE}/o2`, `${SITE}/o3`, `${SITE}/o4`, `${SITE}/o5`,
@@ -1142,15 +1178,114 @@ describe("GET /crawls/:id/issues/:ruleId/urls", () => {
     expect(res.status).toBe(200);
     const rows = items(res);
     expect(rows).toHaveLength(7);
-    expect(rows.map((r) => r["url"])).toEqual([
+    expect(rows.map((r) => r["address"])).toEqual([
       `${SITE}/o1`, `${SITE}/o2`, `${SITE}/o3`, `${SITE}/o4`,
       `${SITE}/o5`, `${SITE}/o6`, `${SITE}/o7`,
     ]);
+    // `url` is `address` under its old name, byte for byte, kept for one
+    // release so no client reading this listing today breaks.
+    expect(rows.map((r) => r["url"])).toEqual(rows.map((r) => r["address"]));
     const first = rows[0]?.["evidence"] as Record<string, unknown>;
     expect(first["discoveredVia"]).toBe("sitemap");
     expect(first["inSitemap"]).toBe(false);
-    // The wrapper is a closed shape: url and evidence, nothing else.
-    expect(Object.keys(rows[0] ?? {}).sort()).toEqual(["evidence", "url"]);
+    // The wrapper is a closed shape: the four standard columns, the alias and
+    // the evidence blob, and nothing else. The evidence is NOT flattened into
+    // the row — nine rules record a `statusCode` of their own, and flattening
+    // would let one of them replace a column derived from the page row.
+    expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
+      "address", "evidence", "indexability", "indexabilityStatus", "statusCode", "url",
+    ]);
+  });
+
+  /**
+   * THE FOUR STANDARD COLUMNS, and the header that says how to print them.
+   *
+   * The response carries `columns` — the rule's report, the standard four first
+   * — so a client renders the table without a second call, and the rows carry
+   * the three derived values beside the address.
+   */
+  it("heads the listing with the rule's columns and derives indexability from the page row", async () => {
+    const res = await call(`/crawls/${crawlA}/issues/links.orphan/urls`);
+    expect(res.body["columns"]).toEqual([
+      { key: "address", label: "Address" },
+      { key: "statusCode", label: "Status Code" },
+      { key: "indexability", label: "Indexability" },
+      { key: "indexabilityStatus", label: "Indexability Status" },
+      { key: "discoveredVia", label: "Discovered Via" },
+      { key: "inSitemap", label: "In Sitemap" },
+      { key: "caveat", label: "Caveat", optional: true },
+    ]);
+    // These seven findings name URLs the fixture never made a `pages` row for,
+    // so all three derived columns are null. NULL IS "NOBODY FETCHED IT",
+    // never "it was fine" — and `address` is filled all the same.
+    for (const row of items(res)) {
+      expect(row["statusCode"]).toBeNull();
+      expect(row["indexability"]).toBeNull();
+      expect(row["indexabilityStatus"]).toBeNull();
+      expect(typeof row["address"]).toBe("string");
+    }
+
+    // And a finding that DOES name a page carries the page's own answer,
+    // through the same `indexabilityOf` the CSV export and the demo read. Two
+    // rows, one of each verdict, ordered by URL: the 500 first, then the 200.
+    const titled = items(await call(`/crawls/${crawlA}/issues/title.missing/urls`));
+    expect(titled.map((r) => r["address"])).toEqual([`${SITE}/b1`, `${SITE}/p1`]);
+    expect(titled[0]).toMatchObject({
+      statusCode: 500,
+      indexability: "Non-Indexable",
+      indexabilityStatus: "Server Error",
+    });
+    expect(titled[1]).toMatchObject({
+      statusCode: 200,
+      indexability: "Indexable",
+      indexabilityStatus: "",
+    });
+  });
+
+  /**
+   * The companion inlinks report, and its refusal.
+   *
+   * A rule with no inlinks report is a 404 naming the two that have one, never
+   * an empty page: an empty page here reads as "nothing links to it".
+   */
+  it("lists the links that point at a broken target, and refuses a rule with no inlinks report", async () => {
+    const res = await call(`/crawls/${crawlF}/issues/links.broken-internal/inlinks`);
+    expect(res.status).toBe(200);
+    expect(res.body["columns"]).toEqual([
+      { key: "source", label: "Source" },
+      { key: "destination", label: "Destination" },
+      { key: "anchor", label: "Anchor" },
+      { key: "statusCode", label: "Status Code" },
+    ]);
+    expect(items(res)).toEqual([
+      {
+        source: `${SITE}/csv-home`,
+        destination: `${SITE}/csv-gone`,
+        anchor: "Broken, right?",
+        statusCode: 404,
+      },
+    ]);
+
+    // The 5xx twin reads the same table with the other class.
+    const boom = await call(`/crawls/${crawlF}/issues/links.to-server-error/inlinks`);
+    expect(items(boom)).toEqual([
+      {
+        source: `${SITE}/csv-home`,
+        destination: `${SITE}/csv-boom`,
+        anchor: "Server, are you there?",
+        statusCode: 502,
+      },
+    ]);
+
+    const other = await call(`/crawls/${crawlF}/issues/links.orphan/inlinks`);
+    expect(other.status).toBe(404);
+    expect(String(other.body["error"])).toContain("no inlinks report");
+    expect(String(other.body["error"])).toContain("links.broken-internal");
+
+    // A rule this ruleset does not define is refused by name, before the
+    // inlinks question is even asked.
+    const unknown = await call(`/crawls/${crawlF}/issues/nope.nope/inlinks`);
+    expect(unknown.status).toBe(400);
   });
 
   it("never leaks a column the projection did not name", async () => {
@@ -1208,7 +1343,7 @@ describe("GET /crawls/:id/metrics", () => {
     const volume = rows.find((r) => r["metricId"] === "redirect.volume");
     expect(volume?.["scope"]).toBe("site");
     expect(volume?.["value"]).toEqual({ ratioPct: 12 });
-    expect(volume?.["title"]).toBe("How much of the crawl was redirects");
+    expect(volume?.["title"]).toBe(titleOf("redirect.volume"));
     expect(typeof volume?.["explanation"]).toBe("string");
     expect(volume?.["checkIds"]).toEqual(["CHECK-10"]);
     expect(volume?.["category"]).toBe("redirects");
@@ -2363,11 +2498,19 @@ describe("GET /crawls/:id/export?format=csv", () => {
       "", "", "",
     ]);
 
+    // The inlinks vocabulary (P20-T1): the same four facts the
+    // `/issues/:rule/inlinks` route serves, under the same headings and in the
+    // same order, so a client with both open translates nothing.
     const broken = await callCsv(`/crawls/${crawlF}/export?format=csv&view=links_to_4xx`);
-    expect(broken.records[0]).toEqual(["source", "target", "status", "anchorText"]);
+    expect(broken.records[0]).toEqual(["Source", "Destination", "Anchor", "Status Code"]);
     expect(rows(broken)).toEqual([
-      [`${SITE}/csv-home`, `${SITE}/csv-gone`, "404", "Broken, right?"],
+      [`${SITE}/csv-home`, `${SITE}/csv-gone`, "Broken, right?", "404"],
     ]);
+
+    // The 5xx twin, a separate file for the reason it is a separate rule: a 404
+    // is fixed in the markup and a 502 in the server's logs.
+    const broken5xx = await callCsv(`/crawls/${crawlG}/export?format=csv&view=links_to_5xx`);
+    expect(broken5xx.records[0]).toEqual(["Source", "Destination", "Anchor", "Status Code"]);
 
     const anchors = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
     expect(rowWhere(anchors, "target", `${SITE}/csv-r1`)).toEqual([
@@ -2377,13 +2520,29 @@ describe("GET /crawls/:id/export?format=csv", () => {
     const issueUrls = await callCsv(
       `/crawls/${crawlF}/export?format=csv&view=issue_urls&ruleId=links.orphan`,
     );
-    expect(issueUrls.records[0]).toEqual(["ruleId", "url", "evidence"]);
+    // THE RULE'S OWN REPORT (P20-T1): the four standard columns, then
+    // `links.orphan`'s declared ones, then the cap note that is always the last
+    // column — a capped export that looked complete is the silent failure hard
+    // rule 7 forbids.
+    expect(issueUrls.records[0]).toEqual([
+      "Address", "Status Code", "Indexability", "Indexability Status",
+      "Discovered Via", "In Sitemap", "Caveat", "Truncated",
+    ]);
     expect(rows(issueUrls)).toHaveLength(1);
-    expect(issueUrls.records[1]?.[1]).toBe(`${SITE}/csv-quoted`);
-    // The long value is clipped and SAYS it was; the full evidence stays on
-    // issue_urls' JSON answer.
-    expect(issueUrls.records[1]?.[2]).toContain("discoveredVia=sitemap");
-    expect(issueUrls.records[1]?.[2]).toContain("…");
+    expect(issueUrls.records[1]?.[0]).toBe(`${SITE}/csv-quoted`);
+    // The standard columns are derived from the page row this finding names,
+    // through the SAME `indexabilityOf` the JSON listing reads.
+    expect(issueUrls.records[1]?.[1]).toBe("200");
+    expect(issueUrls.records[1]?.[2]).toBe("Indexable");
+    expect(issueUrls.records[1]?.[3]).toBe("");
+    expect(issueUrls.records[1]?.[4]).toBe("sitemap");
+    expect(issueUrls.records[1]?.[5]).toBe("false");
+    // A STRUCTURED value in one column is flattened to its leaves and bounded
+    // exactly as the whole-blob cell is: the long one is clipped and SAYS it was.
+    expect(issueUrls.records[1]?.[6]).toContain("failedPages=3");
+    expect(issueUrls.records[1]?.[6]).toContain("…");
+    // No cap note on this rule's one row, and the column is written anyway.
+    expect(issueUrls.records[1]?.[7]).toBe("");
   });
 
   it("walks a redirect path per redirecting page, and says what it could not resolve", async () => {
@@ -2508,7 +2667,9 @@ describe("GET /crawls/:id/export?format=csv", () => {
     );
     const anchors = await callCsv(`/crawls/${crawlF}/export?format=csv&view=anchor_texts`);
     expect(rows(anchors)).toHaveLength(linkCount.rows[0]?.n ?? -1);
-    expect(rows(anchors)).toHaveLength(FILLER_LINKS + 4);
+    // Five hand-built links beside the filler: the 4xx target, the 5xx target,
+    // the chain head, the hostile anchor and the external one.
+    expect(rows(anchors)).toHaveLength(FILLER_LINKS + 5);
 
     const pageCount = await db.execute<{ n: number }>(
       sql`select count(*)::int as n from pages where crawl_id = ${crawlF}`,
@@ -2535,9 +2696,9 @@ describe("GET /crawls/:id/export?format=csv", () => {
     // No duplicates across the batch boundaries either: 1,204 links is three
     // batches, and a keyset that compared on the wrong column would repeat a
     // page of rows rather than lose one.
-    // 1,200 distinct fillers plus the four real anchors, one of which is the
+    // 1,200 distinct fillers plus the five real anchors, one of which is the
     // empty cell an image link leaves behind.
-    expect(new Set(column(anchors, "text")).size).toBe(FILLER_LINKS + 4);
+    expect(new Set(column(anchors, "text")).size).toBe(FILLER_LINKS + 5);
   });
 
   // THE KEYSET, WALKED. Reading a view one row at a time must produce exactly
@@ -2549,7 +2710,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
       rule: (ruleId: string) => {
         const rule = rules.get(ruleId);
         if (rule === undefined) throw new Error(`no rule ${ruleId}`);
-        return rule;
+        return { ...rule, columns: columnsFor(rule) };
       },
       evidence: (value: unknown) => value as Record<string, unknown>,
     };
@@ -2679,7 +2840,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
   it("writes a header even for a view with no rows, so an empty file still says what it is", async () => {
     const res = await callCsv(`/crawls/${crawlA}/export?format=csv&view=links_to_4xx`);
     expect(res.status).toBe(200);
-    expect(res.records).toEqual([["source", "target", "status", "anchorText"]]);
+    expect(res.records).toEqual([["Source", "Destination", "Anchor", "Status Code"]]);
   });
 });
 
@@ -2813,7 +2974,7 @@ describe("GET /compare", () => {
       severity: "warning",
       category: "on-page",
       checkIds: ["CHECK-35"],
-      title: "Missing title tag",
+      title: titleOf("title.missing"),
       baseCount: 3, headCount: 3, baseUrls: 3, headUrls: 3,
       new: 1, resolved: 1, persisting: 2,
       baseTruncated: false, headTruncated: false,

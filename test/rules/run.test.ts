@@ -644,6 +644,7 @@ describe("runRules against the database", () => {
         "the shape a capped rule takes when its listing cannot afford an order.",
       howToFix: "Nothing: the rule is a stand-in for one whose cap cannot afford an order.",
       rulesetVersion: RULESET_VERSION,
+      columns: [],
       // Every run reports CAP findings and every dedupe key is new, so nothing
       // an append-only table could collide on ever repeats.
       run: async () => {
@@ -763,6 +764,7 @@ describe("runRules against the database", () => {
       explanation: "A rule that throws, so the marker's failure path can be observed.",
       howToFix: "Do not ship it.",
       rulesetVersion: RULESET_VERSION,
+      columns: [],
       run: () => {
         throw new Error("boom");
       },
@@ -792,6 +794,7 @@ describe("runRules against the database", () => {
       explanation: "A rule that throws, so the runner's failure path can be observed.",
       howToFix: "Do not ship it.",
       rulesetVersion: RULESET_VERSION,
+      columns: [],
       run: () => {
         throw new Error("boom");
       },

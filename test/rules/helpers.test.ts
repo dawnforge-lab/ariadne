@@ -10,6 +10,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import {
   CANONICALISED_ELSEWHERE,
   finding,
+  indexabilityOf,
   isCanonicalisedElsewhere,
   metricRow,
   metricRule,
@@ -18,6 +19,8 @@ import {
   resolveEffectiveCanonical,
   type MetricIdentity,
 } from "../../src/rules/helpers.js";
+import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
+import type { PageRecord } from "../../src/rules/registry/types.js";
 import { ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import { mkPage } from "./mk-page.js";
@@ -483,5 +486,144 @@ describe("metricRule", () => {
     expect(() => metricRule("no.such-metric", ["CHECK-31"], "links", async () => [])).toThrow(
       /no copy for rule 'no.such-metric'/,
     );
+  });
+});
+
+/**
+ * `indexabilityOf` — the two standard columns every finding row on the API
+ * surface is labelled with.
+ *
+ * The whole ruleset's reports are read through this function, so it is tested
+ * over the WHOLE `FETCH_CLASSES` vocabulary rather than over a sample: a class
+ * added to the crawler and not to the precedence is a row that would otherwise
+ * be labelled by whatever the last `case` happened to be.
+ */
+describe("indexabilityOf", () => {
+  /** A page that is not `ok`: `is_indexable` is false on every one of them. */
+  const notOk = (fetchClass: string, over: Partial<PageRecord> = {}): PageRecord =>
+    mkPage({ fetchClass, isIndexable: false, ...over });
+
+  it("answers Indexable with no reason for a 200 that declares nothing", () => {
+    expect(indexabilityOf(mkPage())).toEqual({ indexability: "Indexable", status: "" });
+  });
+
+  it("names a class for every member of the crawler's vocabulary", () => {
+    // NOT a hand-written sample: every class the fetch layer can write is a
+    // class a finding row can carry, and the default branch throws rather than
+    // labelling one by accident.
+    for (const fetchClass of FETCH_CLASSES) {
+      if (fetchClass === "ok") continue;
+      const answer = indexabilityOf(
+        notOk(fetchClass, { statusCode: fetchClass === "redirect" ? 301 : 404 }),
+      );
+      expect(answer.indexability, `${fetchClass} was called indexable`).toBe("Non-Indexable");
+      expect(answer.status, `${fetchClass} produced no reason`).not.toBe("");
+    }
+    // `ok` is the only class that can be indexable, and it is the only one with
+    // an empty status — the two statements are one fact, and asserting it here
+    // is what makes the loop above exhaustive rather than merely long.
+    expect(indexabilityOf(mkPage())).toEqual({ indexability: "Indexable", status: "" });
+  });
+
+  it("maps each fetch class to the status a reader acts on", () => {
+    const status = (fetchClass: string, statusCode: number | null): string =>
+      indexabilityOf(notOk(fetchClass, { statusCode })).status;
+
+    expect(status("redirect", 301)).toBe("Redirected");
+    expect(status("client_error", 404)).toBe("Client Error");
+    expect(status("server_error", 500)).toBe("Server Error");
+    expect(status("disallowed", null)).toBe("Blocked by robots.txt");
+    expect(status("timeout", null)).toBe("No Response");
+    expect(status("network_error", null)).toBe("No Response");
+    expect(status("non_html", 200)).toBe("Not HTML");
+    // Two more that produced no readable HTML, grouped with `non_html` because
+    // the consequence is identical: no body was analysed, so there is nothing
+    // to judge indexability from. `fetchClass` is where a reader finds out
+    // which of the three it was.
+    expect(status("too_large", 200)).toBe("Not HTML");
+    expect(status("unsupported_encoding", 200)).toBe("Not HTML");
+  });
+
+  it("reads a block off the wire status and never calls it a robots.txt block", () => {
+    // A block is the site refusing THIS CLIENT — a cf-mitigated header, a
+    // 401/403/429, a challenge body on a 503. robots.txt said nothing, and we
+    // did get an answer, so it is neither of those two statuses.
+    expect(indexabilityOf(notOk("blocked", { statusCode: 403 })).status).toBe("Client Error");
+    expect(indexabilityOf(notOk("blocked", { statusCode: 429 })).status).toBe("Client Error");
+    expect(indexabilityOf(notOk("blocked", { statusCode: 503 })).status).toBe("Server Error");
+    // A challenge served with a 200, and a block with no status at all: the
+    // refusal is about the client either way.
+    expect(indexabilityOf(notOk("blocked", { statusCode: 200 })).status).toBe("Client Error");
+    expect(indexabilityOf(notOk("blocked", { statusCode: null })).status).toBe("Client Error");
+  });
+
+  it("reads an ok row that is not a 200 as no HTML to judge", () => {
+    expect(indexabilityOf(mkPage({ statusCode: 204, isIndexable: false })).status).toBe(
+      "Not HTML",
+    );
+  });
+
+  it("puts noindex ahead of the canonical when a 200 carries both", () => {
+    // The spec's precedence, and the only pair that overlaps on a 200: the page
+    // is out of the index whatever it hands its signals to.
+    const both = mkPage({
+      robotsMeta: "noindex",
+      canonicalHtml: "https://example.com/other",
+      isIndexable: false,
+    });
+    expect(indexabilityOf(both)).toEqual({ indexability: "Non-Indexable", status: "Noindex" });
+  });
+
+  it("reads noindex off either robots channel, and `none` as noindex", () => {
+    for (const page of [
+      mkPage({ robotsMeta: "noindex", isIndexable: false }),
+      mkPage({ xRobotsTag: "noindex", isIndexable: false }),
+      mkPage({ robotsMeta: "max-snippet:-1, noindex, nofollow", isIndexable: false }),
+      mkPage({ robotsMeta: "none", isIndexable: false }),
+    ]) {
+      expect(indexabilityOf(page).status).toBe("Noindex");
+    }
+    // And a directive that is not one: `nonevent` is not `none`.
+    expect(indexabilityOf(mkPage({ robotsMeta: "nonevent" })).status).toBe("");
+  });
+
+  it("calls a 200 whose canonical names another URL Canonicalised", () => {
+    const page = mkPage({ canonicalHtml: "https://example.com/other" });
+    expect(indexabilityOf(page)).toEqual({
+      indexability: "Non-Indexable",
+      status: "Canonicalised",
+    });
+    // The HTTP header is the second channel, and a self-canonical is not
+    // "elsewhere" however it is spelled.
+    expect(
+      indexabilityOf(mkPage({ canonicalHtml: null, canonicalHeader: "https://example.com/x" }))
+        .status,
+    ).toBe("Canonicalised");
+    expect(
+      indexabilityOf(mkPage({ canonicalHtml: "https://example.com/page#top" })).status,
+    ).toBe("");
+  });
+
+  it("keeps the crawler's is_indexable column honest, and exempts the one case it cannot see", () => {
+    // A canonicalised page IS crawled and indexable — it has handed its signals
+    // elsewhere — so `is_indexable: true` beside `Non-Indexable` is right, and
+    // the check must not fire on it.
+    expect(() =>
+      indexabilityOf(mkPage({ canonicalHtml: "https://example.com/other", isIndexable: true })),
+    ).not.toThrow();
+    // Everything else: a stored column that contradicts the directives on the
+    // row is a writer defect, and it is LOUD rather than silently resolved one
+    // way (hard rule 7).
+    expect(() => indexabilityOf(mkPage({ robotsMeta: "noindex", isIndexable: true }))).toThrow(
+      /is_indexable/,
+    );
+    expect(() => indexabilityOf(mkPage({ isIndexable: false }))).toThrow(/is_indexable/);
+    // Null asserts nothing: it is the column's value on every page that was
+    // never fetched as HTML.
+    expect(() => indexabilityOf(notOk("timeout", { isIndexable: null }))).not.toThrow();
+  });
+
+  it("refuses a fetch class it has never met rather than labelling it", () => {
+    expect(() => indexabilityOf(mkPage({ fetchClass: "teapot" }))).toThrow(/unknown fetch_class/);
   });
 });

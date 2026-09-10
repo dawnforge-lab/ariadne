@@ -375,6 +375,11 @@ export const linkGraphRules: QueryRule[] = [
     checkIds: ["CHECK-32"],
     category: "links",
     severity: ORPHAN.severity,
+    columns: [
+      { key: "discoveredVia", label: "Discovered Via" },
+      { key: "inSitemap", label: "In Sitemap" },
+      { key: "caveat", label: "Caveat", optional: true },
+    ],
     ...copyFor(ORPHAN.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
@@ -393,6 +398,14 @@ export const linkGraphRules: QueryRule[] = [
     checkIds: ["CHECK-32"],
     category: "links",
     severity: SKIPPED.severity,
+    columns: [
+      { key: "skipped", label: "Reason" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+      { key: "maxPages", label: "Page Limit" },
+      { key: "pending", label: "Pending URLs" },
+      { key: "leased", label: "Leased URLs" },
+      { key: "failed", label: "Failed URLs" },
+    ],
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
@@ -425,6 +438,11 @@ export const linkGraphRules: QueryRule[] = [
     checkIds: ["CHECK-31"],
     category: "technical",
     severity: DEEP.severity,
+    columns: [
+      { key: "clickDepth", label: "Crawl Depth" },
+      { key: "threshold", label: "Threshold" },
+      { key: "caveat", label: "Caveat", optional: true },
+    ],
     ...copyFor(DEEP.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {

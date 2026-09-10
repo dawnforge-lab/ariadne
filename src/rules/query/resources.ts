@@ -1044,6 +1044,11 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-51"],
     category: CATEGORY,
     severity: BROKEN.severity,
+    columns: [
+      { key: "brokenCount", label: "Broken Resources" },
+      { key: "resources", label: "Resources" },
+      { key: "unknownResources", label: "Unknown Resources" },
+    ],
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => brokenFindings(BROKEN, db, crawlId, capsOr(caps)),
@@ -1058,6 +1063,15 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-49"],
     category: CATEGORY,
     severity: OVERSIZED.severity,
+    columns: [
+      { key: "resourceUrl", label: "Image URL" },
+      { key: "contentType", label: "Content Type" },
+      { key: "bytes", label: "Size (Bytes)" },
+      { key: "bytesSource", label: "Size Source" },
+      { key: "threshold", label: "Threshold (Bytes)" },
+      { key: "referencingPages", label: "IMG Inlinks" },
+      { key: "samplePages", label: "Source" },
+    ],
     ...copyFor(OVERSIZED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -1076,6 +1090,15 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-49"],
     category: CATEGORY,
     severity: LEGACY.severity,
+    columns: [
+      { key: "resourceUrl", label: "Image URL" },
+      { key: "contentType", label: "Content Type" },
+      { key: "bytes", label: "Size (Bytes)" },
+      { key: "bytesSource", label: "Size Source" },
+      { key: "threshold", label: "Threshold (Bytes)" },
+      { key: "referencingPages", label: "IMG Inlinks" },
+      { key: "samplePages", label: "Source" },
+    ],
     ...copyFor(LEGACY.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -1098,6 +1121,12 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-50"],
     category: CATEGORY,
     severity: UNCACHED.severity,
+    columns: [
+      { key: "uncachedResources", label: "Uncached Resources" },
+      { key: "fetchedResources", label: "Fetched Resources" },
+      { key: "unknownResources", label: "Unknown Resources" },
+      { key: "sampleResources", label: "Resources" },
+    ],
     ...copyFor(UNCACHED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => uncachedFindings(UNCACHED, db, crawlId),
@@ -1113,6 +1142,11 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: NOT_RECORDED.severity,
+    columns: [
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "pagesWithImages", label: "Pages With Images" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(NOT_RECORDED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
@@ -1130,6 +1164,13 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: NOT_FETCHED.severity,
+    columns: [
+      { key: "reason", label: "Reason" },
+      { key: "notAsked", label: "Explanation" },
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "resourcesSkipped", label: "Resources Skipped" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(NOT_FETCHED.id),
     rulesetVersion: RULESET_VERSION,
     marker:
@@ -1149,6 +1190,12 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: ALL_UNKNOWN.severity,
+    columns: [
+      { key: "dominantClass", label: "Dominant Fetch Class" },
+      { key: "census", label: "Fetch Class Census" },
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(ALL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:
@@ -1170,6 +1217,13 @@ export const resourceRules: QueryRule[] = [
     checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
     category: CATEGORY,
     severity: PARTIAL_UNKNOWN.severity,
+    columns: [
+      { key: "dominantClass", label: "Dominant Fetch Class" },
+      { key: "census", label: "Fetch Class Census" },
+      { key: "resourcesSeen", label: "Resources Seen" },
+      { key: "resourcesUnfetched", label: "Resources Unfetched" },
+      { key: "pagesCrawled", label: "Pages Crawled" },
+    ],
     ...copyFor(PARTIAL_UNKNOWN.id),
     rulesetVersion: RULESET_VERSION,
     marker:

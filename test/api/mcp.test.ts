@@ -617,13 +617,13 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the sixteen tools of the agent surface, each described", async () => {
+  it("advertises exactly the seventeen tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "compare_urls", "crawl_compare", "crawl_list", "crawl_mark_failed", "crawl_render",
         "crawl_resume", "crawl_rules", "crawl_start", "crawl_status", "export_crawl",
-        "issue_urls", "issues_list", "metrics_get", "pages_query", "robots_get",
+        "issue_inlinks", "issue_urls", "issues_list", "metrics_get", "pages_query", "robots_get",
         "rules_catalog",
       ].sort(),
     );
@@ -635,6 +635,7 @@ describe("the tool surface", () => {
         tool.name.endsWith("_list") ||
         tool.name === "pages_query" ||
         tool.name === "issue_urls" ||
+        tool.name === "issue_inlinks" ||
         tool.name === "compare_urls"
       ) {
         expect(tool.description, `${tool.name} does not state the pagination contract`)
@@ -2331,8 +2332,16 @@ describe("export_crawl — the CSV views", () => {
     });
     expect(body["ruleId"]).toBe("links.orphan");
     expect(body["rows"]).toBe(3);
-    expect(String(body["path"])).toContain("issue_urls-links.orphan");
-    expect(read(body).split("\r\n")[0]).toBe("ruleId,url,evidence");
+    // The file is named for the RULE, not for the view (Phase 20): `issue_urls`
+    // is the engine's word for "one rule's findings" and says nothing a person
+    // reading a Downloads folder needs.
+    expect(String(body["path"])).toContain("-links.orphan.csv");
+    expect(String(body["path"])).not.toContain("issue_urls");
+    // And the header is the RULE's report: the four standard columns, then the
+    // rule's own, then the cap note.
+    expect(read(body).split("\r\n")[0]).toBe(
+      "Address,Status Code,Indexability,Indexability Status,Discovered Via,In Sitemap,Caveat,Truncated",
+    );
   });
 
   it("writes the links-derived views of a real crawl", async () => {

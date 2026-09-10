@@ -105,8 +105,14 @@ import {
   METRIC_SCOPES,
   type AnyRule,
   type RuleCategory,
+  type RuleColumn,
   type Severity,
 } from "../rules/registry/types.js";
+import {
+  indexabilityOf,
+  type Indexability,
+  type IndexabilityStatus,
+} from "../rules/helpers.js";
 import { UNTYPED } from "../rules/metric/cohort.js";
 import { resolveRuleCaps, storedFindingCap } from "../rules/query/crawl-evidence.js";
 import { runRules, type RunSummary } from "../rules/run.js";
@@ -1159,6 +1165,23 @@ export interface CatalogRule {
   explanation: string;
   howToFix: string;
   /**
+   * THE RULE'S REPORT, column by column — the four standard columns every
+   * finding row carries, then what this rule declares (`columnsFor`).
+   *
+   * ABSENT on a metric rule, which writes a table of its own shape into
+   * `metrics` rather than finding rows into `issues`: there is no finding row
+   * for a column to be a column of, and `measuresOnly` on `fired` is the flag
+   * that says so. Present on every rule that finds, and never empty — the four
+   * standard columns are in it even for a rule whose own report is only the
+   * address.
+   *
+   * It is here so a client can lay out a rule's table BEFORE it asks for the
+   * rows: the same list `issue_urls` serves with its rows, from the same
+   * function, so a header drawn from the catalog and one drawn from the listing
+   * cannot disagree.
+   */
+  columns?: RuleColumn[];
+  /**
    * Present ONLY on a NOT MEASURED marker, and then the registry's own reason
    * string — the crawl condition whose silence the marker explains. Absent on
    * every ordinary rule: never `null`, never `""`, so `"marker" in rule` and a
@@ -1217,9 +1240,147 @@ export interface RulesCatalog {
  * stack or a path), and the WRAPPER is a closed shape all the same.
  */
 export interface IssueUrl {
-  /** Null for a site-wide finding: a fact about the crawl, not about a page. */
+  /**
+   * The finding's URL, as `address` under the name this surface has always used.
+   *
+   * KEPT AS AN ALIAS, not as a second fact: it is the same string `address`
+   * carries, byte for byte. Phase 20 renamed the column to `address` because
+   * that is what a report reader calls it (Screaming Frog's per-issue exports
+   * head their first column `Address`, and this row is now a report row rather
+   * than a JSON pair) — and a rename that dropped `url` would break every
+   * client reading this listing today for no gain. It stays for one release;
+   * `docs/talos-surface.md` §4.4 says when it goes.
+   */
   url: string | null;
+  /** Null for a site-wide finding: a fact about the crawl, not about a page. */
+  address: string | null;
+  /**
+   * THE THREE STANDARD COLUMNS after the address, derived from the `pages` row
+   * this finding names (`issues.page_id` -> `pages`), never from the evidence.
+   *
+   * **All three are null when there is no page row to derive them from**, and
+   * that is two different situations rather than one:
+   *
+   *  - a SITE-SCOPED finding (`sitemap.missing`, `robots.check-skipped`, every
+   *    marker) names no URL at all, so `address` is null beside them;
+   *  - a finding that names a URL the crawl never made a `pages` row for —
+   *    `host.http-serves-200` on a probed host variant, `sitemap.uncrawled` on
+   *    a URL the frontier never reached, `robots.blocks-sitemap-urls` on one
+   *    robots.txt kept out — has an `address` and nulls here. Null is "nobody
+   *    fetched this URL", never "it was fine".
+   */
+  statusCode: number | null;
+  indexability: Indexability | null;
+  indexabilityStatus: IndexabilityStatus | null;
+  /**
+   * The rule's own testimony, verbatim, INCLUDING its `pageUrl` key — unchanged
+   * by Phase 20 and deliberately not flattened into the row.
+   *
+   * The response's `columns` is what tells a client which of these keys to
+   * print and under what heading: the four standard columns above are read off
+   * the ITEM, and every other column's `key` is read off `evidence`. Flattening
+   * the blob into the row would have made those two lookups one — and would
+   * have let a rule that recorded a field called `statusCode` (nine of them do,
+   * and it is the same number as the standard column by construction) silently
+   * replace a column derived from the page row. The blob stays a blob.
+   */
   evidence: Record<string, unknown>;
+}
+
+/**
+ * THE FOUR COLUMNS EVERY FINDING ROW BEGINS WITH, in order, with the headings a
+ * client prints.
+ *
+ * They are the surface's, not any rule's: `address` is the finding's own URL and
+ * the other three are `indexabilityOf` over the `pages` row it names. Every
+ * rule's declared columns follow them (`columnsFor`), and `defineRule` refuses a
+ * rule that declares one of these keys itself — one heading, one source.
+ *
+ * The labels are Screaming Frog's, exactly, because these four head every
+ * per-issue export it writes and the people reading these reports read those
+ * every week.
+ */
+export const STANDARD_ISSUE_COLUMNS: ReadonlyArray<RuleColumn> = [
+  { key: "address", label: "Address" },
+  { key: "statusCode", label: "Status Code" },
+  { key: "indexability", label: "Indexability" },
+  { key: "indexabilityStatus", label: "Indexability Status" },
+];
+
+/**
+ * One rule's report, column by column: the standard four, then what the rule
+ * itself declares.
+ *
+ * ONE FUNCTION, read by the JSON listing, the CSV writer, the rules catalog and
+ * the demo — so a client that renders the table from `columns` and a spreadsheet
+ * that opens the export see the same headings in the same order.
+ */
+export function columnsFor(rule: AnyRule): RuleColumn[] {
+  return [...STANDARD_ISSUE_COLUMNS, ...(rule.columns ?? [])];
+}
+
+/**
+ * One rule's findings as a table: the columns to print, then the rows.
+ *
+ * `columns` is on the RESPONSE rather than on every row, because it is the same
+ * list for every row of one rule's listing and a client renders a header once.
+ * It is served with the first page and with every page after it — a caller that
+ * follows a cursor gets the header again rather than having to keep it, which
+ * costs a few hundred bytes and removes the state.
+ */
+export interface IssueUrlPage extends Page<IssueUrl> {
+  columns: RuleColumn[];
+}
+
+/**
+ * One row of the companion inlinks report: an internal link that points at
+ * something one of the two link rules found.
+ *
+ * `statusCode` is the TARGET's, read off its own crawled `pages` row — the same
+ * number the finding carries — because the question the row answers is "which
+ * page links to this broken URL, and how broken is it".
+ */
+export interface IssueInlink {
+  source: string;
+  destination: string;
+  /** Null is a link with no anchor text at all — an image link, a bare `<a>`. */
+  anchor: string | null;
+  statusCode: number | null;
+}
+
+/**
+ * The inlinks report's columns. Fixed rather than declared per rule, because
+ * the report is one shape: it is a view of the `links` table, not of a rule's
+ * evidence, and both rules that have one have the same one. Screaming Frog's
+ * headings, for `STANDARD_ISSUE_COLUMNS`' reason.
+ */
+export const INLINK_COLUMNS: ReadonlyArray<RuleColumn> = [
+  { key: "source", label: "Source" },
+  { key: "destination", label: "Destination" },
+  { key: "anchor", label: "Anchor" },
+  { key: "statusCode", label: "Status Code" },
+];
+
+/**
+ * WHICH RULES HAVE AN INLINKS REPORT, and the target `fetch_class` each one's
+ * links point at.
+ *
+ * A map rather than a flag on the rule, and deliberately short: an inlinks
+ * report is only meaningful for a rule that reports a TARGET the site links to.
+ * Every other rule reports the page itself, where "which pages link here" is a
+ * different question from the finding and `/urls` is the whole answer. The two
+ * entries are the two rules `linkTargetClassFindings` defines, and the classes
+ * are the ones it passes — the same predicate, so the report cannot list links
+ * to pages the rule did not fire on.
+ */
+export const INLINK_REPORT_CLASSES: Readonly<Record<string, FetchClass>> = {
+  "links.broken-internal": "client_error",
+  "links.to-server-error": "server_error",
+};
+
+/** The inlinks report as a page: its columns, then its rows. */
+export interface IssueInlinkPage extends Page<IssueInlink> {
+  columns: ReadonlyArray<RuleColumn>;
 }
 
 /**
@@ -2923,6 +3084,10 @@ export class ApiService {
       title: rule.title,
       explanation: rule.explanation,
       howToFix: rule.howToFix,
+      // Absent on a metric rule for `columns`' own reason (it writes no finding
+      // row), spread rather than set to undefined so `"columns" in rule` and a
+      // truthiness test agree — the `marker` discipline, one field along.
+      ...(rule.kind === "metric" ? {} : { columns: columnsFor(rule) }),
       // The registry's flag, mirrored exactly: the key exists on a marker and
       // on nothing else. Spreading a `marker: undefined` instead would put the
       // key on all 96 rows and make "is this a marker" a truthiness question
@@ -3160,9 +3325,9 @@ export class ApiService {
     crawlId: string,
     ruleId: string,
     opts: { limit?: number; cursor?: string } = {},
-  ): Promise<Page<IssueUrl>> {
+  ): Promise<IssueUrlPage> {
     await this.assertCrawl(crawlId);
-    this.findingRule("ruleId", ruleId);
+    const rule = this.findingRule("ruleId", ruleId);
     const limit = parseLimit(opts.limit);
     const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 2);
 
@@ -3174,30 +3339,172 @@ export class ApiService {
       );
     }
 
+    // THE JOIN IS A LEFT JOIN, and that is the whole shape of the standard
+    // columns. A finding names a page (`issues.page_id`), names a URL with no
+    // page row behind it, or names nothing at all — an inner join would drop the
+    // last two silently, which is a listing that says a rule found fewer things
+    // than it did (hard rule 7). The eight columns are the projection
+    // `indexabilityOf` reads and nothing else: this is a listing, not
+    // `pages_query`.
     const result = await this.db.execute<{
       url: string | null;
       url_key: string;
       evidence: unknown;
       dedupe_key: string;
+      page_url: string | null;
+      status_code: number | null;
+      fetch_class: string | null;
+      robots_meta: string | null;
+      x_robots_tag: string | null;
+      is_indexable: boolean | null;
+      canonical_html: string | null;
+      canonical_header: string | null;
     }>(sql`
       select i.details_jsonb->>'pageUrl' as url,
              coalesce(i.details_jsonb->>'pageUrl', '') as url_key,
              i.details_jsonb as evidence,
-             i.dedupe_key
+             i.dedupe_key,
+             p.url as page_url, p.status_code, p.fetch_class,
+             p.robots_meta, p.x_robots_tag, p.is_indexable,
+             p.canonical_html, p.canonical_header
       from issues i
+      -- The crawl is on BOTH sides of the join, not just in the WHERE. A page
+      -- id is unique across the database today, so this is belt and braces —
+      -- and it is the kind of belt Talos obligation 6 asks for: a join that can
+      -- only ever reach rows of the crawl the caller named cannot serve one
+      -- tenant's page beside another's finding, whatever a future id scheme
+      -- does.
+      left join pages p on p.id = i.page_id and p.crawl_id = i.crawl_id
       where ${sql.join(where, sql` and `)}
       order by url_key asc, i.dedupe_key asc
       limit ${limit + 1}`);
 
     const rows = result.rows;
+    const items = rows.slice(0, limit).map((row): IssueUrl => {
+      // `fetch_class` is `not null` on a `pages` row, so a null here is the
+      // left join finding nothing — there is no page, and the three derived
+      // columns are null rather than guessed.
+      const judged =
+        row.fetch_class === null
+          ? null
+          : indexabilityOf({
+              url: row.page_url ?? "",
+              fetchClass: row.fetch_class,
+              statusCode: row.status_code,
+              robotsMeta: row.robots_meta,
+              xRobotsTag: row.x_robots_tag,
+              isIndexable: row.is_indexable,
+              canonicalHtml: row.canonical_html,
+              canonicalHeader: row.canonical_header,
+            });
+      return {
+        url: row.url,
+        address: row.url,
+        statusCode: row.fetch_class === null ? null : row.status_code,
+        indexability: judged === null ? null : judged.indexability,
+        indexabilityStatus: judged === null ? null : judged.status,
+        evidence: asEvidence(row.evidence, crawlId, ruleId),
+      };
+    });
+    const last = rows.length > limit ? rows[limit - 1] : undefined;
+    return {
+      columns: columnsFor(rule),
+      items,
+      nextCursor: last === undefined ? null : encodeCursor(last.url_key, last.dedupe_key),
+    };
+  }
+
+  /**
+   * THE COMPANION INLINKS REPORT for the two link rules: every internal link
+   * that points at a broken target, one row per LINK.
+   *
+   * `GET /crawls/:id/issues/:rule/inlinks` and the `issue_inlinks` tool. It
+   * exists because `links.broken-internal` and `links.to-server-error` report
+   * the TARGET — one dead URL linked from two hundred pages is one thing to fix,
+   * and two hundred findings would bury it — while the person who makes the fix
+   * edits the SOURCE page's markup. The finding's `sampleSources` is a sample of
+   * ten; this is the list, and it is the same list Screaming Frog's "inlinks"
+   * export beside each issue is (`Source`, `Destination`, `Anchor`,
+   * `Status Code`).
+   *
+   * SQL ONLY, hard rule 3: the `links` table is never loaded into memory. One
+   * keyset-cursored, bounded query over `(source_page_id, target_url, position)`
+   * — the same total order the CSV views ride, and the same the `links` primary
+   * key is built on.
+   *
+   * IT READS THE LINKS, NOT THE FINDINGS. The predicate is the target page's
+   * own `fetch_class`, which is exactly what the rule fires on, so the rows here
+   * are the links behind the rule's findings whether or not a rules pass has
+   * ever run — and a rule that CAPPED its findings still gets a complete inlinks
+   * report, because the cap is on how many targets were listed and this is
+   * about the links.
+   */
+  async listIssueInlinks(
+    crawlId: string,
+    ruleId: string,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<IssueInlinkPage> {
+    await this.assertCrawl(crawlId);
+    this.findingRule("ruleId", ruleId);
+    const fetchClass = INLINK_REPORT_CLASSES[ruleId];
+    if (fetchClass === undefined) {
+      // A 404, not an empty page: "this rule has no inlinks report" and "this
+      // rule's inlinks report is empty" are different sentences, and answering
+      // the second to the first question is the silent failure hard rule 7
+      // forbids. The message names the rules that DO have one, so a caller that
+      // guessed is told what to ask for instead.
+      throw new ServiceError(
+        "NOT_FOUND",
+        `rule '${clip(ruleId)}' has no inlinks report: only ` +
+          `${Object.keys(INLINK_REPORT_CLASSES).sort().join(", ")} report the links that ` +
+          "point at what they found — every other rule reports the page itself, and its " +
+          "rows are on /issues/:rule/urls",
+      );
+    }
+    const limit = parseLimit(opts.limit);
+    const cursor = opts.cursor === undefined ? null : decodeCursor(opts.cursor, 3);
+    const after = cursor ?? ["", "", "-1"];
+    const position = Number(after[2]);
+    if (!Number.isInteger(position)) {
+      throw new ServiceError("VALIDATION", "cursor is not a cursor this listing issued");
+    }
+
+    const result = await this.db.execute<{
+      source: string;
+      destination: string;
+      anchor: string | null;
+      status_code: number | null;
+      source_page_id: string;
+      position: number;
+    }>(sql`
+      select src.url as source, l.target_url as destination, l.anchor,
+             tgt.status_code, l.source_page_id, l.position
+      from links l
+      join pages src on src.crawl_id = ${crawlId} and src.id = l.source_page_id
+      join pages tgt on tgt.crawl_id = ${crawlId} and tgt.url = l.target_url
+      where l.crawl_id = ${crawlId}
+        and l.is_internal
+        and tgt.fetch_class = ${fetchClass}
+        and (l.source_page_id, l.target_url, l.position) >
+            (${after[0]}::text, ${after[1]}::text, ${position}::int)
+      order by l.source_page_id asc, l.target_url asc, l.position asc
+      limit ${limit + 1}`);
+
+    const rows = result.rows;
     const items = rows.slice(0, limit).map((row) => ({
-      url: row.url,
-      evidence: asEvidence(row.evidence, crawlId, ruleId),
+      source: row.source,
+      destination: row.destination,
+      anchor: row.anchor,
+      statusCode: row.status_code,
     }));
     const last = rows.length > limit ? rows[limit - 1] : undefined;
     return {
+      columns: INLINK_COLUMNS,
       items,
-      nextCursor: last === undefined ? null : encodeCursor(last.url_key, last.dedupe_key),
+      nextCursor:
+        last === undefined
+          ? null
+          : encodeCursor(last.source_page_id, last.destination, String(last.position)),
     };
   }
 
@@ -3773,7 +4080,7 @@ export class ApiService {
    * `ruleFor` that would have thrown later throws now, before a byte.
    *
    * `issue_urls` needs none of this — `parseExportRequest` has already put its
-   * one rule through `findingRule`. The other four views never touch the
+   * one rule through `findingRule`. The other six views never touch the
    * registry at all.
    */
   private async assertViewAnswerable(crawlId: string, view: CsvViewName): Promise<void> {
@@ -3793,7 +4100,18 @@ export class ApiService {
     await this.assertViewAnswerable(crawlId, view);
     const def = CSV_VIEW_DEFS[view];
     const ctx: CsvViewContext = {
-      rule: (id) => this.ruleFor(id, crawlId, "issues"),
+      // `columnsFor` rather than the rule's own `columns`: the four standard
+      // columns are the surface's, and a spreadsheet that omitted them would be
+      // a different table from the one the JSON listing serves.
+      rule: (id) => {
+        const rule = this.ruleFor(id, crawlId, "issues");
+        return {
+          title: rule.title,
+          category: rule.category,
+          checkIds: rule.checkIds,
+          columns: columnsFor(rule),
+        };
+      },
       evidence: (value, id) => asEvidence(value, crawlId, id),
     };
     const db = this.db;
@@ -3805,7 +4123,7 @@ export class ApiService {
         // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
         // that cannot say what it failed to contain, and a reader would have to
         // guess whether the export ran at all.
-        yield csvRecord(def.header);
+        yield csvRecord(def.header(ruleId, ctx));
         let cursor: readonly string[] = def.start;
         for (;;) {
           const result = await db.execute<Record<string, unknown>>(

@@ -157,6 +157,10 @@ export const sitemapRules: QueryRule[] = [
     checkIds: ["CHECK-06"],
     category: CATEGORY,
     severity: MISSING.severity,
+    columns: [
+      { key: "robotsOutcome", label: "robots.txt Outcome" },
+      { key: "sitemapSources", label: "Sitemap Sources" },
+    ],
     ...copyFor(MISSING.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
@@ -184,6 +188,10 @@ export const sitemapRules: QueryRule[] = [
     checkIds: ["CHECK-06"],
     category: CATEGORY,
     severity: INVALID.severity,
+    columns: [
+      { key: "failures", label: "Failures" },
+      { key: "failureCount", label: "Failure Count" },
+    ],
     ...copyFor(INVALID.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
@@ -233,6 +241,7 @@ export const sitemapRules: QueryRule[] = [
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: NON_200.severity,
+    columns: [{ key: "fetchClass", label: "Fetch Class" }],
     ...copyFor(NON_200.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -257,6 +266,7 @@ export const sitemapRules: QueryRule[] = [
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: REDIRECTED.severity,
+    columns: [{ key: "redirectUrl", label: "Redirect URL" }],
     ...copyFor(REDIRECTED.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -285,6 +295,10 @@ export const sitemapRules: QueryRule[] = [
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: NON_INDEXABLE.severity,
+    columns: [
+      { key: "robotsMeta", label: "Meta Robots" },
+      { key: "xRobotsTag", label: "X-Robots-Tag" },
+    ],
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -343,6 +357,11 @@ export const sitemapRules: QueryRule[] = [
     checkIds: ["CHECK-07"],
     category: CATEGORY,
     severity: UNCRAWLED.severity,
+    columns: [
+      { key: "attempted", label: "Attempted" },
+      { key: "offOrigin", label: "Off Origin" },
+      { key: "fetchClass", label: "Fetch Class", optional: true },
+    ],
     ...copyFor(UNCRAWLED.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
@@ -401,6 +420,7 @@ export const sitemapRules: QueryRule[] = [
     checkIds: ["CHECK-09"],
     category: CATEGORY,
     severity: NOT_IN_SITEMAP.severity,
+    columns: [],
     ...copyFor(NOT_IN_SITEMAP.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {

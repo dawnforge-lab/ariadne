@@ -74,6 +74,40 @@ export type RuleCategory =
   | "content"
   | "structured-data";
 
+/**
+ * One column of a rule's report, as `RuleMeta.columns` declares it.
+ *
+ * `key` NAMES AN EVIDENCE FIELD — a top-level key of the `evidence` object the
+ * rule's findings carry — and `label` is the header a client prints. The labels
+ * are Screaming Frog's vocabulary wherever one exists (`Status Code`,
+ * `Inlinks`, `Title 1`, `Title 1 Length`, `Word Count`, `No. Near Duplicates`,
+ * `Closest Near Duplicate Match`, `Canonical Link Element`, `Meta Robots`,
+ * `hreflang`, `Expected Link`, `URL Not Returning Link`, `Source`, `Anchor`),
+ * because the people reading these reports read those exports every week and a
+ * second name for one thing is a second thing to them.
+ *
+ * THE FIVE STANDARD KEYS ARE RESERVED and may never be declared here:
+ * `address`, `statusCode`, `indexability`, `indexabilityStatus` are derived
+ * from the finding's page row and are prepended to every rule's column list by
+ * the surface; `pageUrl` is the key `runRules` writes the finding's own URL
+ * under, which `address` already is. A rule that declared one of them would
+ * print two columns with one heading, one of them from a different source.
+ *
+ * `optional` marks a key the rule writes only SOMETIMES — a caveat, an
+ * "at least" flag, a second sample list that exists only when there is more
+ * than one. It is a property of the rule, not of any one crawl, so it is
+ * declared beside the column rather than kept in a list in a test: the harness
+ * requires every NON-optional column of a rule that fired to appear in at least
+ * one of its rows (a column nobody can ever see is a heading, not a report),
+ * and lets an optional one be absent. It is on the wire too, because a client
+ * laying out a table wants to know which cells may be blank by design.
+ */
+export interface RuleColumn {
+  key: string;
+  label: string;
+  optional?: true;
+}
+
 interface RuleMeta {
   id: string;               // 'canonical.non-200-target'
   checkIds: string[];       // ['CHECK-19'] — traces to skills/ariadne-audit/checklist.md
@@ -111,10 +145,45 @@ interface RuleMeta {
    * something small" without keeping its own list of which rules are markers.
    */
   marker?: string;
+  /**
+   * THE RULE'S REPORT, column by column — what a reader sees after the four
+   * standard columns every finding row carries (`address`, `statusCode`,
+   * `indexability`, `indexabilityStatus`).
+   *
+   * REQUIRED ON EVERY RULE THAT FINDS (`page` and `query`), and ABSENT on every
+   * `metric` rule: a metric writes a table of its own shape into `metrics` and
+   * never writes an `issues` row, so there is no finding row for a column to be
+   * a column of. `defineRule` enforces both halves.
+   *
+   * EMPTY IS A STATEMENT, not an omission, and it is why the field is required
+   * rather than non-empty. `canonical.missing`, `mobile.viewport-missing` and
+   * `pages.not-in-sitemap` write no evidence beyond the URL the finding is
+   * filed against: their report IS the standard four columns, and inventing a
+   * fifth so the array could be non-empty would put a heading over a column the
+   * rule cannot honestly fill (hard rule 1's shape, one layer out). What the
+   * field being required buys is that a NEW rule cannot forget to say what its
+   * report looks like — the absent field is the error, the empty array is an
+   * answer.
+   *
+   * THE ORDER IS THE READING ORDER. A rule's evidence object is written in
+   * whatever order its body happened to build it; this list is the order the
+   * fact matters in — the value first, then its measurement, then the context.
+   *
+   * KEYS ARE CHECKED AGAINST REALITY BY THE HARNESS, not by `defineRule`: a
+   * declaration is about what the rule writes, and only a run over a real crawl
+   * knows that. test/fixtures/harness.test.ts asserts, for every rule that fired
+   * on the fixture site, that each non-`optional` column appears in at least one
+   * of its rows AND that no evidence key of that rule is undeclared (bar
+   * `pageUrl`, which the writer adds, and `truncated`, which the cap machinery
+   * adds). An undeclared key is a column nobody sees; evidence IS the report.
+   */
+  columns?: ReadonlyArray<RuleColumn>;
 }
 
 export interface PageRule extends RuleMeta {
   kind: "page";
+  /** Required on a rule that finds — see `RuleMeta.columns`. Empty is an answer. */
+  columns: ReadonlyArray<RuleColumn>;
   run: (page: PageRecord) => Finding[];
 }
 /**
@@ -171,6 +240,8 @@ export interface RuleCaps {
 
 export interface QueryRule extends RuleMeta {
   kind: "query";
+  /** Required on a rule that finds — see `RuleMeta.columns`. Empty is an answer. */
+  columns: ReadonlyArray<RuleColumn>;
   /**
    * `caps` is optional so a direct caller — a rule test, a script — may invoke
    * a rule without restating the engine's defaults; `capsOr` turns the absence
@@ -180,6 +251,12 @@ export interface QueryRule extends RuleMeta {
 }
 export interface MetricRule extends RuleMeta {
   kind: "metric";
+  /**
+   * NEVER PRESENT. Narrowed to `undefined` rather than left inherited so the
+   * type says what `defineRule` refuses: a metric writes rows into `metrics`,
+   * not `issues`, so it has no finding row for a column to be a column of.
+   */
+  columns?: undefined;
   run: (db: Db, crawlId: string) => Promise<Metric[]>;
 }
 export type AnyRule = PageRule | QueryRule | MetricRule;

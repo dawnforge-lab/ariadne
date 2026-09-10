@@ -203,6 +203,10 @@ export const robotsRules: QueryRule[] = [
     checkIds: ["CHECK-03"],
     category: "crawl",
     severity: MISSING.severity,
+    columns: [
+      { key: "outcome", label: "robots.txt Outcome" },
+      { key: "note", label: "Note" },
+    ],
     ...copyFor(MISSING.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId): Promise<Finding[]> => {
@@ -225,6 +229,10 @@ export const robotsRules: QueryRule[] = [
     checkIds: ["CHECK-03"],
     category: "crawl",
     severity: BLOCKS.severity,
+    columns: [
+      { key: "userAgent", label: "User Agent" },
+      { key: "matchedBy", label: "Matched Rule", optional: true },
+    ],
     ...copyFor(BLOCKS.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => blockedFindings(db, crawlId, capsOr(caps)),
@@ -239,6 +247,11 @@ export const robotsRules: QueryRule[] = [
     checkIds: ["CHECK-03"],
     category: "crawl",
     severity: SKIPPED.severity,
+    columns: [
+      { key: "skipped", label: "Reason" },
+      { key: "outcome", label: "robots.txt Outcome" },
+      { key: "robotsTruncated", label: "robots.txt Truncated" },
+    ],
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:

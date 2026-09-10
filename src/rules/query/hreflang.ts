@@ -657,6 +657,13 @@ export const hreflangRules: QueryRule[] = [
     checkIds: ["CHECK-25"],
     category: CATEGORY,
     severity: INVALID_CODE.severity,
+    columns: [
+      { key: "code", label: "hreflang" },
+      { key: "targetUrl", label: "Alternate URL" },
+      { key: "occurrences", label: "Occurrences" },
+      { key: "targetUrls", label: "Alternate URLs", optional: true },
+      { key: "sources", label: "Declaration Source", optional: true },
+    ],
     ...copyFor(INVALID_CODE.id),
     rulesetVersion: RULESET_VERSION,
     // The validity test runs in JS over the crawl's hreflang rows, streamed
@@ -773,6 +780,10 @@ export const hreflangRules: QueryRule[] = [
     checkIds: ["CHECK-25"],
     category: CATEGORY,
     severity: X_DEFAULT.severity,
+    columns: [
+      { key: "targets", label: "Alternate URLs" },
+      { key: "setSize", label: "Cluster Size" },
+    ],
     ...copyFor(X_DEFAULT.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => missingXDefaultFindings(db, crawlId, capsOr(caps)),
@@ -793,6 +804,10 @@ export const hreflangRules: QueryRule[] = [
     checkIds: ["CHECK-24"],
     category: CATEGORY,
     severity: RETURN_LINK.severity,
+    columns: [
+      { key: "target", label: "URL Not Returning Link" },
+      { key: "targetHasHreflang", label: "Target Declares hreflang" },
+    ],
     ...copyFor(RETURN_LINK.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -833,6 +848,11 @@ export const hreflangRules: QueryRule[] = [
     checkIds: ["CHECK-26"],
     category: CATEGORY,
     severity: NON_INDEXABLE.severity,
+    columns: [
+      { key: "target", label: "URL Not Returning Link" },
+      { key: "targetFetchClass", label: "Target Fetch Class" },
+      { key: "targetIndexable", label: "Target Indexable" },
+    ],
     ...copyFor(NON_INDEXABLE.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
@@ -862,6 +882,10 @@ export const hreflangRules: QueryRule[] = [
     checkIds: ["CHECK-24"],
     category: CATEGORY,
     severity: SELF_REFERENCE.severity,
+    columns: [
+      { key: "codes", label: "hreflang" },
+      { key: "targets", label: "Alternate URLs" },
+    ],
     ...copyFor(SELF_REFERENCE.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => missingSelfReferenceFindings(db, crawlId, capsOr(caps)),
@@ -879,6 +903,11 @@ export const hreflangRules: QueryRule[] = [
     checkIds: ["CHECK-24", "CHECK-26"],
     category: CATEGORY,
     severity: NOT_CRAWLED.severity,
+    columns: [
+      { key: "total", label: "Alternates" },
+      { key: "hosts", label: "Hosts" },
+      { key: "hostsTruncated", label: "Hosts Truncated", optional: true },
+    ],
     ...copyFor(NOT_CRAWLED.id),
     rulesetVersion: RULESET_VERSION,
     // The reason states only what the query established. It used to add "most

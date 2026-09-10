@@ -404,6 +404,12 @@ export const redirectRules: QueryRule[] = [
     checkIds: ["CHECK-10"],
     category: CATEGORY,
     severity: CHAIN.severity,
+    columns: [
+      { key: "length", label: "Number of Redirects" },
+      { key: "chain", label: "Chain" },
+      { key: "finalStatus", label: "Final Status Code" },
+      { key: "chainTruncated", label: "Chain Truncated" },
+    ],
     ...copyFor(CHAIN.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps) => {
@@ -422,6 +428,7 @@ export const redirectRules: QueryRule[] = [
     checkIds: ["CHECK-10"],
     category: CATEGORY,
     severity: LOOP.severity,
+    columns: [{ key: "cycle", label: "Loop" }],
     ...copyFor(LOOP.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps) => {

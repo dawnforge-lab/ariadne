@@ -32,39 +32,72 @@ const CATEGORY = "technical";
 export const technicalRules: PageRule[] = [
   // Fires only on the absence of the tag. Nothing here inspects the contents of
   // a viewport that does exist, and the copy must not claim otherwise.
-  pageRule("mobile.viewport-missing", ["CHECK-52"], CATEGORY, "critical", (p, self) =>
-    isAuditable(p) && !p.hasViewport ? [finding(self, p, {})] : [],
+  pageRule(
+    "mobile.viewport-missing",
+    ["CHECK-52"],
+    CATEGORY,
+    "critical",
+    [],
+    (p, self) =>
+      isAuditable(p) && !p.hasViewport ? [finding(self, p, {})] : [],
   ),
 
   // A count of <img> elements missing a width or height attribute. CSS may
   // already be reserving the space, so this is the attribute's absence, not
   // proven layout shift — `imagesTotal` rides along so the report can say
   // "3 of 8" rather than a bare number.
-  pageRule("images.missing-dimensions", ["CHECK-49"], CATEGORY, "info", (p, self) =>
-    isAuditable(p) && p.imagesMissingDimensions > 0
-      ? [
-          finding(self, p, {
-            imagesMissingDimensions: p.imagesMissingDimensions,
-            imagesTotal: p.imagesTotal,
-          }),
-        ]
-      : [],
+  pageRule(
+    "images.missing-dimensions",
+    ["CHECK-49"],
+    CATEGORY,
+    "info",
+    [
+      { key: "imagesMissingDimensions", label: "Images Missing Dimensions" },
+      { key: "imagesTotal", label: "Images" },
+    ],
+    (p, self) =>
+      isAuditable(p) && p.imagesMissingDimensions > 0
+        ? [
+            finding(self, p, {
+              imagesMissingDimensions: p.imagesMissingDimensions,
+              imagesTotal: p.imagesTotal,
+            }),
+          ]
+        : [],
   ),
 
   // An absent alt attribute — not an empty one, which is the correct value for
   // a decorative image and is counted as present by the analyzer.
-  pageRule("images.missing-alt", ["CHECK-49"], CATEGORY, "warning", (p, self) =>
-    isAuditable(p) && p.imagesMissingAlt > 0
-      ? [finding(self, p, { imagesMissingAlt: p.imagesMissingAlt, imagesTotal: p.imagesTotal })]
-      : [],
+  pageRule(
+    "images.missing-alt",
+    ["CHECK-49"],
+    CATEGORY,
+    "warning",
+    [
+      { key: "imagesMissingAlt", label: "Images Missing Alt Text" },
+      { key: "imagesTotal", label: "Images" },
+    ],
+    (p, self) =>
+      isAuditable(p) && p.imagesMissingAlt > 0
+        ? [finding(self, p, { imagesMissingAlt: p.imagesMissingAlt, imagesTotal: p.imagesTotal })]
+        : [],
   ),
 
   // One measurement of one fetch, from this machine, on this crawl. A null is
   // an unrecorded timing, not a fast one: firing on it would be reporting a
   // number the crawl does not have.
-  pageRule("performance.slow-response", ["CHECK-50"], CATEGORY, "warning", (p, self) =>
-    isAuditable(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
-      ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: SLOW_MS })]
-      : [],
+  pageRule(
+    "performance.slow-response",
+    ["CHECK-50"],
+    CATEGORY,
+    "warning",
+    [
+      { key: "responseTimeMs", label: "Response Time (ms)" },
+      { key: "threshold", label: "Threshold (ms)" },
+    ],
+    (p, self) =>
+      isAuditable(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
+        ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: SLOW_MS })]
+        : [],
   ),
 ];

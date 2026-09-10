@@ -12,6 +12,7 @@ import type {
   PageRecord,
   PageRule,
   RuleCategory,
+  RuleColumn,
   Severity,
 } from "./registry/types.js";
 
@@ -283,6 +284,215 @@ export const CANONICALISED_ELSEWHERE = (alias: string): SQL => {
 };
 
 /**
+ * `none` as a whole directive: the list is comma- and space-delimited, so the
+ * token has to be bounded on both sides. A substring test would read "nonevent"
+ * as a directive and hide the page from every rule below.
+ */
+const NONE_DIRECTIVE = /(?:^|[\s,])none(?:[\s,]|$)/i;
+
+/**
+ * Whether a robots directive string asks for noindex. Substring match for
+ * `noindex` itself, because the directive arrives as a comma list
+ * ("max-snippet:-1, noindex, nofollow") and the value is stored verbatim.
+ *
+ * `none` counts too: it is Google's shorthand for "noindex, nofollow", and a
+ * page carrying it is out of the index just as surely as one that spelled the
+ * directive out.
+ *
+ * MOVED HERE FROM src/rules/page/indexability.ts (Phase 20), which re-exports
+ * it at its old address, for the reason `resolveEffectiveCanonical` moved: the
+ * function now has a second class of caller — `indexabilityOf`, which every
+ * finding row on the API surface is labelled by — and helpers.ts cannot import
+ * from a rule file that imports helpers.ts. One definition of "noindex", read
+ * by the rule that reports it and by the column that labels every other rule's
+ * rows.
+ *
+ * MIRRORED IN `isIndexable` (src/crawl/persist.ts), which stamps
+ * `pages.is_indexable` at crawl time from the same two robots sources. The two
+ * must agree — a page this function calls noindex and that column calls
+ * indexable is a contradiction the report cannot resolve. Change one, change
+ * the other.
+ */
+export function saysNoindex(value: string | null): boolean {
+  return present(value) && (/noindex/i.test(value) || NONE_DIRECTIVE.test(value));
+}
+
+/** The two robots channels a page can carry a directive on. */
+export type RobotsDeclaration = Pick<PageRecord, "robotsMeta" | "xRobotsTag">;
+
+/** Whether either robots source on this page asks for noindex. */
+export function hasNoindex(page: RobotsDeclaration): boolean {
+  return saysNoindex(page.robotsMeta) || saysNoindex(page.xRobotsTag);
+}
+
+/**
+ * The columns `indexabilityOf` reads. A `Pick` rather than a whole `PageRecord`
+ * for `isAuditable`'s reason: the API's listing query holds a narrow projection
+ * of `pages` (`ISSUE_PAGE_COLUMNS`, src/api/service.ts) and must ask this
+ * question through this function rather than restating it in SQL.
+ */
+export type IndexabilityInput = CanonicalDeclaration &
+  RobotsDeclaration &
+  Pick<PageRecord, "fetchClass" | "statusCode" | "isIndexable">;
+
+/** The two words the `indexability` column can hold. */
+export type Indexability = "Indexable" | "Non-Indexable";
+
+/**
+ * Why a URL is not indexable, in the closed vocabulary the reports print.
+ * The empty string is the value an INDEXABLE row carries: there is no reason,
+ * and an empty cell is what a reader expects to see beside "Indexable".
+ */
+export type IndexabilityStatus =
+  | ""
+  | "Noindex"
+  | "Canonicalised"
+  | "Redirected"
+  | "Client Error"
+  | "Server Error"
+  | "Blocked by robots.txt"
+  | "No Response"
+  | "Not HTML";
+
+/**
+ * THE TWO STANDARD COLUMNS EVERY FINDING ROW CARRIES, derived from the `pages`
+ * row the finding names: is this URL indexable, and if not, why.
+ *
+ * ONE HELPER, and that is the point of it. Screaming Frog prints `Indexability`
+ * and `Indexability Status` on every per-issue export, and a client reading a
+ * "sitemap contains non-indexable URLs" report wants to know WHICH KIND of
+ * non-indexable each row is without opening a second report. Every surface here
+ * — the JSON listing, the CSV, the demo table — reads this function, so the
+ * three cannot disagree about a page.
+ *
+ * ## The precedence, and why it is this order
+ *
+ * The conditions overlap: a 301 can carry a noindex meta, a 404 page can
+ * declare a canonical. The order below is the order in which the fact SETTLES
+ * what a search engine does with the URL, most decisive first — a redirect is
+ * never indexed whatever its HTML says, and a 200's own directives only matter
+ * once there is a 200.
+ *
+ *  1. `redirect`            -> `Redirected`             (the URL is not a page)
+ *  2. `client_error`        -> `Client Error`
+ *  3. `server_error`        -> `Server Error`
+ *  4. `blocked`             -> `Client Error` / `Server Error` by status
+ *  5. `disallowed`          -> `Blocked by robots.txt`
+ *  6. `timeout`, `network_error` -> `No Response`
+ *  7. `non_html`, `too_large`, `unsupported_encoding` -> `Not HTML`
+ *  8. `ok` and a status that is not 200 -> `Not HTML`
+ *  9. `ok` 200 + noindex on either robots channel -> `Noindex`
+ * 10. `ok` 200 + a canonical naming another URL   -> `Canonicalised`
+ * 11. otherwise                                    -> `Indexable`, status `""`
+ *
+ * Three of those groupings are decisions rather than readings, and each is a
+ * choice between members of a closed vocabulary rather than a place to invent
+ * a value:
+ *
+ *  - **`blocked` is read off the wire status.** The class means the site
+ *    refused THIS CLIENT — a WAF challenge, a 401/403/429, a `cf-mitigated`
+ *    header on any status — so it is never `No Response` (we did get an answer)
+ *    and never `Blocked by robots.txt` (robots.txt said nothing). A 5xx
+ *    challenge is reported as the server error the wire said it was; everything
+ *    else, including a 200 challenge page and a block with no status at all, is
+ *    `Client Error`: the request was refused, and the refusal is about the
+ *    client.
+ *  - **`too_large` and `unsupported_encoding` join `non_html`.** All three mean
+ *    the same thing to a reader: the response arrived and produced no HTML this
+ *    engine could read, so there is nothing to judge indexability FROM. The
+ *    causes differ (a body past the read cap, a `content-encoding` we do not
+ *    implement, a content type that was never HTML) and `fetchClass` is where a
+ *    reader finds out which — that column is on `pages_query` and on the
+ *    `internal_urls` export, and this one is not a second copy of it.
+ *  - **`ok` with a status that is not 200** — a 204, a 206 — is `Not HTML` for
+ *    the same reason: `pages.is_indexable` is false on it by construction
+ *    (src/crawl/persist.ts requires the 200), and no body was analysed.
+ *
+ * ## `is_indexable` is asserted against, not read
+ *
+ * The column is the crawler's own stamp (`isIndexable`, src/crawl/persist.ts):
+ * a 200, fetched ok, with no noindex on either channel. That is exactly cases
+ * 8-11 above minus the canonical, so this function computes the same answer
+ * from the same columns and uses the stored boolean as a CHECK on itself: a row
+ * where the two disagree — `is_indexable = true` on a page this function calls
+ * `Noindex`, say — is a writer defect or a hand-edited row, and it throws
+ * rather than printing one of the two answers and dropping the other (hard rule
+ * 7). `Canonicalised` is the one status the column cannot express, and it is
+ * the one case where a `true` column and a `Non-Indexable` verdict are both
+ * right: a canonicalised page IS crawled and indexable, it has simply handed
+ * its signals elsewhere, which is why the check exempts it.
+ *
+ * A `null` `is_indexable` asserts nothing — the column is null on a page that
+ * was never fetched as HTML, which is every case above 8.
+ */
+export function indexabilityOf(page: IndexabilityInput): {
+  indexability: Indexability;
+  status: IndexabilityStatus;
+} {
+  const nonIndexable = (status: IndexabilityStatus): {
+    indexability: Indexability;
+    status: IndexabilityStatus;
+  } => ({ indexability: "Non-Indexable", status });
+
+  switch (page.fetchClass) {
+    case "redirect":
+      return nonIndexable("Redirected");
+    case "client_error":
+      return nonIndexable("Client Error");
+    case "server_error":
+      return nonIndexable("Server Error");
+    case "blocked":
+      return nonIndexable(
+        page.statusCode !== null && page.statusCode >= 500 ? "Server Error" : "Client Error",
+      );
+    case "disallowed":
+      return nonIndexable("Blocked by robots.txt");
+    case "timeout":
+    case "network_error":
+      return nonIndexable("No Response");
+    case "non_html":
+    case "too_large":
+    case "unsupported_encoding":
+      return nonIndexable("Not HTML");
+    case "ok":
+      break;
+    default:
+      // A `fetch_class` this function has never met. It is a `text` column, so
+      // the type system has not seen it, and the honest answer to "is this
+      // indexable" is not a guess: `FETCH_CLASSES` is the closed vocabulary and
+      // a member added there without a case here is a defect to surface.
+      throw new Error(
+        `indexabilityOf: unknown fetch_class '${page.fetchClass}' — add it to the ` +
+          "precedence in src/rules/helpers.ts rather than letting a row be labelled " +
+          "by a default",
+      );
+  }
+
+  if (page.statusCode !== 200) return nonIndexable("Not HTML");
+
+  const answer = hasNoindex(page)
+    ? nonIndexable("Noindex")
+    : isCanonicalisedElsewhere(page)
+      ? nonIndexable("Canonicalised")
+      : { indexability: "Indexable" as const, status: "" as const };
+
+  // The stored column as a check on this computation, never as its source. The
+  // canonical is invisible to `is_indexable`, so a `Canonicalised` row is the
+  // one place the two legitimately differ.
+  if (page.isIndexable !== null && answer.status !== "Canonicalised") {
+    const expected = answer.indexability === "Indexable";
+    if (page.isIndexable !== expected) {
+      throw new Error(
+        `indexabilityOf: '${page.url}' stores is_indexable=${String(page.isIndexable)} ` +
+          `but its robots directives read '${answer.status || "Indexable"}' — the crawl ` +
+          "writer (src/crawl/persist.ts) and this function must agree about noindex",
+      );
+    }
+  }
+  return answer;
+}
+
+/**
  * The identity a finding is stamped with. `pageRule` hands this to the rule
  * body so the id and severity are written once, in the rule's definition,
  * rather than restated inside it where they can drift.
@@ -405,6 +615,12 @@ export function pageRule(
   checkIds: string[],
   category: RuleCategory,
   severity: Severity,
+  // THE REPORT'S COLUMNS, positional and required, immediately before the body
+  // that writes the evidence they name — so the declaration and the object
+  // literal it describes are read together. An EMPTY array is the answer for a
+  // rule whose report is the four standard columns and nothing else; see
+  // `RuleMeta.columns`.
+  columns: ReadonlyArray<RuleColumn>,
   run: (page: PageRecord, self: RuleIdentity) => Finding[],
   // The NOT MEASURED marker flag, threaded through so a page-rule marker
   // (`content.thin-skipped`) declares itself the same one way every other marker
@@ -418,6 +634,7 @@ export function pageRule(
     checkIds,
     category,
     severity,
+    columns,
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
     ...(marker === undefined ? {} : { marker }),

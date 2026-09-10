@@ -107,6 +107,7 @@ export const TOOL_NAMES = [
   "robots_get",
   "issues_list",
   "issue_urls",
+  "issue_inlinks",
   "metrics_get",
   "pages_query",
   "export_crawl",
@@ -671,11 +672,29 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   server.registerTool(
     named("issue_urls"),
     {
-      title: "One rule's findings, URL by URL",
+      title: "One rule's findings, as a table",
       description:
-        "Every finding one rule recorded on one crawl: {url, evidence}. This is " +
-        "the action-plan feed — the list you hand a developer — and the counterpart " +
-        "to issues_list's five-URL sample.\n\n" +
+        "Every finding one rule recorded on one crawl, as the report a client " +
+        "acts on: {columns, items, nextCursor}. This is the action-plan feed — the " +
+        "list you hand a developer — and the counterpart to issues_list's " +
+        "five-URL sample.\n\n" +
+        "COLUMNS ARE THE ANSWER'S OWN HEADER: [{key, label}], the four standard " +
+        "columns first (address, statusCode, indexability, indexabilityStatus) " +
+        "and then the ones this rule declares. Render the table from it. A " +
+        "column whose key is one of the standard four is read off the ITEM; " +
+        "every other column's key is read off item.evidence. A column marked " +
+        "optional: true is one the rule writes only sometimes, so that cell is " +
+        "blank by design.\n\n" +
+        "EVERY ROW CARRIES: address (the URL — url is the same string under its " +
+        "old name and goes away next release), statusCode, indexability " +
+        "('Indexable' or 'Non-Indexable') and indexabilityStatus, which is why " +
+        "it is not indexable: '' when it is, else Noindex, Canonicalised, " +
+        "Redirected, Client Error, Server Error, Blocked by robots.txt, No " +
+        "Response or Not HTML. Quote that word rather than re-deriving it. All " +
+        "three are NULL when the crawl has no page row for the URL — a site-wide " +
+        "finding, a host variant that was probed but never crawled, a sitemap " +
+        "URL the frontier never reached. Null there means NOBODY FETCHED IT, " +
+        "never that it was fine.\n\n" +
         "It reads findings crawl_rules wrote. On a crawl that has not been judged " +
         "every rule answers {items: []}, and so does a rule that simply found " +
         "nothing — the two are indistinguishable here, so an empty answer means NOT " +
@@ -683,11 +702,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "crawl_status: rulesRunAt is the timestamp of the last completed rules " +
         "pass, and null means no complete pass is on record. Reach this tool " +
         "through issues_list, which only names rules that actually found something.\n\n" +
-        "url is null for a site-wide finding (a fact about the crawl, not about a " +
-        "page). evidence is the rule's own testimony, verbatim: its shape is the " +
-        "rule's, so read the fields it gives you rather than expecting a fixed " +
-        "set. ruleId must name a rule that FINDS; a metric rule measures instead " +
-        "and is refused with a pointer to metrics_get.\n\n" +
+        "address is null for a site-wide finding (a fact about the crawl, not " +
+        "about a page). evidence is the rule's own testimony, verbatim, and " +
+        "carries the rule's own pageUrl key; columns is what says which of its " +
+        "fields to print and under what heading. ruleId must name a rule that " +
+        "FINDS; a metric rule measures instead and is refused with a pointer to " +
+        "metrics_get.\n\n" +
+        "For links.broken-internal and links.to-server-error there is a " +
+        "companion report: issue_inlinks lists the links that POINT AT what this " +
+        "one found, which is where the fix is made.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A large rule can have thousands of rows — ` +
         "follow the cursors, or use export_crawl if you want all of them at once.",
@@ -702,6 +725,50 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     },
     async ({ crawlId, ruleId, ...rest }) =>
       run("issue_urls", () => service.listIssueUrls(crawlId, ruleId, defined(rest))),
+  );
+
+  server.registerTool(
+    named("issue_inlinks"),
+    {
+      title: "The links that point at a broken target",
+      description:
+        "The companion report to issue_urls for the two rules that report a " +
+        "TARGET the site links to: {columns, items, nextCursor}, one row per " +
+        "LINK — {source, destination, anchor, statusCode}.\n\n" +
+        "WHY IT EXISTS. links.broken-internal and links.to-server-error report " +
+        "the broken URL, once, however many pages link to it: one dead URL " +
+        "linked from two hundred pages is one thing to fix, and two hundred " +
+        "findings would bury it. But the fix is made in the SOURCE page's " +
+        "markup, and a rule's sampleSources is a sample of ten. This is the " +
+        "list. source is the page carrying the link, destination the URL it " +
+        "points at, anchor the link's text (null for an image link or a bare " +
+        "<a>), statusCode the destination's own crawled status.\n\n" +
+        "ONLY THOSE TWO RULES HAVE ONE. Every other rule reports the page " +
+        "itself, where 'what links here' is a different question from the " +
+        "finding, and naming one is refused rather than answered with an empty " +
+        "page — an empty page here would read as 'nothing links to it'.\n\n" +
+        "It reads the links, not the findings, so it answers before crawl_rules " +
+        "has ever run and a rule that CAPPED its findings still gets a complete " +
+        "report here.\n\n" +
+        `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
+        `maximum ${PAGE_SIZE_MAX}. A site with many broken links has thousands ` +
+        "of rows — follow the cursors, or export the links_to_4xx / links_to_5xx " +
+        "CSV views for all of them at once.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        ruleId: z
+          .string()
+          .describe(
+            "The rule whose inlinks to list: 'links.broken-internal' or " +
+              "'links.to-server-error'. Any other rule is refused — it has no inlinks " +
+              "report.",
+          ),
+        limit: limitField(),
+        cursor: cursorField(),
+      }),
+    },
+    async ({ crawlId, ruleId, ...rest }) =>
+      run("issue_inlinks", () => service.listIssueInlinks(crawlId, ruleId, defined(rest))),
   );
 
   server.registerTool(
@@ -932,10 +999,16 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The whole ruleset, with the client-facing copy each rule would report " +
         "with: {rulesetVersion, rules: [{id, kind, severity, category, checkIds, " +
-        "title, explanation, howToFix, marker?}]}. kind is page | query | metric, severity " +
+        "title, explanation, howToFix, columns?, marker?}]}. kind is page | query | metric, severity " +
         "is critical | warning | info, and checkIds trace each rule to the audit " +
         "checklist. Ordered by severity then rule id — the order issues_list " +
         "returns its groups in.\n\n" +
+        "columns is the rule's REPORT, column by column — [{key, label, " +
+        "optional?}], the same list issue_urls serves beside its rows, so a table " +
+        "can be laid out before the rows are asked for. It is absent on a metric " +
+        "rule, which writes no finding rows, and on every rule that finds it " +
+        "begins with the four standard columns: address, statusCode, " +
+        "indexability, indexabilityStatus.\n\n" +
         "This is the CHECKLIST: what the engine looks for, including the checks a " +
         "site passed and the checks nobody has run yet. issues_list can only name " +
         "the rules that found something, so it cannot answer 'what else was " +
@@ -1140,7 +1213,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "evidence intact. Answers {dataset, path, rows, bytes}.\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
-        "the other five refuse one. Answers {format, view, path, rows, bytes}.\n" +
+        "the other seven refuse one. Answers {format, view, path, rows, bytes}.\n" +
+        "  links_to_4xx and links_to_5xx are the two inlinks worksheets — Source, " +
+        "Destination, Anchor, Status Code, one row per internal link whose target " +
+        "answered 4xx or 5xx, the same rows issue_inlinks paginates.\n" +
         "'dataset' is the first format's word and 'view' is the second's; asking " +
         "with both is refused rather than resolved.\n\n" +
         "WHAT THE CSV LOOKS LIKE, because a human opens it and you are the one who " +
@@ -1150,6 +1226,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "A list inside a cell (checkIds, a redirect chain, an evidence array) is " +
         "joined with '|'. An empty cell means the engine has no value there — " +
         "never zero, never false.\n" +
+        "THE issue_urls VIEW IS THE RULE'S OWN TABLE: its header is the labels of " +
+        "that rule's columns (rules_catalog's `columns`, the four standard ones " +
+        "first), one cell per column, with an array cell comma-joined and a " +
+        "trailing 'Truncated' column that is filled only on the one row carrying a " +
+        "cap note. Every other view's evidence column is the older summary:\n" +
         "The evidence column is the finding's evidence FLATTENED to a deterministic " +
         "summary rather than a JSON blob: sorted key=value pairs joined with '; ', " +
         "dotted paths for nested objects (truncated.total=222), indices for arrays " +

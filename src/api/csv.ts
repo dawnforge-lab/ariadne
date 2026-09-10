@@ -1,5 +1,5 @@
 /**
- * The CSV surface: one writer, one evidence flattening, seven views.
+ * The CSV surface: one writer, two evidence renderings, eight views.
  *
  * These are the files a dashboard's "Bulk export" block hands a human. They are
  * NOT a second API — every view here is a keyset-cursored read of tables the
@@ -63,6 +63,7 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+import { indexabilityOf } from "../rules/helpers.js";
 import { MAX_REDIRECT_HOPS } from "../rules/query/redirects.js";
 
 /** The datasets `export_crawl`'s CSV half can write, and the `view` vocabulary. */
@@ -71,6 +72,7 @@ export const CSV_VIEWS = [
   "issue_urls",
   "internal_urls",
   "links_to_4xx",
+  "links_to_5xx",
   "anchor_texts",
   "redirects",
   "resources",
@@ -185,8 +187,16 @@ export function flattenEvidence(evidence: Record<string, unknown>): string {
   }
 }
 
-/** The depth-first walk `flattenEvidence` is: sorted keys, indexed elements. */
-function walk(value: unknown, path: string, out: string[]): void {
+/**
+ * The depth-first walk `flattenEvidence` is: sorted keys, indexed elements.
+ *
+ * `dropPageUrl` is false for `boundedLeaves`, which walks ONE COLUMN's value
+ * rather than a whole evidence blob. The filter exists because the blob's
+ * top-level `pageUrl` is the row's own `url` column; a `pageUrl` key inside a
+ * column's object would be a different fact, and dropping it because it sits at
+ * depth zero of that value would delete evidence for a coincidence of nesting.
+ */
+function walk(value: unknown, path: string, out: string[], dropPageUrl = true): void {
   if (Array.isArray(value)) {
     if (value.length === 0) {
       out.push(`${path}=[]`);
@@ -196,12 +206,12 @@ function walk(value: unknown, path: string, out: string[]): void {
       out.push(`${path}=${value.map(scalar).join(LIST_SEPARATOR)}`);
       return;
     }
-    value.forEach((item, index) => walk(item, `${path}[${index}]`, out));
+    value.forEach((item, index) => walk(item, `${path}[${index}]`, out, dropPageUrl));
     return;
   }
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !(path === "" && key === "pageUrl"))
+      .filter(([key]) => !(dropPageUrl && path === "" && key === "pageUrl"))
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     if (entries.length === 0) {
       // The top level is not a leaf: evidence holding nothing but a pageUrl is
@@ -209,7 +219,8 @@ function walk(value: unknown, path: string, out: string[]): void {
       if (path !== "") out.push(`${path}={}`);
       return;
     }
-    for (const [key, child] of entries) walk(child, path === "" ? key : `${path}.${key}`, out);
+    for (const [key, child] of entries)
+      walk(child, path === "" ? key : `${path}.${key}`, out, dropPageUrl);
     return;
   }
   out.push(`${path}=${scalar(value)}`);
@@ -231,6 +242,15 @@ export interface CsvRuleCopy {
   title: string;
   category: string;
   checkIds: readonly string[];
+  /**
+   * The rule's report, column by column — the four standard columns and then the
+   * rule's own (`columnsFor`, src/api/service.ts). The `issue_urls` view's HEADER
+   * is these labels and its cells are these keys, so the spreadsheet a client
+   * downloads and the table it renders from the JSON listing are the same table.
+   *
+   * Empty on a view that is not about one rule; only `issue_urls` reads it.
+   */
+  columns: ReadonlyArray<{ key: string; label: string }>;
 }
 
 /**
@@ -247,8 +267,16 @@ export interface CsvViewContext {
 }
 
 export interface CsvView {
-  /** The header row, always written. */
-  readonly header: readonly string[];
+  /**
+   * The header row, always written.
+   *
+   * A FUNCTION OF THE REQUEST rather than a constant, since Phase 20: the
+   * `issue_urls` view's columns are the rule's, so its header cannot be known
+   * until the rule is. Every other view still declares a plain array and
+   * `defineCsvView` wraps it in a function that ignores both arguments, so only
+   * the one view that needs the request sees it.
+   */
+  header(ruleId: string | null, ctx: CsvViewContext): readonly string[];
   /** The columns the cursor is made of — documentation, and the start's arity. */
   readonly keyset: readonly string[];
   /** A cursor that sorts before every real row. Every view starts here. */
@@ -271,7 +299,7 @@ export interface CsvView {
  * against the shape the view's own query selects.
  */
 function defineCsvView<Row extends Record<string, unknown>>(view: {
-  header: readonly string[];
+  header: readonly string[] | ((ruleId: string | null, ctx: CsvViewContext) => readonly string[]);
   keyset: readonly string[];
   start: readonly string[];
   needsRuleId?: boolean;
@@ -280,7 +308,8 @@ function defineCsvView<Row extends Record<string, unknown>>(view: {
   cells(row: Row, ctx: CsvViewContext): string[];
 }): CsvView {
   return {
-    header: view.header,
+    header:
+      typeof view.header === "function" ? view.header : () => view.header as readonly string[],
     keyset: view.keyset,
     start: view.start,
     needsRuleId: view.needsRuleId ?? false,
@@ -296,6 +325,143 @@ function orEmpty(value: string | number | boolean | null | undefined): string {
 }
 
 const ISSUE_HEADER = ["ruleId", "severity", "category", "checkIds", "url", "title", "evidence"];
+
+/**
+ * The header of the always-present last column of `issue_urls`, and the only
+ * one that is not a rule's or the surface's: the cap note.
+ *
+ * Named rather than spelled inline because two places have to agree about it —
+ * the header and the cell — and a report whose last column is headed one thing
+ * and filled from another is worse than no column.
+ */
+export const TRUNCATED_LABEL = "Truncated";
+
+/**
+ * The list separator INSIDE one report cell.
+ *
+ * A COMMA, deliberately, where `LIST_SEPARATOR` is a pipe — the two are
+ * different jobs and this is the one the design named (spec §2.1: array
+ * evidence "is rendered as a comma-joined cell"). `LIST_SEPARATOR` serves a
+ * fixed column whose whole value is a list a reader will want to split back out
+ * (`checkIds`, a redirect chain in the `redirects` view), and a pipe survives
+ * "Text to Columns" where a comma would need the cell unquoted. A report cell
+ * is read, not split: `sampleSources` under a heading that says `Source` is
+ * three URLs a person's eye runs down, and a comma is what English uses. RFC
+ * 4180 quoting makes the comma safe either way.
+ */
+const CELL_SEPARATOR = ", ";
+
+/** The `pages` columns the standard four report columns are derived from. */
+interface IndexabilityRow {
+  page_url: string | null;
+  status_code: number | null;
+  fetch_class: string | null;
+  robots_meta: string | null;
+  x_robots_tag: string | null;
+  is_indexable: boolean | null;
+  canonical_html: string | null;
+  canonical_header: string | null;
+}
+
+/**
+ * The four standard columns of one finding row, as cells, keyed by column key.
+ *
+ * ONE DERIVATION, shared with the JSON listing through `indexabilityOf`: the
+ * spreadsheet and the API answer the same three words about a page because they
+ * run the same function over the same eight columns.
+ *
+ * `fetch_class` is `not null` on a `pages` row, so a null here is the left join
+ * finding nothing — no page, and three EMPTY cells rather than invented ones.
+ * Empty means "the engine has no value", the same as everywhere else in this
+ * file, and `address` is still filled: a URL with no page row (a probed host
+ * variant, a sitemap URL the frontier never reached) is exactly that case.
+ */
+function standardCells(row: IssueRow & IndexabilityRow): Record<string, string> {
+  const judged =
+    row.fetch_class === null
+      ? null
+      : indexabilityOf({
+          url: row.page_url ?? "",
+          fetchClass: row.fetch_class,
+          statusCode: row.status_code,
+          robotsMeta: row.robots_meta,
+          xRobotsTag: row.x_robots_tag,
+          isIndexable: row.is_indexable,
+          canonicalHtml: row.canonical_html,
+          canonicalHeader: row.canonical_header,
+        });
+  return {
+    address: orEmpty(row.url),
+    statusCode: row.fetch_class === null ? "" : orEmpty(row.status_code),
+    indexability: judged === null ? "" : judged.indexability,
+    // An INDEXABLE row's status is the empty string by construction
+    // (`IndexabilityStatus`), which is the same cell a page with no row gets —
+    // and correctly so: both mean "there is no reason to print here". The
+    // `Indexability` column beside it is what tells them apart.
+    indexabilityStatus: judged === null ? "" : judged.status,
+  };
+}
+
+/**
+ * ONE EVIDENCE VALUE AS ONE CELL — the per-column twin of `flattenEvidence`.
+ *
+ * Four shapes, and each is the reading a person doing the fix wants:
+ *
+ *  - a SCALAR is itself, whitespace collapsed and clipped at
+ *    `EVIDENCE_MAX_VALUE` (`scalar`, the same one the flattened cell uses);
+ *  - `null` and a MISSING key are both an empty cell. They are the same fact
+ *    here: this row has no value under this heading. (Inside `flattenEvidence`
+ *    they are spelled `key=null`, because there the alternative was a leaf that
+ *    looked like an empty string; under a heading of its own an empty cell
+ *    already reads as "nothing", which is the file-wide convention.)
+ *  - an ARRAY OF SCALARS is its members, comma-joined — `sampleSources` under
+ *    `Source` is the list of pages that link to the broken URL. An EMPTY array
+ *    is an empty cell for the same reason a null is: under a heading, "nothing"
+ *    is what a blank says. (`flattenEvidence` spells it `key=[]`, because there
+ *    a leaf with no value would have looked like an empty string.)
+ *  - anything with an object in it — `closest`, `hosts`, `resources`, the
+ *    `truncated` note — is flattened to its `path=value` leaves, sorted and
+ *    bounded exactly as `flattenEvidence` bounds a whole blob. It is a
+ *    structured fact in a rectangle, and the alternative (raw JSON) is a cell
+ *    nobody can read and every spreadsheet mangles.
+ */
+export function evidenceCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "";
+    if (value.every((item) => item === null || typeof item !== "object")) {
+      return value.map(scalar).join(CELL_SEPARATOR);
+    }
+    return boundedLeaves(value);
+  }
+  if (typeof value === "object") return boundedLeaves(value);
+  return scalar(value);
+}
+
+/**
+ * A structured value as bounded `path=value` leaves — `flattenEvidence`'s
+ * body, applied to one column's value instead of to a whole blob, so one cell
+ * of a report cannot grow past the same caps.
+ */
+function boundedLeaves(value: object): string {
+  const leaves: string[] = [];
+  walk(value, "", leaves, false);
+  const shown: string[] = [];
+  let length = 0;
+  for (const leaf of leaves) {
+    if (shown.length >= EVIDENCE_MAX_LEAVES) break;
+    const next = length === 0 ? leaf.length : length + 2 + leaf.length;
+    if (shown.length > 0 && next > EVIDENCE_MAX_CELL) break;
+    shown.push(leaf);
+    length = next;
+  }
+  for (;;) {
+    const dropped = leaves.length - shown.length;
+    const cell = dropped > 0 ? [...shown, `+${dropped} more`].join("; ") : shown.join("; ");
+    if (cell.length <= EVIDENCE_MAX_CELL || shown.length <= 1) return cell;
+    shown.pop();
+  }
+}
 
 interface IssueRow extends Record<string, unknown> {
   rule_id: string;
@@ -328,12 +494,41 @@ function linkKeyset(crawlId: string, cursor: readonly string[]): SQL {
         (${cursor[0] ?? ""}::text, ${cursor[1] ?? ""}::text, ${cursor[2] ?? "-1"}::int)`;
 }
 
+/**
+ * The two broken-target link worksheets, which differ in exactly one token: the
+ * `fetch_class` the target answered with.
+ *
+ * A factory rather than two spelled-out views, for `linkTargetClassFindings`'
+ * reason (src/rules/query/link-targets.ts): the question is one question asked
+ * of two status classes, and two copies of it are two places for the keyset,
+ * the internal-only join or the column order to drift.
+ */
+function linkTargetView(fetchClass: "client_error" | "server_error"): CsvView {
+  return defineCsvView<LinkRow & { status_code: number | null }>({
+    header: ["Source", "Destination", "Anchor", "Status Code"],
+    keyset: [...LINK_KEYSET],
+    start: [...LINK_START],
+    query: (crawlId, cursor, limit) => sql`
+      select src.url as source, l.target_url as target, l.anchor,
+             tgt.status_code, l.source_page_id, l.position
+      from links l
+      join pages src on src.crawl_id = ${crawlId} and src.id = l.source_page_id
+      join pages tgt on tgt.crawl_id = ${crawlId} and tgt.url = l.target_url
+      where ${linkKeyset(crawlId, cursor)}
+        and l.is_internal and tgt.fetch_class = ${fetchClass}
+      order by l.source_page_id asc, l.target_url asc, l.position asc
+      limit ${limit}`,
+    next: linkNext,
+    cells: (row) => [row.source, row.target, orEmpty(row.anchor), orEmpty(row.status_code)],
+  });
+}
+
 function linkNext(row: LinkRow): string[] {
   return [row.source_page_id, row.target, String(row.position)];
 }
 
 /**
- * The seven views.
+ * The eight views.
  *
  * Every one of them answers a question the Ahrefs-style bulk-export block asks,
  * and every one of them is a read the JSON surface could already answer more
@@ -373,28 +568,71 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
     },
   }),
 
-  /** One rule's findings, URL by URL — the drill-down as a spreadsheet. */
-  issue_urls: defineCsvView<IssueRow>({
-    header: ["ruleId", "url", "evidence"],
+  /**
+   * ONE RULE'S FINDINGS AS THE REPORT A CLIENT ACTS ON — the drill-down as a
+   * spreadsheet, and since Phase 20 a real table rather than a URL beside a
+   * flattened blob.
+   *
+   * ## The header is the RULE's
+   *
+   * Every other view in this file has a header it knows at module load. This one
+   * cannot: the columns are `columnsFor(rule)` — the four standard ones, then
+   * whatever the rule declares — so the header is a function of the rule id the
+   * request named, and the cells are read key by key out of the same list. The
+   * row a spreadsheet opens is therefore the row the JSON listing serves, drawn
+   * from one declaration.
+   *
+   * ## The last column is always `Truncated`, and it is always there on purpose
+   *
+   * A rule that stopped listing at its cap writes a `truncated` note into the
+   * evidence of its LAST finding, and every JSON surface reads it. In a table
+   * the note has nowhere to live but a column — and dropping it would make a
+   * capped export a file that says "here is the problem" while holding a
+   * fraction of it, with nothing on the page saying so. That is the silent
+   * failure hard rule 7 forbids, so the column is written for every rule and is
+   * empty on every row but the one that carries the note. The empty column is
+   * the price; a complete-looking incomplete export is not.
+   */
+  issue_urls: defineCsvView<IssueRow & IndexabilityRow>({
+    header: (ruleId, ctx) => [
+      ...(ruleId === null ? [] : ctx.rule(ruleId).columns.map((column) => column.label)),
+      TRUNCATED_LABEL,
+    ],
     keyset: ["dedupe_key"],
     start: [""],
     needsRuleId: true,
+    // The left join is `listIssueUrls`' — a finding names a page, names a URL
+    // with no page row, or names nothing, and an inner join would drop two of
+    // those three silently.
     query: (crawlId, cursor, limit, ruleId) => sql`
       select i.rule_id, i.severity,
              i.details_jsonb->>'pageUrl' as url,
              i.details_jsonb as evidence,
-             i.dedupe_key
+             i.dedupe_key,
+             p.url as page_url, p.status_code, p.fetch_class,
+             p.robots_meta, p.x_robots_tag, p.is_indexable,
+             p.canonical_html, p.canonical_header
       from issues i
+      -- The crawl on both sides of the join, not just in the WHERE: see
+      -- listIssueUrls (src/api/service.ts) for why.
+      left join pages p on p.id = i.page_id and p.crawl_id = ${crawlId}
       where i.crawl_id = ${crawlId} and i.rule_id = ${ruleId ?? ""}
         and i.dedupe_key > ${cursor[0] ?? ""}::text
       order by i.dedupe_key asc
       limit ${limit}`,
     next: (row) => [row.dedupe_key],
-    cells: (row, ctx) => [
-      row.rule_id,
-      orEmpty(row.url),
-      flattenEvidence(ctx.evidence(row.evidence, row.rule_id)),
-    ],
+    cells: (row, ctx) => {
+      const evidence = ctx.evidence(row.evidence, row.rule_id);
+      const standard = standardCells(row);
+      return [
+        ...ctx.rule(row.rule_id).columns.map((column) =>
+          column.key in standard
+            ? standard[column.key]!
+            : evidenceCell(evidence[column.key]),
+        ),
+        evidenceCell(evidence["truncated"]),
+      ];
+    },
   }),
 
   /**
@@ -460,7 +698,7 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
   }),
 
   /**
-   * Internal links whose target answered 4xx — the broken-link worksheet, one
+   * INTERNAL LINKS WHOSE TARGET ANSWERED 4xx — the broken-link worksheet, one
    * row per LINK rather than per target, because the fix is made in the source
    * page's markup.
    *
@@ -468,24 +706,25 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
    * never fetched, so this engine has no status to report for it and will not
    * invent one. The target's class is the crawl's own (`client_error`), which is
    * the same predicate `links.broken-internal` fires on.
+   *
+   * ITS COLUMNS ARE THE INLINKS REPORT'S (Phase 20): `Source`, `Destination`,
+   * `Anchor`, `Status Code` — the same four, in the same order, under the same
+   * headings as `GET /crawls/:id/issues/links.broken-internal/inlinks` and as
+   * Screaming Frog's own inlinks exports. The old lower-case `source, target,
+   * status, anchorText` said the same things in a private vocabulary and in a
+   * different order, and a client that has both files open should not have to
+   * translate between them.
    */
-  links_to_4xx: defineCsvView<LinkRow & { status_code: number | null }>({
-    header: ["source", "target", "status", "anchorText"],
-    keyset: [...LINK_KEYSET],
-    start: [...LINK_START],
-    query: (crawlId, cursor, limit) => sql`
-      select src.url as source, l.target_url as target, l.anchor,
-             tgt.status_code, l.source_page_id, l.position
-      from links l
-      join pages src on src.crawl_id = ${crawlId} and src.id = l.source_page_id
-      join pages tgt on tgt.crawl_id = ${crawlId} and tgt.url = l.target_url
-      where ${linkKeyset(crawlId, cursor)}
-        and l.is_internal and tgt.fetch_class = 'client_error'
-      order by l.source_page_id asc, l.target_url asc, l.position asc
-      limit ${limit}`,
-    next: linkNext,
-    cells: (row) => [row.source, row.target, orEmpty(row.status_code), orEmpty(row.anchor)],
-  }),
+  links_to_4xx: linkTargetView("client_error"),
+
+  /**
+   * The same worksheet for a 5xx target — the twin of the view above, and a
+   * separate view for the reason `links.to-server-error` is a separate rule: a
+   * 404 is fixed by editing or restoring the URL and a 502 is fixed by reading
+   * the server's logs, and one file holding both would be a list nobody can
+   * hand to one person.
+   */
+  links_to_5xx: linkTargetView("server_error"),
 
   /**
    * Every link the crawl recorded, with the text it was linked by — internal
@@ -659,9 +898,18 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
   }),
 };
 
-/** A view's `text/csv` filename, deterministic per (crawl, view, rule). */
+/**
+ * A view's `text/csv` filename, deterministic per (crawl, view, rule).
+ *
+ * A RULE-SCOPED EXPORT IS NAMED FOR ITS RULE and not for its view (Phase 20):
+ * `ariadne_b49eab7e-links.broken-internal.csv`, where it used to carry
+ * `-issue_urls-` in the middle. The file lands in a Downloads folder beside a
+ * dozen others and what a person is looking for there is the rule; `issue_urls`
+ * is the engine's word for "one rule's findings" and says nothing a reader of
+ * the filename needs. It is unambiguous because `issue_urls` is the only view
+ * that takes a rule at all (`needsRuleId`), so no other export can produce the
+ * same name — a second rule-scoped view would have to put its own word back in.
+ */
 export function csvFilename(crawlSlug: string, view: CsvViewName, ruleSlug: string | null): string {
-  return ruleSlug === null
-    ? `${crawlSlug}-${view}.csv`
-    : `${crawlSlug}-${view}-${ruleSlug}.csv`;
+  return ruleSlug === null ? `${crawlSlug}-${view}.csv` : `${crawlSlug}-${ruleSlug}.csv`;
 }

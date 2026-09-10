@@ -23,6 +23,49 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
  * rule's verdict or copy changes, so a finding can be traced to the ruleset
  * that produced it. One constant — `loop.ts` imports it rather than restating.
  */
+// PHASE 20 T1 — GROUNDS FOR THE NEXT BUMP, NOT YET STAMPED. The version constant
+// below is still 0.14.0; the orchestrator bumps it to 0.15.0 at T4 and folds
+// this block into the 0.15.0 note beside its own copy grounds. What T1 changed
+// that a version has to carry:
+//
+//  1. EVERY RULE THAT FINDS NOW DECLARES ITS REPORT. `RuleMeta.columns`
+//     (`ReadonlyArray<{key, label, optional?}>`) names the evidence fields a
+//     reader sees and the heading each is printed under — Screaming Frog's
+//     vocabulary where one exists (`Status Code`, `Inlinks`, `Title 1`,
+//     `Title 1 Length`, `Word Count`, `No. Near Duplicates`, `Closest Near
+//     Duplicate Match`, `Canonical Link Element`, `Meta Robots`, `hreflang`,
+//     `Expected Link`, `URL Not Returning Link`, `Source`, `Anchor`). All 86
+//     non-metric rules carry one; `defineRule` requires the field and refuses it
+//     on a metric rule. THIS IS COPY A CLIENT READS, which is why it is a
+//     ground: `rules_catalog` serves the column labels the same way it serves a
+//     title, so what the ruleset SAYS about a site changed even where no verdict
+//     did. Three rules declare an EMPTY list — `canonical.missing`,
+//     `mobile.viewport-missing`, `pages.not-in-sitemap` — because their report
+//     is the four standard columns and nothing else, and inventing a fifth would
+//     put a heading over a column the rule cannot honestly fill.
+//
+//  2. ONE RULE'S EVIDENCE SHAPE CHANGED. `crawl.blocked` gains `fetchReason`,
+//     the sentence `pages.fetch_reason` holds: the standard columns already say
+//     the URL, the status and "Non-Indexable / Client Error", and what they
+//     cannot say is WHICH wall this was — a `cf-mitigated` header, a 401/403/429,
+//     a challenge body on a 503. That is the difference between "allowlist our
+//     user agent" and "this URL is behind a login". No other rule's evidence
+//     moved: the §2.3 gaps the design named (`sitemap.non-indexable`'s reason,
+//     the title/meta/H1 text and lengths, `links.orphan`'s `discoveredVia`,
+//     `structure.deep-page`'s `clickDepth`, the images' resource and bytes) were
+//     already carried, and the sitemap one is given for free by the standard
+//     columns.
+//
+//  3. NOTHING ELSE. No verdict moves, no severity moves, no finding appears or
+//     disappears, and no other evidence key is added or removed. A crawl
+//     re-judged at the bumped version produces the same findings with the same
+//     evidence, plus `fetchReason` on any `crawl.blocked` row.
+//
+// (`saysNoindex` / `hasNoindex` moved from src/rules/page/indexability.ts to
+// src/rules/helpers.ts, which re-exports nothing to the wire and changes no
+// verdict — noted only so a reader of the diff is not looking for a fourth
+// ground.)
+//
 // 0.14.0: Phase 19, the audit accuracy pass
 // (docs/superpowers/specs/2026-09-09-audit-accuracy-pass-design.md), on FOUR
 // grounds. (1) Verdicts MOVED: `content.exact-duplicate` and
@@ -249,7 +292,75 @@ export function defineRule<T extends AnyRule>(rule: T): T {
   // it is refused here rather than reaching the registry as a silent marker.
   if (rule.marker !== undefined && (typeof rule.marker !== "string" || rule.marker.trim() === ""))
     fail("marker, when present, must be a non-empty reason string");
+  validateColumns(rule, fail);
   return rule;
+}
+
+/**
+ * The keys a rule may NOT declare a column for, because the surface already
+ * prints them.
+ *
+ * The first four are the STANDARD COLUMNS: they are derived from the `pages`
+ * row a finding names (`indexabilityOf`, src/rules/helpers.ts) and prepended to
+ * every rule's column list, so a rule declaring one of them would print two
+ * columns under one heading, filled from two different sources. `pageUrl` is
+ * the key `runRules` writes the finding's own URL under — `address` under
+ * another name — and the harness already forbids a rule's evidence from
+ * carrying it at all.
+ */
+const RESERVED_COLUMN_KEYS: ReadonlySet<string> = new Set([
+  "address",
+  "statusCode",
+  "indexability",
+  "indexabilityStatus",
+  "pageUrl",
+]);
+
+/**
+ * `RuleMeta.columns`, checked as far as a definition can be checked here.
+ *
+ * WHAT IS CHECKED IS THE DECLARATION, NOT THE EVIDENCE. Whether a declared key
+ * is a key the rule actually writes is a question about a run, and the answer
+ * lives in test/fixtures/harness.test.ts, over a real crawl of the fixture site
+ * — both directions: a non-optional column that never appears, and an evidence
+ * key no column names. `defineRule` sees a rule's metadata and not one finding,
+ * so what it can hold is the shape: present on the kinds that find, absent on
+ * the kind that measures, and every entry a usable heading.
+ */
+function validateColumns(rule: AnyRule, fail: (msg: string) => never): void {
+  const columns = rule.columns;
+  if (rule.kind === "metric") {
+    if (columns !== undefined) {
+      fail(
+        "a metric rule declares no columns: it writes a table into `metrics` and " +
+          "never an `issues` row, so there is no finding row for a column to describe",
+      );
+    }
+    return;
+  }
+  if (!Array.isArray(columns)) {
+    fail(
+      "columns is required on a rule that finds (an EMPTY array is the answer for a " +
+        "rule whose report is the four standard columns and nothing else)",
+    );
+  }
+  const seen = new Set<string>();
+  for (const column of columns) {
+    if (column === null || typeof column !== "object" || Array.isArray(column))
+      fail("every column must be an object {key, label}");
+    const { key, label } = column as { key?: unknown; label?: unknown };
+    if (typeof key !== "string" || key.trim() === "")
+      fail("every column needs a non-empty key naming an evidence field");
+    if (typeof label !== "string" || label.trim() === "")
+      fail(`column '${key}' needs a non-empty label — the header a client prints`);
+    if (RESERVED_COLUMN_KEYS.has(key))
+      fail(`column '${key}' is a standard column the surface already prints`);
+    if (seen.has(key)) fail(`column '${key}' is declared twice`);
+    seen.add(key);
+    const optional = (column as { optional?: unknown }).optional;
+    if (optional !== undefined && optional !== true)
+      fail(`column '${key}': optional, when present, must be exactly true`);
+  }
 }
 
 export class Registry {

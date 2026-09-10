@@ -22,6 +22,7 @@ const validPageRule = {
   explanation: "The page has no <title> element.",
   howToFix: "Add a unique, descriptive <title>.",
   rulesetVersion: RULESET_VERSION,
+  columns: [{ key: "title", label: "Title 1" }],
   run: () => [],
 };
 
@@ -90,6 +91,79 @@ describe("defineRule", () => {
     expect(() => defineRule({ ...validPageRule, marker: "   " }))
       .toThrow(/marker, when present, must be a non-empty reason string/);
   });
+  // ---------------------------------------------------------------- columns
+  //
+  // `RuleMeta.columns` is the rule's REPORT — the evidence fields a reader sees
+  // and the heading each is printed under. What `defineRule` can hold is the
+  // SHAPE; whether a declared key is a key the rule actually writes is a
+  // question about a run, and test/fixtures/harness.test.ts answers it over a
+  // real crawl in both directions.
+  it("accepts an EMPTY column list — a report that is the standard columns and nothing else", () => {
+    const bare = { ...validPageRule, columns: [] };
+    expect(defineRule(bare)).toBe(bare);
+  });
+  it("throws when a rule that finds declares no columns at all", () => {
+    const { columns: _dropped, ...columnless } = validPageRule;
+    expect(() => defineRule(columnless as typeof validPageRule))
+      .toThrow(/columns is required on a rule that finds/);
+  });
+  it("throws on a column with no key or no label — a heading nobody can print", () => {
+    expect(() => defineRule({ ...validPageRule, columns: [{ key: "  ", label: "Title 1" }] }))
+      .toThrow(/non-empty key naming an evidence field/);
+    expect(() => defineRule({ ...validPageRule, columns: [{ key: "title", label: "" }] }))
+      .toThrow(/needs a non-empty label/);
+  });
+  it("throws on a column that repeats a key", () => {
+    expect(() =>
+      defineRule({
+        ...validPageRule,
+        columns: [
+          { key: "title", label: "Title 1" },
+          { key: "title", label: "Title" },
+        ],
+      }),
+    ).toThrow(/declared twice/);
+  });
+  // The five keys the surface itself prints: `address`, `statusCode`,
+  // `indexability` and `indexabilityStatus` are derived from the page row and
+  // prepended to every rule's list, and `pageUrl` is `address` under the name
+  // `runRules` writes it. A rule declaring one would print two columns under
+  // one heading, filled from two different sources.
+  it("throws on a column that claims a standard heading", () => {
+    for (const key of ["address", "statusCode", "indexability", "indexabilityStatus", "pageUrl"]) {
+      expect(
+        () => defineRule({ ...validPageRule, columns: [{ key, label: "Mine" }] }),
+        key,
+      ).toThrow(/standard column the surface already prints/);
+    }
+  });
+  it("throws on an `optional` that is not exactly true", () => {
+    expect(() =>
+      defineRule({
+        ...validPageRule,
+        columns: [{ key: "title", label: "Title 1", optional: false as unknown as true }],
+      }),
+    ).toThrow(/must be exactly true/);
+  });
+  it("refuses columns on a metric rule, which writes no finding row to head", () => {
+    const metric = {
+      kind: "metric" as const,
+      id: "site.health",
+      checkIds: ["CHECK-83"],
+      category: "crawl" as const,
+      severity: "info" as const,
+      title: "Site: Health rollup",
+      explanation: "A table of counts.",
+      howToFix: "Read it.",
+      rulesetVersion: RULESET_VERSION,
+      run: async () => [],
+    };
+    expect(defineRule(metric)).toBe(metric);
+    expect(() =>
+      defineRule({ ...metric, columns: [{ key: "n", label: "N" }] } as unknown as typeof metric),
+    ).toThrow(/a metric rule declares no columns/);
+  });
+
   it("RuleDefinitionError is recognizable by name", () => {
     try {
       defineRule({ ...validPageRule, id: "BAD ID" });

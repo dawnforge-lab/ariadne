@@ -227,6 +227,10 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-14"],
     category: CATEGORY,
     severity: HTTP_200.severity,
+    columns: [
+      { key: "variant", label: "Host Variant" },
+      { key: "hops", label: "Chain" },
+    ],
     ...copyFor(HTTP_200.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => withProbe(db, crawlId, HTTP_200, httpServes200),
@@ -238,6 +242,10 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-15"],
     category: CATEGORY,
     severity: DUPLICATE.severity,
+    columns: [
+      { key: "variants", label: "Host Variants" },
+      { key: "finals", label: "Final Addresses" },
+    ],
     ...copyFor(DUPLICATE.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => withProbe(db, crawlId, DUPLICATE, duplicateHost200),
@@ -249,6 +257,10 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-15"],
     category: CATEGORY,
     severity: LEGACY.severity,
+    columns: [
+      { key: "variant", label: "Host Variant" },
+      { key: "hops", label: "Chain" },
+    ],
     ...copyFor(LEGACY.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId) => withProbe(db, crawlId, LEGACY, legacyHostReachable),
@@ -261,6 +273,10 @@ export const hostRules: QueryRule[] = [
     checkIds: ["CHECK-14", "CHECK-15"],
     category: CATEGORY,
     severity: SKIPPED.severity,
+    columns: [
+      { key: "skipped", label: "Reason" },
+      { key: "siteUrl", label: "Site" },
+    ],
     ...copyFor(SKIPPED.id),
     rulesetVersion: RULESET_VERSION,
     marker:

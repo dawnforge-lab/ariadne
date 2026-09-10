@@ -52,69 +52,143 @@ function firstLevelSkip(order: number[]): number {
 }
 
 export const onPageRules: PageRule[] = [
-  pageRule("title.missing", ["CHECK-35"], CATEGORY, "critical", (p, self) =>
-    isAuditable(p) && !present(p.title) ? [finding(self, p, { title: p.title })] : [],
+  pageRule(
+    "title.missing",
+    ["CHECK-35"],
+    CATEGORY,
+    "critical",
+    [{ key: "title", label: "Title 1" }],
+    (p, self) =>
+      isAuditable(p) && !present(p.title) ? [finding(self, p, { title: p.title })] : [],
   ),
 
-  pageRule("title.too-short", ["CHECK-35"], CATEGORY, "info", (p, self) =>
-    isAuditable(p) && present(p.title) && p.title.length < TITLE_MIN
-      ? [finding(self, p, { title: p.title, length: p.title.length, min: TITLE_MIN })]
-      : [],
+  pageRule(
+    "title.too-short",
+    ["CHECK-35"],
+    CATEGORY,
+    "info",
+    [
+      { key: "title", label: "Title 1" },
+      { key: "length", label: "Title 1 Length" },
+      { key: "min", label: "Minimum Length" },
+    ],
+    (p, self) =>
+      isAuditable(p) && present(p.title) && p.title.length < TITLE_MIN
+        ? [finding(self, p, { title: p.title, length: p.title.length, min: TITLE_MIN })]
+        : [],
   ),
 
-  pageRule("title.too-long", ["CHECK-35"], CATEGORY, "info", (p, self) =>
-    isAuditable(p) && present(p.title) && p.title.length > TITLE_MAX
-      ? [finding(self, p, { title: p.title, length: p.title.length, max: TITLE_MAX })]
-      : [],
+  pageRule(
+    "title.too-long",
+    ["CHECK-35"],
+    CATEGORY,
+    "info",
+    [
+      { key: "title", label: "Title 1" },
+      { key: "length", label: "Title 1 Length" },
+      { key: "max", label: "Maximum Length" },
+    ],
+    (p, self) =>
+      isAuditable(p) && present(p.title) && p.title.length > TITLE_MAX
+        ? [finding(self, p, { title: p.title, length: p.title.length, max: TITLE_MAX })]
+        : [],
   ),
 
-  pageRule("meta-description.missing", ["CHECK-36"], CATEGORY, "warning", (p, self) =>
-    isAuditable(p) && !present(p.metaDescription)
-      ? [finding(self, p, { metaDescription: p.metaDescription })]
-      : [],
+  pageRule(
+    "meta-description.missing",
+    ["CHECK-36"],
+    CATEGORY,
+    "warning",
+    [{ key: "metaDescription", label: "Meta Description 1" }],
+    (p, self) =>
+      isAuditable(p) && !present(p.metaDescription)
+        ? [finding(self, p, { metaDescription: p.metaDescription })]
+        : [],
   ),
 
-  pageRule("meta-description.too-short", ["CHECK-36"], CATEGORY, "info", (p, self) =>
-    isAuditable(p) && present(p.metaDescription) && p.metaDescription.length < META_MIN
-      ? [
-          finding(self, p, {
-            metaDescription: p.metaDescription,
-            length: p.metaDescription.length,
-            min: META_MIN,
-          }),
-        ]
-      : [],
+  pageRule(
+    "meta-description.too-short",
+    ["CHECK-36"],
+    CATEGORY,
+    "info",
+    [
+      { key: "metaDescription", label: "Meta Description 1" },
+      { key: "length", label: "Meta Description 1 Length" },
+      { key: "min", label: "Minimum Length" },
+    ],
+    (p, self) =>
+      isAuditable(p) && present(p.metaDescription) && p.metaDescription.length < META_MIN
+        ? [
+            finding(self, p, {
+              metaDescription: p.metaDescription,
+              length: p.metaDescription.length,
+              min: META_MIN,
+            }),
+          ]
+        : [],
   ),
 
-  pageRule("meta-description.too-long", ["CHECK-36"], CATEGORY, "info", (p, self) =>
-    isAuditable(p) && present(p.metaDescription) && p.metaDescription.length > META_MAX
-      ? [
-          finding(self, p, {
-            metaDescription: p.metaDescription,
-            length: p.metaDescription.length,
-            max: META_MAX,
-          }),
-        ]
-      : [],
+  pageRule(
+    "meta-description.too-long",
+    ["CHECK-36"],
+    CATEGORY,
+    "info",
+    [
+      { key: "metaDescription", label: "Meta Description 1" },
+      { key: "length", label: "Meta Description 1 Length" },
+      { key: "max", label: "Maximum Length" },
+    ],
+    (p, self) =>
+      isAuditable(p) && present(p.metaDescription) && p.metaDescription.length > META_MAX
+        ? [
+            finding(self, p, {
+              metaDescription: p.metaDescription,
+              length: p.metaDescription.length,
+              max: META_MAX,
+            }),
+          ]
+        : [],
   ),
 
-  pageRule("headings.h1-missing", ["CHECK-37"], CATEGORY, "warning", (p, self) =>
-    isAuditable(p) && p.h1Count === 0 ? [finding(self, p, { h1Count: p.h1Count })] : [],
+  pageRule(
+    "headings.h1-missing",
+    ["CHECK-37"],
+    CATEGORY,
+    "warning",
+    [{ key: "h1Count", label: "H1 Count" }],
+    (p, self) =>
+      isAuditable(p) && p.h1Count === 0 ? [finding(self, p, { h1Count: p.h1Count })] : [],
   ),
 
-  pageRule("headings.h1-multiple", ["CHECK-37"], CATEGORY, "info", (p, self) =>
-    isAuditable(p) && p.h1Count > 1 ? [finding(self, p, { h1Count: p.h1Count })] : [],
+  pageRule(
+    "headings.h1-multiple",
+    ["CHECK-37"],
+    CATEGORY,
+    "info",
+    [{ key: "h1Count", label: "H1 Count" }],
+    (p, self) =>
+      isAuditable(p) && p.h1Count > 1 ? [finding(self, p, { h1Count: p.h1Count })] : [],
   ),
 
-  pageRule("headings.level-skip", ["CHECK-37"], CATEGORY, "info", (p, self) => {
-    if (!isAuditable(p) || p.headingOrder === null) return [];
-    // `skipAt` indexes into `headingOrder`: the position of the heading that
-    // skipped a level. Only the first skip is reported — one finding per page.
-    const skipAt = firstLevelSkip(p.headingOrder);
-    return skipAt === -1
-      ? []
-      : [finding(self, p, { headingOrder: p.headingOrder, skipAt })];
-  }),
+  pageRule(
+    "headings.level-skip",
+    ["CHECK-37"],
+    CATEGORY,
+    "info",
+    [
+      { key: "skipAt", label: "Skips At" },
+      { key: "headingOrder", label: "Heading Order" },
+    ],
+    (p, self) => {
+      if (!isAuditable(p) || p.headingOrder === null) return [];
+      // `skipAt` indexes into `headingOrder`: the position of the heading that
+      // skipped a level. Only the first skip is reported — one finding per page.
+      const skipAt = firstLevelSkip(p.headingOrder);
+      return skipAt === -1
+        ? []
+        : [finding(self, p, { headingOrder: p.headingOrder, skipAt })];
+    },
+  ),
 
   /**
    * Placeholder copy still in the live page, WITH THE SENTENCE IT SITS IN
@@ -137,9 +211,18 @@ export const onPageRules: PageRule[] = [
    * reason: nothing is unmeasured. The check ran, the answer is yes, and only
    * the quotation is missing.
    */
-  pageRule("content.placeholder", ["CHECK-40"], CONTENT, "critical", (p, self) =>
-    isAuditable(p) && p.hasLoremIpsum
-      ? [finding(self, p, { wordCount: p.wordCount, snippet: p.placeholderSnippet })]
-      : [],
+  pageRule(
+    "content.placeholder",
+    ["CHECK-40"],
+    CONTENT,
+    "critical",
+    [
+      { key: "snippet", label: "Placeholder Text" },
+      { key: "wordCount", label: "Word Count" },
+    ],
+    (p, self) =>
+      isAuditable(p) && p.hasLoremIpsum
+        ? [finding(self, p, { wordCount: p.wordCount, snippet: p.placeholderSnippet })]
+        : [],
   ),
 ];
