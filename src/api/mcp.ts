@@ -1060,8 +1060,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "with: {rulesetVersion, rules: [{id, kind, severity, category, checkIds, " +
         "title, explanation, howToFix, columns?, table?, marker?}]}. kind is page | query | metric, severity " +
         "is critical | warning | info, and checkIds trace each rule to the audit " +
-        "checklist. Ordered by severity then rule id — the order issues_list " +
-        "returns its groups in.\n\n" +
+        "checklist. The rules that FIND are ordered by severity then rule id — the " +
+        "order issues_list returns its groups in. The METRIC rules follow them as " +
+        "one block, in the order their tables declare (table.order, lower first, " +
+        "ties by id), which is the order a client should lay the metric section " +
+        "out in.\n\n" +
         "columns is the rule's REPORT, column by column — [{key, label, " +
         "optional?}], the same list issue_urls serves beside its rows, so a table " +
         "can be laid out before the rows are asked for. It is absent on a metric " +
@@ -1070,11 +1073,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "indexability, indexabilityStatus.\n\n" +
         "table is the METRIC's report and is the mirror of columns: present on " +
         "every metric rule and on no other, absent on every rule that finds. It is " +
-        "{columns: [{key, label}], summary: [{key, label}]} — the header of that " +
-        "metric's table and the labels of the site-level scalars above it, the same " +
-        "lists metric_table serves beside its rows, so the table can be laid out " +
-        "before the numbers are asked for. The two fields are never both present " +
-        "and never both absent.\n\n" +
+        "{columns: [{key, label}], summary: [{key, label}], order?} — the header of " +
+        "that metric's table, the labels of the site-level scalars above it, and the " +
+        "metric's place in the metric section; the same lists metric_table serves " +
+        "beside its rows, so the table can be laid out before the numbers are asked " +
+        "for. The two fields are never both present and never both absent.\n\n" +
         "This is the CHECKLIST: what the engine looks for, including the checks a " +
         "site passed and the checks nobody has run yet. issues_list can only name " +
         "the rules that found something, so it cannot answer 'what else was " +

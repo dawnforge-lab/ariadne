@@ -460,6 +460,13 @@ describe("the demo flow", () => {
     // would drop off the page silently and off this list loudly.
     const metricRules = catalog.rules.filter((rule) => rule.kind === "metric");
     expect(metricRules.length).toBeGreaterThan(0);
+    // AND THE ORDER IS THE CATALOG'S, which the metric rules DECLARE: the site
+    // health rollup is the census every other table is a part of, so it heads
+    // the section rather than sitting tenth where the alphabet put it. The page
+    // sorts nothing; the full sequence is pinned in test/api/query.test.ts.
+    expect(metricRules[0]?.id, "the metric section does not lead with site.health").toBe(
+      "site.health",
+    );
     for (const rule of metricRules) {
       expect(rule.title.length).toBeGreaterThan(0);
       expect(rule.explanation.length).toBeGreaterThan(0);
@@ -734,15 +741,25 @@ describe("the demo flow", () => {
     );
 
     // THE NUMBER FORMATTER, and the cell path that uses it. This is the ONE
-    // thing the page decides about a metric: grouping, one decimal where the
-    // label ends in "(%)" or the value is not whole, Yes/No for a boolean, an
-    // empty cell for a null.
+    // thing the page decides about a metric: grouping, one decimal for a
+    // percentage column, four places below one, one decimal otherwise, Yes/No
+    // for a boolean, an empty cell for a null. WHAT it produces is not readable
+    // from the source — test/demo/metric-number.test.ts runs it.
     expect(html).toContain("function metricNumber(value, label) {");
     expect(html, "the cell path spells its numbers here").toContain(
       'if (typeof value === "number") return metricNumber(value, label);',
     );
     expect(html, "a percentage is one its LABEL declares").toContain(
       String.raw`/\(%\)$/.test(label)`,
+    );
+    // A ratio below one keeps its digits. One decimal would print `Text Ratio`'s
+    // 0.0106 as 0.0 — a measurement shown as zero, which is the failure the
+    // fourth-decimal branch exists to prevent.
+    expect(html, "a value below one is not rounded to one decimal").toContain(
+      String.raw`Math.abs(value).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")`,
+    );
+    expect(html, "a whole number stays whole").toContain(
+      "Number.isInteger(value)",
     );
     expect(html, "thousands, grouped by hand rather than by the browser's locale").toContain(
       String.raw`.replace(/\B(?=(\d{3})+(?!\d))/g, ",")`,

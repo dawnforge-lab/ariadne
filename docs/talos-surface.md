@@ -334,13 +334,19 @@ argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
 bounded by the **ruleset** (100 rows at 0.16.0) rather than by the crawl. The
-catalog is ~92 KB (**93,778 bytes**, re-measured 2026-09-10 at the end of
-Phase 20 over all 100 rows of ruleset 0.15.0 — by serialising what
+catalog is ~97 KB (**98,997 bytes**, re-measured 2026-09-11 at the end of
+Phase 21 over all 100 rows of ruleset 0.16.0 — by serialising what
 `rulesCatalog` answers with no crawl id — of which **1,813 bytes** are the
-`marker` strings on the twelve markers. **It SHRANK by 31,241 bytes** across
-Phase 20 even though every rule that finds gained a `columns` array: the copy
-rewrite traded long explanatory prose for the SEO-tool register, and the
-register is shorter than the essay it replaced. The 125,019 before it was
+`marker` strings on the twelve markers and **4,982 bytes** are the `table`
+declarations on the fourteen metric rules — the whole of what Phase 21 added
+here, since no copy moved. The 93,778 before it was measured 2026-09-10 at the
+end of Phase 20 over 100 rows of 0.15.0 (a figure that does not reproduce to the
+byte under this measurement, by about a hundred bytes, so treat the series as
+sizes rather than as a subtractable ledger), and **it had SHRUNK by 31,241
+bytes** across that phase even though
+every rule that finds gained a `columns` array: the copy rewrite traded long
+explanatory prose for the SEO-tool register, and the register is shorter than
+the essay it replaced. The 125,019 before that was
 measured 2026-09-09 at the end of Phase 19, over 100 rows of 0.14.0 whose copy
 pass had lengthened many entries; 111,419 bytes at 96 rows of 0.13.0; the
 109,949 before that was measured earlier in the same phase,
@@ -958,11 +964,22 @@ has ever completed over** — metrics are written by `crawl_rules`, and "nobody
 has looked" is never served as "there is nothing here".
 
 **The header is on the catalog too.** `rules_catalog` carries
-`table: {columns: [{key,label}], summary: [{key,label}]}` on every metric rule
-and on no other, exactly as it carries `columns` on every rule that finds and on
-no metric — the two fields are never both present and never both absent. Both
-come from the rule's own declaration through one function, so a header drawn
-from the catalog and one drawn from the rows are the same list.
+`table: {columns: [{key,label}], summary: [{key,label}], order?}` on every metric
+rule and on no other, exactly as it carries `columns` on every rule that finds
+and on no metric — the two fields are never both present and never both absent.
+Both come from the rule's own declaration through one function, so a header
+drawn from the catalog and one drawn from the rows are the same list.
+
+**And so is the order of the section.** `order` is the metric's place among the
+metric tables — lower first, ties by rule id, absent sorting after every table
+that declares one. It is a decision about what a client reads and in what order,
+so it is declared beside the labels rather than derived from the alphabet:
+ordering the metrics by id put `site.health`, the census every other table is a
+part of, tenth of fourteen. `rules_catalog` already returns the metric rules in
+that order, as one contiguous block after the rules that find (§5.1), so a
+client that lays the section out by filtering `kind === "metric"` and keeping
+the order it was given — which is what the demo does — needs `order` only if it
+sorts for itself.
 
 **The CSV** is `view=metric_table` with a `metricId` (§12): the header is the
 same LABELS, one row per table row, and **the summary scalars lead every row as
@@ -1143,9 +1160,19 @@ is the same list `issue_urls` serves beside its rows (§4.4), from the same
 function, so a table laid out from the catalog and one laid out from the listing
 cannot disagree. **A metric rule has no `columns`**, for the reason it has
 `measuresOnly`: it writes no finding rows. It carries **`table`** instead —
-`{columns: [{key,label}], summary: [{key,label}]}`, the header of that metric's
-own table and the labels above it, the same lists `metric_table` serves beside
-its rows (§4.4b). The two fields are never both present and never both absent.
+`{columns: [{key,label}], summary: [{key,label}], order?}`, the header of that
+metric's own table, the labels above it and the metric's place in the metric
+section, the same lists `metric_table` serves beside its rows (§4.4b). The two
+fields are never both present and never both absent.
+
+**The order of the rows in this answer is two orders.** The rules that FIND come
+first, by severity then rule id — the order `issues_list` returns its groups in,
+so a UI that draws both puts the same rule in the same place twice. The METRIC
+rules follow them as one contiguous block, by their declared `table.order` then
+by id (Phase 21); no other listing has an opinion about where a metric goes,
+because a metric writes no finding row and never appears in `issues_list`.
+Pinned: `test/api/query.test.ts:4064` "leads the metric section with the site
+census, then the declared sequence".
 
 A NOT MEASURED marker's row carries one field more — `marker`, the reason
 (Phase 17; the key is on markers and on nothing else):
@@ -1913,7 +1940,10 @@ and a heading over every column and every summary scalar. No stored value,
 predicate or copy moves; a crawl re-judged at 0.16.0 writes byte-identical
 `metrics` rows. The headings are client-facing text served by `rules_catalog`
 and printed by `metric_table`, so what the ruleset says about a site changed
-exactly as 0.15.0's column headings changed it for the finding rules.
+exactly as 0.15.0's column headings changed it for the finding rules. The same
+declaration carries `table.order` (§5.1) — where each metric sits in the metric
+section — which is presentation rather than a sentence and rides on this bump
+rather than earning one of its own.
 
 **Phase 20 bumped to 0.15.0 on three grounds, none of which moves a verdict.**
 Every rule's client-facing copy was rewritten by hand in the register of an SEO

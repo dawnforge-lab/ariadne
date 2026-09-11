@@ -380,7 +380,7 @@ export const renderMetrics: MetricRule[] = [
       { key: "selectionTruncated", label: "Selection Truncated" },
       { key: "pagesRendered", label: "Pages Rendered" },
       { key: "renderFailures", label: "Render Failures" },
-    ]),
+    ], 9),
     async (db, crawlId, self) => renderCoverage(db, crawlId, self),
   ),
 ];

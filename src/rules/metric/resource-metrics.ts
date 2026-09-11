@@ -242,6 +242,7 @@ export const resourceMetrics: MetricRule[] = [
         { key: "pagesWithUnmeasuredResources", label: "Pages With Unweighed Files" },
         { key: "atLeast", label: "Floor" },
       ],
+      7,
     ),
     async (db, crawlId, self) => pageWeight(db, crawlId, self),
   ),

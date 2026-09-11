@@ -16,10 +16,11 @@
  * import and no browser in this suite. `test/demo/flow.test.ts` asserts the
  * page's CODE PATHS by reading its source, which is right for "does the header
  * come from `columns`" and useless for "what string does this produce". So the
- * four functions are LIFTED OUT OF THE FILE BY NAME and run here against the
- * same inputs as the TypeScript. The lift is brace-balanced and fails loudly if
- * a function is renamed or removed, which is the only way this test can go
- * stale without going red.
+ * four functions are LIFTED OUT OF THE FILE BY NAME (`./lift.ts`, shared with
+ * test/demo/metric-number.test.ts) and run here against the same inputs as the
+ * TypeScript. The lift is brace-balanced and fails loudly if a function is
+ * renamed or removed, which is the only way this test can go stale without
+ * going red.
  *
  * ## The one difference that is deliberate
  *
@@ -30,47 +31,14 @@
  * are `test/api/csv.test.ts`'s to prove.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 import { evidenceCell } from "../../src/api/csv.js";
+import { liftFunctions } from "./lift.js";
 
-const PAGE = fileURLToPath(new URL("../../src/demo/index.html", import.meta.url));
-
-/**
- * One named function's source, from `function NAME(` to its balanced `}`.
- *
- * Naive brace counting, and it is sound on this input because the page's
- * helpers contain no brace inside a string or a regex literal — a fact this
- * file would discover immediately if it stopped being true, because the
- * extracted text would not parse.
- */
-function lift(source: string, name: string): string {
-  const start = source.indexOf(`function ${name}(`);
-  if (start === -1) throw new Error(`src/demo/index.html no longer defines ${name}()`);
-  let depth = 0;
-  let seenBrace = false;
-  for (let i = start; i < source.length; i += 1) {
-    const ch = source[i];
-    if (ch === "{") {
-      depth += 1;
-      seenBrace = true;
-    } else if (ch === "}") {
-      depth -= 1;
-      if (seenBrace && depth === 0) return source.slice(start, i + 1);
-    }
-  }
-  throw new Error(`${name}() in src/demo/index.html has no balanced body`);
-}
-
-const pageValueText = ((): ((value: unknown) => string) => {
-  const html = readFileSync(PAGE, "utf8");
-  const body = ["valueText", "isScalarList", "leaves", "scalarText"]
-    .map((name) => lift(html, name))
-    .join("\n");
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  return new Function(`${body}\nreturn valueText;`)() as (value: unknown) => string;
-})();
+const pageValueText = liftFunctions<(value: unknown) => string>(
+  ["valueText", "isScalarList", "leaves", "scalarText"],
+  "valueText",
+);
 
 describe("the CSV cell and the demo cell are the same string", () => {
   /**

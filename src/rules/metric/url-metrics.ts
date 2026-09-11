@@ -180,6 +180,7 @@ export const urlMetrics: MetricRule[] = [
         { key: "parameterisedPages", label: "URLs With Parameters" },
         { key: "parameterisedIndexablePages", label: "Indexable URLs With Parameters" },
       ],
+      13,
     ),
     async (db, crawlId, self) => paramVolumes(db, crawlId, self),
   ),

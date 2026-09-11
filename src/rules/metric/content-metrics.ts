@@ -315,6 +315,8 @@ export const contentMetrics: MetricRule[] = [
         { key: "textRatio", label: "Text Ratio" },
       ],
       DISTRIBUTION_COLUMNS,
+      [],
+      1,
     ),
     async (db, crawlId, self) =>
       contentByType(db, crawlId, self),
@@ -334,7 +336,7 @@ export const contentMetrics: MetricRule[] = [
       { key: "p75", label: "P75" },
       { key: "shareWithin3BitsPct", label: "Within 3 Bits (%)" },
       { key: "shareWithin8BitsPct", label: "Within 8 Bits (%)" },
-    ]),
+    ], 2),
     async (db, crawlId, self) =>
       templateSimilarity(db, crawlId, self),
   ),

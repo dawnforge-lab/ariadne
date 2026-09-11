@@ -59,10 +59,12 @@
   A METRIC IS A TABLE THE ENGINE SHAPED, and the Metrics section is one block
   per metric: its header, its rows and its summary arrive already shaped from
   the metric's own declaration (`GET /crawls/:id/metrics/:metricId`,
-  docs/talos-surface.md §4.4b), in the catalog's order and with the catalog's
-  copy above them. All this page does with a metric is SPELL ITS NUMBERS —
-  thousands grouped, a decimal where the label says percentage, Yes/No for a
-  boolean, an empty cell for a null — and it invents no column and no label.
+  docs/talos-surface.md §4.4b), in the catalog's order — which the catalog
+  DECLARES for the metrics, so the site health rollup leads the section — and
+  with the catalog's copy above them. All this page does with a metric is SPELL
+  ITS NUMBERS — thousands grouped, a decimal where the label says percentage,
+  four below one, Yes/No for a boolean, an empty cell for a null — and it
+  invents no column, no label and no order.
 -->
 <style>
   :root {
@@ -1200,8 +1202,9 @@
    *  - `null` — and a key this row does not carry — is an EMPTY cell. It is a
    *    value the metric did not write for this row, never a zero (§4.4b).
    *  - a boolean is Yes / No. `true` is the wire's word for it, not a reader's.
-   *  - a number is grouped in thousands, with one decimal where the column is a
-   *    percentage or the value is not whole (`metricNumber`).
+   *  - a number is grouped in thousands and spelled by `metricNumber`: whole
+   *    where the value is whole, one decimal for a percentage column, up to
+   *    four below one, one decimal otherwise.
    *  - a string — the scope column, `(untyped)`, `(other)`, a measure's name —
    *    prints exactly as served.
    *
@@ -1219,8 +1222,20 @@
   }
 
   /**
-   * A number as a table prints it: thousands grouped, one decimal where the
-   * label ends in "(%)" or the value is not a whole number.
+   * A number as a table prints it. Four cases, in this order:
+   *
+   *  - a PERCENTAGE — the column's label ends in "(%)" — is one decimal, always,
+   *    so a column of them lines up and 12 reads as 12.0 rather than as a count.
+   *  - a whole number is whole: 100, 1,009 — never 100.0.
+   *  - a number BELOW ONE is up to four decimals with the trailing zeros
+   *    trimmed, because this is where the ratios live (`Text Ratio` is 0.0106
+   *    and `Clean Ratio` is 0.5): one decimal would print every one of them as
+   *    0.0, which is a measurement the site did not make.
+   *  - anything else is one decimal: 1,009.36 → 1,009.4.
+   *
+   * Four decimals and not more because that is the precision the metrics
+   * themselves carry (`cleanRatio` is stored to four places), and the trim keeps
+   * 0.5 from becoming 0.5000 beside it.
    *
    * Grouped by hand rather than by `toLocaleString`, because that would let the
    * browser's locale decide what this engine's numbers look like — two
@@ -1228,11 +1243,26 @@
    * passes or fails by machine.
    */
   function metricNumber(value, label) {
-    var decimals = (typeof label === "string" && /\(%\)$/.test(label)) || !Number.isInteger(value) ? 1 : 0;
-    var text = Math.abs(value).toFixed(decimals);
+    var text;
+    if (typeof label === "string" && /\(%\)$/.test(label)) {
+      text = Math.abs(value).toFixed(1);
+    } else if (Number.isInteger(value)) {
+      text = Math.abs(value).toFixed(0);
+    } else if (Math.abs(value) < 1) {
+      // The trim is safe on this branch and only on it: the text always begins
+      // "0.", so stripping trailing zeros can never eat a digit of the integer
+      // part the way it would on "100".
+      text = Math.abs(value).toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+    } else {
+      text = Math.abs(value).toFixed(1);
+    }
     var dot = text.indexOf(".");
     var whole = (dot === -1 ? text : text.slice(0, dot)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    return (value < 0 ? "-" : "") + whole + (dot === -1 ? "" : text.slice(dot));
+    // The sign comes off the ROUNDED text, not off the input: a metric cell is
+    // a count, a byte total, a distance or a percentage and none of those goes
+    // below zero, and "-0" for a value that rounded to nothing would be a minus
+    // sign in front of a number that is not negative.
+    return (value < 0 && Number(text) !== 0 ? "-" : "") + whole + (dot === -1 ? "" : text.slice(dot));
   }
 
   /**

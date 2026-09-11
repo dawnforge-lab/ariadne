@@ -126,6 +126,29 @@ export const MAP_VALUE_KEY = "value";
 export const RESERVED_TABLE_KEYS: ReadonlySet<string> = new Set([SCOPE_KEY, MEASURE_KEY]);
 
 /**
+ * WHERE THIS METRIC SITS IN THE METRIC SECTION, and the only thing on a
+ * declaration that is about the SET of tables rather than about this one.
+ *
+ * The catalog's own order is severity then id, which for the metrics — all of
+ * them `info` — is alphabetical, and alphabetical puts `site.health` tenth. That
+ * table is the one a reader meets the site through: the census every other table
+ * is a part of. So the display order is DECLARED rather than derived, here,
+ * beside the columns, because it is the same kind of statement as a label — a
+ * decision about what a client reads and in what order — and a consumer that
+ * lays the section out itself gets it from `rules_catalog` (`table.order`)
+ * rather than re-deriving a list Ariadne already has.
+ *
+ * Lower first, ties broken by rule id, and a table that declares no order sorts
+ * after every table that does. `defineRule` refuses anything but a non-negative
+ * integer. It orders the METRIC rules among themselves and nothing else: the
+ * rules that find keep the severity-then-id order every surface returns them in.
+ */
+interface MetricTableCommon {
+  /** Display order within the metric section; lower first, ties by rule id. */
+  order?: number;
+}
+
+/**
  * One row per stored row: the scope, then a column per dotted path into `value`.
  *
  * `scopeLabel` is the heading over the first column and is a property of what
@@ -133,7 +156,7 @@ export const RESERVED_TABLE_KEYS: ReadonlySet<string> = new Set([SCOPE_KEY, MEAS
  * they are sitemap documents, `Scope` where the only row is the site's. The site
  * row prints `Site` in that column whatever the heading says.
  */
-export interface PerScopeTable {
+export interface PerScopeTable extends MetricTableCommon {
   shape: "perScope";
   scopeLabel: string;
   columns: readonly MetricColumn[];
@@ -153,7 +176,7 @@ export interface PerScopeTable {
  * beside it" must be stated by the declaration and never guessed from whether a
  * lookup happened to miss (hard rule 7).
  */
-export interface PerScopeMeasureTable {
+export interface PerScopeMeasureTable extends MetricTableCommon {
   shape: "perScopeMeasure";
   scopeLabel: string;
   measures: readonly MetricColumn[];
@@ -182,7 +205,7 @@ export interface MetricListSource {
  * may be merged into one table (`inlinks.extremes` prints its two ends as one
  * list with a `List` column), in declaration order, each tagged.
  */
-export interface ExpandListTable {
+export interface ExpandListTable extends MetricTableCommon {
   shape: "expandList";
   lists: readonly MetricListSource[];
   columns: readonly MetricColumn[];
@@ -195,7 +218,7 @@ export interface ExpandListTable {
  * the site's own templates). A column per key is impossible — the keys differ
  * per crawl — so the entry itself is two columns.
  */
-export interface ExpandMapTable {
+export interface ExpandMapTable extends MetricTableCommon {
   shape: "expandMap";
   field: string;
   scopeLabel: string;
@@ -211,22 +234,46 @@ export type MetricTable =
 
 // ------------------------------------------------------------- constructors
 
-/** `perScope(scopeLabel, columns)` — see `PerScopeTable`. */
+/**
+ * `perScope(scopeLabel, columns, order?)` — see `PerScopeTable`.
+ *
+ * `order` is the trailing argument of all four constructors and means the same
+ * thing in each: where this table sits in the metric section (`MetricTableCommon`).
+ */
 export function perScope(
   scopeLabel: string,
   columns: readonly MetricColumn[],
+  order?: number,
 ): PerScopeTable {
-  return { shape: "perScope", scopeLabel, columns };
+  return { shape: "perScope", scopeLabel, columns, ...orderOf(order) };
 }
 
-/** `perScopeMeasure(scopeLabel, measures, columns, scopeColumns?)` — see the type. */
+/** `perScopeMeasure(scopeLabel, measures, columns, scopeColumns?, order?)` — see the type. */
 export function perScopeMeasure(
   scopeLabel: string,
   measures: readonly MetricColumn[],
   columns: readonly MetricColumn[],
   scopeColumns: readonly MetricColumn[] = [],
+  order?: number,
 ): PerScopeMeasureTable {
-  return { shape: "perScopeMeasure", scopeLabel, measures, columns, scopeColumns };
+  return {
+    shape: "perScopeMeasure",
+    scopeLabel,
+    measures,
+    columns,
+    scopeColumns,
+    ...orderOf(order),
+  };
+}
+
+/**
+ * `order`, spread rather than assigned, so a declaration that states none has no
+ * `order` KEY at all — the `marker` discipline the catalog already follows. A
+ * stored `order: undefined` would put the field on every table the catalog
+ * serves and make "did this metric declare a position" a truthiness question.
+ */
+function orderOf(order?: number): { order?: number } {
+  return order === undefined ? {} : { order };
 }
 
 /**
@@ -240,23 +287,26 @@ export function expandList(
   lists: string | readonly MetricListSource[],
   columns: readonly MetricColumn[],
   summary: readonly MetricColumn[] = [],
+  order?: number,
 ): ExpandListTable {
   return {
     shape: "expandList",
     lists: typeof lists === "string" ? [{ field: lists }] : lists,
     columns,
     summary,
+    ...orderOf(order),
   };
 }
 
-/** `expandMap(field, scopeLabel, keyLabel, valueLabel)` — see `ExpandMapTable`. */
+/** `expandMap(field, scopeLabel, keyLabel, valueLabel, order?)` — see `ExpandMapTable`. */
 export function expandMap(
   field: string,
   scopeLabel: string,
   keyLabel: string,
   valueLabel: string,
+  order?: number,
 ): ExpandMapTable {
-  return { shape: "expandMap", field, scopeLabel, keyLabel, valueLabel };
+  return { shape: "expandMap", field, scopeLabel, keyLabel, valueLabel, ...orderOf(order) };
 }
 
 // ----------------------------------------------------------------- shaping
@@ -294,6 +344,21 @@ export function metricTableColumns(table: MetricTable): MetricColumn[] {
 /** The summary labels a declaration promises. Only `expandList` has any. */
 export function metricTableSummary(table: MetricTable): MetricColumn[] {
   return table.shape === "expandList" ? [...table.summary] : [];
+}
+
+/**
+ * Where a declaration sits when the metric tables are sorted — its own `order`,
+ * or, for one that declares none, after every table that does.
+ *
+ * A number rather than a nullable, because the caller is a comparator and a
+ * comparator that has to branch on absence is a comparator with two orders in
+ * it. The sentinel is stated here, once, beside the field it stands in for.
+ */
+export const METRIC_TABLE_ORDER_LAST = Number.MAX_SAFE_INTEGER;
+
+/** See `METRIC_TABLE_ORDER_LAST`. Ties are broken by the rule id, by the caller. */
+export function metricTableOrder(table: MetricTable): number {
+  return table.order ?? METRIC_TABLE_ORDER_LAST;
 }
 
 /**

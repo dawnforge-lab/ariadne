@@ -282,6 +282,9 @@ export const healthMetrics: MetricRule[] = [
     // One row, and the scope column says so: `Scope` heads it because a metric
     // with no cohort rows has no template to name, and the single cell reads
     // `Site`.
+    // FIRST IN THE SECTION (the trailing `0`). Every other table is a part of
+    // this census, so a reader meets the whole before the pieces — the argument
+    // the site row makes inside one table, one level up (`MetricTableCommon`).
     perScope("Scope", [
       { key: "urlsTotal", label: "Pages Judged" },
       { key: "urlsWithCritical", label: "With Critical" },
@@ -290,7 +293,7 @@ export const healthMetrics: MetricRule[] = [
       { key: "urlsClean", label: "Clean" },
       { key: "cleanRatio", label: "Clean Ratio" },
       { key: "pagesNotAuditable", label: "URLs Not Judged" },
-    ]),
+    ], 0),
     async (db, crawlId, self) => siteHealth(db, crawlId, self),
   ),
 ];

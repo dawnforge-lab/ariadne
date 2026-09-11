@@ -745,3 +745,48 @@ describe("every declared column names a key its own rule's source writes", () =>
       .toBeGreaterThanOrEqual(200);
   });
 });
+
+/**
+ * `table.order` — the metric's place in the metric section, and the only field
+ * on a declaration that is about the SET of tables rather than about one.
+ *
+ * A separate block from the `defineRule` suite above because the property has
+ * two halves that live in two places: what a DEFINITION may say (here) and what
+ * the served catalog does with it (test/api/query.test.ts, over the wire).
+ */
+describe("a metric table's declared order", () => {
+  const withOrder = (order: unknown): unknown => ({
+    ...validMetricRule,
+    table: { ...perScope("Scope", [{ key: "urlsTotal", label: "Pages Judged" }]), order },
+  });
+
+  it("accepts a non-negative integer, and no order at all", () => {
+    expect(() => defineRule(withOrder(0) as never)).not.toThrow();
+    expect(() => defineRule(withOrder(13) as never)).not.toThrow();
+    // Absent is a position too — after every table that declares one.
+    expect(() => defineRule(validMetricRule)).not.toThrow();
+  });
+
+  // A position in a list is an index. A fraction, a negative and a NaN are each
+  // a value that looks declared and cannot be ordered, so each is refused by
+  // name rather than sorted somewhere arbitrary.
+  it("refuses anything that is not a position in a list", () => {
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "0", null]) {
+      expect(() => defineRule(withOrder(bad) as never), String(bad)).toThrow(
+        /must be a non-negative integer/,
+      );
+    }
+  });
+
+  // THE RULESET'S OWN FOURTEEN, as a set: every metric declares a position, and
+  // no two declare the same one. A duplicate would leave two tables ordered by
+  // the id tiebreak — silently, and only for that pair.
+  it("gives every metric rule a distinct position", () => {
+    const metrics = buildRegistry().byKind("metric");
+    const orders = metrics.map((rule) => rule.table.order);
+    expect(orders.every((order) => typeof order === "number")).toBe(true);
+    expect(new Set(orders).size, "two metric tables declare the same position").toBe(
+      metrics.length,
+    );
+  });
+});

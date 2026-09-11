@@ -408,7 +408,7 @@ export const crawlMetrics: MetricRule[] = [
       { key: "redirectInlinks", label: "Inlinks To Redirects" },
       { key: "chains", label: "Redirect Chains" },
       { key: "loops", label: "Redirect Loops" },
-    ]),
+    ], 8),
     async (db, crawlId, self) => redirectVolume(db, crawlId, self),
   ),
 
@@ -432,7 +432,7 @@ export const crawlMetrics: MetricRule[] = [
       { key: "docs", label: "Documents" },
       { key: "oversizedDocsSkipped", label: "Documents Dropped For Size" },
       { key: "entryCapReached", label: "Entry Cap Reached" },
-    ]),
+    ], 10),
     async (db, crawlId, self) => sitemapStructure(db, crawlId, self),
   ),
 ];

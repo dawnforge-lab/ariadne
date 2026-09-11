@@ -107,7 +107,7 @@ export const hreflangMetrics: MetricRule[] = [
       { key: "indexablePages", label: "Indexable Pages" },
       { key: "pagesWithHreflang", label: "Pages With Hreflang" },
       { key: "coveragePct", label: "Coverage (%)" },
-    ]),
+    ], 3),
     async (db, crawlId, self) => coverage(db, crawlId, self),
   ),
 ];

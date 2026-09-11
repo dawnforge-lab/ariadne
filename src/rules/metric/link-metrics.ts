@@ -407,7 +407,7 @@ export const linkMetrics: MetricRule[] = [
     "inlinks.distribution",
     ["CHECK-33"],
     LINKS,
-    perScope("Template", DISTRIBUTION_COLUMNS),
+    perScope("Template", DISTRIBUTION_COLUMNS, 4),
     async (db, crawlId, self) => distribution(db, crawlId, self, inlinkCohort(crawlId)),
   ),
 
@@ -431,6 +431,8 @@ export const linkMetrics: MetricRule[] = [
         { key: "url", label: "Address" },
         { key: "inlinks", label: "Inlinks" },
       ],
+      [],
+      5,
     ),
     async (db, crawlId, self) => extremes(db, crawlId, self),
   ),
@@ -442,7 +444,7 @@ export const linkMetrics: MetricRule[] = [
     "inlinks.sources-by-type",
     ["CHECK-33b"],
     LINKS,
-    expandMap("sources", "Destination Template", "Source Template", "Links"),
+    expandMap("sources", "Destination Template", "Source Template", "Links", 6),
     async (db, crawlId, self) => sourcesByType(db, crawlId, self),
   ),
 
@@ -475,7 +477,7 @@ export const linkMetrics: MetricRule[] = [
     "structure.depth-distribution",
     ["CHECK-32"],
     TECHNICAL,
-    perScope("Template", DISTRIBUTION_COLUMNS),
+    perScope("Template", DISTRIBUTION_COLUMNS, 12),
     async (db, crawlId, self) =>
       distribution(
         db,
@@ -506,7 +508,7 @@ export const linkMetrics: MetricRule[] = [
     perScope("Template", [
       ...DISTRIBUTION_COLUMNS,
       { key: "nullCount", label: "Unreachable Pages" },
-    ]),
+    ], 11),
     async (db, crawlId, self) =>
       distribution(
         db,

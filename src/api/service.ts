@@ -103,6 +103,7 @@ import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import {
   metricTableColumns,
+  metricTableOrder,
   metricTableSummary,
   shapeMetricTable,
   type MetricCell,
@@ -1205,7 +1206,7 @@ export interface CatalogRule {
    * ABSENT on every rule that finds, which has `columns` instead. The two fields
    * are never both present and never both absent.
    */
-  table?: { columns: MetricColumn[]; summary: MetricColumn[] };
+  table?: { columns: MetricColumn[]; summary: MetricColumn[]; order?: number };
   /**
    * Present ONLY on a NOT MEASURED marker, and then the registry's own reason
    * string — the crawl condition whose silence the marker explains. Absent on
@@ -1766,6 +1767,42 @@ const SEVERITY_RANK = sql`case i.severity when 'critical' then 0 when 'warning' 
  * SQL, where the value arrives from a row this process did not write.
  */
 const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
+
+/**
+ * THE CATALOG'S ORDER: severity then id for the rules that FIND, and the
+ * declared display order then id for the rules that MEASURE.
+ *
+ * The rules that find are unchanged and stay in `listIssues`' own order, so a UI
+ * rendering both puts the same rule in the same place twice — that property was
+ * the whole reason for the severity sort and nothing here touches it.
+ *
+ * The metrics sort among THEMSELVES, and the reason they can is that they are
+ * all `info` and none of them ever appears in `listIssues`: a metric writes no
+ * finding row, so no other listing has an opinion about where it goes. Ordering
+ * them by id put `site.health` — the census every other metric table is a part
+ * of — tenth of fourteen, which is an accident of the alphabet rather than a
+ * decision. So the decision is declared, on the table itself
+ * (`MetricTableCommon`), and read here.
+ *
+ * They form ONE BLOCK at the end of the `info` band rather than interleaving
+ * with the info findings by id, because a client reading the catalog top to
+ * bottom draws the metric section from a contiguous run — the demo does exactly
+ * that (src/demo/index.html), and it invents no order of its own.
+ */
+function catalogOrder(a: AnyRule, b: AnyRule): number {
+  const bySeverity = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
+  if (bySeverity !== 0) return bySeverity;
+  // Findings before metrics inside a band. Both are the same kind or this is
+  // the answer; only then is either sub-order asked for.
+  const kindRank = (rule: AnyRule): number => (rule.kind === "metric" ? 1 : 0);
+  const byKind = kindRank(a) - kindRank(b);
+  if (byKind !== 0) return byKind;
+  if (a.kind === "metric" && b.kind === "metric") {
+    const byOrder = metricTableOrder(a.table) - metricTableOrder(b.table);
+    if (byOrder !== 0) return byOrder;
+  }
+  return a.id.localeCompare(b.id);
+}
 
 /**
  * `SEVERITY_ORDER` for a severity that came off a ROW rather than out of the
@@ -3131,14 +3168,13 @@ export class ApiService {
    * rule: that would be one round trip per rule for one dashboard paint, and it
    * would let the counts come from as many different snapshots.
    *
-   * Sorted by severity then id — the order `listIssues` returns its groups in —
-   * so a UI that renders both puts the same rule in the same place twice.
+   * Sorted by severity then id for the rules that FIND — the order `listIssues`
+   * returns its groups in, so a UI that renders both puts the same rule in the
+   * same place twice — and by the DECLARED table order then id for the rules
+   * that measure, which form one block at the end (see `catalogOrder`).
    */
   async rulesCatalog(opts: { crawlId?: string } = {}): Promise<RulesCatalog> {
-    const ordered = [...this.registry.all()].sort(
-      (a, b) =>
-        SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.id.localeCompare(b.id),
-    );
+    const ordered = [...this.registry.all()].sort(catalogOrder);
     const copy = (rule: AnyRule): CatalogRule => ({
       id: rule.id,
       kind: rule.kind,
@@ -3156,6 +3192,10 @@ export class ApiService {
             table: {
               columns: metricTableColumns(rule.table),
               summary: metricTableSummary(rule.table),
+              // The declared position, spread for the `marker` discipline: the
+              // key is on a table that states one and absent on a table that
+              // does not, so a client can tell "position 0" from "no position".
+              ...(rule.table.order === undefined ? {} : { order: rule.table.order }),
             },
           }
         : { columns: columnsFor(rule) }),

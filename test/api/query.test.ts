@@ -1652,9 +1652,9 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
     const health = rules.find((r) => r["id"] === "site.health");
     const orphan = rules.find((r) => r["id"] === "links.orphan");
     const served = await table("site.health");
+    // `order` rides with the header: the section's order is served, not derived.
     expect(health?.["table"]).toEqual({
-      columns: served.body["columns"],
-      summary: [],
+      columns: served.body["columns"], summary: [], order: 0,
     });
     // `columns` and `table` are never both present and never both absent.
     expect(health?.["columns"]).toBeUndefined();
@@ -2400,8 +2400,8 @@ describe("GET /rules", () => {
     }
   });
 
-  it("orders the catalog the way issues_list orders its groups", async () => {
-    const rules = rulesOf(await call("/rules"));
+  it("orders the rules that find the way issues_list orders its groups", async () => {
+    const rules = rulesOf(await call("/rules")).filter((r) => r["kind"] !== "metric");
     const rank: Record<string, number> = { critical: 0, warning: 1, info: 2 };
     const keys = rules.map((r) => [rank[String(r["severity"])] ?? 9, String(r["id"])] as const);
     const sorted = [...keys].sort((a, b) => a[0] - b[0] || a[1].localeCompare(b[1]));
@@ -4044,5 +4044,83 @@ describe("GET /crawls/:id — why a failed crawl failed", () => {
     // The listing says a crawl failed; the crawl is where the reason lives.
     expect(listed).not.toHaveProperty("failureReason");
     expect(listed?.["status"]).toBe("failed");
+  });
+});
+
+/**
+ * THE ORDER THE CATALOG PUTS THE METRIC SECTION IN.
+ *
+ * `rules_catalog` is the list a client lays a page out from, and the demo's
+ * Metrics section is literally "the catalog's rules where kind is metric, in the
+ * order they arrive" — it sorts nothing (src/demo/index.html). So the order IS a
+ * served contract, and this pins it over the wire rather than over the registry:
+ * a rule could declare a position the serialiser then re-sorted away.
+ *
+ * The rules that FIND are untouched by this and are asserted so in the same
+ * test, because the severity-then-id order is what makes a catalog row and an
+ * `issues_list` group land in the same place in a UI that draws both.
+ */
+describe("GET /rules — the order of the sections", () => {
+  it("leads the metric section with the site census, then the declared sequence", async () => {
+    const res = await call("/rules");
+    expect(res.status).toBe(200);
+    const rules = res.body["rules"] as {
+      id: string;
+      kind: string;
+      severity: string;
+      table?: { order?: number };
+    }[];
+
+    // THE FOURTEEN, IN THE ORDER A CLIENT DRAWS THEM. `site.health` first
+    // because every other table is a part of that census; the rest
+    // alphabetically, which is what they already were.
+    expect(rules.filter((rule) => rule.kind === "metric").map((rule) => rule.id)).toEqual([
+      "site.health",
+      "content.metrics-by-type",
+      "content.template-similarity",
+      "hreflang.coverage",
+      "inlinks.distribution",
+      "inlinks.extremes",
+      "inlinks.sources-by-type",
+      "page.weight",
+      "redirect.volume",
+      "render.coverage",
+      "sitemap.structure",
+      "structure.click-depth-distribution",
+      "structure.depth-distribution",
+      "url.param-volumes",
+    ]);
+
+    // The position is SERVED, so a client that lays the section out itself gets
+    // the same order without re-deriving it.
+    expect(
+      rules.filter((rule) => rule.kind === "metric").map((rule) => rule.table?.order),
+    ).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    // …and it is on the metric rules and on nothing else.
+    for (const rule of rules) {
+      if (rule.kind === "metric") continue;
+      expect(rule.table, `${rule.id} carries a metric table`).toBeUndefined();
+    }
+
+    // THE RULES THAT FIND ARE UNCHANGED: severity band, then id inside it.
+    const finding = rules.filter((rule) => rule.kind !== "metric");
+    const rank = (severity: string): number =>
+      ({ critical: 0, warning: 1, info: 2 })[severity] ?? 3;
+    for (let i = 1; i < finding.length; i += 1) {
+      const previous = finding[i - 1];
+      const current = finding[i];
+      if (previous === undefined || current === undefined) throw new Error("short listing");
+      const bySeverity = rank(previous.severity) - rank(current.severity);
+      expect(bySeverity, `${previous.id} sorts after ${current.id}`).toBeLessThanOrEqual(0);
+      if (bySeverity === 0) {
+        expect(previous.id.localeCompare(current.id), `${previous.id} vs ${current.id}`)
+          .toBeLessThan(0);
+      }
+    }
+
+    // The metrics are one CONTIGUOUS block, which is what lets a client read the
+    // section off the catalog with a single filter and no sort.
+    const kinds = rules.map((rule) => (rule.kind === "metric" ? "m" : "f"));
+    expect(kinds.join("")).toMatch(/^f+m+$/);
   });
 });

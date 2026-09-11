@@ -263,7 +263,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // `metric_table` route and the `metric_table` CSV print them as headings — so
 // what the ruleset SAYS about a site changed exactly as ground (2) of 0.15.0
 // changed it for the finding rules' column headings. One ground, stated here so
-// the version can be traced to it.
+// the version can be traced to it. The declaration also carries `table.order` —
+// where the metric sits in the metric section — which is a presentation
+// decision rather than a sentence, and rides on the same bump rather than
+// earning one of its own.
 export const RULESET_VERSION = "0.16.0";
 
 /**
@@ -475,6 +478,20 @@ function validateTable(rule: AnyRule, fail: (msg: string) => never): void {
     );
   }
   if (typeof table !== "object" || Array.isArray(table)) fail("table must be a declaration object");
+
+  // WHERE THE TABLE SITS IN THE SECTION, checked for the only property a
+  // definition can carry: it is a position in a list, so a fraction, a negative
+  // or a NaN is not one. Absent is allowed and means "after every table that
+  // declares a position" (`METRIC_TABLE_ORDER_LAST`); what is refused is a value
+  // that LOOKS declared and cannot be ordered.
+  if (table.order !== undefined) {
+    if (typeof table.order !== "number" || !Number.isInteger(table.order) || table.order < 0) {
+      fail(
+        "table.order, when present, is the metric's position in the metric section and must " +
+          "be a non-negative integer — lower first, ties broken by rule id",
+      );
+    }
+  }
 
   // The shaper's own arguments first, because a heading list built from a
   // malformed declaration would fail on the wrong thing.
