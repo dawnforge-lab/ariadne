@@ -59,8 +59,8 @@ by the four summary labels then `Parameter, URLs, Tracking`.
 | | |
 |---|---|
 | `npx tsc --noEmit` | clean |
-| Suite | **82 files / 2,143 tests, 0 failures** (orchestrator's run at 341e875) |
-| Review | **[recorded before PR]** |
+| Suite | **83 files / 2,170 tests, 0 failures** (orchestrator's run after the review wave) |
+| Review | independent opus review of the whole branch: no blockers; all 14 declarations diffed literally against the spec's labels with no deviation; six findings applied (Site health leads via a catalog `order`, sub-1 numbers keep four decimals with the page's formatter now executed by a test, `(other)` sorts last in `expandMap`, the label-absence test derives 78 labels from the registry, a stale scope vocabulary, the catalog re-measured at 98,997 bytes) |
 
 ## 4. What the machine does NOT cover
 

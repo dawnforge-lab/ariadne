@@ -17,11 +17,13 @@
 import { describe, expect, it } from "vitest";
 
 import { buildRegistry } from "../../src/rules/index.js";
+import { OTHER_SOURCES } from "../../src/rules/metric/link-metrics.js";
 import {
   expandList,
   expandMap,
   metricTableColumns,
   metricTableSummary,
+  OTHER_BUCKET_KEY,
   perScope,
   perScopeMeasure,
   shapeMetricTable,
@@ -309,6 +311,31 @@ describe("expandMap", () => {
     expect(() => shapeMetricTable("x.y", table, [cohort("/", { sources: [1, 2] })])).toThrow(
       /not the object of entries/,
     );
+  });
+
+  // The shaper mirrors the rollup key rather than importing it, because
+  // `link-metrics.ts` imports `expandMap` from the shaper: importing back would
+  // be a cycle. This is the pin that keeps the mirror honest.
+  it("mirrors the rollup bucket key the metric writes", () => {
+    expect(OTHER_BUCKET_KEY).toBe(OTHER_SOURCES);
+  });
+
+  // `sourcesByType` caps the named types at `SOURCE_TYPE_CAP` and sums the tail
+  // into `(other)`, ordered LAST by `min(rank)` — NOT by its total, which can
+  // outweigh the leader easily (here 500 against 194). Sorting on value alone
+  // would put the rollup at the top of a table whose whole point is which
+  // template sends the most links, so `(other)` is pinned to the bottom.
+  it("sorts the rollup bucket last even when it outweighs the leader", () => {
+    const shaped = shapeMetricTable("inlinks.sources-by-type", table, [
+      cohort("/", {
+        sources: { [OTHER_SOURCES]: 500, "/search": 5, "/products/:slug": 194 },
+      }),
+    ]);
+    expect(shaped.rows).toEqual([
+      { scope: "/", key: "/products/:slug", value: 194 },
+      { scope: "/", key: "/search", value: 5 },
+      { scope: "/", key: OTHER_SOURCES, value: 500 },
+    ]);
   });
 });
 

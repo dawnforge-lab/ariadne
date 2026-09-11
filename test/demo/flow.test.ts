@@ -33,9 +33,10 @@
  * block of, `GET /crawls/:id/metrics/:metricId` answers one block's copy,
  * header, summary and rows, every cell in them is a scalar, and the CSV the
  * link points at is headed with the same labels. On the page side: the header
- * is the response's `columns`, not one of the sixty-seven labels the fourteen
- * metrics declare — every one of which is asserted ABSENT from the source — and
- * the only decision the page makes about a metric is how a number is spelled.
+ * is the response's `columns`, not one of the labels the fourteen metrics
+ * declare — every one of which is derived from the registry and asserted ABSENT
+ * from the source — and the only decision the page makes about a metric is how
+ * a number is spelled.
  *
  * THE FOURTH SECTION'S ROUTING IS ASSERTED AT THIS FILE'S OWN LEVEL. A NOT
  * MEASURED marker reports that a check could not be answered on this crawl, and
@@ -70,6 +71,13 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createDemoServer, type DemoServer } from "../../src/demo/server.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import {
+  METRIC_SCOPES,
+  metricTableColumns,
+  metricTableSummary,
+  SITE_SCOPE_VALUE,
+} from "../../src/rules/registry/registry.js";
 
 let db: Db;
 
@@ -450,7 +458,7 @@ describe("the demo flow", () => {
     expect(metrics.items.length).toBeGreaterThan(0);
     for (const row of metrics.items) {
       expect(row.metricId.length).toBeGreaterThan(0);
-      expect(["site", "page_type", "rule"]).toContain(row.scope);
+      expect(METRIC_SCOPES).toContain(row.scope);
     }
 
     // THE METRICS SECTION IS ONE BLOCK PER METRIC (Phase 21), and this is where
@@ -796,41 +804,37 @@ describe("the demo flow", () => {
       'errorBox.appendChild(el("span", "step", "the table for " + metricId + " could not be read"));',
     );
 
-    // NO METRIC LABEL IN THE PAGE. Every column and summary label the fourteen
-    // metrics declare (the design's §2 table), asserted absent as a string
-    // literal — the form a hard-coded header would take. The engine owns these
-    // words; a page that spelled one would be renaming a measurement.
-    for (const label of [
-      // site.health
-      "Scope", "Pages Judged", "With Critical", "With Warning Only", "With Info Only",
-      "Clean", "Clean Ratio", "URLs Not Judged",
-      // the distribution columns, wherever a distribution appears
-      "Template", "Measure", "Pages", "Min", "P25", "Median", "Mean", "P75", "P95", "Max",
-      // content.template-similarity
-      "Pages Fingerprinted", "Pages Sampled", "Pairs Compared", "Mean Distance (bits)",
-      "Within 3 Bits (%)", "Within 8 Bits (%)",
-      // hreflang.coverage
-      "Indexable Pages", "Pages With Hreflang", "Coverage (%)",
-      // inlinks.extremes and inlinks.sources-by-type
-      "List", "Address", "Inlinks", "Destination Template", "Source Template", "Links",
-      // page.weight
-      "File References", "Files Weighed", "Pages With Unweighed Files", "Floor",
-      // redirect.volume
-      "Pages Fetched", "Redirecting URLs", "Redirects (%)", "Inlinks To Redirects",
-      "Redirect Chains", "Redirect Loops",
-      // render.coverage
-      "Pages Crawled", "Render Run", "Selection Mode", "Render Budget", "Suspect Pages",
-      "Sampled Pages", "Selected Pages", "Selection Truncated", "Pages Rendered",
-      "Render Failures",
-      // sitemap.structure
-      "Sitemap", "Entries", "Over 50,000 Entries", "Documents", "Documents Dropped For Size",
-      "Entry Cap Reached",
-      // structure.click-depth-distribution
-      "Unreachable Pages",
-      // url.param-volumes, columns then summary
-      "Parameter", "URLs", "Tracking", "Parameters Found", "Tracking Parameters",
-      "URLs With Parameters", "Indexable URLs With Parameters",
-    ]) {
+    // NO METRIC LABEL IN THE PAGE. Every word the fourteen metric declarations
+    // put in a header or a summary, asserted absent as a string literal — the
+    // form a hard-coded header would take. The engine owns these words; a page
+    // that spelled one would be renaming a measurement.
+    //
+    // THE LIST IS DERIVED FROM THE REGISTRY, not typed out: a hand list stops
+    // covering a label the moment a metric declares a new column, and the point
+    // of the assertion is that the page never spells ANY of them. The four
+    // shapers between them put a label in four places — the header
+    // (`metricTableColumns`, which folds in the scope heading and `Measure`),
+    // the summary (`metricTableSummary`), a `perScopeMeasure`'s measure cells,
+    // and an `expandList` tag's value — plus `Site`, the cell every site row
+    // carries in its scope column. The floor below is the count at Phase 21 and
+    // is what stops a derivation that broke from passing vacuously.
+    const metricLabels = new Set<string>([SITE_SCOPE_VALUE]);
+    for (const rule of buildRegistry().byKind("metric")) {
+      for (const column of metricTableColumns(rule.table)) metricLabels.add(column.label);
+      for (const column of metricTableSummary(rule.table)) metricLabels.add(column.label);
+      if (rule.table.shape === "perScopeMeasure") {
+        for (const measure of rule.table.measures) metricLabels.add(measure.label);
+      }
+      if (rule.table.shape === "expandList") {
+        for (const source of rule.table.lists) {
+          if (source.tag !== undefined) metricLabels.add(source.tag.value);
+        }
+      }
+    }
+    expect(metricLabels.size, "the metric label derivation went vacuous").toBeGreaterThanOrEqual(
+      67,
+    );
+    for (const label of metricLabels) {
       expect(html, `the page spells the metric label ${label}`).not.toContain(`"${label}"`);
     }
 

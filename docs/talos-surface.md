@@ -996,7 +996,7 @@ refuses the two that are not", `test/api/query.test.ts:1649` "serves the same
 header on the catalog, and only on metric rules",
 `test/api/mcp.test.ts:2111` "answers one metric's table: the copy, the header,
 and one row per scope",
-`test/rules/metric-table.test.ts:324` "gives every metric rule a table whose
+`test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
 `test/fixtures/harness.test.ts:1809` "renders every metric's table, with no
 empty column and no unmapped key".

@@ -122,6 +122,18 @@ export const MEASURE_LABEL = "Measure";
 export const MAP_KEY = "key";
 export const MAP_VALUE_KEY = "value";
 
+/**
+ * The rollup bucket an `expandMap` sorts LAST whatever its value.
+ *
+ * MIRRORED, not imported: the owner is `OTHER_SOURCES` in
+ * `src/rules/metric/link-metrics.ts`, and that module imports this one (for
+ * `expandMap` itself), so importing it back would make the registry's shaper
+ * depend on a rule. `test/rules/metric-table.test.ts` pins the two equal, so a
+ * rename on either side is a red test rather than a table that quietly sorts a
+ * heavy tail to the top.
+ */
+export const OTHER_BUCKET_KEY = "(other)";
+
 /** The reserved keys no declared column may take. See `SCOPE_KEY`. */
 export const RESERVED_TABLE_KEYS: ReadonlySet<string> = new Set([SCOPE_KEY, MEASURE_KEY]);
 
@@ -596,14 +608,22 @@ export function shapeExpandMap(
     // the ranked list comes back with the shortest template name first. Reading
     // `Object.entries` as written would therefore put an arbitrary row at the
     // top of a table whose whole point is which template sends the most links.
-    // The order is restored instead: value descending, then key ascending,
-    // which is the rule's own `order by inlinks desc, source_type asc` and is
-    // total (a non-numeric value sorts after every number, by key).
+    // The order is restored instead: `OTHER_BUCKET_KEY` last, then value
+    // descending, then key ascending. That is total (a non-numeric value sorts
+    // after every number, by key) and it matches the ranked part of the rule's
+    // order — but only the ranked part. `sourcesByType` folds every type past
+    // `SOURCE_TYPE_CAP` into one `(other)` bucket and orders it LAST by
+    // `min(rank)`, not by its summed count, so a heavy tail that outweighs the
+    // leader would sort to the top of the table if value alone decided. It is
+    // pinned to the bottom first, where the rule put it.
     const entries = Object.entries(map as Record<string, unknown>).map(([key, entry]) => ({
       key,
       cell: cellAt(metricId, { [key]: entry }, key),
     }));
     entries.sort((a, b) => {
+      const leftOther = a.key === OTHER_BUCKET_KEY;
+      const rightOther = b.key === OTHER_BUCKET_KEY;
+      if (leftOther !== rightOther) return leftOther ? 1 : -1;
       const left = typeof a.cell === "number" ? a.cell : null;
       const right = typeof b.cell === "number" ? b.cell : null;
       if (left !== null && right !== null && left !== right) return right - left;
