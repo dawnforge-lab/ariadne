@@ -74,4 +74,4 @@ by the four summary labels then `Parameter, URLs, Tracking`.
 
 ## 5. Integration
 
-**[recorded at merge]**
+Integrated 2026-09-11 as **PR #19** from `worktree-phase-21` (rebased onto main), on the owner's word ("yes, do that"). CI: green first try on a13b1a6 (run 34591660387, 4m51s).
