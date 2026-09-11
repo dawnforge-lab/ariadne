@@ -3,6 +3,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { normalizeUrl } from "../crawl/parse/url-utils.js";
 import { copyFor } from "./registry/copy/index.js";
+import type { MetricTable } from "./registry/metric-table.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
 import type {
   Finding,
@@ -674,11 +675,20 @@ export function pageRule(
  * `severity` is not a parameter, unlike `pageRule`'s. A metric states what was
  * counted; it accuses the site of nothing, and the judgement is the agent's —
  * so `info` is not a default here, it is the only value the kind can have.
+ *
+ * `table` IS a parameter, positional and required, immediately before the body
+ * that writes the values it names — `pageRule`'s `columns`, for the kind that
+ * measures. It is the metric's report: the shaper that turns the rows the body
+ * below returns into rows a client reads, and the label over every one of their
+ * columns (src/rules/registry/metric-table.ts). Declaring it beside the body
+ * rather than in a table somewhere else is what lets the two be read together,
+ * and `defineRule` refuses a metric rule without one.
  */
 export function metricRule(
   id: string,
   checkIds: string[],
   category: RuleCategory,
+  table: MetricTable,
   run: (db: Db, crawlId: string, self: MetricIdentity) => Promise<Metric[]>,
 ): MetricRule {
   const self: MetricIdentity = { id };
@@ -690,6 +700,7 @@ export function metricRule(
     severity: "info",
     ...copyFor(id),
     rulesetVersion: RULESET_VERSION,
+    table,
     run: (db, crawlId) => run(db, crawlId, self),
   });
 }

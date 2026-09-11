@@ -29,7 +29,7 @@ import {
 } from "../../src/db/schema.js";
 import { MARKED_FAILED_REASON, columnsFor } from "../../src/api/service.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
-import { CSV_VIEWS, CSV_VIEW_DEFS, csvRecord } from "../../src/api/csv.js";
+import { CSV_QUERY_VIEWS, CSV_VIEW_DEFS, csvRecord } from "../../src/api/csv.js";
 import { ROBOTS_OUTCOMES } from "../../src/crawl/discovery.js";
 // The pass's own literal, read from the module that writes it: a hand-typed
 // 'recheck-cap' here would keep passing the day the constant changed.
@@ -108,6 +108,20 @@ let crawlF = "";
  * count a wrong count rather than a plausible one.
  */
 let crawlG = "";
+
+/**
+ * THE METRIC-TABLE FIXTURE: one judged crawl holding metric rows in the shapes
+ * the real metric rules write, one per shaper.
+ *
+ * Its own crawl for `crawlG`'s reason. `crawlA`'s metric rows are deliberate
+ * stand-ins — `{words: 800}` under `content.metrics-by-type` — which is all the
+ * raw `/metrics` listing needs, and exactly what a TABLE cannot be built from:
+ * the table is the metric's declared shape, so the fixture has to be in that
+ * shape or the test proves nothing about the surface. The values are the
+ * reference crawl's, rounded: real numbers in the real shapes, small enough to
+ * read in an assertion.
+ */
+let crawlM = "";
 
 /**
  * The comparison fixtures — six crawls whose only job is to make one cross-crawl
@@ -930,6 +944,9 @@ beforeAll(async () => {
     depth: 0, wordCount: 400, fetchedAt: FIRST_LOOK,
   });
 
+  crawlM = `crawl_metrictable_${stamp}`;
+  await seedCrawl(crawlM, { judged: true });
+
   await db.insert(metrics).values([
     { crawlId: crawlA, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: crawlA, metricId: "inlinks.distribution", scope: "site", scopeValue: "", value: { median: 4 } },
@@ -937,6 +954,65 @@ beforeAll(async () => {
     { crawlId: crawlA, metricId: "content.metrics-by-type", scope: "page_type", scopeValue: "blog", value: { words: 300 } },
     { crawlId: crawlB, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 99 } },
     { crawlId: crawlC, metricId: "retired.metric", scope: "site", scopeValue: "", value: { n: 1 } },
+
+    // THE METRIC-TABLE FIXTURE, one metric per shaper — see `crawlM`.
+    {
+      crawlId: crawlM, metricId: "site.health", scope: "site", scopeValue: "",
+      value: {
+        urlsTotal: 435, urlsWithCritical: 8, urlsWithWarningOnly: 427,
+        urlsWithInfoOnly: 0, urlsClean: 0, cleanRatio: 0, pagesNotAuditable: 112,
+      },
+    },
+    {
+      crawlId: crawlM, metricId: "content.metrics-by-type", scope: "site", scopeValue: "",
+      value: {
+        wordCount: { count: 431, min: 543, p25: 800, median: 835, mean: 1009.36, p75: 1099, p95: 1853, max: 4138 },
+        renderableWordCount: { count: 431, min: 352, p25: 471, median: 511, mean: 719.99, p75: 808.5, p95: 1579.5, max: 3251 },
+        textRatio: { count: 431, min: 0.0106, p25: 0.012, median: 0.0125, mean: 0.0136, p75: 0.0135, p95: 0.0183, max: 0.0664 },
+      },
+    },
+    {
+      crawlId: crawlM, metricId: "content.metrics-by-type",
+      scope: "page_type", scopeValue: "/blog",
+      value: {
+        wordCount: { count: 2, min: 300, p25: 325, median: 350, mean: 350, p75: 375, p95: 395, max: 400 },
+        renderableWordCount: { count: 2, min: 100, p25: 125, median: 150, mean: 150, p75: 175, p95: 195, max: 200 },
+        textRatio: { count: 2, min: 0.01, p25: 0.011, median: 0.012, mean: 0.012, p75: 0.013, p95: 0.014, max: 0.014 },
+      },
+    },
+    {
+      crawlId: crawlM, metricId: "inlinks.extremes", scope: "site", scopeValue: "",
+      value: {
+        top: [{ url: `${SITE}/`, inlinks: 434 }, { url: `${SITE}/cart`, inlinks: 434 }],
+        bottom: [{ url: `${SITE}/orphan`, inlinks: 0 }],
+      },
+    },
+    {
+      crawlId: crawlM, metricId: "sitemap.structure", scope: "site", scopeValue: "",
+      value: { docs: 2, totalUrls: 376, oversizedDocsSkipped: 0, urlCapBreaches: 0, entryCapReached: false },
+    },
+    {
+      crawlId: crawlM, metricId: "sitemap.structure", scope: "sitemap_doc",
+      scopeValue: `${SITE}/sitemap_blogs_1.xml`, value: { urls: 5, breaches50k: false },
+    },
+    {
+      crawlId: crawlM, metricId: "sitemap.structure", scope: "sitemap_doc",
+      scopeValue: `${SITE}/sitemap_products_1.xml`, value: { urls: 371, breaches50k: false },
+    },
+    {
+      crawlId: crawlM, metricId: "url.param-volumes", scope: "site", scopeValue: "",
+      value: {
+        topParams: [
+          { name: "_pos", occurrences: 47, isTracking: false },
+          { name: "gclid", occurrences: 3, isTracking: true },
+        ],
+        totalParams: 5, trackingParams: 1, parameterisedPages: 61, parameterisedIndexablePages: 57,
+      },
+    },
+    {
+      crawlId: crawlM, metricId: "inlinks.sources-by-type", scope: "page_type", scopeValue: "/",
+      value: { sources: { "/products/:slug": 194, "/search": 5 } },
+    },
   ]);
 
   api = createApiServer({
@@ -958,6 +1034,7 @@ afterAll(async () => {
   await api.close();
   for (const id of [
     crawlA, crawlB, crawlC, crawlD, crawlE, crawlF, crawlG,
+    crawlM,
     cmpBase, cmpHead, cmpOld, cmpCapped, cmpOther, cmpWww, cmpUnjudged,
     cmpMixed, cmpUnstampedA, cmpUnstampedB,
   ]) {
@@ -1384,6 +1461,207 @@ describe("GET /crawls/:id/metrics", () => {
       "redirect.volume/",
     ]);
     expect((await call("/crawls/crawl_missing/metrics")).status).toBe(404);
+  });
+});
+
+/**
+ * ONE METRIC AS A TABLE — the metric side of `issue_urls`.
+ *
+ * What is under test here is the SURFACE: that the route serves the metric's
+ * declared header and rows, that the two kinds of empty answer are told apart
+ * from the refusals, and that the CSV of the same table is the same table. The
+ * shaping itself is pinned over synthetic rows in
+ * test/rules/metric-table.test.ts, and the declarations' keys against a real
+ * crawl in test/fixtures/harness.test.ts.
+ */
+describe("GET /crawls/:id/metrics/:metricId", () => {
+  const table = async (metricId: string, crawlId = crawlM): Promise<Res> =>
+    await call(`/crawls/${crawlId}/metrics/${metricId}`);
+
+  const labels = (res: Res): string[] =>
+    (res.body["columns"] as { label: string }[]).map((c) => c.label);
+  const tableRows = (res: Res): Record<string, unknown>[] =>
+    res.body["rows"] as Record<string, unknown>[];
+
+  it("serves the metric's copy, its header and one row per scope", async () => {
+    const res = await table("site.health");
+    expect(res.status).toBe(200);
+    expect(res.body["metricId"]).toBe("site.health");
+    expect(res.body["title"]).toBe(titleOf("site.health"));
+    expect(typeof res.body["explanation"]).toBe("string");
+    expect(typeof res.body["howToFix"]).toBe("string");
+    expect(labels(res)).toEqual([
+      "Scope",
+      "Pages Judged",
+      "With Critical",
+      "With Warning Only",
+      "With Info Only",
+      "Clean",
+      "Clean Ratio",
+      "URLs Not Judged",
+    ]);
+    // The site row prints `Site` in the scope column whatever that column is
+    // headed, and every number crosses as a number for the client to format.
+    expect(tableRows(res)).toEqual([
+      {
+        scope: "Site",
+        urlsTotal: 435,
+        urlsWithCritical: 8,
+        urlsWithWarningOnly: 427,
+        urlsWithInfoOnly: 0,
+        urlsClean: 0,
+        cleanRatio: 0,
+        pagesNotAuditable: 112,
+      },
+    ]);
+    // A complete table says nothing about being empty.
+    expect(res.body["note"]).toBeUndefined();
+    expect(res.body["summary"]).toEqual([]);
+  });
+
+  it("writes a row per measure, site first, for a per-measure metric", async () => {
+    const res = await table("content.metrics-by-type");
+    expect(labels(res)).toEqual([
+      "Template", "Measure", "Pages", "Min", "P25", "Median", "Mean", "P75", "P95", "Max",
+    ]);
+    expect(tableRows(res).map((r) => [r["scope"], r["measure"]])).toEqual([
+      ["Site", "Word Count"],
+      ["Site", "Renderable Word Count"],
+      ["Site", "Text Ratio"],
+      ["/blog", "Word Count"],
+      ["/blog", "Renderable Word Count"],
+      ["/blog", "Text Ratio"],
+    ]);
+    expect(tableRows(res)[0]).toMatchObject({ count: 431, median: 835, mean: 1009.36 });
+  });
+
+  it("expands a list metric into rows and lifts its scalars into the summary", async () => {
+    const params = await table("url.param-volumes");
+    expect(labels(params)).toEqual(["Parameter", "URLs", "Tracking"]);
+    expect(tableRows(params)).toEqual([
+      { name: "_pos", occurrences: 47, isTracking: false },
+      { name: "gclid", occurrences: 3, isTracking: true },
+    ]);
+    expect(params.body["summary"]).toEqual([
+      { key: "totalParams", label: "Parameters Found", value: 5 },
+      { key: "trackingParams", label: "Tracking Parameters", value: 1 },
+      { key: "parameterisedPages", label: "URLs With Parameters", value: 61 },
+      { key: "parameterisedIndexablePages", label: "Indexable URLs With Parameters", value: 57 },
+    ]);
+
+    // The merged pair, in declaration order, each row saying which end it is.
+    const extremes = await table("inlinks.extremes");
+    expect(labels(extremes)).toEqual(["List", "Address", "Inlinks"]);
+    expect(tableRows(extremes)).toEqual([
+      { list: "Most linked", url: `${SITE}/`, inlinks: 434 },
+      { list: "Most linked", url: `${SITE}/cart`, inlinks: 434 },
+      { list: "Least linked", url: `${SITE}/orphan`, inlinks: 0 },
+    ]);
+  });
+
+  it("puts both sitemap scopes in one table, with the site-only cells empty", async () => {
+    const res = await table("sitemap.structure");
+    expect(labels(res)).toEqual([
+      "Sitemap",
+      "Entries",
+      "Over 50,000 Entries",
+      "Documents",
+      "Documents Dropped For Size",
+      "Entry Cap Reached",
+    ]);
+    expect(tableRows(res)).toEqual([
+      {
+        scope: "Site",
+        entries: 376,
+        over50kEntries: 0,
+        docs: 2,
+        oversizedDocsSkipped: 0,
+        entryCapReached: false,
+      },
+      // A document row carries its own two facts and NULL — never zero, never
+      // false — under the three columns that are the site's alone.
+      {
+        scope: `${SITE}/sitemap_blogs_1.xml`,
+        entries: 5,
+        over50kEntries: false,
+        docs: null,
+        oversizedDocsSkipped: null,
+        entryCapReached: null,
+      },
+      {
+        scope: `${SITE}/sitemap_products_1.xml`,
+        entries: 371,
+        over50kEntries: false,
+        docs: null,
+        oversizedDocsSkipped: null,
+        entryCapReached: null,
+      },
+    ]);
+  });
+
+  it("expands a map metric into one row per entry, keyed by the scope it belongs to", async () => {
+    const res = await table("inlinks.sources-by-type");
+    expect(labels(res)).toEqual(["Destination Template", "Source Template", "Links"]);
+    expect(tableRows(res)).toEqual([
+      { scope: "/", key: "/products/:slug", value: 194 },
+      { scope: "/", key: "/search", value: 5 },
+    ]);
+  });
+
+  // THE THREE EMPTY ANSWERS, which are three different sentences. Two are
+  // refusals and the third is a measurement that says so out loud.
+  it("says which kind of empty a rowless table is, and refuses the two that are not", async () => {
+    // Judged, and this metric wrote nothing: a measurement, with the sentence
+    // that stops it reading as "nobody looked".
+    const measured = await table("hreflang.coverage");
+    expect(measured.status).toBe(200);
+    expect(measured.body["rows"]).toEqual([]);
+    expect(String(measured.body["note"])).toContain("was judged");
+    expect(String(measured.body["note"])).toContain("wrote no rows");
+    // The header is still there: a table with no rows must still say what it
+    // failed to contain.
+    expect(labels(measured)).toEqual(["Template", "Indexable Pages", "Pages With Hreflang", "Coverage (%)"]);
+
+    // Never judged: a refusal naming the fact, not an empty table.
+    const unjudged = await table("site.health", crawlA);
+    expect(unjudged.status).toBe(404);
+    expect(String(unjudged.body["error"])).toContain("never been judged");
+
+    // A metric this ruleset does not define, and a rule that is not a metric:
+    // both 404, because the metric is the RESOURCE here (where on the listing
+    // it is a filter, and a 400).
+    const unknown = await table("no.such-metric");
+    expect(unknown.status).toBe(404);
+    expect(String(unknown.body["error"])).toContain("no.such-metric");
+    const finding = await table("links.orphan");
+    expect(finding.status).toBe(404);
+    expect(String(finding.body["error"])).toContain("issues");
+
+    expect((await call(`/crawls/crawl_missing/metrics/site.health`)).status).toBe(404);
+  });
+
+  it("leaves the raw metrics listing exactly as it was", async () => {
+    const listing = await call(`/crawls/${crawlM}/metrics?metricId=site.health`);
+    expect(listing.status).toBe(200);
+    expect(items(listing)[0]?.["value"]).toMatchObject({ urlsTotal: 435 });
+  });
+
+  it("serves the same header on the catalog, and only on metric rules", async () => {
+    const catalog = await call("/rules");
+    const rules = catalog.body["rules"] as Record<string, unknown>[];
+    const health = rules.find((r) => r["id"] === "site.health");
+    const orphan = rules.find((r) => r["id"] === "links.orphan");
+    const served = await table("site.health");
+    expect(health?.["table"]).toEqual({
+      columns: served.body["columns"],
+      summary: [],
+    });
+    // `columns` and `table` are never both present and never both absent.
+    expect(health?.["columns"]).toBeUndefined();
+    expect(orphan?.["table"]).toBeUndefined();
+    expect(Array.isArray(orphan?.["columns"])).toBe(true);
+    const params = rules.find((r) => r["id"] === "url.param-volumes");
+    expect((params?.["table"] as { summary: unknown[] }).summary).toHaveLength(4);
   });
 });
 
@@ -2651,6 +2929,92 @@ describe("GET /crawls/:id/export?format=csv", () => {
     for (const row of internal.records) expect(row).toHaveLength(10);
   });
 
+  /**
+   * THE METRIC TABLE AS A SPREADSHEET, and the one view that is not a keyset
+   * read of a table (see `CSV_QUERY_VIEWS`).
+   *
+   * The header is the LABELS — the same header the JSON route serves — and the
+   * summary scalars lead every row as extra columns, because a CSV has one
+   * rectangle and no place above it. Dropping them would hand a client a file
+   * saying "`_pos` appears on 47 URLs" while losing "this site has 5 parameters
+   * on 61 URLs".
+   */
+  it("writes one metric's table, headed by its labels, with the summary leading every row", async () => {
+    const res = await callCsv(
+      `/crawls/${crawlM}/export?format=csv&view=metric_table&metricId=url.param-volumes`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-disposition")).toContain(
+      `filename="${crawlM}-url.param-volumes.csv"`,
+    );
+    expect(res.records[0]).toEqual([
+      "Parameters Found",
+      "Tracking Parameters",
+      "URLs With Parameters",
+      "Indexable URLs With Parameters",
+      "Parameter",
+      "URLs",
+      "Tracking",
+    ]);
+    expect(rows(res)).toEqual([
+      ["5", "1", "61", "57", "_pos", "47", "false"],
+      ["5", "1", "61", "57", "gclid", "3", "true"],
+    ]);
+
+    // A null cell is EMPTY — the file's one meaning for "the engine has no
+    // value here" — and the numbers are written raw for a spreadsheet to format.
+    const sitemap = await callCsv(
+      `/crawls/${crawlM}/export?format=csv&view=metric_table&metricId=sitemap.structure`,
+    );
+    expect(sitemap.records[0]).toEqual([
+      "Sitemap", "Entries", "Over 50,000 Entries", "Documents",
+      "Documents Dropped For Size", "Entry Cap Reached",
+    ]);
+    expect(rows(sitemap)[1]).toEqual([
+      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "",
+    ]);
+
+    // The header is written for a metric that measured nothing too: a zero-row
+    // CSV with no header cannot say what it failed to contain.
+    const empty = await callCsv(
+      `/crawls/${crawlM}/export?format=csv&view=metric_table&metricId=hreflang.coverage`,
+    );
+    expect(empty.records[0]).toEqual([
+      "Template", "Indexable Pages", "Pages With Hreflang", "Coverage (%)",
+    ]);
+    expect(rows(empty)).toEqual([]);
+  });
+
+  // THE SUBJECT IS REQUIRED AND IS NOT THE OTHER VIEW'S. Every refusal happens
+  // before the 200 and the header, because a refusal inside the stream is a torn
+  // socket where a client expects a complete file.
+  it("refuses a metric_table with no metricId, and a metricId on any other view", async () => {
+    const bare = await call(`/crawls/${crawlM}/export?format=csv&view=metric_table`);
+    expect(bare.status).toBe(400);
+    expect(String(bare.body["error"])).toContain("metricId");
+
+    const crossed = await call(
+      `/crawls/${crawlM}/export?format=csv&view=metric_table&ruleId=links.orphan`,
+    );
+    expect(crossed.status).toBe(400);
+    expect(String(crossed.body["error"])).toContain("metricId");
+
+    const elsewhere = await call(
+      `/crawls/${crawlM}/export?format=csv&view=issues&metricId=site.health`,
+    );
+    expect(elsewhere.status).toBe(400);
+    expect(String(elsewhere.body["error"])).toContain("not about one metric");
+
+    const unknown = await call(
+      `/crawls/${crawlM}/export?format=csv&view=metric_table&metricId=no.such-metric`,
+    );
+    expect(unknown.status).toBe(404);
+
+    const jsonl = await call(`/crawls/${crawlM}/export?metricId=site.health`);
+    expect(jsonl.status).toBe(400);
+    expect(String(jsonl.body["error"])).toContain("CSV export");
+  });
+
   // ROW COUNTS EQUAL THE SOURCE. A view that silently dropped rows — a keyset
   // that skipped a batch boundary, a join that lost a row — is a file a client
   // reads as "these are all of them".
@@ -2705,6 +3069,10 @@ describe("GET /crawls/:id/export?format=csv", () => {
   // the file a full-batch read produces: same rows, same order, nothing skipped
   // at a boundary and nothing repeated. This is the memory contract's
   // behavioural half — `test/api/csv.test.ts` pins the SQL that makes it true.
+  // `CSV_QUERY_VIEWS` and not `CSV_VIEWS` since P21-T1: `metric_table` is one
+  // metric's rows shaped by its own declaration rather than a keyset read of a
+  // table, so it has no cursor to walk (and no `CsvView` definition). Its file
+  // is pinned in the metric-table block instead.
   it("reads every view through a cursor that can be walked one row at a time", async () => {
     const ctx = {
       rule: (ruleId: string) => {
@@ -2715,7 +3083,7 @@ describe("GET /crawls/:id/export?format=csv", () => {
       evidence: (value: unknown) => value as Record<string, unknown>,
     };
 
-    for (const view of CSV_VIEWS) {
+    for (const view of CSV_QUERY_VIEWS) {
       const def = CSV_VIEW_DEFS[view];
       const ruleId = def.needsRuleId ? "links.orphan" : null;
       let cursor = [...def.start];

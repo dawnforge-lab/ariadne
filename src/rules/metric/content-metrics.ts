@@ -27,9 +27,11 @@ import type { Metric, MetricRule } from "../registry/registry.js";
 // `page.weight` became their second caller: a distribution copied into a second
 // metric file is a second place for the per-measure null handling to be got
 // wrong. Same shape, same rounding, same argument — see their docblocks there.
+import { perScope, perScopeMeasure } from "../registry/metric-table.js";
 import {
   COHORT_PAGE_TYPE,
   cohortFilter,
+  DISTRIBUTION_COLUMNS,
   nullableNum,
   num,
   readStats,
@@ -297,11 +299,43 @@ async function templateSimilarity(
  * anyone holding the jsonb without the copy beside it.
  */
 export const contentMetrics: MetricRule[] = [
-  metricRule("content.metrics-by-type", ["CHECK-38"], CONTENT, async (db, crawlId, self) =>
-    contentByType(db, crawlId, self),
+  // THREE DISTRIBUTIONS, ONE PER MEASURE — the shape the module header argues
+  // for: the DISTANCE between the word count and the renderable word count is a
+  // template's furniture, and a reader can only see it with the two rows beside
+  // each other under the same headings.
+  metricRule(
+    "content.metrics-by-type",
+    ["CHECK-38"],
+    CONTENT,
+    perScopeMeasure(
+      "Template",
+      [
+        { key: "wordCount", label: "Word Count" },
+        { key: "renderableWordCount", label: "Renderable Word Count" },
+        { key: "textRatio", label: "Text Ratio" },
+      ],
+      DISTRIBUTION_COLUMNS,
+    ),
+    async (db, crawlId, self) =>
+      contentByType(db, crawlId, self),
   ),
 
-  metricRule("content.template-similarity", ["CHECK-38"], CONTENT, async (db, crawlId, self) =>
-    templateSimilarity(db, crawlId, self),
+  metricRule(
+    "content.template-similarity",
+    ["CHECK-38"],
+    CONTENT,
+    perScope("Template", [
+      { key: "pagesFingerprinted", label: "Pages Fingerprinted" },
+      { key: "pagesSampled", label: "Pages Sampled" },
+      { key: "pairsSampled", label: "Pairs Compared" },
+      { key: "meanHamming", label: "Mean Distance (bits)" },
+      { key: "p25", label: "P25" },
+      { key: "median", label: "Median" },
+      { key: "p75", label: "P75" },
+      { key: "shareWithin3BitsPct", label: "Within 3 Bits (%)" },
+      { key: "shareWithin8BitsPct", label: "Within 8 Bits (%)" },
+    ]),
+    async (db, crawlId, self) =>
+      templateSimilarity(db, crawlId, self),
   ),
 ];

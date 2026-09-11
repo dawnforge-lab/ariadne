@@ -15,6 +15,7 @@ import {
 import { metricRow } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { PAGE_BATCH, runRules } from "../../src/rules/run.js";
+import { perScope } from "../../src/rules/registry/metric-table.js";
 import { Registry, RULESET_VERSION } from "../../src/rules/registry/registry.js";
 import type {
   Metric,
@@ -823,6 +824,10 @@ describe("runRules against the database", () => {
       explanation: "A stub metric rule, registered so the runner's metric phase can be observed.",
       howToFix: "A metric is a number, not a fault — there is nothing to fix.",
       rulesetVersion: RULESET_VERSION,
+      // Every metric rule declares its table (`MetricRule.table`); this stub's
+      // rows are the runner's business and not a client's, so the simplest
+      // honest declaration is one column over whatever the body returns.
+      table: perScope("Scope", [{ key: "n", label: "N" }]),
       run,
     };
   }

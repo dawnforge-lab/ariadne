@@ -10,6 +10,9 @@ import {
   AGENT_CHECKS,
   CRAWL_CHECK_IDS,
   defineRule,
+  expandList,
+  perScope,
+  perScopeMeasure,
   Registry,
   RULESET_VERSION,
   RuleDefinitionError,
@@ -29,6 +32,21 @@ const validPageRule = {
   rulesetVersion: RULESET_VERSION,
   columns: [{ key: "title", label: "Title 1" }],
   run: () => [],
+};
+
+/** The metric-rule twin of `validPageRule`: the smallest metric that ships. */
+const validMetricRule = {
+  kind: "metric" as const,
+  id: "site.health",
+  checkIds: ["CHECK-83"],
+  category: "crawl" as const,
+  severity: "info" as const,
+  title: "Site: Health rollup",
+  explanation: "A table of counts.",
+  howToFix: "Read it.",
+  rulesetVersion: RULESET_VERSION,
+  table: perScope("Scope", [{ key: "urlsTotal", label: "Pages Judged" }]),
+  run: async () => [],
 };
 
 describe("defineRule", () => {
@@ -196,12 +214,127 @@ describe("defineRule", () => {
       explanation: "A table of counts.",
       howToFix: "Read it.",
       rulesetVersion: RULESET_VERSION,
+      table: perScope("Scope", [{ key: "urlsTotal", label: "Pages Judged" }]),
       run: async () => [],
     };
     expect(defineRule(metric)).toBe(metric);
     expect(() =>
       defineRule({ ...metric, columns: [{ key: "n", label: "N" }] } as unknown as typeof metric),
     ).toThrow(/a metric rule declares no columns/);
+  });
+
+  // THE MIRROR OF THE TEST ABOVE, one field along: `columns` is required on a
+  // rule that finds and refused on a metric; `table` is required on a metric and
+  // refused on a rule that finds. Neither kind may be silent about its report.
+  it("requires a table on a metric rule and refuses one on a rule that finds", () => {
+    const { table: _table, ...tableless } = validMetricRule;
+    expect(() => defineRule(tableless as unknown as typeof validMetricRule)).toThrow(
+      /must declare its `table`/,
+    );
+    expect(() =>
+      defineRule({
+        ...validPageRule,
+        table: perScope("Scope", [{ key: "n", label: "N" }]),
+      } as unknown as typeof validPageRule),
+    ).toThrow(/only a metric rule declares a `table`/);
+  });
+
+  it("throws on a metric column with no key, or a heading used twice in one table", () => {
+    const withTable = (table: unknown): unknown => ({ ...validMetricRule, table });
+    expect(() =>
+      defineRule(withTable(perScope("Scope", [{ key: "  ", label: "Pages" }])) as never),
+    ).toThrow(/needs a non-empty key/);
+    expect(() =>
+      defineRule(withTable(perScope("Scope", [{ key: "urlsTotal", label: " " }])) as never),
+    ).toThrow(/needs a non-empty label/);
+    // Twice in the value columns...
+    expect(() =>
+      defineRule(
+        withTable(
+          perScope("Scope", [
+            { key: "urlsTotal", label: "Pages" },
+            { key: "urlsClean", label: " pages " },
+          ]),
+        ) as never,
+      ),
+    ).toThrow(/repeats the heading/);
+    // ...and against the SCOPE column's own heading, which the surface writes.
+    expect(() =>
+      defineRule(withTable(perScope("Scope", [{ key: "urlsTotal", label: "scope" }])) as never),
+    ).toThrow(/repeats the heading/);
+    // ...and against a SUMMARY label, because the CSV writes both in one header.
+    expect(() =>
+      defineRule(
+        withTable(
+          expandList(
+            "topParams",
+            [{ key: "name", label: "Parameter" }],
+            [{ key: "totalParams", label: "Parameter" }],
+          ),
+        ) as never,
+      ),
+    ).toThrow(/repeats the heading/);
+  });
+
+  it("throws on a metric column that takes a key this surface writes itself", () => {
+    for (const key of ["scope", "measure"]) {
+      expect(() =>
+        defineRule({
+          ...validMetricRule,
+          table: perScope("Scope", [{ key, label: "Mine" }]),
+        } as never),
+        key,
+      ).toThrow(/a key this surface writes itself/);
+    }
+  });
+
+  // A merged list whose rows carry nothing saying which list they came from is
+  // `inlinks.extremes` with its `List` column deleted: forty rows of URLs, the
+  // most-linked and the least-linked indistinguishable.
+  it("throws on merged lists with no tag, and on a tag no column prints", () => {
+    expect(() =>
+      defineRule({
+        ...validMetricRule,
+        table: expandList(
+          [{ field: "top" }, { field: "bottom" }],
+          [{ key: "url", label: "Address" }],
+        ),
+      } as never),
+    ).toThrow(/carries no tag/);
+    expect(() =>
+      defineRule({
+        ...validMetricRule,
+        table: expandList(
+          [
+            { field: "top", tag: { key: "list", value: "Most linked" } },
+            { field: "bottom", tag: { key: "list", value: "Least linked" } },
+          ],
+          [{ key: "url", label: "Address" }],
+        ),
+      } as never),
+    ).toThrow(/not one of this table's columns/);
+  });
+
+  it("throws on a perScopeMeasure with no measures, or two measures under one label", () => {
+    expect(() =>
+      defineRule({
+        ...validMetricRule,
+        table: perScopeMeasure("Template", [], [{ key: "count", label: "Pages" }]),
+      } as never),
+    ).toThrow(/needs at least one measure/);
+    expect(() =>
+      defineRule({
+        ...validMetricRule,
+        table: perScopeMeasure(
+          "Template",
+          [
+            { key: "wordCount", label: "Words" },
+            { key: "renderableWordCount", label: "words" },
+          ],
+          [{ key: "count", label: "Pages" }],
+        ),
+      } as never),
+    ).toThrow(/repeats the label/);
   });
 
   it("RuleDefinitionError is recognizable by name", () => {

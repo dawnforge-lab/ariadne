@@ -97,6 +97,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import { assertCrawl } from "../query/crawl-evidence.js";
+import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule, Severity } from "../registry/registry.js";
 import { nullableNum, num } from "./cohort.js";
 
@@ -274,7 +275,22 @@ export const healthMetrics: MetricRule[] = [
   // CHECK-83 is the check this table is ABOUT — see the module header. It was
   // filed under CHECK-32 for one phase, as an explicitly temporary bridge, while
   // no check existed for the engine's own coverage.
-  metricRule("site.health", ["CHECK-83"], "crawl", async (db, crawlId, self) =>
-    siteHealth(db, crawlId, self),
+  metricRule(
+    "site.health",
+    ["CHECK-83"],
+    "crawl",
+    // One row, and the scope column says so: `Scope` heads it because a metric
+    // with no cohort rows has no template to name, and the single cell reads
+    // `Site`.
+    perScope("Scope", [
+      { key: "urlsTotal", label: "Pages Judged" },
+      { key: "urlsWithCritical", label: "With Critical" },
+      { key: "urlsWithWarningOnly", label: "With Warning Only" },
+      { key: "urlsWithInfoOnly", label: "With Info Only" },
+      { key: "urlsClean", label: "Clean" },
+      { key: "cleanRatio", label: "Clean Ratio" },
+      { key: "pagesNotAuditable", label: "URLs Not Judged" },
+    ]),
+    async (db, crawlId, self) => siteHealth(db, crawlId, self),
   ),
 ];

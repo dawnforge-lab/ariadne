@@ -27,6 +27,10 @@ import { renderedHtmlFilename } from "../../src/crawl/render/renderer.js";
 import { runRenderPass, type RenderPassSummary } from "../../src/crawl/render/run-render.js";
 import { RENDER_DEFAULTS } from "../../src/crawl/render/select.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
+import {
+  shapeMetricTable,
+  type StoredMetricRow,
+} from "../../src/rules/registry/metric-table.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -1777,6 +1781,112 @@ describe("the fixture site end to end", () => {
         .map((rule) => rule.id)
         .sort(),
     );
+  });
+
+  /**
+   * EVERY METRIC'S TABLE RENDERS, AND EVERY KEY IS ON IT — the metric twin of
+   * the column guard above, and the same argument in both directions.
+   *
+   * `MetricRule.table` is a claim about what a metric writes, and `defineRule`
+   * cannot check it: a declaration is metadata, and the values only exist once a
+   * rule has run over a real crawl. So both directions are checked here, because
+   * both are a real failure:
+   *
+   *  - a declared column whose key is NULL ON EVERY ROW is a heading with
+   *    nothing under it — usually a misspelled key, which no type catches
+   *    because a metric's value is jsonb;
+   *  - a value key NO COLUMN OR SUMMARY READS is a number the metric measured
+   *    and nobody sees. The table is the report now: what is not on it does not
+   *    exist for a client.
+   *
+   * The nesting is checked at the level the shaper reads: the top-level keys of
+   * a stored value against the declaration's own top level, and — for the two
+   * shapers that reach inside — the keys of a measure's object or of a list
+   * element against the columns that read them. `expandMap`'s entries are the
+   * site's own template names and are data rather than keys, so only the field
+   * holding the map is checked.
+   */
+  it("renders every metric's table, with no empty column and no unmapped key", () => {
+    const emptyColumns: string[] = [];
+    const unmapped: string[] = [];
+
+    for (const rule of registry.byKind("metric")) {
+      const byScope = metricsById.get(rule.id);
+      if (byScope === undefined) throw new Error(`no metrics rows for '${rule.id}'`);
+      const stored: StoredMetricRow[] = [...byScope].map(([key, value]) => {
+        const [scope, ...rest] = key.split("|");
+        return { scope: scope ?? "", scopeValue: rest.join("|"), value };
+      });
+
+      // (0) It renders at all. A shaper that throws over a real crawl's rows is
+      // a declaration that has never met the values it describes.
+      const table = shapeMetricTable(rule.id, rule.table, stored);
+      expect(table.rows.length, `${rule.id} shaped no rows from ${stored.length}`)
+        .toBeGreaterThan(0);
+
+      // (1) Every declared column is filled at least once, summary included.
+      for (const column of [...table.columns, ...table.summary]) {
+        if (column.key === "scope" || column.key === "measure") continue;
+        const filled =
+          table.rows.some((row) => row[column.key] !== null && row[column.key] !== undefined) ||
+          table.summary.some((entry) => entry.key === column.key && entry.value !== null);
+        if (!filled) emptyColumns.push(`${rule.id}.${column.key}`);
+      }
+
+      // (2) Every key the stored values carry is read by some column.
+      const declaration = rule.table;
+      const paths = (column: { key: string; from?: readonly string[] }): string[] =>
+        [...(column.from ?? [column.key])].map((path) => path.split(".")[0] ?? path);
+      const top = new Set<string>();
+      const nested = new Set<string>();
+      if (declaration.shape === "perScope") {
+        for (const column of declaration.columns) for (const key of paths(column)) top.add(key);
+      } else if (declaration.shape === "perScopeMeasure") {
+        for (const measure of declaration.measures) top.add(measure.key);
+        for (const column of declaration.scopeColumns) for (const key of paths(column)) top.add(key);
+        for (const column of declaration.columns) for (const key of paths(column)) nested.add(key);
+      } else if (declaration.shape === "expandList") {
+        for (const source of declaration.lists) top.add(source.field);
+        for (const column of declaration.summary) for (const key of paths(column)) top.add(key);
+        for (const column of declaration.columns) for (const key of paths(column)) nested.add(key);
+      } else {
+        top.add(declaration.field);
+      }
+
+      const inner = (value: unknown, where: string): void => {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+        for (const key of Object.keys(value as Record<string, unknown>)) {
+          if (!nested.has(key)) unmapped.push(`${rule.id}.${where}.${key}`);
+        }
+      };
+      for (const row of stored) {
+        const value = row.value as Record<string, unknown>;
+        for (const [key, held] of Object.entries(value)) {
+          if (!top.has(key)) {
+            unmapped.push(`${rule.id}.${key}`);
+            continue;
+          }
+          if (declaration.shape === "perScopeMeasure" && declaration.measures.some((m) => m.key === key)) {
+            inner(held, key);
+          }
+          if (declaration.shape === "expandList" && Array.isArray(held)) {
+            for (const element of held) inner(element, key);
+          }
+        }
+      }
+    }
+
+    expect(
+      emptyColumns.sort(),
+      "these metric columns are null on every row of a real crawl — a heading with " +
+        "nothing under it, which is almost always a key the metric does not write",
+    ).toEqual([]);
+    expect(
+      unmapped.sort(),
+      "these metric value keys are on no column and in no summary — numbers the " +
+        "metric measured and no reader can see. Declare a column for each, or stop " +
+        "writing it",
+    ).toEqual([]);
   });
 
   it("the metric cohorts are this site's templates, not its URLs (P8-T5)", () => {

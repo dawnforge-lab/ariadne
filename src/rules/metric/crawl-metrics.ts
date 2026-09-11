@@ -22,6 +22,7 @@ import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import { assertCrawl, readCrawlEvidence } from "../query/crawl-evidence.js";
 import { CHAIN, LOOP } from "../query/redirects.js";
+import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { bool, nullableNum, num, text } from "./cohort.js";
 
@@ -396,11 +397,42 @@ async function sitemapStructure(db: Db, crawlId: string, self: MetricIdentity): 
 }
 
 export const crawlMetrics: MetricRule[] = [
-  metricRule("redirect.volume", ["CHECK-10"], REDIRECTS, async (db, crawlId, self) =>
-    redirectVolume(db, crawlId, self),
+  metricRule(
+    "redirect.volume",
+    ["CHECK-10"],
+    REDIRECTS,
+    perScope("Scope", [
+      { key: "totalPages", label: "Pages Fetched" },
+      { key: "redirectPages", label: "Redirecting URLs" },
+      { key: "ratioPct", label: "Redirects (%)" },
+      { key: "redirectInlinks", label: "Inlinks To Redirects" },
+      { key: "chains", label: "Redirect Chains" },
+      { key: "loops", label: "Redirect Loops" },
+    ]),
+    async (db, crawlId, self) => redirectVolume(db, crawlId, self),
   ),
 
-  metricRule("sitemap.structure", ["CHECK-08"], SITEMAP, async (db, crawlId, self) =>
-    sitemapStructure(db, crawlId, self),
+  // THE ONE TABLE WHOSE TWO SCOPES SPELL A COLUMN DIFFERENTLY. The site row
+  // counts the whole sitemap set (`totalUrls`, `urlCapBreaches` — how many
+  // documents went over the 50,000-entry limit) and a document row counts itself
+  // (`urls`, `breaches50k` — whether THIS one did). Two stored keys, one heading
+  // each, declared with `from`; the three site-only columns are empty on a
+  // document row, which is what an absent key prints.
+  metricRule(
+    "sitemap.structure",
+    ["CHECK-08"],
+    SITEMAP,
+    perScope("Sitemap", [
+      { key: "entries", label: "Entries", from: ["totalUrls", "urls"] },
+      {
+        key: "over50kEntries",
+        label: "Over 50,000 Entries",
+        from: ["urlCapBreaches", "breaches50k"],
+      },
+      { key: "docs", label: "Documents" },
+      { key: "oversizedDocsSkipped", label: "Documents Dropped For Size" },
+      { key: "entryCapReached", label: "Entry Cap Reached" },
+    ]),
+    async (db, crawlId, self) => sitemapStructure(db, crawlId, self),
   ),
 ];

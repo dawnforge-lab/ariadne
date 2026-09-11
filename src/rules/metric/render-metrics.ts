@@ -71,6 +71,7 @@ import {
 import type { Db } from "../../db/client.js";
 import { crawls } from "../../db/schema.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
+import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { num } from "./cohort.js";
 
@@ -361,7 +362,25 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
 }
 
 export const renderMetrics: MetricRule[] = [
-  metricRule("render.coverage", ["CHECK-01"], "crawl", async (db, crawlId, self) =>
-    renderCoverage(db, crawlId, self),
+  metricRule(
+    "render.coverage",
+    ["CHECK-01"],
+    "crawl",
+    // `Render Run` is `renderPassEvidence` and it is the column to read FIRST:
+    // the four selection numbers beside it describe a decision that was taken
+    // ("ran") or one that would be ("none"), and they look identical either way.
+    perScope("Scope", [
+      { key: "pagesCrawled", label: "Pages Crawled" },
+      { key: "renderPassEvidence", label: "Render Run" },
+      { key: "selectionMode", label: "Selection Mode" },
+      { key: "selectionBudget", label: "Render Budget" },
+      { key: "selectionSuspects", label: "Suspect Pages" },
+      { key: "selectionSampled", label: "Sampled Pages" },
+      { key: "selectionSelected", label: "Selected Pages" },
+      { key: "selectionTruncated", label: "Selection Truncated" },
+      { key: "pagesRendered", label: "Pages Rendered" },
+      { key: "renderFailures", label: "Render Failures" },
+    ]),
+    async (db, crawlId, self) => renderCoverage(db, crawlId, self),
   ),
 ];

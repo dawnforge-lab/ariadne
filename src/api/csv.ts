@@ -76,8 +76,32 @@ export const CSV_VIEWS = [
   "anchor_texts",
   "redirects",
   "resources",
+  "metric_table",
 ] as const;
 export type CsvViewName = (typeof CSV_VIEWS)[number];
+
+/**
+ * THE EIGHT VIEWS THAT ARE A KEYSET READ OF A TABLE — every view but one.
+ *
+ * `metric_table` is the exception and it is a different KIND of view: its rows
+ * are not rows of a table at all. One metric's stored rows become a table
+ * through the rule's own `table` declaration (`shapeMetricTable`), which turns
+ * one stored row into three (a measure each), or a stored list into twenty rows,
+ * or a stored map into its entries — a transformation no `ORDER BY … LIMIT` can
+ * express. So it has no `CsvView` definition, and the properties that make the
+ * other eight safe on a 50,000-page crawl (a LIMIT, an order, a cursor
+ * comparison) are asserted over THIS list rather than over the vocabulary.
+ *
+ * What bounds `metric_table` instead is the rows themselves: one metric writes
+ * one row per cohort — a page type, a sitemap document, the site — and the
+ * shaper's expansion of each is bounded by the metric's own caps
+ * (`EXTREMES_LIST_CAP`, `SOURCE_TYPE_CAP`, `TOP_PARAMS_CAP`). See
+ * `ApiService.metricTable`, which is the one place those rows are read.
+ */
+export const CSV_QUERY_VIEWS = CSV_VIEWS.filter(
+  (view): view is Exclude<CsvViewName, "metric_table"> => view !== "metric_table",
+);
+export type CsvQueryViewName = (typeof CSV_QUERY_VIEWS)[number];
 
 /** The two spellings `format` takes. The first is the default and the original. */
 export const EXPORT_FORMATS = ["jsonl.gz", "csv"] as const;
@@ -560,7 +584,7 @@ function linkNext(row: LinkRow): string[] {
  * and every one of them is a read the JSON surface could already answer more
  * slowly, page by page. Nothing here judges.
  */
-export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
+export const CSV_VIEW_DEFS: Record<CsvQueryViewName, CsvView> = {
   /**
    * Every finding of a judged crawl, one row each — the same rows, in the same
    * order, as the `issues` JSONL dataset, with the evidence flattened.
@@ -925,9 +949,9 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
 };
 
 /**
- * A view's `text/csv` filename, deterministic per (crawl, view, rule).
+ * A view's `text/csv` filename, deterministic per (crawl, view, subject).
  *
- * A RULE-SCOPED EXPORT IS NAMED FOR ITS RULE and not for its view (Phase 20):
+ * A SCOPED EXPORT IS NAMED FOR ITS SUBJECT and not for its view (Phase 20):
  * `crawl_e36211fc-82ad-459b-a67f-d625ee7732ca-links.broken-internal.csv`, where
  * it used to carry `-issue_urls-` in the middle. The crawl component is the
  * WHOLE id — `slug` (src/api/service.ts) only replaces characters a filename
@@ -936,10 +960,62 @@ export const CSV_VIEW_DEFS: Record<CsvViewName, CsvView> = {
  * a Downloads folder beside a
  * dozen others and what a person is looking for there is the rule; `issue_urls`
  * is the engine's word for "one rule's findings" and says nothing a reader of
- * the filename needs. It is unambiguous because `issue_urls` is the only view
- * that takes a rule at all (`needsRuleId`), so no other export can produce the
- * same name — a second rule-scoped view would have to put its own word back in.
+ * the filename needs.
+ *
+ * TWO VIEWS ARE SCOPED SINCE PHASE 21 — `issue_urls` by its rule and
+ * `metric_table` by its metric — and the name stays unambiguous without a view
+ * word because RULE IDS AND METRIC IDS ARE ONE NAMESPACE: the registry refuses a
+ * duplicate id across the kinds, so `crawl_x-site.health.csv` and
+ * `crawl_x-links.orphan.csv` can never name the same subject from two views.
+ * A third scoped view whose subject is not a rule id would have to put its own
+ * word back in.
  */
-export function csvFilename(crawlSlug: string, view: CsvViewName, ruleSlug: string | null): string {
-  return ruleSlug === null ? `${crawlSlug}-${view}.csv` : `${crawlSlug}-${ruleSlug}.csv`;
+export function csvFilename(
+  crawlSlug: string,
+  view: CsvViewName,
+  subjectSlug: string | null,
+): string {
+  return subjectSlug === null ? `${crawlSlug}-${view}.csv` : `${crawlSlug}-${subjectSlug}.csv`;
+}
+
+/**
+ * THE METRIC TABLE AS A CSV, header and rows.
+ *
+ * The header is the LABELS — the table's own columns, led by the summary's.
+ *
+ * ## Why the summary becomes leading columns repeated on every row
+ *
+ * A CSV has one rectangle and no place above it. The site-level scalars
+ * (`url.param-volumes`' four counts of the whole site's parameters) would
+ * otherwise be dropped from the file — a spreadsheet that says "`_pos` appears
+ * on 47 URLs" while losing "this site has 5 parameters on 61 URLs" — or written
+ * as a comment block no parser reads. So they are columns, with their labels in
+ * the header, carrying the SAME value on every row, and they lead rather than
+ * trail because they are the context a reader needs before the first row means
+ * anything. A reader who wants the rows alone deletes the first N columns; a
+ * reader who never learns the site had four more numbers cannot.
+ *
+ * A cell is the value as the shaper produced it — numbers raw, booleans
+ * `true`/`false`, and an EMPTY CELL for null, which is this file's one meaning
+ * for "the engine has no value here".
+ */
+export function metricTableHeader(table: {
+  summary: readonly { label: string }[];
+  columns: readonly { label: string }[];
+}): string[] {
+  return [...table.summary.map((s) => s.label), ...table.columns.map((c) => c.label)];
+}
+
+/** One shaped row as cells, in `metricTableHeader` order. */
+export function metricTableCells(
+  table: {
+    summary: readonly { value: string | number | boolean | null }[];
+    columns: readonly { key: string }[];
+  },
+  row: Record<string, string | number | boolean | null>,
+): string[] {
+  return [
+    ...table.summary.map((s) => orEmpty(s.value)),
+    ...table.columns.map((column) => orEmpty(row[column.key])),
+  ];
 }

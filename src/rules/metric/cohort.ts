@@ -12,6 +12,35 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+import type { MetricColumn } from "../registry/metric-table.js";
+
+/**
+ * THE EIGHT COLUMNS OF A DISTRIBUTION, headed once for every metric that has
+ * one.
+ *
+ * `readStats` below writes exactly these eight keys, and five metrics print them
+ * — the two depth distributions, the inlink distribution, and the two
+ * per-measure tables. One constant, so the same statistic is under the same
+ * heading in all five and a reader comparing two of them is comparing columns
+ * rather than spellings.
+ *
+ * THE ORDER IS THE READING ORDER AND IT IS NOT THE SORTED ONE: the count, then
+ * the floor, then the quartile, then the two middles — median beside mean,
+ * because the pair is the shape of the distribution and a reader compares them
+ * to each other — then the upper tail and the ceiling. `count` is headed `Pages`
+ * because that is what it counts in every one of the five tables.
+ */
+export const DISTRIBUTION_COLUMNS: readonly MetricColumn[] = [
+  { key: "count", label: "Pages" },
+  { key: "min", label: "Min" },
+  { key: "p25", label: "P25" },
+  { key: "median", label: "Median" },
+  { key: "mean", label: "Mean" },
+  { key: "p75", label: "P75" },
+  { key: "p95", label: "P95" },
+  { key: "max", label: "Max" },
+];
+
 /**
  * The scope value a cohort of pages with no `page_type` is filed under.
  *

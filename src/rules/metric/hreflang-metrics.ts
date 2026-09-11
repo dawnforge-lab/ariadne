@@ -19,6 +19,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import { assertCrawl } from "../query/crawl-evidence.js";
+import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { COHORT_PAGE_TYPE, cohortFilter, nullableNum, num, text } from "./cohort.js";
 
@@ -98,7 +99,15 @@ async function coverage(db: Db, crawlId: string, self: MetricIdentity): Promise<
 }
 
 export const hreflangMetrics: MetricRule[] = [
-  metricRule("hreflang.coverage", ["CHECK-24"], HREFLANG, async (db, crawlId, self) =>
-    coverage(db, crawlId, self),
+  metricRule(
+    "hreflang.coverage",
+    ["CHECK-24"],
+    HREFLANG,
+    perScope("Template", [
+      { key: "indexablePages", label: "Indexable Pages" },
+      { key: "pagesWithHreflang", label: "Pages With Hreflang" },
+      { key: "coveragePct", label: "Coverage (%)" },
+    ]),
+    async (db, crawlId, self) => coverage(db, crawlId, self),
   ),
 ];

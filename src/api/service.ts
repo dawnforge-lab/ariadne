@@ -102,6 +102,15 @@ import { isUrlAllowed } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import {
+  metricTableColumns,
+  metricTableSummary,
+  shapeMetricTable,
+  type MetricCell,
+  type MetricColumn,
+  type MetricSummaryValue,
+  type StoredMetricRow,
+} from "../rules/registry/metric-table.js";
+import {
   METRIC_SCOPES,
   type AnyRule,
   type RuleCategory,
@@ -120,6 +129,8 @@ import { isHostAllowed, type ServiceConfig } from "./config.js";
 import {
   CSV_VIEWS,
   CSV_VIEW_DEFS,
+  metricTableCells,
+  metricTableHeader,
   EXPORT_FORMATS,
   csvFilename,
   csvRecord,
@@ -1182,6 +1193,20 @@ export interface CatalogRule {
    */
   columns?: RuleColumn[];
   /**
+   * THE METRIC'S TABLE, header first — `columns`' mirror, and present on
+   * exactly the rules `columns` is absent from.
+   *
+   * `columns` is the header of the metric table (`metric_table`), in order, with
+   * the row's scope leading it; `summary` is the labels of the site-level
+   * scalars printed above the table. Both come from the rule's own declaration
+   * through the same function the shaped table uses, so a header drawn from the
+   * catalog and one drawn from the rows cannot disagree.
+   *
+   * ABSENT on every rule that finds, which has `columns` instead. The two fields
+   * are never both present and never both absent.
+   */
+  table?: { columns: MetricColumn[]; summary: MetricColumn[] };
+  /**
    * Present ONLY on a NOT MEASURED marker, and then the registry's own reason
    * string — the crawl condition whose silence the marker explains. Absent on
    * every ordinary rule: never `null`, never `""`, so `"marker" in rule` and a
@@ -1524,6 +1549,41 @@ export interface CompareUrl {
   url: string | null;
 }
 
+/**
+ * ONE METRIC AS A TABLE — the metric side of `issue_urls`, and the shape every
+ * surface that PRINTS a metric reads.
+ *
+ * `metrics_get` serves a metric's stored `value` verbatim, which is right for an
+ * agent and unusable for a table: the object's shape belongs to the metric, and
+ * five different shapes meant every consumer hand-writing five renderers. This
+ * is the same numbers, shaped ONCE (`shapeMetricTable`, from the rule's own
+ * `table` declaration) into the header and rows a client draws. The demo, the
+ * `metric_table` CSV and the `metric_table` tool all read this one function, so
+ * a number's heading is the same string wherever it is printed.
+ *
+ * `summary` is the site-level scalars that sit ABOVE the table rather than in
+ * it — `url.param-volumes`' four counts of the site's parameters, which would
+ * otherwise be repeated on every parameter row. Empty on the twelve metrics that
+ * have none.
+ *
+ * `note` IS PRESENT EXACTLY WHEN `rows` IS EMPTY, and it says which kind of
+ * empty this is: a judged crawl whose metric wrote nothing, or a metric that
+ * wrote its rows and whose list inside them is empty. An empty table with no
+ * word about why is the silence hard rule 7 forbids — and the case that is NOT
+ * in this shape at all is a crawl nobody judged, which is a refusal (see
+ * `metricTable`).
+ */
+export interface MetricTableOut {
+  metricId: string;
+  title: string;
+  explanation: string;
+  howToFix: string;
+  summary: MetricSummaryValue[];
+  columns: MetricColumn[];
+  rows: Record<string, MetricCell>[];
+  note?: string;
+}
+
 /** One metric row, with the registry's copy joined — the quotable table. */
 export interface MetricRow {
   metricId: string;
@@ -1638,6 +1698,8 @@ export interface CsvExportResult {
   view: CsvViewName;
   /** Present only on `issue_urls`, which is a view of ONE rule. */
   ruleId?: string;
+  /** Present only on `metric_table`, which is a view of ONE metric. */
+  metricId?: string;
   path: string;
   /** DATA rows. The header is always written and is never counted here. */
   rows: number;
@@ -1648,6 +1710,8 @@ export interface CsvExportResult {
 export interface CsvStream {
   view: CsvViewName;
   ruleId: string | null;
+  /** The metric `metric_table` was asked for; null on every other view. */
+  metricId: string | null;
   /** Deterministic per (crawl, view, rule) — what a browser saves it as. */
   filename: string;
   /**
@@ -1663,7 +1727,7 @@ export interface CsvStream {
 /** What the two halves of `export_crawl` were asked for, after validation. */
 type ExportRequest =
   | { format: "jsonl.gz"; dataset: ExportDataset }
-  | { format: "csv"; view: CsvViewName; ruleId: string | null };
+  | { format: "csv"; view: CsvViewName; ruleId: string | null; metricId: string | null };
 
 /** Sample URLs carried on an issue group. Five is a sample; more is a slice. */
 export const ISSUE_SAMPLE_URLS = 5;
@@ -3087,7 +3151,14 @@ export class ApiService {
       // Absent on a metric rule for `columns`' own reason (it writes no finding
       // row), spread rather than set to undefined so `"columns" in rule` and a
       // truthiness test agree — the `marker` discipline, one field along.
-      ...(rule.kind === "metric" ? {} : { columns: columnsFor(rule) }),
+      ...(rule.kind === "metric"
+        ? {
+            table: {
+              columns: metricTableColumns(rule.table),
+              summary: metricTableSummary(rule.table),
+            },
+          }
+        : { columns: columnsFor(rule) }),
       // The registry's flag, mirrored exactly: the key exists on a marker and
       // on nothing else. Spreading a `marker: undefined` instead would put the
       // key on all 96 rows and make "is this a marker" a truthiness question
@@ -3827,6 +3898,102 @@ export class ApiService {
     };
   }
 
+
+  /**
+   * ONE METRIC AS A TABLE: the rows it wrote for this crawl, shaped by its own
+   * declaration into a header and rows (`MetricTableOut`).
+   *
+   * ## Why the rows are read whole, and what bounds them
+   *
+   * Every other listing on this surface is a keyset cursor, because its rows are
+   * a table that grows with the site. These are not: one metric's rows for one
+   * crawl are one row per COHORT — a page type, a sitemap document, or the site
+   * — and the cohorts are the crawler's collapsed template set, tens of rows on
+   * a real site. The shaping needs them together anyway (a table has one header
+   * and one order), so this reads them in one statement and shapes them in one
+   * place rather than paginating a page the client would have to reassemble.
+   * `metrics_get` is still the paginated read of the same rows for an agent that
+   * wants the raw values.
+   *
+   * ## The three empty answers, which are three different sentences
+   *
+   *  - **An unknown metric id is a 404**, not an empty table: the id is the
+   *    RESOURCE here, where on `metrics_get` it is a filter (and a 400 there).
+   *    `retired.metric` and `redirect.volme` are both "no such thing", and a
+   *    table rendered with no columns would say "this metric measured nothing".
+   *  - **A crawl nobody judged is a 404** naming that fact. Metrics are written
+   *    by `crawl_rules`; until it has run there is no answer, and serving
+   *    `rows: []` would be "this site has nothing" where the truth is "nobody
+   *    has looked" (hard rule 7, and §5 of the surface contract).
+   *  - **A judged crawl whose metric wrote nothing, or wrote rows whose list is
+   *    empty, is `rows: []` WITH A NOTE** saying which of the two it is. That is
+   *    a measurement, and the note is what keeps it from reading as the refusals
+   *    above.
+   */
+  async metricTable(crawlId: string, metricId: string): Promise<MetricTableOut> {
+    await this.assertCrawl(crawlId);
+    const rule = this.rules.get(metricId);
+    if (rule === undefined || rule.kind !== "metric") {
+      throw new ServiceError(
+        "NOT_FOUND",
+        `'${clip(metricId)}' is not a metric in ruleset ${RULESET_VERSION}` +
+          (rule === undefined
+            ? ""
+            : " — it is a rule that finds, and its table is /crawls/:id/issues/:ruleId/urls") +
+          ": rules_catalog names the metrics this engine measures",
+      );
+    }
+
+    const result = await this.db.execute<{
+      scope: string;
+      scope_value: string;
+      value: unknown;
+    }>(sql`
+      select m.scope, m.scope_value, m.value_jsonb as value
+      from metrics m
+      where m.crawl_id = ${crawlId} and m.metric_id = ${metricId}
+      order by m.scope asc, m.scope_value asc`);
+
+    const stored: StoredMetricRow[] = result.rows.map((row) => ({
+      scope: row.scope,
+      scopeValue: row.scope_value,
+      value: row.value,
+    }));
+    const shaped = shapeMetricTable(metricId, rule.table, stored);
+    const copy = {
+      metricId,
+      title: rule.title,
+      explanation: rule.explanation,
+      howToFix: rule.howToFix,
+    };
+
+    if (shaped.rows.length > 0) return { ...copy, ...shaped };
+
+    // Empty, so this answer has to say WHICH empty. The judged check is one
+    // column and is only asked here, on the path where the difference matters.
+    const judged = await this.db
+      .select({ rulesRunAt: crawls.rulesRunAt })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId))
+      .limit(1);
+    const rulesRunAt = judged[0]?.rulesRunAt ?? null;
+    if (stored.length === 0 && rulesRunAt === null) {
+      throw new ServiceError(
+        "NOT_FOUND",
+        `crawl ${crawlId} holds no rows for metric '${clip(metricId)}' and has never been ` +
+          "judged (rulesRunAt is null): run the rules over it before reading its metrics — " +
+          "an empty table here would read as 'this site measured nothing'",
+      );
+    }
+    const note =
+      stored.length === 0
+        ? `crawl ${crawlId} was judged and metric '${metricId}' wrote no rows: the table is ` +
+          "empty because there was nothing to measure, not because nobody looked"
+        : `metric '${metricId}' wrote ${stored.length} row(s) for crawl ${crawlId} and the ` +
+          "list they expand into rows is empty: nothing was found to list";
+    return { ...copy, ...shaped, note };
+  }
+
   /**
    * The crawl's pages, filtered and slim.
    *
@@ -3940,7 +4107,12 @@ export class ApiService {
     const request = parseExportRequest(opts, (field, id) => this.findingRule(field, id));
 
     if (request.format === "csv") {
-      const stream = await this.csvStream(crawlId, request.view, request.ruleId);
+      const stream = await this.csvStream(
+        crawlId,
+        request.view,
+        request.ruleId,
+        request.metricId,
+      );
       const { written, bytes, path } = await this.writeExport(
         stream.filename,
         new PassThrough(),
@@ -3950,6 +4122,7 @@ export class ApiService {
         format: "csv",
         view: stream.view,
         ...(stream.ruleId === null ? {} : { ruleId: stream.ruleId }),
+        ...(stream.metricId === null ? {} : { metricId: stream.metricId }),
         path,
         // The header is written and is not a row. `written` counts records.
         rows: written - 1,
@@ -4054,7 +4227,13 @@ export class ApiService {
    */
   async prepareCsvExport(
     crawlId: string,
-    opts: { dataset?: string; format?: string; view?: string; ruleId?: string } = {},
+    opts: {
+      dataset?: string;
+      format?: string;
+      view?: string;
+      ruleId?: string;
+      metricId?: string;
+    } = {},
   ): Promise<CsvStream> {
     await this.assertCrawl(crawlId);
     const request = parseExportRequest(
@@ -4068,7 +4247,7 @@ export class ApiService {
           "without format=csv and read the path it answers with",
       );
     }
-    return this.csvStream(crawlId, request.view, request.ruleId);
+    return this.csvStream(crawlId, request.view, request.ruleId, request.metricId);
   }
 
   /**
@@ -4097,12 +4276,30 @@ export class ApiService {
     for (const row of result.rows) this.ruleFor(row.rule_id, crawlId, "issues");
   }
 
-  /** The prepared stream itself. The validation is the caller's; this reads rows. */
+  /**
+   * The prepared stream itself. The validation is the caller's; this reads rows.
+   *
+   * TWO KINDS OF VIEW MEET HERE. Eight are a keyset read of a table and stream
+   * in batches of `EXPORT_BATCH` (`CSV_QUERY_VIEWS`); `metric_table` is one
+   * metric's rows shaped by its own declaration, which is not a query at all —
+   * see `metricTableStream`, which is where its refusals happen and where the
+   * bound on its size is argued.
+   */
   private async csvStream(
     crawlId: string,
     view: CsvViewName,
     ruleId: string | null,
+    metricId: string | null,
   ): Promise<CsvStream> {
+    if (view === "metric_table") {
+      if (metricId === null) {
+        // Unreachable through `parseExportRequest`, which requires the id — and
+        // stated rather than defaulted, because an export named for a metric
+        // nobody asked for is worse than a refusal.
+        throw new Error("csvStream: the metric_table view was prepared without a metricId");
+      }
+      return await this.metricTableStream(crawlId, metricId);
+    }
     await this.assertViewAnswerable(crawlId, view);
     const def = CSV_VIEW_DEFS[view];
     const ctx: CsvViewContext = {
@@ -4124,6 +4321,7 @@ export class ApiService {
     return {
       view,
       ruleId,
+      metricId: null,
       filename: csvFilename(slug(crawlId), view, ruleId === null ? null : slug(ruleId)),
       async *records(): AsyncGenerator<string> {
         // THE HEADER IS UNCONDITIONAL. A zero-row CSV with no header is a file
@@ -4144,6 +4342,42 @@ export class ApiService {
           if (last === undefined) return;
           cursor = def.next(last);
         }
+      },
+    };
+  }
+
+  /**
+   * `metric_table` as a stream: the shaped table, header then rows.
+   *
+   * THE WHOLE TABLE IS BUILT BEFORE THE FIRST BYTE, and that is deliberate
+   * rather than a shortcut. `metricTable` is where this view's refusals live —
+   * an unknown metric, a crawl nobody judged — and a refusal that fires inside
+   * the generator arrives after the 200 and the header, which is a torn socket
+   * where the JSON surface answers a clean 404 (`prepareCsvExport`'s rule, one
+   * view along). The table is also what the view IS: its rows are a
+   * transformation of the metric's stored rows, not a window onto them, so
+   * there is nothing to page.
+   *
+   * The size is bounded by the metric, not by the site: one stored row per
+   * cohort, expanded by the shaper within the metric's own caps
+   * (`CSV_QUERY_VIEWS` states the argument). The largest today is
+   * `inlinks.sources-by-type` at cohorts × `SOURCE_TYPE_CAP`.
+   *
+   * A NOTE ON AN EMPTY TABLE IS NOT WRITTEN INTO THE FILE. The header is, so the
+   * file says what it failed to contain, and the sentence explaining WHY it is
+   * empty is on the JSON route and the MCP tool where a reader can act on it —
+   * a comment line in a CSV is a row to every parser that opens it.
+   */
+  private async metricTableStream(crawlId: string, metricId: string): Promise<CsvStream> {
+    const table = await this.metricTable(crawlId, metricId);
+    return {
+      view: "metric_table",
+      ruleId: null,
+      metricId,
+      filename: csvFilename(slug(crawlId), "metric_table", slug(metricId)),
+      async *records(): AsyncGenerator<string> {
+        yield csvRecord(metricTableHeader(table));
+        for (const row of table.rows) yield csvRecord(metricTableCells(table, row));
       },
     };
   }
@@ -5828,7 +6062,7 @@ function parseSeverity(value: string): string {
  * it would read as "this rule found nothing".
  */
 function parseExportRequest(
-  opts: { dataset?: string; format?: string; view?: string; ruleId?: string },
+  opts: { dataset?: string; format?: string; view?: string; ruleId?: string; metricId?: string },
   findingRule: (field: string, id: string) => AnyRule,
 ): ExportRequest {
   const format = parseFormat(opts.format);
@@ -5837,6 +6071,7 @@ function parseExportRequest(
     for (const [field, value] of [
       ["view", opts.view],
       ["ruleId", opts.ruleId],
+      ["metricId", opts.metricId],
     ] as const) {
       if (value !== undefined) {
         throw new ServiceError(
@@ -5858,6 +6093,34 @@ function parseExportRequest(
   }
 
   const view = parseCsvView(opts.view);
+
+  // THE ONE VIEW THAT IS NOT A KEYSET READ, and the one that takes a metric
+  // rather than a rule. Its subject is required for `issue_urls`' reason: the
+  // view IS one metric's table, and there is no such thing as all of them.
+  if (view === "metric_table") {
+    if (opts.ruleId !== undefined) {
+      throw new ServiceError(
+        "VALIDATION",
+        "'ruleId' narrows the issue_urls view; the metric_table view is one METRIC's table " +
+          "and takes a 'metricId'",
+      );
+    }
+    if (opts.metricId === undefined || opts.metricId === "") {
+      throw new ServiceError(
+        "VALIDATION",
+        "view 'metric_table' is one metric's table and needs a 'metricId' — rules_catalog " +
+          "names the metrics this engine measures",
+      );
+    }
+    return { format, view, ruleId: null, metricId: opts.metricId };
+  }
+  if (opts.metricId !== undefined) {
+    throw new ServiceError(
+      "VALIDATION",
+      `'metricId' names the metric_table view's subject; view '${view}' is not about one metric`,
+    );
+  }
+
   const needsRuleId = CSV_VIEW_DEFS[view].needsRuleId;
   if (needsRuleId && (opts.ruleId === undefined || opts.ruleId === "")) {
     throw new ServiceError(
@@ -5873,7 +6136,7 @@ function parseExportRequest(
     );
   }
   if (opts.ruleId !== undefined) findingRule("ruleId", opts.ruleId);
-  return { format, view, ruleId: opts.ruleId ?? null };
+  return { format, view, ruleId: opts.ruleId ?? null, metricId: null };
 }
 
 /** The export format, defaulting to the one that shipped first. */
