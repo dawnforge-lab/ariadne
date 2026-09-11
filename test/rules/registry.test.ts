@@ -499,7 +499,11 @@ describe("check universe", () => {
     // 0.15.0: Phase 20 — copy rewritten by hand in SEO-tool register, report
     // columns declared on every finding rule and served with every listing,
     // crawl.blocked gains fetchReason; registry.ts carries the grounds.
-    expect(RULESET_VERSION).toBe("0.15.0");
+    //
+    // 0.16.0: Phase 21 — every metric rule declares its table (shaper + a label
+    // over every column and summary scalar); labels are client-facing and the
+    // catalog serves them, so what the ruleset says changed; no value moves.
+    expect(RULESET_VERSION).toBe("0.16.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

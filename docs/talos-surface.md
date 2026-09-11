@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 21 (migrations 0000–0019,
+**Status:** the contract as of Phase 21 (ruleset 0.16.0, migrations 0000–0019,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -333,7 +333,7 @@ validator before the handler runs (`test/api/mcp.test.ts:802` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (100 rows at 0.15.0) rather than by the crawl. The
+bounded by the **ruleset** (100 rows at 0.16.0) rather than by the crawl. The
 catalog is ~92 KB (**93,778 bytes**, re-measured 2026-09-10 at the end of
 Phase 20 over all 100 rows of ruleset 0.15.0 — by serialising what
 `rulesCatalog` answers with no crawl id — of which **1,813 bytes** are the
@@ -847,7 +847,7 @@ a reader acts on", `test/rules/helpers.test.ts:567` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1031` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:701` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:705` "finds one defining file per rule, and the key
 spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -1848,7 +1848,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.15.0** as of Phase 20) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.16.0** as of Phase 21) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1906,6 +1906,14 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 21 bumped to 0.16.0 on one ground: labels.** Every metric rule now
+declares its table (§4.4b) — the shaper that turns its stored rows into rows,
+and a heading over every column and every summary scalar. No stored value,
+predicate or copy moves; a crawl re-judged at 0.16.0 writes byte-identical
+`metrics` rows. The headings are client-facing text served by `rules_catalog`
+and printed by `metric_table`, so what the ruleset says about a site changed
+exactly as 0.15.0's column headings changed it for the finding rules.
 
 **Phase 20 bumped to 0.15.0 on three grounds, none of which moves a verdict.**
 Every rule's client-facing copy was rewritten by hand in the register of an SEO

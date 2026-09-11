@@ -253,8 +253,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // sites became reachable, so a re-judged crawl can change verdict.
 //
 // ---------------------------------------------------------------------------
-// PHASE 21 GROUNDS, for the orchestrator's 0.16.0 bump (T3 stamps it; T1 does
-// not touch the constant). The metric tables pass
+// 0.16.0: Phase 21, on ONE ground. The metric tables pass
 // (docs/superpowers/specs/2026-09-11-metric-tables-design.md) gives every metric
 // rule a `table` declaration — the shaper that turns its stored rows into rows,
 // and a LABEL over every column and every summary scalar. No metric's stored
@@ -265,7 +264,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // what the ruleset SAYS about a site changed exactly as ground (2) of 0.15.0
 // changed it for the finding rules' column headings. One ground, stated here so
 // the version can be traced to it.
-export const RULESET_VERSION = "0.15.0";
+export const RULESET_VERSION = "0.16.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
