@@ -30,6 +30,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import { assertCrawl } from "../query/crawl-evidence.js";
+import { expandList } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { bool, cohortFilter, num, text } from "./cohort.js";
 
@@ -158,7 +159,29 @@ async function paramVolumes(db: Db, crawlId: string, self: MetricIdentity): Prom
 }
 
 export const urlMetrics: MetricRule[] = [
-  metricRule("url.param-volumes", ["CHECK-29", "CHECK-27"], URL_CATEGORY, async (db, crawlId, self) =>
-    paramVolumes(db, crawlId, self),
+  // THE TABLE IS THE PARAMETER LIST; the four site-wide counts are the summary
+  // above it. Putting those counts in columns would repeat one site's four
+  // numbers on every parameter row, and the row a reader acts on is the
+  // parameter.
+  metricRule(
+    "url.param-volumes",
+    ["CHECK-29", "CHECK-27"],
+    URL_CATEGORY,
+    expandList(
+      "topParams",
+      [
+        { key: "name", label: "Parameter" },
+        { key: "occurrences", label: "URLs" },
+        { key: "isTracking", label: "Tracking" },
+      ],
+      [
+        { key: "totalParams", label: "Parameters Found" },
+        { key: "trackingParams", label: "Tracking Parameters" },
+        { key: "parameterisedPages", label: "URLs With Parameters" },
+        { key: "parameterisedIndexablePages", label: "Indexable URLs With Parameters" },
+      ],
+      13,
+    ),
+    async (db, crawlId, self) => paramVolumes(db, crawlId, self),
   ),
 ];

@@ -28,6 +28,16 @@
  * rule ids, and the test pins both halves of why: the map has two entries, and
  * the engine 404s every other rule by name.
  *
+ * A METRIC IS A TABLE TOO (Phase 21), and it is asserted at the same two
+ * levels. On the API side: the catalog's metric rules are what the section is a
+ * block of, `GET /crawls/:id/metrics/:metricId` answers one block's copy,
+ * header, summary and rows, every cell in them is a scalar, and the CSV the
+ * link points at is headed with the same labels. On the page side: the header
+ * is the response's `columns`, not one of the labels the fourteen metrics
+ * declare — every one of which is derived from the registry and asserted ABSENT
+ * from the source — and the only decision the page makes about a metric is how
+ * a number is spelled.
+ *
  * THE FOURTH SECTION'S ROUTING IS ASSERTED AT THIS FILE'S OWN LEVEL. A NOT
  * MEASURED marker reports that a check could not be answered on this crawl, and
  * every marker is `info` — so without a key of its own the page would file them
@@ -61,6 +71,13 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues } from "../../src/db/schema.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createDemoServer, type DemoServer } from "../../src/demo/server.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import {
+  METRIC_SCOPES,
+  metricTableColumns,
+  metricTableSummary,
+  SITE_SCOPE_VALUE,
+} from "../../src/rules/registry/registry.js";
 
 let db: Db;
 
@@ -284,10 +301,15 @@ describe("the demo flow", () => {
       rulesetVersion: string;
       rules: {
         id: string;
+        kind: string;
         title: string;
         explanation: string;
         howToFix: string;
         marker?: string;
+        table?: {
+          columns: { key: string; label: string }[];
+          summary: { key: string; label: string }[];
+        };
       }[];
     };
     expect(catalog.rulesetVersion.length).toBeGreaterThan(0);
@@ -436,8 +458,96 @@ describe("the demo flow", () => {
     expect(metrics.items.length).toBeGreaterThan(0);
     for (const row of metrics.items) {
       expect(row.metricId.length).toBeGreaterThan(0);
-      expect(["site", "page_type", "rule"]).toContain(row.scope);
+      expect(METRIC_SCOPES).toContain(row.scope);
     }
+
+    // THE METRICS SECTION IS ONE BLOCK PER METRIC (Phase 21), and this is where
+    // the blocks come from: the catalog's metric rules, in the catalog's own
+    // order, each carrying the copy the page heads its block with. `kind` is
+    // the flag the page filters on, so a metric that stopped answering to it
+    // would drop off the page silently and off this list loudly.
+    const metricRules = catalog.rules.filter((rule) => rule.kind === "metric");
+    expect(metricRules.length).toBeGreaterThan(0);
+    // AND THE ORDER IS THE CATALOG'S, which the metric rules DECLARE: the site
+    // health rollup is the census every other table is a part of, so it heads
+    // the section rather than sitting tenth where the alphabet put it. The page
+    // sorts nothing; the full sequence is pinned in test/api/query.test.ts.
+    expect(metricRules[0]?.id, "the metric section does not lead with site.health").toBe(
+      "site.health",
+    );
+    for (const rule of metricRules) {
+      expect(rule.title.length).toBeGreaterThan(0);
+      expect(rule.explanation.length).toBeGreaterThan(0);
+      // The "How to read" paragraph above each table.
+      expect(rule.howToFix.length).toBeGreaterThan(0);
+      // The header is on the catalog too. The page draws from the response, but
+      // a metric rule with no table declaration has no block to draw at all.
+      expect(rule.table?.columns.length, `${rule.id} has no table header`).toBeGreaterThan(0);
+    }
+
+    // …and the request that fills one block (§4.4b): one per metric, made
+    // sequentially after the rules pass.
+    const table = (await json(
+      await fetch(`${base}/api/crawls/${crawlId}/metrics/site.health`),
+      "metric table",
+    )) as unknown as {
+      metricId: string;
+      title: string;
+      explanation: string;
+      howToFix: string;
+      summary: { key: string; label: string; value: unknown }[];
+      columns: { key: string; label: string }[];
+      rows: Record<string, unknown>[];
+      note?: string;
+    };
+    expect(table.metricId).toBe("site.health");
+    expect(table.title.length).toBeGreaterThan(0);
+    expect(table.explanation.length).toBeGreaterThan(0);
+    expect(table.howToFix.length).toBeGreaterThan(0);
+    expect(Array.isArray(table.summary)).toBe(true);
+    // The header the page prints, in this order, the scope column leading it.
+    expect(table.columns[0]).toEqual({ key: "scope", label: "Scope" });
+    for (const column of table.columns) {
+      expect(typeof column.key).toBe("string");
+      expect(column.label.length).toBeGreaterThan(0);
+    }
+    // A row is drawn by walking the columns, and every cell is a scalar this
+    // page can spell. An object would be a JSON blob under a heading — which is
+    // exactly what Phase 21 removed — and `metricCellText` throws on one rather
+    // than stringify it into a cell nobody reads.
+    expect(table.rows.length).toBeGreaterThan(0);
+    for (const row of table.rows) {
+      expect(Object.keys(row).length).toBeGreaterThan(0);
+      for (const value of Object.values(row)) {
+        expect(
+          ["string", "number", "boolean"],
+          `a metric cell is a ${typeof value}`,
+        ).toContain(value === null ? "string" : typeof value);
+      }
+    }
+    // `note` is present exactly when `rows` is empty — the block prints it
+    // INSTEAD of the table, so a filled table carrying one would be two answers.
+    expect(table).not.toHaveProperty("note");
+    // The site row leads, and its identity cell is the engine's word for it.
+    expect(table.rows[0]?.["scope"]).toBe("Site");
+
+    // THE CSV BESIDE THE TABLE, at the URL the page builds (`metricExportHref`):
+    // the metric rides as `metricId`, the parameter this view takes, and the
+    // summary labels lead the header because a CSV has nowhere above the rows.
+    const metricCsv = await fetch(
+      `${base}/api/crawls/${crawlId}/export?format=csv&view=metric_table&metricId=site.health`,
+    );
+    expect(metricCsv.status).toBe(200);
+    expect(metricCsv.headers.get("content-type")).toContain("text/csv");
+    // Named for the metric, as the issue export is named for its rule.
+    expect(metricCsv.headers.get("content-disposition")).toContain("site.health.csv");
+    const metricHeader = (await metricCsv.text()).split("\r\n")[0];
+    expect(metricHeader).toBe(
+      [
+        ...table.summary.map((column) => column.label),
+        ...table.columns.map((column) => column.label),
+      ].join(","),
+    );
   }, 90_000);
 
   it("serves a page whose element ids match the flow the test just drove", async () => {
@@ -579,6 +689,170 @@ describe("the demo flow", () => {
     expect(new Set(html.match(/links_to_\dxx/g))).toEqual(
       new Set(["links_to_4xx", "links_to_5xx"]),
     );
+  });
+
+  /**
+   * THE METRICS SECTION, read out of the source that builds it (Phase 21).
+   *
+   * Same discipline as the findings table above, one surface along. A metric's
+   * block is the catalog's copy over a table the ENGINE shaped, so the only
+   * thing this page may decide about it is how a number is spelled: every
+   * heading, every label and every cell comes off the response, and the list
+   * below is the whole of the engine's metric vocabulary asserted ABSENT from
+   * the page. The raw-rows renderer it replaced — metric id, scope and the
+   * `value` object as JSON — is asserted gone for the same reason: a JSON blob
+   * under a heading is a table nobody can read.
+   */
+  it("builds every metric's table from the engine's own header, and spells only its numbers", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+
+    // ONE BLOCK PER METRIC, in the catalog's order and from the catalog's flag.
+    // The page keeps no list of which rules measure and no order of its own.
+    expect(html, "the blocks are the catalog's metric rules").toContain(
+      'if (rules[r].kind === "metric") metricRules.push(rules[r]);',
+    );
+    expect(html, "the heading is the catalog's title").toContain(
+      'block.appendChild(el("h3", null, String(rule.title)));',
+    );
+    expect(html, "the explanation under it").toContain(
+      'block.appendChild(el("p", null, String(rule.explanation)));',
+    );
+    // A metric is a measurement, so its `howToFix` is a reading instruction and
+    // the label says so.
+    expect(html, "how to READ a metric, not how to fix it").toContain(
+      '"How to read: " + String(rule.howToFix)',
+    );
+
+    // ONE REQUEST PER BLOCK, awaited one at a time — fourteen at once is this
+    // page being impolite to the engine on the operator's own machine.
+    expect(html).toContain('"/metrics/" + encodeURIComponent(metricId)');
+    expect(html).toContain(
+      "await loadMetricTable(forCrawl, slots[s].metricId, slots[s].slot);",
+    );
+
+    // THE TABLE IS THE FINDINGS TABLE'S BUILDER, over the engine's own columns
+    // and rows — the same `.scroll` box, so a metric with fourteen columns
+    // scrolls in its container and never widens the page.
+    expect(html, "the same table builder, over the served header").toContain(
+      "box.appendChild(reportTable(body.columns, body.rows, metricCell(labels)));",
+    );
+    expect(html, "the labels are read off the response").toContain(
+      'labels[String(body.columns[c].key)] = String(body.columns[c].label);',
+    );
+    // …and a response that does not bring them is a shape error, not a blank.
+    expect(html).toContain('" without a columns array"');
+    expect(html).toContain('" without a rows array"');
+    // An empty table prints the ENGINE's note saying which empty it is.
+    expect(html).toContain('box.appendChild(el("p", "note", body.note));');
+    expect(html, "an empty table with no note is a shape error").toContain(
+      '" without the note that says which kind of empty it is"',
+    );
+
+    // THE NUMBER FORMATTER, and the cell path that uses it. This is the ONE
+    // thing the page decides about a metric: grouping, one decimal for a
+    // percentage column, four places below one, one decimal otherwise, Yes/No
+    // for a boolean, an empty cell for a null. WHAT it produces is not readable
+    // from the source — test/demo/metric-number.test.ts runs it.
+    expect(html).toContain("function metricNumber(value, label) {");
+    expect(html, "the cell path spells its numbers here").toContain(
+      'if (typeof value === "number") return metricNumber(value, label);',
+    );
+    expect(html, "a percentage is one its LABEL declares").toContain(
+      String.raw`/\(%\)$/.test(label)`,
+    );
+    // A ratio below one keeps its digits. One decimal would print `Text Ratio`'s
+    // 0.0106 as 0.0 — a measurement shown as zero, which is the failure the
+    // fourth-decimal branch exists to prevent.
+    expect(html, "a value below one is not rounded to one decimal").toContain(
+      String.raw`Math.abs(value).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")`,
+    );
+    expect(html, "a whole number stays whole").toContain(
+      "Number.isInteger(value)",
+    );
+    expect(html, "thousands, grouped by hand rather than by the browser's locale").toContain(
+      String.raw`.replace(/\B(?=(\d{3})+(?!\d))/g, ",")`,
+    );
+    // The CALL, not the phrase: the docblock above that helper names
+    // `toLocaleString` as what it is deliberately not using.
+    expect(html, "the page never asks the browser to decide what a number looks like")
+      .not.toContain("toLocaleString(");
+    expect(html).toContain('if (typeof value === "boolean") return value ? "Yes" : "No";');
+    expect(html, "a null cell is empty, never a zero").toContain(
+      'if (value === null || value === undefined) return "";',
+    );
+    // A cell that is not a scalar is thrown, not stringified: the block's own
+    // error box is where a change of shape belongs (rule 7).
+    expect(html).toContain(
+      '"a boolean nor null: " + JSON.stringify(value)',
+    );
+
+    // THE SUMMARY, as one line of the engine's own `label: value` pairs, and
+    // omitted rather than printed empty on the twelve metrics that have none.
+    expect(html).toContain('label + ": " + metricCellText(summary[i].value, label)');
+    expect(html).toContain('if (body.summary.length > 0) {');
+
+    // THE CSV LINK, at the shape the export route answers (asserted live in the
+    // flow test above): the `metric_table` view, whose subject is a `metricId`
+    // and not `exportHref`'s `ruleId`.
+    expect(html).toContain(
+      'return exportHref(forCrawl, "metric_table", null) + "&metricId=" + encodeURIComponent(metricId);',
+    );
+
+    // A FAILED BLOCK IS LOUD AND LOCAL: the error box every other step uses,
+    // inside the block whose table is missing.
+    expect(html).toContain(
+      'errorBox.appendChild(el("span", "step", "the table for " + metricId + " could not be read"));',
+    );
+
+    // NO METRIC LABEL IN THE PAGE. Every word the fourteen metric declarations
+    // put in a header or a summary, asserted absent as a string literal — the
+    // form a hard-coded header would take. The engine owns these words; a page
+    // that spelled one would be renaming a measurement.
+    //
+    // THE LIST IS DERIVED FROM THE REGISTRY, not typed out: a hand list stops
+    // covering a label the moment a metric declares a new column, and the point
+    // of the assertion is that the page never spells ANY of them. The four
+    // shapers between them put a label in four places — the header
+    // (`metricTableColumns`, which folds in the scope heading and `Measure`),
+    // the summary (`metricTableSummary`), a `perScopeMeasure`'s measure cells,
+    // and an `expandList` tag's value — plus `Site`, the cell every site row
+    // carries in its scope column. The floor below is the count at Phase 21 and
+    // is what stops a derivation that broke from passing vacuously.
+    const metricLabels = new Set<string>([SITE_SCOPE_VALUE]);
+    for (const rule of buildRegistry().byKind("metric")) {
+      for (const column of metricTableColumns(rule.table)) metricLabels.add(column.label);
+      for (const column of metricTableSummary(rule.table)) metricLabels.add(column.label);
+      if (rule.table.shape === "perScopeMeasure") {
+        for (const measure of rule.table.measures) metricLabels.add(measure.label);
+      }
+      if (rule.table.shape === "expandList") {
+        for (const source of rule.table.lists) {
+          if (source.tag !== undefined) metricLabels.add(source.tag.value);
+        }
+      }
+    }
+    expect(metricLabels.size, "the metric label derivation went vacuous").toBeGreaterThanOrEqual(
+      67,
+    );
+    for (const label of metricLabels) {
+      expect(html, `the page spells the metric label ${label}`).not.toContain(`"${label}"`);
+    }
+
+    // THE RAW ROWS ARE GONE: no metric id, scope and JSON `value` table, and no
+    // paging note for a listing the section no longer walks.
+    expect(html, "the raw metric value").not.toContain("JSON.stringify(row.value)");
+    expect(html, "the old three-column header").not.toContain('el("th", null, "metric")');
+    expect(html, "the old metrics paging note").not.toContain("pages of metrics");
+
+    // The new classes, at the element that builds each and the rule that styles
+    // it — the class contract Phase 20 started, two entries longer.
+    expect(html).toContain('el("div", "metric")');
+    expect(html).toContain('el("p", "sums"');
+    expect(html).toContain(".metric { border-top:");
+    expect(html).toContain(".sums { color: var(--muted);");
+    // …over the SAME box and scroller a finding's table uses.
+    expect(html).toContain('var box = el("div", "drill");');
+    expect(html).toContain('var link = el("a", "dl", "Download CSV");');
   });
 
   it("asks for nothing off this origin: no external URL in the page", async () => {

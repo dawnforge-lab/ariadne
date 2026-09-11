@@ -59,7 +59,15 @@ import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import { assertCrawl } from "../query/crawl-evidence.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
-import { COHORT_PAGE_TYPE, cohortFilter, nullableNum, num, UNTYPED } from "./cohort.js";
+import { expandList, expandMap, perScope } from "../registry/metric-table.js";
+import {
+  COHORT_PAGE_TYPE,
+  cohortFilter,
+  DISTRIBUTION_COLUMNS,
+  nullableNum,
+  num,
+  UNTYPED,
+} from "./cohort.js";
 
 /** How many URLs `inlinks.extremes` names at each end. */
 export const EXTREMES_LIST_CAP = 20;
@@ -395,16 +403,49 @@ const TECHNICAL = "technical";
  * factory.
  */
 export const linkMetrics: MetricRule[] = [
-  metricRule("inlinks.distribution", ["CHECK-33"], LINKS, async (db, crawlId, self) =>
-    distribution(db, crawlId, self, inlinkCohort(crawlId)),
+  metricRule(
+    "inlinks.distribution",
+    ["CHECK-33"],
+    LINKS,
+    perScope("Template", DISTRIBUTION_COLUMNS, 4),
+    async (db, crawlId, self) => distribution(db, crawlId, self, inlinkCohort(crawlId)),
   ),
 
-  metricRule("inlinks.extremes", ["CHECK-33"], LINKS, async (db, crawlId, self) =>
-    extremes(db, crawlId, self),
+  // THE TWO ENDS AS ONE LIST. The value carries `top` and `bottom` — two arrays
+  // of the same shape — and a reader wants one table of URLs, so the shaper
+  // merges them and stamps each row with the list it came from. Without that
+  // column the twenty least-linked pages would sit under the twenty most-linked
+  // ones with nothing saying which is which, and on a site smaller than the cap
+  // the two lists name the SAME pages in opposite orders (see `extremes`).
+  metricRule(
+    "inlinks.extremes",
+    ["CHECK-33"],
+    LINKS,
+    expandList(
+      [
+        { field: "top", tag: { key: "list", value: "Most linked" } },
+        { field: "bottom", tag: { key: "list", value: "Least linked" } },
+      ],
+      [
+        { key: "list", label: "List" },
+        { key: "url", label: "Address" },
+        { key: "inlinks", label: "Inlinks" },
+      ],
+      [],
+      5,
+    ),
+    async (db, crawlId, self) => extremes(db, crawlId, self),
   ),
 
-  metricRule("inlinks.sources-by-type", ["CHECK-33b"], LINKS, async (db, crawlId, self) =>
-    sourcesByType(db, crawlId, self),
+  // The one map shape in the ruleset: the source templates are the SITE's own
+  // templates, so there is no fixed set of columns to head — the entry is the
+  // row (see `expandMap`).
+  metricRule(
+    "inlinks.sources-by-type",
+    ["CHECK-33b"],
+    LINKS,
+    expandMap("sources", "Destination Template", "Source Template", "Links", 6),
+    async (db, crawlId, self) => sourcesByType(db, crawlId, self),
   ),
 
   // DISCOVERY depth: how the crawler first arrived at each page, which is a
@@ -432,15 +473,20 @@ export const linkMetrics: MetricRule[] = [
   // to zero is a crawl that found its pages from the sitemap rather than from
   // links, which is the site-wide shadow of the per-page fact `links.orphan`
   // reports. The verdict stays with that rule; this is the shape beside it.
-  metricRule("structure.depth-distribution", ["CHECK-32"], TECHNICAL, async (db, crawlId, self) =>
-    distribution(
-      db,
-      crawlId,
-      self,
-      sql`select ${COHORT_PAGE_TYPE} as page_type, p.depth as v
+  metricRule(
+    "structure.depth-distribution",
+    ["CHECK-32"],
+    TECHNICAL,
+    perScope("Template", DISTRIBUTION_COLUMNS, 12),
+    async (db, crawlId, self) =>
+      distribution(
+        db,
+        crawlId,
+        self,
+        sql`select ${COHORT_PAGE_TYPE} as page_type, p.depth as v
           from pages p
           where ${cohortFilter(crawlId)}`,
-    ),
+      ),
   ),
 
   // CLICK depth, and the metric CHECK-31 has always meant: the shortest chain of
@@ -457,6 +503,12 @@ export const linkMetrics: MetricRule[] = [
     "structure.click-depth-distribution",
     ["CHECK-31"],
     TECHNICAL,
+    // The ninth column is the finding, not a footnote: a page no internal link
+    // reaches is the worst bucket in the table (see the comment above).
+    perScope("Template", [
+      ...DISTRIBUTION_COLUMNS,
+      { key: "nullCount", label: "Unreachable Pages" },
+    ], 11),
     async (db, crawlId, self) =>
       distribution(
         db,

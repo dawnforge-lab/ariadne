@@ -1,4 +1,6 @@
+import { metricTableColumns, metricTableSummary, RESERVED_TABLE_KEYS } from "./metric-table.js";
 import type { AnyRule } from "./types.js";
+export * from "./metric-table.js";
 export * from "./types.js";
 
 export class RuleDefinitionError extends Error {
@@ -249,7 +251,23 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //
 // 0.7.0: `structure.deep-page` moved to `click_depth` — a rule silent on real
 // sites became reachable, so a re-judged crawl can change verdict.
-export const RULESET_VERSION = "0.15.0";
+//
+// ---------------------------------------------------------------------------
+// 0.16.0: Phase 21, on ONE ground. The metric tables pass
+// (docs/superpowers/specs/2026-09-11-metric-tables-design.md) gives every metric
+// rule a `table` declaration — the shaper that turns its stored rows into rows,
+// and a LABEL over every column and every summary scalar. No metric's stored
+// value, predicate or copy moves: a crawl re-judged under the bumped version
+// writes byte-identical `metrics` rows. The ground is the labels themselves.
+// They are client-facing text — `rules_catalog` serves them beside a title, the
+// `metric_table` route and the `metric_table` CSV print them as headings — so
+// what the ruleset SAYS about a site changed exactly as ground (2) of 0.15.0
+// changed it for the finding rules' column headings. One ground, stated here so
+// the version can be traced to it. The declaration also carries `table.order` —
+// where the metric sits in the metric section — which is a presentation
+// decision rather than a sentence, and rides on the same bump rather than
+// earning one of its own.
+export const RULESET_VERSION = "0.16.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
@@ -305,6 +323,7 @@ export function defineRule<T extends AnyRule>(rule: T): T {
   if (rule.marker !== undefined && (typeof rule.marker !== "string" || rule.marker.trim() === ""))
     fail("marker, when present, must be a non-empty reason string");
   validateColumns(rule, fail);
+  validateTable(rule, fail);
   return rule;
 }
 
@@ -421,6 +440,138 @@ function validateColumns(rule: AnyRule, fail: (msg: string) => never): void {
     const optional = (column as { optional?: unknown }).optional;
     if (optional !== undefined && optional !== true)
       fail(`column '${key}': optional, when present, must be exactly true`);
+  }
+}
+
+/**
+ * `MetricRule.table`, checked as far as a definition can be checked here.
+ *
+ * The mirror of `validateColumns`, and the same split of responsibilities: this
+ * function sees a DECLARATION and no stored row, so what it holds is the shape —
+ * present on the kind that measures, absent on the kinds that find, and every
+ * entry a usable heading. Whether a declared key names something the metric
+ * actually writes is a question about a run, and test/fixtures/harness.test.ts
+ * answers it over a real crawl, in both directions.
+ *
+ * A HEADING IS AS UNIQUE AS A KEY, and the uniqueness set here is WIDER than a
+ * finding rule's: the summary labels are in it beside the column labels, because
+ * the `metric_table` CSV writes the summary as leading columns repeated on every
+ * row (src/api/csv.ts), so one header row carries both lists and a label in both
+ * would be two columns a reader cannot tell apart.
+ */
+function validateTable(rule: AnyRule, fail: (msg: string) => never): void {
+  const table = rule.table;
+  if (rule.kind !== "metric") {
+    if (table !== undefined) {
+      fail(
+        "only a metric rule declares a `table`: a rule that finds writes `issues` rows, " +
+          "whose report is `columns`",
+      );
+    }
+    return;
+  }
+  if (table === undefined) {
+    fail(
+      "a metric rule must declare its `table` — the shaper that turns its stored rows " +
+        "into the rows a client reads, and the label over every column " +
+        "(src/rules/registry/metric-table.ts)",
+    );
+  }
+  if (typeof table !== "object" || Array.isArray(table)) fail("table must be a declaration object");
+
+  // WHERE THE TABLE SITS IN THE SECTION, checked for the only property a
+  // definition can carry: it is a position in a list, so a fraction, a negative
+  // or a NaN is not one. Absent is allowed and means "after every table that
+  // declares a position" (`METRIC_TABLE_ORDER_LAST`); what is refused is a value
+  // that LOOKS declared and cannot be ordered.
+  if (table.order !== undefined) {
+    if (typeof table.order !== "number" || !Number.isInteger(table.order) || table.order < 0) {
+      fail(
+        "table.order, when present, is the metric's position in the metric section and must " +
+          "be a non-negative integer — lower first, ties broken by rule id",
+      );
+    }
+  }
+
+  // The shaper's own arguments first, because a heading list built from a
+  // malformed declaration would fail on the wrong thing.
+  if (table.shape === "perScopeMeasure") {
+    if (table.measures.length === 0)
+      fail("perScopeMeasure needs at least one measure — it is a column of the table");
+    const seen = new Set<string>();
+    for (const measure of table.measures) {
+      if (typeof measure.key !== "string" || measure.key.trim() === "")
+        fail("every measure needs a non-empty key naming an object inside the metric's value");
+      if (typeof measure.label !== "string" || measure.label.trim() === "")
+        fail(`measure '${measure.key}' needs a non-empty label — the cell a client reads`);
+      if (seen.has(headingKey(measure.label)))
+        fail(`measure '${measure.key}' repeats the label '${measure.label}' of another measure`);
+      seen.add(headingKey(measure.label));
+    }
+  }
+  if (table.shape === "expandList") {
+    if (table.lists.length === 0) fail("expandList needs at least one list to expand");
+    const keys = new Set(table.columns.map((column) => column.key));
+    for (const source of table.lists) {
+      if (typeof source.field !== "string" || source.field.trim() === "")
+        fail("every expanded list needs a non-empty field naming it on the site row");
+      if (source.tag === undefined) {
+        // One list needs no tag: every row came from it. Two do, or the rows of
+        // the second are indistinguishable from the first's.
+        if (table.lists.length > 1)
+          fail(
+            `list '${source.field}' is merged with another and carries no tag — nothing on ` +
+              "its rows would say which list they came from",
+          );
+        continue;
+      }
+      if (!keys.has(source.tag.key))
+        fail(
+          `list '${source.field}' tags its rows under '${source.tag.key}', which is not one of ` +
+            "this table's columns — the tag would be written into a cell nobody prints",
+        );
+      if (typeof source.tag.value !== "string" || source.tag.value.trim() === "")
+        fail(`list '${source.field}' needs a non-empty tag value — a client reads it as a cell`);
+    }
+  }
+  if (table.shape === "expandMap" && (typeof table.field !== "string" || table.field.trim() === ""))
+    fail("expandMap needs a non-empty field naming the map on each stored row");
+
+  // The reserved keys, checked against the DECLARED columns only: the scope and
+  // measure columns are built from those same names by `metricTableColumns`, so
+  // reading the whole list would refuse every table there is.
+  const declared =
+    table.shape === "expandMap"
+      ? []
+      : [...table.columns, ...(table.shape === "perScopeMeasure" ? table.scopeColumns : [])];
+  for (const column of declared) {
+    if (RESERVED_TABLE_KEYS.has(column.key))
+      fail(
+        `column '${column.key}' is a key this surface writes itself (the row's scope and its ` +
+          "measure) — two columns under one key, filled from two sources",
+      );
+  }
+
+  const columns = [...metricTableColumns(table), ...metricTableSummary(table)];
+  const seen = new Set<string>();
+  const seenLabels = new Set<string>();
+  for (const column of columns) {
+    if (column === null || typeof column !== "object" || Array.isArray(column))
+      fail("every column must be an object {key, label}");
+    const { key, label } = column as { key?: unknown; label?: unknown };
+    if (typeof key !== "string" || key.trim() === "")
+      fail("every column needs a non-empty key naming a path into the metric's value");
+    if (typeof label !== "string" || label.trim() === "")
+      fail(`column '${key}' needs a non-empty label — the header a client prints`);
+    if (seen.has(key)) fail(`column '${key}' is declared twice`);
+    seen.add(key);
+    const heading = headingKey(label);
+    if (seenLabels.has(heading))
+      fail(
+        `column '${key}' repeats the heading '${label}' — the scope column, the measure ` +
+          "column, the value columns and the summary labels share one header row",
+      );
+    seenLabels.add(heading);
   }
 }
 

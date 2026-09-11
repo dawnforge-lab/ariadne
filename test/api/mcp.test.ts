@@ -591,6 +591,17 @@ beforeAll(async () => {
   await db.insert(metrics).values([
     { crawlId: seededCrawlId, metricId: "redirect.volume", scope: "site", scopeValue: "", value: { ratioPct: 12 } },
     { crawlId: seededCrawlId, metricId: "content.metrics-by-type", scope: "page_type", scopeValue: "product", value: { words: 800 } },
+    // IN THE SHAPE THE RULE REALLY WRITES, unlike the two above, because
+    // `metric_table` renders the metric's declared table and a stand-in value
+    // would prove nothing about the surface. See the same fixture in
+    // test/api/query.test.ts.
+    {
+      crawlId: seededCrawlId, metricId: "site.health", scope: "site", scopeValue: "",
+      value: {
+        urlsTotal: 2, urlsWithCritical: 1, urlsWithWarningOnly: 0, urlsWithInfoOnly: 0,
+        urlsClean: 1, cleanRatio: 50, pagesNotAuditable: 0,
+      },
+    },
   ]);
 
   // The live crawl: started through the tool, run in this process.
@@ -617,14 +628,14 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-  it("advertises exactly the seventeen tools of the agent surface, each described", async () => {
+  it("advertises exactly the eighteen tools of the agent surface, each described", async () => {
     const listed = await client.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual(
       [
         "compare_urls", "crawl_compare", "crawl_list", "crawl_mark_failed", "crawl_render",
         "crawl_resume", "crawl_rules", "crawl_start", "crawl_status", "export_crawl",
-        "issue_inlinks", "issue_urls", "issues_list", "metrics_get", "pages_query", "robots_get",
-        "rules_catalog",
+        "issue_inlinks", "issue_urls", "issues_list", "metric_table", "metrics_get",
+        "pages_query", "robots_get", "rules_catalog",
       ].sort(),
     );
     for (const tool of listed.tools) {
@@ -2072,7 +2083,7 @@ describe("metrics_get", () => {
     const body = await ok("metrics_get", { crawlId: seededCrawlId });
     const rows = items(body);
     expect(rows.map((r) => r["metricId"])).toEqual([
-      "content.metrics-by-type", "redirect.volume",
+      "content.metrics-by-type", "redirect.volume", "site.health",
     ]);
     expect(rows[1]?.["value"]).toEqual({ ratioPct: 12 });
     expect(String(rows[1]?.["explanation"] ?? "")).not.toBe("");
@@ -2087,6 +2098,69 @@ describe("metrics_get", () => {
     const answer = await call("metrics_get", { crawlId: seededCrawlId, metricId: "no.such.metric" });
     expect(answer.isError).toBe(true);
     expect(String(answer.body["error"])).toContain("no.such.metric");
+  });
+});
+
+/**
+ * THE MCP MIRROR of `GET /crawls/:id/metrics/:metricId`. The table itself is
+ * pinned over the HTTP transport (test/api/query.test.ts) and the shaping over
+ * synthetic rows (test/rules/metric-table.test.ts); what is checked here is that
+ * this transport serves the same object and describes what it serves.
+ */
+describe("metric_table", () => {
+  it("answers one metric's table: the copy, the header, and one row per scope", async () => {
+    const body = await ok("metric_table", { crawlId: seededCrawlId, metricId: "site.health" });
+    expect(body["metricId"]).toBe("site.health");
+    expect(String(body["title"] ?? "")).not.toBe("");
+    expect((body["columns"] as { label: string }[]).map((c) => c.label)).toEqual([
+      "Scope", "Pages Judged", "With Critical", "With Warning Only", "With Info Only",
+      "Clean", "Clean Ratio", "URLs Not Judged",
+    ]);
+    expect(body["rows"]).toEqual([
+      {
+        scope: "Site", urlsTotal: 2, urlsWithCritical: 1, urlsWithWarningOnly: 0,
+        urlsWithInfoOnly: 0, urlsClean: 1, cleanRatio: 50, pagesNotAuditable: 0,
+      },
+    ]);
+    expect(body["summary"]).toEqual([]);
+  });
+
+  it("refuses a metric this ruleset does not define, and a rule that finds", async () => {
+    const unknown = await call("metric_table", {
+      crawlId: seededCrawlId,
+      metricId: "no.such-metric",
+    });
+    expect(unknown.isError).toBe(true);
+    expect(String(unknown.body["error"])).toContain("no.such-metric");
+
+    const finding = await call("metric_table", {
+      crawlId: seededCrawlId,
+      metricId: "links.orphan",
+    });
+    expect(finding.isError).toBe(true);
+    expect(String(finding.body["error"])).toContain("issues");
+  });
+
+  // THE DESCRIPTION IS PINNED TO THE OBJECT THIS TOOL JUST RETURNED, on the
+  // `pages_query` model: a field returned and never described is a field an
+  // agent does not know it can read. A row's own shape is named too, because
+  // the keys of a row come from the metric and not from a fixed list.
+  it("names every field of the answer, and of a row, in its own description", async () => {
+    const body = await ok("metric_table", { crawlId: seededCrawlId, metricId: "site.health" });
+    const listed = await client.listTools();
+    const description = listed.tools.find((t) => t.name === "metric_table")?.description ?? "";
+    expect(description, "metric_table has no description").not.toBe("");
+    for (const field of Object.keys(body)) {
+      expect(description, `metric_table does not name ${field}`).toContain(field);
+    }
+    // `note` is absent from a complete answer and is the field an agent most
+    // needs described, so it is named here rather than inferred from a run.
+    expect(description).toContain("note");
+    // The row shape: how a cell is found, and what the first column holds.
+    expect(description).toContain("row[column.key]");
+    expect(description).toContain("'Site'");
+    // And the null rule, which is the surface's one hard rule at this layer.
+    expect(description).toContain("never a zero");
   });
 });
 
@@ -2342,6 +2416,32 @@ describe("export_crawl — the CSV views", () => {
     expect(read(body).split("\r\n")[0]).toBe(
       "Address,Status Code,Indexability,Indexability Status,Discovered Via,In Sitemap,Caveat,Truncated",
     );
+  });
+
+  // The metric twin of the test above, on the transport that writes a FILE: the
+  // same shaping, named for the metric rather than the view, with the summary
+  // leading the header because a CSV has no place above the rectangle.
+  it("names the metric in the file it writes for one metric's table", async () => {
+    const body = await ok("export_crawl", {
+      crawlId: seededCrawlId, format: "csv", view: "metric_table", metricId: "site.health",
+    });
+    expect(body["metricId"]).toBe("site.health");
+    expect(body["ruleId"]).toBeUndefined();
+    expect(body["rows"]).toBe(1);
+    expect(String(body["path"])).toContain("-site.health.csv");
+    expect(String(body["path"])).not.toContain("metric_table");
+    const lines = read(body).split("\r\n");
+    expect(lines[0]).toBe(
+      "Scope,Pages Judged,With Critical,With Warning Only,With Info Only,Clean," +
+        "Clean Ratio,URLs Not Judged",
+    );
+    expect(lines[1]).toBe("Site,2,1,0,0,1,50,0");
+
+    const noMetric = await call("export_crawl", {
+      crawlId: seededCrawlId, format: "csv", view: "metric_table",
+    });
+    expect(noMetric.isError).toBe(true);
+    expect(String(noMetric.body["error"])).toContain("metricId");
   });
 
   it("writes the links-derived views of a real crawl", async () => {

@@ -21,8 +21,10 @@ import { describe, expect, it } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 import {
+  CSV_QUERY_VIEWS,
   CSV_VIEWS,
   CSV_VIEW_DEFS,
+  type CsvQueryViewName,
   EVIDENCE_MAX_CELL,
   EVIDENCE_MAX_LEAVES,
   EVIDENCE_MAX_VALUE,
@@ -32,7 +34,6 @@ import {
   evidenceCell,
   flattenEvidence,
   type CsvViewContext,
-  type CsvViewName,
 } from "../../src/api/csv.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { columnsFor } from "../../src/api/service.js";
@@ -185,18 +186,29 @@ describe("flattenEvidence", () => {
 
 describe("the view definitions", () => {
   const dialect = new PgDialect();
-  const rendered = (view: CsvViewName): string =>
+  const rendered = (view: CsvQueryViewName): string =>
     dialect.sqlToQuery(
       CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
     ).sql;
 
-  it("defines exactly the eight views the surface advertises", () => {
-    expect(Object.keys(CSV_VIEW_DEFS).sort()).toEqual([...CSV_VIEWS].sort());
+  it("defines exactly the eight keyset views the surface advertises", () => {
+    expect(Object.keys(CSV_VIEW_DEFS).sort()).toEqual([...CSV_QUERY_VIEWS].sort());
     // Eight since P20-T1 added `links_to_5xx` beside `links_to_4xx`. The count
     // moves with the vocabulary deliberately: a view defined and never
     // advertised, or advertised and never defined, fails the line above, and a
     // view SILENTLY DELETED fails this one.
-    expect(CSV_VIEWS).toHaveLength(8);
+    //
+    // NINE ADVERTISED SINCE P21-T1 and eight defined here: `metric_table` is in
+    // the vocabulary and has no `CsvView`, because its rows are one metric's
+    // stored rows SHAPED by the metric's own declaration — three rows out of one
+    // stored row for a per-measure table, twenty out of one for a list — which
+    // is not something a keyset query can express. The split is the type
+    // (`CSV_QUERY_VIEWS`), so a ninth keyset view cannot be added without a
+    // definition and this one cannot be mistaken for having lost its.
+    expect(CSV_VIEWS).toHaveLength(9);
+    expect(CSV_QUERY_VIEWS).toHaveLength(8);
+    expect(CSV_VIEWS).toContain("metric_table");
+    expect(CSV_QUERY_VIEWS).not.toContain("metric_table");
   });
 
   it("gives every view a header, a keyset and a start cursor of matching arity", () => {
@@ -205,7 +217,7 @@ describe("the view definitions", () => {
     // constant. `links.orphan` is a rule that finds, which is all any view here
     // needs of it.
     const ctx = ruleCtx();
-    for (const view of CSV_VIEWS) {
+    for (const view of CSV_QUERY_VIEWS) {
       const def = CSV_VIEW_DEFS[view];
       const ruleId = def.needsRuleId ? "links.orphan" : null;
       expect(def.header(ruleId, ctx).length, `${view} has no header`).toBeGreaterThan(0);
@@ -239,7 +251,7 @@ describe("the view definitions", () => {
   // row-content test in this repository and would read the whole table into one
   // result set; only the query text says otherwise.
   it("bounds every view's read and orders it, so a cursor can walk it", () => {
-    for (const view of CSV_VIEWS) {
+    for (const view of CSV_QUERY_VIEWS) {
       const def = CSV_VIEW_DEFS[view];
       const text = rendered(view);
       expect(text, `${view} reads without a limit`).toMatch(/\blimit\b/i);
@@ -267,7 +279,7 @@ describe("the view definitions", () => {
   });
 
   it("starts every view at a cursor no real row can equal", () => {
-    for (const view of CSV_VIEWS) {
+    for (const view of CSV_QUERY_VIEWS) {
       for (const part of CSV_VIEW_DEFS[view].start) {
         // The empty string is the minimum of text ordering, so no `url`,
         // `rule_id` or `dedupe_key` sorts at or before it; the one numeric part
@@ -283,7 +295,7 @@ describe("the view definitions", () => {
   });
 
   it("parameterises the crawl id rather than interpolating it into the SQL", () => {
-    for (const view of CSV_VIEWS) {
+    for (const view of CSV_QUERY_VIEWS) {
       const { params } = new PgDialect().sqlToQuery(
         CSV_VIEW_DEFS[view].query("crawl_x", CSV_VIEW_DEFS[view].start, 500, "title.missing"),
       );
@@ -294,7 +306,7 @@ describe("the view definitions", () => {
 
   it("asks for a ruleId only where one is meaningful", () => {
     expect(CSV_VIEW_DEFS["issue_urls"].needsRuleId).toBe(true);
-    for (const view of CSV_VIEWS) {
+    for (const view of CSV_QUERY_VIEWS) {
       if (view === "issue_urls") continue;
       expect(CSV_VIEW_DEFS[view].needsRuleId, `${view} asks for a ruleId`).toBe(false);
     }

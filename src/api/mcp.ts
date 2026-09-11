@@ -109,6 +109,7 @@ export const TOOL_NAMES = [
   "issue_urls",
   "issue_inlinks",
   "metrics_get",
+  "metric_table",
   "pages_query",
   "export_crawl",
   "rules_catalog",
@@ -822,6 +823,61 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
   );
 
   server.registerTool(
+    named("metric_table"),
+    {
+      title: "One metric as a table",
+      description:
+        "ONE METRIC, SHAPED INTO THE TABLE IT IS: {metricId, title, explanation, " +
+        "howToFix, summary, columns, rows, note?}. metrics_get serves a metric's " +
+        "stored value verbatim, and its shape belongs to the metric — four " +
+        "different shapes across the fourteen metrics, each needing its own " +
+        "reader. This is the same numbers with the engine's own header on them.\n\n" +
+        "columns is the header, in order: [{key, label}]. rows are objects keyed " +
+        "by those keys — {[key]: string | number | boolean | null} — so a row is " +
+        "rendered by walking columns and reading row[column.key] and nothing else. " +
+        "The FIRST column is the row's scope wherever the rows are per scope: its " +
+        "cell is the template name, the sitemap document's URL, or 'Site' for the " +
+        "row that covers the whole crawl, and its label says which kind of row the " +
+        "table holds (Template, Sitemap, or Scope where the site is the only row). " +
+        "'(untyped)' is the cohort of pages the crawler could not type and " +
+        "'(other)' the templates past a rollup cap; both are real cohorts and " +
+        "print as they are.\n\n" +
+        "summary is [{key, label, value}] — the SITE-LEVEL scalars that belong " +
+        "above the table rather than in it (url.param-volumes' counts of the " +
+        "site's parameters, which would otherwise repeat on every parameter row). " +
+        "Empty on the metrics that have none, which is most of them.\n\n" +
+        "A null cell is a value this metric did not write for that row — an empty " +
+        "cell, never a zero. sitemap.structure is the one table whose two kinds of " +
+        "row carry different facts: the site row counts the documents and the " +
+        "per-document rows count their own entries, so the site-only columns are " +
+        "null on a document row by design. Percentages are numbers under a label " +
+        "ending '(%)'; byte counts are bytes; booleans are true/false.\n\n" +
+        "note is present EXACTLY WHEN rows is empty, and it says which empty this " +
+        "is: a judged crawl whose metric measured nothing, or a metric whose rows " +
+        "hold an empty list. The two answers that are NOT an empty table are " +
+        "refusals: a metricId this ruleset does not define, and a crawl no rules " +
+        "pass has ever completed over — metrics are written by crawl_rules, and " +
+        "'nobody has looked' is never served as 'there is nothing here'.\n\n" +
+        "Not paginated: one metric's table is bounded by the crawl's cohorts and " +
+        "by the metric's own caps, not by the size of the site. The same table is " +
+        "a spreadsheet through export_crawl (format=csv, view=metric_table, " +
+        "metricId), and its header — the same labels — is on rules_catalog's " +
+        "`table` field so it can be laid out before the rows are asked for.",
+      inputSchema: z.strictObject({
+        crawlId: crawlIdField(),
+        metricId: z
+          .string()
+          .describe(
+            "The metric to table, e.g. 'site.health'. rules_catalog lists them (kind " +
+              "'metric'); a rule that finds is refused here and has issue_urls instead.",
+          ),
+      }),
+    },
+    async ({ crawlId, metricId }) =>
+      run("metric_table", () => service.metricTable(crawlId, metricId)),
+  );
+
+  server.registerTool(
     named("pages_query"),
     {
       title: "The crawled pages",
@@ -1002,16 +1058,26 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "The whole ruleset, with the client-facing copy each rule would report " +
         "with: {rulesetVersion, rules: [{id, kind, severity, category, checkIds, " +
-        "title, explanation, howToFix, columns?, marker?}]}. kind is page | query | metric, severity " +
+        "title, explanation, howToFix, columns?, table?, marker?}]}. kind is page | query | metric, severity " +
         "is critical | warning | info, and checkIds trace each rule to the audit " +
-        "checklist. Ordered by severity then rule id — the order issues_list " +
-        "returns its groups in.\n\n" +
+        "checklist. The rules that FIND are ordered by severity then rule id — the " +
+        "order issues_list returns its groups in. The METRIC rules follow them as " +
+        "one block, in the order their tables declare (table.order, lower first, " +
+        "ties by id), which is the order a client should lay the metric section " +
+        "out in.\n\n" +
         "columns is the rule's REPORT, column by column — [{key, label, " +
         "optional?}], the same list issue_urls serves beside its rows, so a table " +
         "can be laid out before the rows are asked for. It is absent on a metric " +
         "rule, which writes no finding rows, and on every rule that finds it " +
         "begins with the four standard columns: address, statusCode, " +
         "indexability, indexabilityStatus.\n\n" +
+        "table is the METRIC's report and is the mirror of columns: present on " +
+        "every metric rule and on no other, absent on every rule that finds. It is " +
+        "{columns: [{key, label}], summary: [{key, label}], order?} — the header of " +
+        "that metric's table, the labels of the site-level scalars above it, and the " +
+        "metric's place in the metric section; the same lists metric_table serves " +
+        "beside its rows, so the table can be laid out before the numbers are asked " +
+        "for. The two fields are never both present and never both absent.\n\n" +
         "This is the CHECKLIST: what the engine looks for, including the checks a " +
         "site passed and the checks nobody has run yet. issues_list can only name " +
         "the rules that found something, so it cannot answer 'what else was " +
@@ -1216,7 +1282,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "evidence intact. Answers {dataset, path, rows, bytes}.\n" +
         `  format=csv writes a spreadsheet of one VIEW: ${CSV_VIEWS.join(", ")} ` +
         "(default issues). issue_urls is one rule's findings and needs a ruleId; " +
-        "the other seven refuse one. Answers {format, view, path, rows, bytes}.\n" +
+        "metric_table is one metric's table and needs a metricId; the other seven " +
+        "refuse both. Answers {format, view, path, rows, bytes}.\n" +
+        "  metric_table is the spreadsheet of the metric_table tool's table: the " +
+        "header is the column LABELS, one row per table row, and the metric's " +
+        "summary scalars lead every row as extra columns — a CSV has no place " +
+        "above the rectangle, and dropping them would lose the site-wide counts " +
+        "the rows are read against.\n" +
         "  links_to_4xx and links_to_5xx are the two inlinks worksheets — Source, " +
         "Destination, Anchor, Status Code, one row per internal link whose target " +
         "answered 4xx or 5xx, the same rows issue_inlinks paginates.\n" +
@@ -1292,6 +1364,13 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
           .string()
           .describe(
             "The rule whose findings the issue_urls view writes, e.g. 'links.orphan'. " +
+              "Required for that view and refused for every other one.",
+          )
+          .optional(),
+        metricId: z
+          .string()
+          .describe(
+            "The metric whose table the metric_table view writes, e.g. 'site.health'. " +
               "Required for that view and refused for every other one.",
           )
           .optional(),

@@ -47,6 +47,10 @@
  *                                      Anchor, Status Code. 404 for any other
  *                                      rule: it has no inlinks report
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
+ *   GET  /crawls/:id/metrics/:metricId one metric as a table: {metricId, title,
+ *                                      explanation, howToFix, summary, columns,
+ *                                      rows, note?} — the same numbers shaped by
+ *                                      the metric's own declaration
  *   GET  /crawls/:id/pages             the crawled pages, slim and filtered
  *   GET  /crawls/:id/robots            the site's robots.txt as this crawl read it
  *   GET  /rules                        the rule catalog: every rule with its
@@ -393,6 +397,21 @@ function buildRoutes(): Route[] {
         }),
       }),
     },
+    // ONE METRIC AS A TABLE. `/metrics` is the raw rows an agent quotes;
+    // this is the same numbers shaped into the header and rows a client DRAWS,
+    // by the metric's own declaration rather than by the client's guess at its
+    // shape. The metric is a path segment and not a filter because it is the
+    // resource: there is no table of all the metrics at once, and an unknown id
+    // here is a 404 rather than the 400 the `/metrics?metricId=` filter gives.
+    {
+      method: "GET",
+      pattern: ["crawls", id, "metrics", { param: "metricId" }],
+      query: [],
+      handler: async (service, ctx) => ({
+        status: 200,
+        body: await service.metricTable(param(ctx, "id"), param(ctx, "metricId")),
+      }),
+    },
     {
       method: "GET",
       pattern: ["crawls", id, "pages"],
@@ -482,13 +501,14 @@ function buildRoutes(): Route[] {
     {
       method: "GET",
       pattern: ["crawls", id, "export"],
-      query: ["dataset", "format", "view", "ruleId"],
+      query: ["dataset", "format", "view", "ruleId", "metricId"],
       handler: async (service, ctx) => {
         const opts = {
           ...optionalString(ctx.query, "dataset"),
           ...optionalString(ctx.query, "format"),
           ...optionalString(ctx.query, "view"),
           ...optionalString(ctx.query, "ruleId"),
+          ...optionalString(ctx.query, "metricId"),
         };
         // `format=csv` STREAMS; every other format writes a file and answers
         // with its path. The branch is on the caller's word rather than on a

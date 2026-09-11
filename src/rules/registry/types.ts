@@ -1,5 +1,6 @@
 import type { Db } from "../../db/client.js";
 import type { pages } from "../../db/schema.js";
+import type { MetricTable } from "./metric-table.js";
 
 export type Severity = "critical" | "warning" | "info";
 export type PageRecord = typeof pages.$inferSelect;
@@ -178,12 +179,36 @@ interface RuleMeta {
    * adds). An undeclared key is a column nobody sees; evidence IS the report.
    */
   columns?: ReadonlyArray<RuleColumn>;
+  /**
+   * THE METRIC'S TABLE — the other kind of report, and the mirror image of
+   * `columns`.
+   *
+   * REQUIRED ON EVERY `metric` RULE and ABSENT on every rule that finds, which
+   * is exactly the reverse of `columns` and for the same reason: a metric writes
+   * a jsonb object per scope into `metrics` and never an `issues` row, so its
+   * report is not a list of evidence fields but a shaper that says how those
+   * objects become rows. `defineRule` enforces both halves.
+   *
+   * The declaration is DATA (see src/rules/registry/metric-table.ts) so the
+   * catalog can serve it, and the labels in it are CLIENT-FACING COPY: a reader
+   * of a metric table sees these strings and nothing else of the declaration.
+   * That is why the ruleset version moves when they do.
+   *
+   * THE KEYS ARE CHECKED AGAINST REALITY BY THE HARNESS, exactly as a finding
+   * rule's are: `defineRule` sees a declaration and not one stored row, so a key
+   * that names nothing the metric writes — a column empty on every row of every
+   * crawl — is caught in test/fixtures/harness.test.ts over a real crawl, in
+   * both directions (a column nothing fills, and a value key no column prints).
+   */
+  table?: MetricTable;
 }
 
 export interface PageRule extends RuleMeta {
   kind: "page";
   /** Required on a rule that finds — see `RuleMeta.columns`. Empty is an answer. */
   columns: ReadonlyArray<RuleColumn>;
+  /** NEVER PRESENT on a rule that finds — see `MetricRule.table`. */
+  table?: undefined;
   run: (page: PageRecord) => Finding[];
 }
 /**
@@ -242,6 +267,8 @@ export interface QueryRule extends RuleMeta {
   kind: "query";
   /** Required on a rule that finds — see `RuleMeta.columns`. Empty is an answer. */
   columns: ReadonlyArray<RuleColumn>;
+  /** NEVER PRESENT on a rule that finds — see `MetricRule.table`. */
+  table?: undefined;
   /**
    * `caps` is optional so a direct caller — a rule test, a script — may invoke
    * a rule without restating the engine's defaults; `capsOr` turns the absence
@@ -257,6 +284,12 @@ export interface MetricRule extends RuleMeta {
    * not `issues`, so it has no finding row for a column to be a column of.
    */
   columns?: undefined;
+  /**
+   * REQUIRED. How this metric's stored rows become the table a client reads —
+   * see `RuleMeta.table`, and the four shapers in
+   * src/rules/registry/metric-table.ts.
+   */
+  table: MetricTable;
   run: (db: Db, crawlId: string) => Promise<Metric[]>;
 }
 export type AnyRule = PageRule | QueryRule | MetricRule;

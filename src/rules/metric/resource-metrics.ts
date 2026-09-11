@@ -54,10 +54,12 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
 import { assertCrawl } from "../query/crawl-evidence.js";
+import { perScopeMeasure } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import {
   COHORT_PAGE_TYPE,
   cohortFilter,
+  DISTRIBUTION_COLUMNS,
   num,
   readStats,
   statsAggregates,
@@ -214,7 +216,34 @@ export const resourceMetrics: MetricRule[] = [
   // for two checks whose verdicts stay with the agent, exactly as the module
   // header states. Neither claim is the whole check: render-blocking analysis
   // and unused-JavaScript measurement are browser work and remain so.
-  metricRule("page.weight", ["CHECK-48", "CHECK-49"], "technical", async (db, crawlId, self) =>
-    pageWeight(db, crawlId, self),
+  metricRule(
+    "page.weight",
+    ["CHECK-48", "CHECK-49"],
+    "technical",
+    // FIVE MEASURES, then four facts about the SCOPE repeated on each of its
+    // measure rows. The four are a property of the cohort and not of any one
+    // byte count — how many files its pages reference, how many were weighed,
+    // how many pages carry a file nobody weighed, and whether the whole row is
+    // therefore a floor — and they have to be beside every row because a reader
+    // quoting the image median needs to know the images were not fetched.
+    perScopeMeasure(
+      "Template",
+      [
+        { key: "pageWeight", label: "Page Weight" },
+        { key: "htmlBytes", label: "HTML" },
+        { key: "imageBytes", label: "Images" },
+        { key: "cssBytes", label: "CSS" },
+        { key: "jsBytes", label: "JavaScript" },
+      ],
+      DISTRIBUTION_COLUMNS,
+      [
+        { key: "resourcesReferenced", label: "File References" },
+        { key: "resourcesWeighed", label: "Files Weighed" },
+        { key: "pagesWithUnmeasuredResources", label: "Pages With Unweighed Files" },
+        { key: "atLeast", label: "Floor" },
+      ],
+      7,
+    ),
+    async (db, crawlId, self) => pageWeight(db, crawlId, self),
   ),
 ];

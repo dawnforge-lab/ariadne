@@ -55,6 +55,16 @@
   row's own `evidence`. It invents no column, renames none and drops none: a
   heading that reads wrong here is wrong in the registry, and the CSV link
   beside each table downloads the same rows under the same headings.
+
+  A METRIC IS A TABLE THE ENGINE SHAPED, and the Metrics section is one block
+  per metric: its header, its rows and its summary arrive already shaped from
+  the metric's own declaration (`GET /crawls/:id/metrics/:metricId`,
+  docs/talos-surface.md §4.4b), in the catalog's order — which the catalog
+  DECLARES for the metrics, so the site health rollup leads the section — and
+  with the catalog's copy above them. All this page does with a metric is SPELL
+  ITS NUMBERS — thousands grouped, a decimal where the label says percentage,
+  four below one, Yes/No for a boolean, an empty cell for a null — and it
+  invents no column, no label and no order.
 -->
 <style>
   :root {
@@ -142,6 +152,15 @@
   .drill .dl { float: right; color: var(--info); font-size: .87rem; }
   .scroll { overflow-x: auto; }
   table.report { width: auto; min-width: 100%; }
+  /*
+    One metric, one block: the catalog's copy, the site-level scalars on one
+    line, and the engine's table under them in the same `.drill` / `.scroll`
+    box a finding's table sits in.
+  */
+  .metric { border-top: 1px solid var(--line); padding: 1rem 0 .6rem; }
+  .metric > p { margin: .4rem 0 0; }
+  .metric .fix { color: var(--muted); }
+  .sums { color: var(--muted); font-variant-numeric: tabular-nums; margin: .6rem 0 0; }
   /*
     `break-word` and not `anywhere`: the second lets the table's own sizing
     squeeze a URL column to one character and stack a URL down the page, which
@@ -627,9 +646,18 @@
     var rules = catalog.rules;
     for (var i = 0; i < rules.length; i++) copy[rules[i].id] = rules[i];
 
+    // THE METRIC BLOCKS ARE THE CATALOG'S METRIC RULES, in the catalog's own
+    // order. `kind` is the engine's word for a rule that MEASURES rather than
+    // finds, so this page keeps no list of which rules are metrics and no order
+    // of its own — one block each, one request each, below.
+    var metricRules = [];
+    for (var r = 0; r < rules.length; r++) {
+      if (rules[r].kind === "metric") metricRules.push(rules[r]);
+    }
+
     renderSummary(issues, metrics);
     renderBands(issues, copy);
-    renderMetrics(metrics);
+    await renderMetrics(metricRules);
     finishRun();
   }
 
@@ -650,7 +678,10 @@
     // and writes no issues, so it never appears in a band and is not counted
     // here; its numbers are in the metrics table below.
     cell(grid, "rules with findings", String(groupCount));
-    cell(grid, "metric rows", String(metricCount));
+    // The stored rows BEHIND the tables below, and a "+" where this page
+    // stopped walking the listing — the `truncated` idiom the rule rows use,
+    // with the sentence for it under the grid.
+    cell(grid, "metric rows", String(metricCount) + (metrics.more ? "+" : ""));
     box.appendChild(grid);
     // The bound, said ONCE and where the counts are, rather than repeated under
     // every band. A slice presented as the whole is the failure worth avoiding.
@@ -658,6 +689,13 @@
       box.appendChild(el("p", "note",
         "This page followed " + MAX_PAGES_FOLLOWED + " pages of findings and stopped: the " +
         "bands below are not the whole listing. Export the crawl for all of it."));
+    }
+    // The same honesty for the row count, and only for the count: each metric's
+    // TABLE below is served whole, in one request of its own.
+    if (metrics.more) {
+      box.appendChild(el("p", "note",
+        "This page followed " + MAX_PAGES_FOLLOWED + " pages of metric rows and stopped, so " +
+        "the count above is a floor. The tables below are unaffected."));
     }
   }
 
@@ -1025,34 +1063,219 @@
     return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : String(value);
   }
 
-  function renderMetrics(metrics) {
+  /**
+   * The Metrics section: one block per metric, in the catalog's order.
+   *
+   * Each block is written FIRST — heading, explanation, how to read — and its
+   * table filled afterwards, one request at a time. Sequential and not
+   * parallel: fourteen simultaneous requests is this page being impolite to the
+   * engine on the same machine, and writing the blocks up front means the ORDER
+   * on screen is the catalog's whatever order the answers arrive in.
+   *
+   * The copy above each table is the CATALOG's, joined the way a finding's is;
+   * everything inside the table comes from that metric's own response.
+   */
+  async function renderMetrics(metricRules) {
     var host = byId("metrics");
     clear(host);
-    if (metrics.items.length === 0) {
+    if (metricRules.length === 0) {
+      // Not an empty section: a ruleset with no metric rules measures nothing,
+      // and that is a fact about the engine rather than about the site.
       host.appendChild(el("p", "note",
-        "The rules pass wrote no metrics for this crawl. An absent metric has not measured zero."));
+        "This ruleset defines no metric rules, so this crawl measured nothing."));
       return;
     }
-    var table = el("table");
-    var head = el("tr");
-    head.appendChild(el("th", null, "metric"));
-    head.appendChild(el("th", null, "scope"));
-    head.appendChild(el("th", null, "value"));
-    table.appendChild(head);
-    for (var i = 0; i < metrics.items.length; i++) {
-      var row = metrics.items[i];
-      var tr = el("tr");
-      tr.appendChild(el("td", null, String(row.metricId)));
-      tr.appendChild(el("td", null, String(row.scope) + (row.scopeValue ? " · " + String(row.scopeValue) : "")));
-      // The value's shape belongs to the metric, so it is printed as it came.
-      tr.appendChild(el("td", "value", JSON.stringify(row.value)));
-      table.appendChild(tr);
+    // Captured for `ruleRow`'s reason: these blocks fill over several seconds,
+    // and a second crawl started meanwhile must not be asked for this one's
+    // tables.
+    var forCrawl = crawlId;
+    var slots = [];
+    for (var i = 0; i < metricRules.length; i++) {
+      var rule = metricRules[i];
+      var block = el("div", "metric");
+      block.appendChild(el("h3", null, String(rule.title)));
+      block.appendChild(el("p", null, String(rule.explanation)));
+      // A metric is a measurement, not a defect, so the registry's `howToFix`
+      // on one is a sentence about READING the numbers. The label says that:
+      // "How to fix" over a table of counts would tell a reader the counts are
+      // the problem.
+      block.appendChild(el("p", "fix", "How to read: " + String(rule.howToFix)));
+      var slot = el("div");
+      slot.appendChild(el("p", "note", "loading…"));
+      block.appendChild(slot);
+      host.appendChild(block);
+      slots.push({ metricId: String(rule.id), slot: slot });
     }
-    host.appendChild(table);
-    if (metrics.more) {
-      host.appendChild(el("p", "note",
-        "This page stopped after " + MAX_PAGES_FOLLOWED + " pages of metrics; there are more."));
+    for (var s = 0; s < slots.length; s++) {
+      await loadMetricTable(forCrawl, slots[s].metricId, slots[s].slot);
     }
+  }
+
+  /**
+   * One metric's table, as the engine shaped it (docs/talos-surface.md §4.4b).
+   *
+   * The header is `columns`, a cell is `row[column.key]`, and the line above
+   * the table is `summary` — the site-level scalars that would otherwise repeat
+   * on every row. Nothing here is named by this page.
+   *
+   * THE FAILURE IS PER BLOCK. One metric's table is one request, so a refusal
+   * is rendered in the block whose table is missing, in the same error box
+   * every other step uses, and the thirteen tables that did arrive stay on
+   * screen beside it (rule 7).
+   */
+  async function loadMetricTable(forCrawl, metricId, slot) {
+    try {
+      var body = await call("/crawls/" + encodeURIComponent(forCrawl) +
+        "/metrics/" + encodeURIComponent(metricId));
+      if (!Array.isArray(body.columns)) {
+        throw new Error("the engine answered the table for " + metricId + " without a columns array");
+      }
+      if (!Array.isArray(body.rows)) {
+        throw new Error("the engine answered the table for " + metricId + " without a rows array");
+      }
+      if (!Array.isArray(body.summary)) {
+        throw new Error("the engine answered the table for " + metricId + " without a summary array");
+      }
+      // The label a cell is spelled under, by key: a percentage is a percentage
+      // because its LABEL ends in "(%)", and the label lives on the column the
+      // cell sits under.
+      var labels = {};
+      for (var c = 0; c < body.columns.length; c++) {
+        labels[String(body.columns[c].key)] = String(body.columns[c].label);
+      }
+      clear(slot);
+      if (body.summary.length > 0) {
+        slot.appendChild(el("p", "sums", summaryLine(body.summary)));
+      }
+      var box = el("div", "drill");
+      var link = el("a", "dl", "Download CSV");
+      link.href = metricExportHref(forCrawl, metricId);
+      box.appendChild(link);
+      if (body.rows.length === 0) {
+        // AN EMPTY TABLE SAYS WHICH EMPTY IT IS, in the engine's words: the note
+        // is served exactly when there are no rows and distinguishes "there was
+        // nothing to measure" from "the list inside the rows is empty". A blank
+        // table under a heading is the silence rule 7 forbids, so a missing note
+        // is a shape error rather than a blank.
+        if (typeof body.note !== "string") {
+          throw new Error("the engine answered an empty table for " + metricId +
+            " without the note that says which kind of empty it is");
+        }
+        box.appendChild(el("p", "note", body.note));
+      } else {
+        box.appendChild(reportTable(body.columns, body.rows, metricCell(labels)));
+      }
+      slot.appendChild(box);
+    } catch (error) {
+      clear(slot);
+      var errorBox = el("div", "error");
+      errorBox.appendChild(el("span", "step", "the table for " + metricId + " could not be read"));
+      errorBox.appendChild(el("span", "said", error.message));
+      slot.appendChild(errorBox);
+    }
+  }
+
+  /** The site-level scalars as one line of `label: value` pairs. */
+  function summaryLine(summary) {
+    var parts = [];
+    for (var i = 0; i < summary.length; i++) {
+      var label = String(summary[i].label);
+      parts.push(label + ": " + metricCellText(summary[i].value, label));
+    }
+    return parts.join(" · ");
+  }
+
+  /**
+   * A metric table's cell reader, bound to that table's own labels.
+   *
+   * `reportTable` hands a cell function the row and the key; a number needs its
+   * LABEL to know whether it is a percentage, so the labels of the table being
+   * drawn are closed over here rather than looked up from anywhere global.
+   */
+  function metricCell(labels) {
+    return function (row, key) { return metricCellText(row[key], labels[key]); };
+  }
+
+  /**
+   * One metric cell: the engine's value, spelled for reading.
+   *
+   *  - `null` — and a key this row does not carry — is an EMPTY cell. It is a
+   *    value the metric did not write for this row, never a zero (§4.4b).
+   *  - a boolean is Yes / No. `true` is the wire's word for it, not a reader's.
+   *  - a number is grouped in thousands and spelled by `metricNumber`: whole
+   *    where the value is whole, one decimal for a percentage column, up to
+   *    four below one, one decimal otherwise.
+   *  - a string — the scope column, `(untyped)`, `(other)`, a measure's name —
+   *    prints exactly as served.
+   *
+   * Anything else is a cell that does not have the shape the contract promises,
+   * and it is thrown rather than stringified: the caller's catch puts it in the
+   * block's error box, where a change of shape is visible instead of silent.
+   */
+  function metricCellText(value, label) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "boolean") return value ? "Yes" : "No";
+    if (typeof value === "number") return metricNumber(value, label);
+    if (typeof value === "string") return value;
+    throw new Error("the cell under '" + String(label) + "' is neither a string, a number, " +
+      "a boolean nor null: " + JSON.stringify(value));
+  }
+
+  /**
+   * A number as a table prints it. Four cases, in this order:
+   *
+   *  - a PERCENTAGE — the column's label ends in "(%)" — is one decimal, always,
+   *    so a column of them lines up and 12 reads as 12.0 rather than as a count.
+   *  - a whole number is whole: 100, 1,009 — never 100.0.
+   *  - a number BELOW ONE is up to four decimals with the trailing zeros
+   *    trimmed, because this is where the ratios live (`Text Ratio` is 0.0106
+   *    and `Clean Ratio` is 0.5): one decimal would print every one of them as
+   *    0.0, which is a measurement the site did not make.
+   *  - anything else is one decimal: 1,009.36 → 1,009.4.
+   *
+   * Four decimals and not more because that is the precision the metrics
+   * themselves carry (`cleanRatio` is stored to four places), and the trim keeps
+   * 0.5 from becoming 0.5000 beside it.
+   *
+   * Grouped by hand rather than by `toLocaleString`, because that would let the
+   * browser's locale decide what this engine's numbers look like — two
+   * operators reading two different figures off the same crawl, and a test that
+   * passes or fails by machine.
+   */
+  function metricNumber(value, label) {
+    var text;
+    if (typeof label === "string" && /\(%\)$/.test(label)) {
+      text = Math.abs(value).toFixed(1);
+    } else if (Number.isInteger(value)) {
+      text = Math.abs(value).toFixed(0);
+    } else if (Math.abs(value) < 1) {
+      // The trim is safe on this branch and only on it: the text always begins
+      // "0.", so stripping trailing zeros can never eat a digit of the integer
+      // part the way it would on "100".
+      text = Math.abs(value).toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+    } else {
+      text = Math.abs(value).toFixed(1);
+    }
+    var dot = text.indexOf(".");
+    var whole = (dot === -1 ? text : text.slice(0, dot)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    // The sign comes off the ROUNDED text, not off the input: a metric cell is
+    // a count, a byte total, a distance or a percentage and none of those goes
+    // below zero, and "-0" for a value that rounded to nothing would be a minus
+    // sign in front of a number that is not negative.
+    return (value < 0 && Number(text) !== 0 ? "-" : "") + whole + (dot === -1 ? "" : text.slice(dot));
+  }
+
+  /**
+   * The CSV beside one metric's table: the `metric_table` view, which is a view
+   * of ONE METRIC (docs/talos-surface.md §12).
+   *
+   * The metric rides as `metricId` and not as `exportHref`'s `ruleId`: the
+   * route keeps the two apart — `ruleId` narrows the findings views — and
+   * sending one under the other's name is a 400 the browser would show as a
+   * failed download.
+   */
+  function metricExportHref(forCrawl, metricId) {
+    return exportHref(forCrawl, "metric_table", null) + "&metricId=" + encodeURIComponent(metricId);
   }
 })();
 </script>

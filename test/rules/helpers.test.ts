@@ -20,6 +20,7 @@ import {
   type MetricIdentity,
 } from "../../src/rules/helpers.js";
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
+import { perScope } from "../../src/rules/registry/metric-table.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import { ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
@@ -456,10 +457,16 @@ describe("metricRule", () => {
   // stamp its rows with an id different from the one the runner deletes by.
   it("hands the body its own identity, and it is the registered id", async () => {
     let seen: MetricIdentity | undefined;
-    const rule = metricRule("inlinks.distribution", ["CHECK-33"], "links", async (_db, _crawl, self) => {
-      seen = self;
-      return [metricRow(self, { scope: "site", value: { n: 1 } })];
-    });
+    const rule = metricRule(
+      "inlinks.distribution",
+      ["CHECK-33"],
+      "links",
+      perScope("Template", [{ key: "n", label: "N" }]),
+      async (_db, _crawl, self) => {
+        seen = self;
+        return [metricRow(self, { scope: "site", value: { n: 1 } })];
+      },
+    );
 
     const rows = await rule.run(undefined as never, "crawl_1");
     expect(seen).toEqual({ id: "inlinks.distribution" });
@@ -471,7 +478,13 @@ describe("metricRule", () => {
   // Not a default the caller may override — the kind has one severity, because
   // a metric states a number and accuses no one.
   it("registers as a metric rule that is always info, with the rule's own copy", () => {
-    const rule = metricRule("structure.depth-distribution", ["CHECK-31"], "technical", async () => []);
+    const rule = metricRule(
+      "structure.depth-distribution",
+      ["CHECK-31"],
+      "technical",
+      perScope("Template", [{ key: "n", label: "N" }]),
+      async () => [],
+    );
     expect(rule.kind).toBe("metric");
     expect(rule.severity).toBe("info");
     expect(rule.category).toBe("technical");
@@ -483,9 +496,15 @@ describe("metricRule", () => {
   // Copy is looked up at definition time, so a metric with none fails when the
   // module loads rather than rendering as an unlabelled table.
   it("refuses to define a metric that has no copy", () => {
-    expect(() => metricRule("no.such-metric", ["CHECK-31"], "links", async () => [])).toThrow(
-      /no copy for rule 'no.such-metric'/,
-    );
+    expect(() =>
+      metricRule(
+        "no.such-metric",
+        ["CHECK-31"],
+        "links",
+        perScope("Template", [{ key: "n", label: "N" }]),
+        async () => [],
+      ),
+    ).toThrow(/no copy for rule 'no.such-metric'/);
   });
 });
 
