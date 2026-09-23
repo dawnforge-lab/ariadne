@@ -273,7 +273,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // Three grounds, all of ground (2)'s family — what the ruleset SAYS about a site
 // changes on a re-judge, with no migration and nothing backfilled:
 //
-//  1. ~20 rules narrowed their cohort to the JUDGED page (fetched OK, 200,
+//  1. 26 rules narrowed their cohort to the JUDGED page (fetched OK, 200,
 //     indexable, NOT canonicalised elsewhere — `isJudged`/`JUDGED`,
 //     src/rules/helpers.ts). Every on-page, technical, content, structured-data,
 //     link-graph and sitemap-coverage rule listed in §1 of the spec now says

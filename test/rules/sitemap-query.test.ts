@@ -91,6 +91,13 @@ describe("the sitemap rules against the database", () => {
     redirectUrl?: string;
     /** The page's declared canonical, absolute. Undefined leaves it null. */
     canonical?: string;
+    /**
+     * Writes a NULL `is_indexable` instead of the stamp the writer would
+     * compute. The column is nullable and no crawl this engine writes leaves
+     * it null, so this is how the defensive row is built for the one test
+     * that is about it.
+     */
+    stampNull?: boolean;
   }
 
   async function newCrawl(discovery: unknown = mkDiscovery()): Promise<string> {
@@ -116,7 +123,7 @@ describe("the sitemap rules against the database", () => {
       urlNormalised: url(s.path).toLowerCase().replace(/\/$/, ""),
       fetchClass: s.fetchClass ?? "ok",
       statusCode: s.statusCode === undefined ? 200 : s.statusCode,
-      isIndexable: writerIndexable(s),
+      isIndexable: s.stampNull === true ? null : writerIndexable(s),
       robotsMeta: s.robotsMeta ?? null,
       xRobotsTag: s.xRobotsTag ?? null,
       redirectUrl: s.redirectUrl ?? null,
@@ -379,6 +386,29 @@ describe("the sitemap rules against the database", () => {
       // is labelled by: one vocabulary, not two.
       const [row] = await db.select().from(pages).where(eq(pages.id, ids.get("/both")!));
       expect(indexabilityOf(row!).status).toBe("Noindex");
+    });
+
+    it("reports a listed 200 whose indexability stamp is null, under `noindex`", async () => {
+      // THE PARTITION HOLE, closed. `site.health` counts a fetched 200 whose
+      // `is_indexable` is null among the pages it sets aside (`is not true`),
+      // and `JUDGED` requires `= true`, so a `= false` predicate here would
+      // leave such a row judged by nothing and set aside by nobody. No crawl
+      // this engine writes produces one — `PageWriter` computes a boolean for
+      // every row — so it is inserted by hand, which is the only way it can
+      // exist at all. The word is `noindex`, the one that census files it
+      // under.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/no-stamp", stampNull: true }]);
+      await addSitemapUrls(crawlId, ["/no-stamp"]);
+
+      const found = await run("sitemap.non-indexable", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        url: url("/no-stamp"),
+        reason: "noindex",
+        robotsMeta: null,
+        xRobotsTag: null,
+      });
     });
 
     it("says nothing about a listed page that canonicalises to ITSELF", async () => {

@@ -744,6 +744,78 @@ describe("the field duplicate rules against the database", () => {
       expect(await run(TITLE, crawlId)).toEqual([]);
     });
 
+    /**
+     * THE HUB: a page OUTSIDE the duplicate group that both members declare.
+     *
+     * `/a` and `/c` share a title and say nothing about each other; each is
+     * reciprocal only with a hub that carries a different title and is
+     * therefore not in the group at all. They are two pages competing for one
+     * query, and the answer may not depend on where the hub's URL happens to
+     * sort — which is exactly what the earlier one-hop key did (it folded them
+     * into one when the hub sorted first and kept two when it sorted last).
+     */
+    for (const hub of ["/0-hub", "/z-hub"]) {
+      it(`keeps two members when both declare only a hub outside the group (${hub})`, async () => {
+        const crawlId = await newCrawl();
+        const ids = await addPages(crawlId, [
+          { path: "/a", title: SHARED },
+          { path: "/c", title: SHARED },
+          { path: hub, title: "A different title entirely" },
+        ]);
+        await addHreflang(crawlId, ids, [
+          { from: "/a", code: "en", to: "/a" },
+          { from: "/a", code: "fr", to: hub },
+          { from: hub, code: "en", to: "/a" },
+          { from: "/c", code: "en", to: "/c" },
+          { from: "/c", code: "de", to: hub },
+          { from: hub, code: "en", to: "/c" },
+        ]);
+        const found = await run(TITLE, crawlId);
+        expect(found).toHaveLength(1);
+        expect(found[0]!.evidence).toMatchObject({
+          count: 2,
+          pages: [url("/a"), url("/c")],
+          alternatesCollapsed: 0,
+        });
+      });
+    }
+
+    /**
+     * THE CHAIN: A↔B and B↔C declared, A↔C not.
+     *
+     * The same graph as the hub above with the middle page inside the group
+     * this time, and the same principle decides it: only pages that declare
+     * EACH OTHER fold. A and C never named each other, so no set of three URLs
+     * here is one page, and the group keeps all three members — the honest
+     * answer for a cluster broken in the way `hreflang.missing-return-link` and
+     * `hreflang.missing-self-reference` report by name.
+     *
+     * Run twice, with the middle page's URL sorting last and then first: a
+     * broken chain must not change its size because of a string comparison.
+     */
+    for (const middle of ["/m-mid", "/0-mid"]) {
+      it(`keeps three members on a chain whose ends do not declare each other (${middle})`, async () => {
+        const crawlId = await newCrawl();
+        const ids = await addPages(crawlId, [
+          { path: "/a", title: SHARED },
+          { path: middle, title: SHARED },
+          { path: "/c", title: SHARED },
+        ]);
+        await addHreflang(crawlId, ids, [
+          { from: "/a", code: "fr", to: middle },
+          { from: middle, code: "en", to: "/a" },
+          { from: middle, code: "de", to: "/c" },
+          { from: "/c", code: "fr", to: middle },
+        ]);
+        const found = await run(TITLE, crawlId);
+        expect(found).toHaveLength(1);
+        expect(found[0]!.evidence).toMatchObject({
+          count: 3,
+          alternatesCollapsed: 0,
+        });
+      });
+    }
+
     it("does not fold in an alternate that is itself out of the judged cohort", async () => {
       // The French page carries a noindex, so it is not in the cohort at all
       // and cannot be a group member — and folding the English page into it

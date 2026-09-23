@@ -75,9 +75,15 @@
  * Indexability Status column already shows `Noindex` first. ONE VOCABULARY
  * across the surface: a page a reader sees labelled `Noindex` in a finding row
  * is the page this table counts under `urlsNoindex`, and
- * `sitemap.non-indexable`'s `reason` says `noindex` about it too. The counts
- * below are computed from the same predicates in the same order for that
- * reason, so the three cannot drift apart again.
+ * `sitemap.non-indexable`'s `reason` says `noindex` about it too.
+ *
+ * The three are EQUIVALENT BY CONSTRUCTION rather than textually identical:
+ * this table tests the stamped `is_indexable`, while the Indexability Status
+ * column and `sitemap.non-indexable`'s `reason` ask `hasNoindex` of the two
+ * robots channels. They cannot disagree, because the stamp is written from
+ * those same two channels (`src/crawl/persist.ts`) and `indexabilityOf` throws
+ * when a row says otherwise (src/rules/helpers.ts) — a contradiction is a loud
+ * error, not a page counted under one word here and another word there.
  *
  * **The partition, in full:** `urlsTotal + urlsCanonicalised + urlsNoindex +
  * pagesNotAuditable` is every URL the crawl has a `pages` row for. It is
@@ -101,8 +107,9 @@
  * the error responses, but a 200 that was not HTML is counted by NEITHER — the
  * reference crawl has exactly one such row — which is the second reason this
  * column is on the row rather than left to a reader's arithmetic. On that crawl
- * it is 443 auditable pages and 108 outside, carrying 97 findings between them:
- * without the column, a health row of 443 would look like the whole crawl.
+ * it is 441 judged pages, 2 set aside as canonicalised and 108 outside, those
+ * 108 carrying 97 findings between them: without the column, a health row of
+ * 441 would look like the whole crawl.
  *
  * ## The ratio is over REPORTED findings
  *
@@ -201,7 +208,7 @@ type HealthRow = {
  * ONE GROUPED PASS, no per-page iteration: the worst severity per page is a
  * `min` over the ordered mapping inside a single `group by page_id`, and the
  * buckets are `filter`ed counts over the result. A crawl with 17,659 findings
- * over 443 pages is one statement, not 443.
+ * over 441 pages is one statement, not 441.
  */
 async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
   // A crawl id nothing knows has no pages, which aggregates to a census of zero

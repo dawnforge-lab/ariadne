@@ -873,6 +873,10 @@ async function nearDuplicateFindings(
             -- translation of this page, declared reciprocally, is not a
             -- near-duplicate of it — it is the same page in another language,
             -- which is what the annotation says and what the engine honours.
+            -- The cluster is decided in src/rules/query/hreflang-cluster.ts,
+            -- and only mutual declaration folds two pages together: a pair in
+            -- a cluster that is not complete keeps two keys and is compared
+            -- here, which is the direction a duplicate rule must err in.
             and ${CLUSTER_KEY("b", "hcb")} is distinct from ${CLUSTER_KEY("a", "hca")}
             and a.content_hash is distinct from b.content_hash
             and ( (a.main_simhash >> 0)  & 65535 = (b.main_simhash >> 0)  & 65535

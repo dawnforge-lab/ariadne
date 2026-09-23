@@ -817,7 +817,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `sitemap.non-indexable` (critical) — a listed URL the crawl judged non-indexable:
     it carries a noindex, or it canonicalises to another URL (the evidence's
     `reason` says which, `"noindex"` or `"canonicalised"`; a page that is both is
-    reported once, as canonicalised)
+    reported once, as noindex)
   - `sitemap.uncrawled` (info) — a listed URL this crawl never reached: blocked by
     robots or outside the crawl's budget, off this crawl's origin (another host,
     port, or scheme — never attempted by design; the evidence's `offOrigin` flag

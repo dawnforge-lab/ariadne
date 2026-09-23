@@ -106,6 +106,16 @@ interface JoinRow extends Record<string, unknown> {
    */
   robots_meta: string | null;
   x_robots_tag: string | null;
+  /**
+   * The stored indexability stamp, read by `sitemap.non-indexable` for ONE
+   * case the two channels above cannot speak for: a 200 whose stamp is null.
+   * No crawl this engine writes produces one (`PageWriter` computes a boolean
+   * for every row), and `indexabilityOf` declines to assert over it — but the
+   * rule's cohort admits it, because `site.health` counts it among the pages
+   * set aside and the two must partition the same 200s. Such a row reads
+   * `noindex`, which is the word that census files it under.
+   */
+  is_indexable: boolean | null;
   /** The size of the whole matching set, before the cap. */
   total_matches: number;
 }
@@ -138,7 +148,7 @@ async function joinFindings(
   await assertNormalisedSitemap(db, crawlId, self.id);
   const result = await db.execute<JoinRow>(sql`
     select s.url, p.id as page_id, p.status_code, p.fetch_class, p.redirect_url,
-           p.robots_meta, p.x_robots_tag,
+           p.robots_meta, p.x_robots_tag, p.is_indexable,
            count(*) over ()::int as total_matches
     from sitemap_urls s
     join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
@@ -311,8 +321,22 @@ export const sitemapRules: QueryRule[] = [
   // pages, because the defect belongs to the URL they defer to — but a sitemap
   // is a list of URLs the site is asking to have indexed, and a URL that has
   // told search engines to index something else does not belong on it. The
-  // cohort this rule reports over is therefore deliberately the opposite of
-  // `JUDGED`: fetched OK with a 200, and NOT judged.
+  // cohort this rule reports over is therefore the COMPLEMENT OF `JUDGED`
+  // WITHIN THE FETCHED-OK 200s: a 200 this crawl did not judge, because it
+  // noindexes itself or defers to another URL. Not "the opposite of JUDGED" —
+  // the 404s, redirects and 5xx are outside `JUDGED` too and belong to the two
+  // rules above.
+  //
+  // `is_indexable IS NOT TRUE` rather than `= false`, so that a NULL stamp
+  // lands here rather than in neither cohort. That is the predicate
+  // `site.health` counts its noindex set-aside with (src/rules/metric/
+  // health-metrics.ts), and the two must partition the same 200s: with `=
+  // false` a NULL-stamped 200 that canonicalises nowhere would be judged by
+  // nothing and set aside by nobody. No crawl this engine writes produces a
+  // NULL there — `PageWriter` computes a boolean for every row — and the row is
+  // covered rather than assumed away. Its `reason` reads `noindex`, because
+  // that is the word `site.health` files it under, and one vocabulary across
+  // the two is worth more than a second guess at a row nothing writes.
   //
   // `reason` is what a reader needs beside the two robots columns, which are
   // both empty on a canonicalised entry: without it, half this rule's rows
@@ -324,10 +348,11 @@ export const sitemapRules: QueryRule[] = [
   // instruction to stay out of the index, while a canonical is a hint about
   // which URL to prefer, and search engines treat the explicit directive as
   // the stronger signal — which is why the Indexability Status column beside
-  // this row already reads `Noindex`. The word is read from the same predicate
-  // that column uses (`hasNoindex` over the two robots channels, not the
-  // `is_indexable` stamp), so a row cannot say `canonicalised` where the
-  // column beside it says `Noindex`.
+  // this row already reads `Noindex`. The word is read from the predicate that
+  // column uses — `hasNoindex` over the two robots channels — so a row cannot
+  // say `canonicalised` where the column beside it says `Noindex`; the stamp
+  // is consulted only for the null case above, where that column asserts
+  // nothing at all.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
@@ -347,12 +372,14 @@ export const sitemapRules: QueryRule[] = [
         db,
         crawlId,
         sql`${FETCHED_OK("p")}
-            and (p.is_indexable = false or ${CANONICALISED_ELSEWHERE("p")})`,
+            and (p.is_indexable is not true or ${CANONICALISED_ELSEWHERE("p")})`,
         (row) => ({
           url: row.url,
-          reason: hasNoindex({ robotsMeta: row.robots_meta, xRobotsTag: row.x_robots_tag })
-            ? "noindex"
-            : "canonicalised",
+          reason:
+            hasNoindex({ robotsMeta: row.robots_meta, xRobotsTag: row.x_robots_tag }) ||
+            row.is_indexable !== true
+              ? "noindex"
+              : "canonicalised",
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
         }),

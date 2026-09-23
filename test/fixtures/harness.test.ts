@@ -723,8 +723,9 @@ describe("the fixture site end to end", () => {
 
   /**
    * PHASE 22 §1, END TO END: the pages this site serves that are NOT judged —
-   * three noindexed and seven canonicalised elsewhere — carry none of the rules
-   * that moved to the judged cohort.
+   * four noindexed and six canonicalised elsewhere, noindex taking precedence
+   * where a page is both — carry none of the rules that moved to the judged
+   * cohort.
    *
    * The unit tests pin each rule's silence over rows inserted by hand; this
    * pins it over pages a real crawler fetched from a real server, on the two
@@ -772,8 +773,19 @@ describe("the fixture site end to end", () => {
     expect(setAside.sort()).toContain("/index/canonicalized");
     expect(setAside).toContain("/index/noindex-meta");
     expect(setAside.length).toBe(10);
+    //
+    // EVERY ONE OF THE 26 FIRES SOMEWHERE ON THIS FIXTURE — the site was built
+    // to trip them — so the anti-vacuity guard is that whole list rather than a
+    // count over it. A threshold ("more than ten of them fired") passes while
+    // fifteen rules sit silent site-wide; this fails and names them, which is
+    // the difference between a guard and a formality. A rule that legitimately
+    // stops applying to the fixture is removed from `MOVED` in the same commit
+    // that changes the fixture, deliberately and in writing.
     const firedSomewhere = new Set([...issuesByPath.values()].flatMap((ids) => [...ids]));
-    expect(MOVED.filter((id) => firedSomewhere.has(id)).length).toBeGreaterThan(10);
+    expect(
+      MOVED.filter((id) => firedSomewhere.has(id)).sort(),
+      "every moved rule must still fire somewhere on the fixture",
+    ).toEqual([...MOVED].sort());
   });
 
   it("no rule fires on the control page", () => {
@@ -2041,24 +2053,29 @@ describe("the fixture site end to end", () => {
     // shares (fetched OK, 200, indexable, NOT canonicalised elsewhere —
     // `JUDGED`, src/rules/helpers.ts):
     //
-    //   noindex (3): /index/noindex-meta, /index/noindex-header,
-    //                /authored/noindex-conflict
+    //   noindex (4): /index/noindex-meta, /index/noindex-header,
+    //                /authored/noindex-conflict, /authored/canonical-noindex
+    //                (which also canonicalises elsewhere — counted once, here,
+    //                because NOINDEX takes precedence: the page's own explicit
+    //                directive over a hint about which URL to prefer, which is
+    //                `indexabilityOf`'s order and the order the recount below
+    //                and `site.health` use)
     //   errors  (3): /status/not-found 404, /status/server-error 503,
     //                /status/blocked 403
     //   redirects(4): /redirect/chain-1, /redirect/chain-2, /redirect/loop,
     //                /redirect/trailing-slash
-    //   canonicalised elsewhere (7), PHASE 22 §1's exclusion:
+    //   canonicalised elsewhere (6), PHASE 22 §1's exclusion:
     //                /index/canonicalized, /index/canonical-conflict,
-    //                /authored/canonical-crossdomain, /authored/canonical-noindex
-    //                (which is also noindexed — counted once, here, because
-    //                canonicalised takes precedence), /authored3/canonical-to-404,
+    //                /authored/canonical-crossdomain,
+    //                /authored3/canonical-to-404,
     //                /authored3/canonical-to-noindex, /authored3/paged-2
     //
-    // 84 - 17 = 67 cohort pages, where before Phase 22 it was 73: the six
-    // indexable pages in the canonicalised list are what moved, and
-    // `/authored/canonical-noindex` moved between two exclusions rather than in
-    // or out. The seven `/render/*` fixtures P5-T6 added are all judged pages
-    // and all inside it; so are P7-T1's `/authored7/hidden-chrome`, P7-T2's
+    // 84 - 17 = 67 cohort pages, where before Phase 22 it was 73: the six pages
+    // in the canonicalised list are what moved, all of them indexable.
+    // `/authored/canonical-noindex` was outside the cohort before Phase 22 and
+    // is outside it now, under the same word both times. The seven `/render/*`
+    // fixtures P5-T6 added are all judged pages and all inside it; so are
+    // P7-T1's `/authored7/hidden-chrome`, P7-T2's
     // `/authored7/shared-h1-a` and `-b`, and P11-T3's
     // `/authored11/broken-resource` and `/authored11/heavy-image` — healthy
     // indexable 200s whose defect is a FILE rather than a tag. The

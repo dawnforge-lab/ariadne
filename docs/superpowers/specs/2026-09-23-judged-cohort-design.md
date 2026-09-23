@@ -124,7 +124,7 @@ says so.
 
 ## 4. Ruleset 0.17.0
 
-Verdicts move on ~20 rules (fewer findings on any site with canonicalised
+Verdicts move on 26 rules (fewer findings on any site with canonicalised
 pages or hreflang clusters); `sitemap.non-indexable` gains a case; no evidence
 key is removed. Nothing backfilled.
 

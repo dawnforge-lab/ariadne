@@ -1315,7 +1315,7 @@ describe("copy: metric tables", () => {
     expect(text, "urlsWithInfoOnly").toMatch(/only informational/i);
     expect(text, "urlsClean").toMatch(/how many none|no finding|clean/i);
     expect(text, "cleanRatio").toMatch(/clean ratio/i);
-    expect(text, "pagesNotAuditable").toMatch(/other fetched URLs|left out/i);
+    expect(text, "pagesNotAuditable").toMatch(/other (?:fetched|crawled) URLs|left out/i);
     // Counted once, at the worst severity — the property the whole table rests
     // on, and the one a reader would otherwise assume the other way round.
     expect(text, "counted once at the worst severity").toMatch(
