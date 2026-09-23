@@ -17,6 +17,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages, sitemapUrls } from "../../src/db/schema.js";
+import { indexabilityOf } from "../../src/rules/helpers.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { sitemapRules } from "../../src/rules/query/sitemap.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
@@ -350,13 +351,17 @@ describe("the sitemap rules against the database", () => {
       });
     });
 
-    it("says canonicalised when a page is both, and still shows the directive", async () => {
+    it("says noindex when a page is both, and still shows the canonical's effect", async () => {
       // A page can noindex itself AND defer to another URL. It is one entry and
-      // one line of XML to delete, so it is one finding — and the canonical is
-      // the more specific statement, which is the precedence `site.health`
-      // sets the two aside in.
+      // one line of XML to delete, so it is one finding — and the word is
+      // `noindex`: the directive is the page's own explicit instruction to stay
+      // out of the index, where the canonical is a hint about which URL to
+      // prefer, so search engines act on the directive. That is
+      // `indexabilityOf`'s order (this page's Indexability Status reads
+      // `Noindex` beside the row) and the order `site.health` sets the two
+      // aside in.
       const crawlId = await newCrawl();
-      await addPages(crawlId, [
+      const ids = await addPages(crawlId, [
         { path: "/live" },
         { path: "/both", canonical: url("/live"), robotsMeta: "noindex" },
       ]);
@@ -366,10 +371,14 @@ describe("the sitemap rules against the database", () => {
       expect(found).toHaveLength(1);
       expect(found[0]!.evidence).toEqual({
         url: url("/both"),
-        reason: "canonicalised",
+        reason: "noindex",
         robotsMeta: "noindex",
         xRobotsTag: null,
       });
+      // The same row, labelled by the helper every finding on the API surface
+      // is labelled by: one vocabulary, not two.
+      const [row] = await db.select().from(pages).where(eq(pages.id, ids.get("/both")!));
+      expect(indexabilityOf(row!).status).toBe("Noindex");
     });
 
     it("says nothing about a listed page that canonicalises to ITSELF", async () => {

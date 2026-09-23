@@ -738,8 +738,14 @@ describe("indexabilityOf", () => {
   });
 
   it("puts noindex ahead of the canonical when a 200 carries both", () => {
-    // The spec's precedence, and the only pair that overlaps on a 200: the page
-    // is out of the index whatever it hands its signals to.
+    // The only pair that overlaps on a 200, and THE ORDER THE WHOLE SURFACE
+    // USES: a noindex is the page's own explicit instruction to stay out of
+    // the index, while a canonical is a hint about which URL to prefer, and
+    // search engines treat the explicit directive as the stronger signal. This
+    // page is `Noindex` here, counted under `urlsNoindex` by `site.health`
+    // (test/rules/health-metrics.test.ts) and reported with
+    // `reason: "noindex"` by `sitemap.non-indexable`
+    // (test/rules/sitemap-query.test.ts). One vocabulary, three places.
     const both = mkPage({
       robotsMeta: "noindex",
       canonicalHtml: "https://example.com/other",

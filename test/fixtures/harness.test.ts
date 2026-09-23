@@ -42,7 +42,7 @@ import {
   resources,
   sitemapUrls,
 } from "../../src/db/schema.js";
-import { isCanonicalisedElsewhere, isJudged } from "../../src/rules/helpers.js";
+import { indexabilityOf, isJudged } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 
 import {
@@ -2422,15 +2422,19 @@ describe("the fixture site end to end", () => {
     let clean = 0;
     let judged = 0;
     // PHASE 22 §3's two set-aside columns, recounted the same way: a fetched
-    // 200 that is not judged is either canonicalised elsewhere or noindexed,
-    // and the canonical takes precedence when it is both.
+    // 200 that is not judged is either noindexed or canonicalised elsewhere,
+    // and the NOINDEX takes precedence when it is both — the page's own
+    // explicit directive over a hint about which URL to prefer. That is
+    // `indexabilityOf`'s order, so the recount asks `indexabilityOf` itself
+    // rather than restating it: the column a reader sees on the finding row is
+    // the column this test counts the page under.
     let canonicalised = 0;
     let noindex = 0;
     for (const [path, page] of pageByPath) {
       if (page.fetchClass !== "ok" || page.statusCode !== 200) continue;
       if (!isJudged(page)) {
-        if (isCanonicalisedElsewhere(page)) canonicalised += 1;
-        else noindex += 1;
+        if (indexabilityOf(page).status === "Noindex") noindex += 1;
+        else canonicalised += 1;
         continue;
       }
       judged += 1;

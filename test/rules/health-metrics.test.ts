@@ -371,6 +371,28 @@ describe("site.health against the database", () => {
   });
 
   /**
+   * THE PRECEDENCE, on the one page where the two set-aside columns overlap.
+   * A noindex is the page's own explicit instruction to stay out of the index,
+   * while a canonical is a hint about which URL to prefer, and search engines
+   * act on the directive — so `indexabilityOf` labels this page `Noindex`, and
+   * these columns set it aside under the same word. One vocabulary across the
+   * surface; `sitemap.non-indexable` says `reason: "noindex"` about it too.
+   */
+  it("counts a page that both noindexes and canonicalises under noindex", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/live" },
+      { path: "/both", canonical: url("/live"), isIndexable: false },
+    ]);
+
+    expect(await health(crawlId)).toMatchObject({
+      urlsTotal: 1,
+      urlsCanonicalised: 0,
+      urlsNoindex: 1,
+    });
+  });
+
+  /**
    * THE PARTITION THE TWO NEW COLUMNS EXIST FOR (Phase 22 §3): every URL the
    * crawl has a row for is in exactly one of four places, and a reader can add
    * them up. The rule throws if they do not, so this is the same property
@@ -383,8 +405,9 @@ describe("site.health against the database", () => {
       { path: "/judged-1", findings: ["warning"] },
       { path: "/judged-2" },
       { path: "/variant", canonical: url("/judged-1") },
-      // Both at once: canonicalised takes precedence, so this is ONE
-      // canonicalised URL and not a second noindexed one.
+      // Both at once: NOINDEX takes precedence, so this is a second noindexed
+      // URL and not a second canonicalised one — `indexabilityOf`'s order, and
+      // the row-level test of it is in test/rules/helpers.test.ts.
       { path: "/variant-noindex", canonical: url("/judged-1"), isIndexable: false },
       { path: "/hidden", isIndexable: false },
       { path: "/gone", statusCode: 404, fetchClass: "client_error" },
@@ -394,8 +417,8 @@ describe("site.health against the database", () => {
     const v = await health(crawlId);
     expect(v).toMatchObject({
       urlsTotal: 2,
-      urlsCanonicalised: 2,
-      urlsNoindex: 1,
+      urlsCanonicalised: 1,
+      urlsNoindex: 2,
       pagesNotAuditable: 2,
     });
     expect(

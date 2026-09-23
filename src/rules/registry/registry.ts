@@ -268,7 +268,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // decision rather than a sentence, and rides on the same bump rather than
 // earning one of its own.
 // ---------------------------------------------------------------------------
-// 0.17.0 (STAMPED BY PHASE 22 T2, NOT HERE — T1 records the grounds it earns):
+// 0.17.0: Phase 22, the judged cohort. Grounds as T1 recorded them:
 // the judged cohort (docs/superpowers/specs/2026-09-23-judged-cohort-design.md).
 // Three grounds, all of ground (2)'s family — what the ruleset SAYS about a site
 // changes on a re-judge, with no migration and nothing backfilled:
@@ -294,7 +294,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // that is really a not-found is a fault whatever its directives say), and the
 // two page-scoped structured-data rules acquired a page cohort where they had
 // none at all.
-export const RULESET_VERSION = "0.16.0";
+export const RULESET_VERSION = "0.17.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

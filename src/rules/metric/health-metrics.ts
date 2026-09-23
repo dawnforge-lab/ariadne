@@ -65,17 +65,19 @@
  * judged cohort sets aside, and they exist so that nothing goes silent without
  * a trace (Phase 22 §3): a crawl that reports far fewer findings than the last
  * one must be able to say how many pages it stopped judging and why. They are
- * DISJOINT, with canonicalised taking precedence — a page that both noindexes
- * itself and canonicalises elsewhere is counted once, under the canonical.
+ * DISJOINT, with NOINDEX taking precedence — a page that both noindexes itself
+ * and canonicalises elsewhere is counted once, under the noindex.
  *
- * That precedence is the opposite of `indexabilityOf`'s, which ranks `Noindex`
- * above `Canonicalised` in the per-row Indexability Status column, and the
- * difference is deliberate rather than an oversight: that function answers
- * "what will a search engine do with this URL", where the directive is the more
- * decisive fact, while these two columns answer "which exclusion took this page
- * out of the audit", where the canonical is the more specific statement — it
- * names the URL the page's signals went to. `sitemap.non-indexable`'s `reason`
- * evidence orders them the same way this does.
+ * That is `indexabilityOf`'s order, and deliberately the same one: a noindex is
+ * the page's own explicit instruction to stay out of the index, while a
+ * canonical is a hint about which URL to prefer, and search engines treat the
+ * explicit directive as the stronger signal — which is why the per-row
+ * Indexability Status column already shows `Noindex` first. ONE VOCABULARY
+ * across the surface: a page a reader sees labelled `Noindex` in a finding row
+ * is the page this table counts under `urlsNoindex`, and
+ * `sitemap.non-indexable`'s `reason` says `noindex` about it too. The counts
+ * below are computed from the same predicates in the same order for that
+ * reason, so the three cannot drift apart again.
  *
  * **The partition, in full:** `urlsTotal + urlsCanonicalised + urlsNoindex +
  * pagesNotAuditable` is every URL the crawl has a `pages` row for. It is
@@ -182,9 +184,9 @@ type HealthRow = {
  *  - `pagesNotAuditable` — pages the crawl has a row for that are not fetched-OK
  *    200s at all: redirects, errors, blocks, non-HTML bodies.
  *  - `urlsCanonicalised` — fetched-OK 200s set aside because they hand their
- *    signals to another URL.
- *  - `urlsNoindex` — fetched-OK 200s set aside because they carry a noindex and
- *    do not canonicalise elsewhere.
+ *    signals to another URL and carry no noindex of their own.
+ *  - `urlsNoindex` — fetched-OK 200s set aside because they carry a noindex,
+ *    whether or not they also canonicalise elsewhere (the precedence above).
  *
  * **The four buckets partition `urlsTotal` exactly**, and that is a property of
  * the statement rather than a hope: every cohort page appears once on the left
@@ -224,20 +226,34 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
       -- rather than four statements that have to agree.
       select count(*)::int as crawled,
              count(*) filter (where ${FETCHED_OK("p")})::int as fetched_ok,
-             count(*) filter (
-               where ${FETCHED_OK("p")} and ${CANONICALISED_ELSEWHERE("p")}
-             )::int as canonicalised,
-             -- Everything fetched OK with a 200 that is neither judged nor
-             -- canonicalised, which for those rows is exactly "carries a
+             -- NOINDEX IS TESTED FIRST, and the canonical bucket is what is
+             -- left, because that is indexabilityOf's order (case 9 before
+             -- case 10, src/rules/helpers.ts) and one vocabulary is better
+             -- than two: a noindex is the page's own explicit instruction to
+             -- stay out of the index, while a canonical is a hint about which
+             -- URL to prefer, and search engines treat the explicit directive
+             -- as the stronger signal. The Indexability Status column already
+             -- shows Noindex for a page carrying both; these columns now set
+             -- the same page aside under the same word.
+             --
+             -- "Fetched OK with a 200 and not is_indexable" IS "carries a
              -- noindex": the writer sets is_indexable from the two robots
              -- channels and requires the 200 (src/crawl/persist.ts). A NULL
-             -- lands here rather than nowhere, so the partition cannot be
-             -- broken by one; no crawl this engine writes produces one, and
-             -- indexabilityOf is what refuses the contradiction out loud.
+             -- lands in this bucket rather than nowhere — "is not true", not
+             -- "= false" — so the partition cannot be broken by one; no crawl
+             -- this engine writes produces one, and indexabilityOf is what
+             -- refuses the contradiction out loud.
              count(*) filter (
-               where ${FETCHED_OK("p")} and not ${CANONICALISED_ELSEWHERE("p")}
-                 and p.is_indexable is not true
-             )::int as noindex
+               where ${FETCHED_OK("p")} and p.is_indexable is not true
+             )::int as noindex,
+             -- The rest of the set-aside: indexable, so not counted above, and
+             -- handing its signals to another URL. "is_indexable = true"
+             -- rather than "is not false", so a NULL is counted once — over
+             -- there — and never twice.
+             count(*) filter (
+               where ${FETCHED_OK("p")} and p.is_indexable = true
+                 and ${CANONICALISED_ELSEWHERE("p")}
+             )::int as canonicalised
       from pages p
       where p.crawl_id = ${crawlId}
     ),

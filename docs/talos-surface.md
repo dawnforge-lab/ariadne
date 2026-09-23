@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 21 (ruleset 0.16.0, migrations 0000–0019,
+**Status:** the contract as of Phase 22 (ruleset 0.17.0, migrations 0000–0019,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -333,7 +333,7 @@ validator before the handler runs (`test/api/mcp.test.ts:802` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (100 rows at 0.16.0) rather than by the crawl. The
+bounded by the **ruleset** (100 rows at 0.17.0) rather than by the crawl. The
 catalog is ~97 KB (**98,997 bytes**, re-measured 2026-09-11 at the end of
 Phase 21 over all 100 rows of ruleset 0.16.0 — by serialising what
 `rulesCatalog` answers with no crawl id — of which **1,813 bytes** are the
@@ -853,7 +853,7 @@ a reader acts on", `test/rules/helpers.test.ts:712` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1088` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:705` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:710` "finds one defining file per rule, and the key
 spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -1514,13 +1514,14 @@ cell rather than a nought nobody counted.)
 - **`urlsCanonicalised` and `urlsNoindex` are the fetched, 200-answering URLs
   the cohort sets aside**, so that a crawl reporting far fewer findings than the
   last one can say how many pages it stopped judging and why. They are disjoint,
-  **canonicalised taking precedence**: a page that both noindexes itself and
-  defers to another URL is counted once, under the canonical. (That is the
-  opposite order from the per-row `Indexability Status` column, which asks what
-  a search engine will DO with a URL, where the directive is more decisive;
-  these two ask which exclusion took the page out of the audit, where the
-  canonical is the more specific statement. `sitemap.non-indexable`'s `reason`
-  orders them as these do.)
+  **noindex taking precedence**: a page that both noindexes itself and defers to
+  another URL is counted once, under the noindex. (One vocabulary across the
+  surface — that is the order the per-row `Indexability Status` column uses, and
+  the one `sitemap.non-indexable`'s `reason` uses. A noindex is the page's own
+  explicit instruction to stay out of the index; a canonical is a hint about
+  which URL to prefer, and search engines treat the explicit directive as the
+  stronger signal, so such a page reads `Noindex` in every one of the three
+  places.)
 - **The four buckets partition `urlsTotal` exactly.** A page is counted once, at
   the worst severity it carries. Site-level findings (no `page_id`) reach no
   bucket at all — a site-wide fault is not a share of the pages.
@@ -1576,7 +1577,7 @@ filing (§7.3).
 **No grades, no labels, no thresholds** — here or anywhere else (§10). The row
 is ingredients; the judgement is the consumer's.
 
-Pinned: `test/rules/health-metrics.test.ts` (14 tests) —
+Pinned: `test/rules/health-metrics.test.ts` (15 tests) —
 `test/rules/health-metrics.test.ts:45` "carrying the engine-coverage check it is
 evidence for", `test/rules/health-metrics.test.ts:215` "partitions the census
 exactly", `test/rules/health-metrics.test.ts:248` "answers an empty census with a
@@ -1584,8 +1585,10 @@ null ratio", `test/rules/health-metrics.test.ts:271` "lets no site-level finding
 poison a page bucket", `test/rules/health-metrics.test.ts:295` "keeps the pages
 it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:343`
 "sets a noindex 200 aside in its own column rather than in a bucket",
-`test/rules/health-metrics.test.ts:380` "partitions every fetched URL over the
-four columns", `test/rules/health-metrics.test.ts:509`
+`test/rules/health-metrics.test.ts:381` "counts a page that both noindexes and
+canonicalises under noindex", `test/rules/health-metrics.test.ts:402`
+"partitions every fetched URL over the four columns",
+`test/rules/health-metrics.test.ts:532`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
 `test/rules/copy.test.ts:1309` "names every column and the population they
 are over", `test/rules/copy.test.ts:1334` "says the counts are the authority, not the
@@ -1897,7 +1900,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.16.0** as of Phase 21) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.17.0** as of Phase 22) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1955,6 +1958,21 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 22 bumped to 0.17.0 because verdicts MOVE on some twenty-six rules.**
+A page defect is now reported only on a JUDGED page — fetched OK, 200,
+indexable, not canonicalised to another URL — and the metrics count the same
+cohort; a noindexed or canonicalised page carries no title, heading, image,
+thin-content, orphan, depth, sitemap-absence or structured-data finding,
+because the defect belongs to the URL it defers to. The rules whose subject is
+the canonical, the directive, the response code, the sitemap entry, the file
+or the rendered template keep fetched-OK on purpose. The three field-duplicate
+rules and near-duplicate count reciprocal hreflang alternates as one page
+(`alternatesCollapsed` says how many were folded in); exact-duplicate does
+not. `sitemap.non-indexable` gains the canonicalised case (`reason`).
+`site.health` gains `urlsCanonicalised` and `urlsNoindex`, so the pages set
+aside are counted, never silent. Nothing is backfilled: a crawl re-judged at
+0.17.0 loses the findings on its set-aside pages and keeps every other.
 
 **Phase 21 bumped to 0.16.0 on one ground: labels.** Every metric rule now
 declares its table (§4.4b) — the shaper that turns its stored rows into rows,

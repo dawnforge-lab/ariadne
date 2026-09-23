@@ -109,7 +109,11 @@ says so.
 
 - `site.health` gains `urlsCanonicalised` and `urlsNoindex` (fetched OK, 200,
   excluded from `urlsTotal` for that reason; the two are disjoint with
-  canonicalised taking precedence as in `indexabilityOf`), columns
+  **noindex** taking precedence, as in `indexabilityOf` — this clause read
+  "canonicalised taking precedence" when it was written and was wrong about the
+  helper, which resolves `Noindex` before `Canonicalised`; corrected in place
+  during T1 so the spec names one vocabulary and not two, and
+  `sitemap.non-indexable`'s `reason` follows the same order), columns
   `Canonicalised (set aside)` and `Noindex (set aside)`. `urlsTotal +
   urlsCanonicalised + urlsNoindex + pagesNotAuditable` = every fetched URL.
 - The demo's summary line shows `judged N of M fetched (C canonicalised, X

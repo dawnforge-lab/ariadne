@@ -49,6 +49,7 @@ import type { Db } from "../../db/client.js";
 import {
   CANONICALISED_ELSEWHERE,
   FETCHED_OK,
+  hasNoindex,
   JUDGED,
   queryFinding,
   type RuleIdentity,
@@ -95,15 +96,16 @@ interface JoinRow extends Record<string, unknown> {
   status_code: number | null;
   fetch_class: string;
   redirect_url: string | null;
+  /**
+   * The two robots channels, which are the EVIDENCE on a
+   * `sitemap.non-indexable` row and also what its `reason` is decided from:
+   * `hasNoindex` over this pair is `indexabilityOf`'s own test, so the word in
+   * the evidence and the Indexability Status column beside it are one reading.
+   * Both are empty on an entry set aside for its canonical, which is why the
+   * reason exists at all.
+   */
   robots_meta: string | null;
   x_robots_tag: string | null;
-  /**
-   * Whether the page hands its signals to another URL — `CANONICALISED_ELSEWHERE`
-   * computed in the same statement, so `sitemap.non-indexable` names the reason
-   * a listed entry is set aside rather than leaving a reader to work it out
-   * from two robots columns that are both empty on a canonicalised page.
-   */
-  canonicalised: boolean;
   /** The size of the whole matching set, before the cap. */
   total_matches: number;
 }
@@ -137,7 +139,6 @@ async function joinFindings(
   const result = await db.execute<JoinRow>(sql`
     select s.url, p.id as page_id, p.status_code, p.fetch_class, p.redirect_url,
            p.robots_meta, p.x_robots_tag,
-           ${CANONICALISED_ELSEWHERE("p")} as canonicalised,
            count(*) over ()::int as total_matches
     from sitemap_urls s
     join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
@@ -315,11 +316,18 @@ export const sitemapRules: QueryRule[] = [
   //
   // `reason` is what a reader needs beside the two robots columns, which are
   // both empty on a canonicalised entry: without it, half this rule's rows
-  // would carry copy about a directive and no evidence of one. Canonicalised
-  // takes precedence when a page is both, the same order `site.health` sets
-  // the two aside in (src/rules/metric/health-metrics.ts) — the canonical is
-  // the more specific statement about a listed duplicate, and the robots
-  // columns beside it still show the noindex.
+  // would carry copy about a directive and no evidence of one.
+  //
+  // NOINDEX TAKES PRECEDENCE when a page is both, which is `indexabilityOf`'s
+  // order (src/rules/helpers.ts, case 9 before case 10) and the order
+  // `site.health` sets the two aside in: a noindex is the page's own explicit
+  // instruction to stay out of the index, while a canonical is a hint about
+  // which URL to prefer, and search engines treat the explicit directive as
+  // the stronger signal — which is why the Indexability Status column beside
+  // this row already reads `Noindex`. The word is read from the same predicate
+  // that column uses (`hasNoindex` over the two robots channels, not the
+  // `is_indexable` stamp), so a row cannot say `canonicalised` where the
+  // column beside it says `Noindex`.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
@@ -342,7 +350,9 @@ export const sitemapRules: QueryRule[] = [
             and (p.is_indexable = false or ${CANONICALISED_ELSEWHERE("p")})`,
         (row) => ({
           url: row.url,
-          reason: row.canonicalised ? "canonicalised" : "noindex",
+          reason: hasNoindex({ robotsMeta: row.robots_meta, xRobotsTag: row.x_robots_tag })
+            ? "noindex"
+            : "canonicalised",
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
         }),
