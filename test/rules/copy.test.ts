@@ -661,7 +661,7 @@ describe("copy: on-page and content", () => {
     for (const [id, value] of Object.entries(fields)) {
       const text = copy(id).explanation;
       expect(text, `${id}: the duplicated value`).toMatch(value);
-      expect(text, `${id}: the count of the group`).toMatch(/number of pages carrying it/i);
+      expect(text, `${id}: the count of the group`).toMatch(/number of (?:distinct )?pages/i);
       expect(text, `${id}: the capped list`).toMatch(
         new RegExp(`up to ${DUPLICATE_SAMPLE_URLS} of their URLs`, "i"),
       );
@@ -719,7 +719,7 @@ describe("copy: structured data", () => {
   it("quotes the breadcrumb page floor the rule actually uses, inclusively", () => {
     const c = copy("schema.breadcrumb-absent");
     expect(c.explanation).toMatch(
-      new RegExp(`\\bat least ${BREADCRUMB_PAGE_FLOOR} indexable pages\\b`),
+      new RegExp(`\\bat least ${BREADCRUMB_PAGE_FLOOR} indexable(?:, self-canonical)? pages\\b`),
     );
     expect(c.explanation).not.toMatch(new RegExp(`\\bmore than ${BREADCRUMB_PAGE_FLOOR}\\b`));
   });
@@ -1308,7 +1308,7 @@ describe("copy: metric tables", () => {
   // metric's does.
   it("site.health names every column and the population they are over", () => {
     const text = copy("site.health").explanation;
-    expect(text, "urlsTotal").toMatch(/pages the audit could judge/i);
+    expect(text, "urlsTotal").toMatch(/pages the audit (?:could judge|judges)/i);
     expect(text, "the census definition").toMatch(/200, HTML|200 with HTML/i);
     expect(text, "urlsWithCritical").toMatch(/critical/i);
     expect(text, "urlsWithWarningOnly").toMatch(/warning and no critical/i);
