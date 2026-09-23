@@ -72,6 +72,12 @@ export const ALTERNATE_HOST_CAP = 50;
 // does not name the tracking variant back. Reporting that is reporting the
 // canonical's own remedy as a fault.
 //
+// This file therefore reached Phase 22 §1's cohort under its own steam, and
+// keeps `FETCHED_OK` plus that exclusion rather than adopting `JUDGED`: an
+// hreflang annotation is worth reading on a page that carries a noindex — the
+// cluster it belongs to is still real, and `hreflang.non-indexable-target` is
+// the rule whose whole subject is an alternate in exactly that state.
+//
 // So a canonicalised page is invisible to hreflang ENTIRELY, on both sides of
 // every relationship:
 //

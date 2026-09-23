@@ -12,6 +12,7 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+import { JUDGED } from "../helpers.js";
 import type { MetricColumn } from "../registry/metric-table.js";
 
 /**
@@ -67,11 +68,16 @@ export const DISTRIBUTION_COLUMNS: readonly MetricColumn[] = [
 export const UNTYPED = "(untyped)";
 
 /**
- * The pages every metric measures: fetched OK, 200, indexable.
+ * The pages every metric measures: the JUDGED cohort — fetched OK, 200,
+ * indexable, and not canonicalised elsewhere (`JUDGED`, src/rules/helpers.ts).
  *
  * A 404, a redirect or a noindex page is not competing for crawl attention or
  * link equity, so counting it would move every number in every metric table
- * without describing anything a client can act on.
+ * without describing anything a client can act on. Phase 22 §1 added the
+ * canonical to that list for the same reason and with more force: on the
+ * bilingual Shopify crawl that provoked it, 163 of 371 fetched pages were
+ * collection paths canonicalising to `/products/x`, so every distribution in
+ * every metric table was measuring the same products several times over.
  *
  * The alias is fixed at `p` rather than parameterised, because a shared cohort
  * whose spelling varied per caller would be back to being restated per rule.
@@ -81,10 +87,7 @@ export const UNTYPED = "(untyped)";
  * apply this: a noindex page still links, and the link it makes is still a link.
  */
 export function cohortFilter(crawlId: string): SQL {
-  return sql`p.crawl_id = ${crawlId}
-    and p.fetch_class = 'ok'
-    and p.status_code = 200
-    and p.is_indexable`;
+  return sql`p.crawl_id = ${crawlId} and ${JUDGED("p")}`;
 }
 
 /**

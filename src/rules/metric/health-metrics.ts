@@ -51,14 +51,36 @@
  *
  * ## The census, and what is outside it
  *
- * `urlsTotal` is the AUDITABLE pages: fetched OK with a 200, which is
- * `isAuditable` in src/rules/helpers.ts and the population nearly every page
- * rule guards itself with. It is deliberately NOT `cohortFilter`'s cohort (the
- * other metrics'), which additionally requires `is_indexable`: a noindex 200
- * page is still judged — `indexability.noindex`, `canonical.noindex-canonicalised`
- * and every on-page rule fire on it — so excluding it would leave findings
- * attached to pages the denominator had never heard of, and four buckets that
- * do not partition anything.
+ * `urlsTotal` is the JUDGED pages: fetched OK with a 200, indexable, and not
+ * canonicalised elsewhere — `isJudged`/`JUDGED` in src/rules/helpers.ts, and
+ * since Phase 22 §1 the population nearly every page rule guards itself with.
+ * It is now the SAME cohort `cohortFilter` gives every other metric, which it
+ * deliberately was not before: until Phase 22 a noindex or canonicalised 200
+ * was still judged by every on-page rule, so excluding it here would have left
+ * findings attached to pages the denominator had never heard of. The rules
+ * moved; this moved with them, and the two columns below are what keep the
+ * move visible.
+ *
+ * `urlsCanonicalised` and `urlsNoindex` are the fetched, 200-answering URLs the
+ * judged cohort sets aside, and they exist so that nothing goes silent without
+ * a trace (Phase 22 §3): a crawl that reports far fewer findings than the last
+ * one must be able to say how many pages it stopped judging and why. They are
+ * DISJOINT, with canonicalised taking precedence — a page that both noindexes
+ * itself and canonicalises elsewhere is counted once, under the canonical.
+ *
+ * That precedence is the opposite of `indexabilityOf`'s, which ranks `Noindex`
+ * above `Canonicalised` in the per-row Indexability Status column, and the
+ * difference is deliberate rather than an oversight: that function answers
+ * "what will a search engine do with this URL", where the directive is the more
+ * decisive fact, while these two columns answer "which exclusion took this page
+ * out of the audit", where the canonical is the more specific statement — it
+ * names the URL the page's signals went to. `sitemap.non-indexable`'s `reason`
+ * evidence orders them the same way this does.
+ *
+ * **The partition, in full:** `urlsTotal + urlsCanonicalised + urlsNoindex +
+ * pagesNotAuditable` is every URL the crawl has a `pages` row for. It is
+ * asserted in `siteHealth`, in test/rules/health-metrics.test.ts and end to end
+ * in the fixture harness.
  *
  * It is also not the crawl's page count, and the remainder is OPEN-ENDED rather
  * than a list. The predicate is positive — fetched OK, answered 200, which for
@@ -71,8 +93,8 @@
  *
  * Those pages are excluded from every bucket here, and `pagesNotAuditable` is
  * the column that says how many, so the exclusion is a number a reader can see
- * rather than a silence they have to infer (`urlsTotal + pagesNotAuditable` is
- * the crawl's page count). **The other tables do not cover the remainder
+ * rather than a silence they have to infer (it is the crawl's page count minus
+ * the three cohorts above). **The other tables do not cover the remainder
  * either**: `redirect.volume` counts the redirects and the status rules judge
  * the error responses, but a 200 that was not HTML is counted by NEITHER — the
  * reference crawl has exactly one such row — which is the second reason this
@@ -95,7 +117,14 @@
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
+import {
+  CANONICALISED_ELSEWHERE,
+  FETCHED_OK,
+  JUDGED,
+  metricRow,
+  metricRule,
+  type MetricIdentity,
+} from "../helpers.js";
 import { assertCrawl } from "../query/crawl-evidence.js";
 import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule, Severity } from "../registry/registry.js";
@@ -122,7 +151,13 @@ type HealthRow = {
   urls_with_info_only: number;
   urls_clean: number;
   clean_ratio: number | null;
+  urls_canonicalised: number;
+  urls_noindex: number;
   pages_not_auditable: number;
+  /** Fetched OK with a 200: the three cohort counts above must sum to it. */
+  fetched_ok: number;
+  /** Every `pages` row of the crawl: all four counts must sum to it. */
+  crawled: number;
   unmapped_severities: number;
   unmapped_list: string | null;
 };
@@ -132,9 +167,9 @@ type HealthRow = {
  *
  * The columns, in the order they are written:
  *
- *  - `urlsTotal` — auditable pages: fetched OK, status 200. The denominator of
- *    everything below it, and the module header says why it is neither the
- *    crawl's page count nor the metric cohort.
+ *  - `urlsTotal` — judged pages: fetched OK, status 200, indexable, not
+ *    canonicalised elsewhere. The denominator of everything below it, and the
+ *    module header says why it is not the crawl's page count.
  *  - `urlsWithCritical` — pages whose worst finding is critical.
  *  - `urlsWithWarningOnly` — pages carrying at least one warning and no
  *    critical.
@@ -144,7 +179,12 @@ type HealthRow = {
  *    empty census rather than 0 or 1: nothing was measured, and both of those
  *    are claims about a site that has no auditable pages (`redirect.volume`'s
  *    `ratioPct` answers the same way for the same reason).
- *  - `pagesNotAuditable` — pages the crawl fetched that this census excludes.
+ *  - `pagesNotAuditable` — pages the crawl has a row for that are not fetched-OK
+ *    200s at all: redirects, errors, blocks, non-HTML bodies.
+ *  - `urlsCanonicalised` — fetched-OK 200s set aside because they hand their
+ *    signals to another URL.
+ *  - `urlsNoindex` — fetched-OK 200s set aside because they carry a noindex and
+ *    do not canonicalise elsewhere.
  *
  * **The four buckets partition `urlsTotal` exactly**, and that is a property of
  * the statement rather than a hope: every cohort page appears once on the left
@@ -178,15 +218,33 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
   );
 
   const result = await db.execute<HealthRow>(sql`
-    with crawled as (
-      select count(*)::int as n from pages p where p.crawl_id = ${crawlId}
+    with census as (
+      -- ONE PASS OVER THE CRAWL'S PAGES, four counts out of it, so the
+      -- partition this table publishes is arithmetic over one population
+      -- rather than four statements that have to agree.
+      select count(*)::int as crawled,
+             count(*) filter (where ${FETCHED_OK("p")})::int as fetched_ok,
+             count(*) filter (
+               where ${FETCHED_OK("p")} and ${CANONICALISED_ELSEWHERE("p")}
+             )::int as canonicalised,
+             -- Everything fetched OK with a 200 that is neither judged nor
+             -- canonicalised, which for those rows is exactly "carries a
+             -- noindex": the writer sets is_indexable from the two robots
+             -- channels and requires the 200 (src/crawl/persist.ts). A NULL
+             -- lands here rather than nowhere, so the partition cannot be
+             -- broken by one; no crawl this engine writes produces one, and
+             -- indexabilityOf is what refuses the contradiction out loud.
+             count(*) filter (
+               where ${FETCHED_OK("p")} and not ${CANONICALISED_ELSEWHERE("p")}
+                 and p.is_indexable is not true
+             )::int as noindex
+      from pages p
+      where p.crawl_id = ${crawlId}
     ),
     cohort as (
       select p.id
       from pages p
-      where p.crawl_id = ${crawlId}
-        and p.fetch_class = 'ok'
-        and p.status_code = 200
+      where p.crawl_id = ${crawlId} and ${JUDGED("p")}
     ),
     worst as (
       select i.page_id,
@@ -210,7 +268,12 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
       count(*) filter (where w.rank is null)::int as urls_clean,
       round(count(*) filter (where w.rank is null)::numeric
             / nullif(count(*), 0), 4)::float8 as clean_ratio,
-      ((select n from crawled) - count(*))::int as pages_not_auditable,
+      (select canonicalised from census)::int as urls_canonicalised,
+      (select noindex from census)::int as urls_noindex,
+      ((select crawled from census) - (select fetched_ok from census))::int
+        as pages_not_auditable,
+      (select fetched_ok from census)::int as fetched_ok,
+      (select crawled from census)::int as crawled,
       coalesce(sum(w.unmapped), 0)::int as unmapped_severities,
       string_agg(distinct w.unmapped_list, ', ') as unmapped_list
     from cohort c
@@ -251,7 +314,37 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
   if (bucketed !== urlsTotal) {
     throw new Error(
       `${self.id}: crawl '${crawlId}' buckets sum to ${bucketed} over ${urlsTotal} ` +
-        `auditable pages — the four buckets must partition the census exactly`,
+        `judged pages — the four buckets must partition the census exactly`,
+    );
+  }
+
+  const urlsCanonicalised = num(row.urls_canonicalised, "urls_canonicalised", self.id);
+  const urlsNoindex = num(row.urls_noindex, "urls_noindex", self.id);
+  const pagesNotAuditable = num(row.pages_not_auditable, "pages_not_auditable", self.id);
+  const fetchedOk = num(row.fetched_ok, "fetched_ok", self.id);
+  const crawled = num(row.crawled, "crawled", self.id);
+
+  // THE SECOND PARTITION, checked for the first one's reason (Phase 22 §3).
+  // Every URL the crawl fetched is in exactly one of four places: judged, set
+  // aside as canonicalised, set aside as noindex, or outside the fetched-OK
+  // 200 census entirely. The statement above makes that structurally true —
+  // the three cohort counts are `filter`s over one pass whose conditions are
+  // mutually exclusive and cover `fetched_ok` — and this is what catches the
+  // edit that stops it being so, before a dashboard renders pages that
+  // vanished between two numbers.
+  if (urlsTotal + urlsCanonicalised + urlsNoindex !== fetchedOk) {
+    throw new Error(
+      `${self.id}: crawl '${crawlId}' counts ${urlsTotal} judged + ` +
+        `${urlsCanonicalised} canonicalised + ${urlsNoindex} noindex over ` +
+        `${fetchedOk} URLs fetched OK with a 200 — the three cohorts must ` +
+        `partition that census exactly`,
+    );
+  }
+  if (fetchedOk + pagesNotAuditable !== crawled) {
+    throw new Error(
+      `${self.id}: crawl '${crawlId}' counts ${fetchedOk} fetched OK plus ` +
+        `${pagesNotAuditable} not judged over ${crawled} pages — every URL the ` +
+        `crawl fetched must be in exactly one of the two`,
     );
   }
 
@@ -265,7 +358,9 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
         urlsWithInfoOnly,
         urlsClean,
         cleanRatio: nullableNum(row.clean_ratio, "clean_ratio", self.id),
-        pagesNotAuditable: num(row.pages_not_auditable, "pages_not_auditable", self.id),
+        pagesNotAuditable,
+        urlsCanonicalised,
+        urlsNoindex,
       },
     }),
   ];
@@ -293,6 +388,12 @@ export const healthMetrics: MetricRule[] = [
       { key: "urlsClean", label: "Clean" },
       { key: "cleanRatio", label: "Clean Ratio" },
       { key: "pagesNotAuditable", label: "URLs Not Judged" },
+      // THE TWO EXCLUSIONS THE JUDGED COHORT MAKES, on the row rather than in
+      // silence (Phase 22 §3). They come last, after the census and its
+      // buckets, because they are a footnote to `urlsTotal`: these are the
+      // fetched, 200-answering URLs the ruleset deliberately did not judge.
+      { key: "urlsCanonicalised", label: "Canonicalised (set aside)" },
+      { key: "urlsNoindex", label: "Noindex (set aside)" },
     ], 0),
     async (db, crawlId, self) => siteHealth(db, crawlId, self),
   ),

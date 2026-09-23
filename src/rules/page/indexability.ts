@@ -4,6 +4,14 @@ import type { PageRecord, PageRule } from "../registry/types.js";
 const CATEGORY = "indexability";
 
 /**
+ * BOTH RULES KEEP THE FETCHED-OK COHORT (`isAuditable`) rather than moving to
+ * `isJudged` with the on-page rules (Phase 22 §1): their subject is the
+ * directive, and `is_indexable` is false on every page they speak about, so the
+ * judged cohort would silence them entirely — the always-passes hole hard rule
+ * 1 forbids.
+ */
+
+/**
  * `saysNoindex` and `hasNoindex` MOVED TO src/rules/helpers.ts (Phase 20) and
  * are re-exported here at their old address.
  *

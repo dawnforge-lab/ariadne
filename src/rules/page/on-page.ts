@@ -1,4 +1,4 @@
-import { finding, isAuditable, pageRule, present } from "../helpers.js";
+import { finding, isJudged, pageRule, present } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
 
 /**
@@ -19,6 +19,14 @@ export const META_MAX = 160;
 export const HEADING_MAX_STEP = 1;
 
 const CATEGORY = "on-page";
+
+/**
+ * EVERY RULE IN THIS FILE IS GATED ON `isJudged` (Phase 22 §1), not on
+ * `isAuditable`: a page that is noindexed or that canonicalises to another URL
+ * is not a page a search engine ranks, so a missing title, a duplicate
+ * description or a broken heading outline on it is the other URL's problem or
+ * nobody's. `site.health` counts both exclusions so the silence is visible.
+ */
 
 /**
  * The one rule in this file that is about the page's BODY rather than its head.
@@ -59,7 +67,7 @@ export const onPageRules: PageRule[] = [
     "critical",
     [{ key: "title", label: "Title 1" }],
     (p, self) =>
-      isAuditable(p) && !present(p.title) ? [finding(self, p, { title: p.title })] : [],
+      isJudged(p) && !present(p.title) ? [finding(self, p, { title: p.title })] : [],
   ),
 
   pageRule(
@@ -73,7 +81,7 @@ export const onPageRules: PageRule[] = [
       { key: "min", label: "Minimum Length" },
     ],
     (p, self) =>
-      isAuditable(p) && present(p.title) && p.title.length < TITLE_MIN
+      isJudged(p) && present(p.title) && p.title.length < TITLE_MIN
         ? [finding(self, p, { title: p.title, length: p.title.length, min: TITLE_MIN })]
         : [],
   ),
@@ -89,7 +97,7 @@ export const onPageRules: PageRule[] = [
       { key: "max", label: "Maximum Length" },
     ],
     (p, self) =>
-      isAuditable(p) && present(p.title) && p.title.length > TITLE_MAX
+      isJudged(p) && present(p.title) && p.title.length > TITLE_MAX
         ? [finding(self, p, { title: p.title, length: p.title.length, max: TITLE_MAX })]
         : [],
   ),
@@ -101,7 +109,7 @@ export const onPageRules: PageRule[] = [
     "warning",
     [{ key: "metaDescription", label: "Meta Description 1" }],
     (p, self) =>
-      isAuditable(p) && !present(p.metaDescription)
+      isJudged(p) && !present(p.metaDescription)
         ? [finding(self, p, { metaDescription: p.metaDescription })]
         : [],
   ),
@@ -117,7 +125,7 @@ export const onPageRules: PageRule[] = [
       { key: "min", label: "Minimum Length" },
     ],
     (p, self) =>
-      isAuditable(p) && present(p.metaDescription) && p.metaDescription.length < META_MIN
+      isJudged(p) && present(p.metaDescription) && p.metaDescription.length < META_MIN
         ? [
             finding(self, p, {
               metaDescription: p.metaDescription,
@@ -139,7 +147,7 @@ export const onPageRules: PageRule[] = [
       { key: "max", label: "Maximum Length" },
     ],
     (p, self) =>
-      isAuditable(p) && present(p.metaDescription) && p.metaDescription.length > META_MAX
+      isJudged(p) && present(p.metaDescription) && p.metaDescription.length > META_MAX
         ? [
             finding(self, p, {
               metaDescription: p.metaDescription,
@@ -157,7 +165,7 @@ export const onPageRules: PageRule[] = [
     "warning",
     [{ key: "h1Count", label: "H1 Count" }],
     (p, self) =>
-      isAuditable(p) && p.h1Count === 0 ? [finding(self, p, { h1Count: p.h1Count })] : [],
+      isJudged(p) && p.h1Count === 0 ? [finding(self, p, { h1Count: p.h1Count })] : [],
   ),
 
   pageRule(
@@ -167,7 +175,7 @@ export const onPageRules: PageRule[] = [
     "info",
     [{ key: "h1Count", label: "H1 Count" }],
     (p, self) =>
-      isAuditable(p) && p.h1Count > 1 ? [finding(self, p, { h1Count: p.h1Count })] : [],
+      isJudged(p) && p.h1Count > 1 ? [finding(self, p, { h1Count: p.h1Count })] : [],
   ),
 
   pageRule(
@@ -180,7 +188,7 @@ export const onPageRules: PageRule[] = [
       { key: "headingOrder", label: "Heading Order" },
     ],
     (p, self) => {
-      if (!isAuditable(p) || p.headingOrder === null) return [];
+      if (!isJudged(p) || p.headingOrder === null) return [];
       // `skipAt` indexes into `headingOrder`: the position of the heading that
       // skipped a level. Only the first skip is reported — one finding per page.
       const skipAt = firstLevelSkip(p.headingOrder);
@@ -221,7 +229,7 @@ export const onPageRules: PageRule[] = [
       { key: "wordCount", label: "Word Count" },
     ],
     (p, self) =>
-      isAuditable(p) && p.hasLoremIpsum
+      isJudged(p) && p.hasLoremIpsum
         ? [finding(self, p, { wordCount: p.wordCount, snippet: p.placeholderSnippet })]
         : [],
   ),

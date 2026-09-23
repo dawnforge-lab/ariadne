@@ -24,6 +24,13 @@
  * a URL the server itself redirected is already claimed, by the redirect rules,
  * with their own copy and their own fix. This rule speaks only for the JS-only
  * case.
+ *
+ * IT KEEPS THAT COHORT RATHER THAN MOVING TO `JUDGED` with the on-page rules
+ * (Phase 22 §1). A canonicalised or noindexed URL that rewrites its own address
+ * in the browser is evidence about the TEMPLATE, which is what a render finding
+ * is for, and the render pass samples pages rather than covering them — so
+ * dropping the sampled page because of its canonical can silence the finding
+ * for the whole site.
  */
 import { sql } from "drizzle-orm";
 

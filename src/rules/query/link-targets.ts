@@ -140,6 +140,11 @@ interface ResolvedTarget {
  * resolved, its targets looked up in one `IN` query, and then dropped: nothing
  * outlives its batch, so RAM is O(batch) on a crawl of any size.
  *
+ * NONE OF THESE RULES MOVED TO THE JUDGED COHORT in Phase 22 §1. The two link
+ * rules judge the TARGET's response — a 404 is a 404 however the page linking
+ * to it is annotated — and the two canonical rules judge a canonical, which is
+ * the one thing the judged cohort excludes by definition.
+ *
  * Two silences are deliberate:
  *  - A canonical target with no page row produces nothing. The crawl never
  *    fetched that URL, so it has no evidence about it, and "unknown" is not a

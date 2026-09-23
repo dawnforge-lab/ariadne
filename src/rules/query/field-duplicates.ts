@@ -31,7 +31,9 @@
  *  - `count` is the group's REAL size and `pages` is a capped, ordered sample
  *    of it (`DUPLICATE_SAMPLE_URLS`). A templated catalogue can put one title on
  *    ten thousand URLs, and a findings row is not the place to list them; the
- *    count is what says how big the problem is.
+ *    count is what says how big the problem is. Since Phase 22 the size is
+ *    counted in hreflang CLUSTERS and the sample lists one URL per cluster —
+ *    see below.
  *  - the LISTING of groups stops at the run's `caps.listing` with an exact
  *    `noteTruncation` total behind it, because the grouping runs to completion
  *    either way — only the listing is cut. An uncapped run (`findingCap: null`)
@@ -42,10 +44,33 @@
  *    ten-thousand-element array would be a pathological finding, not a fuller
  *    picture.
  *
- * **The cohort is indexable 200s**, the same one `content.exact-duplicate`
- * uses. A duplicate title on a page search engines are told to ignore is not a
- * finding: the page is out of the index, so nothing of it competes with
- * anything. Redirects and errors have no title worth comparing at all.
+ * **The cohort is the JUDGED page** (`JUDGED`, src/rules/helpers.ts) — fetched
+ * OK, 200, indexable, not canonicalised elsewhere — which is the same one
+ * `content.exact-duplicate` and `content.near-duplicate` use. A duplicate title
+ * on a page search engines are told to ignore is not a finding: the page is out
+ * of the index, or it has handed its signals to another URL, so nothing of it
+ * competes with anything. Redirects and errors have no title worth comparing at
+ * all. Phase 22 added the canonical half of that exclusion, which is what took
+ * raelon.ca's 79 duplicate-title groups down to 5: most of them were Shopify
+ * collection paths canonicalising to `/products/x`.
+ *
+ * SINCE MIGRATION 0012 THE COHORT IS ALSO AN INDEX PREDICATE. The three partial
+ * indexes `pages_dupe_title`, `pages_dupe_meta_description` and
+ * `pages_dupe_h1_text` (src/db/schema.ts, beside the simhash bands) are built
+ * `where fetch_class = 'ok' and status_code = 200 and is_indexable = true and
+ * <field> is not null`, and Postgres uses a partial index only when it can
+ * prove the query's WHERE implies the index's. `JUDGED` is that predicate plus
+ * the canonical exclusion, which implies it; WIDEN the cohort without widening
+ * those indexes and the planner stops using them — a slow query, not an error.
+ *
+ * **Hreflang alternates are one member** (Phase 22 §2). A correctly
+ * internationalised site publishes the same title on `/x` and `/fr/x` whenever
+ * a string is untranslated, and the reciprocal annotation is precisely what
+ * tells a search engine those are one page in two languages. `hreflang_cluster`
+ * (src/rules/query/hreflang-cluster.ts) is where that is decided; here it means
+ * the group's `count` is its distinct clusters, `pages` lists the lexically
+ * first URL of each, and `alternatesCollapsed` says how many URLs were folded
+ * in. A group that falls below two clusters produces no finding at all.
  *
  * **Blank never groups.** `null` and `''` are dropped before the grouping, in
  * all three rules. Postgres groups nulls together, so without that guard every
@@ -55,10 +80,10 @@
  */
 import { createHash } from "node:crypto";
 
-import { sql, type SQL } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { JUDGED, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -69,6 +94,7 @@ import {
 import type { RuleCaps } from "../registry/types.js";
 import { DUPLICATE_SAMPLE_URLS } from "./content.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { CLUSTER_KEY, HREFLANG_CLUSTER_CTES } from "./hreflang-cluster.js";
 
 /**
  * The category, for all four rules.
@@ -86,28 +112,6 @@ const TITLE: RuleIdentity = { id: "title.duplicate", severity: "warning" };
 const META: RuleIdentity = { id: "meta-description.duplicate", severity: "warning" };
 const H1: RuleIdentity = { id: "h1.duplicate-text", severity: "warning" };
 const H1_SKIPPED: RuleIdentity = { id: "h1.duplicate-skipped", severity: "info" };
-
-/**
- * The cohort these rules compare over, in SQL: fetched OK, 200, indexable.
- *
- * Spelled here rather than imported from `content.ts` because it is a different
- * rule family's decision to make, and a shared constant would make one file's
- * widening silently the other's. The two agree today, and each says so where a
- * reader can check it.
- *
- * SINCE MIGRATION 0012 THIS TEXT IS ALSO AN INDEX PREDICATE. The three partial
- * indexes `pages_dupe_title`, `pages_dupe_meta_description` and
- * `pages_dupe_h1_text` (src/db/schema.ts, beside the simhash bands) are built
- * `where fetch_class = 'ok' and status_code = 200 and is_indexable = true and
- * <field> is not null`, and Postgres uses a partial index only when it can
- * prove the query's WHERE implies the index's. Widen this cohort without
- * widening those and the planner stops using them — a slow query, not an
- * error. Change one, change the other, and re-check with EXPLAIN.
- */
-const INDEXABLE = (alias: string): SQL =>
-  sql.raw(
-    `${alias}.fetch_class = 'ok' and ${alias}.status_code = 200 and ${alias}.is_indexable = true`,
-  );
 
 /** The stable identity of one duplicated value. */
 function valueKey(value: string): string {
@@ -129,7 +133,10 @@ interface DuplicateField {
 
 type GroupRow = {
   value: string;
+  /** Distinct hreflang clusters carrying the value — the group's size. */
   page_count: number;
+  /** URLs carrying it, before the clusters collapsed. */
+  member_count: number;
   urls: string[];
   first_id: string;
   total_matches: number;
@@ -222,36 +229,43 @@ async function groupFindings(
   // the rule definitions at the bottom of this file, so nothing outside this
   // module chooses them and no crawl datum reaches here.
   const column = sql.raw(`p.${field.column}`);
-  const columnB = sql.raw(`p2.${field.column}`);
 
   const result = await db.execute<GroupRow>(sql`
-    with dupes as (
-      select btrim(${column}) as value,
-             count(*)::int as page_count,
-             min(p.url) as first_url
+    with ${HREFLANG_CLUSTER_CTES(crawlId)},
+    members as (
+      select btrim(${column}) as value, p.id, p.url,
+             ${CLUSTER_KEY("p", "hc")} as cluster_key
       from pages p
-      where p.crawl_id = ${crawlId} and ${INDEXABLE("p")}
+      left join hreflang_cluster hc on hc.page_id = p.id
+      where p.crawl_id = ${crawlId} and ${JUDGED("p")}
         and ${column} is not null and btrim(${column}) <> ''
-      group by btrim(${column})
-      having count(*) > 1
+    ),
+    dupes as (
+      select m.value,
+             count(distinct m.cluster_key)::int as page_count,
+             count(*)::int as member_count,
+             min(m.url) as first_url
+      from members m
+      group by m.value
+      having count(distinct m.cluster_key) > 1
     ),
     capped as (
-      select d.value, d.page_count, d.first_url,
+      select d.value, d.page_count, d.member_count, d.first_url,
              count(*) over ()::int as total_matches
       from dupes d
       order by d.first_url
       ${limitTo(caps.listing)}
     )
-    select c.value, c.page_count, c.total_matches, s.urls, s.first_id
+    select c.value, c.page_count, c.member_count, c.total_matches, s.urls, s.first_id
     from capped c
     cross join lateral (
       select array_agg(sample.url) as urls, (array_agg(sample.id))[1] as first_id
       from (
-        select p2.id, p2.url
-        from pages p2
-        where p2.crawl_id = ${crawlId} and ${INDEXABLE("p2")}
-          and btrim(${columnB}) = c.value
-        order by p2.url
+        select min(m2.url) as url, (array_agg(m2.id order by m2.url))[1] as id
+        from members m2
+        where m2.value = c.value
+        group by m2.cluster_key
+        order by 1
         limit ${DUPLICATE_SAMPLE_URLS}
       ) sample
     ) s
@@ -263,9 +277,17 @@ async function groupFindings(
       pageUrl: row.urls[0] ?? null,
       evidence: {
         [field.evidenceKey]: row.value,
-        // Exact: the group's real size, whatever the sample below holds.
+        // Exact: the group's real size in CLUSTERS, whatever the sample below
+        // holds. An hreflang cluster is one member (Phase 22 §2), so this is
+        // the number of distinct pages competing with each other rather than
+        // the number of URLs carrying the value.
         count: row.page_count,
         pages: row.urls,
+        // The URLs the line above folded away: members minus clusters. Zero on
+        // a site with no reciprocal alternates, and carried anyway — a reader
+        // comparing `count` against a longer list of URLs elsewhere in the
+        // report is owed the number rather than left to infer it (Phase 22 §3).
+        alternatesCollapsed: row.member_count - row.page_count,
       },
       dedupeKey: valueKey(row.value),
     }),
@@ -292,7 +314,7 @@ async function h1Coverage(db: Db, crawlId: string, ruleId: string): Promise<H1Co
            count(*) filter (where p.h1_count > 0)::int as pages_with_h1,
            count(*) filter (where p.h1_text is not null)::int as pages_with_h1_text
     from pages p
-    where p.crawl_id = ${crawlId} and ${INDEXABLE("p")}`);
+    where p.crawl_id = ${crawlId} and ${JUDGED("p")}`);
   const row = result.rows[0];
   if (row === undefined) {
     // An aggregate with no GROUP BY returns one row over any input, including
@@ -369,6 +391,7 @@ export const fieldDuplicateRules: QueryRule[] = [
       { key: "title", label: "Title 1" },
       { key: "count", label: "Occurrences" },
       { key: "pages", label: "Addresses" },
+      { key: "alternatesCollapsed", label: "Alternates Collapsed" },
     ],
     ...copyFor(TITLE.id),
     rulesetVersion: RULESET_VERSION,
@@ -386,6 +409,7 @@ export const fieldDuplicateRules: QueryRule[] = [
       { key: "metaDescription", label: "Meta Description 1" },
       { key: "count", label: "Occurrences" },
       { key: "pages", label: "Addresses" },
+      { key: "alternatesCollapsed", label: "Alternates Collapsed" },
     ],
     ...copyFor(META.id),
     rulesetVersion: RULESET_VERSION,
@@ -428,6 +452,7 @@ export const fieldDuplicateRules: QueryRule[] = [
       { key: "h1Text", label: "H1-1" },
       { key: "count", label: "Occurrences" },
       { key: "pages", label: "Addresses" },
+      { key: "alternatesCollapsed", label: "Alternates Collapsed" },
     ],
     ...copyFor(H1.id),
     rulesetVersion: RULESET_VERSION,

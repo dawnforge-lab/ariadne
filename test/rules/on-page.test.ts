@@ -14,6 +14,7 @@ import {
   CLEAN_META,
   CLEAN_TITLE,
   expectSilentOnNonOkFetches,
+  expectSilentOnNotJudged,
   mkPage,
   ruleLookup,
 } from "./mk-page.js";
@@ -110,6 +111,15 @@ describe("onPageRules metadata", () => {
     // to stay silent is the fetch class. Redirects and errors are the status
     // rules' job.
     expectSilentOnNonOkFetches(onPageRules, BROKEN_ON_PAGE);
+  });
+
+  // PHASE 22 §1. The same sweep for the other half of the judged cohort: a page
+  // that answered 200 and is either kept out of the index or canonicalised to
+  // another URL carries none of these findings. The defect belongs to the URL
+  // it defers to, or to nobody — and `site.health` counts both exclusions so
+  // the silence is a number on the report rather than an absence.
+  it("no rule fires on a 200 that is noindexed or canonicalised elsewhere", () => {
+    expectSilentOnNotJudged(onPageRules, BROKEN_ON_PAGE);
   });
 });
 
@@ -292,10 +302,17 @@ describe("content rules", () => {
     expect(Object.keys(f[0]!.evidence)).toContain("snippet");
   });
 
-  it("content.placeholder fires regardless of indexability", () => {
+  // IT USED TO FIRE REGARDLESS OF INDEXABILITY, and Phase 22 §1 is where that
+  // stopped: `content.placeholder` moved to the judged cohort with the nine
+  // rules beside it. Lorem ipsum on a page search engines are told to skip is
+  // not copy anybody reads, and if the template it came from is live anywhere
+  // it is reported on the judged page that shares it.
+  it("content.placeholder is silent on a noindexed page", () => {
     expect(
-      rule("content.placeholder").run(mkPage({ hasLoremIpsum: true, isIndexable: false })),
-    ).toHaveLength(1);
+      rule("content.placeholder").run(
+        mkPage({ hasLoremIpsum: true, robotsMeta: "noindex", isIndexable: false }),
+      ),
+    ).toHaveLength(0);
   });
 
   it("content.placeholder is silent on the clean page", () => {

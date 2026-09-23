@@ -22,6 +22,16 @@ export { resolveEffectiveCanonical, type CanonicalTarget } from "../helpers.js";
 
 const CATEGORY = "canonical";
 
+/**
+ * THESE RULES KEEP THE FETCHED-OK COHORT (`isAuditable`) WHERE EVERY ON-PAGE
+ * AND TECHNICAL RULE MOVED TO `isJudged` (Phase 22 §1), and the reason is that
+ * their subject IS the canonical: a rule that skipped pages canonicalised
+ * elsewhere would skip exactly the pages it exists to report on — every
+ * `canonical.points-elsewhere` finding is about such a page — and
+ * `canonical.noindex-canonicalised` would lose the noindex half of the
+ * contradiction it names.
+ */
+
 export const canonicalRules: PageRule[] = [
   pageRule(
     "canonical.missing",

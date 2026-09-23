@@ -46,7 +46,13 @@ import { sql, type SQL } from "drizzle-orm";
 // into every rule run (hard rule 2 — rules read the database).
 import { isSameOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import {
+  CANONICALISED_ELSEWHERE,
+  FETCHED_OK,
+  JUDGED,
+  queryFinding,
+  type RuleIdentity,
+} from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -91,6 +97,13 @@ interface JoinRow extends Record<string, unknown> {
   redirect_url: string | null;
   robots_meta: string | null;
   x_robots_tag: string | null;
+  /**
+   * Whether the page hands its signals to another URL — `CANONICALISED_ELSEWHERE`
+   * computed in the same statement, so `sitemap.non-indexable` names the reason
+   * a listed entry is set aside rather than leaving a reader to work it out
+   * from two robots columns that are both empty on a canonicalised page.
+   */
+  canonicalised: boolean;
   /** The size of the whole matching set, before the cap. */
   total_matches: number;
 }
@@ -124,6 +137,7 @@ async function joinFindings(
   const result = await db.execute<JoinRow>(sql`
     select s.url, p.id as page_id, p.status_code, p.fetch_class, p.redirect_url,
            p.robots_meta, p.x_robots_tag,
+           ${CANONICALISED_ELSEWHERE("p")} as canonicalised,
            count(*) over ()::int as total_matches
     from sitemap_urls s
     join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
@@ -284,11 +298,28 @@ export const sitemapRules: QueryRule[] = [
       ),
   }),
 
-  // A listed URL that answers with a 200 page telling search engines to keep
-  // it out of the index. The 200 is half the condition and it is what keeps
-  // this rule disjoint from the two above: `is_indexable` is false for every
-  // 404, redirect and 5xx as well, so testing it alone would report a listed
-  // 404 under copy about a robots directive that page never had.
+  // A listed URL that answers with a 200 page a search engine is not going to
+  // keep: it carries a noindex, OR it canonicalises to another URL. The 200 is
+  // half the condition and it is what keeps this rule disjoint from the two
+  // above: `is_indexable` is false for every 404, redirect and 5xx as well, so
+  // testing it alone would report a listed 404 under copy about a robots
+  // directive that page never had.
+  //
+  // THE CANONICALISED CASE ARRIVED IN PHASE 22 §1, and it is the inverse of the
+  // same phase's other move. Every other rule STOPPED judging canonicalised
+  // pages, because the defect belongs to the URL they defer to — but a sitemap
+  // is a list of URLs the site is asking to have indexed, and a URL that has
+  // told search engines to index something else does not belong on it. The
+  // cohort this rule reports over is therefore deliberately the opposite of
+  // `JUDGED`: fetched OK with a 200, and NOT judged.
+  //
+  // `reason` is what a reader needs beside the two robots columns, which are
+  // both empty on a canonicalised entry: without it, half this rule's rows
+  // would carry copy about a directive and no evidence of one. Canonicalised
+  // takes precedence when a page is both, the same order `site.health` sets
+  // the two aside in (src/rules/metric/health-metrics.ts) — the canonical is
+  // the more specific statement about a listed duplicate, and the robots
+  // columns beside it still show the noindex.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
@@ -296,6 +327,7 @@ export const sitemapRules: QueryRule[] = [
     category: CATEGORY,
     severity: NON_INDEXABLE.severity,
     columns: [
+      { key: "reason", label: "Reason" },
       { key: "robotsMeta", label: "Meta Robots" },
       { key: "xRobotsTag", label: "X-Robots-Tag" },
     ],
@@ -306,9 +338,11 @@ export const sitemapRules: QueryRule[] = [
         NON_INDEXABLE,
         db,
         crawlId,
-        sql`p.fetch_class = 'ok' and p.status_code = 200 and p.is_indexable = false`,
+        sql`${FETCHED_OK("p")}
+            and (p.is_indexable = false or ${CANONICALISED_ELSEWHERE("p")})`,
         (row) => ({
           url: row.url,
+          reason: row.canonicalised ? "canonicalised" : "noindex",
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
         }),
@@ -441,9 +475,10 @@ export const sitemapRules: QueryRule[] = [
         select p.id, p.url, count(*) over ()::int as total_matches
         from pages p
         where p.crawl_id = ${crawlId}
-          and p.fetch_class = 'ok'
-          and p.status_code = 200
-          and p.is_indexable
+          -- THE JUDGED COHORT (Phase 22 §1). A canonicalised page should NOT be
+          -- in the sitemap -- sitemap.non-indexable reports it when it is --
+          -- so reporting it as missing from one is the inverse of right.
+          and ${JUDGED("p")}
           and not exists (
             select 1 from sitemap_urls s
             where s.crawl_id = ${crawlId} and s.url_normalised = p.url

@@ -848,10 +848,10 @@ replace a column derived from the page row.
 Pinned: `test/api/query.test.ts:1253` "returns the URL slice with the evidence as
 stored", `test/api/query.test.ts:1368` "never leaks a column the projection did
 not name", `test/api/query.test.ts:1376` "carries a finding with no page as a
-null url", `test/rules/helpers.test.ts:547` "maps each fetch class to the status
-a reader acts on", `test/rules/helpers.test.ts:567` "names a block a block,
+null url", `test/rules/helpers.test.ts:692` "maps each fetch class to the status
+a reader acts on", `test/rules/helpers.test.ts:712` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1031` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1088` "declares a column for every evidence key it
 writes, and writes every column it declares",
 `test/rules/registry.test.ts:705` "finds one defining file per rule, and the key
 spelled inside it".
@@ -998,7 +998,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:1809` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:1885` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1495,23 +1495,42 @@ One row per crawl, `scope: "site"`:
 
 ```json
 {"urlsTotal":443,"urlsWithCritical":0,"urlsWithWarningOnly":400,
- "urlsWithInfoOnly":32,"urlsClean":11,"cleanRatio":0.0248,"pagesNotAuditable":108}
+ "urlsWithInfoOnly":32,"urlsClean":11,"cleanRatio":0.0248,"pagesNotAuditable":108,
+ "urlsCanonicalised":0,"urlsNoindex":0}
 ```
 
-(Measured fresh on `crawl_02ff6f7a`, 2026-09-01.)
+(Measured on `crawl_02ff6f7a`, 2026-09-01; the two trailing columns arrived with
+ruleset 0.17.0 and are shown at the values that crawl's pages produce. A crawl
+judged before 0.17.0 carries no such keys at all, and the table prints an empty
+cell rather than a nought nobody counted.)
 
-- **The census is `fetch_class = 'ok' AND status_code = 200` with HTML** —
-  "pages the crawler fetched OK that answered 200 with HTML". It is neither the
-  crawl's page count nor the other metrics' cohort: a `noindex` 200 page is
-  still judged, so it is in.
+- **The census is THE JUDGED PAGE: `fetch_class = 'ok' AND status_code = 200 AND
+  is_indexable AND NOT canonicalised elsewhere`** — the cohort the ruleset
+  reports defects on as a page's own (§5.x, `isJudged`/`JUDGED` in
+  src/rules/helpers.ts). It is the same cohort every other metric measures and
+  it is not the crawl's page count. Before 0.17.0 it was fetched-OK 200s
+  including noindexed and canonicalised pages, because the rules judged those
+  too; the rules stopped, and this moved with them.
+- **`urlsCanonicalised` and `urlsNoindex` are the fetched, 200-answering URLs
+  the cohort sets aside**, so that a crawl reporting far fewer findings than the
+  last one can say how many pages it stopped judging and why. They are disjoint,
+  **canonicalised taking precedence**: a page that both noindexes itself and
+  defers to another URL is counted once, under the canonical. (That is the
+  opposite order from the per-row `Indexability Status` column, which asks what
+  a search engine will DO with a URL, where the directive is more decisive;
+  these two ask which exclusion took the page out of the audit, where the
+  canonical is the more specific statement. `sitemap.non-indexable`'s `reason`
+  orders them as these do.)
 - **The four buckets partition `urlsTotal` exactly.** A page is counted once, at
   the worst severity it carries. Site-level findings (no `page_id`) reach no
   bucket at all — a site-wide fault is not a share of the pages.
 - **`pagesNotAuditable` is everything else, lumped: redirects, 4xx, 5xx, failed
   or refused fetches, non-HTML 200s, any other status.** One number for several
   unlike things, on purpose — it is a *remainder*, and its job is to stop 108
-  pages vanishing silently beside a gauge. `urlsTotal + pagesNotAuditable` is
-  the crawl's page count (443 + 108 = 551). Which kinds those are is a
+  pages vanishing silently beside a gauge. **`urlsTotal + urlsCanonicalised +
+  urlsNoindex + pagesNotAuditable` is the crawl's page count** (443 + 0 + 0 +
+  108 = 551), asserted by the rule itself, by its unit test and end to end in
+  the fixture harness. Which kinds those are is a
   `pages_query` question; a non-HTML 200 is counted by no other table at all.
 - **The four counts are the authority; `cleanRatio` is a convenience.** Four
   decimal places collapse at scale: 1 clean page in 50,000 rounds to `0.0000`
@@ -1521,14 +1540,14 @@ One row per crawl, `scope: "site"`:
   on a capped run the ratio is a **floor of what is known**, not a fact about
   the site.
 - **`cleanRatio` is `null` over an empty census** — nothing was measured, and
-  both 0 and 1 would be claims about a site with no auditable pages.
+  both 0 and 1 would be claims about a site with no judged pages.
 - **`urlsWithCritical` is structurally near-empty today**, and the reference
   crawl's 0 is honest rather than flattering. Exactly three rules carry
   `critical` severity, and none of them can readily fill this bucket:
   `content.csr-dependent` and `nav.js-only` judge only pages the render pass
   actually rendered — that crawl rendered **14 of its 551 pages**, about 3% of
   the census, and neither rule fired on any of them — while `redirect.loop`
-  fires on redirecting pages, which are **outside the auditable census by
+  fires on redirecting pages, which are **outside the judged census by
   definition** (they are part of `pagesNotAuditable`), so its criticals can
   never enter a bucket at all. Do not read `urlsWithCritical: 0` as "nothing
   serious was found": read it as "almost nothing here is eligible to be
@@ -1557,13 +1576,16 @@ filing (§7.3).
 **No grades, no labels, no thresholds** — here or anywhere else (§10). The row
 is ingredients; the judgement is the consumer's.
 
-Pinned: `test/rules/health-metrics.test.ts` (13 tests) —
+Pinned: `test/rules/health-metrics.test.ts` (14 tests) —
 `test/rules/health-metrics.test.ts:45` "carrying the engine-coverage check it is
-evidence for", `test/rules/health-metrics.test.ts:208` "partitions the census
-exactly", `test/rules/health-metrics.test.ts:239` "answers an empty census with a
-null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
-poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
-it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
+evidence for", `test/rules/health-metrics.test.ts:215` "partitions the census
+exactly", `test/rules/health-metrics.test.ts:248` "answers an empty census with a
+null ratio", `test/rules/health-metrics.test.ts:271` "lets no site-level finding
+poison a page bucket", `test/rules/health-metrics.test.ts:295` "keeps the pages
+it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:343`
+"sets a noindex 200 aside in its own column rather than in a bucket",
+`test/rules/health-metrics.test.ts:380` "partitions every fetched URL over the
+four columns", `test/rules/health-metrics.test.ts:509`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
 `test/rules/copy.test.ts:1309` "names every column and the population they
 are over", `test/rules/copy.test.ts:1334` "says the counts are the authority, not the
@@ -1572,7 +1594,7 @@ threshold";
 `test/rules/coverage.test.ts:365` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2299` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2405` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

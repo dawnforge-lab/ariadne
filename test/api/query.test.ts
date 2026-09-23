@@ -1498,7 +1498,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
       "With Info Only",
       "Clean",
       "Clean Ratio",
-      "URLs Not Judged",
+      "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", // P22 §3
     ]);
     // The site row prints `Site` in the scope column whatever that column is
     // headed, and every number crosses as a number for the client to format.
@@ -1511,7 +1511,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         urlsWithInfoOnly: 0,
         urlsClean: 0,
         cleanRatio: 0,
-        pagesNotAuditable: 112,
+        pagesNotAuditable: 112, urlsCanonicalised: null, urlsNoindex: null, // null, not 0
       },
     ]);
     // A complete table says nothing about being empty.

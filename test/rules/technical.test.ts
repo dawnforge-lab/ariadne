@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { buildRegistry } from "../../src/rules/index.js";
 import { SLOW_MS, technicalRules } from "../../src/rules/page/technical.js";
-import { expectSilentOnNonOkFetches, mkPage, ruleLookup } from "./mk-page.js";
+import {
+  expectSilentOnNonOkFetches,
+  expectSilentOnNotJudged,
+  mkPage,
+  ruleLookup,
+} from "./mk-page.js";
 
 const rule = ruleLookup(technicalRules, "technicalRules");
 
@@ -70,6 +75,12 @@ describe("technicalRules metadata", () => {
 
   it("no rule fires on a page that was not fetched as a 200 OK", () => {
     expectSilentOnNonOkFetches(technicalRules, BROKEN_TECHNICALS);
+  });
+
+  // PHASE 22 §1: the judged cohort's other two exclusions. A missing viewport
+  // on a page nothing indexes is a fact about a URL nobody is served.
+  it("no rule fires on a 200 that is noindexed or canonicalised elsewhere", () => {
+    expectSilentOnNotJudged(technicalRules, BROKEN_TECHNICALS);
   });
 });
 
