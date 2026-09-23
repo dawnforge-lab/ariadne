@@ -98,4 +98,4 @@ time to the rules pass.
 
 ## 5. Integration
 
-**[recorded at merge]**
+Integrated 2026-09-23 as **PR #20** from `worktree-phase-22` (rebased onto main), on the owner's word ("go"). CI: green first try on 0eff2a0 (run 35867333896, 4m39s).
