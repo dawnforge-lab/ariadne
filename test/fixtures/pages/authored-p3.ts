@@ -88,7 +88,13 @@ const canonicalTo404: Fixture = {
   path: "/authored3/canonical-to-404",
   category: CANONICAL,
   name: "Canonical points at a 404",
-  expectedIssues: ["canonical.non-200-target", "canonical.points-elsewhere"],
+  // `sitemap.non-indexable` since Phase 22 §1: the page is listed in the
+  // sitemap and canonicalises elsewhere, which is the new case that rule reports.
+  expectedIssues: [
+    "canonical.non-200-target",
+    "canonical.points-elsewhere",
+    "sitemap.non-indexable",
+  ],
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
@@ -110,7 +116,12 @@ const canonicalToNoindex: Fixture = {
   path: "/authored3/canonical-to-noindex",
   category: CANONICAL,
   name: "Canonical points at a noindexed page",
-  expectedIssues: ["canonical.non-indexable-target", "canonical.points-elsewhere"],
+  // `sitemap.non-indexable` for `canonical-to-404`'s reason (Phase 22 §1).
+  expectedIssues: [
+    "canonical.non-indexable-target",
+    "canonical.points-elsewhere",
+    "sitemap.non-indexable",
+  ],
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
@@ -237,6 +248,10 @@ const paged2: Fixture = {
     "canonical.points-elsewhere",
     "pagination.canonical-to-other",
     "pagination.next-not-linked",
+    // PHASE 22 §1: page two is listed in the sitemap and canonicalises to page
+    // one, which `sitemap.non-indexable` now reports. It is the same canonical
+    // the two pagination findings are about, read from the sitemap's side.
+    "sitemap.non-indexable",
   ],
   exact: true,
   handler: (req, res) =>
@@ -326,7 +341,14 @@ const hreflangA: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
-      title: "Opening hours, English",
+      // THE SAME TITLE AS ITS FRENCH HALF, and deliberately (Phase 22 §2): an
+      // untranslated `<title>` is what a bilingual site really ships, and it is
+      // what used to be reported as a duplicate. The two pages declare each
+      // other reciprocally under different language codes, so they are ONE
+      // member of any duplicate group — and the `expectedIssues: []` with
+      // `exact: true` on both halves is the end-to-end proof that
+      // `title.duplicate` says nothing about them.
+      title: "Opening hours",
       metaDescription:
         "The English half of a two-language pair. It names both versions and an x-default, and its French half names the same two back.",
       headExtra: [
@@ -352,7 +374,10 @@ const hreflangB: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
-      title: "Horaires, French",
+      // The English half's title, verbatim — see the note there. The DESCRIPTION
+      // still differs, so `meta-description.duplicate` is not being asserted
+      // about at the same time and the title is the only collapsed column.
+      title: "Opening hours",
       metaDescription:
         "The French half of the pair, carrying the same three annotations as its English counterpart so the cluster is complete from both sides.",
       headExtra: [

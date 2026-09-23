@@ -57,11 +57,15 @@ interface PaginatedPage {
  * in one `IN` query, and is then dropped, so RAM is O(batch) on a crawl of any
  * size.
  *
- * `isAuditable` gates the scan for the reason every canonical and on-page rule
- * is gated: these columns come from the analyzer, which only runs on an HTML
- * 200, so a page that 404s or redirects has no pagination signals to judge —
- * and a row that somehow carried them would be judged on markup nobody was
- * served.
+ * `isAuditable` gates the scan for the reason every canonical rule is gated:
+ * these columns come from the analyzer, which only runs on an HTML 200, so a
+ * page that 404s or redirects has no pagination signals to judge — and a row
+ * that somehow carried them would be judged on markup nobody was served.
+ *
+ * IT IS DELIBERATELY NOT `isJudged` (Phase 22 §1), where the on-page rules
+ * went. `pagination.canonical-to-other` is ABOUT a page whose canonical names
+ * another URL — the judged cohort would silence it entirely — and a paginated
+ * series is a crawl-path fact that a noindex on page four does not repeal.
  */
 async function eachPaginatedPage(
   db: Db,

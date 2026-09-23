@@ -17,13 +17,24 @@
  * nothing knows groups, joins and scans to nothing, and three empty results
  * read exactly like a site with tidy URLs (the `sitemap` rules' precedent, and
  * `runRules`' own).
+ *
+ * **TWO OF THE THREE KEEP THE FETCHED-OK COHORT** where the on-page rules moved
+ * to `isJudged` in Phase 22 §1, and on purpose. `url.normalisation-variants`
+ * asks which URLs BOTH SERVE the page, and a canonical on one of them is the
+ * fix it is looking for, not a reason to stop looking; `url.tracking-params-
+ * internal` judges the LINK a page makes, which is a link whatever the page
+ * linking from says about itself. `url.parameter-pages-indexable` is the judged
+ * one, and it always was in substance: it already required an indexable page
+ * with a self-referential canonical, which is `isJudged` plus the canonical
+ * being present, so the swap below is the rule layer's one authority replacing
+ * a condition spelled out beside it.
  */
 import { and, asc, eq, gt, sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { pages } from "../../db/schema.js";
 import { TRACKING_PARAMS } from "../derive/url-params.js";
-import { isAuditable, queryFinding, type RuleIdentity } from "../helpers.js";
+import { FETCHED_OK, isJudged, queryFinding, type RuleIdentity } from "../helpers.js";
 import { resolveEffectiveCanonical } from "../page/canonical.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -125,7 +136,7 @@ async function variantFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
     with served as (
       select p.id, p.url, p.url_normalised
       from pages p
-      where p.crawl_id = ${crawlId} and p.fetch_class = 'ok' and p.status_code = 200
+      where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
     ),
     groups as (
       select s.url_normalised, count(distinct s.url)::int as variant_count
@@ -297,9 +308,11 @@ async function parameterPageFindings(
 
     for (const page of batch) {
       // `is_indexable` already implies a 200 OK for every row the writer wrote,
-      // but `isAuditable` is the rule layer's single authority on "a page we
-      // may judge" and it stays the one that decides here too.
-      if (!isAuditable(page)) continue;
+      // but `isJudged` is the rule layer's single authority on "a page we may
+      // judge" (Phase 22 §1) and it stays the one that decides here too. Its
+      // canonical half is redundant with the self-canonical test below rather
+      // than a second exclusion: a page canonicalised elsewhere fails both.
+      if (!isJudged(page)) continue;
       const canonical = resolveEffectiveCanonical(page);
       if (canonical === null || canonical.resolved === null || canonical.pointsElsewhere) continue;
 

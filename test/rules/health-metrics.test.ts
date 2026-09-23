@@ -73,6 +73,10 @@ interface PageSpec {
   fetchClass?: string;
   /** The severities this page's findings carry, one issue row each. */
   findings?: Severity[];
+  /** The page's declared canonical, absolute. Undefined leaves it null. */
+  canonical?: string;
+  /** The writer's indexability stamp. Defaults to true. */
+  isIndexable?: boolean;
 }
 
 describe("site.health against the database", () => {
@@ -95,7 +99,8 @@ describe("site.health against the database", () => {
       pageType: "content",
       fetchClass: s.fetchClass ?? "ok",
       statusCode: s.statusCode === undefined ? 200 : s.statusCode,
-      isIndexable: true,
+      isIndexable: s.isIndexable ?? true,
+      canonicalHtml: s.canonical ?? null,
       depth: 1,
       discoveredVia: "link",
     }));
@@ -202,6 +207,8 @@ describe("site.health against the database", () => {
       // 2/7 = 0.285714… -> four decimal places.
       cleanRatio: 0.2857,
       pagesNotAuditable: 0,
+      urlsCanonicalised: 0,
+      urlsNoindex: 0,
     });
   });
 
@@ -233,6 +240,8 @@ describe("site.health against the database", () => {
       urlsClean: 3,
       cleanRatio: 1,
       pagesNotAuditable: 0,
+      urlsCanonicalised: 0,
+      urlsNoindex: 0,
     });
   });
 
@@ -254,6 +263,8 @@ describe("site.health against the database", () => {
       urlsClean: 0,
       cleanRatio: null,
       pagesNotAuditable: 2,
+      urlsCanonicalised: 0,
+      urlsNoindex: 0,
     });
   });
 
@@ -276,6 +287,8 @@ describe("site.health against the database", () => {
       urlsClean: 2,
       cleanRatio: 1,
       pagesNotAuditable: 0,
+      urlsCanonicalised: 0,
+      urlsNoindex: 0,
     });
   });
 
@@ -309,10 +322,25 @@ describe("site.health against the database", () => {
       urlsClean: 1,
       cleanRatio: 0.5,
       pagesNotAuditable: 5,
+      urlsCanonicalised: 0,
+      urlsNoindex: 0,
     });
   });
 
-  it("counts a noindex 200 page, which the other metrics' cohort excludes", async () => {
+  /**
+   * PHASE 22 §3. Until this phase a noindex 200 was IN the census, because every
+   * on-page rule still judged it; now the rules do not, so counting it in the
+   * denominator would put a page nothing judged in the clean bucket and quietly
+   * improve the ratio. It moves to its own column instead — which is the whole
+   * point of the two new ones: the page did not vanish, it was set aside, and
+   * the row says how many were.
+   *
+   * The finding that remains on it is real and is not counted here: a noindexed
+   * page still carries `indexability.noindex`, whose subject IS the directive
+   * (spec §1's second list). A site-scoped finding is outside the buckets for
+   * the same reason — this table measures the judgement of JUDGED pages.
+   */
+  it("sets a noindex 200 aside in its own column rather than in a bucket", async () => {
     const crawlId = await newCrawl();
     await addPages(crawlId, [{ path: "/a" }, { path: "/noindex" }]);
     await db
@@ -329,18 +357,76 @@ describe("site.health against the database", () => {
       details: { pageUrl: url("/noindex") },
     });
 
-    // `cohortFilter` — what every other metric measures — would drop this page
-    // for not being indexable, and its finding would then belong to no
-    // denominator at all. The buckets would stop partitioning anything.
     expect(await health(crawlId)).toEqual({
-      urlsTotal: 2,
+      urlsTotal: 1,
       urlsWithCritical: 0,
-      urlsWithWarningOnly: 1,
+      urlsWithWarningOnly: 0,
       urlsWithInfoOnly: 0,
       urlsClean: 1,
-      cleanRatio: 0.5,
+      cleanRatio: 1,
       pagesNotAuditable: 0,
+      urlsCanonicalised: 0,
+      urlsNoindex: 1,
     });
+  });
+
+  /**
+   * THE PRECEDENCE, on the one page where the two set-aside columns overlap.
+   * A noindex is the page's own explicit instruction to stay out of the index,
+   * while a canonical is a hint about which URL to prefer, and search engines
+   * act on the directive — so `indexabilityOf` labels this page `Noindex`, and
+   * these columns set it aside under the same word. One vocabulary across the
+   * surface; `sitemap.non-indexable` says `reason: "noindex"` about it too.
+   */
+  it("counts a page that both noindexes and canonicalises under noindex", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/live" },
+      { path: "/both", canonical: url("/live"), isIndexable: false },
+    ]);
+
+    expect(await health(crawlId)).toMatchObject({
+      urlsTotal: 1,
+      urlsCanonicalised: 0,
+      urlsNoindex: 1,
+    });
+  });
+
+  /**
+   * THE PARTITION THE TWO NEW COLUMNS EXIST FOR (Phase 22 §3): every URL the
+   * crawl has a row for is in exactly one of four places, and a reader can add
+   * them up. The rule throws if they do not, so this is the same property
+   * asserted from outside — and, unlike the rule's own check, over a crawl that
+   * has something in all four.
+   */
+  it("partitions every fetched URL over the four columns", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/judged-1", findings: ["warning"] },
+      { path: "/judged-2" },
+      { path: "/variant", canonical: url("/judged-1") },
+      // Both at once: NOINDEX takes precedence, so this is a second noindexed
+      // URL and not a second canonicalised one — `indexabilityOf`'s order, and
+      // the row-level test of it is in test/rules/helpers.test.ts.
+      { path: "/variant-noindex", canonical: url("/judged-1"), isIndexable: false },
+      { path: "/hidden", isIndexable: false },
+      { path: "/gone", statusCode: 404, fetchClass: "client_error" },
+      { path: "/moved", statusCode: 301, fetchClass: "redirect" },
+    ]);
+
+    const v = await health(crawlId);
+    expect(v).toMatchObject({
+      urlsTotal: 2,
+      urlsCanonicalised: 1,
+      urlsNoindex: 2,
+      pagesNotAuditable: 2,
+    });
+    expect(
+      Number(v["urlsTotal"]) +
+        Number(v["urlsCanonicalised"]) +
+        Number(v["urlsNoindex"]) +
+        Number(v["pagesNotAuditable"]),
+    ).toBe(7);
   });
 
   it("refuses to place a severity its ranking does not know", async () => {
@@ -469,6 +555,8 @@ describe("site.health over a capped run", () => {
       urlsClean: 7,
       cleanRatio: 0.7,
       pagesNotAuditable: 0,
+      urlsCanonicalised: 0,
+      urlsNoindex: 0,
     });
     expect(await siteRow(uncapped)).toEqual({
       urlsTotal: 10,
@@ -478,6 +566,8 @@ describe("site.health over a capped run", () => {
       urlsClean: 1,
       cleanRatio: 0.1,
       pagesNotAuditable: 0,
+      urlsCanonicalised: 0,
+      urlsNoindex: 0,
     });
   });
 

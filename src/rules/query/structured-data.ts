@@ -30,7 +30,7 @@ import {
   hasValue,
   type SchemaProfile,
 } from "../derive/field-presence.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { JUDGED, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -110,8 +110,19 @@ for (const type of [PRODUCT_TYPE, BREADCRUMB_TYPE]) {
   }
 }
 
-/** The pages these rules count as the site: fetched OK, 200, indexable. */
-const INDEXABLE = sql`p.fetch_class = 'ok' and p.status_code = 200 and p.is_indexable = true`;
+/**
+ * The pages these rules count as the site: the JUDGED cohort (fetched OK, 200,
+ * indexable, not canonicalised elsewhere — `JUDGED`, src/rules/helpers.ts).
+ *
+ * Phase 22 §1 moved all four rules here onto it, the two site-scoped ones
+ * through this constant and the two page-scoped ones through the `JUDGED("p")`
+ * on their own joins — which they had no cohort filter of any kind before.
+ * `schema.product-incomplete` fired 40 times on the raelon.ca crawl and 10 of
+ * those were pages a canonical had already handed elsewhere: the same Product
+ * block, reported once for the URL that owns it and three times for the
+ * collection paths that defer to it.
+ */
+const INDEXABLE = JUDGED("p");
 
 /**
  * How big the crawl found the site to be, in pages a search engine may index.
@@ -310,7 +321,8 @@ async function productFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
            count(*) over ()::int as total_matches
     from product pr
     join pages p on p.crawl_id = ${crawlId} and p.id = pr.page_id
-    where pr.presence is null
+    where ${INDEXABLE} and (
+       pr.presence is null
        -- "is distinct from", not "<>": a missing key makes jsonb_typeof NULL,
        -- and NULL <> 'object' is NULL — which a WHERE clause reads as "no",
        -- so the blob that omits a whole group would be the one shape to escape.
@@ -327,7 +339,7 @@ async function productFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
             ])}::text[]), false)
        or jsonb_path_exists(pr.presence, '$.required.* ? (@.type() != "boolean")')
        or jsonb_path_exists(pr.presence, '$.recommended.* ? (@.type() != "boolean")')
-       or jsonb_path_exists(pr.presence, '$.required.* ? (@ == false)')
+       or jsonb_path_exists(pr.presence, '$.required.* ? (@ == false)'))
     order by p.url
     ${limitTo(caps.listing)}`);
 
@@ -388,6 +400,7 @@ async function selfServingFindings(db: Db, crawlId: string, caps: RuleCaps): Pro
     from structured_data sd
     join pages p on p.crawl_id = ${crawlId} and p.id = sd.page_id
     where sd.crawl_id = ${crawlId}
+      and ${INDEXABLE}
       and sd.schema_type = any(${types}::text[])
       and (
         jsonb_exists(sd.raw_jsonb, 'aggregateRating')

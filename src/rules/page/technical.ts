@@ -1,4 +1,4 @@
-import { finding, isAuditable, pageRule } from "../helpers.js";
+import { finding, isJudged, pageRule } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
 
 /**
@@ -24,6 +24,13 @@ export const SLOW_MS = 1500;
 const CATEGORY = "technical";
 
 /**
+ * ALL FOUR ARE GATED ON `isJudged` (Phase 22 §1): a missing viewport, an
+ * undescribed image or a slow response on a page that is noindexed or
+ * canonicalised elsewhere is a fact about a URL nothing ranks. The template it
+ * came from is reported through the judged pages that share it.
+ */
+
+/**
  * The bonus technical rules: signals the analyzer already extracts that trace
  * to checklist items outside the 47 crawl-derived checks. Each one states a
  * fact about the page — an absent tag, a count, a measured number — and leaves
@@ -39,7 +46,7 @@ export const technicalRules: PageRule[] = [
     "critical",
     [],
     (p, self) =>
-      isAuditable(p) && !p.hasViewport ? [finding(self, p, {})] : [],
+      isJudged(p) && !p.hasViewport ? [finding(self, p, {})] : [],
   ),
 
   // A count of <img> elements missing a width or height attribute. CSS may
@@ -56,7 +63,7 @@ export const technicalRules: PageRule[] = [
       { key: "imagesTotal", label: "Images" },
     ],
     (p, self) =>
-      isAuditable(p) && p.imagesMissingDimensions > 0
+      isJudged(p) && p.imagesMissingDimensions > 0
         ? [
             finding(self, p, {
               imagesMissingDimensions: p.imagesMissingDimensions,
@@ -78,7 +85,7 @@ export const technicalRules: PageRule[] = [
       { key: "imagesTotal", label: "Images" },
     ],
     (p, self) =>
-      isAuditable(p) && p.imagesMissingAlt > 0
+      isJudged(p) && p.imagesMissingAlt > 0
         ? [finding(self, p, { imagesMissingAlt: p.imagesMissingAlt, imagesTotal: p.imagesTotal })]
         : [],
   ),
@@ -96,7 +103,7 @@ export const technicalRules: PageRule[] = [
       { key: "threshold", label: "Threshold (ms)" },
     ],
     (p, self) =>
-      isAuditable(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
+      isJudged(p) && p.responseTimeMs !== null && p.responseTimeMs > SLOW_MS
         ? [finding(self, p, { responseTimeMs: p.responseTimeMs, threshold: SLOW_MS })]
         : [],
   ),

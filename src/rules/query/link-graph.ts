@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { JUDGED, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -33,14 +33,20 @@ const DEEP: RuleIdentity = { id: "structure.deep-page", severity: "info" };
 export const DEEP_DEPTH = 5;
 
 /**
- * The pages these rules count as the site: fetched OK, 200, indexable.
+ * The pages these rules count as the site: the JUDGED cohort (fetched OK, 200,
+ * indexable, not canonicalised elsewhere — `JUDGED`, src/rules/helpers.ts).
  *
  * One fragment rather than three lines repeated per rule, so "the same cohort
  * `links.orphan` reports over" is a structural fact about the file instead of a
  * claim in a comment that a future edit can quietly falsify. Same idiom as
  * src/rules/query/structured-data.ts.
+ *
+ * Phase 22 §1 added the canonical half: an orphaned or deep page that
+ * canonicalises elsewhere is the base URL's problem. Nothing links to a
+ * tracking variant and nothing should; reporting it as an orphan asks a client
+ * to build links to a URL they have already told search engines to ignore.
  */
-const INDEXABLE = sql`p.fetch_class = 'ok' and p.status_code = 200 and p.is_indexable`;
+const INDEXABLE = JUDGED("p");
 
 /** What the crawl row and the frontier say about whether the crawl finished. */
 interface Completeness {

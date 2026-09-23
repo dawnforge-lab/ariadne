@@ -170,7 +170,14 @@ const canonicalCrossDomain: Fixture = {
   path: "/authored/canonical-crossdomain",
   category: CANONICAL,
   name: "Canonical points at another domain",
-  expectedIssues: ["canonical.cross-domain", "canonical.points-elsewhere"],
+  expectedIssues: [
+    "canonical.cross-domain",
+    "canonical.points-elsewhere",
+    // PHASE 22 §1: this page is in the sitemap and canonicalises to another
+    // host, which `sitemap.non-indexable` now reports — a listed URL that has
+    // told search engines to index something else does not belong on the list.
+    "sitemap.non-indexable",
+  ],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

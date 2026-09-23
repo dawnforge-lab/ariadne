@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 21 (ruleset 0.16.0, migrations 0000–0019,
+**Status:** the contract as of Phase 22 (ruleset 0.17.0, migrations 0000–0019,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -333,14 +333,18 @@ validator before the handler runs (`test/api/mcp.test.ts:802` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (100 rows at 0.16.0) rather than by the crawl. The
-catalog is ~97 KB (**98,997 bytes**, re-measured 2026-09-11 at the end of
-Phase 21 over all 100 rows of ruleset 0.16.0 — by serialising what
+bounded by the **ruleset** (100 rows at 0.17.0) rather than by the crawl. The
+catalog is ~99 KB (**101,010 bytes**, re-measured 2026-09-23 at the end of
+Phase 22 over all 100 rows of ruleset 0.17.0 — by serialising what
 `rulesCatalog` answers with no crawl id — of which **1,813 bytes** are the
-`marker` strings on the twelve markers and **4,982 bytes** are the `table`
-declarations on the fourteen metric rules — the whole of what Phase 21 added
-here, since no copy moved. The 93,778 before it was measured 2026-09-10 at the
-end of Phase 20 over 100 rows of 0.15.0 (a figure that does not reproduce to the
+`marker` strings on the twelve markers and **5,098 bytes** are the `table`
+declarations on the fourteen metric rules. Phase 22 added 2,013 bytes and no
+rows: the judged cohort's sentence in the moved rules' copy, and the 116 bytes
+`site.health`'s two new columns add to its `table` declaration. The 98,997
+before it was measured 2026-09-11 at the end of Phase 21 over 100 rows of
+0.16.0 — 1,813 bytes of markers and 4,982 of tables, the whole of what that
+phase added, since no copy moved. The 93,778 before it was measured 2026-09-10
+at the end of Phase 20 over 100 rows of 0.15.0 (a figure that does not reproduce to the
 byte under this measurement, by about a hundred bytes, so treat the series as
 sizes rather than as a subtractable ledger), and **it had SHRUNK by 31,241
 bytes** across that phase even though
@@ -848,12 +852,12 @@ replace a column derived from the page row.
 Pinned: `test/api/query.test.ts:1253` "returns the URL slice with the evidence as
 stored", `test/api/query.test.ts:1368` "never leaks a column the projection did
 not name", `test/api/query.test.ts:1376` "carries a finding with no page as a
-null url", `test/rules/helpers.test.ts:547` "maps each fetch class to the status
-a reader acts on", `test/rules/helpers.test.ts:567` "names a block a block,
+null url", `test/rules/helpers.test.ts:692` "maps each fetch class to the status
+a reader acts on", `test/rules/helpers.test.ts:712` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1031` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1100` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:705` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:710` "finds one defining file per rule, and the key
 spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -998,7 +1002,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:1809` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:1897` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1494,24 +1498,50 @@ crawl apart from a crawl that did not fail" (the two nulls, on the wire).
 One row per crawl, `scope: "site"`:
 
 ```json
-{"urlsTotal":443,"urlsWithCritical":0,"urlsWithWarningOnly":400,
- "urlsWithInfoOnly":32,"urlsClean":11,"cleanRatio":0.0248,"pagesNotAuditable":108}
+{"urlsTotal":441,"urlsWithCritical":0,"urlsWithWarningOnly":398,
+ "urlsWithInfoOnly":32,"urlsClean":11,"cleanRatio":0.0249,"pagesNotAuditable":108,
+ "urlsCanonicalised":2,"urlsNoindex":0}
 ```
 
-(Measured fresh on `crawl_02ff6f7a`, 2026-09-01.)
+(The row ruleset 0.17.0's own statement produces on `crawl_02ff6f7a`,
+re-measured 2026-09-23 over that crawl's 551 pages and its stored findings. The
+pre-0.17.0 printing of the same crawl read `urlsTotal` 443 with no trailing
+columns at all: the two pages that canonicalise elsewhere were judged then and
+are set aside now, which is the whole of the difference — 441 + 2 + 0 + 108.
+A crawl judged before 0.17.0 carries no such keys at all, and the table prints
+an empty cell rather than a nought nobody counted.)
 
-- **The census is `fetch_class = 'ok' AND status_code = 200` with HTML** —
-  "pages the crawler fetched OK that answered 200 with HTML". It is neither the
-  crawl's page count nor the other metrics' cohort: a `noindex` 200 page is
-  still judged, so it is in.
+- **The census is THE JUDGED PAGE: `fetch_class = 'ok' AND status_code = 200 AND
+  is_indexable AND NOT canonicalised elsewhere`** — the cohort the ruleset
+  reports defects on as a page's own (§5.x, `isJudged`/`JUDGED` in
+  src/rules/helpers.ts). It is the same cohort every other metric measures and
+  it is not the crawl's page count. Before 0.17.0 it was fetched-OK 200s
+  including noindexed and canonicalised pages, because the rules judged those
+  too; the rules stopped, and this moved with them.
+- **`urlsCanonicalised` and `urlsNoindex` are the fetched, 200-answering URLs
+  the cohort sets aside**, so that a crawl reporting far fewer findings than the
+  last one can say how many pages it stopped judging and why. They are disjoint,
+  **noindex taking precedence**: a page that both noindexes itself and defers to
+  another URL is counted once, under the noindex. (One vocabulary across the
+  surface — that is the order the per-row `Indexability Status` column uses, and
+  the one `sitemap.non-indexable`'s `reason` uses. A noindex is the page's own
+  explicit instruction to stay out of the index; a canonical is a hint about
+  which URL to prefer, and search engines treat the explicit directive as the
+  stronger signal, so such a page reads `Noindex` in every one of the three
+  places. The three are equivalent by construction rather than textually
+  identical: this table tests the stamped `is_indexable`, the other two ask
+  `hasNoindex` of the two robots channels — and the stamp is written from those
+  same two channels, with `indexabilityOf` throwing if a row ever disagrees.)
 - **The four buckets partition `urlsTotal` exactly.** A page is counted once, at
   the worst severity it carries. Site-level findings (no `page_id`) reach no
   bucket at all — a site-wide fault is not a share of the pages.
 - **`pagesNotAuditable` is everything else, lumped: redirects, 4xx, 5xx, failed
   or refused fetches, non-HTML 200s, any other status.** One number for several
   unlike things, on purpose — it is a *remainder*, and its job is to stop 108
-  pages vanishing silently beside a gauge. `urlsTotal + pagesNotAuditable` is
-  the crawl's page count (443 + 108 = 551). Which kinds those are is a
+  pages vanishing silently beside a gauge. **`urlsTotal + urlsCanonicalised +
+  urlsNoindex + pagesNotAuditable` is the crawl's page count** (441 + 2 + 0 +
+  108 = 551), asserted by the rule itself, by its unit test and end to end in
+  the fixture harness. Which kinds those are is a
   `pages_query` question; a non-HTML 200 is counted by no other table at all.
 - **The four counts are the authority; `cleanRatio` is a convenience.** Four
   decimal places collapse at scale: 1 clean page in 50,000 rounds to `0.0000`
@@ -1521,14 +1551,14 @@ One row per crawl, `scope: "site"`:
   on a capped run the ratio is a **floor of what is known**, not a fact about
   the site.
 - **`cleanRatio` is `null` over an empty census** — nothing was measured, and
-  both 0 and 1 would be claims about a site with no auditable pages.
+  both 0 and 1 would be claims about a site with no judged pages.
 - **`urlsWithCritical` is structurally near-empty today**, and the reference
   crawl's 0 is honest rather than flattering. Exactly three rules carry
   `critical` severity, and none of them can readily fill this bucket:
   `content.csr-dependent` and `nav.js-only` judge only pages the render pass
   actually rendered — that crawl rendered **14 of its 551 pages**, about 3% of
   the census, and neither rule fired on any of them — while `redirect.loop`
-  fires on redirecting pages, which are **outside the auditable census by
+  fires on redirecting pages, which are **outside the judged census by
   definition** (they are part of `pagesNotAuditable`), so its criticals can
   never enter a bucket at all. Do not read `urlsWithCritical: 0` as "nothing
   serious was found": read it as "almost nothing here is eligible to be
@@ -1557,13 +1587,18 @@ filing (§7.3).
 **No grades, no labels, no thresholds** — here or anywhere else (§10). The row
 is ingredients; the judgement is the consumer's.
 
-Pinned: `test/rules/health-metrics.test.ts` (13 tests) —
+Pinned: `test/rules/health-metrics.test.ts` (15 tests) —
 `test/rules/health-metrics.test.ts:45` "carrying the engine-coverage check it is
-evidence for", `test/rules/health-metrics.test.ts:208` "partitions the census
-exactly", `test/rules/health-metrics.test.ts:239` "answers an empty census with a
-null ratio", `test/rules/health-metrics.test.ts:260` "lets no site-level finding
-poison a page bucket", `test/rules/health-metrics.test.ts:282` "keeps the pages
-it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:446`
+evidence for", `test/rules/health-metrics.test.ts:215` "partitions the census
+exactly", `test/rules/health-metrics.test.ts:248` "answers an empty census with a
+null ratio", `test/rules/health-metrics.test.ts:271` "lets no site-level finding
+poison a page bucket", `test/rules/health-metrics.test.ts:295` "keeps the pages
+it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:343`
+"sets a noindex 200 aside in its own column rather than in a bucket",
+`test/rules/health-metrics.test.ts:381` "counts a page that both noindexes and
+canonicalises under noindex", `test/rules/health-metrics.test.ts:402`
+"partitions every fetched URL over the four columns",
+`test/rules/health-metrics.test.ts:532`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
 `test/rules/copy.test.ts:1309` "names every column and the population they
 are over", `test/rules/copy.test.ts:1334` "says the counts are the authority, not the
@@ -1572,7 +1607,7 @@ threshold";
 `test/rules/coverage.test.ts:365` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2299` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2422` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -1875,7 +1910,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.16.0** as of Phase 21) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.17.0** as of Phase 22) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1933,6 +1968,21 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 22 bumped to 0.17.0 because verdicts MOVE on 26 rules.**
+A page defect is now reported only on a JUDGED page — fetched OK, 200,
+indexable, not canonicalised to another URL — and the metrics count the same
+cohort; a noindexed or canonicalised page carries no title, heading, image,
+thin-content, orphan, depth, sitemap-absence or structured-data finding,
+because the defect belongs to the URL it defers to. The rules whose subject is
+the canonical, the directive, the response code, the sitemap entry, the file
+or the rendered template keep fetched-OK on purpose. The three field-duplicate
+rules and near-duplicate count reciprocal hreflang alternates as one page
+(`alternatesCollapsed` says how many were folded in); exact-duplicate does
+not. `sitemap.non-indexable` gains the canonicalised case (`reason`).
+`site.health` gains `urlsCanonicalised` and `urlsNoindex`, so the pages set
+aside are counted, never silent. Nothing is backfilled: a crawl re-judged at
+0.17.0 loses the findings on its set-aside pages and keeps every other.
 
 **Phase 21 bumped to 0.16.0 on one ground: labels.** Every metric rule now
 declares its table (§4.4b) — the shaper that turns its stored rows into rows,

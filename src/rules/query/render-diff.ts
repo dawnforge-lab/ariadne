@@ -24,6 +24,13 @@
  * `assertRenderedColumns`. That combination is not a page, it is a defect in
  * whatever wrote the row.
  *
+ * **The cohort stays `rendered = true` and does NOT become `JUDGED`** (Phase 22
+ * §1), where the on-page rules went. These three describe how a TEMPLATE is
+ * built, the render pass samples rather than covers, and a sampled page that
+ * happens to carry a canonical or a noindex is still the only evidence this
+ * crawl has about the template it was rendered from. Dropping it would trade a
+ * finding about the site for a silence about one URL.
+ *
  * **WHICH INSTRUMENT EACH RULE COMPARES, and why they are not all the same
  * (P8-T1).** The render pass measures every page it renders twice — once with
  * `innerText` and DOM selectors inside the browser, once by running the crawl's

@@ -267,7 +267,34 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // where the metric sits in the metric section — which is a presentation
 // decision rather than a sentence, and rides on the same bump rather than
 // earning one of its own.
-export const RULESET_VERSION = "0.16.0";
+// ---------------------------------------------------------------------------
+// 0.17.0: Phase 22, the judged cohort. Grounds as T1 recorded them:
+// the judged cohort (docs/superpowers/specs/2026-09-23-judged-cohort-design.md).
+// Three grounds, all of ground (2)'s family — what the ruleset SAYS about a site
+// changes on a re-judge, with no migration and nothing backfilled:
+//
+//  1. 26 rules narrowed their cohort to the JUDGED page (fetched OK, 200,
+//     indexable, NOT canonicalised elsewhere — `isJudged`/`JUDGED`,
+//     src/rules/helpers.ts). Every on-page, technical, content, structured-data,
+//     link-graph and sitemap-coverage rule listed in §1 of the spec now says
+//     nothing about a page that has handed its signals to another URL or been
+//     kept out of the index, so a re-judged crawl LOSES findings — 79 duplicate
+//     title groups to 5 on the reference bilingual crawl. `site.health` gains
+//     `urlsCanonicalised` and `urlsNoindex` so the loss is a number rather than
+//     a silence, and the metrics' shared cohort narrowed with the rules.
+//  2. the four duplicate rules collapse reciprocal hreflang alternates into one
+//     member (§2): a group's `count` is its distinct clusters, `pages` lists one
+//     URL per cluster, and `alternatesCollapsed` is the new evidence key beside
+//     them. `content.exact-duplicate` is deliberately NOT collapsed.
+//  3. `sitemap.non-indexable` gained a case rather than losing one — a listed
+//     URL that canonicalises elsewhere — with a `reason` evidence key and a
+//     Reason column, so a re-judged crawl can gain findings there.
+//
+// Two widenings ride along: `content.soft-404` dropped `is_indexable` (a 200
+// that is really a not-found is a fault whatever its directives say), and the
+// two page-scoped structured-data rules acquired a page cohort where they had
+// none at all.
+export const RULESET_VERSION = "0.17.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

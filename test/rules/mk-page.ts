@@ -16,7 +16,14 @@ export const CLEAN_META =
   "A clear and honest summary of what this page covers, written to earn the click from a search result."; // 100 chars
 
 export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
-  const url = "https://example.com/page";
+  // THE OVERRIDDEN URL IS THE CLEAN PAGE'S URL, and the canonical below follows
+  // it (Phase 22). A test that overrides `url` alone used to get a page whose
+  // canonical named the DEFAULT address — which since the judged cohort means
+  // "canonicalised elsewhere", and a page in that state is invisible to every
+  // on-page, technical and content rule. "Clean" has to keep meaning clean
+  // whichever address the test gives the page, or a rule would look silent
+  // because of a default nobody wrote.
+  const url = overrides.url ?? "https://example.com/page";
   return {
     id: "page_clean",
     crawlId: "crawl_test",
@@ -210,6 +217,55 @@ export const NON_OK_FETCHES: Partial<PageRecord>[] = [
   { fetchClass: "non_html", statusCode: 200 },
   { fetchClass: "ok", statusCode: 204 },
 ];
+
+/**
+ * The two shapes a fetched, 200-answering page can be in and still not be
+ * JUDGED (Phase 22 §1): it tells search engines to keep it out of the index, or
+ * it hands its signals to another URL.
+ *
+ * The noindex shape sets BOTH the directive and the stored flag, because that
+ * is what a crawl writes: `isIndexable` is `PageWriter`'s stamp of the same two
+ * robots channels (src/crawl/persist.ts), and a row carrying one without the
+ * other is a contradiction `indexabilityOf` refuses out loud.
+ */
+export const NOT_JUDGED_200S: Partial<PageRecord>[] = [
+  { robotsMeta: "noindex, follow", isIndexable: false },
+  { xRobotsTag: "noindex", isIndexable: false },
+  { canonicalHtml: "https://example.com/somewhere-else" },
+  { canonicalHtml: null, canonicalHeader: "https://example.com/somewhere-else" },
+];
+
+/**
+ * `expectSilentOnNonOkFetches` for the judged cohort: assert that a set of
+ * `isJudged`-guarded rules says nothing about a 200 that is noindexed or
+ * canonicalised elsewhere — with the same vacuity guard, so the silence can
+ * only come from the cohort and not from shapes that stopped firing.
+ */
+export function expectSilentOnNotJudged(
+  rules: PageRule[],
+  brokenShapes: Partial<PageRecord>[],
+): void {
+  const fired = new Set(
+    brokenShapes.flatMap((shape) =>
+      rules.filter((r) => r.run(mkPage(shape)).length > 0).map((r) => r.id),
+    ),
+  );
+  for (const r of rules) {
+    expect(fired.has(r.id), `${r.id}: no broken shape fires it, the sweep would be vacuous`)
+      .toBe(true);
+  }
+
+  for (const shape of brokenShapes) {
+    for (const notJudged of NOT_JUDGED_200S) {
+      for (const r of rules) {
+        expect(
+          r.run(mkPage({ ...shape, ...notJudged })),
+          `${r.id} ${JSON.stringify(notJudged)}`,
+        ).toHaveLength(0);
+      }
+    }
+  }
+}
 
 /**
  * Assert that a set of `isAuditable`-guarded rules is silent on every non-200

@@ -23,7 +23,7 @@ import { hammingDistance, simhash64 } from "../../src/crawl/parse/simhash.js";
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pages } from "../../src/db/schema.js";
+import { crawls, hreflang, pages } from "../../src/db/schema.js";
 import {
   DUPLICATE_SAMPLE_URLS,
   NEAR_DUPLICATE_COUNT_CAP,
@@ -435,13 +435,30 @@ describe("the content rules against the database", () => {
       });
     });
 
-    it("stays silent on a page that is not indexable or did not answer 200", async () => {
+    it("stays silent on a page that did not answer 200", async () => {
       const crawlId = await newCrawl(probeServing(RETURNS));
       await addPages(crawlId, [
-        { path: "/noindex", text: RETURNS_EDITED, wordCount: 80, hasSoft404Phrases: true, robotsMeta: "noindex" },
         { path: "/404", text: RETURNS_EDITED, wordCount: 80, hasSoft404Phrases: true, statusCode: 404, fetchClass: "client_error" },
       ]);
       expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    // PHASE 22 §1, AND IT IS A WIDENING WHERE THE PHASE MOSTLY NARROWS. This
+    // rule keeps the FETCHED-OK cohort while every rule beside it moved to the
+    // judged one, and it dropped `is_indexable` in the same move: a 200 that is
+    // really a not-found is a fault whatever the page's directives or canonical
+    // say. The site is still serving 200 for an address that has nothing behind
+    // it, and a crawler still spends a request on it.
+    it("reports a soft 404 that is noindexed or canonicalised elsewhere", async () => {
+      const crawlId = await newCrawl(probeServing(RETURNS));
+      await addPages(crawlId, [
+        { path: "/noindex", text: RETURNS_EDITED, wordCount: 80, hasSoft404Phrases: true, robotsMeta: "noindex" },
+        { path: "/canonicalised", text: RETURNS_EDITED, wordCount: 80, hasSoft404Phrases: true, canonicalHtml: `${SITE}/live` },
+      ]);
+      expect((await run(ID, crawlId)).map((f) => f.pageUrl)).toEqual([
+        `${SITE}/canonicalised`,
+        `${SITE}/noindex`,
+      ]);
     });
 
     it("uses the word-count threshold the copy quotes", async () => {
@@ -658,6 +675,30 @@ describe("the content rules against the database", () => {
       });
     });
 
+    // PHASE 22 §2, THE EXCEPTION. The three field-duplicate rules and
+    // `content.near-duplicate` fold reciprocal hreflang alternates into one
+    // member; this rule deliberately does not. Byte-identical bodies across two
+    // locales is not internationalisation working — it is the translation
+    // missing, and the annotation is what makes it worth reporting rather than
+    // what excuses it.
+    it("still reports an en/fr pair that serves byte-identical bodies", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/policies/refund", text: RETURNS, contentHash: "same" },
+        { path: "/fr/policies/refund", text: RETURNS, contentHash: "same" },
+      ]);
+      await addReciprocalHreflang(crawlId, ids, [
+        { path: "/policies/refund", code: "en" },
+        { path: "/fr/policies/refund", code: "fr" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        count: 2,
+        urls: [url("/fr/policies/refund"), url("/policies/refund")],
+      });
+    });
+
     it("keeps a page whose canonical is its own URL", async () => {
       // The self-referential canonical is the healthy declaration every page
       // should carry. Reading it as "canonicalised elsewhere" would silence the
@@ -694,6 +735,33 @@ describe("the content rules against the database", () => {
       await expect(run(ID, "crawl_nope")).rejects.toThrow(/no such crawl/);
     });
   });
+
+  /**
+   * Reciprocal hreflang alternates, inserted the way the crawler stores them:
+   * `target_page_id` null, the target as the absolute href the page declared.
+   */
+  async function addReciprocalHreflang(
+    crawlId: string,
+    ids: Map<string, string>,
+    pairs: { path: string; code: string }[],
+  ): Promise<void> {
+    await db.insert(hreflang).values(
+      pairs.flatMap((from) =>
+        pairs.map((to) => {
+          const pageId = ids.get(from.path);
+          if (pageId === undefined) throw new Error(`no page '${from.path}' in this crawl`);
+          return {
+            crawlId,
+            pageId,
+            hreflangCode: to.code,
+            targetUrl: url(to.path),
+            targetPageId: null,
+            source: "html",
+          };
+        }),
+      ),
+    );
+  }
 
   describe("content.near-duplicate", () => {
     const ID = "content.near-duplicate";
@@ -766,6 +834,61 @@ describe("the content rules against the database", () => {
       const [b] = await run(ID, second);
       expect(a!.dedupeKey).toBe(b!.dedupeKey);
       expect(a!.evidence).toEqual(b!.evidence);
+    });
+
+    // PHASE 22 §2. The raelon.ca crawl's only two near-duplicate findings were
+    // the English and French refund policies — a translation that shares its
+    // structure closely enough to land inside the band. Reciprocal alternates
+    // are one page, so neither is the other's near-duplicate and both findings
+    // go.
+    it("does not report a reciprocal hreflang pair against each other", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/policies/refund", text: RETURNS },
+        { path: "/fr/policies/refund", text: RETURNS_EDITED },
+      ]);
+      await addReciprocalHreflang(crawlId, ids, [
+        { path: "/policies/refund", code: "en" },
+        { path: "/fr/policies/refund", code: "fr" },
+      ]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("still reports a third page that is near both halves of a cluster", async () => {
+      // The cluster excuses the PAIR, not the page beside it: a third URL
+      // serving the same content is still competing with the cluster, and both
+      // cluster members still see it. What each of them must NOT see is the
+      // other.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/policies/refund", text: RETURNS },
+        { path: "/fr/policies/refund", text: RETURNS_EDITED },
+        // The same main content as the French page under a third address, with
+        // a body that is not byte-identical — otherwise the shared content hash
+        // would hand this pair to `content.exact-duplicate` and the cluster
+        // would not be what the test was measuring.
+        { path: "/legal/refunds", text: RETURNS_EDITED, contentHash: "legal-refunds" },
+      ]);
+      await addReciprocalHreflang(crawlId, ids, [
+        { path: "/policies/refund", code: "en" },
+        { path: "/fr/policies/refund", code: "fr" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(
+        Object.fromEntries(
+          found.map((f) => [f.pageUrl, (f.evidence as { nearDuplicates: number }).nearDuplicates]),
+        ),
+      ).toEqual({
+        [url("/fr/policies/refund")]: 1,
+        [url("/legal/refunds")]: 2,
+        [url("/policies/refund")]: 1,
+      });
+      // And the list beside each count is the same population as the count:
+      // the French page names the third URL and not its own English twin.
+      const fr = found.find((f) => f.pageUrl === url("/fr/policies/refund"))!;
+      expect((fr.evidence as { closest: { url: string }[] }).closest.map((c) => c.url)).toEqual([
+        url("/legal/refunds"),
+      ]);
     });
 
     it("does not report a pair further apart than the band", async () => {

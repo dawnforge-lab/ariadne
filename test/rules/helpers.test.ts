@@ -10,6 +10,8 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import {
   CANONICALISED_ELSEWHERE,
   finding,
+  isJudged,
+  JUDGED,
   indexabilityOf,
   isCanonicalisedElsewhere,
   metricRow,
@@ -379,6 +381,149 @@ describe("CANONICALISED_ELSEWHERE agrees with isCanonicalisedElsewhere", () => {
   });
 });
 
+/**
+ * THE JUDGED COHORT (Phase 22 §1), both halves, against each other.
+ *
+ * The four exclusions one at a time in TypeScript, then the same rows through
+ * Postgres: `isJudged` gates every on-page, technical and structured-data rule
+ * and `JUDGED` gates every query and metric rule that asks the same question of
+ * a group, so a page the two disagreed about would be judged by one rule and
+ * invisible to the next — the drift the `CANONICALISED_ELSEWHERE` pin above
+ * exists to catch, one exclusion wider.
+ */
+describe("isJudged", () => {
+  /** The judged page: fetched OK, 200, indexable, canonical naming itself. */
+  const judged = (over: Partial<PageRecord> = {}): PageRecord => mkPage(over);
+
+  it("admits a fetched, 200, indexable, self-canonical page", () => {
+    expect(isJudged(judged())).toBe(true);
+    // And with no canonical at all: declaring nothing is not deferring to
+    // anything, which is `isCanonicalisedElsewhere`'s own reading.
+    expect(isJudged(judged({ canonicalHtml: null, canonicalHeader: null }))).toBe(true);
+  });
+
+  it("excludes a page that was not fetched OK", () => {
+    expect(isJudged(judged({ fetchClass: "non_html" }))).toBe(false);
+  });
+
+  it("excludes a page that did not answer 200", () => {
+    expect(isJudged(judged({ statusCode: 204 }))).toBe(false);
+  });
+
+  it("excludes a noindexed page, by the stored flag the writer stamps", () => {
+    expect(isJudged(judged({ robotsMeta: "noindex, follow", isIndexable: false }))).toBe(false);
+    // A null flag is not a yes. No crawl this engine writes produces one, and
+    // the honest answer to "may this page be judged" is not a guess.
+    expect(isJudged(judged({ isIndexable: null }))).toBe(false);
+  });
+
+  it("excludes a page canonicalised elsewhere, from either channel", () => {
+    expect(isJudged(judged({ canonicalHtml: "https://example.com/other" }))).toBe(false);
+    expect(
+      isJudged(judged({ canonicalHtml: null, canonicalHeader: "https://example.com/other" })),
+    ).toBe(false);
+  });
+});
+
+/**
+ * The SQL form of the cohort, run through Postgres and compared with the
+ * TypeScript one case by case — `CANONICALISED_ELSEWHERE`'s test above, over
+ * the whole predicate. Same `values` table, same reason: this asserts what one
+ * expression answers about six column values and needs no crawl, no migrations,
+ * and nothing it could leave behind on a shared database.
+ */
+describe("JUDGED agrees with isJudged", () => {
+  let db: Db;
+
+  beforeAll(() => {
+    const url = process.env.DATABASE_URL;
+    if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
+    db = createDb(url);
+  });
+
+  afterAll(async () => {
+    await closeDb(db);
+  });
+
+  const SELF = "https://example.com/page";
+
+  /** One case: the six columns the two forms read, and what it is for. */
+  interface JudgedCase {
+    fetchClass: string;
+    statusCode: number | null;
+    isIndexable: boolean | null;
+    canonicalHtml: string | null;
+    canonicalHeader: string | null;
+    why: string;
+  }
+
+  const base = (over: Partial<JudgedCase>, why: string): JudgedCase => ({
+    fetchClass: "ok",
+    statusCode: 200,
+    isIndexable: true,
+    canonicalHtml: SELF,
+    canonicalHeader: null,
+    why,
+    ...over,
+  });
+
+  const CASES: JudgedCase[] = [
+    base({}, "the judged page"),
+    base({ canonicalHtml: null }, "declares no canonical"),
+    base({ canonicalHtml: `${SELF}#top` }, "a fragment is not a difference"),
+    base({ fetchClass: "non_html" }, "not fetched as HTML"),
+    base({ fetchClass: "redirect", statusCode: 301, isIndexable: false }, "a redirect"),
+    base({ fetchClass: "client_error", statusCode: 404, isIndexable: false }, "a 404"),
+    base({ statusCode: 204, isIndexable: false }, "an ok that is not a 200"),
+    base({ isIndexable: false }, "noindex"),
+    base({ isIndexable: null }, "a flag no writer wrote"),
+    base({ canonicalHtml: "https://example.com/other" }, "canonicalised elsewhere, html"),
+    base(
+      { canonicalHtml: null, canonicalHeader: "https://example.com/other" },
+      "canonicalised elsewhere, header",
+    ),
+    base({ isIndexable: false, canonicalHtml: "https://example.com/other" }, "both at once"),
+  ];
+
+  it("answers exactly what the TypeScript form answers, case for case", async () => {
+    const rows = CASES.map(
+      (c, i) =>
+        // Every column cast: a `values` list's parameters arrive untyped, and
+        // `status_code = 200` against an unknown is the error this would
+        // otherwise be — not a wrong answer, but not a test either.
+        sql`(${String(i)}, ${SELF}::text, ${c.fetchClass}::text, ${c.statusCode}::int, ${c.isIndexable}::boolean, ${c.canonicalHtml}::text, ${c.canonicalHeader}::text)`,
+    );
+    const result = await db.execute<{ i: string; judged: boolean }>(sql`
+      select p.i, ${JUDGED("p")} as judged
+      from (values ${sql.join(rows, sql`, `)})
+        as p(i, url, fetch_class, status_code, is_indexable, canonical_html, canonical_header)
+      order by p.i::int`);
+    const sqlSaid = result.rows.map((r) => r.judged);
+    expect(sqlSaid).toHaveLength(CASES.length);
+    // NULL WHERE THE FLAG IS NULL, and pinned rather than glossed: the SQL form
+    // is a plain conjunction — `coalesce(…, false)` around it would cost the
+    // three partial duplicate indexes their usability, which is measured at
+    // `JUDGED`'s docblock — so a null `is_indexable` leaves it NULL. Every
+    // caller uses it in a WHERE, where NULL and false do the same thing; the
+    // rule that follows from this row is that nothing may NEGATE it.
+    const nullCase = CASES.findIndex((c) => c.isIndexable === null);
+    expect(sqlSaid[nullCase], "a null flag must not read as a judged page").not.toBe(true);
+    CASES.forEach((c, i) => {
+      const ts = isJudged({
+        url: SELF,
+        fetchClass: c.fetchClass,
+        statusCode: c.statusCode,
+        isIndexable: c.isIndexable,
+        canonicalHtml: c.canonicalHtml,
+        canonicalHeader: c.canonicalHeader,
+      } as PageRecord);
+      // `=== true` is what a WHERE clause does with this expression, and is
+      // therefore the comparison the two forms have to agree on.
+      expect(sqlSaid[i] === true, `${c.why}`).toBe(ts);
+    });
+  });
+});
+
 describe("metricRow", () => {
   it("stamps the rule's id and defaults a site-scoped row's scope value to the empty string", () => {
     const m = metricRow(
@@ -593,8 +738,14 @@ describe("indexabilityOf", () => {
   });
 
   it("puts noindex ahead of the canonical when a 200 carries both", () => {
-    // The spec's precedence, and the only pair that overlaps on a 200: the page
-    // is out of the index whatever it hands its signals to.
+    // The only pair that overlaps on a 200, and THE ORDER THE WHOLE SURFACE
+    // USES: a noindex is the page's own explicit instruction to stay out of
+    // the index, while a canonical is a hint about which URL to prefer, and
+    // search engines treat the explicit directive as the stronger signal. This
+    // page is `Noindex` here, counted under `urlsNoindex` by `site.health`
+    // (test/rules/health-metrics.test.ts) and reported with
+    // `reason: "noindex"` by `sitemap.non-indexable`
+    // (test/rules/sitemap-query.test.ts). One vocabulary, three places.
     const both = mkPage({
       robotsMeta: "noindex",
       canonicalHtml: "https://example.com/other",

@@ -36,18 +36,24 @@
  * nothing here loads a table into memory (hard rule 3), and no rule re-hashes a
  * page: the fingerprints were computed once, during the single streaming parse.
  *
- * **THE CANONICAL IS READ BY EVERY RULE HERE BUT THE SOFT 404** (Phase 19 §1
- * and §11). A page whose
+ * **THE COHORT IS THE JUDGED PAGE FOR EVERY RULE HERE BUT THE SOFT 404**
+ * (Phase 19 §1 and §11, widened to one helper in Phase 22 §1). A page whose
  * declared canonical names another URL has already handed its signals over, and
- * reporting it as a duplicate reports the remedy as the fault — which is what
- * the crawl behind Phase 19 did, twice, at critical severity. The two duplicate
- * rules and `content.thin` therefore filter with `CANONICALISED_ELSEWHERE`, the
- * string-level SQL form of `isCanonicalisedElsewhere`, stated once in
- * src/rules/helpers.ts and used from here rather than restated — a parameter
- * variant of a full page is not a thin page any more than it is a duplicate
- * one; it is the same page, said once. `content.soft-404` does NOT: a page that is a
- * missing page is a missing page whoever it points at, and a soft 404 under a
- * tracking parameter is still a URL the site should stop serving 200 for.
+ * a noindexed page is out of the index entirely; reporting either as a
+ * duplicate or as thin reports the remedy as the fault — which is what the
+ * crawl behind Phase 19 did, twice, at critical severity. The two duplicate
+ * rules and `content.thin` therefore filter with `JUDGED` (src/rules/helpers.ts),
+ * the one SQL spelling of "fetched OK, 200, indexable, not canonicalised
+ * elsewhere", used from here rather than restated — a parameter variant of a
+ * full page is not a thin page any more than it is a duplicate one; it is the
+ * same page, said once.
+ *
+ * `content.soft-404` does NOT, and it is `FETCHED_OK` rather than `JUDGED` in
+ * BOTH directions (Phase 22 §1): a page that is a missing page is a missing
+ * page whoever it points at, so a soft 404 under a tracking parameter is still
+ * a URL the site should stop serving 200 for — and a noindexed one is too,
+ * which is why this rule also stopped requiring `is_indexable`. A 200 that is
+ * really a not-found is a fault whatever its directives say.
  *
  * **The signed-bigint contract.** `simhash64` produces a value in the unsigned
  * 64-bit range; `pages.simhash` and `pages.main_simhash` are signed Postgres
@@ -59,10 +65,10 @@
  * arrives in the same signed spelling (`NotFoundProbeSample.simhash`), so no
  * conversion happens anywhere between the analyzer and the comparison.
  */
-import { sql, type SQL } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { CANONICALISED_ELSEWHERE, queryFinding, type RuleIdentity } from "../helpers.js";
+import { FETCHED_OK, JUDGED, queryFinding, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -79,6 +85,7 @@ import {
   readNotFoundProbe,
   type NotFoundProbeReading,
 } from "./crawl-evidence.js";
+import { CLUSTER_KEY, HREFLANG_CLUSTER_CTES } from "./hreflang-cluster.js";
 
 const CATEGORY = "content" as const;
 
@@ -220,12 +227,6 @@ const NEAR_DUPLICATE_COUNT_PROBE = NEAR_DUPLICATE_COUNT_CAP + 1;
  */
 export const DUPLICATE_SAMPLE_URLS = 20;
 
-/** The three content rules' idea of a page worth judging, in SQL. */
-const AUDITABLE = (alias: string): SQL =>
-  sql.raw(
-    `${alias}.fetch_class = 'ok' and ${alias}.status_code = 200 and ${alias}.is_indexable = true`,
-  );
-
 /**
  * The site's 404 template as a signed bigint, or null when this crawl has none
  * to compare against.
@@ -326,7 +327,7 @@ async function soft404Findings(db: Db, crawlId: string, caps: RuleCaps): Promise
            ${distance === null ? sql`null::int` : distance} as hamming,
            count(*) over ()::int as total_matches
     from pages p
-    where p.crawl_id = ${crawlId} and ${AUDITABLE("p")}
+    where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")}
       and (
         (p.has_soft404_phrases and p.renderable_word_count is not null
           and p.renderable_word_count < ${SOFT_404_WORDS})
@@ -457,8 +458,7 @@ async function exactDuplicateFindings(
              array_agg(distinct p.page_type)
                filter (where p.page_type is not null) as page_types
       from pages p
-      where p.crawl_id = ${crawlId} and ${AUDITABLE("p")} and p.content_hash is not null
-        and not ${CANONICALISED_ELSEWHERE("p")}
+      where p.crawl_id = ${crawlId} and ${JUDGED("p")} and p.content_hash is not null
       group by p.content_hash
       having count(*) > 1
     ),
@@ -477,8 +477,7 @@ async function exactDuplicateFindings(
       from (
         select p2.id, p2.url
         from pages p2
-        where p2.crawl_id = ${crawlId} and ${AUDITABLE("p2")}
-          and not ${CANONICALISED_ELSEWHERE("p2")}
+        where p2.crawl_id = ${crawlId} and ${JUDGED("p2")}
           and p2.content_hash = c.content_hash
         order by p2.url
         limit ${DUPLICATE_SAMPLE_URLS}
@@ -515,12 +514,16 @@ async function exactDuplicateFindings(
  * READ BY FOUR RULES, not two (Phase 19 §11): `content.near-duplicate` and
  * `content.thin` both stand on the main-content fingerprint, and each has a
  * marker that fires exactly where its rule cannot run. The population is the
- * same one both rules judge — auditable and indexable — so a crawl either
+ * same one both rules judge — `JUDGED` since Phase 22, which is where the
+ * canonical half of the exclusion joined the indexable half — so a crawl either
  * carries this measurement or it does not, and the two pairs never disagree
- * about which.
+ * about which. The field below keeps its name: `auditable` is what the marker's
+ * evidence has called this count since Phase 19 and renaming an evidence key
+ * would rewrite the meaning of every crawl already judged (Phase 22 §4 removes
+ * no key).
  */
 interface MainFingerprintCensus {
-  /** Pages these rules would consider at all: auditable, indexable. */
+  /** Pages these rules would consider at all: the JUDGED cohort. */
   auditable: number;
   /** Whether ANY of them carries a `main_simhash`. */
   anyMainSimhash: boolean;
@@ -537,7 +540,7 @@ async function mainFingerprintCensus(db: Db, crawlId: string): Promise<MainFinge
     select count(*)::int as auditable,
            bool_or(p.main_simhash is not null) as any_main
     from pages p
-    where p.crawl_id = ${crawlId} and ${AUDITABLE("p")}`);
+    where p.crawl_id = ${crawlId} and ${JUDGED("p")}`);
   const row = rows.rows[0];
   // An aggregate with no GROUP BY returns exactly one row for any input; no row
   // means the query is not the query this function thinks it is.
@@ -845,10 +848,13 @@ async function nearDuplicateFindings(
     closest: { url: string; hamming: number; mainWords: number }[];
     total_matches: number;
   }>(sql`
-    with counted as (
+    with ${HREFLANG_CLUSTER_CTES(crawlId)},
+    counted as (
       select a.id, a.url, a.main_simhash, a.content_hash, a.main_word_count,
+             ${CLUSTER_KEY("a", "hca")} as cluster_key,
              n.near_count
       from pages a
+      left join hreflang_cluster hca on hca.page_id = a.id
       cross join lateral (
         -- THE LIMIT IS INSIDE AND THE COUNT IS OUTSIDE, which is the whole
         -- bound: the derived table stops the moment it has produced
@@ -861,28 +867,37 @@ async function nearDuplicateFindings(
         from (
           select 1
           from pages b
+          left join hreflang_cluster hcb on hcb.page_id = b.id
           where b.crawl_id = a.crawl_id and b.id <> a.id
+            -- HREFLANG ALTERNATES ARE ONE PAGE (Phase 22 §2). A French
+            -- translation of this page, declared reciprocally, is not a
+            -- near-duplicate of it — it is the same page in another language,
+            -- which is what the annotation says and what the engine honours.
+            -- The cluster is decided in src/rules/query/hreflang-cluster.ts,
+            -- and only mutual declaration folds two pages together: a pair in
+            -- a cluster that is not complete keeps two keys and is compared
+            -- here, which is the direction a duplicate rule must err in.
+            and ${CLUSTER_KEY("b", "hcb")} is distinct from ${CLUSTER_KEY("a", "hca")}
             and a.content_hash is distinct from b.content_hash
             and ( (a.main_simhash >> 0)  & 65535 = (b.main_simhash >> 0)  & 65535
                or (a.main_simhash >> 16) & 65535 = (b.main_simhash >> 16) & 65535
                or (a.main_simhash >> 32) & 65535 = (b.main_simhash >> 32) & 65535
                or (a.main_simhash >> 48) & 65535 = (b.main_simhash >> 48) & 65535 )
-            and ${AUDITABLE("b")}
-            and not ${CANONICALISED_ELSEWHERE("b")}
+            and ${JUDGED("b")}
             and b.main_simhash is not null
             and b.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
             and bit_count((a.main_simhash # b.main_simhash)::bit(64)) <= ${NEAR_DUPLICATE_HAMMING}
           limit ${NEAR_DUPLICATE_COUNT_PROBE}
         ) probe
       ) n
-      where a.crawl_id = ${crawlId} and ${AUDITABLE("a")}
-        and not ${CANONICALISED_ELSEWHERE("a")}
+      where a.crawl_id = ${crawlId} and ${JUDGED("a")}
         and a.main_simhash is not null
         and a.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
         and n.near_count > 0
     ),
     capped as (
-      select c.id, c.url, c.main_simhash, c.content_hash, c.main_word_count, c.near_count,
+      select c.id, c.url, c.main_simhash, c.content_hash, c.main_word_count,
+             c.cluster_key, c.near_count,
              count(*) over ()::int as total_matches
       from counted c
       order by c.near_count desc, c.url
@@ -900,9 +915,12 @@ async function nearDuplicateFindings(
         select nb.url, nb.main_word_count as main_words,
                bit_count((cp.main_simhash # nb.main_simhash)::bit(64))::int as hamming
         from pages nb
-        where nb.crawl_id = ${crawlId} and ${AUDITABLE("nb")}
-          and not ${CANONICALISED_ELSEWHERE("nb")}
+        left join hreflang_cluster hcnb on hcnb.page_id = nb.id
+        where nb.crawl_id = ${crawlId} and ${JUDGED("nb")}
           and nb.id <> cp.id
+          -- The same cluster exclusion the count above applies, so the list and
+          -- the number beside it are about one population.
+          and ${CLUSTER_KEY("nb", "hcnb")} is distinct from cp.cluster_key
           and cp.content_hash is distinct from nb.content_hash
           and nb.main_simhash is not null
           and nb.main_word_count >= ${NEAR_DUPLICATE_MIN_MAIN_WORDS}
@@ -1027,8 +1045,7 @@ async function thinFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
     select p.id, p.url, p.main_word_count, p.word_count,
            count(*) over ()::int as total_matches
     from pages p
-    where p.crawl_id = ${crawlId} and ${AUDITABLE("p")}
-      and not ${CANONICALISED_ELSEWHERE("p")}
+    where p.crawl_id = ${crawlId} and ${JUDGED("p")}
       and p.word_count is not null
       and (p.main_word_count is null or p.main_word_count < ${THIN_WORDS})
     order by coalesce(p.main_word_count, 0), p.url

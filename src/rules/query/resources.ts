@@ -2,6 +2,12 @@
  * The resource rules: what the crawl learned by asking for the files its pages
  * point at (P11-T3).
  *
+ * THE SUBJECT IS THE FILE, NOT THE PAGE, which is why nothing here moved to the
+ * judged cohort in Phase 22 §1: a broken image is broken for every page that
+ * references it, and the referencing-page sample is a way to find it rather
+ * than the thing being judged. The page-scoped cohort would silence a genuinely
+ * broken asset because the one page sampled for it canonicalises elsewhere.
+ *
  * Every rule here reads `resources` and `page_resources` and NOTHING ELSE about
  * the network — the resource fetch pass (src/crawl/resources/fetch-resources.ts)
  * is the only thing in this engine that asks a server for an asset, and a rule

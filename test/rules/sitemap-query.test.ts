@@ -17,6 +17,7 @@ import { eq } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pages, sitemapUrls } from "../../src/db/schema.js";
+import { indexabilityOf } from "../../src/rules/helpers.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { sitemapRules } from "../../src/rules/query/sitemap.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
@@ -88,6 +89,15 @@ describe("the sitemap rules against the database", () => {
   interface PageSpec extends IndexabilitySpec {
     path: string;
     redirectUrl?: string;
+    /** The page's declared canonical, absolute. Undefined leaves it null. */
+    canonical?: string;
+    /**
+     * Writes a NULL `is_indexable` instead of the stamp the writer would
+     * compute. The column is nullable and no crawl this engine writes leaves
+     * it null, so this is how the defensive row is built for the one test
+     * that is about it.
+     */
+    stampNull?: boolean;
   }
 
   async function newCrawl(discovery: unknown = mkDiscovery()): Promise<string> {
@@ -113,11 +123,12 @@ describe("the sitemap rules against the database", () => {
       urlNormalised: url(s.path).toLowerCase().replace(/\/$/, ""),
       fetchClass: s.fetchClass ?? "ok",
       statusCode: s.statusCode === undefined ? 200 : s.statusCode,
-      isIndexable: writerIndexable(s),
+      isIndexable: s.stampNull === true ? null : writerIndexable(s),
       robotsMeta: s.robotsMeta ?? null,
       xRobotsTag: s.xRobotsTag ?? null,
       redirectUrl: s.redirectUrl ?? null,
       redirectUrlNormalised: s.redirectUrl === undefined ? null : normalised(s.redirectUrl),
+      canonicalHtml: s.canonical ?? null,
       depth: 1,
       discoveredVia: "sitemap",
     }));
@@ -306,12 +317,109 @@ describe("the sitemap rules against the database", () => {
     expect(nonIndexable[0]!).toMatchObject({ pageId: ids.get("/hidden"), pageUrl: url("/hidden") });
     expect(nonIndexable[0]!.evidence).toEqual({
       url: url("/hidden"),
+      // WHICH KIND of non-indexable, since Phase 22 §1 gave this rule a second
+      // one. The two robots columns are empty on a canonicalised entry, so
+      // without this key half the rule's rows would carry copy about a
+      // directive and no evidence of one.
+      reason: "noindex",
       robotsMeta: "noindex",
       xRobotsTag: null,
     });
 
     // The 200 that is indexable fires nothing, and nothing was left uncrawled.
     expect(await run("sitemap.uncrawled", crawlId)).toHaveLength(0);
+  });
+
+  /**
+   * THE CANONICALISED CASE (Phase 22 §1), which is this phase's one widening of
+   * a rule rather than a narrowing of it. Everything else stopped judging
+   * canonicalised pages because the defect belongs to the URL they defer to —
+   * but a sitemap is a list of URLs the site is ASKING to have indexed, and a
+   * URL that has told search engines to index something else does not belong
+   * on it. The `reason` is what tells the two cases apart on the report.
+   */
+  describe("a listed URL that canonicalises elsewhere", () => {
+    it("reports it, with the reason and no robots evidence to show", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/live" },
+        { path: "/live-variant", canonical: url("/live") },
+      ]);
+      await addSitemapUrls(crawlId, ["/live", "/live-variant"]);
+
+      const found = await run("sitemap.non-indexable", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({ pageId: ids.get("/live-variant") });
+      expect(found[0]!.evidence).toEqual({
+        url: url("/live-variant"),
+        reason: "canonicalised",
+        robotsMeta: null,
+        xRobotsTag: null,
+      });
+    });
+
+    it("says noindex when a page is both, and still shows the canonical's effect", async () => {
+      // A page can noindex itself AND defer to another URL. It is one entry and
+      // one line of XML to delete, so it is one finding — and the word is
+      // `noindex`: the directive is the page's own explicit instruction to stay
+      // out of the index, where the canonical is a hint about which URL to
+      // prefer, so search engines act on the directive. That is
+      // `indexabilityOf`'s order (this page's Indexability Status reads
+      // `Noindex` beside the row) and the order `site.health` sets the two
+      // aside in.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/live" },
+        { path: "/both", canonical: url("/live"), robotsMeta: "noindex" },
+      ]);
+      await addSitemapUrls(crawlId, ["/both"]);
+
+      const found = await run("sitemap.non-indexable", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        url: url("/both"),
+        reason: "noindex",
+        robotsMeta: "noindex",
+        xRobotsTag: null,
+      });
+      // The same row, labelled by the helper every finding on the API surface
+      // is labelled by: one vocabulary, not two.
+      const [row] = await db.select().from(pages).where(eq(pages.id, ids.get("/both")!));
+      expect(indexabilityOf(row!).status).toBe("Noindex");
+    });
+
+    it("reports a listed 200 whose indexability stamp is null, under `noindex`", async () => {
+      // THE PARTITION HOLE, closed. `site.health` counts a fetched 200 whose
+      // `is_indexable` is null among the pages it sets aside (`is not true`),
+      // and `JUDGED` requires `= true`, so a `= false` predicate here would
+      // leave such a row judged by nothing and set aside by nobody. No crawl
+      // this engine writes produces one — `PageWriter` computes a boolean for
+      // every row — so it is inserted by hand, which is the only way it can
+      // exist at all. The word is `noindex`, the one that census files it
+      // under.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/no-stamp", stampNull: true }]);
+      await addSitemapUrls(crawlId, ["/no-stamp"]);
+
+      const found = await run("sitemap.non-indexable", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        url: url("/no-stamp"),
+        reason: "noindex",
+        robotsMeta: null,
+        xRobotsTag: null,
+      });
+    });
+
+    it("says nothing about a listed page that canonicalises to ITSELF", async () => {
+      // The self-referential canonical is the healthy declaration every page
+      // should carry, and a rule that read it as "canonicalised" would fire on
+      // every correctly marked-up sitemap entry on the internet.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/live", canonical: url("/live") }]);
+      await addSitemapUrls(crawlId, ["/live"]);
+      expect(await run("sitemap.non-indexable", crawlId)).toHaveLength(0);
+    });
   });
 
   // `is_indexable` is false for every 404, redirect and 5xx as well as for a
@@ -520,9 +628,13 @@ describe("the sitemap rules against the database", () => {
     const ids = await addPages(crawlId, [
       { path: "/listed" },
       { path: "/unlisted" },
-      // Neither of these belongs in a sitemap, so neither is a finding.
+      // None of these belongs in a sitemap, so none is a finding.
       { path: "/gone", fetchClass: "client_error", statusCode: 404 },
       { path: "/hidden", robotsMeta: "noindex" },
+      // PHASE 22 §1: a canonicalised page SHOULD be absent from the sitemap —
+      // `sitemap.non-indexable` is what reports it when it is listed — so
+      // reporting it as missing from one is the inverse of right.
+      { path: "/variant", canonical: url("/listed") },
     ]);
     await addSitemapUrls(crawlId, ["/listed"]);
 

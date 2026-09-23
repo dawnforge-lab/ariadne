@@ -18,7 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { normalizeUrl } from "../../src/crawl/parse/url-utils.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { pages } from "../../src/db/schema.js";
+import { hreflang, pages } from "../../src/db/schema.js";
 import { DUPLICATE_SAMPLE_URLS } from "../../src/rules/query/content.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { fieldDuplicateRules } from "../../src/rules/query/field-duplicates.js";
@@ -87,6 +87,38 @@ describe("the field duplicate rules against the database", () => {
     h1Text?: string | null;
     /** How many `<h1>` elements the page carried. Defaults to 1 where there is text. */
     h1Count?: number;
+    /**
+     * The page's `<link rel=canonical>`, absolute. Omitted means none declared,
+     * which is "not canonicalised elsewhere" and therefore judged (Phase 22 §1).
+     */
+    canonical?: string;
+  }
+
+  /** One `<link rel=alternate hreflang>` declaration, as the crawler stores it. */
+  interface HreflangSpec {
+    from: string;
+    code: string;
+    to: string;
+  }
+
+  async function addHreflang(crawlId: string, ids: Map<string, string>, specs: HreflangSpec[]):
+    Promise<void> {
+    await db.insert(hreflang).values(
+      specs.map((h) => {
+        const pageId = ids.get(h.from);
+        if (pageId === undefined) throw new Error(`no page '${h.from}' in this crawl`);
+        return {
+          crawlId,
+          pageId,
+          hreflangCode: h.code,
+          targetUrl: url(h.to),
+          // Written null by the crawler for every row; the cluster CTE joins on
+          // the URL, exactly as the hreflang rules do.
+          targetPageId: null,
+          source: "html",
+        };
+      }),
+    );
   }
 
   const newCrawl = async (): Promise<string> =>
@@ -118,6 +150,7 @@ describe("the field duplicate rules against the database", () => {
         // with text has an h1. A spec that says otherwise is describing the
         // pre-Phase-7 row, which is what the skip rule is about.
         h1Count: s.h1Count ?? (h1Text === null ? 0 : 1),
+        canonicalHtml: s.canonical ?? null,
         depth: 1,
         discoveredVia: "link",
       };
@@ -192,6 +225,10 @@ describe("the field duplicate rules against the database", () => {
         title: "About Sole Mates",
         count: 2,
         pages: [url("/about"), url("/contact")],
+        // No hreflang on this crawl, so no URL was folded into another — and
+        // the key is carried anyway, so a reader never has to guess whether a
+        // group of two was really a group of three (Phase 22 §2).
+        alternatesCollapsed: 0,
       });
 
       expect(found[1]!.pageId).toBe(ids.get("/shoes/marathon"));
@@ -200,6 +237,7 @@ describe("the field duplicate rules against the database", () => {
         count: 3,
         // Alphabetical, and the same three on every run.
         pages: [url("/shoes/marathon"), url("/shoes/sprint"), url("/shoes/trail")],
+        alternatesCollapsed: 0,
       });
     });
 
@@ -247,6 +285,7 @@ describe("the field duplicate rules against the database", () => {
         title: SHARED,
         count: 2,
         pages: [url("/live-a"), url("/live-b")],
+        alternatesCollapsed: 0,
       });
     });
 
@@ -370,6 +409,7 @@ describe("the field duplicate rules against the database", () => {
         metaDescription: SHARED,
         count: 3,
         pages: [url("/bakery"), url("/florist"), url("/studio")],
+        alternatesCollapsed: 0,
       });
     });
 
@@ -432,6 +472,7 @@ describe("the field duplicate rules against the database", () => {
         h1Text: SHARED,
         count: 2,
         pages: [url("/guides/returns"), url("/guides/sizing")],
+        alternatesCollapsed: 0,
       });
       // And neither of the other two rules has anything to say about the same
       // pages, which is what makes the grouping column provable.
@@ -538,6 +579,7 @@ describe("the field duplicate rules against the database", () => {
         h1Text: "The same new heading",
         count: 2,
         pages: [url("/new-a"), url("/new-b")],
+        alternatesCollapsed: 0,
       });
     });
 
@@ -549,6 +591,253 @@ describe("the field duplicate rules against the database", () => {
       ]);
       expect(await run(H1_SKIPPED, crawlId)).toEqual([]);
       expect(await run(H1, crawlId)).toEqual([]);
+    });
+  });
+
+  /**
+   * THE JUDGED COHORT'S CANONICAL HALF (Phase 22 §1).
+   *
+   * The noindex half was already pinned above ("compares indexable 200s only").
+   * This is the one that moved: a URL that hands its signals to another page is
+   * not competing with anything, so a title it shares is the base URL's title
+   * and not a duplicate. On the raelon.ca crawl this is 74 of 79 groups.
+   */
+  describe("pages canonicalised elsewhere", () => {
+    const SHARED = "One title, several addresses";
+
+    it("does not count a canonicalised page in a group", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/live-a", title: SHARED },
+        { path: "/live-b", title: SHARED },
+        { path: "/live-a?variant=2", title: SHARED, canonical: url("/live-a") },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        count: 2,
+        pages: [url("/live-a"), url("/live-b")],
+        // Not "collapsed": the variant is out of the COHORT, which is a
+        // different exclusion from an hreflang alternate folded into a cluster,
+        // and the two must not be reported as one number. `site.health`'s
+        // `urlsCanonicalised` is where this one is counted.
+        alternatesCollapsed: 0,
+      });
+    });
+
+    it("is silent when the only other member is canonicalised elsewhere", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/live", title: SHARED },
+        { path: "/live?ref=email", title: SHARED, canonical: url("/live") },
+      ]);
+      expect(await run(TITLE, crawlId)).toEqual([]);
+    });
+  });
+
+  /**
+   * HREFLANG ALTERNATES ARE ONE MEMBER (Phase 22 §2).
+   *
+   * Every case below is the same two-language site with the same untranslated
+   * title; what changes is what the two pages DECLARE about each other, which is
+   * the whole of what the cluster CTE reads.
+   */
+  describe("the hreflang cluster", () => {
+    const SHARED = "Refund policy";
+    const EN = "/policies/refund";
+    const FR = "/fr/policies/refund";
+
+    it("collapses a reciprocal en/fr pair, so a group of two vanishes", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: EN, title: SHARED },
+        { path: FR, title: SHARED },
+      ]);
+      await addHreflang(crawlId, ids, [
+        { from: EN, code: "en", to: EN },
+        { from: EN, code: "fr", to: FR },
+        { from: FR, code: "en", to: EN },
+        { from: FR, code: "fr", to: FR },
+      ]);
+      // One cluster, so one member, so no duplicate at all: the annotation is
+      // exactly the mechanism that says these two ARE one page.
+      expect(await run(TITLE, crawlId)).toEqual([]);
+      expect(await run(META, crawlId)).toEqual([]);
+    });
+
+    it("counts a group of three with one pair in it as two, and says what it folded", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: EN, title: SHARED },
+        { path: FR, title: SHARED },
+        { path: "/legal/refunds", title: SHARED },
+      ]);
+      await addHreflang(crawlId, ids, [
+        { from: EN, code: "en", to: EN },
+        { from: EN, code: "fr", to: FR },
+        { from: FR, code: "en", to: EN },
+        { from: FR, code: "fr", to: FR },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        title: SHARED,
+        // Two clusters: the en/fr pair, and the third page on its own.
+        count: 2,
+        // One URL per cluster, the lexically first of each. `/fr/...` sorts
+        // before `/legal/...` and `/policies/...`, and it is the pair's key.
+        pages: [url(FR), url("/legal/refunds")],
+        alternatesCollapsed: 1,
+      });
+    });
+
+    it("does not collapse a one-way declaration", async () => {
+      // The English page claims the French one; the French one says nothing
+      // back. An unreciprocated annotation is discarded by search engines
+      // (`hreflang.missing-return-link` is the rule that reports it), so the
+      // two really are two pages with one title.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: EN, title: SHARED },
+        { path: FR, title: SHARED },
+      ]);
+      await addHreflang(crawlId, ids, [
+        { from: EN, code: "en", to: EN },
+        { from: EN, code: "fr", to: FR },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({ count: 2, alternatesCollapsed: 0 });
+    });
+
+    it("does not collapse a pair that claims each other in the SAME language", async () => {
+      // Two URLs both declaring themselves and the other as `en` are not a
+      // translation pair. They are the same language twice — which is the
+      // duplicate this rule exists to report, annotated.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/a", title: SHARED },
+        { path: "/b", title: SHARED },
+      ]);
+      await addHreflang(crawlId, ids, [
+        { from: "/a", code: "en", to: "/b" },
+        { from: "/b", code: "en", to: "/a" },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({ count: 2, alternatesCollapsed: 0 });
+    });
+
+    it("collapses a three-language cluster to one member", async () => {
+      const crawlId = await newCrawl();
+      const paths = ["/en/x", "/fr/x", "/de/x"];
+      const ids = await addPages(
+        crawlId,
+        paths.map((path) => ({ path, title: SHARED })),
+      );
+      const codes = ["en", "fr", "de"];
+      await addHreflang(
+        crawlId,
+        ids,
+        paths.flatMap((from) => paths.map((to, i) => ({ from, code: codes[i]!, to }))),
+      );
+      expect(await run(TITLE, crawlId)).toEqual([]);
+    });
+
+    /**
+     * THE HUB: a page OUTSIDE the duplicate group that both members declare.
+     *
+     * `/a` and `/c` share a title and say nothing about each other; each is
+     * reciprocal only with a hub that carries a different title and is
+     * therefore not in the group at all. They are two pages competing for one
+     * query, and the answer may not depend on where the hub's URL happens to
+     * sort — which is exactly what the earlier one-hop key did (it folded them
+     * into one when the hub sorted first and kept two when it sorted last).
+     */
+    for (const hub of ["/0-hub", "/z-hub"]) {
+      it(`keeps two members when both declare only a hub outside the group (${hub})`, async () => {
+        const crawlId = await newCrawl();
+        const ids = await addPages(crawlId, [
+          { path: "/a", title: SHARED },
+          { path: "/c", title: SHARED },
+          { path: hub, title: "A different title entirely" },
+        ]);
+        await addHreflang(crawlId, ids, [
+          { from: "/a", code: "en", to: "/a" },
+          { from: "/a", code: "fr", to: hub },
+          { from: hub, code: "en", to: "/a" },
+          { from: "/c", code: "en", to: "/c" },
+          { from: "/c", code: "de", to: hub },
+          { from: hub, code: "en", to: "/c" },
+        ]);
+        const found = await run(TITLE, crawlId);
+        expect(found).toHaveLength(1);
+        expect(found[0]!.evidence).toMatchObject({
+          count: 2,
+          pages: [url("/a"), url("/c")],
+          alternatesCollapsed: 0,
+        });
+      });
+    }
+
+    /**
+     * THE CHAIN: A↔B and B↔C declared, A↔C not.
+     *
+     * The same graph as the hub above with the middle page inside the group
+     * this time, and the same principle decides it: only pages that declare
+     * EACH OTHER fold. A and C never named each other, so no set of three URLs
+     * here is one page, and the group keeps all three members — the honest
+     * answer for a cluster broken in the way `hreflang.missing-return-link` and
+     * `hreflang.missing-self-reference` report by name.
+     *
+     * Run twice, with the middle page's URL sorting last and then first: a
+     * broken chain must not change its size because of a string comparison.
+     */
+    for (const middle of ["/m-mid", "/0-mid"]) {
+      it(`keeps three members on a chain whose ends do not declare each other (${middle})`, async () => {
+        const crawlId = await newCrawl();
+        const ids = await addPages(crawlId, [
+          { path: "/a", title: SHARED },
+          { path: middle, title: SHARED },
+          { path: "/c", title: SHARED },
+        ]);
+        await addHreflang(crawlId, ids, [
+          { from: "/a", code: "fr", to: middle },
+          { from: middle, code: "en", to: "/a" },
+          { from: middle, code: "de", to: "/c" },
+          { from: "/c", code: "fr", to: middle },
+        ]);
+        const found = await run(TITLE, crawlId);
+        expect(found).toHaveLength(1);
+        expect(found[0]!.evidence).toMatchObject({
+          count: 3,
+          alternatesCollapsed: 0,
+        });
+      });
+    }
+
+    it("does not fold in an alternate that is itself out of the judged cohort", async () => {
+      // The French page carries a noindex, so it is not in the cohort at all
+      // and cannot be a group member — and folding the English page into it
+      // would key the cluster on a URL the group does not contain. The English
+      // page stands on its own beside the third URL.
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: EN, title: SHARED },
+        { path: FR, title: SHARED, robotsMeta: "noindex" },
+        { path: "/legal/refunds", title: SHARED },
+      ]);
+      await addHreflang(crawlId, ids, [
+        { from: EN, code: "fr", to: FR },
+        { from: FR, code: "en", to: EN },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        count: 2,
+        pages: [url("/legal/refunds"), url(EN)],
+        alternatesCollapsed: 0,
+      });
     });
   });
 });

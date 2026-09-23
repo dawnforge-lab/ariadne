@@ -42,6 +42,7 @@ import {
   resources,
   sitemapUrls,
 } from "../../src/db/schema.js";
+import { indexabilityOf, isJudged } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 
 import {
@@ -720,6 +721,73 @@ describe("the fixture site end to end", () => {
     }
   });
 
+  /**
+   * PHASE 22 §1, END TO END: the pages this site serves that are NOT judged —
+   * four noindexed and six canonicalised elsewhere, noindex taking precedence
+   * where a page is both — carry none of the rules that moved to the judged
+   * cohort.
+   *
+   * The unit tests pin each rule's silence over rows inserted by hand; this
+   * pins it over pages a real crawler fetched from a real server, on the two
+   * fixtures the spec named (`/index/canonicalized`, `/index/noindex-meta`) and
+   * on the eight beside them. Before this phase `/index/canonicalized` carried
+   * `content.thin` and `/index/noindex-meta` carried it too — findings about
+   * pages that had already handed their signals elsewhere or asked to be left
+   * out of the index.
+   */
+  it("no rule that moved to the judged cohort fires on a page outside it", () => {
+    // The list from the spec's §1, first list, as rule ids. Each is checked
+    // against the registry first: a renamed rule would otherwise make this
+    // sweep quietly weaker instead of failing.
+    const MOVED = [
+      "title.missing", "title.too-short", "title.too-long", "title.duplicate",
+      "meta-description.missing", "meta-description.too-short",
+      "meta-description.too-long", "meta-description.duplicate",
+      "headings.h1-missing", "headings.h1-multiple", "headings.level-skip",
+      "h1.duplicate-text", "content.placeholder", "content.thin",
+      "content.near-duplicate", "content.exact-duplicate", "images.missing-alt",
+      "images.missing-dimensions", "mobile.viewport-missing",
+      "performance.slow-response", "schema.product-incomplete",
+      "schema.self-serving-reviews", "links.orphan", "structure.deep-page",
+      "pages.not-in-sitemap", "url.parameter-pages-indexable",
+    ];
+    const known = new Set(registry.all().map((r) => r.id));
+    expect(MOVED.filter((id) => !known.has(id)), "not rule ids any more").toEqual([]);
+
+    const setAside: string[] = [];
+    for (const [path, page] of pageByPath) {
+      if (page.fetchClass !== "ok" || page.statusCode !== 200) continue;
+      if (isJudged(page)) continue;
+      setAside.push(path);
+      const fired = [...(issuesByPath.get(path) ?? new Set<string>())];
+      expect(
+        fired.filter((id) => MOVED.includes(id)).sort(),
+        `${path} is outside the judged cohort and must carry none of the moved rules`,
+      ).toEqual([]);
+    }
+
+    // THE SWEEP IS NOT VACUOUS, in both directions. There are pages outside the
+    // cohort on this site — the two the spec named among them — and the rules
+    // above do fire on the pages that ARE judged, so the silence observed is
+    // the cohort's doing and not a ruleset that stopped working.
+    expect(setAside.sort()).toContain("/index/canonicalized");
+    expect(setAside).toContain("/index/noindex-meta");
+    expect(setAside.length).toBe(10);
+    //
+    // EVERY ONE OF THE 26 FIRES SOMEWHERE ON THIS FIXTURE — the site was built
+    // to trip them — so the anti-vacuity guard is that whole list rather than a
+    // count over it. A threshold ("more than ten of them fired") passes while
+    // fifteen rules sit silent site-wide; this fails and names them, which is
+    // the difference between a guard and a formality. A rule that legitimately
+    // stops applying to the fixture is removed from `MOVED` in the same commit
+    // that changes the fixture, deliberately and in writing.
+    const firedSomewhere = new Set([...issuesByPath.values()].flatMap((ids) => [...ids]));
+    expect(
+      MOVED.filter((id) => firedSomewhere.has(id)).sort(),
+      "every moved rule must still fire somewhere on the fixture",
+    ).toEqual([...MOVED].sort());
+  });
+
   it("no rule fires on the control page", () => {
     // "Fired nothing" is only evidence if the page was actually audited. Almost
     // every page rule is gated on `isAuditable`, so a control that regressed to
@@ -820,13 +888,14 @@ describe("the fixture site end to end", () => {
       "sitemap.uncrawled",
     ]);
 
-    // The breadcrumb finding carries how many pages of this site a search engine
-    // could index, and the number is checked against the `pages` rows the crawl
+    // The breadcrumb finding carries how many pages of this site the ruleset
+    // judged, and the number is checked against the `pages` rows the crawl
     // actually wrote rather than pinned as a literal, so adding a fixture does
-    // not turn into an unrelated failure here.
-    const indexablePages = [...pageByPath.values()].filter(
-      (p) => p.fetchClass === "ok" && p.statusCode === 200 && p.isIndexable,
-    ).length;
+    // not turn into an unrelated failure here. The evidence key is still
+    // `indexablePages` — no key was removed in Phase 22 §1 — but the cohort
+    // behind it is `isJudged`, read here through the rule layer's own predicate
+    // so the two cannot drift.
+    const indexablePages = [...pageByPath.values()].filter((p) => isJudged(p)).length;
     expect(indexablePages).toBeGreaterThanOrEqual(5);
     // `runRules` writes `pageUrl` into every details blob; a site-scoped finding
     // names no page, so it is null here.
@@ -1152,6 +1221,10 @@ describe("the fixture site end to end", () => {
     expect(detailsByPath.get("/index/noindex-meta\nsitemap.non-indexable")).toEqual({
       pageUrl: `${app.base}/index/noindex-meta`,
       url: `${app.base}/index/noindex-meta`,
+      // WHICH KIND, since Phase 22 §1 gave this rule the canonicalised case as
+      // well. `/index/canonicalized` is the fixture that carries the other
+      // value, and both are listed in this site's sitemap.
+      reason: "noindex",
       robotsMeta: "noindex, follow",
       xRobotsTag: null,
     });
@@ -1607,12 +1680,27 @@ describe("the fixture site end to end", () => {
     // these exact sets rather than containment checks: a rule grouping on
     // whitespace, on nulls, or on the wrong column would show up here as an
     // extra group rather than as a silence nobody notices.
+    //
+    // ONE PAIR SHARES A TITLE AND IS DELIBERATELY ABSENT (Phase 22 §2):
+    // `/authored3/hreflang-a` and `/authored3/hreflang-b` both serve "Opening
+    // hours" and declare each other reciprocally as `en` and `fr`, which makes
+    // them one member of any duplicate group and therefore no group. The
+    // assertion below is what states that — an exact set with no third title
+    // group in it — and both fixtures carry `exact: true` with no expected
+    // issues, so the same fact is asserted from the page's side as well.
     const at = (path: string): string => `${app.base}${path}`;
     const group = (value: Record<string, unknown>, paths: string[]): Record<string, unknown> => ({
       pageUrl: at(paths[0]!),
       ...value,
       count: paths.length,
       pages: paths.map(at),
+      // ZERO ON EVERY GROUP HERE, and the one group that WOULD have carried a
+      // number is the one that no longer exists: `/authored3/hreflang-a` and
+      // `-b` now publish the same `<title>` and declare each other as `en`/`fr`
+      // alternates, so they are one cluster, one member, and no group at all
+      // (Phase 22 §2). Every group below is a pair with no hreflang between
+      // them, so nothing was folded into anything.
+      alternatesCollapsed: 0,
     });
 
     expect(await findingSet("title.duplicate")).toEqual([
@@ -1895,13 +1983,21 @@ describe("the fixture site end to end", () => {
     // templates the metric layer groups this site by — and before the
     // crawl-end template inference it was fifty of them, most holding one page.
     //
-    // Hand-derived from the fixture collection: the eighteen below are the
-    // nineteen types the crawl ends with, minus `/status/:slug` (all three
-    // `/status/*` fixtures answer 403, 404 or 500, so none is in the cohort
-    // every metric shares). Each `:slug` entry is a family the inference
-    // collapsed; each literal entry is a page with no family, and there is no
-    // `(untyped)` row because this site's every URL has a path the detector
-    // can read.
+    // Hand-derived from the fixture collection: the seventeen below are the
+    // nineteen types the crawl ends with, minus two that keep no page in the
+    // cohort every metric shares:
+    //   `/status/:slug`  all three `/status/*` fixtures answer 403, 404 or 500;
+    //   `/index/:slug`   all four are outside the JUDGED cohort since Phase 22
+    //                    §1 — `/index/noindex-meta` and `/index/noindex-header`
+    //                    carry a noindex, and `/index/canonicalized` and
+    //                    `/index/canonical-conflict` both declare a canonical
+    //                    naming another URL. A whole template can leave the
+    //                    metric tables that way, and that is the cohort doing
+    //                    its job: nothing in `/index/` is a page this site is
+    //                    asking anyone to rank.
+    // Each `:slug` entry is a family the inference collapsed; each literal entry
+    // is a page with no family, and there is no `(untyped)` row because this
+    // site's every URL has a path the detector can read.
     //
     // P11-T3's two pages are LITERAL entries rather than an `/authored11/:slug`
     // family, and that is the inference behaving as designed rather than an
@@ -1920,7 +2016,6 @@ describe("the fixture site end to end", () => {
         "page_type|/control",
         "page_type|/deep/:id",
         "page_type|/head/:slug",
-        "page_type|/index/:slug",
         "page_type|/kitchen-sink",
         "page_type|/links/:slug",
         "page_type|/perf/slow-response",
@@ -1953,28 +2048,41 @@ describe("the fixture site end to end", () => {
     // produced, which would assert only that the query is deterministic.
     //
     // THE COHORT, which two of the three are computed over. The crawl writes 84
-    // `pages` rows: the 83 fixtures plus the hub at `/`. Eleven of them are not
-    // an indexable 200 and are therefore outside the cohort every metric shares
-    // (fetched OK, 200, indexable):
+    // `pages` rows: the 83 fixtures plus the hub at `/`. Seventeen of them are
+    // not a JUDGED page and are therefore outside the cohort every metric
+    // shares (fetched OK, 200, indexable, NOT canonicalised elsewhere —
+    // `JUDGED`, src/rules/helpers.ts):
     //
     //   noindex (4): /index/noindex-meta, /index/noindex-header,
-    //                /authored/canonical-noindex, /authored/noindex-conflict
+    //                /authored/noindex-conflict, /authored/canonical-noindex
+    //                (which also canonicalises elsewhere — counted once, here,
+    //                because NOINDEX takes precedence: the page's own explicit
+    //                directive over a hint about which URL to prefer, which is
+    //                `indexabilityOf`'s order and the order the recount below
+    //                and `site.health` use)
     //   errors  (3): /status/not-found 404, /status/server-error 503,
     //                /status/blocked 403
     //   redirects(4): /redirect/chain-1, /redirect/chain-2, /redirect/loop,
     //                /redirect/trailing-slash
+    //   canonicalised elsewhere (6), PHASE 22 §1's exclusion:
+    //                /index/canonicalized, /index/canonical-conflict,
+    //                /authored/canonical-crossdomain,
+    //                /authored3/canonical-to-404,
+    //                /authored3/canonical-to-noindex, /authored3/paged-2
     //
-    // 84 - 11 = 73 cohort pages. The seven `/render/*` fixtures P5-T6 added are
-    // all indexable 200s and all inside it, which is why this number moved by
-    // exactly seven; P7-T1's `/authored7/hidden-chrome` is an indexable 200 too
-    // and is why it moved by one more; and P7-T2's `/authored7/shared-h1-a` and
-    // `-b` are two more of the same; and P11-T3's `/authored11/broken-resource`
-    // and `/authored11/heavy-image` are two more again — healthy indexable 200s
-    // whose defect is a FILE rather than a tag — which is this commit's +2. The
+    // 84 - 17 = 67 cohort pages, where before Phase 22 it was 73: the six pages
+    // in the canonicalised list are what moved, all of them indexable.
+    // `/authored/canonical-noindex` was outside the cohort before Phase 22 and
+    // is outside it now, under the same word both times. The seven `/render/*`
+    // fixtures P5-T6 added are all judged pages and all inside it; so are
+    // P7-T1's `/authored7/hidden-chrome`, P7-T2's
+    // `/authored7/shared-h1-a` and `-b`, and P11-T3's
+    // `/authored11/broken-resource` and `/authored11/heavy-image` — healthy
+    // indexable 200s whose defect is a FILE rather than a tag. The
     // `schema.breadcrumb-absent` assertion above counts the same set out of
     // `pageByPath` and is asserted against the same rows, which is a second
     // reading of this number from a different direction.
-    const COHORT = 73;
+    const COHORT = 67;
 
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
     // kinds: the hub at `/` links the 75 fixtures whose `linkedFromHub` is not
@@ -1990,25 +2098,35 @@ describe("the fixture site end to end", () => {
     // never counted (the `links.orphan` lesson, and the reason `/render/healthy`
     // appears in the "hub alone" row below rather than in one of its own):
     //
+    // THE SOURCE SIDE IS NOT THE COHORT, deliberately (`cohortFilter`): a page
+    // that is noindexed or canonicalised elsewhere still LINKS, and the link it
+    // makes is still a link. Only the page being MEASURED has to be judged —
+    // which is why `/authored3/paged-1` below still counts the inlink from
+    // `paged-2`, a page Phase 22 took out of the cohort.
+    //
     //   0  `/`                       nothing links the hub. `/redirect/chain-2`
     //                                REDIRECTS to it, and a redirect is not a link.
     //   0  /structure/orphan         not hub-linked, and nothing else names it
     //   0  /authored3/paged-3        not hub-linked; only paged-3 links paged-3
-    //   3  /authored3/paged-2        the hub, paged-1, paged-3
     //   2  /authored3/paged-1        the hub, paged-2
     //   1  /deep/2 … /deep/7         the rung above (6 pages)
     //   1  every other cohort page   the hub alone —
-    //                                73 - 3 - 1 - 1 - 6 = 62 pages
+    //                                67 - 3 - 1 - 6 = 57 pages
     //
-    // Sorted, that is 0,0,0 then sixty-eight 1s (the 62 above plus the 6 deep
-    // rungs) then 2 then 3. Sum = 68 + 2 + 3 = 73, so mean = 73/73 = 1.
+    // `/authored3/paged-2` — the hub, paged-1 and paged-3, three inlinks and the
+    // old maximum — is gone from the measured side: it canonicalises to page
+    // one, so Phase 22 §1 stopped judging it.
     //
-    // n = 73, so `percentile_cont` interpolates at pos = q * 72 over v0…v72,
-    // where v0…v2 = 0, v3…v70 = 1, v71 = 2, v72 = 3:
-    //   p25    pos 18    -> v18, which is 1
-    //   median pos 36    -> v36, which is 1
-    //   p75    pos 54    -> v54, which is 1
-    //   p95    pos 68.4  -> between v68 and v69, both 1 -> 1
+    // Sorted, that is 0,0,0 then sixty-three 1s (the 57 above plus the 6 deep
+    // rungs) then 2. Sum = 63 + 2 = 65, so mean = 65/67 = 0.9701… -> 0.97 at the
+    // two decimal places the SQL rounds to.
+    //
+    // n = 67, so `percentile_cont` interpolates at pos = q * 66 over v0…v66,
+    // where v0…v2 = 0, v3…v65 = 1, v66 = 2:
+    //   p25    pos 16.5  -> between v16 and v17, both 1 -> 1
+    //   median pos 33    -> v33, which is 1
+    //   p75    pos 49.5  -> between v49 and v50, both 1 -> 1
+    //   p95    pos 62.7  -> between v62 and v63, both 1 -> 1
     // Every one lands inside the run of 1s, so each interpolates between two
     // equal values and the interpolation changes nothing.
     expect(siteMetric("inlinks.distribution")).toEqual({
@@ -2018,8 +2136,8 @@ describe("the fixture site end to end", () => {
       median: 1,
       p75: 1,
       p95: 1,
-      max: 3,
-      mean: 1,
+      max: 2,
+      mean: 0.97,
     });
 
     // HREFLANG COVERAGE. Six pages publish a declaration — exactly the six the
@@ -2029,22 +2147,24 @@ describe("the fixture site end to end", () => {
     // the page, not the declaration: `/authored3/hreflang-a` names three
     // alternates and is one covered page.
     //
-    // 100 * 6 / 73 = 8.21917… -> 8.2 at the one decimal place the SQL rounds to.
+    // 100 * 6 / 67 = 8.9552… -> 9 at the one decimal place the SQL rounds to.
+    // (It read 8.2 over the 73-page cohort before Phase 22 §1 narrowed it; the
+    // numerator did not move — none of the six declaring pages is canonicalised
+    // — so the coverage percentage rose because the denominator shrank.)
     expect(siteMetric("hreflang.coverage")).toEqual({
       pagesWithHreflang: 6,
       indexablePages: COHORT,
-      coveragePct: 8.2,
+      coveragePct: 9,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
     // indexable, fails as a disagreement between two readings rather than as
     // an unexplained number.
     expect(hreflangByPath.size).toBe(6);
-    expect(
-      [...pageByPath.values()].filter(
-        (p) => p.fetchClass === "ok" && p.statusCode === 200 && p.isIndexable,
-      ).length,
-    ).toBe(COHORT);
+    // Counted through the rule layer's own predicate rather than a copy of it:
+    // `isJudged` is what the metric queries' `JUDGED` is the SQL twin of, so
+    // this reading and the metric's agree by construction or not at all.
+    expect([...pageByPath.values()].filter((p) => isJudged(p)).length).toBe(COHORT);
 
     // SITEMAP STRUCTURE. robots.txt declares two documents and only one of them
     // contributes an entry: `/sitemap-broken.xml` answers 200 with an HTML
@@ -2091,18 +2211,21 @@ describe("the fixture site end to end", () => {
     // the paginated series, the one broken link and `/render/healthy`'s
     // self-link. Nothing else on this site renders an `<a>`.
     //
-    // The cohort is the same 73 indexable 200s. Breadth-first from the hub at
+    // The cohort is the same 67 JUDGED pages. Breadth-first from the hub at
     // `/`, which is the crawl's seed:
     //
     //   0    `/`                     1 page, the entry point
-    //   1    every cohort page the hub links   64 pages —
-    //        the hub links 75 fixtures, ELEVEN of which are the non-cohort
-    //        pages (4 noindex, 3 errors, 4 redirects), so 75 - 11 = 64
+    //   1    every cohort page the hub links   58 pages —
+    //        the hub links 75 fixtures, SEVENTEEN of which are outside the
+    //        cohort (3 noindex, 3 errors, 4 redirects, 7 canonicalised
+    //        elsewhere — the list at `COHORT` above), so 75 - 17 = 58
     //   2-7  /deep/2 … /deep/7       6 pages, one per rung: the hub links
     //        /deep/1 (depth 1) and each rung links only the next
     //   null /structure/orphan, /authored3/paged-3   2 pages
     //
-    // 1 + 64 + 6 + 2 = 73, which is the cohort back again.
+    // 1 + 58 + 6 + 2 = 67, which is the cohort back again. The six pages that
+    // left it in Phase 22 §1 were all one click from the hub, so every one of
+    // them came out of the depth-1 run.
     //
     // The two nulls are EXACTLY the two pages `links.orphan` names, and that is
     // this metric's whole reason for existing: both reached the crawl through
@@ -2111,24 +2234,24 @@ describe("the fixture site end to end", () => {
     // own URL as a link, so a search that followed a page's self-link would
     // have reached it and reported one null instead of two.
     //
-    // The 71 pages that HAVE a depth, sorted: v0 = 0, v1…v64 = 1, then
-    // v65…v70 = 2,3,4,5,6,7. n = 71, so `percentile_cont` interpolates at
-    // pos = q * 70:
-    //   mean   = (0 + 64 + (2+3+4+5+6+7)) / 71 = 91/71 = 1.28169… -> 1.28
-    //   p25    pos 17.5 -> between v17 and v18, both 1 -> 1
-    //   median pos 35   -> v35 = 1
-    //   p75    pos 52.5 -> between v52 and v53, both 1 -> 1
-    //   p95    pos 66.5 -> v66=3, v67=4 -> 3 + 0.5*1 = 3.5
+    // The 65 pages that HAVE a depth, sorted: v0 = 0, v1…v58 = 1, then
+    // v59…v64 = 2,3,4,5,6,7. n = 65, so `percentile_cont` interpolates at
+    // pos = q * 64:
+    //   mean   = (0 + 58 + (2+3+4+5+6+7)) / 65 = 85/65 = 1.30769… -> 1.31
+    //   p25    pos 16   -> v16 = 1
+    //   median pos 32   -> v32 = 1
+    //   p75    pos 48   -> v48 = 1
+    //   p95    pos 60.8 -> v60=3, v61=4 -> 3 + 0.8*1 = 3.8
     expect(siteMetric("structure.click-depth-distribution")).toEqual({
-      count: 73,
+      count: 67,
       nullCount: 2,
       min: 0,
       p25: 1,
       median: 1,
       p75: 1,
-      p95: 3.5,
+      p95: 3.8,
       max: 7,
-      mean: 1.28,
+      mean: 1.31,
     });
 
     // The same two facts read off the pages table rather than out of the metric,
@@ -2314,10 +2437,24 @@ describe("the fixture site end to end", () => {
     let warningOnly = 0;
     let infoOnly = 0;
     let clean = 0;
-    let auditable = 0;
+    let judged = 0;
+    // PHASE 22 §3's two set-aside columns, recounted the same way: a fetched
+    // 200 that is not judged is either noindexed or canonicalised elsewhere,
+    // and the NOINDEX takes precedence when it is both — the page's own
+    // explicit directive over a hint about which URL to prefer. That is
+    // `indexabilityOf`'s order, so the recount asks `indexabilityOf` itself
+    // rather than restating it: the column a reader sees on the finding row is
+    // the column this test counts the page under.
+    let canonicalised = 0;
+    let noindex = 0;
     for (const [path, page] of pageByPath) {
       if (page.fetchClass !== "ok" || page.statusCode !== 200) continue;
-      auditable += 1;
+      if (!isJudged(page)) {
+        if (indexabilityOf(page).status === "Noindex") noindex += 1;
+        else canonicalised += 1;
+        continue;
+      }
+      judged += 1;
       let worst = 4;
       for (const ruleId of issuesByPath.get(path) ?? []) {
         const severity = severityOf.get(ruleId);
@@ -2329,8 +2466,12 @@ describe("the fixture site end to end", () => {
       else if (worst === 3) infoOnly += 1;
       else clean += 1;
     }
-    expect(auditable).toBeGreaterThan(0);
-    expect(critical + warningOnly + infoOnly + clean).toBe(auditable);
+    expect(judged).toBeGreaterThan(0);
+    expect(critical + warningOnly + infoOnly + clean).toBe(judged);
+    // Both exclusions really happen on this site, so the two columns below are
+    // asserted against something rather than against zero.
+    expect(canonicalised).toBeGreaterThan(0);
+    expect(noindex).toBeGreaterThan(0);
     // The ratio, rounded THE WAY POSTGRES ROUNDS IT. `round(numeric, 4)` is
     // half-away-from-zero on the exact decimal; `toFixed(4)` rounds a binary
     // float, so at an exact .00005 boundary the two can disagree and a future
@@ -2339,18 +2480,34 @@ describe("the fixture site end to end", () => {
     // `floor(clean·10^4/auditable + 1/2)` written with no division at all, as
     // `floor((2·clean·10^4 + auditable) / (2·auditable))`.
     const cleanRatio =
-      Math.floor((2 * clean * 10_000 + auditable) / (2 * auditable)) / 10_000;
+      Math.floor((2 * clean * 10_000 + judged) / (2 * judged)) / 10_000;
     expect(siteMetric("site.health")).toEqual({
-      urlsTotal: auditable,
+      urlsTotal: judged,
       urlsWithCritical: critical,
       urlsWithWarningOnly: warningOnly,
       urlsWithInfoOnly: infoOnly,
       urlsClean: clean,
       cleanRatio,
-      // 84 pages crawled, and the census is the auditable ones: the rest are
-      // this fixture site's redirects, its 404s, its 5xx and its non-HTML.
-      pagesNotAuditable: 84 - auditable,
+      // 84 pages crawled, and the census is the judged ones: the rest are this
+      // fixture site's redirects, its 404s, its 5xx and its non-HTML, plus the
+      // two set-aside columns beside them.
+      pagesNotAuditable: 84 - judged - canonicalised - noindex,
+      urlsCanonicalised: canonicalised,
+      urlsNoindex: noindex,
     });
+    // THE PARTITION, end to end (Phase 22 §3): every URL this crawl has a row
+    // for is in exactly one of the four columns. The rule asserts it over its
+    // own SQL; this adds the four numbers the METRIC published — not the four
+    // this test counted — and checks them against the crawl's page count read
+    // from a third place again.
+    const health = siteMetric("site.health") as Record<string, number>;
+    expect(
+      health["urlsTotal"]! +
+        health["urlsCanonicalised"]! +
+        health["urlsNoindex"]! +
+        health["pagesNotAuditable"]!,
+    ).toBe(84);
+    expect(pageByPath.size).toBe(84);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {
@@ -2447,7 +2604,7 @@ describe("the fixture site end to end", () => {
     expect(weight.atLeast).toBe(true);
     // And the distribution is over the same cohort every other metric uses, so
     // its count is the constant the three quotable metrics are pinned against.
-    expect(weight.pageWeight.count).toBe(73);
+    expect(weight.pageWeight.count).toBe(67);
     // The heavy page is the heaviest thing on this site by a wide margin, so
     // the maximum is at least the image the assertion above pinned. Stated as a
     // floor rather than a sum: the page's own HTML is in there too.

@@ -3,9 +3,11 @@ import { finding, pageRule } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
 
 /**
- * Fetch-outcome rules. These are the only page rules with no `isAuditable`
- * guard: the non-ok rows ARE their subject. A URL that failed to fetch is a
- * classified finding, never a page the audit passes over in silence.
+ * Fetch-outcome rules. These are the only page rules with no cohort guard at
+ * all — neither `isAuditable` nor, since Phase 22 §1, `isJudged`: the non-ok
+ * rows ARE their subject. A URL that failed to fetch is a classified finding,
+ * never a page the audit passes over in silence, and a 404 is a 404 whatever
+ * its canonical or its robots meta would have said.
  *
  * They report under `crawl` rather than a category of their own: what that
  * heading collects is everything about whether the crawler could reach a URL

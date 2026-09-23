@@ -106,21 +106,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "content.exact-duplicate": {
     title: "Content: Exact duplicates",
     explanation:
-      "Groups of indexable 200 pages that return identical visible text, none of them canonicalised to another URL; each row gives the exact page count and up to 20 of the URLs. Search engines index one and drop the rest, and the links and signals meant for one page are split between copies.",
+      "Groups of indexable, self-canonical pages that return identical visible text; each row gives the exact page count and up to 20 of the URLs. Hreflang alternates are not exempt: two locale versions with byte-identical text means the translation is missing. Search engines index one copy and drop the rest, and the links and signals meant for one page are split between copies.",
     howToFix:
-      "Pick the URL that should rank and canonicalise or 301 the copies to it. On templated sites fix the pattern that creates them: a print view, a parameter, a second path to the same page.",
+      "Pick the URL that should rank and canonicalise or 301 the copies to it. On templated sites fix the pattern that creates them: a print view, a parameter, a second path to the same page; for identical locale versions, translate the page.",
   },
   "content.metrics-by-type": {
     title: "Content: Word count by template",
     explanation:
-      "For the site and for each page template: word count, renderable word count (the same text minus markup-hidden parts) and text ratio (visible-text bytes as a share of HTML bytes), each as count, min, max, mean, quartiles and 95th percentile over indexable 200 pages. Pages without a template are grouped as (untyped).",
+      "For the site and for each page template: word count, renderable word count (the same text minus markup-hidden parts) and text ratio (visible-text bytes as a share of HTML bytes), each as count, min, max, mean, quartiles and 95th percentile over indexable, self-canonical 200 pages. Pages without a template are grouped as (untyped).",
     howToFix:
       "Compare each template with the site row and with the template's purpose; a listing carries less text than an article. A large gap between word count and renderable word count is hidden template chrome on every page of that template.",
   },
   "content.near-duplicate": {
     title: "Content: Near duplicates (main content within 3 of 64 fingerprint bits)",
     explanation:
-      "Indexable 200 pages whose main content is near-identical to at least one other such page: fingerprints within 3 bits of 64, compared on the content area with header, navigation, sidebar and footer excluded, both pages carrying at least 50 words of their own, neither canonicalised elsewhere. Each page is listed once with how many near duplicates it has (exact up to 200) and the closest five. Search engines group pages this similar and show one.",
+      "Indexable, self-canonical pages whose main content is near-identical to at least one other such page: fingerprints within 3 bits of 64, compared on the content area with header, navigation, sidebar and footer excluded, both pages carrying at least 50 words of their own. Pages that declare each other as hreflang alternates are not compared with each other. Each page is listed once with how many near duplicates it has (exact up to 200) and the closest five; search engines group pages this similar and show one.",
     howToFix:
       "Merge near-duplicate pages into one stronger page and redirect the rest, or give each page substantive content of its own. Canonicalise filtered and parameterised variants to the base page.",
   },
@@ -134,14 +134,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "content.placeholder": {
     title: "Content: Lorem ipsum placeholder text",
     explanation:
-      "Pages whose visible text contains \"lorem ipsum\". The row quotes up to 160 characters of visible text from the match (empty on crawls taken before the quote was recorded). Search engines index it and visitors see it.",
+      "Indexable, self-canonical pages whose visible text contains \"lorem ipsum\". The row quotes up to 160 characters of visible text from the match (empty on crawls taken before the quote was recorded). Search engines index it and visitors see it.",
     howToFix:
       "Replace the quoted text with real copy or unpublish the page. Check excerpts, summaries and descriptions as well as the body, and search the CMS for the phrase: placeholder text usually sits in the same field on several records.",
   },
   "content.soft-404": {
     title: "Content: Soft 404 (not-found wording under 300 words, or the not-found template)",
     explanation:
-      "Pages that return 200 but look like an error page: not-found wording with fewer than 300 renderable words, or content within 4 of 64 fingerprint bits of the site's real not-found page. Search engines treat them as errors, keep them out of the index and keep re-crawling them.",
+      "Pages returning 200 that look like an error page, whatever their directives or canonical say: not-found wording with fewer than 300 renderable words, or content within 4 of 64 fingerprint bits of the site's real not-found page. Search engines treat them as errors, keep them out of the index and keep re-crawling them.",
     howToFix:
       "Return a real 404 or 410 for content that is gone, or 301 to the closest live page. If the page is genuine, expand it so it no longer resembles the error template, and check what links to it.",
   },
@@ -155,7 +155,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "content.thin": {
     title: "Content: Low content pages (under 150 words of own content)",
     explanation:
-      "Indexable pages with fewer than 150 words of their own content: the text inside the page's main area, or the whole body where none is marked, in both cases with header, navigation, sidebar and footer excluded. Each row shows own words beside the whole-document word count; a page with no own text shows 0. Pages canonicalised to another URL are excluded.",
+      "Indexable, self-canonical pages with fewer than 150 words of their own content: the text inside the page's main area, or the whole body where none is marked, in both cases with header, navigation, sidebar and footer excluded. Each row shows own words beside the whole-document word count; a page with no own text shows 0.",
     howToFix:
       "Add content that answers the page's query, consolidate the page into a stronger one, or noindex it if it exists for another reason. If own words are far below the document total, check that the template's content field is being filled for this record.",
   },
@@ -220,9 +220,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "site.health": {
     title: "Site: Pages by worst finding severity",
     explanation:
-      "Of the pages the audit could judge (200, HTML), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio and the number of other fetched URLs (redirects, errors, blocked, failed, non-HTML and every other status). Site-wide findings appear in none of the counts, and on a capped run pages past the cap count as clean. This table is the evidence for the engine-coverage check, not a finding about the site.",
+      "Of the pages the audit judges (200, HTML, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other crawled URLs (redirects, errors, blocked, failed, non-HTML). The four buckets plus the two set-aside counts plus the other URLs add up to every crawled URL; site-wide findings appear in none of the counts, and on a capped run pages past the cap count as clean. This table is the evidence for the engine-coverage check, not a finding about the site.",
     howToFix:
-      "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, and the issue list says what is wrong. Work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
+      "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, and the issue list says what is wrong. Read the set-aside counts to know how much of the site the audit judged; work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
   },
 
   // ------------------------------------------------------------------ hosts
@@ -266,7 +266,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "hreflang.coverage": {
     title: "Hreflang: Share of pages declaring hreflang",
     explanation:
-      "For the site and for each template: how many indexable 200 pages declare at least one hreflang alternate (HTML, HTTP header or sitemap), how many were measured, and the percentage. A page counts once regardless of how many alternates it names.",
+      "For the site and for each template: how many indexable, self-canonical 200 pages declare at least one hreflang alternate (HTML, HTTP header or sitemap), how many were measured, and the percentage. A page counts once regardless of how many alternates it names.",
     howToFix:
       "Read coverage against the site: on a single-language site low coverage is expected, and on an international site a template near zero beside others near 100% has been left out of the hreflang generator.",
   },
@@ -326,21 +326,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "inlinks.distribution": {
     title: "Links: Inlinks per page by template",
     explanation:
-      "For the site and for each template: the number of unique internal inlinks per indexable 200 page, as count, min, max, mean, quartiles and 95th percentile. A page counts once per linking page; self-links are not counted; pages with no inlinks count as 0.",
+      "For the site and for each template: the number of unique internal inlinks per indexable, self-canonical 200 page, as count, min, max, mean, quartiles and 95th percentile. A page counts once per linking page; self-links are not counted; pages with no inlinks count as 0.",
     howToFix:
       "Read the bottom quartile first: those pages are barely supported by internal linking. A template whose median sits well below the site's has been left out of the linking.",
   },
   "inlinks.extremes": {
     title: "Links: Most and least linked pages",
     explanation:
-      "The 20 indexable pages with the fewest unique internal inlinks and the 20 with the most, each with its count. Ties are broken by URL.",
+      "The 20 indexable, self-canonical pages with the fewest unique internal inlinks and the 20 with the most, each with its count. Ties are broken by URL.",
     howToFix:
       "Check the least-linked list against the pages that matter commercially; those are the ones to link from the most-linked pages, which are usually navigation hubs.",
   },
   "inlinks.sources-by-type": {
     title: "Links: Inlink sources by template",
     explanation:
-      "For each destination template, how many unique internal links reach it from each source template; the 25 largest sources per destination are kept and the rest summed into (other), and pages without a template appear as (untyped) on both sides. Destinations are indexable 200 pages; sources are every crawled page.",
+      "For each destination template, how many unique internal links reach it from each source template; the 25 largest sources per destination are kept and the rest summed into (other), and pages without a template appear as (untyped) on both sides. Destinations are indexable, self-canonical 200 pages; sources are every crawled page.",
     howToFix:
       "Read each row as a sentence about site structure: a commercial template reached from only one source template depends entirely on that template being crawled; one with no sources is reachable only from the sitemap.",
   },
@@ -354,7 +354,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "links.orphan": {
     title: "Links: Orphan pages",
     explanation:
-      "Indexable pages that were crawled and that no other page links to; self-links do not count, the start URL is excluded, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
+      "Indexable, self-canonical pages that were crawled and that no other page links to; self-links do not count, the start URL is excluded, and a page in the sitemap but linked from nowhere is still an orphan. Orphans are crawled rarely and receive no internal link value. Where the crawl could not fetch some URLs, the row says how many, since one of them could link here.",
     howToFix:
       "Link to the page from a hub, category, navigation or related content. If nothing on the site has a reason to link to it, consolidate or remove it.",
   },
@@ -377,91 +377,91 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "h1.duplicate-skipped": {
     title: "H1: Duplicate H1 not checked on this crawl",
     explanation:
-      "This crawl stored no H1 text although its pages carry H1 elements, which is what a crawl taken before H1 text was recorded looks like. Duplicate H1s could not be detected; the check was left unrun rather than reported clean.",
+      "This crawl stored no H1 text although its judged pages carry H1 elements, which is what a crawl taken before H1 text was recorded looks like. Duplicate H1s could not be detected; the check was left unrun rather than reported clean.",
     howToFix:
       "Re-crawl the site. H1 text is recorded on every crawl from this version onwards.",
   },
   "h1.duplicate-text": {
     title: "H1: Duplicate",
     explanation:
-      "Groups of indexable 200 pages whose first H1 is identical, pages canonicalised to another URL included. Each row names the H1, the number of pages carrying it and up to 20 of their URLs. Pages with the same H1 claim to be about the same thing.",
+      "Groups of indexable, self-canonical pages whose first H1 is identical. Pages that declare each other as hreflang alternates count as one page; each row names the H1, the number of distinct pages, up to 20 of their URLs (one per hreflang set) and how many alternates were folded in. Pages with the same H1 claim to be about the same thing.",
     howToFix:
       "Generate the H1 from the fields that make each page different. Where a layout puts the section name in the H1 and the real headline in a styled div, swap them.",
   },
   "headings.h1-missing": {
     title: "H1: Missing",
     explanation:
-      "Pages whose HTML response has no H1. The H1 states the page's main topic for search engines and is the first landmark screen-reader users jump to.",
+      "Indexable, self-canonical pages whose HTML response has no H1. The H1 states the page's main topic for search engines and is the first landmark screen-reader users jump to.",
     howToFix:
       "Add one H1 that states the page's main topic, consistent with the title. If the visual headline is a styled div or span, change the element rather than adding a second heading.",
   },
   "headings.h1-multiple": {
     title: "H1: Multiple",
     explanation:
-      "Pages with more than one H1. Valid HTML, but on most templates an accident such as a logo and a headline both marked up as H1, leaving no single heading that names the page's subject.",
+      "Indexable, self-canonical pages with more than one H1. Valid HTML, but on most templates an accident such as a logo and a headline both marked up as H1, leaving no single heading that names the page's subject.",
     howToFix:
       "Keep one H1 for the main heading and demote the rest to H2 or H3; mark up a logo with a non-heading element.",
   },
   "headings.level-skip": {
     title: "Headings: Non-sequential levels (skip of more than 1)",
     explanation:
-      "Pages whose headings step down more than one level, such as an H4 directly under an H2; the row shows the first skip. Assistive technology and parsers read the heading outline, and a skipped level breaks it.",
+      "Indexable, self-canonical pages whose headings step down more than one level, such as an H4 directly under an H2; the row shows the first skip. Assistive technology and parsers read the heading outline, and a skipped level breaks it.",
     howToFix:
       "Make heading levels descend one step at a time. Where a level was skipped for a smaller font, fix the CSS instead.",
   },
   "meta-description.duplicate": {
     title: "Meta description: Duplicate",
     explanation:
-      "Groups of indexable 200 pages with an identical meta description, pages canonicalised to another URL included. Each row names the description, the number of pages carrying it and up to 20 of their URLs. Duplicate descriptions are replaced by search engines with text from the page.",
+      "Groups of indexable, self-canonical pages with an identical meta description. Pages that declare each other as hreflang alternates count as one page; each row names the description, the number of distinct pages, up to 20 of their URLs (one per hreflang set) and how many alternates were folded in. Duplicate descriptions are replaced by search engines with text from the page.",
     howToFix:
       "Write the description in the template from fields that differ per page. Where a section has nothing distinct to say, leave the description off rather than repeating one.",
   },
   "meta-description.missing": {
     title: "Meta description: Missing",
     explanation:
-      "Pages whose HTML response has no meta description, or an empty one. Search engines then build the snippet from page text, which is less compelling and lowers click-through rate.",
+      "Indexable, self-canonical pages whose HTML response has no meta description, or an empty one. Search engines then build the snippet from page text, which is less compelling and lowers click-through rate.",
     howToFix:
       "Add a unique meta description of 70 to 160 characters that summarises the page and gives a reason to click.",
   },
   "meta-description.too-long": {
     title: "Meta description: Over 160 characters",
     explanation:
-      "Pages whose meta description exceeds 160 characters. Search results cut descriptions by pixel width, so the closing words are lost.",
+      "Indexable, self-canonical pages whose meta description exceeds 160 characters. Search results cut descriptions by pixel width, so the closing words are lost.",
     howToFix:
       "Trim the description to 160 characters or fewer, keeping the core message and the reason to click in the first sentence.",
   },
   "meta-description.too-short": {
     title: "Meta description: Below 70 characters",
     explanation:
-      "Pages whose meta description is under 70 characters. Short descriptions waste the snippet space and are frequently replaced by search engines with text from the page.",
+      "Indexable, self-canonical pages whose meta description is under 70 characters. Short descriptions waste the snippet space and are frequently replaced by search engines with text from the page.",
     howToFix:
       "Expand the description to 70 to 160 characters. Where a whole section is short, build it in the template from fields that differ per page.",
   },
   "title.duplicate": {
     title: "Page titles: Duplicate",
     explanation:
-      "Groups of indexable 200 pages with an identical title, pages canonicalised to another URL included. Each row names the title, the number of pages carrying it and up to 20 of their URLs. Duplicate titles make pages indistinguishable in search results and are typically a template writing the same string for every item.",
+      "Groups of indexable, self-canonical pages with an identical title. Pages that declare each other as hreflang alternates count as one page, so a French and an English version sharing a title are not a duplicate; each row names the title, the number of distinct pages, up to 20 of their URLs (one per hreflang set) and how many alternates were folded in. Duplicate titles make pages indistinguishable in search results and are typically a template writing the same string for every item.",
     howToFix:
-      "Build the title in the template from the fields that differ between pages (product, article, location, page number) with the shared part short and last. If the pages are the same page at several URLs, redirect or noindex the copies.",
+      "Build the title in the template from the fields that differ between pages (product, article, location, page number) with the shared part short and last. If the pages are the same page at several URLs, canonicalise or redirect the copies.",
   },
   "title.missing": {
     title: "Page titles: Missing",
     explanation:
-      "Pages whose HTML response has no title tag, or an empty one. The title is a primary relevance signal and the headline of the search result; without one, search engines write their own from page text.",
+      "Indexable, self-canonical pages whose HTML response has no title tag, or an empty one. The title is a primary relevance signal and the headline of the search result; without one, search engines write their own from page text.",
     howToFix:
       "Add a unique, descriptive title naming the page's main topic (30 to 60 characters is the usual target), generated in the template from the fields that differ per page.",
   },
   "title.too-long": {
     title: "Page titles: Over 60 characters",
     explanation:
-      "Pages whose title exceeds 60 characters. Search results cut titles by pixel width, so long titles lose their ending and a title under 60 characters can still be cut.",
+      "Indexable, self-canonical pages whose title exceeds 60 characters. Search results cut titles by pixel width, so long titles lose their ending and a title under 60 characters can still be cut.",
     howToFix:
       "Shorten the title to 60 characters or fewer, front-loading the important words and moving or dropping the site name.",
   },
   "title.too-short": {
     title: "Page titles: Below 10 characters",
     explanation:
-      "Pages whose title is under 10 characters. Titles this short are too generic to describe the page or earn a click.",
+      "Indexable, self-canonical pages whose title is under 10 characters. Titles this short are too generic to describe the page or earn a click.",
     howToFix:
       "Expand the title to a descriptive phrase (the flag clears at 10 characters; 30 to 60 is the usual target). Where a whole section is short, add the missing part in the template.",
   },
@@ -500,7 +500,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "pages.not-in-sitemap": {
     title: "Sitemaps: Indexable URLs not in sitemap",
     explanation:
-      "Indexable 200 pages that were crawled and are not listed in any sitemap. They are discovered only through links and are missing from sitemap coverage reporting. Some omissions are deliberate.",
+      "Indexable, self-canonical 200 pages that were crawled and are not listed in any sitemap; a canonicalised page belongs out of the sitemap and is not reported. They are discovered only through links and are missing from sitemap coverage reporting. Some omissions are deliberate.",
     howToFix:
       "Add the pages to the sitemap, or fix the generator that should have included them. Confirm any deliberate exclusion is a decision rather than an oversight.",
   },
@@ -526,11 +526,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Remove 404 and 410 URLs from the sitemap or restore the pages, and fix a 5xx at the server. For 401, 403 and 429, allowlist the crawler in the bot protection and re-check before deleting the entry. Generate the sitemap from the same source as the pages.",
   },
   "sitemap.non-indexable": {
-    title: "Sitemaps: Sitemap URLs with noindex",
+    title: "Sitemaps: Sitemap URLs that are noindex or canonicalised",
     explanation:
-      "URLs listed in the sitemap whose page returns 200 and carries noindex in its robots meta tag or X-Robots-Tag header. The sitemap asks for indexing and the page refuses; search engines follow the page.",
+      "URLs listed in the sitemap whose page returns 200 and is either noindex (robots meta tag or X-Robots-Tag header) or canonicalised to another URL; the Reason column says which, noindex first where both apply. A sitemap should list only the URLs you want indexed, and these pages ask for the opposite.",
     howToFix:
-      "Remove the noindex if the page should rank, otherwise remove the URL from the sitemap. Filtered, paginated and thank-you pages usually belong in the second group.",
+      "Remove noindex if the page should rank, otherwise remove the URL from the sitemap. For a canonicalised URL, list the canonical target instead. Filtered, paginated and thank-you pages usually belong out of the sitemap.",
   },
   "sitemap.redirected": {
     title: "Sitemaps: Sitemap URLs that redirect",
@@ -558,7 +558,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "schema.breadcrumb-absent": {
     title: "Structured data: No BreadcrumbList markup on the site",
     explanation:
-      "The site has at least 5 indexable pages and no page carries BreadcrumbList JSON-LD. Breadcrumb markup lets search results show the path to a page and tells search engines how sections relate.",
+      "The site has at least 5 indexable, self-canonical pages and no page carries BreadcrumbList JSON-LD. Breadcrumb markup lets search results show the path to a page and tells search engines how sections relate.",
     howToFix:
       "Add a BreadcrumbList block to every template below the home page, generated from the same navigation data as the visible breadcrumbs.",
   },
@@ -572,14 +572,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "schema.product-incomplete": {
     title: "Structured data: Product markup missing required fields",
     explanation:
-      "Pages whose Product markup, taken across all its Product blocks, lacks a field a product rich result needs; each row lists the missing fields. An offers block counts only with a price or priceSpecification; gtin, ean and any GTIN length count as a GTIN, and mpn is counted separately.",
+      "Indexable, self-canonical pages whose Product markup, taken across all its Product blocks, lacks a field a product rich result needs; each row lists the missing fields. An offers block counts only with a price or priceSpecification; gtin, ean and any GTIN length count as a GTIN, and mpn is counted separately.",
     howToFix:
       "Fill in name, image and a priced offers block from the product data the page renders, then add currency, availability, a GTIN and an MPN where they exist, description, SKU and brand. Confirm the page in the Rich Results Test.",
   },
   "schema.self-serving-reviews": {
     title: "Structured data: Self-serving reviews on Organization or LocalBusiness markup",
     explanation:
-      "Pages whose markup typed exactly Organization or LocalBusiness carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
+      "Indexable, self-canonical pages whose markup typed exactly Organization or LocalBusiness carries a rating or reviews about the business itself. Google's review snippet policy treats these as self-serving and does not show the stars.",
     howToFix:
       "Move the ratings to the type they are about (Product, Service, Course, Recipe) and let independent review platforms carry the business-level rating.",
   },
@@ -595,14 +595,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "images.missing-alt": {
     title: "Images: Missing alt text",
     explanation:
-      "Pages with images that have no alt attribute; each row shows how many of the page's images. Alt text is what screen readers announce and the main way search engines understand an image. Only img elements in the HTML response are counted.",
+      "Indexable, self-canonical pages with images that have no alt attribute; each row shows how many of the page's images. Alt text is what screen readers announce and the main way search engines understand an image. Only img elements in the HTML response are counted.",
     howToFix:
       "Give every meaningful image alt text describing what it conveys, and an empty alt (alt=\"\") to purely decorative images.",
   },
   "images.missing-dimensions": {
     title: "Images: Missing size attributes",
     explanation:
-      "Pages with images that lack a width or a height attribute; each row shows how many of the page's images. Without dimensions the browser cannot reserve space, and the layout shifts as images load unless CSS reserves it. Only img elements in the HTML response are counted, and an attribute that exists but is empty counts as present.",
+      "Indexable, self-canonical pages with images that lack a width or a height attribute; each row shows how many of the page's images. Without dimensions the browser cannot reserve space, and the layout shifts as images load unless CSS reserves it. Only img elements in the HTML response are counted, and an attribute that exists but is empty counts as present.",
     howToFix:
       "Set width and height attributes to the image's intrinsic pixel dimensions, or set an aspect-ratio in CSS. Verify against the rendered page before treating it as a defect.",
   },
@@ -618,7 +618,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "mobile.viewport-missing": {
     title: "Mobile: Missing viewport tag",
     explanation:
-      "Pages with no viewport meta tag. Mobile browsers lay them out at desktop width and zoom out, so text is small, tap targets cramped and responsive CSS never applies.",
+      "Indexable, self-canonical pages with no viewport meta tag. Mobile browsers lay them out at desktop width and zoom out, so text is small, tap targets cramped and responsive CSS never applies.",
     howToFix:
       "Add <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> to the head in the site-wide template.",
   },
@@ -632,14 +632,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "page.weight": {
     title: "Performance: Page weight by template",
     explanation:
-      "For the site and for each template: total page weight, HTML bytes, and image, stylesheet and script bytes, each as count, min, max, mean, quartiles and 95th percentile over indexable 200 pages, with how many file references the pages make, how many of those were weighed, and how many pages have an unweighed file; rows with unweighed files are flagged as a floor. Totals are a ceiling where responsive image renditions are all counted. Only img src, stylesheet and script references in the HTML response are counted.",
+      "For the site and for each template: total page weight, HTML bytes, and image, stylesheet and script bytes, each as count, min, max, mean, quartiles and 95th percentile over indexable, self-canonical 200 pages, with how many file references the pages make, how many of those were weighed, and how many pages have an unweighed file; rows with unweighed files are flagged as a floor. Totals are a ceiling where responsive image renditions are all counted. Only img src, stylesheet and script references in the HTML response are counted.",
     howToFix:
       "Read script bytes against total weight first; a template whose median script weight is a large share of the total is a build problem. Compare templates with the site row, and check the weighed count against the referenced count before quoting a figure.",
   },
   "performance.slow-response": {
     title: "Performance: Response time over 1500 ms",
     explanation:
-      "Pages that took more than 1500 ms to start responding, measured once from the crawler. Time to first byte delays everything the reader sees and reduces how much a search engine crawls per visit. A cold cache or a busy moment shows up the same as a slow route.",
+      "Indexable, self-canonical pages that took more than 1500 ms to start responding, measured once from the crawler. Time to first byte delays everything the reader sees and reduces how much a search engine crawls per visit. A cold cache or a busy moment shows up the same as a slow route.",
     howToFix:
       "Re-test to rule out a cold cache, then reduce server and database time for the route; serve cached or statically generated HTML where possible.",
   },
@@ -688,21 +688,21 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "structure.click-depth-distribution": {
     title: "Links: Click depth by template",
     explanation:
-      "For the site and for each template: the shortest link path from the home page to each indexable 200 page, as count, min, max, mean, quartiles and 95th percentile, plus how many pages no link path reaches. Internal links only; a link landing on a redirect leads no further.",
+      "For the site and for each template: the shortest link path from the home page to each indexable, self-canonical 200 page, as count, min, max, mean, quartiles and 95th percentile, plus how many pages no link path reaches. Internal links only; a link landing on a redirect leads no further.",
     howToFix:
       "Start with the unreachable pages and give each a home in a category, hub or related block, or remove it from the sitemap. Shorten the path to templates whose median depth is high with a hub or navigation entry.",
   },
   "structure.deep-page": {
     title: "Links: Crawl depth over 5",
     explanation:
-      "Indexable pages whose shortest internal link path from the home page is more than 5 links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
+      "Indexable, self-canonical pages whose shortest internal link path from the home page is more than 5 links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
     howToFix:
       "Link to the page from a category, landing page or navigation entry closer to the home page. If it is not worth linking from higher up, consolidate or remove it.",
   },
   "structure.depth-distribution": {
     title: "Crawl: Discovery depth by template",
     explanation:
-      "For the site and for each template: how deep into the crawl each indexable 200 page was first found, as count, min, max, mean, quartiles and 95th percentile. Sitemap URLs are discovered at depth 0, so this measures the crawl, not the site's link structure; read click depth for that.",
+      "For the site and for each template: how deep into the crawl each indexable, self-canonical 200 page was first found, as count, min, max, mean, quartiles and 95th percentile. Sitemap URLs are discovered at depth 0, so this measures the crawl, not the site's link structure; read click depth for that.",
     howToFix:
       "Compare with the click depth table. Discovery depth far shallower than click depth means the sitemap is doing the work internal linking should do.",
   },

@@ -36,10 +36,10 @@ export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">)
  * halves of one rule are one predicate rather than a function and a string that
  * happen to say the same thing.
  *
- * NOT the same predicate as `AUDITABLE` in src/rules/query/content.ts, which
- * adds `is_indexable = true`: the three content rules judge what a search
- * engine would index, and an hreflang annotation is worth reading on a page
- * that is fetched and 200 whether or not it carries a noindex.
+ * NOT the same predicate as `JUDGED` below, which adds `is_indexable = true`
+ * and the canonical exclusion: an hreflang annotation, a JavaScript redirect or
+ * a soft 404 is worth reading on a page that is fetched and 200 whether or not
+ * it carries a noindex or defers to another URL.
  */
 export const FETCHED_OK = (alias: string): SQL =>
   sql.raw(`${alias}.fetch_class = 'ok' and ${alias}.status_code = 200`);
@@ -156,6 +156,62 @@ export function resolveEffectiveCanonical(page: CanonicalDeclaration): Canonical
  */
 export function isCanonicalisedElsewhere(page: CanonicalDeclaration): boolean {
   return resolveEffectiveCanonical(page)?.pointsElsewhere === true;
+}
+
+/**
+ * The columns the judged cohort is decided from — a `Pick` rather than a whole
+ * `PageRecord`, for `isAuditable`'s reason: a rule holding a narrower
+ * projection of `pages` must ask this question through this function rather
+ * than restating it beside its own row shape.
+ */
+export type JudgedInput = CanonicalDeclaration &
+  Pick<PageRecord, "fetchClass" | "statusCode" | "isIndexable">;
+
+/**
+ * THE JUDGED PAGE: one the audit reports defects on AS ITS OWN PAGE — fetched
+ * OK with a 200, indexable, and not canonicalised elsewhere (Phase 22 §1).
+ *
+ * Composed from the two cohorts that were already here rather than restated:
+ * `isAuditable` (fetched OK, 200), the stored `is_indexable` and
+ * `isCanonicalisedElsewhere`. The owner's rule, reading the raelon.ca crawl:
+ * "if a page is indexable or not or it has other rules in place that doesn't
+ * make it an error" — a noindex page is out of the index and a canonicalised
+ * one has handed its signals to another URL, so a duplicate title, a thin body
+ * or an incomplete Product block on either belongs to the URL it defers to and
+ * not to it. `site.health`'s `urlsCanonicalised` and `urlsNoindex` are what
+ * stop that exclusion from being silent (hard rule 1).
+ *
+ * WHICH RULES DELIBERATELY DO NOT USE IT, because their subject is the very
+ * thing this predicate excludes or is true whatever the page's directives say:
+ *
+ *  - the canonical rules (`canonical.*`, `directive.canonical-noindex-conflict`)
+ *    — their subject IS the canonical;
+ *  - `indexability.noindex`, `indexability.meta-header-conflict` — their
+ *    subject is the directive;
+ *  - the response-code rules (`http.server-error*`, `crawl.blocked`,
+ *    `links.broken-internal`, `links.to-server-error`) — a 404 is a 404;
+ *  - `content.soft-404` — a 200 that is really a not-found is a fault whatever
+ *    its canonical or its robots meta says (fetched OK + 200, indexable or not);
+ *  - the sitemap-entry rules (`sitemap.non-200`, `.redirected`,
+ *    `.non-indexable`, `.uncrawled`, `robots.blocks-sitemap-urls`) — their
+ *    subject is the sitemap ENTRY, and a canonicalised entry is precisely what
+ *    `sitemap.non-indexable` now also reports;
+ *  - the resource rules (`resources.*`, `images.oversized`,
+ *    `images.legacy-format`) — their subject is the file;
+ *  - the render rules (`content.csr-dependent`, `nav.js-only`,
+ *    `filters.js-only`, `redirect.js`) — a canonicalised page rendered by the
+ *    sample is still evidence about the template;
+ *  - `url.normalisation-variants`, `url.tracking-params-internal`, `hreflang.*`
+ *    (canonical-aware since Phase 19) and `pagination.*`.
+ *
+ * `isIndexable` is READ here and not recomputed from the robots columns, so
+ * that this and `JUDGED` — which has only the column — decide the same pages.
+ * `indexabilityOf` is where the column is checked against the directives it was
+ * written from, and it throws when they disagree (hard rule 7), so a `true`
+ * column beside a noindex meta never reaches a rule as a silent judgement.
+ */
+export function isJudged(page: JudgedInput): boolean {
+  return isAuditable(page) && page.isIndexable === true && !isCanonicalisedElsewhere(page);
 }
 
 /**
@@ -283,6 +339,79 @@ export const CANONICALISED_ELSEWHERE = (alias: string): SQL => {
       ` and ${QUERY_SET(url)} <@ ${QUERY_SET(declared)})), false)`,
   );
 };
+
+/**
+ * A URL as a comparison key, in SQL: `normalizeUrl`'s settled form of it, as far
+ * as SQL can settle it — fragment stripped, scheme and authority lower-cased, a
+ * default port dropped, an empty path made `/`, and the query sorted so
+ * `?b=2&a=1` and `?a=1&b=2` are one key.
+ *
+ * THE TYPESCRIPT TWIN IS `targetKey` (src/rules/query/hreflang.ts), which runs
+ * `normalizeUrl` itself. This cannot — SQL has no URL parser — so it applies the
+ * same steps as string operations, exactly as `CANONICALISED_ELSEWHERE` does,
+ * and it is used where BOTH SIDES go through it: `pages.url` (already
+ * `normalizeUrl` output) against `hreflang.target_url` (a plain absolute href).
+ * Where the two spellings differ in something this cannot settle — a
+ * percent-encoding, a non-ASCII host, a dot segment — the keys differ, the two
+ * URLs do not match, and the effect is a cluster that fails to form: a duplicate
+ * group reported that might have been collapsed, never a group silenced. That
+ * is the safe direction (hard rule 1), and it is the same asymmetry every URL
+ * comparison in this file is built on.
+ */
+export const URL_MATCH_KEY = (value: string): SQL =>
+  sql.raw(
+    `(${ORIGIN_AND_PATH(value)} || '?' || coalesce(` +
+      `(select string_agg(kv, '&' order by kv) from unnest(${QUERY_SET(value)}) as kv), ''))`,
+  );
+
+/**
+ * `isJudged` for a rule that asks the question in SQL, over an aliased `pages`:
+ * fetched OK with a 200, indexable, and not canonicalised elsewhere.
+ *
+ * ONE SPELLING, and that is the point of it. Before Phase 22 this condition was
+ * written out in nine files — `content.ts`'s private `AUDITABLE`,
+ * `field-duplicates.ts`'s and `structured-data.ts`'s and `link-graph.ts`'s
+ * `INDEXABLE`, and five inline `fetch_class = 'ok' and status_code = 200`
+ * fragments — three of which had already been given the canonical exclusion and
+ * six of which had not, so whether a canonicalised page was judged depended on
+ * which rule was asking. The cohort and the list of rules that deliberately
+ * stay outside it are documented on `isJudged` above; this is the same
+ * predicate for the rules whose question is a GROUP rather than a row, and
+ * test/rules/helpers.test.ts pins the two against each other case by case.
+ *
+ * PARENTHESISED, unlike `FETCHED_OK`: it contains a `not`, and a caller
+ * interpolating it into anything but a chain of `and`s would otherwise bind it
+ * wrongly and silently.
+ *
+ * `is_indexable = true`, SPELLED AS A PLAIN EQUALITY AND NOT WRAPPED, and that
+ * is a measured requirement rather than a style. The three partial duplicate
+ * indexes are built `where fetch_class = 'ok' and status_code = 200 and
+ * is_indexable = true and <field> is not null` (`pages_dupe_title` and its two
+ * siblings, src/db/schema.ts), and Postgres uses a partial index only when it
+ * can PROVE the query's WHERE implies the index's — which it does for these
+ * three clauses as written here, and does NOT do for `coalesce(… , false)`
+ * around them or for `is_indexable IS TRUE`. Both of those were tried against
+ * the reference crawl and both lost `pages_dupe_title` to a whole-crawl bitmap
+ * scan: a slow query, never an error, which is the failure that hides. Keep the
+ * three clauses conjunctive and unwrapped; anything ADDED beside them (the
+ * canonical exclusion below) only restricts further and costs nothing.
+ *
+ * THE PRICE IS THREE-VALUED LOGIC, and the rule it imposes on callers: a NULL
+ * `is_indexable` — which no crawl this engine writes produces (see
+ * `indexabilityOf`), the column being nullable only for rows no writer here
+ * made — leaves this expression NULL rather than false. Every WHERE clause
+ * reads that as "no", which is the right answer and is how all ten callers use
+ * it. **Never negate it.** `and not JUDGED(p)` would drop a null-flagged row
+ * from both sides of a partition, and that is the page that vanishes without a
+ * number (hard rule 1). `site.health` counts the pages the cohort sets aside by
+ * spelling their conditions out for exactly this reason, and
+ * test/rules/helpers.test.ts pins the NULL case so the property cannot be
+ * forgotten.
+ */
+export const JUDGED = (alias: string): SQL =>
+  sql`(${FETCHED_OK(alias)} and ${sql.raw(
+    `${alias}.is_indexable = true`,
+  )} and not ${CANONICALISED_ELSEWHERE(alias)})`;
 
 /**
  * `none` as a whole directive: the list is comma- and space-delimited, so the

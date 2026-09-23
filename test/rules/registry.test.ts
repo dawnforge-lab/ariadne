@@ -503,7 +503,12 @@ describe("check universe", () => {
     // 0.16.0: Phase 21 — every metric rule declares its table (shaper + a label
     // over every column and summary scalar); labels are client-facing and the
     // catalog serves them, so what the ruleset says changed; no value moves.
-    expect(RULESET_VERSION).toBe("0.16.0");
+    //
+    // 0.17.0: Phase 22 — the judged cohort (indexable, self-canonical) on 26
+    // page-defect rules and the metrics; hreflang alternates count as one page
+    // in the duplicate rules; sitemap.non-indexable gains the canonicalised
+    // case; site.health gains the two set-aside counts. Verdicts move.
+    expect(RULESET_VERSION).toBe("0.17.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

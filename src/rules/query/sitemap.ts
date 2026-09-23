@@ -46,7 +46,14 @@ import { sql, type SQL } from "drizzle-orm";
 // into every rule run (hard rule 2 — rules read the database).
 import { isSameOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import {
+  CANONICALISED_ELSEWHERE,
+  FETCHED_OK,
+  hasNoindex,
+  JUDGED,
+  queryFinding,
+  type RuleIdentity,
+} from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -89,8 +96,26 @@ interface JoinRow extends Record<string, unknown> {
   status_code: number | null;
   fetch_class: string;
   redirect_url: string | null;
+  /**
+   * The two robots channels, which are the EVIDENCE on a
+   * `sitemap.non-indexable` row and also what its `reason` is decided from:
+   * `hasNoindex` over this pair is `indexabilityOf`'s own test, so the word in
+   * the evidence and the Indexability Status column beside it are one reading.
+   * Both are empty on an entry set aside for its canonical, which is why the
+   * reason exists at all.
+   */
   robots_meta: string | null;
   x_robots_tag: string | null;
+  /**
+   * The stored indexability stamp, read by `sitemap.non-indexable` for ONE
+   * case the two channels above cannot speak for: a 200 whose stamp is null.
+   * No crawl this engine writes produces one (`PageWriter` computes a boolean
+   * for every row), and `indexabilityOf` declines to assert over it — but the
+   * rule's cohort admits it, because `site.health` counts it among the pages
+   * set aside and the two must partition the same 200s. Such a row reads
+   * `noindex`, which is the word that census files it under.
+   */
+  is_indexable: boolean | null;
   /** The size of the whole matching set, before the cap. */
   total_matches: number;
 }
@@ -123,7 +148,7 @@ async function joinFindings(
   await assertNormalisedSitemap(db, crawlId, self.id);
   const result = await db.execute<JoinRow>(sql`
     select s.url, p.id as page_id, p.status_code, p.fetch_class, p.redirect_url,
-           p.robots_meta, p.x_robots_tag,
+           p.robots_meta, p.x_robots_tag, p.is_indexable,
            count(*) over ()::int as total_matches
     from sitemap_urls s
     join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
@@ -284,11 +309,50 @@ export const sitemapRules: QueryRule[] = [
       ),
   }),
 
-  // A listed URL that answers with a 200 page telling search engines to keep
-  // it out of the index. The 200 is half the condition and it is what keeps
-  // this rule disjoint from the two above: `is_indexable` is false for every
-  // 404, redirect and 5xx as well, so testing it alone would report a listed
-  // 404 under copy about a robots directive that page never had.
+  // A listed URL that answers with a 200 page a search engine is not going to
+  // keep: it carries a noindex, OR it canonicalises to another URL. The 200 is
+  // half the condition and it is what keeps this rule disjoint from the two
+  // above: `is_indexable` is false for every 404, redirect and 5xx as well, so
+  // testing it alone would report a listed 404 under copy about a robots
+  // directive that page never had.
+  //
+  // THE CANONICALISED CASE ARRIVED IN PHASE 22 §1, and it is the inverse of the
+  // same phase's other move. Every other rule STOPPED judging canonicalised
+  // pages, because the defect belongs to the URL they defer to — but a sitemap
+  // is a list of URLs the site is asking to have indexed, and a URL that has
+  // told search engines to index something else does not belong on it. The
+  // cohort this rule reports over is therefore the COMPLEMENT OF `JUDGED`
+  // WITHIN THE FETCHED-OK 200s: a 200 this crawl did not judge, because it
+  // noindexes itself or defers to another URL. Not "the opposite of JUDGED" —
+  // the 404s, redirects and 5xx are outside `JUDGED` too and belong to the two
+  // rules above.
+  //
+  // `is_indexable IS NOT TRUE` rather than `= false`, so that a NULL stamp
+  // lands here rather than in neither cohort. That is the predicate
+  // `site.health` counts its noindex set-aside with (src/rules/metric/
+  // health-metrics.ts), and the two must partition the same 200s: with `=
+  // false` a NULL-stamped 200 that canonicalises nowhere would be judged by
+  // nothing and set aside by nobody. No crawl this engine writes produces a
+  // NULL there — `PageWriter` computes a boolean for every row — and the row is
+  // covered rather than assumed away. Its `reason` reads `noindex`, because
+  // that is the word `site.health` files it under, and one vocabulary across
+  // the two is worth more than a second guess at a row nothing writes.
+  //
+  // `reason` is what a reader needs beside the two robots columns, which are
+  // both empty on a canonicalised entry: without it, half this rule's rows
+  // would carry copy about a directive and no evidence of one.
+  //
+  // NOINDEX TAKES PRECEDENCE when a page is both, which is `indexabilityOf`'s
+  // order (src/rules/helpers.ts, case 9 before case 10) and the order
+  // `site.health` sets the two aside in: a noindex is the page's own explicit
+  // instruction to stay out of the index, while a canonical is a hint about
+  // which URL to prefer, and search engines treat the explicit directive as
+  // the stronger signal — which is why the Indexability Status column beside
+  // this row already reads `Noindex`. The word is read from the predicate that
+  // column uses — `hasNoindex` over the two robots channels — so a row cannot
+  // say `canonicalised` where the column beside it says `Noindex`; the stamp
+  // is consulted only for the null case above, where that column asserts
+  // nothing at all.
   defineRule<QueryRule>({
     kind: "query",
     id: NON_INDEXABLE.id,
@@ -296,6 +360,7 @@ export const sitemapRules: QueryRule[] = [
     category: CATEGORY,
     severity: NON_INDEXABLE.severity,
     columns: [
+      { key: "reason", label: "Reason" },
       { key: "robotsMeta", label: "Meta Robots" },
       { key: "xRobotsTag", label: "X-Robots-Tag" },
     ],
@@ -306,9 +371,15 @@ export const sitemapRules: QueryRule[] = [
         NON_INDEXABLE,
         db,
         crawlId,
-        sql`p.fetch_class = 'ok' and p.status_code = 200 and p.is_indexable = false`,
+        sql`${FETCHED_OK("p")}
+            and (p.is_indexable is not true or ${CANONICALISED_ELSEWHERE("p")})`,
         (row) => ({
           url: row.url,
+          reason:
+            hasNoindex({ robotsMeta: row.robots_meta, xRobotsTag: row.x_robots_tag }) ||
+            row.is_indexable !== true
+              ? "noindex"
+              : "canonicalised",
           robotsMeta: row.robots_meta,
           xRobotsTag: row.x_robots_tag,
         }),
@@ -441,9 +512,10 @@ export const sitemapRules: QueryRule[] = [
         select p.id, p.url, count(*) over ()::int as total_matches
         from pages p
         where p.crawl_id = ${crawlId}
-          and p.fetch_class = 'ok'
-          and p.status_code = 200
-          and p.is_indexable
+          -- THE JUDGED COHORT (Phase 22 §1). A canonicalised page should NOT be
+          -- in the sitemap -- sitemap.non-indexable reports it when it is --
+          -- so reporting it as missing from one is the inverse of right.
+          and ${JUDGED("p")}
           and not exists (
             select 1 from sitemap_urls s
             where s.crawl_id = ${crawlId} and s.url_normalised = p.url
