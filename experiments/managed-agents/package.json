@@ -1,0 +1,26 @@
+{
+  "name": "ariadne-managed-agents-experiment",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Drive an Ariadne audit from a Claude Managed Agents session, with Ariadne's MCP tools relayed as custom tools.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "selftest": "tsx src/selftest.ts",
+    "setup": "tsx src/setup.ts",
+    "audit": "tsx src/run.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/driver.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.134.0",
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

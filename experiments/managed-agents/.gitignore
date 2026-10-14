@@ -1,0 +1,5 @@
+node_modules/
+# Resource IDs from `npm run setup` (per account; not source).
+state.json
+# Per-session event logs, engine logs and downloaded deliverables.
+runs/
