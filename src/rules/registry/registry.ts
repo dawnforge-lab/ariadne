@@ -294,7 +294,26 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 // that is really a not-found is a fault whatever its directives say), and the
 // two page-scoped structured-data rules acquired a page cohort where they had
 // none at all.
-export const RULESET_VERSION = "0.17.0";
+// ---------------------------------------------------------------------------
+// 0.18.0: Phase 23, proven behaviour (docs/research/2026-10-21-screaming-frog-
+// study.md; plan docs/superpowers/plans/2026-10-21-phase-23-proven-behaviour.md).
+// ONE BUMP FOR THE PHASE, stamped by T2; later tasks append their grounds here.
+//
+//  1. (T2, study D2) Four fetch outcomes that were classified rows and judged by
+//     NO rule now are findings — the silence hard rule 7 forbids. A crawl
+//     re-judged at 0.18.0 can GAIN findings, and no existing verdict moves:
+//     `http.no-response` (critical) / `http.no-response-transient` (warning)
+//     over `timeout` and `network_error` rows, split on the recheck exactly as
+//     the 5xx pair is; `page.html-too-large` (critical) over a 200 `too_large`
+//     row; and the `crawl.unreadable-encoding` marker over
+//     `unsupported_encoding`. The recheck pass now also re-asks the two
+//     no-response classes (`RECHECK_CLASSES`, one shared 500-row budget), and
+//     `crawl_status.recheck` gained a `noResponse` block. A pre-Phase-23 crawl
+//     re-judged here has no recheck on those rows, so its no-response findings
+//     say `recheck: not run` and stay critical — the honest reading.
+//     The HTML body cap rose from 1 MiB to 2 MiB (`MAX_BODY`), which changes
+//     what a NEW crawl reads but no stored verdict.
+export const RULESET_VERSION = "0.18.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

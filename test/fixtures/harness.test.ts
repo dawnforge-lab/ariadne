@@ -272,6 +272,17 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // `FetchClass` union — including the exclusivity guard that no 5xx page can
   // fire both rules or neither — in test/rules/status.test.ts.
   "http.server-error-transient",
+  // Phase 23's no-response pair, exempt on exactly the argument above, one
+  // fetch class along. `http.no-response-transient` fires on a URL that gave no
+  // response to the crawl and DID answer the recheck — a flapping route, whose
+  // answer depends on how many times it was asked, which this shared app rules
+  // out. `/authored23/no-response` is a STATELESS reset, so its recheck resets
+  // too and the confirmed half (`http.no-response`) is what this site proves.
+  // The transient half is covered on servers that can flap: the pass's
+  // "no-response rows" cases in test/crawl/recheck.test.ts, and the pair's
+  // exclusivity guard over the whole `FetchClass` union in
+  // test/rules/status.test.ts.
+  "http.no-response-transient",
   "h1.duplicate-skipped",
   "host.duplicate-host-200",
   "host.probe-skipped",
@@ -400,7 +411,7 @@ const FIXTURE_COLUMN_RULES: readonly string[] = [
  *
  * Deliberate, and the whole reason `render.coverage`'s row below can be pinned
  * as arithmetic rather than as an outcome. At 100% the budget is the crawl's
- * page count (84), which is comfortably more than the 71 pages suspicion and
+ * page count (87), which is comfortably more than the 71 pages suspicion and
  * the per-type sample between them nominate — so nothing is cut, `truncated` is
  * false, and the selected set is exactly the candidate set. A smaller percentage
  * would make the assertion a statement about which candidates happened to sort
@@ -684,7 +695,11 @@ describe("the fixture site end to end", () => {
     // (Task 6b) and then settles as a classified `blocked` page row and a
     // FAILED frontier row — the same disposition a spent timeout gets, because
     // in both cases the URL's own outbound links were never read.
-    expect(summary.frontier.failed).toBe(1);
+    //
+    // Two since Phase 23: `/authored23/no-response` spends its three attempts
+    // on reset connections and settles the same way. Its recheck writes beside
+    // the first observation and never reopens the frontier row.
+    expect(summary.frontier.failed).toBe(2);
 
     // Asserted from the `pages` rows, not from the findings: a fixture that
     // fires nothing (the control) still has to have been fetched, and a fixture
@@ -1335,8 +1350,9 @@ describe("the fixture site end to end", () => {
         // The caveat, qualifying the finding: one URL (`/status/blocked`, the
         // 403 fixture) was never read, so its outbound links are unknown and
         // "nothing links to this page" is a verdict with one page missing from
-        // the evidence. That is the caveat doing its job, not a defect.
-        caveat: { failedPages: 1 },
+        // the evidence. That is the caveat doing its job, not a defect. Two
+        // since Phase 23: `/authored23/no-response` was never read either.
+        caveat: { failedPages: 2 },
       });
     }
   });
@@ -1773,11 +1789,12 @@ describe("the fixture site end to end", () => {
     // `/redirect/trailing-slash`. The slash form `/redirect/trailing-slash/` is
     // the 200 at the end of that hop and is not one of them.
     //
-    // totalPages = 84, the whole crawl — the same count `render.coverage` above
+    // totalPages = 87, the whole crawl — the same count `render.coverage` above
     // starts from, and deliberately not the 73-page cohort: a redirect is a
-    // share of what was fetched.
+    // share of what was fetched. (84 until Phase 23 added the three
+    // fetch-outcome fixtures, which are pages rows like any other.)
     //
-    // ratioPct = 100 × 4 / 84 = 4.761… -> 4.8 at one decimal place.
+    // ratioPct = 100 × 4 / 87 = 4.597… -> 4.6 at one decimal place.
     //
     // redirectInlinks = 4, and the number being equal to `redirectPages` here is
     // a property of this site rather than of the metric: the hub links each of
@@ -1795,8 +1812,8 @@ describe("the fixture site end to end", () => {
     expect(siteMetric("redirect.volume")).toEqual({
       redirectPages: 4,
       redirectInlinks: 4,
-      totalPages: 84,
-      ratioPct: 4.8,
+      totalPages: 87,
+      ratioPct: 4.6,
       chains: 1,
       loops: 1,
     });
@@ -2027,17 +2044,23 @@ describe("the fixture site end to end", () => {
     );
 
     // And what the crawl itself said it did, on its way out: 63 parse-time
-    // types over 84 pages became 19, and 48 pages were retyped. P11-T3's two
+    // types over 84 pages became 19, and 48 pages were retyped (before Phase 23). P11-T3's two
     // pages arrive as two parse-time types and stay two: `/authored11/` is a
     // two-page directory, under MIN_COHORT, so there is nothing to collapse
     // them into and neither is counted as retyped — which is why this commit
     // moved the first two numbers by two and the third not at all. The summary
     // carries it because "the types were collapsed" and "there was nothing to
     // collapse" are different facts about a crawl and a null field is neither.
+    //
+    // Phase 23's three `/authored23/*` fixtures arrive as three parse-time
+    // types and leave as one `/authored23/:slug` family — three pages is
+    // MIN_COHORT exactly: typesBefore 63 -> 66, typesAfter 19 -> 20, and
+    // pagesRetyped 48 -> 51. None of the three is in the judged cohort, so the
+    // key set above does not move.
     expect(summary.pageTemplates).toEqual({
-      typesBefore: 63,
-      typesAfter: 19,
-      pagesRetyped: 48,
+      typesBefore: 66,
+      typesAfter: 20,
+      pagesRetyped: 51,
     });
   });
 
@@ -2047,8 +2070,8 @@ describe("the fixture site end to end", () => {
     // and the sitemap it publishes — rather than copied from what the SQL
     // produced, which would assert only that the query is deterministic.
     //
-    // THE COHORT, which two of the three are computed over. The crawl writes 84
-    // `pages` rows: the 83 fixtures plus the hub at `/`. Seventeen of them are
+    // THE COHORT, which two of the three are computed over. The crawl writes 87
+    // `pages` rows: the 86 fixtures plus the hub at `/`. Twenty of them are
     // not a JUDGED page and are therefore outside the cohort every metric
     // shares (fetched OK, 200, indexable, NOT canonicalised elsewhere —
     // `JUDGED`, src/rules/helpers.ts):
@@ -2062,6 +2085,9 @@ describe("the fixture site end to end", () => {
     //                and `site.health` use)
     //   errors  (3): /status/not-found 404, /status/server-error 503,
     //                /status/blocked 403
+    //   fetch outcomes (3), Phase 23: /authored23/no-response,
+    //                /authored23/too-large, /authored23/brotli — none
+    //                fetched OK
     //   redirects(4): /redirect/chain-1, /redirect/chain-2, /redirect/loop,
     //                /redirect/trailing-slash
     //   canonicalised elsewhere (6), PHASE 22 §1's exclusion:
@@ -2070,7 +2096,7 @@ describe("the fixture site end to end", () => {
     //                /authored3/canonical-to-404,
     //                /authored3/canonical-to-noindex, /authored3/paged-2
     //
-    // 84 - 17 = 67 cohort pages, where before Phase 22 it was 73: the six pages
+    // 87 - 20 = 67 cohort pages, where before Phase 22 it was 73: the six pages
     // in the canonicalised list are what moved, all of them indexable.
     // `/authored/canonical-noindex` was outside the cohort before Phase 22 and
     // is outside it now, under the same word both times. The seven `/render/*`
@@ -2284,18 +2310,21 @@ describe("the fixture site end to end", () => {
     // comes from the fixture collection and the selection rules
     // (src/crawl/render/select.ts), not from what the SQL produced.
     //
-    // pagesCrawled = 84. The 83 fixtures plus the hub — the same count the
-    // cohort derivation two tests above starts from.
+    // pagesCrawled = 87. The 86 fixtures plus the hub — the same count the
+    // cohort derivation two tests above starts from. (84 until Phase 23's three
+    // fetch-outcome fixtures, none of which is in the selection cohort below.)
     //
-    // selectionBudget = min(ceil(84 × 100/100), renderMaxPages 500) = 84.
+    // selectionBudget = min(ceil(87 × 100/100), renderMaxPages 500) = 87.
     // The percentage is taken over EVERY crawled URL, not over the renderable
-    // ones, so the denominator is 84 and not the 77-page cohort below.
+    // ones, so the denominator is 87 and not the 77-page cohort below.
     //
     // THE SELECTION COHORT is `fetch_class = 'ok'` AND `status_code = 200`, and
     // deliberately NOT `is_indexable` — a noindex page built by JavaScript is
-    // exactly the evidence this pass collects. So it is 84 minus the seven
+    // exactly the evidence this pass collects. So it is 87 minus the ten
     // pages that are neither: /status/not-found, /status/server-error,
-    // /status/blocked, and the four `/redirect/*` hops. 84 - 7 = 77.
+    // /status/blocked, the four `/redirect/*` hops, and Phase 23's three
+    // `/authored23/*` fetch outcomes (a no-response row, a `too_large` and an
+    // `unsupported_encoding` — the last two 200s, but not `ok`). 87 - 10 = 77.
     //
     // selectionSuspects = 65. Only ONE of the four suspicion triggers can fire
     // on this site: no fixture is a 50KB document with under 50 words, and no
@@ -2352,15 +2381,15 @@ describe("the fixture site end to end", () => {
     // go to templates instead (the Phase 7 gate crawl spent roughly half its
     // sample that way).
     //
-    // selectionSelected = min(84, 65 + 6) = 71, selectionTruncated = false:
-    // the budget is thirteen seats larger than the need, so nothing was cut.
+    // selectionSelected = min(87, 65 + 6) = 71, selectionTruncated = false:
+    // the budget is sixteen seats larger than the need, so nothing was cut.
     //
     // pagesRendered = 70 and renderFailures = 1, and the two are disjoint and
     // sum to the 71 selected — the single-pass invariant this crawl happens to
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
-      pagesCrawled: 84,
+      pagesCrawled: 87,
       // P12-T4. The end-to-end crawl really did render, so this is the `ran`
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 70` below is evidence enough on its own
@@ -2370,7 +2399,7 @@ describe("the fixture site end to end", () => {
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.
       selectionMode: "auto",
-      selectionBudget: 84,
+      selectionBudget: 87,
       selectionSuspects: 65,
       selectionSampled: 6,
       selectionSelected: 71,
@@ -2383,7 +2412,7 @@ describe("the fixture site end to end", () => {
     // the statement that actually promoted the frontier rows. Asserting both
     // is what proves `renderSelectionStats` describes the selection that
     // happened rather than one it would make today.
-    expect(render.selection.budget).toBe(84);
+    expect(render.selection.budget).toBe(87);
     expect(render.selection.suspects).toBe(65);
     expect(render.selection.sampled).toBe(6);
     expect(render.selection.truncated).toBe(false);
@@ -2488,10 +2517,11 @@ describe("the fixture site end to end", () => {
       urlsWithInfoOnly: infoOnly,
       urlsClean: clean,
       cleanRatio,
-      // 84 pages crawled, and the census is the judged ones: the rest are this
-      // fixture site's redirects, its 404s, its 5xx and its non-HTML, plus the
-      // two set-aside columns beside them.
-      pagesNotAuditable: 84 - judged - canonicalised - noindex,
+      // 87 pages crawled, and the census is the judged ones: the rest are this
+      // fixture site's redirects, its 404s, its 5xx, its non-HTML and (Phase 23)
+      // its three unread fetch outcomes, plus the two set-aside columns beside
+      // them.
+      pagesNotAuditable: 87 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
     });
@@ -2506,8 +2536,8 @@ describe("the fixture site end to end", () => {
         health["urlsCanonicalised"]! +
         health["urlsNoindex"]! +
         health["pagesNotAuditable"]!,
-    ).toBe(84);
-    expect(pageByPath.size).toBe(84);
+    ).toBe(87);
+    expect(pageByPath.size).toBe(87);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {
@@ -2882,10 +2912,11 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the fifteen `SKIP_HARNESS_CLAIMS` names and
+    // this one crawl, save the sixteen `SKIP_HARNESS_CLAIMS` names and
     // explains (the count was written as nine when the list held nine and has
-    // been carried stale through four phases of markers; P17 corrected it and
-    // P19-T2's near-duplicate marker makes fifteen). A
+    // been carried stale through four phases of markers; P17 corrected it,
+    // P19-T2's near-duplicate marker made fifteen and Phase 23's
+    // `http.no-response-transient` makes sixteen). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     expect(
@@ -3027,13 +3058,16 @@ describe("the 5xx re-verification pass ran on the fixture crawl", () => {
     if (pass === null) throw new Error("the crawl reported no recheck pass");
 
     // One 5xx on the whole site (`/status/server-error`), asked exactly once
-    // more. The partition is asserted as arithmetic rather than spot-checked:
+    // more — and since Phase 23 one no-response page (`/authored23/no-response`,
+    // a stateless reset), asked once more too and still not answering: two
+    // rows, both confirmed, each by its own first class's partition. The
+    // partition is asserted as arithmetic rather than spot-checked:
     // `confirmed + cleared + inconclusive == rechecked` is the claim
     // `RecheckPassSummary` makes, and a pass that lost a row would satisfy any
     // single equality above it.
     expect(pass).toEqual({
-      rechecked: 1,
-      confirmed: 1,
+      rechecked: 2,
+      confirmed: 2,
       cleared: 0,
       inconclusive: 0,
       capped: false,

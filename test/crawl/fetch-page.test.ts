@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { gzipSync } from "node:zlib";
-import { fetchPage, parseRetryAfter } from "../../src/crawl/fetch-page.js";
+import { fetchPage, MAX_BODY, parseRetryAfter } from "../../src/crawl/fetch-page.js";
+import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 import { closeFetchAgents, type DnsLookupFn } from "../../src/crawl/http.js";
 
 let server: Server;
@@ -26,10 +27,10 @@ beforeAll(async () => {
       res.setHeader("content-type", "text/html; charset=utf-8");
       res.setHeader("content-encoding", "gzip");
       res.end(gzipSync(Buffer.from(htmlOfSize(4096), "utf-8")));
-    } else if (req.url === "/gzip-exactly-1mib") {
+    } else if (req.url === "/gzip-exactly-2mib") {
       res.setHeader("content-type", "text/html");
       res.setHeader("content-encoding", "gzip");
-      res.end(gzipSync(Buffer.from(htmlOfSize(1024 * 1024), "utf-8")));
+      res.end(gzipSync(Buffer.from(htmlOfSize(2 * 1024 * 1024), "utf-8")));
     } else if (req.url === "/gzip-bomb") {
       // ~5KB on the wire, 8MiB decompressed: under any wire-byte cap, far over
       // the body cap. The whole point of capping the inflated side.
@@ -100,11 +101,19 @@ beforeAll(async () => {
       res.statusCode = 302;
       res.end();
     } else if (req.url === "/big") {
+      // 2.5 MiB: over the 2 MiB cap.
+      res.setHeader("content-type", "text/html");
+      res.end("x".repeat(2.5 * 1024 * 1024));
+    } else if (req.url === "/one-and-a-half-mib") {
+      // 1.5 MiB: over the OLD 1 MiB cap, under the 2 MiB one. A real page, so
+      // the analyser has something to read past the old cut-off.
+      res.setHeader("content-type", "text/html");
+      const shell = "<html><head><title>late title</title></head><body>";
+      const tail = '<a href="/after-the-old-cap">late link</a></body></html>';
+      res.end(shell + "x".repeat(1.5 * 1024 * 1024 - shell.length - tail.length) + tail);
+    } else if (req.url === "/exactly-2mib") {
       res.setHeader("content-type", "text/html");
       res.end("x".repeat(2 * 1024 * 1024));
-    } else if (req.url === "/exactly-1mib") {
-      res.setHeader("content-type", "text/html");
-      res.end("x".repeat(1024 * 1024));
     } else if (req.url === "/pdf") {
       res.setHeader("content-type", "application/pdf");
       res.end("%PDF-");
@@ -312,18 +321,37 @@ describe("fetchPage", () => {
     expect(r.disallowedReason).toContain("Location");
   });
 
-  it("caps the body at 1MiB", async () => {
-    const r = await fetchPage(`${base}/big`, OPTS);
-    expect(r.fetchClass).toBe("too_large");
-    expect(r.body).toBeNull();
-    expect(r.htmlBytes).toBe(1024 * 1024);
+  it("keeps the cap at 2MiB (Phase 23, study D2)", () => {
+    expect(MAX_BODY).toBe(2 * 1024 * 1024);
   });
 
-  it("accepts a body of exactly 1MiB", async () => {
-    const r = await fetchPage(`${base}/exactly-1mib`, OPTS);
+  it("caps the body at 2MiB: a 2.5MiB page is too_large, and htmlBytes holds the cap", async () => {
+    const r = await fetchPage(`${base}/big`, OPTS);
+    expect(r.fetchClass).toBe("too_large");
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toBeNull();
+    // The byte count at which reading stopped — the cap itself. This is what
+    // `pages.html_bytes` holds for a too_large row and what
+    // `page.html-too-large` reports.
+    expect(r.htmlBytes).toBe(2 * 1024 * 1024);
+  });
+
+  it("reads and analyses a 1.5MiB page that the old 1MiB cap refused", async () => {
+    const r = await fetchPage(`${base}/one-and-a-half-mib`, OPTS);
     expect(r.fetchClass).toBe("ok");
-    expect(r.htmlBytes).toBe(1024 * 1024);
-    expect(r.body?.length).toBe(1024 * 1024);
+    expect(r.htmlBytes).toBe(1.5 * 1024 * 1024);
+    expect(r.body).not.toBeNull();
+    const a = analyzePage(r.body!, `${base}/one-and-a-half-mib`);
+    expect(a.title).toBe("late title");
+    // A link past the old 1MiB cut-off is seen.
+    expect(a.links.map((l) => l.href)).toContain(`${base}/after-the-old-cap`);
+  });
+
+  it("accepts a body of exactly 2MiB", async () => {
+    const r = await fetchPage(`${base}/exactly-2mib`, OPTS);
+    expect(r.fetchClass).toBe("ok");
+    expect(r.htmlBytes).toBe(2 * 1024 * 1024);
+    expect(r.body?.length).toBe(2 * 1024 * 1024);
   });
 
   it("classifies non-html", async () => {
@@ -350,20 +378,20 @@ describe("fetchPage", () => {
       expect(r.htmlBytes).toBe(4096);
     });
 
-    it("accepts a gzipped body of exactly 1MiB decompressed", async () => {
-      const r = await fetchPage(`${base}/gzip-exactly-1mib`, OPTS);
+    it("accepts a gzipped body of exactly 2MiB decompressed", async () => {
+      const r = await fetchPage(`${base}/gzip-exactly-2mib`, OPTS);
       expect(r.fetchClass).toBe("ok");
-      expect(r.htmlBytes).toBe(1024 * 1024);
-      expect(r.body?.length).toBe(1024 * 1024);
+      expect(r.htmlBytes).toBe(2 * 1024 * 1024);
+      expect(r.body?.length).toBe(2 * 1024 * 1024);
     });
 
     it("refuses a body that expands past the cap — classified, not truncated", async () => {
       const r = await fetchPage(`${base}/gzip-bomb`, OPTS);
-      // The failure is classified. A page row holding the first MiB of a bomb
+      // The failure is classified. A page row holding the first 2MiB of a bomb
       // would read to every rule as a real 8MiB-of-nothing page.
       expect(r.fetchClass).toBe("too_large");
       expect(r.body).toBeNull();
-      expect(r.htmlBytes).toBe(1024 * 1024);
+      expect(r.htmlBytes).toBe(2 * 1024 * 1024);
       expect(r.statusCode).toBe(200);
     });
 

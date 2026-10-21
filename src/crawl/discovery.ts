@@ -2,7 +2,7 @@
  * Discovery: the two documents a crawl reads before it reads any page —
  * robots.txt and the sitemap tree it points at.
  *
- * These are not HTML pages, so `fetchPage` is the wrong primitive (its 1MiB
+ * These are not HTML pages, so `fetchPage` is the wrong primitive (its 2MiB
  * cap, HTML mime gate and challenge table are all about pages). They are
  * network I/O like any other, though, so they share fetch-page's discipline
  * through `./http`: the same connection pools, the same connect-time address

@@ -53,7 +53,7 @@ import { crawls, sitemapUrls } from "../db/schema.js";
 // loop only stamps it.
 import { RULESET_VERSION } from "../rules/registry/registry.js";
 import { discover, type DiscoveryResult, type DiscoveryTruncation, type RobotsInfo } from "./discovery.js";
-import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
+import { fetchPage, MAX_BODY, type FetchClass, type FetchResult } from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
 import {
   crawledRows,
@@ -367,7 +367,7 @@ export interface CrawlSummary {
    */
   resources: ResourcePassSummary | null;
   /**
-   * What the 5xx re-verification pass did, or null when it did not run — a
+   * What the re-verification pass (5xx and no-response rows) did, or null when it did not run — a
    * crawl that failed before it had pages, or one that was already cancelled
    * when the pass's turn came (an abort means stop asking servers for things,
    * and the pass is all asking). The `resources: null` precedent, with the same
@@ -457,10 +457,12 @@ const RETRYABLE: ReadonlySet<FetchClass> = new Set<FetchClass>([
  * Bytes reserved in the window's in-flight budget for one fetch. A body's real
  * size is unknown until it has been read, so the reservation is fetch-page's
  * own hard cap — the worst case, which is the only number that can bound peak
- * RSS before the fact. Real sizes are reported to the window afterwards, in
- * `BatchOutcome.htmlBytes`.
+ * RSS before the fact. IMPORTED, not restated: a 1MiB literal left here when
+ * the cap moved to 2MiB (Phase 23) would under-reserve every fetch by half and
+ * let in-flight bytes reach twice the budget. Real sizes are reported to the
+ * window afterwards, in `BatchOutcome.htmlBytes`.
  */
-const RESERVED_BYTES_PER_FETCH = 1024 * 1024;
+const RESERVED_BYTES_PER_FETCH = MAX_BODY;
 
 /** How long to wait before re-polling the byte budget. See admit(). */
 const ADMIT_POLL_MS = 25;
@@ -1470,7 +1472,8 @@ async function runToCompletion(
   // INSERTION 3c — the crawl takes a SECOND look at every page that answered
   // "server error", so a finding can say whether the error persists rather than
   // only that it happened once (P17; docs/superpowers/specs/2026-09-08-5xx-
-  // recheck-design.md). Lettered like 3b, for 3b's reason: the markers are
+  // recheck-design.md) — and, since Phase 23, at every page that gave no
+  // response at all (`timeout`, `network_error`; `RECHECK_CLASSES`). Lettered like 3b, for 3b's reason: the markers are
   // positional and INSERTION 4 is cited by name elsewhere.
   //
   // WHY HERE, between the known-404 probe and the resource pass:

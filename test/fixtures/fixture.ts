@@ -14,6 +14,7 @@ import { authoredFixtures } from "./pages/authored.js";
 import { authoredP3Fixtures } from "./pages/authored-p3.js";
 import { authoredP7Fixtures } from "./pages/authored-p7.js";
 import { authoredP11Fixtures } from "./pages/authored-p11.js";
+import { authoredP23Fixtures } from "./pages/authored-p23.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -132,6 +133,10 @@ export function allFixtures(): Fixture[] {
     // bytes. The first fixtures whose finding depends on a request the crawler
     // made after the page was parsed.
     ...authoredP11Fixtures,
+    // P23: three URLs the crawler cannot read as pages — no response, a body
+    // over the 2 MiB cap, and a coding it did not ask for. Fetch outcomes no
+    // rule judged before 0.18.0.
+    ...authoredP23Fixtures,
     controlFixture,
   ];
 }

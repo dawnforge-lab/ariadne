@@ -88,8 +88,8 @@ import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 // to (`RESOURCE_CAP_REASON`'s twin), and the set of second-observation classes
 // the rule pair calls "the site answered, and not with a 5xx". See
 // `recheckCoverage`.
-import { RECHECK_CAP_REASON } from "../crawl/recheck/recheck-server-errors.js";
-import { RECHECK_CLEARED } from "../rules/page/status.js";
+import { RECHECK_CAP_REASON, RECHECK_CLASSES } from "../crawl/recheck/recheck-server-errors.js";
+import { NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../rules/page/status.js";
 import {
   RENDER_HTML_DIR,
   RenderPassRefusal,
@@ -905,9 +905,37 @@ export interface CrawlDetail extends CrawlListItem {
      */
     pending: number;
     /**
-     * True when the pass's own budget (`MAX_RECHECKS`) stopped it short of at
-     * least one row — those rows carry `recheck_reason` with a null class and
-     * are counted in `pending`.
+     * THE SAME PASS OVER THE PAGES THAT GAVE NO RESPONSE AT ALL (Phase 23,
+     * ruleset 0.18.0): first fetch `timeout` or `network_error`. A separate
+     * block rather than more rows in the five numbers above, because the
+     * partition is different — for these rows a 5xx or a block on the second
+     * look is an ANSWER (`http.no-response-transient`), where for a 5xx row it
+     * is "confirmed" or "inconclusive" — and folding them in would change what
+     * every existing number above means to every consumer already reading it.
+     *
+     * `confirmed + answered + inconclusive + pending == pages`, always.
+     */
+    noResponse: {
+      /** Pages whose FIRST fetch gave no HTTP response. The denominator. */
+      pages: number;
+      /** Re-asked, and still no response (timeout or network error). */
+      confirmed: number;
+      /**
+       * Re-asked, and the site gave an HTTP answer — any answer, a 5xx or a
+       * block included (`NO_RESPONSE_ANSWERED`, imported from the rule). The
+       * rows `http.no-response-transient` claims.
+       */
+      answered: number;
+      /** Re-asked with no request made: our policy or robots.txt refused it. */
+      inconclusive: number;
+      /** Not re-asked at all, the cap's rows included. */
+      pending: number;
+    };
+    /**
+     * True when the pass's own budget (`MAX_RECHECKS`, ONE budget shared by the
+     * 5xx and the no-response rows) stopped it short of at least one row — those
+     * rows carry `recheck_reason` with a null class and are counted in the
+     * `pending` of their block.
      *
      * ONE LITERAL, READ AS A CONSTANT (`RECHECK_CAP_REASON`), on
      * `resources.capped`'s model: the reasons on this column are the fetch
@@ -1834,6 +1862,15 @@ function severityRank(severity: string): number {
 const SERVER_ERROR_CLASS: FetchClass = "server_error";
 
 /**
+ * The first-observation classes `crawl_status.recheck.noResponse` counts:
+ * `RECHECK_CLASSES` minus the 5xx, derived rather than listed so the block
+ * follows the pass's own work list.
+ */
+const NO_RESPONSE_CLASSES: readonly FetchClass[] = [...RECHECK_CLASSES].filter(
+  (c) => c !== SERVER_ERROR_CLASS,
+);
+
+/**
  * What `markCrawlFailed` writes into `crawls.failure_reason` (migration 0017).
  *
  * A CONSTANT, and exported, because it is the one failure sentence on this
@@ -2423,6 +2460,13 @@ export class ApiService {
    * start calling it a cap. Those rows are counted in `pending` either way,
    * because nothing about them was decided.
    *
+   * `noResponse` (Phase 23) is the same pass's partition of the `timeout` /
+   * `network_error` rows, counted in the SAME statement for the same snapshot
+   * reason, and against `NO_RESPONSE_ANSWERED` — the set
+   * `http.no-response-transient` fires on — so `answered` is by construction
+   * the number of pages that rule claims. The statement scans `RECHECK_CLASSES`
+   * (the pass's own work list), so `capped` covers the one shared budget.
+   *
    * `passAt` is NOT counted here — it is `crawls.recheck_pass_at`, handed in
    * from the crawl-row read so the stamp and the counts come off one crawl-row
    * snapshot rather than two.
@@ -2434,30 +2478,64 @@ export class ApiService {
     // The set as a list, so the template renders it as an IN tuple of bound
     // parameters — never as text spliced into the statement.
     const cleared = [...RECHECK_CLEARED];
+    const answered = [...NO_RESPONSE_ANSWERED];
+    const noResponse = [...NO_RESPONSE_CLASSES];
+    // The whole work list the pass walks, so the shared cap is read over it.
+    const rechecked = [...RECHECK_CLASSES];
     const rows = await this.db.execute<{
       server_errors: number;
       confirmed: number;
       cleared: number;
       inconclusive: number;
       pending: number;
+      nr_pages: number;
+      nr_confirmed: number;
+      nr_answered: number;
+      nr_inconclusive: number;
+      nr_pending: number;
       capped: boolean;
     }>(sql`
-      select count(*)::int as server_errors,
+      select count(*) filter (where p.fetch_class = ${SERVER_ERROR_CLASS})::int as server_errors,
              count(*) filter (
-               where p.recheck_fetch_class = ${SERVER_ERROR_CLASS}
+               where p.fetch_class = ${SERVER_ERROR_CLASS}
+                 and p.recheck_fetch_class = ${SERVER_ERROR_CLASS}
              )::int as confirmed,
-             count(*) filter (where p.recheck_fetch_class in ${cleared})::int as cleared,
              count(*) filter (
-               where p.recheck_fetch_class is not null
+               where p.fetch_class = ${SERVER_ERROR_CLASS}
+                 and p.recheck_fetch_class in ${cleared}
+             )::int as cleared,
+             count(*) filter (
+               where p.fetch_class = ${SERVER_ERROR_CLASS}
+                 and p.recheck_fetch_class is not null
                  and p.recheck_fetch_class <> ${SERVER_ERROR_CLASS}
                  and not (p.recheck_fetch_class in ${cleared})
              )::int as inconclusive,
-             count(*) filter (where p.recheck_fetch_class is null)::int as pending,
+             count(*) filter (
+               where p.fetch_class = ${SERVER_ERROR_CLASS} and p.recheck_fetch_class is null
+             )::int as pending,
+             count(*) filter (where p.fetch_class in ${noResponse})::int as nr_pages,
+             count(*) filter (
+               where p.fetch_class in ${noResponse}
+                 and p.recheck_fetch_class in ${noResponse}
+             )::int as nr_confirmed,
+             count(*) filter (
+               where p.fetch_class in ${noResponse}
+                 and p.recheck_fetch_class in ${answered}
+             )::int as nr_answered,
+             count(*) filter (
+               where p.fetch_class in ${noResponse}
+                 and p.recheck_fetch_class is not null
+                 and not (p.recheck_fetch_class in ${noResponse})
+                 and not (p.recheck_fetch_class in ${answered})
+             )::int as nr_inconclusive,
+             count(*) filter (
+               where p.fetch_class in ${noResponse} and p.recheck_fetch_class is null
+             )::int as nr_pending,
              count(*) filter (
                where p.recheck_fetch_class is null and p.recheck_reason = ${RECHECK_CAP_REASON}
              ) > 0 as capped
       from pages p
-      where p.crawl_id = ${crawlId} and p.fetch_class = ${SERVER_ERROR_CLASS}`);
+      where p.crawl_id = ${crawlId} and p.fetch_class in ${rechecked}`);
     const row = rows.rows[0];
     if (row === undefined) {
       // A bare aggregate over no rows still answers one row. No row at all
@@ -2471,6 +2549,13 @@ export class ApiService {
       cleared: row.cleared,
       inconclusive: row.inconclusive,
       pending: row.pending,
+      noResponse: {
+        pages: row.nr_pages,
+        confirmed: row.nr_confirmed,
+        answered: row.nr_answered,
+        inconclusive: row.nr_inconclusive,
+        pending: row.nr_pending,
+      },
       capped: row.capped,
       passAt: passAt === null ? null : passAt.toISOString(),
     };

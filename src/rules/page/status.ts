@@ -1,4 +1,4 @@
-import type { FetchClass } from "../../crawl/fetch-page.js";
+import { MAX_BODY, type FetchClass } from "../../crawl/fetch-page.js";
 import { finding, pageRule } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
 
@@ -63,10 +63,66 @@ function recheckCleared(p: PageRecord): boolean {
 }
 
 /**
+ * The first observations that are NO RESPONSE AT ALL: the request timed out,
+ * or the connection or DNS lookup failed. Since Phase 23 (study D2) the recheck
+ * pass re-asks these too, and the `http.no-response` pair judges them.
+ */
+const NO_RESPONSE: ReadonlySet<string> = new Set<FetchClass>(["timeout", "network_error"]);
+
+/**
+ * The recheck classes that mean THE SITE GAVE AN HTTP ANSWER to a URL that gave
+ * none the first time: `RECHECK_CLEARED` plus two more.
+ *
+ *   server_error   - a 5xx IS an answer. The server received the request and
+ *                    responded; the "no response" this rule pair is about is
+ *                    over. That the answer is an error is a fact about the
+ *                    page's health, which the Recheck Status Code column carries
+ *                    and the copy reads out ("a 4xx, 5xx or redirect means it
+ *                    is broken in a different way"). Calling it "still no
+ *                    response" would claim a silence the second look disproved.
+ *   blocked        - a 401/403/429 or a challenge is an answer too, about our
+ *                    crawler rather than the page. Under the 5xx pair it clears
+ *                    nothing, because the question there is "is the 5xx still
+ *                    there" and a block cannot say. Here the question is "does
+ *                    the URL respond at all", and a block says yes.
+ *
+ * Excluded, deliberately: `timeout` and `network_error` (still no response —
+ * confirmed) and `disallowed` (no second request was made, so nothing was
+ * learned — inconclusive).
+ *
+ * EXPORTED for the same reason `RECHECK_CLEARED` is: `crawl_status.recheck`
+ * counts the rows `http.no-response-transient` claims off this set, never off a
+ * copy of it.
+ */
+export const NO_RESPONSE_ANSWERED: ReadonlySet<string> = new Set<string>([
+  ...RECHECK_CLEARED,
+  ...new Set<FetchClass>(["server_error", "blocked"]),
+]);
+
+/**
+ * Did the second look at a no-response URL get an HTTP answer? The single
+ * predicate the no-response pair is defined against, as `recheckCleared` is for
+ * the 5xx pair — so the two are mutually exclusive and jointly exhaustive over
+ * `fetch_class in ('timeout','network_error')`, asserted over the whole
+ * `FETCH_CLASSES` union plus null in test/rules/status.test.ts.
+ */
+function recheckAnswered(p: PageRecord): boolean {
+  return p.recheckFetchClass !== null && NO_RESPONSE_ANSWERED.has(p.recheckFetchClass);
+}
+
+/** The recheck classes that CONFIRM a 5xx: the same failure again. */
+const CONFIRMS_SERVER_ERROR: ReadonlySet<string> = new Set<FetchClass>(["server_error"]);
+
+/**
  * Which of the four things the recheck columns can be saying, as the word the
  * evidence carries. Four values rather than a boolean because "we never asked",
  * "a budget stopped us", "it is still broken" and "we asked and learned
  * nothing" are four different sentences a report writer needs.
+ *
+ * `confirming` is the set of recheck classes that mean "the same failure
+ * again": `server_error` for a 5xx page, `timeout`/`network_error` for a page
+ * that gave no response. Anything else a rule calls this for (its non-cleared
+ * half) is `inconclusive`.
  *
  * `capped` keys on `recheck_reason` being NON-NULL, not on its text. The null
  * contract (src/db/schema.ts) is what says the pass decided not to ask and gave
@@ -74,9 +130,12 @@ function recheckCleared(p: PageRecord): boolean {
  * later must land here as "the pass decided not to ask" without editing this
  * function or the evidence's vocabulary.
  */
-function recheckState(p: PageRecord): "not run" | "capped" | "confirmed" | "inconclusive" {
+function recheckState(
+  p: PageRecord,
+  confirming: ReadonlySet<string>,
+): "not run" | "capped" | "confirmed" | "inconclusive" {
   if (p.recheckFetchClass === null) return p.recheckReason === null ? "not run" : "capped";
-  return p.recheckFetchClass === "server_error" ? "confirmed" : "inconclusive";
+  return confirming.has(p.recheckFetchClass) ? "confirmed" : "inconclusive";
 }
 
 /**
@@ -117,7 +176,7 @@ export const statusRules: PageRule[] = [
         ? [
             finding(self, p, {
               statusCode: p.statusCode,
-              recheck: recheckState(p),
+              recheck: recheckState(p, CONFIRMS_SERVER_ERROR),
               recheckStatusCode: p.recheckStatusCode,
               recheckFetchClass: p.recheckFetchClass,
               recheckReason: p.recheckReason,
@@ -180,5 +239,123 @@ export const statusRules: PageRule[] = [
         ? [finding(self, p, { statusCode: p.statusCode, fetchReason: p.fetchReason })]
         : [],
     "The site answered the crawler with a bot challenge or access denial, so this page was not read; allowlist the crawler's user agent and crawl again.",
+  ),
+
+  // ---- Phase 23 (docs/research/2026-10-21-screaming-frog-study.md, D2) ----
+  // Before 0.18.0 a timeout, a network error, an over-cap body and an
+  // undecodable body were classified rows that NO rule spoke for: a URL that
+  // never answered looked, in the report, exactly like a URL that was fine.
+  // That is the silence hard rule 7 forbids. Like every rule in this file they
+  // have no cohort guard: the failed fetch IS the subject.
+
+  // No HTTP response at all, and the recheck did not get one either: still
+  // timing out or failing to connect (confirmed), no second request because the
+  // policy or robots refused it (inconclusive), the shared recheck budget ran
+  // out (capped), or no pass reached the row (not run). `critical` on the
+  // `http.server-error` argument: a URL that does not answer cannot be crawled
+  // or indexed, and NOT a marker, because CHECK-12 was answered — the URL gave
+  // no response, which is a fact about the site. The loop already retried these
+  // up to MAX_ATTEMPTS before writing the row, so by the time this fires the URL
+  // has failed several times a minute or more apart.
+  pageRule(
+    "http.no-response",
+    ["CHECK-12"],
+    CATEGORY,
+    "critical",
+    [
+      { key: "recheck", label: "Recheck" },
+      { key: "recheckStatusCode", label: "Recheck Status Code" },
+      { key: "recheckFetchClass", label: "Recheck Fetch Class" },
+      { key: "recheckReason", label: "Recheck Reason" },
+      { key: "gapSeconds", label: "Recheck Gap (s)" },
+    ],
+    (p, self) =>
+      p.fetchClass !== null && NO_RESPONSE.has(p.fetchClass) && !recheckAnswered(p)
+        ? [
+            finding(self, p, {
+              statusCode: p.statusCode,
+              recheck: recheckState(p, NO_RESPONSE),
+              recheckStatusCode: p.recheckStatusCode,
+              recheckFetchClass: p.recheckFetchClass,
+              recheckReason: p.recheckReason,
+              gapSeconds: gapSeconds(p),
+            }),
+          ]
+        : [],
+  ),
+
+  // The same URL after the second request got an HTTP answer — ANY answer,
+  // including a 5xx or a block (see `NO_RESPONSE_ANSWERED` for why those two
+  // count here and not under the 5xx pair). `warning`, on the 5xx-transient
+  // argument: the URL responds now, and an intermittent failure to respond
+  // still costs crawl rate. The Recheck Status Code column says what the answer
+  // was, so a 200 (recovered) and a 404 (broken differently) read apart.
+  pageRule(
+    "http.no-response-transient",
+    ["CHECK-12"],
+    CATEGORY,
+    "warning",
+    [
+      { key: "recheckStatusCode", label: "Recheck Status Code" },
+      { key: "recheckFetchClass", label: "Recheck Fetch Class" },
+      { key: "gapSeconds", label: "Recheck Gap (s)" },
+    ],
+    (p, self) =>
+      p.fetchClass !== null && NO_RESPONSE.has(p.fetchClass) && recheckAnswered(p)
+        ? [
+            finding(self, p, {
+              statusCode: p.statusCode,
+              recheckStatusCode: p.recheckStatusCode,
+              recheckFetchClass: p.recheckFetchClass,
+              gapSeconds: gapSeconds(p),
+            }),
+          ]
+        : [],
+  ),
+
+  // A 200 HTML page whose decompressed body went past `MAX_BODY`. The crawler
+  // stopped reading and kept no body, so nothing on the page was checked —
+  // which is a defect of the PAGE, not a hole in our evidence: search engines
+  // also stop reading HTML at a size limit, and the copy says so. `critical`
+  // per the Phase 23 plan's table, and not a marker for that reason.
+  //
+  // `statusCode === 200` because `too_large` is only ever reached from `ok`
+  // (fetch-page.ts: a non-2xx status wins over the size), and a 2xx that is not
+  // 200 is not the case the copy describes. `htmlBytes` is `pages.html_bytes`,
+  // which for this class holds the byte count at which reading stopped — the
+  // cap itself (`readCapped` sets it to `maxBytes` on truncation); `limit` is
+  // the cap read off the constant, so the two columns say the same number and
+  // a reader sees why.
+  pageRule(
+    "page.html-too-large",
+    ["CHECK-12"],
+    CATEGORY,
+    "critical",
+    [
+      { key: "htmlBytes", label: "Size (bytes)" },
+      { key: "limit", label: "Limit (bytes)" },
+    ],
+    (p, self) =>
+      p.fetchClass === "too_large" && p.statusCode === 200
+        ? [finding(self, p, { statusCode: p.statusCode, htmlBytes: p.htmlBytes, limit: MAX_BODY })]
+        : [],
+  ),
+
+  // A NOT MEASURED marker, on `crawl.blocked`'s argument: the server answered in
+  // a content-encoding we never asked for and cannot decode, so every check on
+  // the page is unanswered on this crawl rather than answered clean. `info`, as
+  // the marker contract requires. `fetchReason` is the fetch layer's sentence
+  // naming the coding (`unsupported content-encoding (br)`).
+  pageRule(
+    "crawl.unreadable-encoding",
+    ["CHECK-05"],
+    CATEGORY,
+    "info",
+    [{ key: "fetchReason", label: "Encoding" }],
+    (p, self) =>
+      p.fetchClass === "unsupported_encoding"
+        ? [finding(self, p, { statusCode: p.statusCode, fetchReason: p.fetchReason })]
+        : [],
+    "The page was sent in a compression format the crawler did not request and cannot decode, so nothing on it was checked; crawl it again once the server honours the requested encoding.",
   ),
 ];

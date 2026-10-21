@@ -115,7 +115,12 @@ describe("buildRegistry", () => {
     // says the main-content fingerprint was not there to measure.
     expect(ids).toContain("links.to-server-error");
     expect(ids).toContain("content.near-duplicate-skipped");
-    expect(ids.length).toBe(100);
+    // Phase 23 Task 2: the four fetch outcomes that used to meet no rule.
+    expect(ids).toContain("http.no-response");
+    expect(ids).toContain("http.no-response-transient");
+    expect(ids).toContain("page.html-too-large");
+    expect(ids).toContain("crawl.unreadable-encoding");
+    expect(ids.length).toBe(104);
   });
 
   it("registers every kind the runner drives", () => {

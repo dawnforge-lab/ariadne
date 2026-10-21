@@ -199,7 +199,7 @@ export class CrawlWindow {
    * A request is always admitted when nothing else is in flight, even if it
    * alone exceeds the budget: refusing it would deadlock the loop with no
    * outstanding release to unblock it. In practice fetch-page caps bodies at
-   * 1MiB against a 64MiB default budget, so that branch is a guard, not a
+   * 2MiB (`MAX_BODY`) against a 64MiB default budget, so that branch is a guard, not a
    * routine path.
    */
   admitBytes(bytes: number): boolean {

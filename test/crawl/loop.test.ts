@@ -780,7 +780,9 @@ describe("runCrawl", () => {
   it("retries a transient failure and records the attempt that settles it", async () => {
     flappyHits = 0;
     alwaysBrokenHits = 0;
-    const summary = await crawl(config({ siteUrl: broken }));
+    // The test-only recheck gap: since Phase 23 the `network_error` row below is
+    // re-asked at crawl end, and the real 60 s floor would be waited for.
+    const summary = await crawl(config({ siteUrl: broken, recheckMinGapMs: 50 }));
 
     const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
     const byUrl = new Map(rows.map((r) => [r.url, r]));
@@ -790,9 +792,12 @@ describe("runCrawl", () => {
     expect(flappyHits).toBe(3);
     expect(byUrl.get(`${broken}/flappy`)?.fetchClass).toBe("ok");
 
-    // Reset for ever: three attempts, then one row carrying the failure.
-    expect(alwaysBrokenHits).toBe(3);
+    // Reset for ever: three attempts, then one row carrying the failure — and
+    // since Phase 23 ONE more request, the recheck pass's, whose answer sits
+    // beside the first observation rather than replacing it.
+    expect(alwaysBrokenHits).toBe(4);
     expect(byUrl.get(`${broken}/always-broken`)?.fetchClass).toBe("network_error");
+    expect(byUrl.get(`${broken}/always-broken`)?.recheckFetchClass).toBe("network_error");
 
     // The frontier agrees: the retried URL is done, the exhausted one failed.
     expect(summary.frontier.done).toBe(2); // / and /flappy

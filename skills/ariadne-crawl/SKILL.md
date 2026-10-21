@@ -224,7 +224,9 @@ target is not something this skill can crawl.
  resourceRefsCappedPages,
  resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
              capped},
- recheck: {serverErrors, confirmed, cleared, inconclusive, pending, capped, passAt}}
+ recheck: {serverErrors, confirmed, cleared, inconclusive, pending,
+          noResponse: {pages, confirmed, answered, inconclusive, pending},
+          capped, passAt}}
 ```
 
 What the fields mean when you are waiting:

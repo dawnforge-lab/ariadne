@@ -36,6 +36,7 @@ import {
   MAX_RECHECKS,
   MIN_RECHECK_GAP_MS,
   RECHECK_CAP_REASON,
+  RECHECK_CLASSES,
   type RecheckPassSummary,
 } from "../../src/crawl/recheck/recheck-server-errors.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -110,6 +111,12 @@ beforeAll(async () => {
       res.end(html("<p>fine</p>"));
       return;
     }
+    // Never answers: the second look at a no-response page that is still not
+    // responding. The socket is held open until the request's own deadline
+    // gives up, and `afterAll` destroys whatever is left.
+    if (path === "/hang") {
+      return;
+    }
     res.writeHead(404, { "content-type": "text/html" });
     res.end(html("<p>gone</p>"));
   });
@@ -123,6 +130,7 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
   await closeDb(db);
+  server.closeAllConnections();
   await new Promise<void>((ok) => server.close(() => ok()));
   await closeFetchAgents();
 });
@@ -163,7 +171,8 @@ async function seedCrawl(): Promise<string> {
 interface SeedPage {
   path: string;
   fetchClass: string;
-  statusCode: number;
+  /** Null on a no-response row: there was no HTTP answer to have a status. */
+  statusCode: number | null;
   /** Seconds ago the first observation was taken. Controls the walk's order. */
   agoSec?: number;
 }
@@ -321,6 +330,86 @@ describe("the second observation", () => {
     // ONE more request for the 5xx row, and one only: no retries (a timeout on
     // the recheck is a `timeout` row, not a second attempt).
     expect(hitCount("/flaky")).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 23 (study D2): the pass also re-asks the pages that gave no response
+// ---------------------------------------------------------------------------
+
+describe("no-response rows", () => {
+  it("selects exactly server_error, timeout and network_error", () => {
+    expect([...RECHECK_CLASSES].sort()).toEqual(["network_error", "server_error", "timeout"]);
+  });
+
+  it("re-asks timeout and network_error rows, and leaves client_error alone", async () => {
+    const crawlId = await seedCrawl();
+    await seedPages(crawlId, [
+      { path: "/flaky", fetchClass: "timeout", statusCode: null, agoSec: 4 },
+      { path: "/broken", fetchClass: "network_error", statusCode: null, agoSec: 3 },
+      { path: "/hang", fetchClass: "timeout", statusCode: null, agoSec: 2 },
+      { path: "/gone", fetchClass: "client_error", statusCode: 404, agoSec: 1 },
+    ]);
+
+    const summary = await runPass(crawlId, { timeoutMs: 300 });
+
+    // The first observation is never rewritten, whatever the second said.
+    const flaky = await rowFor(crawlId, "/flaky");
+    expect(flaky.fetchClass).toBe("timeout");
+    expect(flaky.statusCode).toBeNull();
+    expect(flaky.recheckFetchClass).toBe("ok");
+    expect(flaky.recheckStatusCode).toBe(200);
+    expect(flaky.recheckAt).not.toBeNull();
+
+    // A 5xx on the second look is still an HTTP ANSWER: the page responded.
+    const broken = await rowFor(crawlId, "/broken");
+    expect(broken.fetchClass).toBe("network_error");
+    expect(broken.recheckFetchClass).toBe("server_error");
+    expect(broken.recheckStatusCode).toBe(500);
+
+    // Still no response: the same failure, confirmed.
+    const hang = await rowFor(crawlId, "/hang");
+    expect(hang.fetchClass).toBe("timeout");
+    expect(hang.recheckFetchClass).toBe("timeout");
+    expect(hang.recheckAt).not.toBeNull();
+
+    // A 404 is an answer. Nobody asked again.
+    const gone = await rowFor(crawlId, "/gone");
+    expect(gone.recheckFetchClass).toBeNull();
+    expect(gone.recheckReason).toBeNull();
+    expect(gone.recheckAt).toBeNull();
+    expect(hitCount("/gone")).toBe(0);
+
+    // The partition is by the FIRST class: for a no-response row `confirmed`
+    // is "still no response" and `cleared` is "an HTTP answer came back".
+    expect(summary).toMatchObject({
+      rechecked: 3,
+      confirmed: 1,
+      cleared: 2,
+      inconclusive: 0,
+      capped: false,
+      aborted: false,
+    });
+  });
+
+  it("shares ONE cap across the three classes, and stamps the rows past it", async () => {
+    const crawlId = await seedCrawl();
+    await seedPages(crawlId, [
+      { path: "/broken-a", fetchClass: "server_error", statusCode: 500, agoSec: 3 },
+      { path: "/flaky", fetchClass: "timeout", statusCode: null, agoSec: 2 },
+      { path: "/broken-b", fetchClass: "network_error", statusCode: null, agoSec: 1 },
+    ]);
+
+    const summary = await runPass(crawlId, { maxRechecks: 1 });
+
+    expect(summary).toMatchObject({ rechecked: 1, capped: true, aborted: false });
+    expect((await rowFor(crawlId, "/broken-a")).recheckFetchClass).toBe("server_error");
+    for (const path of ["/flaky", "/broken-b"]) {
+      const row = await rowFor(crawlId, path);
+      expect(row.recheckFetchClass, path).toBeNull();
+      expect(row.recheckReason, path).toBe(RECHECK_CAP_REASON);
+      expect(hitCount(path), path).toBe(0);
+    }
   });
 });
 

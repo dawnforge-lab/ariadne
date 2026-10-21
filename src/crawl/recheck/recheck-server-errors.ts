@@ -24,14 +24,28 @@
  * and no simhash — silently exempt from most of the ruleset while looking
  * healthy (hard rules 1 and 7). Two observations are two facts.
  *
+ * ## Phase 23: the pages that gave no response at all
+ *
+ * Since ruleset 0.18.0 (docs/research/2026-10-21-screaming-frog-study.md, D2)
+ * the pass also re-asks `timeout` and `network_error` rows — `RECHECK_CLASSES`.
+ * Before it, those rows were retried by the loop (up to `MAX_ATTEMPTS`, within
+ * seconds of each other) and then judged by no rule at all. The loop's retries
+ * answer "was it a dropped packet"; this pass answers what it answers for a
+ * 5xx — "is it still like that a minute later" — and the `http.no-response`
+ * pair reads the answer. The file and export names keep "server errors"
+ * because they are on the Talos surface; the vocabulary is now wider than the
+ * name.
+ *
  * ## The budget: one request per already-broken page
  *
- * That is the whole reason this pass can be unconditional. Nothing but
- * `server_error` rows is re-fetched — not 4xx (an answer), not `timeout` or
- * `network_error` (the loop already retried those up to `MAX_ATTEMPTS`), not
- * `blocked` (owner-ruled a fact about our CRAWLER, not the site), not
- * `non_html` / `too_large` / `unsupported_encoding` (deterministic non-answers).
- * On a healthy site the work list is empty and the pass costs one SQL query.
+ * That is the whole reason this pass can be unconditional. Nothing but the
+ * `RECHECK_CLASSES` rows is re-fetched — not 4xx (an answer), not `blocked`
+ * (owner-ruled a fact about our CRAWLER, not the site), not `non_html` /
+ * `too_large` / `unsupported_encoding` (deterministic non-answers). On a healthy
+ * site the work list is empty and the pass costs one SQL query. The cap below
+ * is ONE budget shared across the three classes, walked in one oldest-first
+ * order, so a site that times out everywhere cannot buy itself 500 more
+ * requests per class.
  *
  * ## The three constants, and why they are these numbers
  *
@@ -100,13 +114,15 @@
  *    produce a half-analyzed page whose links go nowhere, and writing it would
  *    be the first-observation rewrite this pass exists not to do.
  *  - **No retries.** ONE more fetch. A timeout on the recheck is a `timeout`
- *    row and the finding stays `critical`.
+ *    row and the finding stays `critical`. A no-response row's second look can
+ *    itself hang for the whole `timeoutMs`; the walk is sequential, so the
+ *    worst case adds `timeoutMs` per row, bounded by the cap.
  *  - **RAM is O(1)** (hard rule 6): the work list is read in cursor-paged
  *    batches and nothing here holds a set of URLs.
  *
  * ## Resumable the frontier's way
  *
- * The work list IS `fetch_class = 'server_error' and recheck_fetch_class is
+ * The work list IS `fetch_class in RECHECK_CLASSES and recheck_fetch_class is
  * null`, so an interrupted pass re-run asks exactly the rows the first one never
  * reached and re-asks nothing it settled. An abort leaves BOTH nulls — nothing
  * was decided — and returns `aborted: true` so the crawl loop closes its row
@@ -120,7 +136,7 @@
  * missing because the writer broke". It propagates, `execute` closes the crawl
  * `failed`, and the operator finds out (hard rule 7).
  */
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { pages } from "../../db/schema.js";
 import type { RobotsInfo } from "../discovery.js";
@@ -133,6 +149,18 @@ import { isUrlAllowed } from "../url-policy.js";
  * for why 60 seconds and why the wait is paid once rather than per row.
  */
 export const MIN_RECHECK_GAP_MS = 60_000;
+
+/**
+ * The first-observation classes this pass re-asks: a 5xx, and the two ways a
+ * URL gives no HTTP response at all (Phase 23). EXPORTED because the surfaces
+ * that count the pass's coverage (`crawl_status.recheck`, src/api/service.ts)
+ * must count over the same rows the pass walks, never over a copy of the list.
+ */
+export const RECHECK_CLASSES: ReadonlySet<FetchClass> = new Set<FetchClass>([
+  "server_error",
+  "timeout",
+  "network_error",
+]);
 
 /**
  * Rows one pass will settle — those it re-asks about AND those it refuses
@@ -208,21 +236,30 @@ export interface RecheckPassOpts {
  * settled, and whether a budget or a caller stopped it.
  *
  * `confirmed + cleared + inconclusive == rechecked`, always: the three are an
- * exhaustive partition of the `FetchClass` union (see `outcomeOf`, which the
- * compiler holds to it).
+ * exhaustive partition of the `FetchClass` union for each first class (see
+ * `outcomeOf`, which the compiler holds to it). The partition is the one the
+ * rule pair for that first class draws, so these counts and the findings agree.
  */
 export interface RecheckPassSummary {
   /** Rows this pass settled: wrote a `recheck_fetch_class` onto. */
   rechecked: number;
-  /** Of those, still 5xx. */
+  /**
+   * Of those, the same failure again: still 5xx for a 5xx row, still no
+   * response (timeout or network error) for a no-response row.
+   */
   confirmed: number;
-  /** Of those, the site answered and not with a 5xx. */
+  /**
+   * Of those, the transient case: for a 5xx row the site answered and not with
+   * a 5xx (`RECHECK_CLEARED`); for a no-response row the site gave any HTTP
+   * answer at all, a 5xx or a block included (`NO_RESPONSE_ANSWERED`).
+   */
   cleared: number;
   /**
-   * Of those, no answer ABOUT THE PAGE: a timeout, a network error, a block
-   * (which is an answer about our crawler) or a refusal by our own policy or by
-   * robots (which is no request at all). Settled rows every one — the pass
-   * decided something and said what — but nothing that clears a 5xx.
+   * Of those, nothing learned. For a 5xx row: a timeout, a network error, a
+   * block (an answer about our crawler) or a refusal by our own policy or by
+   * robots (no request at all). For a no-response row: only the refusal.
+   * Settled rows every one — the pass decided something and said what — but
+   * nothing that confirms or clears.
    */
   inconclusive: number;
   /** `MAX_RECHECKS` stopped the walk; the rows past it say `recheck-cap`. */
@@ -242,17 +279,43 @@ export interface RecheckPassSummary {
 interface WorkItem {
   id: string;
   url: string;
+  /**
+   * The FIRST observation's class, one of `RECHECK_CLASSES`. Read because what
+   * a second observation means depends on what the first one was.
+   */
+  fetchClass: string;
   /** When the FIRST observation was taken. Null on a pre-0016 row. */
   fetchedAt: Date | null;
 }
 
 /**
- * Which of the three things a second observation can mean, off the class alone.
+ * Which of the three things a second observation can mean, given the first.
  *
- * The switch is exhaustive over `FetchClass` BY THE COMPILER — the declared
- * return type has no `undefined` in it, so a member added to `FETCH_CLASSES` and
- * not named here is a typecheck failure rather than a row that silently counts
- * as one of the three. Every exclusion from `cleared` is deliberate:
+ * For a 5xx row, `serverErrorOutcome`. For a no-response row (`timeout`,
+ * `network_error`), `noResponseOutcome`. Each switch is exhaustive over
+ * `FetchClass` BY THE COMPILER — the declared return type has no `undefined` in
+ * it, so a member added to `FETCH_CLASSES` and not named in both is a typecheck
+ * failure rather than a row that silently counts as one of the three.
+ *
+ * The rule layer holds its own copy of these partitions (`RECHECK_CLEARED` and
+ * `NO_RESPONSE_ANSWERED` in src/rules/page/status.ts). The two are the same
+ * partitions, and the exhaustiveness guard in each is what keeps them one.
+ */
+function outcomeOf(
+  firstClass: string,
+  recheckClass: FetchClass,
+): "confirmed" | "cleared" | "inconclusive" {
+  if (firstClass === "server_error") return serverErrorOutcome(recheckClass);
+  if (firstClass === "timeout" || firstClass === "network_error") {
+    return noResponseOutcome(recheckClass);
+  }
+  // The work list selects RECHECK_CLASSES only; a row outside them here means
+  // the query and this function disagree, which is our defect (hard rule 7).
+  throw new Error(`recheckServerErrors: no outcome partition for first class '${firstClass}'`);
+}
+
+/**
+ * A second look at a 5xx. Every exclusion from `cleared` is deliberate:
  *
  *   server_error   confirmed, not cleared.
  *   blocked        an answer about our CRAWLER, not about the page (owner
@@ -260,13 +323,8 @@ interface WorkItem {
  *   timeout        no answer at all.
  *   network_error  no answer at all.
  *   disallowed     no request was made (url-policy or robots, on recheck).
- *
- * The rule layer holds its own copy of this partition (`RECHECK_CLEARED` in
- * src/rules/page/status.ts) because a rule reads a `PageRecord` and must not
- * import the crawler. The two are the same partition, and the exhaustiveness
- * guard in each is what keeps them one.
  */
-function outcomeOf(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
+function serverErrorOutcome(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
   switch (fetchClass) {
     case "server_error":
       return "confirmed";
@@ -280,6 +338,35 @@ function outcomeOf(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclus
     case "blocked":
     case "timeout":
     case "network_error":
+    case "disallowed":
+      return "inconclusive";
+  }
+}
+
+/**
+ * A second look at a URL that gave no response. The question is "does it
+ * respond at all now", so ANY HTTP answer is `cleared` — a 5xx and a block
+ * included, because each is the server responding (see `NO_RESPONSE_ANSWERED`
+ * in src/rules/page/status.ts for the argument).
+ *
+ *   timeout        still no response: confirmed.
+ *   network_error  still no response: confirmed.
+ *   disallowed     no request was made (url-policy or robots, on recheck).
+ */
+function noResponseOutcome(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
+  switch (fetchClass) {
+    case "timeout":
+    case "network_error":
+      return "confirmed";
+    case "ok":
+    case "redirect":
+    case "client_error":
+    case "non_html":
+    case "too_large":
+    case "unsupported_encoding":
+    case "server_error":
+    case "blocked":
+      return "cleared";
     case "disallowed":
       return "inconclusive";
   }
@@ -318,8 +405,8 @@ function hostOf(url: string): string | null {
 }
 
 /**
- * Ask every unrechecked `server_error` page of `crawlId` one more time, and
- * record what it said.
+ * Ask every unrechecked `RECHECK_CLASSES` page of `crawlId` (a 5xx, a timeout,
+ * a network error) one more time, and record what it said.
  *
  * Never throws for a site's behaviour — a second 500, a timeout, a WAF that has
  * started refusing us are all classified rows (hard rule 7). It DOES throw for
@@ -365,6 +452,9 @@ export async function recheckServerErrors(
     statusCode: number | null,
     reason: string | null,
   ): Promise<void> => {
+    // Before the write, so a row outside every partition throws without
+    // having been settled.
+    const outcome = outcomeOf(item.fetchClass, fetchClass);
     await db
       .update(pages)
       .set({
@@ -377,7 +467,7 @@ export async function recheckServerErrors(
       })
       .where(eq(pages.id, item.id));
     rechecked += 1;
-    switch (outcomeOf(fetchClass)) {
+    switch (outcome) {
       case "confirmed":
         confirmed += 1;
         break;
@@ -493,7 +583,9 @@ export async function recheckServerErrors(
       .where(
         and(
           eq(pages.crawlId, crawlId),
-          eq(pages.fetchClass, "server_error"),
+          // ONE budget across the three classes, so the stamp covers all of
+          // them: a no-response row past the cap is as capped as a 5xx one.
+          inArray(pages.fetchClass, [...RECHECK_CLASSES]),
           isNull(pages.recheckFetchClass),
           isNull(pages.recheckReason),
         ),
@@ -504,8 +596,9 @@ export async function recheckServerErrors(
 }
 
 /**
- * The next slice of the work list: this crawl's server errors that no pass has
- * settled, OLDEST FIRST.
+ * The next slice of the work list: this crawl's `RECHECK_CLASSES` rows (5xx,
+ * timeout, network error) that no pass has settled, OLDEST FIRST, all three
+ * classes in one order — the order the shared cap is spent in.
  *
  * The order is not cosmetic — it is what makes the 60-second wait cost 60
  * seconds instead of 60 per row (see the module header). `fetched_at` is
@@ -526,11 +619,16 @@ async function workList(
   cursor: WorkItem | null,
   limit: number,
 ): Promise<WorkItem[]> {
-  const result = await db.execute<{ id: string; url: string; fetched_at: string | null }>(
-    sql`select id, url, fetched_at
+  const result = await db.execute<{
+    id: string;
+    url: string;
+    fetch_class: string;
+    fetched_at: string | null;
+  }>(
+    sql`select id, url, fetch_class, fetched_at
           from pages
          where crawl_id = ${crawlId}
-           and fetch_class = 'server_error'
+           and fetch_class in ${[...RECHECK_CLASSES]}
            and recheck_fetch_class is null
            ${
              cursor === null
@@ -545,6 +643,7 @@ async function workList(
   return result.rows.map((row) => ({
     id: row.id,
     url: row.url,
+    fetchClass: row.fetch_class,
     // A STRING, not a Date: `db.execute` hands back postgres's own text form
     // (`2026-09-08 14:14:37.642+00`) rather than the Date the query builder's
     // column mappers produce (src/api/csv.ts says the same of its own views).

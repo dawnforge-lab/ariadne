@@ -37,7 +37,10 @@ import { RECHECK_CAP_REASON } from "../../src/crawl/recheck/recheck-server-error
 // The cleared-class set, imported from the rule that judges it: this test
 // asserts the surface counts the SAME set, which a copy of the six names here
 // could not do.
-import { RECHECK_CLEARED } from "../../src/rules/page/status.js";
+import { NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../../src/rules/page/status.js";
+
+/** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
+const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
 import { buildRegistry } from "../../src/rules/index.js";
 
 /**
@@ -2140,6 +2143,8 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
       // one its budget stopped short of. The second is why `capped` is true,
       // and it is counted here all the same.
       pending: 2,
+      // No page on this crawl gave no response; the Phase 23 block is zeroes.
+      noResponse: NO_RESPONSE_ZERO,
       capped: true,
       passAt: "2026-09-08T10:00:00.000Z",
     });
@@ -2186,6 +2191,65 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     await db.update(pages).set({ recheckFetchClass: "ok" }).where(eq(pages.id, page));
   });
 
+  // PHASE 23: the pages that gave no response at all, partitioned by the
+  // no-response rule pair's own set and kept OUT of the five 5xx numbers.
+  // Seeded onto crawlE (no 5xx) and removed again, so the fixtures above keep
+  // their counts.
+  it("partitions the no-response pages in their own block, by the rule's own set", async () => {
+    const FIRST = new Date("2026-09-08T09:57:00.000Z");
+    const AGAIN = new Date("2026-09-08T09:59:00.000Z");
+    const rows: { slug: string; fetchClass: string; recheck: string | null; reason?: string }[] = [
+      { slug: "nr-still", fetchClass: "timeout", recheck: "network_error" },
+      { slug: "nr-back", fetchClass: "network_error", recheck: "ok" },
+      { slug: "nr-5xx", fetchClass: "timeout", recheck: "server_error" },
+      { slug: "nr-refused", fetchClass: "timeout", recheck: "disallowed" },
+      { slug: "nr-unasked", fetchClass: "network_error", recheck: null },
+      { slug: "nr-capped", fetchClass: "timeout", recheck: null, reason: RECHECK_CAP_REASON },
+    ];
+    const ids = rows.map((r) => `${crawlE}_${r.slug}`);
+    await db.insert(pages).values(
+      rows.map((r, i) => ({
+        id: ids[i]!,
+        crawlId: crawlE,
+        url: `${SITE}/${r.slug}`,
+        urlNormalised: `${SITE}/${r.slug}`,
+        fetchClass: r.fetchClass,
+        statusCode: null,
+        depth: 1,
+        discoveredVia: "link",
+        fetchedAt: FIRST,
+        recheckFetchClass: r.recheck,
+        recheckReason: r.reason ?? null,
+        recheckAt: r.recheck === null ? null : AGAIN,
+      })),
+    );
+    try {
+      const rc = (await call(`/crawls/${crawlE}`)).body["recheck"] as Record<string, unknown>;
+      // The 5xx block does not move: none of these rows is a server error.
+      expect(rc["serverErrors"]).toBe(0);
+      expect(rc["pending"]).toBe(0);
+      // A 5xx on the second look is an ANSWER here, not a confirmation.
+      expect(rc["noResponse"]).toEqual({
+        pages: 6, confirmed: 1, answered: 2, inconclusive: 1, pending: 2,
+      });
+      // The shared budget's stamp on a no-response row raises the one flag.
+      expect(rc["capped"]).toBe(true);
+
+      // `answered` is NO_RESPONSE_ANSWERED, class by class.
+      for (const cls of NO_RESPONSE_ANSWERED) {
+        await db.update(pages).set({ recheckFetchClass: cls })
+          .where(eq(pages.id, `${crawlE}_nr-refused`));
+        const nr = ((await call(`/crawls/${crawlE}`)).body["recheck"] as Record<string, unknown>)[
+          "noResponse"
+        ] as Record<string, number>;
+        expect(nr["answered"], `${cls} is in NO_RESPONSE_ANSWERED but is not counted`).toBe(3);
+        expect(nr["inconclusive"], `${cls} was counted twice`).toBe(0);
+      }
+    } finally {
+      for (const id of ids) await db.delete(pages).where(eq(pages.id, id));
+    }
+  });
+
   // THE TWO ZEROES, WHICH SAY DIFFERENT THINGS. `serverErrors: 0` is a
   // measurement — this crawl saw no server errors — and `passAt: null` is
   // "nobody looked". A consumer that reads them as one number reports a crawl
@@ -2196,7 +2260,7 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     const never = await call(`/crawls/${crawlE}`);
     expect(never.body["recheck"]).toEqual({
       serverErrors: 0, confirmed: 0, cleared: 0, inconclusive: 0,
-      pending: 0, capped: false, passAt: null,
+      pending: 0, noResponse: NO_RESPONSE_ZERO, capped: false, passAt: null,
     });
 
     // The same crawl after a pass completed over it: identical counts, and now
@@ -2207,7 +2271,7 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
       const after = await call(`/crawls/${crawlE}`);
       expect(after.body["recheck"]).toEqual({
         serverErrors: 0, confirmed: 0, cleared: 0, inconclusive: 0,
-        pending: 0, capped: false, passAt: stamped.toISOString(),
+        pending: 0, noResponse: NO_RESPONSE_ZERO, capped: false, passAt: stamped.toISOString(),
       });
     } finally {
       await db.update(crawls).set({ recheckPassAt: null }).where(eq(crawls.id, crawlE));
@@ -2219,7 +2283,7 @@ describe("GET /crawls/:id — the fields an audit checks itself against", () => 
     const unrechecked = await call(`/crawls/${crawlA}`);
     expect(unrechecked.body["recheck"]).toEqual({
       serverErrors: 1, confirmed: 0, cleared: 0, inconclusive: 0,
-      pending: 1, capped: false, passAt: null,
+      pending: 1, noResponse: NO_RESPONSE_ZERO, capped: false, passAt: null,
     });
   });
 

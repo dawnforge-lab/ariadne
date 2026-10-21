@@ -329,7 +329,7 @@ answered from, and its verdict is the confidence interval around all of them.
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
   `resources.all-unknown`, `resources.partial-unknown`,
   `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
-  and the per-page `crawl.blocked`. Each one
+  and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
   resource markers are siblings and never more than one appears: `resources.not-recorded` means
   the crawl holds NO resource records, `resources.not-fetched` means it recorded them
@@ -752,6 +752,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   Report it against the user agent the crawl actually used (`robots_get`'s
   `userAgent`) — the claim is "this UA was blocked on these URLs", never "all bots are
   blocked".
+
+  `crawl.unreadable-encoding` (info) is the same kind of NOT MEASURED marker under
+  this check: the server answered in a content-encoding the crawler did not request
+  and cannot decode (the evidence's `fetchReason` names it), so nothing on those
+  pages was checked.
 
   **The census beside the finding**: `pages_query` with `fetchClass: "blocked"` lists
   every blocked page with its `statusCode` and a `fetchReason` naming how many

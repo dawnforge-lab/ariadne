@@ -175,6 +175,27 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Allowlist the crawler's user agent (AriadneBot unless overridden) in the WAF or bot-protection settings and crawl again. If the block is deliberate and applies to search engines too, confirm those URLs are meant to be unreachable.",
   },
+  "crawl.unreadable-encoding": {
+    title: "Crawl: Page served in an unreadable compression format (not audited)",
+    explanation:
+      "URLs that answered with a content-encoding the crawler did not ask for and cannot decode, so nothing on them was checked; the Encoding column names the format. Servers should only use a compression format the client lists in its Accept-Encoding header.",
+    howToFix:
+      "Check the server or CDN compression settings for these URLs and serve them gzip-compressed or uncompressed when gzip is the only format requested.",
+  },
+  "http.no-response": {
+    title: "Response codes: Internal no response",
+    explanation:
+      "Internal URLs that gave no HTTP response at all: the request timed out, or the connection or DNS lookup failed. Each was requested a second time at the end of the crawl; the row says whether the failure was confirmed, the second request got an answer that is not about the page (inconclusive), the re-check budget ran out (capped) or no second look was made (not run). A URL that does not answer cannot be crawled or indexed, and links to it lead visitors nowhere.",
+    howToFix:
+      "Request the URL from outside your network and check the server, firewall and DNS for it. If it should not exist, remove the internal links pointing to it.",
+  },
+  "http.no-response-transient": {
+    title: "Response codes: Intermittent no response (answered on re-check)",
+    explanation:
+      "Internal URLs that gave no HTTP response during the crawl and did answer when requested again at the end of it; the Recheck Status Code column shows the second answer. A 200 there means the URL recovered; a 4xx, 5xx or redirect means it is broken in a different way. Timeouts and dropped connections make search engines slow their crawling of the whole site.",
+    howToFix:
+      "Read the server, proxy and CDN logs around the crawl time; the row gives the seconds between the two requests. Check for overloaded workers, rate limits and connection limits that fail under load.",
+  },
   "http.server-error": {
     title: "Response codes: Internal server error (5xx)",
     explanation:
@@ -188,6 +209,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "URLs that returned a 5xx during the crawl and a non-5xx response when requested again at the end of it; the Recheck Status Code column shows what the second request got. A 200 there means the page recovered; a 4xx or a redirect means the URL is broken in a different way, not fixed. An intermittent 5xx makes search engines back off the whole site and shows visitors an error page during the outage.",
     howToFix:
       "Read the application, proxy, load balancer and CDN logs around the crawl time; the row gives the seconds between the two requests. Restarts, deploys, exhausted connection pools and upstream timeouts are the usual causes.",
+  },
+  "page.html-too-large": {
+    title: "Response codes: HTML over 2 MB",
+    explanation:
+      "Internal HTML pages that returned 200 with a body larger than 2 MB once decompressed. Nothing on them was checked, because the crawler stops reading at 2 MB; search engines also stop reading HTML at a size limit, so content and links past it may never be indexed.",
+    howToFix:
+      "Cut the HTML below 2 MB: move inline scripts, styles and embedded JSON into external files, paginate long lists and remove repeated markup.",
   },
   "render.coverage": {
     title: "Rendering: Browser render coverage",

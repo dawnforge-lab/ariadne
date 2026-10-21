@@ -508,7 +508,13 @@ describe("check universe", () => {
     // page-defect rules and the metrics; hreflang alternates count as one page
     // in the duplicate rules; sitemap.non-indexable gains the canonicalised
     // case; site.health gains the two set-aside counts. Verdicts move.
-    expect(RULESET_VERSION).toBe("0.17.0");
+    //
+    // 0.18.0: Phase 23 — timeout, network_error, too_large and
+    // unsupported_encoding rows, judged by no rule before, gain four rules
+    // (http.no-response pair, page.html-too-large, the crawl.unreadable-encoding
+    // marker); the recheck pass also re-asks the no-response rows; registry.ts
+    // carries the grounds.
+    expect(RULESET_VERSION).toBe("0.18.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -567,20 +573,24 @@ describe("check annotations", () => {
  * (warning) and two markers. The critical list was UNCHANGED by the 0.13.0 bump —
  * `http.server-error` is still critical and still fires on every 5xx the
  * recheck did not clear — which is the whole of the "no old crawl silently
- * loses an Error" claim, read off the severity shape. Two classes are fixed by
+ * loses an Error" claim, read off the severity shape. Phase 23 (0.18.0) adds
+ * four, all over fetch outcomes no rule judged before: `http.no-response` and
+ * `page.html-too-large` (critical, both added to the list below),
+ * `http.no-response-transient` (warning) and the `crawl.unreadable-encoding`
+ * marker (info). Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
- * the twelve markers, which report a hole in OUR evidence and never a fault of
+ * the thirteen markers, which report a hole in OUR evidence and never a fault of
  * the site.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 28 critical, 25 warning and 47 info rules", () => {
+  it("holds 30 critical, 26 warning and 48 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 28, warning: 25, info: 47 });
-    expect(all).toHaveLength(100);
+    expect(counts).toEqual({ critical: 30, warning: 26, info: 48 });
+    expect(all).toHaveLength(104);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -599,12 +609,14 @@ describe("severity shape of the ruleset", () => {
       "hreflang.invalid-code",
       "hreflang.missing-return-link",
       "hreflang.non-indexable-target",
+      "http.no-response",
       "http.server-error",
       "indexability.meta-header-conflict",
       "links.broken-internal",
       "links.to-server-error",
       "mobile.viewport-missing",
       "nav.js-only",
+      "page.html-too-large",
       "redirect.js",
       "redirect.loop",
       "robots.blocks-sitemap-urls",

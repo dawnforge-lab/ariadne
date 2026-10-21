@@ -378,6 +378,16 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "refused on the second look — and it stays critical. pending is NOT ASKED " +
         "AT ALL. confirmed + cleared + inconclusive + pending = serverErrors, " +
         "always.\n\n" +
+        "recheck.noResponse is the same pass over the pages whose FIRST fetch got " +
+        "no HTTP response at all (a timeout, or a connection or DNS failure): " +
+        "pages is the denominator, confirmed is still no response on the second " +
+        "look (http.no-response stays critical), answered is ANY HTTP answer — a " +
+        "5xx or a block included, because the URL responded — which turns the " +
+        "finding into the http.no-response-transient warning, inconclusive is a " +
+        "second look our policy or robots.txt refused, and pending is not asked " +
+        "at all. confirmed + answered + inconclusive + pending = pages, always. " +
+        "These rows are NOT in serverErrors or its four counts. The 500-row " +
+        "budget is shared by both blocks, and capped is one flag over both.\n\n" +
         "passAt is when a pass COMPLETED over this crawl, and null means no " +
         "complete pass is on record — never run, running right now, or stopped " +
         "part-way. READ IT WITH pending, because zeroes have two meanings here: " +

@@ -14,7 +14,7 @@
  * Fetch semantics are OpenSEO's decisions (site-audit-workflow-helpers.ts
  * @ c469a48ae90ab58413b198fe3d1ac1aa90a9b070), read as reference and
  * re-implemented over undici rather than lifted: manual redirects so every hop
- * is its own row, a 1MiB body cap (spent on decompressed bytes — see
+ * is its own row, a 2MiB body cap (spent on decompressed bytes — see
  * readCappedDecoded), and the bot-challenge classification table. Divergences
  * from that table are marked "CHANGED" at their line.
  *
@@ -45,9 +45,21 @@ import {
  * The body cap, spent on **decompressed** bytes (see readCappedDecoded). It
  * bounds the wire read too, because the reader stops inflating and destroys
  * the socket the moment the cap is reached — a compressed body can therefore
- * never cost more than ~1MiB of transfer either.
+ * never cost more than ~2MiB of transfer either.
+ *
+ * 2MiB since Phase 23 (docs/research/2026-10-21-screaming-frog-study.md, D2):
+ * 1MiB refused real pages that search engines read, and a refused page was
+ * then silent. Over the cap a 200 HTML page is `too_large` and
+ * `page.html-too-large` reports it; `htmlBytes` on that row is this number,
+ * the byte count at which reading stopped.
+ *
+ * EXPORTED because three readers need the SAME number: the crawl loop reserves
+ * it per fetch in `CrawlWindow`'s byte budget (the worst case is the only number
+ * that bounds peak RSS before the fact — 64MiB / 2MiB = at most 32 bodies in
+ * flight, whatever the concurrency), and `page.html-too-large` reports it as the
+ * limit the page went over.
  */
-const MAX_BODY = 1024 * 1024;
+export const MAX_BODY = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 /** How much of the body the challenge markers are searched in. */
@@ -132,7 +144,7 @@ export interface FetchResult {
    * see resolveRedirectTarget.
    */
   redirectUrl: string | null;
-  /** Decoded html text, ≤ 1MiB; null for every class except `ok`. */
+  /** Decoded html text, ≤ MAX_BODY (2MiB); null for every class except `ok`. */
   body: string | null;
   /**
    * How many bytes of body we hold, capped at MAX_BODY. For the classes that
@@ -524,7 +536,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     }
     if (fetchClass === "ok" && !isHtml) fetchClass = "non_html";
     // Decompressed, not wire: a 40KB body that inflates past MAX_BODY is a
-    // `too_large` row with no body, never a page row holding the first MiB of
+    // `too_large` row with no body, never a page row holding the first 2MiB of
     // it. Precedence is unchanged — the status still wins, so a 500 with a
     // 5MB body is `server_error`.
     if (fetchClass === "ok" && read.truncated) fetchClass = "too_large";

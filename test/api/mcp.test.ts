@@ -58,6 +58,9 @@ import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 
+/** `crawl_status.recheck.noResponse` on a crawl with no no-response pages. */
+const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
+
 const SEEDED_SITE = "http://mcp-query.example";
 
 function databaseUrl(): string {
@@ -1069,7 +1072,7 @@ describe("crawl_status / crawl_list", () => {
     const seeded = await ok("crawl_status", { crawlId: seededCrawlId });
     expect(seeded["recheck"]).toEqual({
       serverErrors: 1, confirmed: 0, cleared: 0, inconclusive: 0,
-      pending: 1, capped: false, passAt: null,
+      pending: 1, noResponse: NO_RESPONSE_ZERO, capped: false, passAt: null,
     });
 
     // The same row after a pass settled it with a non-5xx ANSWER from the site:
@@ -1084,7 +1087,7 @@ describe("crawl_status / crawl_list", () => {
       const after = await ok("crawl_status", { crawlId: seededCrawlId });
       expect(after["recheck"]).toEqual({
         serverErrors: 1, confirmed: 0, cleared: 1, inconclusive: 0,
-        pending: 0, capped: false, passAt: settled.toISOString(),
+        pending: 0, noResponse: NO_RESPONSE_ZERO, capped: false, passAt: settled.toISOString(),
       });
       // The FIRST observation is untouched by the second, on the listing an
       // agent would check the count against.
@@ -1138,7 +1141,8 @@ describe("crawl_status / crawl_list", () => {
     // left undocumented fails here, which a hand-written list could not do.
     const answered = (await ok("crawl_status", { crawlId: seededCrawlId }))["recheck"];
     expect(Object.keys(answered as Record<string, unknown>).sort()).toEqual([
-      "capped", "cleared", "confirmed", "inconclusive", "passAt", "pending", "serverErrors",
+      "capped", "cleared", "confirmed", "inconclusive", "noResponse", "passAt", "pending",
+      "serverErrors",
     ]);
     for (const field of Object.keys(answered as Record<string, unknown>)) {
       expect(text, `crawl_status does not name recheck.${field}`).toContain(field);
@@ -1146,6 +1150,11 @@ describe("crawl_status / crawl_list", () => {
     // The arithmetic a consumer may rely on, and the two sentences a bare zero
     // would hide — the same three claims the resource block above pins.
     expect(text).toContain("confirmed + cleared + inconclusive + pending = serverErrors");
+    // And the Phase 23 block's own fields and arithmetic.
+    for (const field of ["pages", "answered"]) {
+      expect(text, `crawl_status does not name recheck.noResponse.${field}`).toContain(field);
+    }
+    expect(text).toContain("confirmed + answered + inconclusive + pending = pages");
     expect(text).toContain("NOT ASKED");
     expect(text).toContain("nobody looked");
     // And the rule the counts pay for: a cleared page is the one case that

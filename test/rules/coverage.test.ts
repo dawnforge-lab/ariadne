@@ -291,10 +291,22 @@ describe("checklist coverage", () => {
   // The claimed-check arithmetic does not move, and that is the test of whether
   // this was a MOVE: same ids, same CHECK-40 + CHECK-13, same severities, same
   // category.
-  it("pins the ruleset split the gate doc reports: 100 rules = 25 page + 61 query + 14 metric", () => {
+  //
+  // Phase 23 Task 2 adds FOUR page rules over fetch outcomes no rule judged
+  // before: `http.no-response` and `http.no-response-transient` (the
+  // timeout/network-error pair, split on the recheck as the 5xx pair is),
+  // `page.html-too-large` and the `crawl.unreadable-encoding` marker.
+  //
+  //   page    25 + 4 = 29
+  //   total   100 + 4 = 104
+  //
+  // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE: three claim CHECK-12 (already
+  // claimed by `http.server-error`) and the marker claims CHECK-05 (already
+  // claimed by `crawl.blocked`).
+  it("pins the ruleset split the gate doc reports: 104 rules = 29 page + 61 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(100);
-    expect(registry.byKind("page")).toHaveLength(25);
+    expect(registry.all()).toHaveLength(104);
+    expect(registry.byKind("page")).toHaveLength(29);
     expect(registry.byKind("query")).toHaveLength(61);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
