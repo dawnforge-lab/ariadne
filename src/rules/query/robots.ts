@@ -1,10 +1,11 @@
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import robotsParserImport from "robots-parser";
 
 import { onRulesOrigin } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
-import { sitemapUrls } from "../../db/schema.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { ROBOTS_BLOCKED_REASON_PREFIX } from "../../crawl/discovery.js";
+import { crawls, sitemapUrls } from "../../db/schema.js";
+import { queryFinding, ROBOTS_BLOCKED, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -16,6 +17,8 @@ import type { RuleCaps } from "../registry/types.js";
 import {
   assertNormalisedSitemap,
   capsOr,
+  limitTo,
+  noteAtLeastTruncation,
   noteTruncation,
   readCrawlEvidence,
   robotsUnreadable,
@@ -43,6 +46,7 @@ export const SITEMAP_URL_BATCH = 500;
 const MISSING: RuleIdentity = { id: "robots.missing", severity: "info" };
 const BLOCKS: RuleIdentity = { id: "robots.blocks-sitemap-urls", severity: "critical" };
 const SKIPPED: RuleIdentity = { id: "robots.check-skipped", severity: "info" };
+const INTERNAL: RuleIdentity = { id: "robots.blocks-internal-urls", severity: "warning" };
 
 /**
  * Every sitemap URL of one crawl, in batches, oldest-first by URL.
@@ -159,9 +163,13 @@ async function blockedFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
     const text = line > 0 ? lines[line - 1] : undefined;
     findings.push(
       queryFinding(BLOCKS, {
-        // No page id: the crawl enqueues nothing robots.txt disallows (see the
-        // `enqueue` guard in the crawl loop), so a URL reported here has no
-        // `pages` row to attribute the finding to. The URL is the evidence.
+        // No page id. The crawl never records a sitemap entry robots.txt
+        // disallows as a page row (the `enqueue` guard in the crawl loop: the
+        // entry is in `sitemap_urls`, and this rule is its report). Since
+        // Phase 23 T3 the same URL MAY have a `disallowed` row because a page
+        // also LINKS to it — that is `robots.blocks-internal-urls`' finding,
+        // about the link, and this one stays about the sitemap line. The URL
+        // is the evidence.
         pageId: null,
         pageUrl: url,
         evidence: {
@@ -178,13 +186,126 @@ async function blockedFindings(db: Db, crawlId: string, caps: RuleCaps): Promise
 }
 
 /**
+ * Internal URLs robots.txt kept the crawler out of, each with the line that
+ * did it and the internal links that point at it (Phase 23 T3, study D1).
+ *
+ * THE COHORT IS THE FETCH OUTCOME, NOT `isJudged` — the Phase 22 rule for
+ * fetch-outcome rules (status, robots, render): the subject is a URL that was
+ * never requested, so there is no page to judge. The rows are exactly
+ * `ROBOTS_BLOCKED` (src/rules/helpers.ts): `fetch_class = 'disallowed'` with
+ * the crawl loop's `robots.txt: <matching line>` reason. A `disallowed` row our
+ * OWN url-policy wrote carries the policy's words instead and is not this
+ * rule's — calling a policy refusal a robots.txt block would send a client to
+ * edit a file that says nothing about the URL.
+ *
+ * WHAT IT READS IS WHAT THE CRAWL WROTE. Before Phase 23 such a URL was dropped
+ * at enqueue with no row; now the loop records it (never requested — rule 5
+ * still runs first, and robots is the reason no fetch follows) and stores the
+ * deciding line, quoted from the robots.txt it read, in `fetch_reason`. The
+ * line is read back here, not re-derived by re-parsing robots.txt, so the
+ * finding says what governed the crawl at the moment it decided.
+ *
+ * "LINKED FROM CRAWLED PAGES" IS THE CONDITION, as the copy says it is: a
+ * blocked row with no internal link pointing at it — the seed, or a URL only a
+ * redirect named — is on record (Indexability Status `Blocked by robots.txt`)
+ * but is not this finding. Sitemap entries are never recorded as rows at all:
+ * `robots.blocks-sitemap-urls` reports those from `sitemap_urls`, and a URL
+ * both listed and linked is two facts under two rules, not one counted twice.
+ *
+ * Target-centric, `links.broken-internal`'s shape and for its reason: one
+ * blocked URL linked from every page is one decision to make, and the inlinks
+ * report (`GET /crawls/:id/issues/robots.blocks-internal-urls/inlinks`) lists
+ * the sources. `inlinks` counts distinct source pages, which is what the copy
+ * promises. SQL only (hard rule 3); the `count(*) over ()` window sits after
+ * the grouping and before the `limit`, so a capped listing keeps the exact
+ * total of blocked URLs (`noteTruncation`).
+ *
+ * THE CRAWL'S OWN BUDGET IS THE OTHER TRUNCATION. Blocked rows have their own
+ * budget (`CrawlConfig.maxBlockedUrls`); past it the loop counts
+ * `crawls.robots_blocked_dropped` instead of writing a row. A non-zero count
+ * means this list is incomplete in a way no query can repair — the URLs were
+ * never written down — and the count is of DISCOVERIES turned away, not
+ * distinct URLs, so the only honest magnitude is a floor: at least one more
+ * than the rows on record (`noteAtLeastTruncation`). A NULL count is a crawl
+ * written before migration 0020: nobody counted, which is not "nothing was
+ * turned away", and it is read as unmeasured — no note — never as a fact.
+ */
+async function internalBlockedFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
+  // The siblings' gate, for their reason: a crawl row no completed discovery
+  // produced (no robots.txt evidence on record) is not a crawl whose blocked
+  // URLs can be judged, and it is refused rather than read as "none blocked".
+  await readCrawlEvidence(db, crawlId, INTERNAL.id);
+  const crawlRows = await db
+    .select({ dropped: crawls.robotsBlockedDropped })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const crawl = crawlRows[0];
+  if (crawl === undefined) throw new Error(`${INTERNAL.id}: no such crawl '${crawlId}'`);
+
+  const result = await db.execute<{
+    page_id: string;
+    url: string;
+    fetch_reason: string;
+    inlinks: number;
+    total_matches: number;
+  }>(sql`
+    with targets as (
+      select p.id as page_id, p.url, p.fetch_reason,
+             count(distinct l.source_page_id)::int as inlinks,
+             count(*) over ()::int as total_matches
+      from pages p
+      join links l
+        on l.crawl_id = ${crawlId} and l.target_url = p.url and l.is_internal
+      where p.crawl_id = ${crawlId} and ${ROBOTS_BLOCKED("p")}
+      group by p.id, p.url, p.fetch_reason
+      order by p.url
+      ${limitTo(caps.listing)}
+    )
+    select page_id, url, fetch_reason, inlinks, total_matches
+    from targets
+    order by url`);
+
+  const findings = result.rows.map((row) => {
+    // `ROBOTS_BLOCKED` selected on this prefix, so a row without it is a
+    // predicate and a reader that disagree — our defect, loudly.
+    if (!row.fetch_reason.startsWith(ROBOTS_BLOCKED_REASON_PREFIX)) {
+      throw new Error(
+        `${INTERNAL.id}: crawl '${crawlId}' row ${row.url} was selected as robots-blocked ` +
+          `but its reason does not say so: '${row.fetch_reason}'`,
+      );
+    }
+    return queryFinding(INTERNAL, {
+      pageId: row.page_id,
+      pageUrl: row.url,
+      evidence: {
+        matchedRule: row.fetch_reason.slice(ROBOTS_BLOCKED_REASON_PREFIX.length),
+        inlinks: row.inlinks,
+      },
+      dedupeKey: row.url,
+    });
+  });
+
+  const total = result.rows[0]?.total_matches ?? 0;
+  if (crawl.dropped !== null && crawl.dropped > 0) {
+    return noteAtLeastTruncation(findings, total + 1);
+  }
+  return noteTruncation(findings, total);
+}
+
+/**
  * The robots.txt rules.
  *
- * Three ids for one check, because copy is looked up by rule id and the three
+ * Four ids for one check, because copy is looked up by rule id and the four
  * statements are not interchangeable: "this site serves no robots.txt", "this
- * site's robots.txt blocks URLs its sitemap lists", and "we could not read the
- * robots.txt well enough to say". Rendering the third under either of the
- * others would be a false statement to a client — the `links.orphan-skipped`
+ * site's robots.txt blocks URLs its sitemap lists", "this site's robots.txt
+ * blocks URLs its own pages link to" (Phase 23 T3), and "we could not read the
+ * robots.txt well enough to say". Rendering the last under any of the others
+ * would be a false statement to a client — the `links.orphan-skipped`
  * precedent.
  *
  * Each reads the crawl row for itself rather than sharing state: a rule that
@@ -236,6 +357,27 @@ export const robotsRules: QueryRule[] = [
     ...copyFor(BLOCKS.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => blockedFindings(db, crawlId, capsOr(caps)),
+  }),
+
+  // Phase 23 T3 (study D1): the linked URLs robots.txt keeps the crawler out
+  // of, recorded by the crawl instead of dropped. A warning where the sitemap
+  // twin above is critical: a Disallow on a linked URL may well be intended
+  // (a cart, an account area), and the finding asks the site to confirm it;
+  // a sitemap that lists what robots.txt forbids contradicts itself. See
+  // `internalBlockedFindings` for the cohort and the two truncations.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: INTERNAL.id,
+    checkIds: ["CHECK-03"],
+    category: "crawl",
+    severity: INTERNAL.severity,
+    columns: [
+      { key: "matchedRule", label: "Matched Robots.txt Line" },
+      { key: "inlinks", label: "Inlinks" },
+    ],
+    ...copyFor(INTERNAL.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => internalBlockedFindings(db, crawlId, capsOr(caps)),
   }),
 
   // A check we could not run is visible, never silent (hard rule 7). One

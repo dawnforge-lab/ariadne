@@ -260,7 +260,8 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
       description:
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
-        "with, failureReason, queuePosition, liveLeases, blockedPages, hostSpacingMs, " +
+        "with, failureReason, queuePosition, liveLeases, blockedPages, robotsBlocked, " +
+        "hostSpacingMs, " +
         "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount, " +
         "pagesScanned, fetchResources, resources and recheck.\n\n" +
         "WHY A FAILED CRAWL FAILED: failureReason, one sentence, and null on " +
@@ -427,7 +428,14 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the lesson. blockedPages still rising, or hostSpacingMs pinned at the " +
         "30000ms cap, is the engine out of room: re-crawl slower (maxConcurrency " +
         "1, perHostDelayMs 2000), or stop and talk to the site's owner. Never " +
-        "faster.",
+        "faster.\n\n" +
+        "robotsBlocked is NOT blockedPages: it is the internal URLs robots.txt " +
+        "kept this crawl out of, which were never requested. recorded counts the " +
+        "ones on record as pages (robots.blocks-internal-urls reports them with " +
+        "their inlinks); dropped counts discoveries of blocked URLs turned away " +
+        "once their own budget (default maxPages) was full — discoveries, not " +
+        "distinct URLs, and non-zero means that rule's list is incomplete. " +
+        "dropped null is a crawl from before this was counted, not zero.",
       inputSchema: z.strictObject({ crawlId: crawlIdField() }),
     },
     async ({ crawlId }) => run("crawl_status", () => service.getCrawl(crawlId)),
@@ -723,9 +731,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "fields to print and under what heading. ruleId must name a rule that " +
         "FINDS; a metric rule measures instead and is refused with a pointer to " +
         "metrics_get.\n\n" +
-        "For links.broken-internal and links.to-server-error there is a " +
-        "companion report: issue_inlinks lists the links that POINT AT what this " +
-        "one found, which is where the fix is made.\n\n" +
+        "For links.broken-internal, links.to-server-error and " +
+        "robots.blocks-internal-urls there is a companion report: issue_inlinks " +
+        "lists the links that POINT AT what this one found, which is where the " +
+        "fix is made.\n\n" +
         `Paginated: {items, nextCursor}; limit defaults to ${PAGE_SIZE_DEFAULT}, ` +
         `maximum ${PAGE_SIZE_MAX}. A large rule can have thousands of rows — ` +
         "follow the cursors, or use export_crawl if you want all of them at once.",
@@ -747,18 +756,21 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
     {
       title: "The links that point at a broken target",
       description:
-        "The companion report to issue_urls for the two rules that report a " +
+        "The companion report to issue_urls for the three rules that report a " +
         "TARGET the site links to: {columns, items, nextCursor}, one row per " +
         "LINK — {source, destination, anchor, statusCode}.\n\n" +
-        "WHY IT EXISTS. links.broken-internal and links.to-server-error report " +
-        "the broken URL, once, however many pages link to it: one dead URL " +
+        "WHY IT EXISTS. links.broken-internal, links.to-server-error and " +
+        "robots.blocks-internal-urls report the broken or robots-blocked URL, " +
+        "once, however many pages link to it: one dead URL " +
         "linked from two hundred pages is one thing to fix, and two hundred " +
         "findings would bury it. But the fix is made in the SOURCE page's " +
         "markup, and a rule's sampleSources is a sample of ten. This is the " +
         "list. source is the page carrying the link, destination the URL it " +
         "points at, anchor the link's text (null for an image link or a bare " +
-        "<a>), statusCode the destination's own crawled status.\n\n" +
-        "ONLY THOSE TWO RULES HAVE ONE. Every other rule reports the page " +
+        "<a>), statusCode the destination's own crawled status — always null " +
+        "for robots.blocks-internal-urls, whose destinations were never " +
+        "requested.\n\n" +
+        "ONLY THOSE THREE RULES HAVE ONE. Every other rule reports the page " +
         "itself, where 'what links here' is a different question from the " +
         "finding, and naming one is refused rather than answered with an empty " +
         "page — an empty page here would read as 'nothing links to it'.\n\n" +
@@ -776,8 +788,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         ruleId: z
           .string()
           .describe(
-            "The rule whose inlinks to list: 'links.broken-internal' or " +
-              "'links.to-server-error'. Any other rule is refused — it has no inlinks " +
+            "The rule whose inlinks to list: 'links.broken-internal', " +
+              "'links.to-server-error' or 'robots.blocks-internal-urls'. Any other " +
+              "rule is refused — it has no inlinks " +
               "report.",
           ),
         limit: limitField(),

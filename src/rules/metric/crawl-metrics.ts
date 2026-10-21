@@ -19,7 +19,7 @@
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { metricRow, metricRule, type MetricIdentity } from "../helpers.js";
+import { metricRow, metricRule, ROBOTS_BLOCKED, type MetricIdentity } from "../helpers.js";
 import { assertCrawl, readCrawlEvidence } from "../query/crawl-evidence.js";
 import { CHAIN, LOOP } from "../query/redirects.js";
 import { perScope } from "../registry/metric-table.js";
@@ -176,9 +176,10 @@ function exactFindingCount(row: FindingCountRow, self: MetricIdentity): number {
  *    is about this site's own crawl budget; in practice it excludes nothing,
  *    since only a URL this crawl fetched has a `pages` row at all, and saying so
  *    is cheaper than leaving a reader to work it out.
- *  - `totalPages` — every page row of the crawl, whatever its status. Redirects
- *    are a share of what was fetched, not of what was indexable, so this is
- *    deliberately not the metric cohort.
+ *  - `totalPages` — every page row of the crawl, whatever its status, EXCEPT
+ *    the robots-blocked rows (Phase 23 T3), which were recorded and never
+ *    requested. Redirects are a share of what was fetched, not of what was
+ *    indexable, so this is deliberately not the metric cohort.
  *  - `ratioPct` — `100 × redirectPages / totalPages`, computed in SQL and
  *    rounded to one decimal place (`hreflang.coverage`'s idiom). NULL over a
  *    crawl with no pages rather than 0: nothing was measured, and "0% of this
@@ -217,7 +218,10 @@ async function redirectVolume(db: Db, crawlId: string, self: MetricIdentity): Pr
                       / count(*), 1)::float8
       end as ratio_pct
     from pages p
-    where p.crawl_id = ${crawlId}`);
+    where p.crawl_id = ${crawlId}
+      -- What was FETCHED: a robots-blocked row was never requested (Phase 23
+      -- T3), and a share of "what the crawl fetched" must not count it.
+      and not ${ROBOTS_BLOCKED("p")}`);
 
   const row = rows.rows[0];
   if (row === undefined) {

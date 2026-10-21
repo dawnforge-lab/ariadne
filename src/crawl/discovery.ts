@@ -66,6 +66,8 @@ const gunzip = promisify(gunzipCallback);
 /** The subset of robots-parser's surface we use. */
 interface RobotsRules {
   isAllowed(url: string, ua?: string): boolean | undefined;
+  /** 1-based line of the rule that decided; -1 when no rule matched. */
+  getMatchingLineNumber(url: string, ua?: string): number;
   getCrawlDelay(ua?: string): number | undefined;
   getSitemaps(): string[];
 }
@@ -180,6 +182,21 @@ export interface RobotsInfo {
    * must not escape its rules. See onRulesOrigin.
    */
   isAllowed(url: string): boolean;
+  /**
+   * The robots.txt line that DECIDED this URL — `Disallow: /private/`, or the
+   * `Allow:` line that won — as the site wrote it, comment stripped and
+   * whitespace trimmed. Null when no line matched (the protocol's default
+   * allow), and always null when there is no robots.txt text at all (absent
+   * or unreachable: the verdict then comes from the outcome, not from a line).
+   *
+   * Judged exactly as `isAllowed` is — same parser, same user agent, same
+   * same-site origin rewrite — so a `false` from `isAllowed` on a read
+   * robots.txt always has a line here. The crawl loop quotes it as the reason
+   * a robots-blocked row was never requested (`robotsBlockedReason`), and
+   * throws if a disallow ever arrives without one rather than writing a row
+   * that cannot say why (hard rule 7).
+   */
+  matchingRule(url: string): string | null;
   crawlDelaySec: number | null;
   sitemapUrls: string[];
   raw: string | null;
@@ -294,6 +311,8 @@ function noRobots(fields: {
     status: fields.status,
     attempts: fields.attempts,
     isAllowed: () => fields.allowed,
+    // No text, so no line decided anything: the verdict above is the outcome's.
+    matchingRule: () => null,
     crawlDelaySec: fields.crawlDelaySec,
     sitemapUrls: [],
     raw: null,
@@ -526,6 +545,81 @@ function classifyRobotsFailure(doc: DocResult): "absent" | "unreachable" | "retr
 }
 
 /**
+ * The prefix of `pages.fetch_reason` on a row the crawl recorded and never
+ * requested because robots.txt disallowed it (Phase 23 T3, study D1).
+ *
+ * It is what keeps the two meanings of `fetch_class = 'disallowed'` apart: the
+ * same class is written when OUR url-policy refuses a URL at fetch time
+ * (`fetchPage`'s `emptyResult`, reason in the policy's own words, which never
+ * start with this). `robots.blocks-internal-urls`, its inlinks report and every
+ * census that must not count a never-requested URL as crawled select on the
+ * prefix (`ROBOTS_BLOCKED`, src/rules/helpers.ts), never on the class alone.
+ */
+export const ROBOTS_BLOCKED_REASON_PREFIX = "robots.txt: ";
+
+/** `fetch_reason` for a robots-blocked row: the prefix and the line that decided. */
+export function robotsBlockedReason(line: string): string {
+  return `${ROBOTS_BLOCKED_REASON_PREFIX}${line}`;
+}
+
+/**
+ * The verdict and the deciding line for one robots.txt text — `isAllowed` and
+ * `matchingRule` exactly as `RobotsInfo` carries them, as a pure function of
+ * the text so both can be tested without a server.
+ *
+ * `robotsUrl` is the URL the text was actually read from (after redirects): its
+ * origin is the one these rules govern, and every same-site spelling is
+ * rewritten onto it first (onRulesOrigin).
+ *
+ * robots-parser answers `undefined` when no group matches, when the URL is
+ * unparseable, or when it belongs to another host. None of those is a
+ * prohibition, and none of them is guesswork: "no rule forbids this" is exactly
+ * what the protocol says to do. Same-site origin variants are rewritten onto
+ * the rules origin first, so "another host" cannot mean a second spelling of
+ * this one.
+ *
+ * The precedence is robots-parser's, which is RFC 9309 §2.2.2's: the longest
+ * matching pattern wins, an `Allow` beats a `Disallow` of the same length, `*`
+ * matches any run of characters and a trailing `$` anchors the end. The line is
+ * quoted from the text by the parser's own line number, split on the same line
+ * endings the parser splits on, so the two cannot disagree about which line it
+ * was.
+ */
+export function robotsRulesOf(
+  robotsUrl: string,
+  raw: string,
+  userAgent: string,
+): {
+  parsed: RobotsRules;
+  isAllowed: (url: string) => boolean;
+  matchingRule: (url: string) => string | null;
+} {
+  const parsed = robotsParser(robotsUrl, raw);
+  const rulesOrigin = new URL(robotsUrl).origin;
+  // Split once, not once per URL: the text is up to 500KB and the crawl loop
+  // asks about every disallowed link it meets.
+  const lines = raw.split(/\r\n|\r|\n/);
+  return {
+    parsed,
+    isAllowed: (url: string) =>
+      parsed.isAllowed(onRulesOrigin(url, rulesOrigin), userAgent) !== false,
+    matchingRule: (url: string) => {
+      const line = parsed.getMatchingLineNumber(onRulesOrigin(url, rulesOrigin), userAgent);
+      if (!Number.isInteger(line) || line < 1) return null;
+      const text = lines[line - 1];
+      if (text === undefined) {
+        throw new Error(
+          `robots.txt rule line ${line} is past the end of a ${lines.length}-line text`,
+        );
+      }
+      // The parser strips a `#` comment before it reads a line; so does the quote.
+      const hash = text.indexOf("#");
+      return (hash === -1 ? text : text.slice(0, hash)).trim();
+    },
+  };
+}
+
+/**
  * Read one origin's robots.txt and turn it into rules.
  *
  * EXPORTED for the resource fetch pass (src/crawl/resources/fetch-resources.ts).
@@ -605,27 +699,18 @@ export async function fetchRobots(
   }
 
   const raw = decodeBody(doc.body, doc.contentType);
-  const parsed = robotsParser(doc.url, raw);
   const userAgent = opts.userAgent;
-  // The origin these rules govern: the robots.txt we actually read, after any
-  // redirect. Every same-site spelling is judged against it (onRulesOrigin).
-  const rulesOrigin = new URL(doc.url).origin;
+  const rules = robotsRulesOf(doc.url, raw, userAgent);
 
   return {
     fetched: true,
     outcome: "read",
     attempts,
     status: doc.status,
-    // robots-parser answers `undefined` when no group matches, when the URL is
-    // unparseable, or when it belongs to another host. None of those is a
-    // prohibition, and none of them is guesswork: "no rule forbids this" is
-    // exactly what the protocol says to do. Same-site origin variants are
-    // rewritten onto the rules origin first, so "another host" cannot mean a
-    // second spelling of this one — see onRulesOrigin.
-    isAllowed: (url: string) =>
-      parsed.isAllowed(onRulesOrigin(url, rulesOrigin), userAgent) !== false,
-    crawlDelaySec: parsed.getCrawlDelay(userAgent) ?? null,
-    sitemapUrls: parsed.getSitemaps(),
+    isAllowed: rules.isAllowed,
+    matchingRule: rules.matchingRule,
+    crawlDelaySec: rules.parsed.getCrawlDelay(userAgent) ?? null,
+    sitemapUrls: rules.parsed.getSitemaps(),
     raw,
     truncated: doc.truncated,
     note: null,

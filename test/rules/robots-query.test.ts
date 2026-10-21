@@ -19,7 +19,7 @@ import { eq } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, sitemapUrls } from "../../src/db/schema.js";
+import { crawls, links, pages, sitemapUrls } from "../../src/db/schema.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { robotsRules } from "../../src/rules/query/robots.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
@@ -43,8 +43,9 @@ function rule(id: string): QueryRule {
 }
 
 describe("robotsRules metadata", () => {
-  it("defines the three robots rules", () => {
+  it("defines the four robots rules", () => {
     expect(robotsRules.map((r) => r.id).sort()).toEqual([
+      "robots.blocks-internal-urls",
       "robots.blocks-sitemap-urls",
       "robots.check-skipped",
       "robots.missing",
@@ -57,6 +58,10 @@ describe("robotsRules metadata", () => {
     ).toEqual({
       "robots.missing": [["CHECK-03"], "info", "crawl"],
       "robots.blocks-sitemap-urls": [["CHECK-03"], "critical", "crawl"],
+      // Phase 23 T3: the linked URLs robots.txt keeps the crawler out of. A
+      // warning — the Disallow may well be intended — where a sitemap that
+      // lists what robots.txt blocks contradicts itself and is critical.
+      "robots.blocks-internal-urls": [["CHECK-03"], "warning", "crawl"],
       // Info: a statement about what this crawl could read, not a fault on the
       // site's markup.
       "robots.check-skipped": [["CHECK-03"], "info", "crawl"],
@@ -384,5 +389,198 @@ describe("the robots rules against the database", () => {
       if (other === undefined) throw new Error(`${id} is not registered`);
       await expect(other.run(db, crawlId), id).resolves.toBeDefined();
     }
+  });
+});
+
+/**
+ * `robots.blocks-internal-urls` (Phase 23 T3, study D1): the rows the crawl
+ * RECORDED and never requested because robots.txt disallowed them, each with
+ * the internal links that point at it.
+ *
+ * Rows are hand-built to the shape the crawl loop writes: `fetch_class
+ * 'disallowed'`, `fetch_reason 'robots.txt: <the matching line>'`, no status.
+ * The rule reads the database only — the line is the one the crawl stored, not
+ * a re-parse.
+ */
+describe("robots.blocks-internal-urls against the database", () => {
+  let db: Db;
+  const createdCrawls: string[] = [];
+  const ROBOTS_REASON = "robots.txt: Disallow: /private/";
+
+  const blocked = (): QueryRule => {
+    const r = robotsRules.find((rule) => rule.id === "robots.blocks-internal-urls");
+    if (r === undefined) throw new Error("robots.blocks-internal-urls is not registered");
+    return r;
+  };
+
+  async function newCrawl(dropped: number | null = 0): Promise<string> {
+    const id = `crawl_${randomUUID()}`;
+    await db.insert(crawls).values({
+      id,
+      siteUrl: SITE,
+      config: { maxPages: 500, userAgent: UA },
+      rulesetVersion: "test",
+      status: "finished",
+      pagesCrawled: 1,
+      discovery: mkDiscovery({ robots: { raw: "User-agent: *\nDisallow: /private/\n" } }),
+      robotsBlockedDropped: dropped,
+    });
+    createdCrawls.push(id);
+    return id;
+  }
+
+  interface RowSpec {
+    path: string;
+    fetchClass?: string;
+    fetchReason?: string | null;
+    statusCode?: number | null;
+  }
+
+  async function addPages(crawlId: string, specs: RowSpec[]): Promise<Map<string, string>> {
+    const rows = specs.map((s) => ({
+      id: `page_${randomUUID()}`,
+      crawlId,
+      url: `${SITE}${s.path}`,
+      urlNormalised: normalised(`${SITE}${s.path}`),
+      fetchClass: s.fetchClass ?? "ok",
+      fetchReason: s.fetchReason ?? null,
+      statusCode: s.statusCode === undefined ? 200 : s.statusCode,
+      isIndexable: (s.fetchClass ?? "ok") === "ok",
+      depth: 1,
+      discoveredVia: "link",
+    }));
+    await db.insert(pages).values(rows);
+    return new Map(rows.map((r, i) => [specs[i]!.path, r.id]));
+  }
+
+  async function addLink(
+    crawlId: string,
+    sourceId: string,
+    target: string,
+    position: number,
+    isInternal = true,
+  ): Promise<void> {
+    await db.insert(links).values({
+      crawlId,
+      sourcePageId: sourceId,
+      targetUrl: `${SITE}${target}`,
+      targetPageId: null,
+      anchor: "go",
+      rel: null,
+      isInternal,
+      isNofollow: false,
+      position,
+    });
+  }
+
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+
+  afterAll(async () => {
+    for (const id of createdCrawls) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+  });
+
+  it("reports each robots-blocked URL once, with the line that blocked it and its inlinks", async () => {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [
+      { path: "/a" },
+      { path: "/b" },
+      { path: "/private/x", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+      { path: "/private/y", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+    ]);
+    await addLink(crawlId, ids.get("/a")!, "/private/x", 0);
+    await addLink(crawlId, ids.get("/b")!, "/private/x", 0);
+    await addLink(crawlId, ids.get("/a")!, "/private/y", 1);
+
+    const found = await blocked().run(db, crawlId);
+    expect(found.map((f) => ({ pageId: f.pageId, pageUrl: f.pageUrl, evidence: f.evidence }))).toEqual([
+      {
+        pageId: ids.get("/private/x"),
+        pageUrl: `${SITE}/private/x`,
+        evidence: { matchedRule: "Disallow: /private/", inlinks: 2 },
+      },
+      {
+        pageId: ids.get("/private/y"),
+        pageUrl: `${SITE}/private/y`,
+        evidence: { matchedRule: "Disallow: /private/", inlinks: 1 },
+      },
+    ]);
+    expect(found.every((f) => f.severity === "warning")).toBe(true);
+  });
+
+  it("never reports a URL our own policy refused: that is `disallowed` without the robots reason", async () => {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [
+      { path: "/a" },
+      {
+        path: "/internal-admin",
+        fetchClass: "disallowed",
+        fetchReason: "blocked host (169.254.169.254)",
+        statusCode: null,
+      },
+    ]);
+    await addLink(crawlId, ids.get("/a")!, "/internal-admin", 0);
+    expect(await blocked().run(db, crawlId)).toEqual([]);
+  });
+
+  it("is silent about a blocked row no internal link points at", async () => {
+    // The seed or a redirect target: on record, but "linked from crawled
+    // pages" is not true of it. An external link does not count either.
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [
+      { path: "/a" },
+      { path: "/private/z", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+    ]);
+    await addLink(crawlId, ids.get("/a")!, "/private/z", 0, false);
+    expect(await blocked().run(db, crawlId)).toEqual([]);
+  });
+
+  it("caps the listing with an exact total", async () => {
+    const crawlId = await newCrawl();
+    const ids = await addPages(crawlId, [
+      { path: "/a" },
+      { path: "/private/1", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+      { path: "/private/2", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+      { path: "/private/3", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+    ]);
+    for (const [i, p] of ["/private/1", "/private/2", "/private/3"].entries()) {
+      await addLink(crawlId, ids.get("/a")!, p, i);
+    }
+    const found = await blocked().run(db, crawlId, { listing: 2 });
+    expect(found.map((f) => f.pageUrl)).toEqual([`${SITE}/private/1`, `${SITE}/private/2`]);
+    expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
+    expect(found[0]!.evidence).not.toHaveProperty("truncated");
+  });
+
+  it("says the list is incomplete when the crawl turned blocked URLs away", async () => {
+    const crawlId = await newCrawl(5);
+    const ids = await addPages(crawlId, [
+      { path: "/a" },
+      { path: "/private/1", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+    ]);
+    await addLink(crawlId, ids.get("/a")!, "/private/1", 0);
+    const found = await blocked().run(db, crawlId);
+    // A lower bound, not a total: the crawl counted discoveries it turned
+    // away, not distinct URLs, so the honest claim is "at least one more".
+    expect(found[0]!.evidence).toMatchObject({ truncated: { reported: 1, atLeast: 2 } });
+  });
+
+  it("reads a null overflow count (a crawl before 0020) as unmeasured, never as truncated", async () => {
+    const crawlId = await newCrawl(null);
+    const ids = await addPages(crawlId, [
+      { path: "/a" },
+      { path: "/private/1", fetchClass: "disallowed", fetchReason: ROBOTS_REASON, statusCode: null },
+    ]);
+    await addLink(crawlId, ids.get("/a")!, "/private/1", 0);
+    const found = await blocked().run(db, crawlId);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.evidence).not.toHaveProperty("truncated");
+  });
+
+  it("refuses a crawl id nothing knows, naming it", async () => {
+    await expect(blocked().run(db, "crawl_nope")).rejects.toThrow(/crawl_nope/);
   });
 });

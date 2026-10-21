@@ -80,4 +80,28 @@ const brotli: Fixture = {
   },
 };
 
-export const authoredP23Fixtures: Fixture[] = [noResponse, tooLarge, brotli];
+/**
+ * Study D1 (Phase 23 T3): an internal URL robots.txt disallows, LINKED from a
+ * crawled page — the hub links every fixture. Until 0.18.0 the crawl dropped it
+ * at enqueue with no row; now it is a `disallowed` row, never requested, and
+ * `robots.blocks-internal-urls` reports it with its inlinks. It lives under the
+ * app's `/private/` prefix, which is what robots.txt disallows.
+ *
+ * The handler answers like any page on purpose: if the crawler ever requested
+ * it, the row would be `ok` and the harness would see a fetched page here
+ * instead of a robots block. Off the sitemap: a listed blocked URL is
+ * `robots.blocks-sitemap-urls`' subject, proved by `/private/hidden`.
+ */
+const robotsBlockedLinked: Fixture = {
+  path: "/private/linked",
+  category: FETCH,
+  name: "Internal link into a URL robots.txt disallows",
+  expectedIssues: ["robots.blocks-internal-urls"],
+  exact: true,
+  inSitemap: false,
+  handler: (_req, res) => {
+    html(res, "<!doctype html><html><head><title>Never fetched</title></head><body></body></html>");
+  },
+};
+
+export const authoredP23Fixtures: Fixture[] = [noResponse, tooLarge, brotli, robotsBlockedLinked];

@@ -2,6 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 
 import type { Db } from "../db/client.js";
 import { normalizeUrl } from "../crawl/parse/url-utils.js";
+import { ROBOTS_BLOCKED_REASON_PREFIX } from "../crawl/discovery.js";
 import { copyFor } from "./registry/copy/index.js";
 import type { MetricTable } from "./registry/metric-table.js";
 import { defineRule, RULESET_VERSION } from "./registry/registry.js";
@@ -43,6 +44,26 @@ export function isAuditable(page: Pick<PageRecord, "fetchClass" | "statusCode">)
  */
 export const FETCHED_OK = (alias: string): SQL =>
   sql.raw(`${alias}.fetch_class = 'ok' and ${alias}.status_code = 200`);
+
+/**
+ * A row the crawl RECORDED and NEVER REQUESTED because robots.txt disallowed it
+ * (Phase 23 T3, study D1): `fetch_class = 'disallowed'` with the
+ * `robots.txt: <matching line>` reason the crawl loop writes
+ * (`ROBOTS_BLOCKED_REASON_PREFIX`, src/crawl/discovery.ts).
+ *
+ * THE CLASS ALONE IS NOT ENOUGH, and that is why this exists: `disallowed` is
+ * also what our own url-policy writes when it refuses a URL at fetch time,
+ * with the policy's reason. `robots.blocks-internal-urls` and its inlinks
+ * report must not call a policy refusal a robots.txt block, and every census
+ * that counts what the crawl FETCHED — `redirect.volume`'s denominator, the
+ * render budget and `render.coverage`'s `pagesCrawled` — must not count a URL
+ * nobody asked for. Every such reader goes through this predicate.
+ */
+export const ROBOTS_BLOCKED = (alias: string): SQL =>
+  sql.raw(
+    `(${alias}.fetch_class = 'disallowed' and ` +
+      `starts_with(coalesce(${alias}.fetch_reason, ''), '${ROBOTS_BLOCKED_REASON_PREFIX}'))`,
+  );
 
 /**
  * Whether a stored string actually declares something. A tag that reached the

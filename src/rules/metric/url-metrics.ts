@@ -89,7 +89,11 @@ type ParamRow = {
  *  - `parameterisedPages` — pages of this crawl whose URL carries a query
  *    string, over EVERY page row the crawl wrote, whatever its status. That is
  *    the population the inventory itself was built from, and the two would
- *    otherwise be percentages of different sites.
+ *    otherwise be percentages of different sites. It includes, DELIBERATELY,
+ *    the robots-blocked rows (Phase 23 T3): a `?filter=` URL the site links to
+ *    and disallows in robots.txt is faceted navigation the site is already
+ *    managing, which is CHECK-29's evidence, not noise in it. They are never
+ *    in `parameterisedIndexablePages` (not fetched, so not in the cohort).
  *  - `parameterisedIndexablePages` — the subset of those in the shared metric
  *    cohort (fetched OK, 200, indexable). This is the number CHECK-29 turns on:
  *    a filter URL that 404s or carries a noindex is a crawl-budget question,

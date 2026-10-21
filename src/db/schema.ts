@@ -234,6 +234,32 @@ export const crawls = pgTable("crawls", {
   // count with its own — which is the only reading that stays true, since the
   // resumed pass asks only the rows the interrupted one never reached.
   recheckPassCount: integer("recheck_pass_count").notNull().default(0),
+  // Robots-disallowed internal URLs the crawl TURNED AWAY because their own
+  // budget (`CrawlConfig.maxBlockedUrls`, default `maxPages`) was full
+  // (migration 0020, Phase 23 T3, study D1).
+  //
+  // Below the budget such a URL is a `pages` row — `fetch_class = 'disallowed'`,
+  // `fetch_reason = 'robots.txt: <the matching line>'`, never requested — and
+  // `robots.blocks-internal-urls` reports it with its inlinks. Past the budget
+  // it is counted HERE instead of written, so a robots.txt that disallows a
+  // faceted URL space (`Disallow: /search`, `?filter=` on every page) costs a
+  // bounded number of rows and the overflow is a number, not a silence (hard
+  // rule 7).
+  //
+  // DISCOVERIES TURNED AWAY, NOT DISTINCT URLS — the `resource_refs_capped_pages`
+  // precedent. The crawl keeps no set of the URLs it turned away (that set is
+  // the O(URLs) structure the budget exists to avoid, hard rule 6), so one
+  // blocked URL linked from three pages after the budget filled counts three.
+  // A URL that already HAS a row is never counted here. Read it as "the list is
+  // incomplete, by up to this many discoveries" — `robots.blocks-internal-urls`
+  // turns a non-zero count into its truncation note.
+  //
+  // NULLABLE, AND THE NULL IS LOAD-BEARING: null means nobody counted — a crawl
+  // written before 0020, or a resume of one (`null + n` stays null in SQL, as
+  // `resource_refs_capped_pages`' resume does). Every crawl the 0020 loop starts
+  // writes 0 before its first enqueue, so 0 is a measurement: nothing was
+  // turned away.
+  robotsBlockedDropped: integer("robots_blocked_dropped"),
 });
 
 export const pages = pgTable("pages", {

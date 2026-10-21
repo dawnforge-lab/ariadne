@@ -367,6 +367,7 @@ function allowAllRobots(): RobotsInfo {
     status: 200,
     attempts: 1,
     isAllowed: () => true,
+    matchingRule: () => null,
     crawlDelaySec: null,
     sitemapUrls: [],
     raw: "User-agent: *\nAllow: /\n",

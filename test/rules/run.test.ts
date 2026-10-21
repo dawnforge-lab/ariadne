@@ -120,7 +120,9 @@ describe("buildRegistry", () => {
     expect(ids).toContain("http.no-response-transient");
     expect(ids).toContain("page.html-too-large");
     expect(ids).toContain("crawl.unreadable-encoding");
-    expect(ids.length).toBe(104);
+    // Phase 23 Task 3: the internal URLs robots.txt kept the crawl out of.
+    expect(ids).toContain("robots.blocks-internal-urls");
+    expect(ids.length).toBe(105);
   });
 
   it("registers every kind the runner drives", () => {

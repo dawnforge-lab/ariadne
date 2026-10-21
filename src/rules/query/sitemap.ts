@@ -52,6 +52,7 @@ import {
   hasNoindex,
   JUDGED,
   queryFinding,
+  ROBOTS_BLOCKED,
   type RuleIdentity,
 } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -403,6 +404,10 @@ export const sitemapRules: QueryRule[] = [
   //  - a `pages` row with a null status: the crawl attempted it and got no
   //    HTTP answer back (a timeout, a connection failure, an address the
   //    policy refused at connect time). Nothing is known about the page.
+  //    ONE SUCH ROW WAS NEVER ATTEMPTED (Phase 23 T3): a robots-blocked row,
+  //    recorded because a page links to the URL and robots.txt forbade the
+  //    request. It reads `attempted: false` with `fetchClass: disallowed` —
+  //    the first cause, robots.txt, named by the row itself.
   //
   // The third belongs here rather than in `sitemap.non-200`, which would have
   // to invent a status to report, and it must not be silent: an attempted-and-
@@ -443,9 +448,11 @@ export const sitemapRules: QueryRule[] = [
         url_normalised: string;
         page_id: string | null;
         fetch_class: string | null;
+        robots_blocked: boolean;
         total_matches: number;
       }>(sql`
         select s.url, s.url_normalised, p.id as page_id, p.fetch_class,
+               coalesce(${ROBOTS_BLOCKED("p")}, false) as robots_blocked,
                count(*) over ()::int as total_matches
         from sitemap_urls s
         left join pages p on p.crawl_id = ${crawlId} and p.url = s.url_normalised
@@ -463,7 +470,10 @@ export const sitemapRules: QueryRule[] = [
           pageUrl: row.url,
           evidence: {
             url: row.url,
-            attempted: row.page_id !== null,
+            // A robots-blocked row (Phase 23 T3) has a row and was NEVER
+            // REQUESTED — recorded because a page links to it — so it is not
+            // an attempt; its `fetchClass` still says why there is no page.
+            attempted: row.page_id !== null && !row.robots_blocked,
             // The frontier key, not the published `<loc>`: `isSameOrigin` is
             // asked the same question about the same string the loop asked it
             // about. `assertNormalisedSitemap` has already refused a crawl

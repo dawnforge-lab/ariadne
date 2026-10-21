@@ -878,6 +878,11 @@ describe("crawl lifecycle", () => {
     expect(counts["done"]).toBeGreaterThanOrEqual(3);
     // A fixture site nobody blocks: present and zero, not absent.
     expect(fixtureFinal["blockedPages"]).toBe(0);
+    // A crawl a 0020 loop ran: the overflow is COUNTED (0, a measurement),
+    // never the null a pre-0020 row carries.
+    const robotsBlocked = fixtureFinal["robotsBlocked"] as Record<string, unknown>;
+    expect(robotsBlocked["dropped"]).toBe(0);
+    expect(typeof robotsBlocked["recorded"]).toBe("number");
     // The gate reported its spacing even though nothing ever escalated it — the
     // crawl ran at perHostDelayMs 0, and 0 is a real answer, not "unknown".
     expect(fixtureFinal["hostSpacingMs"]).toBe(0);
@@ -922,6 +927,9 @@ describe("crawl lifecycle", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body["blockedPages"]).toBe(2);
+    // No robots-blocked row among them, and a seeded crawl row no 0020 loop
+    // ran: nobody counted the overflow, which is null and not 0.
+    expect(body["robotsBlocked"]).toEqual({ recorded: 0, dropped: null });
     // A seeded row no crawl loop ever ran: null means "never reported", which
     // is a different fact from a spacing of 0.
     expect(body["hostSpacingMs"]).toBeNull();

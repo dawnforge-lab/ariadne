@@ -110,6 +110,13 @@ import { derivePageType, type PageTypePattern } from "./page-type.js";
 
 const DEFAULT_BATCH_SIZE = 100;
 
+/**
+ * Robots-blocked page rows per INSERT (`insertRobotsBlocked`). A page row binds
+ * ~76 parameters, so 500 rows is ~38,000 — well under Postgres' 65,535 — with
+ * room for the row to grow.
+ */
+const BLOCKED_INSERT_CHUNK_ROWS = 500;
+
 /** The frontier's view of a URL — `LeasedUrl` satisfies this structurally. */
 export interface PageWriterItem {
   url: string;
@@ -484,6 +491,81 @@ export class PageWriter {
         return inserted.length;
       }),
     );
+  }
+
+  /**
+   * Write the page rows of URLs the crawl will NEVER REQUEST because robots.txt
+   * disallowed them, immediately, and return how many rows actually landed
+   * (Phase 23 T3, study D1).
+   *
+   * Not through the page buffer, for three reasons that are each enough:
+   *  - **The count is the budget.** The loop spends `maxBlockedUrls` against
+   *    rows that EXIST, and only the insert's `returning` knows which candidates
+   *    a `(crawl_id, url)` conflict dropped — a URL a sibling page already
+   *    recorded, or that an earlier run of a resumed crawl did. A buffered write
+   *    would answer that after the loop had already spent the budget.
+   *  - **There is no frontier row to settle.** These URLs are never enqueued,
+   *    so the hard-kill transaction `flushPages` exists for — page row and
+   *    frontier completion committing together — has nothing to pair.
+   *  - **There is nothing hanging off them.** No analysis, so no links,
+   *    hreflang, structured data or resources.
+   *
+   * The rows are built by `pageRow`, the one place a page row is shaped, from a
+   * `FetchResult` that says exactly what happened: class `disallowed`, no
+   * status, no bytes, and the reason the caller composed
+   * (`robotsBlockedReason` — `robots.txt: <the matching line>`). Two columns
+   * are then corrected to what is true of a URL nobody asked for:
+   * `response_time_ms` and `html_bytes` are NULL (not measured), never the 0 a
+   * fetch that answered instantly with nothing would write. `fetched_at` keeps
+   * its stamp: it dates THIS observation, which is "robots.txt said no", and
+   * the recheck pass never reads a `disallowed` row.
+   *
+   * NOT COUNTED IN `stats().pages`, which is the crawl summary's count of the
+   * fetches the writer persisted; the loop owns the blocked count and the
+   * crawl row carries the overflow (`crawls.robots_blocked_dropped`).
+   */
+  async insertRobotsBlocked(
+    blocked: ReadonlyArray<{ item: PageWriterItem; reason: string }>,
+  ): Promise<number> {
+    if (blocked.length === 0) return 0;
+    const rows = blocked.map(({ item, reason }) => ({
+      ...this.pageRow(
+        `page_${randomUUID()}`,
+        item,
+        {
+          url: item.url,
+          statusCode: null,
+          fetchClass: "disallowed",
+          contentType: null,
+          redirectUrl: null,
+          body: null,
+          htmlBytes: 0,
+          responseTimeMs: 0,
+          retryAfterMs: null,
+          canonicalHeader: null,
+          xRobotsTag: null,
+          disallowedReason: reason,
+        },
+        null,
+      ),
+      responseTimeMs: null,
+      htmlBytes: null,
+    }));
+    // Chunked under Postgres' 65,535-parameter ceiling: a page row binds every
+    // column it names (~76), and one page can link to up to the analyzer's
+    // 2,000 blocked URLs — `INSERT_CHUNK_ROWS`' problem in frontier.ts, at a
+    // wider row. Not one transaction, deliberately: each row is idempotent
+    // under the conflict target, and the count returned is what landed.
+    let count = 0;
+    for (let i = 0; i < rows.length; i += BLOCKED_INSERT_CHUNK_ROWS) {
+      const inserted = await this.db
+        .insert(pages)
+        .values(rows.slice(i, i + BLOCKED_INSERT_CHUNK_ROWS))
+        .onConflictDoNothing({ target: [pages.crawlId, pages.url] })
+        .returning({ id: pages.id });
+      count += inserted.length;
+    }
+    return count;
   }
 
   private async flushLinks(): Promise<void> {

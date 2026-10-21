@@ -53,7 +53,11 @@ export interface FixtureApp {
   close(): Promise<void>;
 }
 
-/** The prefix robots.txt disallows. No fixture is served under it. */
+/**
+ * The prefix robots.txt disallows. One fixture lives under it,
+ * `/private/linked` (authored-p23.ts): the hub links it and the crawl must
+ * record it unrequested (Phase 23 T3). Nothing else is served under it.
+ */
 const ROBOTS_BLOCKED_PREFIX = "/private/";
 /**
  * The one sitemap entry that is not a fixture: a URL the site publishes and its

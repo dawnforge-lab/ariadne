@@ -314,6 +314,20 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     say `recheck: not run` and stay critical — the honest reading.
 //     The HTML body cap rose from 1 MiB to 2 MiB (`MAX_BODY`), which changes
 //     what a NEW crawl reads but no stored verdict.
+//  2. (T3, study D1) Internal URLs robots.txt disallows were dropped at enqueue
+//     — no row, no finding. The crawl now records each as a `disallowed` page
+//     row (never requested; `fetch_reason` = `robots.txt: <matching line>`)
+//     under its own budget (`maxBlockedUrls`, default `maxPages`; overflow in
+//     `crawls.robots_blocked_dropped`, migration 0020), and
+//     `robots.blocks-internal-urls` (warning, CHECK-03) reports each with its
+//     inlinks, served by the inlinks report beside the two link rules'. Only a
+//     NEW crawl has the rows: a pre-0020 crawl re-judged here has none, so the
+//     rule is silent on it and its null overflow count is read as unmeasured.
+//     The fetched-page censuses (`redirect.volume`'s denominator,
+//     `render.coverage`'s `pagesCrawled`, the render budget) exclude the rows;
+//     `site.health` counts them under URLs Not Judged; `sitemap.uncrawled`
+//     says `attempted: false` for one; the pagination and hreflang target
+//     lookups read one as "never fetched", as the absence of a row was read.
 export const RULESET_VERSION = "0.18.0";
 
 /**

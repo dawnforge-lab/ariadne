@@ -17,6 +17,10 @@
  *    Not at fetch time — at *enqueue* time, for the seed, for sitemap entries,
  *    for links, and for redirect targets alike (rule 5; `fetchPage` re-checks
  *    the policy anyway, which is belt and braces, not a substitute).
+ *    A same-origin URL the policy allows and robots.txt forbids is never
+ *    fetched and, since Phase 23 T3, never silently dropped either: it is a
+ *    `disallowed` page row quoting the robots.txt line, written against its own
+ *    budget (`CrawlConfig.maxBlockedUrls`) and never against `maxPages`.
  *
  *  - **Every leased URL ends as a row.** A 404, a redirect, a block and a
  *    timeout that exhausted its retries are all `pages` rows carrying their
@@ -52,7 +56,14 @@ import { crawls, sitemapUrls } from "../db/schema.js";
 // Ruleset provenance for the `crawls` row: the registry owns the number, the
 // loop only stamps it.
 import { RULESET_VERSION } from "../rules/registry/registry.js";
-import { discover, type DiscoveryResult, type DiscoveryTruncation, type RobotsInfo } from "./discovery.js";
+import {
+  discover,
+  ROBOTS_BLOCKED_REASON_PREFIX,
+  robotsBlockedReason,
+  type DiscoveryResult,
+  type DiscoveryTruncation,
+  type RobotsInfo,
+} from "./discovery.js";
 import { fetchPage, MAX_BODY, type FetchClass, type FetchResult } from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
 import {
@@ -238,6 +249,32 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * interrupted pass, from a cap, and from a crawl written before 0013.
    */
   fetchResources?: boolean;
+  /**
+   * How many ROBOTS-BLOCKED internal URLs this crawl may record as page rows
+   * (Phase 23 T3, study D1). Absent is `maxPages`.
+   *
+   * A same-origin URL that passes the url-policy and that robots.txt disallows
+   * is never requested; it is written as a `disallowed` page row whose
+   * `fetch_reason` quotes the matching line, so `robots.blocks-internal-urls`
+   * can report it with its inlinks. THIS IS ITS OWN BUDGET AND NEVER
+   * `maxPages`'S: a blocked row costs the site nothing, and a robots.txt that
+   * disallows a faceted space (`Disallow: /*?filter=` linked from every page)
+   * must not be able to stop the crawl from fetching real pages. Past the
+   * budget a URL is counted in `crawls.robots_blocked_dropped` instead of
+   * written — a number, never a silence (hard rule 7).
+   *
+   * Sitemap entries are not recorded against it: a sitemap entry robots.txt
+   * disallows is already on record in `sitemap_urls` and reported by
+   * `robots.blocks-sitemap-urls`, and spending this budget on a sitemap's
+   * blocked entries before the first link is read would starve the finding
+   * this budget exists for.
+   *
+   * CRAWL config rather than an engine constant for the resource budgets'
+   * reason: a resume must spend the same budget the first attempt was given.
+   * Not accepted over the API (yet): `parseStartCrawlInput`'s allowlist is
+   * closed, so every API crawl takes the `maxPages` default.
+   */
+  maxBlockedUrls?: number;
 }
 
 /**
@@ -703,6 +740,7 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     maxResources: raw["maxResources"],
     maxResourceHosts: raw["maxResourceHosts"],
     fetchResources: raw["fetchResources"],
+    maxBlockedUrls: raw["maxBlockedUrls"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -742,6 +780,8 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     // reports it as a cap the operator asked for.
     "maxResources",
     "maxResourceHosts",
+    // The blocked-row budget (Phase 23 T3), on the same terms.
+    "maxBlockedUrls",
   ] as const) {
     if (config[field] !== undefined && typeof config[field] !== "number") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a number`);
@@ -854,6 +894,10 @@ export function validateCrawlConfig(config: CrawlConfig): void {
   for (const [field, value] of [
     ["maxResources", config.maxResources],
     ["maxResourceHosts", config.maxResourceHosts],
+    // A blocked budget of 0 would turn every robots-blocked link into an
+    // overflow count with no row behind it — the silence this budget exists
+    // to bound, made total. Refused for the same reason as the two above.
+    ["maxBlockedUrls", config.maxBlockedUrls],
   ] as const) {
     if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
       throw new RangeError(
@@ -1164,6 +1208,90 @@ async function runToCompletion(
     crawledRows(startCounts);
 
   /**
+   * THE ROBOTS-BLOCKED BUDGET (Phase 23 T3, study D1), kept beside the frontier's
+   * and never mixed with it: `blockedRows` counts the `disallowed` page rows
+   * this crawl has RECORDED for robots.txt, against `maxBlockedUrls` (default
+   * `maxPages`). A counter, not a set — the dedupe is the `(crawl_id, url)`
+   * unique index's, exactly as the frontier's is (hard rule 6).
+   *
+   * Read off the table on every start rather than assumed zero, so a resume
+   * spends what is left of the budget rather than a second one.
+   *
+   * The overflow column is stamped 0 on a crawl that holds no pages yet — the
+   * row then says "counted, nothing turned away" rather than the null a pre-0020
+   * crawl carries. A resume adds to whatever is there, and `null + n` stays null
+   * in SQL: a crawl whose first run predates 0020 never acquires a partial count
+   * that reads like a whole one (`resource_refs_capped_pages`' rule).
+   */
+  const blockedBudget = config.maxBlockedUrls ?? config.maxPages;
+  let blockedRows = await robotsBlockedRowCount(db, crawlId);
+  if (!resumed) {
+    await db.update(crawls).set({ robotsBlockedDropped: 0 }).where(eq(crawls.id, crawlId));
+  }
+
+  /**
+   * Record robots-blocked URLs: a page row each while the budget lasts, a count
+   * on the crawl row past it. Never a request (the caller has already decided
+   * robots.txt forbids every one of them), and never a frontier row.
+   *
+   * `blocked` is one `enqueue` call's distinct candidates — bounded by the call
+   * (one page's links, the analyzer caps them at 2,000), never by the crawl.
+   *
+   * A URL ALREADY ON RECORD is neither a new row nor a drop: a site whose every
+   * page links to `/cart` has one `/cart` row, and the thousandth page's link to
+   * it must not read as "turned away" once the budget is full. One indexed
+   * lookup per call answers that; it is SQL, not a set of seen URLs.
+   *
+   * The budget is RESERVED in one synchronous step after that lookup — the
+   * check and the increment with no `await` between them — for the frontier's
+   * reason: up to `maxConcurrency` handlers are in here at once. The count is
+   * then corrected downwards by however many rows the conflict dropped (a
+   * sibling handler recorded the same URL a moment earlier). What that race can
+   * still do, and it is stated rather than hidden: when the budget is full, two
+   * handlers that both met a URL neither had seen recorded may count it twice,
+   * and one that a sibling recorded in the same instant may be counted as
+   * turned away. `robots_blocked_dropped` is a count of discoveries turned away,
+   * documented as such (src/db/schema.ts), and never claimed as distinct URLs.
+   */
+  const recordRobotsBlocked = async (
+    blocked: ReadonlyMap<string, string>,
+    depth: number,
+    discoveredVia: DiscoveredVia,
+  ): Promise<void> => {
+    const candidates = [...blocked.keys()];
+    const known = await db.execute<{ url: string }>(sql`
+      select url from pages
+      where crawl_id = ${crawlId} and url = any(${sql.param(candidates)}::text[])`);
+    const onRecord = new Set(known.rows.map((row) => row.url));
+    const fresh = candidates.filter((url) => !onRecord.has(url));
+    if (fresh.length === 0) return;
+
+    // Reserve. Synchronous with the check — see the docblock.
+    const take = Math.min(Math.max(0, blockedBudget - blockedRows), fresh.length);
+    blockedRows += take;
+    const overflow = fresh.length - take;
+
+    if (take > 0) {
+      const inserted = await writer.insertRobotsBlocked(
+        fresh.slice(0, take).map((url) => {
+          const reason = blocked.get(url);
+          if (reason === undefined) {
+            throw new Error(`recordRobotsBlocked: ${url} lost its robots.txt line`);
+          }
+          return { item: { url, depth, discoveredVia }, reason };
+        }),
+      );
+      blockedRows -= take - inserted;
+    }
+    if (overflow > 0) {
+      await db
+        .update(crawls)
+        .set({ robotsBlockedDropped: sql`${crawls.robotsBlockedDropped} + ${overflow}` })
+        .where(eq(crawls.id, crawlId));
+    }
+  };
+
+  /**
    * Enqueue candidates that pass every gate, never letting the frontier grow
    * past `maxPages` rows. The cap is on rows *ever inserted*, so a hub page
    * with 5000 links cannot turn a 100-page crawl into a 5000-row table.
@@ -1177,6 +1305,14 @@ async function runToCompletion(
    * count is corrected downwards afterwards by however many rows the
    * `(crawl_id, url)` conflict dropped, so URLs already in the frontier do not
    * permanently consume budget.
+   *
+   * A candidate robots.txt disallows is NOT enqueued — it is never fetched —
+   * and since Phase 23 T3 it is not dropped either: it is collected with the
+   * line that blocked it and recorded by `recordRobotsBlocked`, against its own
+   * budget. That is why a full frontier no longer ends the scan early for a
+   * page's links (a blocked link past the frontier cap is still a fact), while
+   * the sitemap's entries, which are never recorded as blocked rows, still stop
+   * at the cap as they always did.
    */
   const enqueue = async (
     urls: readonly string[],
@@ -1186,9 +1322,15 @@ async function runToCompletion(
     // of discovery has to be declared there before it can be enqueued here.
     discoveredVia: DiscoveredVia,
   ): Promise<void> => {
-    if (frontierRows >= config.maxPages) return;
+    // Sitemap entries robots.txt disallows are on record in `sitemap_urls` and
+    // reported by `robots.blocks-sitemap-urls`; see `CrawlConfig.maxBlockedUrls`.
+    const recordsBlocked = discoveredVia !== "sitemap";
+    if (frontierRows >= config.maxPages && !recordsBlocked) return;
 
     const items: EnqueueItem[] = [];
+    // url -> the `fetch_reason` it will be recorded with. Distinct within the
+    // call, bounded by it.
+    const blocked = new Map<string, string>();
     for (const raw of urls) {
       // normalizeUrl is the single frontier-key authority (url-utils). Links
       // arrive already normalised from the analyzer; the seed and sitemap
@@ -1196,26 +1338,50 @@ async function runToCompletion(
       const url = normalizeUrl(raw);
       if (url === null) continue;
       if (!isSameOrigin(url, config.siteUrl)) continue; // external: linked, never fetched
+      // Rule 5 first, for every candidate — a blocked row is recorded only for
+      // a URL the policy would have let us fetch; robots.txt is then the reason
+      // no fetch follows.
       const verdict = await isUrlAllowed(url, { allowPrivate });
       if (!verdict.allowed) continue;
       // isSameOrigin admits www<->apex and http->https spellings, and the
       // robots wrapper judges those by the same rules (RobotsInfo.isAllowed):
       // a variant spelling is never a way around Disallow.
-      if (!discovery.robots.isAllowed(url)) continue;
+      if (!discovery.robots.isAllowed(url)) {
+        if (recordsBlocked && !blocked.has(url)) {
+          // The line that decided, quoted from the robots.txt this crawl read.
+          // A disallow with no line behind it would be a row that cannot say
+          // why it was never requested — our defect, and loud (rule 7).
+          const line = discovery.robots.matchingRule(url);
+          if (line === null) {
+            throw new Error(
+              `enqueue: robots.txt disallows ${url} but names no line that decided it ` +
+                `(robots outcome '${discovery.robots.outcome}')`,
+            );
+          }
+          blocked.set(url, robotsBlockedReason(line));
+        }
+        continue;
+      }
 
       // Reserve. Atomic with respect to the event loop, which is what makes
       // the cap hold across concurrent handlers.
-      if (frontierRows >= config.maxPages) break;
+      if (frontierRows >= config.maxPages) {
+        if (!recordsBlocked) break;
+        continue;
+      }
       frontierRows += 1;
       items.push({ url, depth, discoveredVia });
     }
-    if (items.length === 0) return;
-
-    // A throw here leaves the reservation standing, which is the safe
-    // direction: the crawl is on its way out, and over-counting the frontier
-    // can only stop work early, never run past maxPages.
-    const inserted = await enqueueUrls(db, crawlId, items);
-    frontierRows -= items.length - inserted;
+    if (items.length > 0) {
+      // A throw here leaves the reservation standing, which is the safe
+      // direction: the crawl is on its way out, and over-counting the frontier
+      // can only stop work early, never run past maxPages.
+      const inserted = await enqueueUrls(db, crawlId, items);
+      frontierRows -= items.length - inserted;
+    }
+    // After the frontier: the URLs that will be fetched are queued before the
+    // ones that never will be are written down.
+    if (blocked.size > 0) await recordRobotsBlocked(blocked, depth, discoveredVia);
   };
 
   /**
@@ -1965,6 +2131,26 @@ async function persistSitemap(
     // the same sitemap. The first read's row stands.
     await db.insert(sitemapUrls).values(batch).onConflictDoNothing();
   }
+}
+
+/**
+ * How many robots-blocked page rows this crawl already holds — the starting
+ * point of the blocked budget (`CrawlConfig.maxBlockedUrls`), read once per run
+ * so a resume spends what is left rather than a second budget. The predicate is
+ * the one `ROBOTS_BLOCKED` (src/rules/helpers.ts) spells: the class AND the
+ * robots reason, so a url-policy refusal is not counted against robots.txt.
+ */
+async function robotsBlockedRowCount(db: Db, crawlId: string): Promise<number> {
+  const res = await db.execute<{ n: number }>(sql`
+    select count(*)::int as n from pages
+    where crawl_id = ${crawlId}
+      and fetch_class = 'disallowed'
+      and starts_with(coalesce(fetch_reason, ''), ${ROBOTS_BLOCKED_REASON_PREFIX})`);
+  const n = res.rows[0]?.n;
+  if (typeof n !== "number") {
+    throw new Error(`robotsBlockedRowCount: count came back as ${typeof n}, not a number`);
+  }
+  return n;
 }
 
 /**

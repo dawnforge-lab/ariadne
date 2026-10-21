@@ -42,10 +42,12 @@
  *                                      `{columns, items, nextCursor}`, each row
  *                                      the four standard columns plus the rule's
  *                                      own evidence
- *   GET  /crawls/:id/issues/:rule/inlinks the links that point at what the two
- *                                      link rules found — Source, Destination,
- *                                      Anchor, Status Code. 404 for any other
- *                                      rule: it has no inlinks report
+ *   GET  /crawls/:id/issues/:rule/inlinks the links that point at what the three
+ *                                      target rules found (links.broken-internal,
+ *                                      links.to-server-error,
+ *                                      robots.blocks-internal-urls) — Source,
+ *                                      Destination, Anchor, Status Code. 404 for
+ *                                      any other rule: it has no inlinks report
  *   GET  /crawls/:id/metrics           the measured numbers, with their copy
  *   GET  /crawls/:id/metrics/:metricId one metric as a table: {metricId, title,
  *                                      explanation, howToFix, summary, columns,
@@ -366,9 +368,9 @@ function buildRoutes(): Route[] {
         }),
       }),
     },
-    // THE COMPANION INLINKS REPORT, for the two rules that report a TARGET the
-    // site links to. Every other rule reports the page itself and is refused
-    // here with a 404 naming the two that are not — never an empty page, which
+    // THE COMPANION INLINKS REPORT, for the three rules that report a TARGET
+    // the site links to. Every other rule reports the page itself and is
+    // refused here with a 404 naming the three that are not — never an empty page, which
     // would read as "nothing links to it" (see `listIssueInlinks`).
     {
       method: "GET",

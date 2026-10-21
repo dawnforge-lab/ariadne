@@ -303,11 +303,21 @@ describe("checklist coverage", () => {
   // THE CLAIMED-CHECK ARITHMETIC DOES NOT MOVE: three claim CHECK-12 (already
   // claimed by `http.server-error`) and the marker claims CHECK-05 (already
   // claimed by `crawl.blocked`).
-  it("pins the ruleset split the gate doc reports: 104 rules = 29 page + 61 query + 14 metric", () => {
+  //
+  // Phase 23 Task 3 adds ONE query rule, `robots.blocks-internal-urls`: the
+  // internal URLs robots.txt disallows, recorded by the crawl instead of
+  // dropped, each with its inlinks.
+  //
+  //   query   61 + 1 = 62
+  //   total   104 + 1 = 105
+  //
+  // The claimed-check arithmetic does not move: it claims CHECK-03, already
+  // claimed by the three robots rules beside it.
+  it("pins the ruleset split the gate doc reports: 105 rules = 29 page + 62 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(104);
+    expect(registry.all()).toHaveLength(105);
     expect(registry.byKind("page")).toHaveLength(29);
-    expect(registry.byKind("query")).toHaveLength(61);
+    expect(registry.byKind("query")).toHaveLength(62);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

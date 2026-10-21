@@ -2057,9 +2057,15 @@ describe("the fixture site end to end", () => {
     // MIN_COHORT exactly: typesBefore 63 -> 66, typesAfter 19 -> 20, and
     // pagesRetyped 48 -> 51. None of the three is in the judged cohort, so the
     // key set above does not move.
+    //
+    // Phase 23 T3's `/private/linked` is a robots-blocked row — never requested,
+    // but a page row, and a page type is a fact about the URL, typed like any
+    // 404 row is. One page under `/private/` is under MIN_COHORT, so it is one
+    // more parse-time type that stays its own: typesBefore 66 -> 67, typesAfter
+    // 20 -> 21, pagesRetyped unchanged. Not judged, so no cohort moves.
     expect(summary.pageTemplates).toEqual({
-      typesBefore: 66,
-      typesAfter: 20,
+      typesBefore: 67,
+      typesAfter: 21,
       pagesRetyped: 51,
     });
   });
@@ -2517,11 +2523,13 @@ describe("the fixture site end to end", () => {
       urlsWithInfoOnly: infoOnly,
       urlsClean: clean,
       cleanRatio,
-      // 87 pages crawled, and the census is the judged ones: the rest are this
-      // fixture site's redirects, its 404s, its 5xx, its non-HTML and (Phase 23)
-      // its three unread fetch outcomes, plus the two set-aside columns beside
-      // them.
-      pagesNotAuditable: 87 - judged - canonicalised - noindex,
+      // 88 rows on record — 87 pages crawled plus (Phase 23 T3) the one
+      // robots-blocked `/private/linked`, recorded and never requested — and the
+      // census is the judged ones: the rest are this fixture site's redirects,
+      // its 404s, its 5xx, its non-HTML, its three unread fetch outcomes and the
+      // robots-blocked row (counted here DELIBERATELY: "URLs Not Judged" is over
+      // every URL on record), plus the two set-aside columns beside them.
+      pagesNotAuditable: 88 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
     });
@@ -2536,8 +2544,8 @@ describe("the fixture site end to end", () => {
         health["urlsCanonicalised"]! +
         health["urlsNoindex"]! +
         health["pagesNotAuditable"]!,
-    ).toBe(87);
-    expect(pageByPath.size).toBe(87);
+    ).toBe(88);
+    expect(pageByPath.size).toBe(88);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {

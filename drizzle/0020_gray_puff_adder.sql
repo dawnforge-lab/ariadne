@@ -1,0 +1,1 @@
+ALTER TABLE "crawls" ADD COLUMN "robots_blocked_dropped" integer;

@@ -1368,6 +1368,72 @@ describe("GET /crawls/:id/issues/:ruleId/urls", () => {
     expect(unknown.status).toBe(400);
   });
 
+  /**
+   * The third inlinks report (Phase 23 T3): `robots.blocks-internal-urls`. Its
+   * predicate is the class AND the robots reason, so a link to a URL our own
+   * url-policy refused — also `disallowed` — is not listed, and crawl_status
+   * counts the two apart.
+   */
+  it("lists the links into robots-blocked URLs, and never a url-policy refusal", async () => {
+    const crawlR = `crawl_query_r_${Date.now()}`;
+    await seedCrawl(crawlR, { judged: true });
+    try {
+      const home = await seedPage(crawlR, {
+        slug: "r-home", pageType: "home", statusCode: 200, isIndexable: true,
+        rendered: false, depth: 0, wordCount: 300,
+      });
+      for (const [slug, reason] of [
+        ["r-private", "robots.txt: Disallow: /r-private"],
+        ["r-refused", "blocked host (169.254.169.254)"],
+      ] as const) {
+        await db.insert(pages).values({
+          id: `${crawlR}_page_${slug}`,
+          crawlId: crawlR,
+          url: `${SITE}/${slug}`,
+          urlNormalised: `${SITE}/${slug}`,
+          statusCode: null,
+          fetchClass: "disallowed",
+          fetchReason: reason,
+          depth: 1,
+          discoveredVia: "link",
+          isIndexable: false,
+          rendered: false,
+        });
+      }
+      await db.insert(links).values([
+        {
+          crawlId: crawlR, sourcePageId: home, targetUrl: `${SITE}/r-private`,
+          targetPageId: null, anchor: "Staff area", rel: null, isInternal: true, position: 0,
+        },
+        {
+          crawlId: crawlR, sourcePageId: home, targetUrl: `${SITE}/r-refused`,
+          targetPageId: null, anchor: "Refused", rel: null, isInternal: true, position: 1,
+        },
+      ]);
+
+      const res = await call(`/crawls/${crawlR}/issues/robots.blocks-internal-urls/inlinks`);
+      expect(res.status).toBe(200);
+      expect(items(res)).toEqual([
+        {
+          source: `${SITE}/r-home`,
+          destination: `${SITE}/r-private`,
+          anchor: "Staff area",
+          // Never requested, so no status — and none is invented.
+          statusCode: null,
+        },
+      ]);
+
+      const status = await call(`/crawls/${crawlR}`);
+      expect(status.body["robotsBlocked"]).toEqual({ recorded: 1, dropped: null });
+
+      // The refusal names all three rules that have a report.
+      const other = await call(`/crawls/${crawlR}/issues/links.orphan/inlinks`);
+      expect(String(other.body["error"])).toContain("robots.blocks-internal-urls");
+    } finally {
+      await db.delete(crawls).where(eq(crawls.id, crawlR));
+    }
+  });
+
   it("never leaks a column the projection did not name", async () => {
     const res = await call(`/crawls/${crawlA}/issues/links.orphan/urls`);
     // `dedupe_key` is the sort key and is deliberately not part of the answer.

@@ -9,6 +9,7 @@ import {
   isAuditable,
   isCanonicalisedElsewhere,
   queryFinding,
+  ROBOTS_BLOCKED,
   type RuleIdentity,
 } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
@@ -303,7 +304,11 @@ async function targetContext(
     select p.id, p.url, p.fetch_class, p.status_code, p.is_indexable,
            p.canonical_html, p.canonical_header
     from pages p
-    where p.crawl_id = ${crawlId} and p.url = any(${sql.param(wanted)}::text[])`);
+    where p.crawl_id = ${crawlId} and p.url = any(${sql.param(wanted)}::text[])
+      -- A robots-blocked row (Phase 23 T3) was recorded and NEVER REQUESTED,
+      -- so it is read the way an alternate nobody fetched always was: absent
+      -- from this map, and counted by hreflang.alternates-not-crawled.
+      and not ${ROBOTS_BLOCKED("p")}`);
   const byUrl = new Map<string, TargetPage>();
   for (const row of targetRows.rows) {
     // The other half of the canonical exclusion: a target that canonicalises
@@ -599,7 +604,10 @@ async function alternatesNotCrawledFindings(db: Db, crawlId: string): Promise<Fi
         and not ${CANONICALISED_ELSEWHERE("p")}
         and not exists (
           select 1 from pages t
-          where t.crawl_id = ${crawlId} and t.url = h.target_url)
+          where t.crawl_id = ${crawlId} and t.url = h.target_url
+            -- Recorded but never requested (robots.txt, Phase 23 T3) is still
+            -- "not requested by this crawl": the marker's own words.
+            and not ${ROBOTS_BLOCKED("t")})
     ),
     by_host as (
       select

@@ -224,6 +224,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Read this before quoting any rendering finding. If no run happened, the rendering findings are silent because nothing was measured. Rendered against crawled is the sample size; a truncated selection means the budget, not the site, decided where the run stopped.",
   },
+  "robots.blocks-internal-urls": {
+    title: "Robots.txt: Internal URLs blocked by robots.txt",
+    explanation:
+      "Internal URLs linked from crawled pages that robots.txt disallows for the crawler's user agent; they were not requested. Each URL is listed once with the Disallow line that matches it and the number of pages linking to it. A blocked URL cannot be read, so at best it is indexed as a bare URL with no title or description, and the links pointing at it lead nowhere a search engine can follow.",
+    howToFix:
+      "Confirm each Disallow is intended. If the pages should be found, narrow or remove the rule; if they should not, remove the internal links to them, and use noindex rather than robots.txt where the aim is to keep a page out of the index.",
+  },
   "robots.blocks-sitemap-urls": {
     title: "Robots.txt: Sitemap URLs blocked by robots.txt",
     explanation:

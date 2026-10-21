@@ -577,7 +577,9 @@ describe("check annotations", () => {
  * four, all over fetch outcomes no rule judged before: `http.no-response` and
  * `page.html-too-large` (critical, both added to the list below),
  * `http.no-response-transient` (warning) and the `crawl.unreadable-encoding`
- * marker (info). Two classes are fixed by
+ * marker (info). Task 3 adds one warning, `robots.blocks-internal-urls` (a
+ * Disallow on a linked URL may be intended, so the site is asked to confirm
+ * it). Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
  * the thirteen markers, which report a hole in OUR evidence and never a fault of
@@ -586,11 +588,11 @@ describe("check annotations", () => {
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 30 critical, 26 warning and 48 info rules", () => {
+  it("holds 30 critical, 27 warning and 48 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 30, warning: 26, info: 48 });
-    expect(all).toHaveLength(104);
+    expect(counts).toEqual({ critical: 30, warning: 27, info: 48 });
+    expect(all).toHaveLength(105);
   });
 
   it("names exactly the rules that are critical", () => {

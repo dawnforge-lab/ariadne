@@ -10,7 +10,10 @@
  * crawl it is judging.
  *
  * Everything below happens in SQL. The aggregation is over every URL the crawl
- * stored — tens of thousands of rows on a real site — and pulling them into
+ * stored — the robots-blocked rows of Phase 23 T3 included, deliberately: a
+ * parameter the site links to and disallows is still a parameter the site
+ * publishes (see `url.param-volumes`) — tens of thousands of rows on a real
+ * site — and pulling them into
  * JavaScript to count parameter names would be the memory contract broken for
  * no reason (hard rule 6).
  */

@@ -3,7 +3,7 @@ import { and, asc, eq, gt, isNotNull, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import { pages } from "../../db/schema.js";
-import { isAuditable, queryFinding, type RuleIdentity } from "../helpers.js";
+import { isAuditable, queryFinding, ROBOTS_BLOCKED, type RuleIdentity } from "../helpers.js";
 import { resolveEffectiveCanonical } from "../page/canonical.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -120,7 +120,11 @@ async function eachPaginatedPage(
                ) as linked
         from pages p
         where p.crawl_id = ${crawlId}
-          and p.url = any(${sql.param(wanted)}::text[])`);
+          and p.url = any(${sql.param(wanted)}::text[])
+          -- A robots-blocked row (Phase 23 T3) is a URL the crawl recorded and
+          -- NEVER FETCHED: to "was the next page crawled" it answers no, exactly
+          -- as the absence of a row did before such rows existed.
+          and not ${ROBOTS_BLOCKED("p")}`);
       for (const row of rows.rows) {
         targets.set(String(row.url), { url: String(row.url), linked: row.linked });
       }

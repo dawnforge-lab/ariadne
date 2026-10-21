@@ -220,6 +220,7 @@ target is not something this skill can crawl.
  renderPassCount, rulesetVersion, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs,
+ robotsBlocked: {recorded, dropped},
  rulesRunAt, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
  resources: {seen, fetched, failed, skipped, robotsDenied, robotsUnreachable,
@@ -269,6 +270,12 @@ What the fields mean when you are waiting:
 - **`blockedPages`** — pages a WAF or rate limiter answered instead of the site
   (401, 403, 429, or a challenge page). Watch it across polls: the number matters far
   less than whether it is still rising. See the reaction loop below.
+- **`robotsBlocked`** — not a block by the site: internal URLs the site's own
+  robots.txt disallows, which this crawl never requested. `recorded` are on record as
+  pages (`robots.blocks-internal-urls` lists them with their inlinks); `dropped` counts
+  discoveries turned away once their own budget (default `maxPages`) was full — not
+  distinct URLs — and non-zero means that rule's list is incomplete. `dropped: null`
+  is a crawl from before this was counted, not zero.
 - **`hostSpacingMs`** — how far the engine has already backed off: the widest gap it
   is enforcing between two requests to one host, in milliseconds. It starts at the
   crawl's `perHostDelayMs` and only ever rises. Null means no crawl loop reported one

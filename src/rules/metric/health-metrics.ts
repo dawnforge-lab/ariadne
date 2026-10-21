@@ -99,6 +99,15 @@
  * that were the whole remainder is the mistake this paragraph exists to stop: it
  * is the shape of the predicate, not a catalogue.
  *
+ * Since Phase 23 T3 the remainder also holds the ROBOTS-BLOCKED rows: internal
+ * URLs a page linked to that robots.txt disallowed, recorded and never
+ * requested. They are counted there DELIBERATELY, not by accident of the
+ * predicate: the column is "URLs Not Judged" and the partition is over every
+ * URL the crawl has a row for, and a blocked URL is exactly that — on record,
+ * not judged, and reported by `robots.blocks-internal-urls`. The censuses of
+ * what was FETCHED (`redirect.volume`'s denominator, `render.coverage`'s
+ * `pagesCrawled`, the render budget) exclude them instead (`ROBOTS_BLOCKED`).
+ *
  * Those pages are excluded from every bucket here, and `pagesNotAuditable` is
  * the column that says how many, so the exclusion is a number a reader can see
  * rather than a silence they have to infer (it is the crawl's page count minus

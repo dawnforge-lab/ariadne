@@ -17,6 +17,7 @@ import {
 import type { HostProbeResult } from "../../src/crawl/host-probe.js";
 import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
+import { robotsRules } from "../../src/rules/query/robots.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -538,12 +539,23 @@ describe("runCrawl", () => {
     expect(byUrl.get(`${base}/b`)?.fetchClass).toBe("redirect"); // hop is its own row
     expect(byUrl.get(`${base}/c`)?.fetchClass).toBe("ok"); // redirect target crawled
     expect(byUrl.get(`${base}/missing`)?.fetchClass).toBe("client_error");
-    expect(byUrl.has(`${base}/admin/secret`)).toBe(false); // robots respected
+    // Robots respected: the linked /admin/secret is RECORDED (Phase 23 T3) as
+    // a row that was never requested, with the line that blocked it — not
+    // fetched, and not silently dropped either.
+    expect(byUrl.get(`${base}/admin/secret`)).toMatchObject({
+      fetchClass: "disallowed",
+      fetchReason: "robots.txt: Disallow: /admin",
+      statusCode: null,
+      discoveredVia: "link",
+    });
     expect([...byUrl.keys()].every((u) => u.startsWith(base))).toBe(true); // same-origin
     expect(summary.frontier.pending).toBe(0);
 
-    // The seed, /a, /b, /c, /missing and the sitemap-only /d — and nothing else.
-    expect([...byUrl.keys()].sort()).toEqual(
+    // The seed, /a, /b, /c, /missing and the sitemap-only /d — and nothing else
+    // that was fetched.
+    expect(
+      rows.filter((r) => r.fetchClass !== "disallowed").map((r) => r.url).sort(),
+    ).toEqual(
       [`${base}/`, `${base}/a`, `${base}/b`, `${base}/c`, `${base}/d`, `${base}/missing`].sort(),
     );
     expect(summary.status).toBe("finished");
@@ -658,7 +670,9 @@ describe("runCrawl", () => {
     const summary = await crawl(config({ maxPages: 2 }));
     expect(summary.pagesCrawled).toBeLessThanOrEqual(2);
     const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
-    expect(rows.length).toBeLessThanOrEqual(2);
+    // Fetched rows only: a robots-blocked row is never requested and has its
+    // own budget (Phase 23 T3), so it does not count against maxPages.
+    expect(rows.filter((r) => r.fetchClass !== "disallowed").length).toBeLessThanOrEqual(2);
   });
 
   it("abort signal stops the loop and releases nothing into limbo", async () => {
@@ -767,9 +781,11 @@ describe("runCrawl", () => {
     // maxDepth a page is crawled but not expanded.
     expect(byUrl.has(`${base}/c`)).toBe(true);
     expect(byUrl.has(`${base}/missing`)).toBe(false);
+    // Plus the depth-1 robots-blocked link from the seed, recorded unrequested.
     expect([...byUrl.keys()].sort()).toEqual(
-      [`${base}/`, `${base}/a`, `${base}/b`, `${base}/c`, `${base}/d`].sort(),
+      [`${base}/`, `${base}/a`, `${base}/admin/secret`, `${base}/b`, `${base}/c`, `${base}/d`].sort(),
     );
+    expect(byUrl.get(`${base}/admin/secret`)?.fetchClass).toBe("disallowed");
     expect(rows.every((r) => r.depth <= 1)).toBe(true);
     // A redirect target is the same depth, not a step deeper, so /b -> /c is
     // still followed from a depth-1 page.
@@ -859,7 +875,21 @@ describe("runCrawl", () => {
     // The www. spelling of /admin/x is same-origin by our own rule, so it is a
     // URL this crawl would otherwise fetch. robots disallows /admin: it must
     // not be fetched under either spelling, and must not even be enqueued.
-    expect(rows.map((r) => r.url).sort()).toEqual([`${variant}/`, `${variant}/ok`].sort());
+    // Since Phase 23 T3 it is RECORDED under the spelling it was linked as —
+    // a disallowed row, never requested, quoting the line of the apex's
+    // robots.txt that governs it.
+    expect(
+      rows.filter((r) => r.fetchClass !== "disallowed").map((r) => r.url).sort(),
+    ).toEqual([`${variant}/`, `${variant}/ok`].sort());
+    expect(
+      rows
+        .filter((r) => r.fetchClass === "disallowed")
+        .map((r) => ({ url: r.url, fetchReason: r.fetchReason, statusCode: r.statusCode }))
+        .sort((a, b) => a.url.localeCompare(b.url)),
+    ).toEqual([
+      { url: `${variantWww}/admin/x`, fetchReason: "robots.txt: Disallow: /admin", statusCode: null },
+      { url: `${variantWww}/admin/y`, fetchReason: "robots.txt: Disallow: /admin", statusCode: null },
+    ]);
 
     const queued = await db
       .select()
@@ -891,6 +921,24 @@ describe("runCrawl", () => {
     expect(summary.frontier).toEqual({
       pending: 0, leased: 0, done: 0, failed: 0, renderPending: 0,
     });
+    // The seed itself is the one URL the site linked us to, and it is on
+    // record (Phase 23 T3): never requested, blocked by `Disallow: /`.
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+    expect(
+      rows.map((r) => ({
+        url: r.url,
+        fetchClass: r.fetchClass,
+        fetchReason: r.fetchReason,
+        discoveredVia: r.discoveredVia,
+      })),
+    ).toEqual([
+      {
+        url: `${closed}/`,
+        fetchClass: "disallowed",
+        fetchReason: "robots.txt: Disallow: /",
+        discoveredVia: "seed",
+      },
+    ]);
   });
 
   it("lets our own errors kill the run, and marks the crawl failed", async () => {
@@ -933,6 +981,201 @@ describe("runCrawl", () => {
     const text = aggregate.errors.map((e) => String((e as Error).message ?? e)).join("\n");
     expect(text).toMatch(/frontier/); // the loop's error survived
     expect(text).toMatch(/pages/); // and so did the flush's
+  });
+});
+
+/**
+ * ROBOTS-BLOCKED INTERNAL URLS ARE RECORDED, NEVER REQUESTED (Phase 23 T3,
+ * study D1). Until this phase a same-origin URL robots.txt disallowed was
+ * dropped at enqueue — no row, no finding, the silence hard rule 7 forbids.
+ *
+ * Two fixture sites, each counting every request it is asked so "never
+ * requested" is an observation rather than an absence:
+ *   linked:  /  -> /p1, /p2
+ *            /p1 -> /private/x, /private/y
+ *            /p2 -> /private/x
+ *   many:    /  -> /ok, /private/a, /private/b, /private/c
+ *            /ok -> /private/a (already recorded by then: never "dropped")
+ */
+describe("robots-blocked internal URLs", () => {
+  let linkedServer: Server;
+  let linked: string;
+  let manyServer: Server;
+  let many: string;
+  const linkedHits: string[] = [];
+  const manyHits: string[] = [];
+
+  const ROBOTS = "User-agent: *\nDisallow: /private/   # staff only\nAllow: /\n";
+
+  function site(hits: string[], bodies: Record<string, string>): Server {
+    return createServer((req, res) => {
+      const path = req.url ?? "";
+      hits.push(path);
+      if (path === "/robots.txt") {
+        res.setHeader("content-type", "text/plain");
+        res.end(ROBOTS);
+        return;
+      }
+      const body = bodies[path];
+      if (body === undefined) {
+        res.writeHead(404, { "content-type": "text/html" });
+        res.end(html("<p>gone</p>"));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(body);
+    });
+  }
+
+  const blockedRule = () => {
+    const r = robotsRules.find((rule) => rule.id === "robots.blocks-internal-urls");
+    if (r === undefined) throw new Error("no robots.blocks-internal-urls rule");
+    return r;
+  };
+
+  async function rowsOf(crawlId: string) {
+    return db.select().from(pages).where(eq(pages.crawlId, crawlId));
+  }
+
+  async function droppedOf(crawlId: string): Promise<number | null> {
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    if (row === undefined) throw new Error(`no crawls row for ${crawlId}`);
+    return row.robotsBlockedDropped;
+  }
+
+  beforeAll(async () => {
+    linkedServer = site(linkedHits, {
+      "/": html(`<a href="/p1">one</a><a href="/p2">two</a>`),
+      "/p1": html(`<a href="/private/x">x</a><a href="/private/y">y</a>`),
+      "/p2": html(`<a href="/private/x">x again</a>`),
+      "/private/x": html("<p>must never be fetched</p>"),
+      "/private/y": html("<p>must never be fetched</p>"),
+    });
+    linked = await listen(linkedServer);
+    manyServer = site(manyHits, {
+      "/": html(
+        `<a href="/ok">ok</a><a href="/private/a">a</a>` +
+          `<a href="/private/b">b</a><a href="/private/c">c</a>`,
+      ),
+      "/ok": html(`<a href="/private/a">a again</a>`),
+    });
+    many = await listen(manyServer);
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => linkedServer.close(() => r()));
+    await new Promise<void>((r) => manyServer.close(() => r()));
+  });
+
+  it("writes a disallowed row per blocked URL, requests none of them, and reports their inlinks", async () => {
+    linkedHits.length = 0;
+    const summary = await crawl(config({ siteUrl: linked, probeHosts: false }));
+
+    // Not one request under the disallowed prefix — robots is the reason no
+    // fetch follows, and the fixture's own log is the witness.
+    expect(linkedHits.filter((p) => p.startsWith("/private/"))).toEqual([]);
+
+    const rows = await rowsOf(summary.crawlId);
+    const blocked = rows
+      .filter((r) => r.fetchClass === "disallowed")
+      .map((r) => ({
+        url: r.url,
+        fetchReason: r.fetchReason,
+        statusCode: r.statusCode,
+        discoveredVia: r.discoveredVia,
+        depth: r.depth,
+        isIndexable: r.isIndexable,
+      }))
+      .sort((a, b) => a.url.localeCompare(b.url));
+    expect(blocked).toEqual([
+      {
+        url: `${linked}/private/x`,
+        fetchReason: "robots.txt: Disallow: /private/",
+        statusCode: null,
+        discoveredVia: "link",
+        depth: 2,
+        isIndexable: false,
+      },
+      {
+        url: `${linked}/private/y`,
+        fetchReason: "robots.txt: Disallow: /private/",
+        statusCode: null,
+        discoveredVia: "link",
+        depth: 2,
+        isIndexable: false,
+      },
+    ]);
+
+    // The fetch budget and the frontier know nothing of them: three pages
+    // were crawled, three frontier rows settled, and no frontier row names a
+    // blocked URL (it would be leased, and leasing is fetching).
+    expect(summary.pagesCrawled).toBe(3);
+    expect(summary.frontier.done).toBe(3);
+    const queued = await db.select().from(frontier).where(eq(frontier.crawlId, summary.crawlId));
+    expect(queued.filter((r) => r.url.includes("/private/"))).toEqual([]);
+    // A measurement: the budget held every blocked URL, nothing turned away.
+    expect(await droppedOf(summary.crawlId)).toBe(0);
+
+    const findings = await blockedRule().run(db, summary.crawlId);
+    expect(findings.map((f) => ({ pageUrl: f.pageUrl, evidence: f.evidence }))).toEqual([
+      {
+        pageUrl: `${linked}/private/x`,
+        evidence: { matchedRule: "Disallow: /private/", inlinks: 2 },
+      },
+      {
+        pageUrl: `${linked}/private/y`,
+        evidence: { matchedRule: "Disallow: /private/", inlinks: 1 },
+      },
+    ]);
+  });
+
+  it("caps blocked rows at their own budget, counts the overflow, and notes it on the finding", async () => {
+    manyHits.length = 0;
+    const summary = await crawl(
+      config({ siteUrl: many, probeHosts: false, maxConcurrency: 1, maxBlockedUrls: 1 }),
+    );
+    expect(manyHits.filter((p) => p.startsWith("/private/"))).toEqual([]);
+
+    const blocked = (await rowsOf(summary.crawlId)).filter((r) => r.fetchClass === "disallowed");
+    expect(blocked.map((r) => r.url)).toEqual([`${many}/private/a`]);
+    // b and c were turned away; /ok's second link to the RECORDED /private/a
+    // is not a drop — that URL has its row.
+    expect(await droppedOf(summary.crawlId)).toBe(2);
+    expect(summary.pagesCrawled).toBe(2);
+
+    const findings = await blockedRule().run(db, summary.crawlId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.evidence).toMatchObject({
+      matchedRule: "Disallow: /private/",
+      inlinks: 2,
+      // The list is incomplete and the real number is unknown: at least one
+      // more blocked URL exists than the one row listed.
+      truncated: { reported: 1, atLeast: 2 },
+    });
+  });
+
+  it("never spends maxPages on a blocked row, and defaults the blocked budget to maxPages", async () => {
+    const summary = await crawl(
+      config({ siteUrl: many, probeHosts: false, maxPages: 2, maxConcurrency: 1 }),
+    );
+    // Both real pages were fetched: three blocked URLs met on the way did not
+    // take the second fetch's place.
+    expect(summary.pagesCrawled).toBe(2);
+    const rows = await rowsOf(summary.crawlId);
+    expect(rows.filter((r) => r.fetchClass !== "disallowed").map((r) => r.url).sort()).toEqual(
+      [`${many}/`, `${many}/ok`].sort(),
+    );
+    // maxBlockedUrls absent = maxPages = 2: two rows, the third turned away.
+    expect(rows.filter((r) => r.fetchClass === "disallowed").map((r) => r.url).sort()).toEqual(
+      [`${many}/private/a`, `${many}/private/b`].sort(),
+    );
+    expect(await droppedOf(summary.crawlId)).toBe(1);
+  });
+
+  it("refuses a blocked budget that is not a positive integer", async () => {
+    await expect(
+      crawl(config({ siteUrl: many, probeHosts: false, maxBlockedUrls: 0 })),
+    ).rejects.toThrow(/maxBlockedUrls/);
   });
 });
 
@@ -1100,9 +1343,14 @@ describe("resumeCrawl", () => {
     expect(resumed.status).toBe("finished");
     expect(resumed.frontier.pending).toBe(0);
     expect(resumed.pagesCrawled).toBe(6);
-    // Pages crawled before the abort were not re-fetched: one row per URL.
+    // Pages crawled before the abort were not re-fetched: one row per URL —
+    // the six fetched, plus the robots-blocked /admin/secret recorded exactly
+    // once across both runs (Phase 23 T3: the conflict absorbs it too).
     const rows = await db.select().from(pages).where(eq(pages.crawlId, first.crawlId));
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(7);
+    expect(rows.filter((r) => r.fetchClass === "disallowed").map((r) => r.url)).toEqual([
+      `${base}/admin/secret`,
+    ]);
     // The resumed run only wrote the pages the first run had not.
     expect(resumed.writer.pages).toBe(6 - first.pagesCrawled);
   });
@@ -1371,7 +1619,8 @@ describe("resumeCrawl", () => {
     // The lost URL was crawled again, and the site's page set is whole — one
     // row per URL, because the (crawl, url) conflict still absorbs re-crawls.
     expect(rows.map((r) => r.url)).toContain(lost.url);
-    expect(rows).toHaveLength(6);
+    // Six fetched, plus the robots-blocked /admin/secret (never requested).
+    expect(rows).toHaveLength(7);
     expect(await frontierCounts(db, first.crawlId)).toMatchObject({
       pending: 0,
       leased: 0,

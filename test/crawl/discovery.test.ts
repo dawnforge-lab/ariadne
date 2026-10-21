@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
-import { discover } from "../../src/crawl/discovery.js";
+import {
+  discover,
+  ROBOTS_BLOCKED_REASON_PREFIX,
+  robotsBlockedReason,
+  robotsRulesOf,
+} from "../../src/crawl/discovery.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 
 /**
@@ -679,5 +684,91 @@ describe("discover: sitemaps", () => {
     });
     expect(evil.sitemapEntries).toEqual([]);
     expect(evil.truncation.failures[0]?.reason).toContain("scheme");
+  });
+});
+
+/**
+ * `matchingRule` — the robots.txt line that DECIDED a URL (Phase 23 T3, study
+ * D1). The crawl loop quotes it as the reason a robots-blocked row was never
+ * requested, so it must name the line robots-parser actually applied, under
+ * RFC 9309's precedence: longest pattern wins, Allow beats a Disallow of the
+ * same length, `*` matches any run and a trailing `$` anchors the end.
+ *
+ * Pure: `robotsRulesOf` is the function `fetchRobots` builds `RobotsInfo`'s two
+ * members from, so a text in and a verdict out is the whole of what is tested.
+ */
+describe("robotsRulesOf: the line that decided", () => {
+  const SITE = "https://rules.example";
+  const UA = "AriadneBot-test";
+  const rulesFor = (raw: string) => robotsRulesOf(`${SITE}/robots.txt`, raw, UA);
+
+  it("names the Disallow line that blocks a URL, comment stripped and trimmed", () => {
+    const r = rulesFor(
+      ["User-agent: *", "Disallow: /private/   # staff only", "Allow: /", ""].join("\n"),
+    );
+    expect(r.isAllowed(`${SITE}/private/x`)).toBe(false);
+    expect(r.matchingRule(`${SITE}/private/x`)).toBe("Disallow: /private/");
+    // The Allow line decides the rest of the site; it is still the deciding line.
+    expect(r.isAllowed(`${SITE}/public`)).toBe(true);
+    expect(r.matchingRule(`${SITE}/public`)).toBe("Allow: /");
+  });
+
+  it("lets the longest matching pattern win, whichever kind it is", () => {
+    const r = rulesFor(
+      ["User-agent: *", "Disallow: /shop/", "Allow: /shop/public/", "Disallow: /shop/public/drafts", ""].join(
+        "\n",
+      ),
+    );
+    expect(r.matchingRule(`${SITE}/shop/cart`)).toBe("Disallow: /shop/");
+    expect(r.isAllowed(`${SITE}/shop/public/a`)).toBe(true);
+    expect(r.matchingRule(`${SITE}/shop/public/a`)).toBe("Allow: /shop/public/");
+    expect(r.isAllowed(`${SITE}/shop/public/drafts/1`)).toBe(false);
+    expect(r.matchingRule(`${SITE}/shop/public/drafts/1`)).toBe("Disallow: /shop/public/drafts");
+  });
+
+  it("lets Allow win a tie of equal length", () => {
+    const r = rulesFor(["User-agent: *", "Disallow: /page", "Allow: /page", ""].join("\n"));
+    expect(r.isAllowed(`${SITE}/page`)).toBe(true);
+    expect(r.matchingRule(`${SITE}/page`)).toBe("Allow: /page");
+  });
+
+  it("honours * and the $ anchor", () => {
+    const r = rulesFor(
+      ["User-agent: *", "Disallow: /*?filter=", "Disallow: /*.pdf$", ""].join("\r\n"),
+    );
+    expect(r.isAllowed(`${SITE}/shoes?filter=red`)).toBe(false);
+    expect(r.matchingRule(`${SITE}/shoes?filter=red`)).toBe("Disallow: /*?filter=");
+    expect(r.isAllowed(`${SITE}/files/a.pdf`)).toBe(false);
+    expect(r.matchingRule(`${SITE}/files/a.pdf`)).toBe("Disallow: /*.pdf$");
+    // `$` anchors: a PDF path with a query string after it is not matched.
+    expect(r.isAllowed(`${SITE}/files/a.pdf?v=2`)).toBe(true);
+    expect(r.matchingRule(`${SITE}/files/a.pdf?v=2`)).toBeNull();
+  });
+
+  it("is null where no line matched, and for another site's URL", () => {
+    const r = rulesFor(["User-agent: *", "Disallow: /private/", ""].join("\n"));
+    expect(r.matchingRule(`${SITE}/open`)).toBeNull();
+    expect(r.isAllowed("https://other.example/private/x")).toBe(true);
+    expect(r.matchingRule("https://other.example/private/x")).toBeNull();
+  });
+
+  it("judges the www spelling by the same lines", () => {
+    const r = rulesFor(["User-agent: *", "Disallow: /private/", ""].join("\n"));
+    expect(r.matchingRule("https://www.rules.example/private/x")).toBe("Disallow: /private/");
+  });
+
+  it("reads the group for the crawl's own user agent", () => {
+    const r = rulesFor(
+      ["User-agent: *", "Disallow: /", "", "User-agent: AriadneBot-test", "Disallow: /mine/", ""].join(
+        "\n",
+      ),
+    );
+    expect(r.isAllowed(`${SITE}/other`)).toBe(true);
+    expect(r.matchingRule(`${SITE}/mine/x`)).toBe("Disallow: /mine/");
+  });
+
+  it("prefixes the stored reason so url-policy refusals stay distinguishable", () => {
+    expect(ROBOTS_BLOCKED_REASON_PREFIX).toBe("robots.txt: ");
+    expect(robotsBlockedReason("Disallow: /private/")).toBe("robots.txt: Disallow: /private/");
   });
 });

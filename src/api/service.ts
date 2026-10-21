@@ -120,6 +120,7 @@ import {
 } from "../rules/registry/types.js";
 import {
   indexabilityOf,
+  ROBOTS_BLOCKED,
   type Indexability,
   type IndexabilityStatus,
 } from "../rules/helpers.js";
@@ -545,6 +546,30 @@ export interface CrawlDetail extends CrawlListItem {
    * Counted live off the `pages` rows, so it is meaningful mid-crawl.
    */
   blockedPages: number;
+  /**
+   * The internal URLs robots.txt kept this crawl out of (Phase 23 T3, study
+   * D1) — NOT `blockedPages`, which is a site refusing requests we made; these
+   * are requests we never made.
+   *
+   * `recorded` is the `disallowed` page rows carrying the robots reason, counted
+   * live off `pages` (`ROBOTS_BLOCKED`): never requested, each reported with its
+   * inlinks by `robots.blocks-internal-urls`. Rows a url-policy refusal wrote
+   * are not among them. Zero is a measurement.
+   *
+   * `dropped` is `crawls.robots_blocked_dropped`: discoveries of blocked URLs
+   * turned away because the blocked-row budget (`maxBlockedUrls`, default
+   * `maxPages`) was full. A count of DISCOVERIES, not distinct URLs — one URL
+   * linked from three pages after the budget filled counts three. NON-ZERO
+   * MEANS THE RULE'S LIST IS INCOMPLETE, and the finding carries a truncation
+   * note saying so. NULL IS NOT ZERO: it is a crawl written before migration
+   * 0020 (or a resume of one), where nobody counted.
+   */
+  robotsBlocked: {
+    /** Robots-blocked page rows on record, never requested. Zero is a measurement. */
+    recorded: number;
+    /** `crawls.robots_blocked_dropped`: discoveries turned away; null = not counted. */
+    dropped: number | null;
+  };
   /**
    * The widest per-host spacing the crawl's politeness gate has escalated to,
    * in milliseconds, or null when no crawl loop ever reported one (a row that
@@ -1390,11 +1415,13 @@ export interface IssueUrlPage extends Page<IssueUrl> {
 
 /**
  * One row of the companion inlinks report: an internal link that points at
- * something one of the two link rules found.
+ * something one of the three target rules found (`INLINK_REPORT_TARGETS`).
  *
  * `statusCode` is the TARGET's, read off its own crawled `pages` row — the same
  * number the finding carries — because the question the row answers is "which
- * page links to this broken URL, and how broken is it".
+ * page links to this broken URL, and how broken is it". On a
+ * `robots.blocks-internal-urls` row it is always null: the target was never
+ * requested, so it has no status, and none is invented.
  */
 export interface IssueInlink {
   source: string;
@@ -1407,7 +1434,7 @@ export interface IssueInlink {
 /**
  * The inlinks report's columns. Fixed rather than declared per rule, because
  * the report is one shape: it is a view of the `links` table, not of a rule's
- * evidence, and both rules that have one have the same one. Screaming Frog's
+ * evidence, and every rule that has one has the same one. Screaming Frog's
  * headings, for `STANDARD_ISSUE_COLUMNS`' reason.
  */
 export const INLINK_COLUMNS: ReadonlyArray<RuleColumn> = [
@@ -1418,20 +1445,28 @@ export const INLINK_COLUMNS: ReadonlyArray<RuleColumn> = [
 ];
 
 /**
- * WHICH RULES HAVE AN INLINKS REPORT, and the target `fetch_class` each one's
- * links point at.
+ * WHICH RULES HAVE AN INLINKS REPORT, and the predicate on the TARGET row each
+ * one's links point at (aliased `tgt`).
  *
  * A map rather than a flag on the rule, and deliberately short: an inlinks
  * report is only meaningful for a rule that reports a TARGET the site links to.
  * Every other rule reports the page itself, where "which pages link here" is a
- * different question from the finding and `/urls` is the whole answer. The two
- * entries are the two rules `linkTargetClassFindings` defines, and the classes
- * are the ones it passes — the same predicate, so the report cannot list links
- * to pages the rule did not fire on.
+ * different question from the finding and `/urls` is the whole answer. Each
+ * entry is the rule's OWN predicate, so the report cannot list links to pages
+ * the rule did not fire on:
+ *
+ *  - the two rules `linkTargetClassFindings` defines, by the class it passes;
+ *  - `robots.blocks-internal-urls` (Phase 23 T3) by `ROBOTS_BLOCKED` — the
+ *    `disallowed` class AND the robots reason, never the class alone, which
+ *    would list links to URLs our own url-policy refused as robots blocks.
+ *    Its `statusCode` cell is always null: the target was never requested.
  */
-export const INLINK_REPORT_CLASSES: Readonly<Record<string, FetchClass>> = {
-  "links.broken-internal": "client_error",
-  "links.to-server-error": "server_error",
+const CLIENT_ERROR: FetchClass = "client_error";
+const SERVER_ERROR: FetchClass = "server_error";
+export const INLINK_REPORT_TARGETS: Readonly<Record<string, SQL>> = {
+  "links.broken-internal": sql`tgt.fetch_class = ${CLIENT_ERROR}`,
+  "links.to-server-error": sql`tgt.fetch_class = ${SERVER_ERROR}`,
+  "robots.blocks-internal-urls": ROBOTS_BLOCKED("tgt"),
 };
 
 /** The inlinks report as a page: its columns, then its rows. */
@@ -2299,16 +2334,18 @@ export class ApiService {
    */
   async getCrawl(crawlId: string): Promise<CrawlDetail> {
     const { row, findingsCount, pagesScanned } = await this.crawlRowWithCounts(crawlId);
-    const [counts, liveLeases, blockedPages, resourceCounts, recheckCounts] = await Promise.all([
-      frontierCounts(this.db, crawlId),
-      this.liveLeaseCount(crawlId),
-      this.blockedPageCount(crawlId),
-      this.resourceCoverage(crawlId),
-      // The crawl row's own stamp rides in rather than being read again: it
-      // came out of the statement above, so the block's `passAt` and its
-      // counts cannot describe two different runs of the pass.
-      this.recheckCoverage(crawlId, row.recheckPassAt),
-    ]);
+    const [counts, liveLeases, blockedPages, robotsBlockedRows, resourceCounts, recheckCounts] =
+      await Promise.all([
+        frontierCounts(this.db, crawlId),
+        this.liveLeaseCount(crawlId),
+        this.blockedPageCount(crawlId),
+        this.robotsBlockedCount(crawlId),
+        this.resourceCoverage(crawlId),
+        // The crawl row's own stamp rides in rather than being read again: it
+        // came out of the statement above, so the block's `passAt` and its
+        // counts cannot describe two different runs of the pass.
+        this.recheckCoverage(crawlId, row.recheckPassAt),
+      ]);
     return {
       crawlId: row.id,
       siteUrl: row.siteUrl,
@@ -2329,6 +2366,9 @@ export class ApiService {
       queuePosition: row.status === "queued" ? this.queuePosition(crawlId) : null,
       liveLeases,
       blockedPages,
+      // The overflow is STAMPED on the crawl row (null kept: nobody counted),
+      // the recorded rows are counted live, like `blockedPages` beside them.
+      robotsBlocked: { recorded: robotsBlockedRows, dropped: row.robotsBlockedDropped },
       hostSpacingMs: row.hostSpacingMs,
       legacyHosts: configStringList(row.config, "legacyHosts", crawlId),
       sitemapUrls: configStringList(row.config, "sitemapUrls", crawlId),
@@ -3613,12 +3653,14 @@ export class ApiService {
   }
 
   /**
-   * THE COMPANION INLINKS REPORT for the two link rules: every internal link
-   * that points at a broken target, one row per LINK.
+   * THE COMPANION INLINKS REPORT for the three rules that report a linked
+   * TARGET (`INLINK_REPORT_TARGETS`): every internal link that points at a
+   * broken or robots-blocked target, one row per LINK.
    *
    * `GET /crawls/:id/issues/:rule/inlinks` and the `issue_inlinks` tool. It
-   * exists because `links.broken-internal` and `links.to-server-error` report
-   * the TARGET — one dead URL linked from two hundred pages is one thing to fix,
+   * exists because `links.broken-internal`, `links.to-server-error` and (Phase
+   * 23 T3) `robots.blocks-internal-urls` report the TARGET — one dead or
+   * blocked URL linked from two hundred pages is one thing to fix,
    * and two hundred findings would bury it — while the person who makes the fix
    * edits the SOURCE page's markup. The finding's `sampleSources` is a sample of
    * ten; this is the list, and it is the same list Screaming Frog's "inlinks"
@@ -3650,8 +3692,8 @@ export class ApiService {
   ): Promise<IssueInlinkPage> {
     await this.assertCrawl(crawlId);
     this.findingRule("ruleId", ruleId);
-    const fetchClass = INLINK_REPORT_CLASSES[ruleId];
-    if (fetchClass === undefined) {
+    const target = INLINK_REPORT_TARGETS[ruleId];
+    if (target === undefined) {
       // A 404, not an empty page: "this rule has no inlinks report" and "this
       // rule's inlinks report is empty" are different sentences, and answering
       // the second to the first question is the silent failure hard rule 7
@@ -3660,7 +3702,7 @@ export class ApiService {
       throw new ServiceError(
         "NOT_FOUND",
         `rule '${clip(ruleId)}' has no inlinks report: only ` +
-          `${Object.keys(INLINK_REPORT_CLASSES).sort().join(", ")} report the links that ` +
+          `${Object.keys(INLINK_REPORT_TARGETS).sort().join(", ")} report the links that ` +
           "point at what they found — every other rule reports the page itself, and its " +
           "rows are on /issues/:rule/urls",
       );
@@ -3688,7 +3730,7 @@ export class ApiService {
       join pages tgt on tgt.crawl_id = ${crawlId} and tgt.url = l.target_url
       where l.crawl_id = ${crawlId}
         and l.is_internal
-        and tgt.fetch_class = ${fetchClass}
+        and ${target}
         and (l.source_page_id, l.target_url, l.position) >
             (${after[0]}::text, ${after[1]}::text, ${position}::int)
       order by l.source_page_id asc, l.target_url asc, l.position asc
@@ -5382,6 +5424,22 @@ export class ApiService {
     const n = rows[0]?.n;
     if (typeof n !== "number") {
       throw new Error(`blockedPageCount: count came back as ${typeof n}, not a number`);
+    }
+    return n;
+  }
+
+  /**
+   * The robots-blocked page rows (`CrawlDetail.robotsBlocked.recorded`): the
+   * class AND the robots reason (`ROBOTS_BLOCKED`), so a url-policy refusal is
+   * not counted as a robots.txt block.
+   */
+  private async robotsBlockedCount(crawlId: string): Promise<number> {
+    const rows = await this.db.execute<{ n: number }>(sql`
+      select count(*)::int as n from pages p
+      where p.crawl_id = ${crawlId} and ${ROBOTS_BLOCKED("p")}`);
+    const n = rows.rows[0]?.n;
+    if (typeof n !== "number") {
+      throw new Error(`robotsBlockedCount: count came back as ${typeof n}, not a number`);
     }
     return n;
   }
