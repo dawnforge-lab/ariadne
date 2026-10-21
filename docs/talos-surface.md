@@ -1626,9 +1626,9 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:402`
 "partitions every fetched URL over the four columns",
 `test/rules/health-metrics.test.ts:532`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1311` "names every column and the population they
-are over", `test/rules/copy.test.ts:1336` "says the counts are the authority, not the
-ratio", `test/rules/copy.test.ts:1353` "grades nothing: no score, no label, no
+`test/rules/copy.test.ts:1316` "names every column and the population they
+are over", `test/rules/copy.test.ts:1341` "says the counts are the authority, not the
+ratio", `test/rules/copy.test.ts:1358` "grades nothing: no score, no label, no
 threshold";
 `test/rules/coverage.test.ts:394` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both

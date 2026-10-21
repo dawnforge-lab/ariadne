@@ -21,10 +21,10 @@
  *  1. Say only what the rule detects. The rule source is the contract; copy
  *     that promises more than the analyser measures is a defect.
  *  2. Thresholds in prose match the constants in the rules (title 30–60,
- *     meta description 70–155, H1 70, URL 115, thin content 150 words, near-duplicate 3 of 64
- *     bits and 50 own words, soft 404 300 words, slow response 1500 ms, deep
- *     page 5, images 100,000 bytes, redirect chain 2 hops). Change one, change
- *     both; test/rules/copy.test.ts pins them.
+ *     meta description 70–155, H1 70, URL 115, thin content 150 words,
+ *     near-duplicate 3 of 64 bits and 50 own words, soft 404 300 words, slow
+ *     response 1500 ms, deep page 5, images 100,000 bytes, redirect chain 2
+ *     hops). Change one, change both; test/rules/copy.test.ts pins them.
  *
  * Metric rules describe a TABLE: the title names it, the description says
  * what the columns are, the fix says how to read it.
@@ -463,7 +463,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "Indexable, self-canonical pages whose HTML response has no meta description, or an empty one. Search engines then build the snippet from page text, which is less compelling and lowers click-through rate.",
     howToFix:
-      "Add a unique meta description of 70 to 160 characters that summarises the page and gives a reason to click.",
+      "Add a unique meta description of 70 to 155 characters that summarises the page and gives a reason to click.",
   },
   "meta-description.too-long": {
     title: "Meta description: Over 155 characters",
@@ -477,7 +477,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     explanation:
       "Indexable, self-canonical pages whose meta description is under 70 characters. Short descriptions waste the snippet space and are frequently replaced by search engines with text from the page.",
     howToFix:
-      "Expand the description to 70 to 160 characters. Where a whole section is short, build it in the template from fields that differ per page.",
+      "Expand the description to 70 to 155 characters. Where a whole section is short, build it in the template from fields that differ per page.",
   },
   "title.duplicate": {
     title: "Page titles: Duplicate",

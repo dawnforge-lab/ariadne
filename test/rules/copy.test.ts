@@ -471,6 +471,11 @@ describe("copy: on-page and content", () => {
     expect(copy("content.thin").explanation).toContain(`${THIN_WORDS} words`);
   });
 
+  it("quotes the meta description range, not just its ends, in the fixes", () => {
+    expect(copy("meta-description.missing").howToFix).toContain(`${META_MIN} to ${META_MAX}`);
+    expect(copy("meta-description.too-short").howToFix).toContain(`${META_MIN} to ${META_MAX}`);
+  });
+
   // Same contract for the two technical numbers. Word-bounded: a bare
   // `toContain("5 links")` would also pass against "15 links". `SLOW_MS` is
   // quoted with the space a client reads ("1500 ms"), so the pin allows it.
