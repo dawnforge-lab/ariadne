@@ -1370,6 +1370,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   parameters, which is how a site links itself into a parallel set of parameterised
   URLs. `issue_urls` for the list; `url.param-volumes`' `trackingParams` and the
   `isTracking` flag on `topParams` give the totals.
+  `url.too-long` (info) rides on this check as the one URL-shape rule: an indexable,
+  self-canonical page whose stored URL is over 115 characters, which is usually a
+  tracking or session parameter or a repeated folder.
 - **Evaluate**:
   - FAIL if tracking param URLs are indexable without canonical to clean URL
   - Record: count, sample URLs
@@ -1829,7 +1832,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-37: H1 and heading hierarchy
 - **Priority**: High | **Requires**: Engine + DevTools
 - **Engine**: `issues_list` with `checkId: "CHECK-37"` — `headings.h1-missing`
-  (warning), `headings.h1-multiple` (info), `headings.level-skip` (info),
+  (warning), `headings.h1-multiple` (info), `headings.h1-too-long` (info, first H1
+  over 70 characters), `headings.level-skip` (info),
   `h1.duplicate-text` (warning) and `h1.duplicate-skipped` (info). Filter by
   `pageType` for the per-template counts.
 

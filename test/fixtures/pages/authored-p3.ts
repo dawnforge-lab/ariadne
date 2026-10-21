@@ -225,7 +225,7 @@ const paged1: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
-      title: "Field notes, page 1 of 3",
+      title: "Field notes, page 1 of 3 on the fixture site",
       metaDescription:
         "The first page of a three-page archive. It declares the next page and canonicalises to itself, which is the arrangement nothing should be reported about.",
       headExtra: `<link rel="next" href="${new URL(PAGED_2, self).href}">`,
@@ -256,7 +256,7 @@ const paged2: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
-      title: "Field notes, page 2 of 3",
+      title: "Field notes, page 2 of 3 on the fixture site",
       metaDescription:
         "The second page of the archive: it folds itself into page one with a canonical and points a rel=next at a page nothing links to.",
       canonical: new URL(PAGED_1, self).href,
@@ -287,7 +287,7 @@ const paged3: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
-      title: "Field notes, page 3 of 3",
+      title: "Field notes, page 3 of 3 on the fixture site",
       metaDescription:
         "The last page of the archive, reachable only through the sitemap, declaring a fourth page the crawl never sees.",
       headExtra: [
@@ -348,7 +348,7 @@ const hreflangA: Fixture = {
       // member of any duplicate group — and the `expectedIssues: []` with
       // `exact: true` on both halves is the end-to-end proof that
       // `title.duplicate` says nothing about them.
-      title: "Opening hours",
+      title: "Opening hours on the fixture site",
       metaDescription:
         "The English half of a two-language pair. It names both versions and an x-default, and its French half names the same two back.",
       headExtra: [
@@ -377,7 +377,7 @@ const hreflangB: Fixture = {
       // The English half's title, verbatim — see the note there. The DESCRIPTION
       // still differs, so `meta-description.duplicate` is not being asserted
       // about at the same time and the title is the only collapsed column.
-      title: "Opening hours",
+      title: "Opening hours on the fixture site",
       metaDescription:
         "The French half of the pair, carrying the same three annotations as its English counterpart so the cluster is complete from both sides.",
       headExtra: [
@@ -403,7 +403,7 @@ const hreflangOneWay: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
-      title: "Delivery information, English",
+      title: "Delivery information, English on the fixture site",
       metaDescription:
         "This page names a German alternate. The page it names carries no hreflang at all, so the annotation is discarded.",
       headExtra: [
@@ -452,7 +452,7 @@ const hreflangNoindexTarget: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, (self) => ({
-      title: "Returns policy, English",
+      title: "Returns policy, English on the fixture site",
       metaDescription:
         "The German alternate named here answers 200 and carries a noindex, so the version this page points travellers at can never be shown.",
       headExtra: [
@@ -635,7 +635,7 @@ const notInSitemap: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A page the sitemap forgot",
+      title: "A page the sitemap forgot on the fixture site",
       metaDescription:
         "This page is linked, indexable and perfectly ordinary. The site's sitemap does not mention it.",
       bodyHtml: healthyBody({
@@ -676,7 +676,7 @@ const productIncomplete: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "Enamel camp mug, 350ml",
+      title: "Enamel camp mug, 350ml on the fixture site",
       metaDescription:
         "A product page whose JSON-LD names the product and a priced offer, and never names an image.",
       // Name and a priced offer are present; `image` is not. The derivation
@@ -711,7 +711,7 @@ const selfServingReviews: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "About Estuary Supplies",
+      title: "About Estuary Supplies on the fixture site",
       metaDescription:
         "An about page whose Organization markup carries an aggregate rating of the organisation itself.",
       headExtra: jsonLd({

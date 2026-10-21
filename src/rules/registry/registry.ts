@@ -328,6 +328,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `site.health` counts them under URLs Not Judged; `sitemap.uncrawled`
 //     says `attempted: false` for one; the pagination and hreflang target
 //     lookups read one as "never fetched", as the absence of a row was read.
+//  3. (T4, study §2) Two thresholds moved to the proven defaults: the title
+//     floor 10 -> 30 characters and the meta description ceiling 160 -> 155, so
+//     a crawl re-judged at 0.18.0 can GAIN `title.too-short` and
+//     `meta-description.too-long` findings. Two info page rules were added,
+//     both judged-only: `headings.h1-too-long` (first H1 over 70 characters,
+//     CHECK-37) and `url.too-long` (stored URL over 115 characters, CHECK-28).
 export const RULESET_VERSION = "0.18.0";
 
 /**

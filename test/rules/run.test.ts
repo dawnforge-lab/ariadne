@@ -122,7 +122,10 @@ describe("buildRegistry", () => {
     expect(ids).toContain("crawl.unreadable-encoding");
     // Phase 23 Task 3: the internal URLs robots.txt kept the crawl out of.
     expect(ids).toContain("robots.blocks-internal-urls");
-    expect(ids.length).toBe(105);
+    // Phase 23 Task 4: the two length rules.
+    expect(ids).toContain("headings.h1-too-long");
+    expect(ids).toContain("url.too-long");
+    expect(ids.length).toBe(107);
   });
 
   it("registers every kind the runner drives", () => {
@@ -215,8 +218,8 @@ describe("runRules against the database", () => {
       // nothing" would then be quietly failing to mean. A second slice of the
       // same digest, so the two fingerprints are independent of each other.
       mainSimhash: BigInt.asIntN(64, BigInt(`0x${digest.slice(16, 32)}`)),
-      // 21 characters, inside TITLE_MIN..TITLE_MAX.
-      title: `A page about ${tag}`,
+      // 48 characters, inside TITLE_MIN..TITLE_MAX.
+      title: `A page about ${tag} and its own clean heading`,
       // The clean description plus a sentence naming the page: 100 + 20 = 120
       // characters, inside META_MIN..META_MAX.
       metaDescription: `${CLEAN_META} About ${tag}.`,

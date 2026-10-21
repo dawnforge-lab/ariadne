@@ -5,10 +5,12 @@ import { copyFor, ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
 import { buildRegistry } from "../../src/rules/index.js";
 import {
   HEADING_MAX_STEP,
+  H1_MAX,
   META_MAX,
   META_MIN,
   TITLE_MAX,
   TITLE_MIN,
+  URL_MAX,
 } from "../../src/rules/page/on-page.js";
 import { SLOW_MS } from "../../src/rules/page/technical.js";
 // `DEEP_DEPTH` moved with `structure.deep-page` in Phase 9: the rule reads
@@ -1666,6 +1668,8 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "title.too-long": String(TITLE_MAX),
     "meta-description.too-short": String(META_MIN),
     "meta-description.too-long": String(META_MAX),
+    "headings.h1-too-long": String(H1_MAX),
+    "url.too-long": String(URL_MAX),
     "content.thin": String(THIN_WORDS),
     "performance.slow-response": String(SLOW_MS),
     "structure.deep-page": String(DEEP_DEPTH),

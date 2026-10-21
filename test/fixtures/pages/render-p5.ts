@@ -565,7 +565,7 @@ const jsRedirectOffsite: Fixture = {
     serve(req, res, () => ({
       title: "A page that leaves the site as soon as it loads",
       metaDescription:
-        "This address answers two hundred and then moves the browser to a different origin entirely, which no redirect rule reading the fetch layer could ever notice.",
+        "This address answers two hundred, then moves the browser to a different origin, which no rule reading the fetch layer could notice.",
       bodyHtml: `${article({
         h1: "The page that leaves the site",
         lede: "A script here sends the visitor to another origin before they have read anything.",

@@ -588,11 +588,11 @@ describe("check annotations", () => {
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 30 critical, 27 warning and 48 info rules", () => {
+  it("holds 30 critical, 27 warning and 50 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 30, warning: 27, info: 48 });
-    expect(all).toHaveLength(105);
+    expect(counts).toEqual({ critical: 30, warning: 27, info: 50 });
+    expect(all).toHaveLength(107);
   });
 
   it("names exactly the rules that are critical", () => {

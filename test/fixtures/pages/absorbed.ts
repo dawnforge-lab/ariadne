@@ -223,7 +223,7 @@ const missingH1: Fixture = {
   expectedIssues: ["headings.h1-missing"],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A page with no H1",
+      title: "A page with no H1 on the fixture site",
       metaDescription:
         "Every heading on this page is an H2 or lower. The top-level H1 that should state the topic is missing.",
       // Hand-authored body: starts at H2 on purpose, no H1.
@@ -250,7 +250,7 @@ const emptyH1: Fixture = {
   expectedIssues: [],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A page with an empty H1",
+      title: "A page with an empty H1 on the fixture site",
       metaDescription:
         "The only H1 on this page is empty, so the markup has a top-level heading tag but no actual heading text.",
       bodyHtml: `<h1></h1>
@@ -270,7 +270,7 @@ const multipleH1: Fixture = {
   expectedIssues: ["headings.h1-multiple"],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A page with three H1s",
+      title: "A page with three H1s on the fixture site",
       metaDescription:
         "This page marks three separate lines as an H1, so a crawler gets three competing claims about the topic.",
       bodyHtml: `<h1>This line is an H1</h1>
@@ -314,7 +314,7 @@ const thinContent: Fixture = {
   expectedIssues: ["content.thin"],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "Thin content example",
+      title: "Thin content example on the fixture site",
       metaDescription:
         "A sparse page with almost no visible text, built to show how thin content reads to a crawler.",
       bodyHtml: `<h1>Nothing here yet</h1>
@@ -546,7 +546,7 @@ const noindexMeta: Fixture = {
   expectedIssues: ["indexability.noindex", "sitemap.non-indexable"],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A page set to noindex",
+      title: "A page set to noindex on the fixture site",
       metaDescription:
         "This page can be crawled, but a robots noindex tag tells search engines to keep it out of results.",
       robotsMeta: "noindex, follow",
@@ -696,7 +696,7 @@ const notFound: Fixture = {
       req,
       res,
       () => ({
-        title: "404, this page does not exist",
+        title: "404, this page does not exist on the fixture site",
         metaDescription: "A URL that is listed in the sitemap but returns 404.",
         bodyHtml: article({
           h1: "404, but the sitemap still lists it",
@@ -736,7 +736,7 @@ const serverError: Fixture = {
       req,
       res,
       () => ({
-        title: "503, the server errored",
+        title: "503, the server errored on the fixture site",
         metaDescription: "A URL that returns a server error to every crawler.",
         bodyHtml: article({
           h1: "A server error",
@@ -769,7 +769,7 @@ const blocked: Fixture = {
       req,
       res,
       () => ({
-        title: "403, the crawler was blocked",
+        title: "403, the crawler was blocked on the fixture site",
         metaDescription: "A page that returns 403 Forbidden to crawlers.",
         bodyHtml: article({
           h1: "403, access denied to the crawler",
@@ -888,7 +888,7 @@ const trailingSlashCanonical: Fixture = {
   expectedIssues: [],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "Trailing-slash canonical page",
+      title: "Trailing-slash canonical page on the fixture site",
       metaDescription:
         "The canonical version of this page ends in a trailing slash, and the non-slash form redirects to it, which trips up crawlers that strip slashes.",
       bodyHtml: article({
@@ -976,7 +976,7 @@ const orphan: Fixture = {
   expectedIssues: ["links.orphan"],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "An orphan page",
+      title: "An orphan page on the fixture site",
       metaDescription:
         "A normal page that no other page on the site links to. It is only reachable because it is listed in the sitemap.",
       bodyHtml: article({
@@ -1010,7 +1010,7 @@ const noOutgoingLinks: Fixture = {
   expectedIssues: [],
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "Page with no outgoing links",
+      title: "Page with no outgoing links on the fixture site",
       metaDescription:
         "This healthy page deliberately renders no anchor tags, so crawlers and users reach a dead end.",
       bodyHtml: article({
@@ -1090,7 +1090,7 @@ function deepRung(level: number): Fixture {
     inSitemap: false,
     handler: (req, res) =>
       serve(req, res, () => ({
-        title: `Deep click-path, level ${level}`,
+        title: `Deep click-path, level ${level} of a deliberately deep chain`,
         metaDescription: `Level ${level} of a deliberately deep click-path. The only way on is the single link at the bottom of the page.`,
         bodyHtml: `${article({
           h1: `You are ${level} click${level === 1 ? "" : "s"} deep`,

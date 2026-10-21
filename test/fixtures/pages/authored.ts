@@ -86,7 +86,7 @@ const placeholderCopy: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "Placeholder copy that shipped",
+      title: "Placeholder copy that shipped on a live page",
       metaDescription:
         "This page went live with a block of lorem ipsum still sitting where the real product copy was supposed to be.",
       bodyHtml: healthyBody({
@@ -117,7 +117,7 @@ const canonicalNone: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A page with no canonical link",
+      title: "A page with no canonical link on the fixture site",
       metaDescription:
         "An indexable page that declares no canonical URL at all, in the head or in the response headers, so nothing names the original.",
       canonical: null,
@@ -181,7 +181,7 @@ const canonicalCrossDomain: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A canonical on another domain",
+      title: "A canonical on another domain on the fixture site",
       metaDescription:
         "The canonical on this page names a URL on a completely different host, handing the page's ranking signals off the site.",
       canonical: "https://other.example/x",
@@ -381,7 +381,7 @@ const noViewport: Fixture = {
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
-      title: "A page with no viewport meta",
+      title: "A page with no viewport meta on the fixture site",
       metaDescription:
         "Everything about this page is healthy except the missing viewport meta tag, so phones render it at desktop width.",
       viewport: false,
@@ -400,12 +400,21 @@ const noViewport: Fixture = {
  * `/content/images-missing-alt` page, which has dimensions and no alt. The
  * article helper's own image is suppressed (`withImage: false`) so this page
  * carries exactly one image and the count in the finding is unambiguous.
+ *
+ * It ALSO carries the two Phase 23 length findings, on purpose and for want of
+ * a page to spare: its H1 is 90 characters (`H1_MAX` is 70) and its path is long
+ * enough that the stored URL, origin included, is over `URL_MAX` (115). A new
+ * fixture page would move every census the harness pins (the 87 crawled pages,
+ * the 67-page cohort, the click-depth percentiles, the render budget); reusing
+ * this one proves `headings.h1-too-long` and `url.too-long` end to end with no
+ * count moving. The title and description stay inside their bands, so these are
+ * the only extra findings.
  */
 const imageNoDimensions: Fixture = {
-  path: "/authored/img-no-dimensions",
+  path: "/authored/img-no-dimensions-on-a-page-whose-address-and-heading-both-run-long-past-what-a-result-shows",
   category: IMAGES,
   name: "Image with alt text but no dimensions",
-  expectedIssues: ["images.missing-dimensions"],
+  expectedIssues: ["headings.h1-too-long", "images.missing-dimensions", "url.too-long"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
@@ -413,7 +422,7 @@ const imageNoDimensions: Fixture = {
       metaDescription:
         "The image on this page has good alt text but no width or height attributes, so the layout shifts as it finally loads.",
       bodyHtml: `${healthyBody({
-        h1: "An image that does not reserve its own space",
+        h1: "An image that does not reserve its own space and a heading that runs on past what it needs",
         lede: "The image below is described properly. It just never says how big it is.",
         withImage: false,
         what: "The image on this page carries alt text, so a screen reader and an image search both know what it shows. What it does not carry is a width and a height, so the browser has no idea how much room to leave for it until the file itself has arrived.",

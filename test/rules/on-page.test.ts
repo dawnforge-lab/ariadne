@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  H1_MAX,
   META_MAX,
   META_MIN,
   onPageRules,
   TITLE_MAX,
   TITLE_MIN,
+  URL_MAX,
 } from "../../src/rules/page/on-page.js";
 // The thin-content floor moved to the query rules with `content.thin` itself
 // (Phase 19 §11) — see test/rules/content-query.test.ts, which owns that rule's
@@ -22,7 +24,7 @@ import {
 const rule = ruleLookup(onPageRules, "onPageRules");
 
 /**
- * Page shapes whose union fires all ten on-page rules on a 200: nothing
+ * Page shapes whose union fires every on-page rule on a 200: nothing
  * present, everything too short, everything too long. (`content.thin` and its
  * skip were in this file until Phase 19 §11 moved both to the query rules —
  * their floor reads a column whose null only the crawl's census can read.)
@@ -42,16 +44,19 @@ const BROKEN_ON_PAGE = [
     title: "x".repeat(TITLE_MAX + 1),
     metaDescription: "x".repeat(META_MAX + 1),
     h1Count: 3,
+    h1Text: "x".repeat(H1_MAX + 1),
+    url: "https://example.com/" + "a".repeat(URL_MAX),
   },
 ];
 
 describe("onPageRules metadata", () => {
-  it("defines the ten on-page rules the Phase 2 table left in this file", () => {
+  it("defines the on-page rules this file holds (Phase 2's ten plus Phase 23's two length rules)", () => {
     expect(onPageRules.map((r) => r.id).sort()).toEqual(
       [
         "content.placeholder",
         "headings.h1-missing",
         "headings.h1-multiple",
+        "headings.h1-too-long",
         "headings.level-skip",
         "meta-description.missing",
         "meta-description.too-long",
@@ -59,6 +64,7 @@ describe("onPageRules metadata", () => {
         "title.missing",
         "title.too-long",
         "title.too-short",
+        "url.too-long",
       ].sort(),
     );
   });
@@ -70,7 +76,10 @@ describe("onPageRules metadata", () => {
       // The one body rule reports under `content`, beside the cross-page
       // content rules, so a client reading the content section of a report
       // finds every content finding there (see `CONTENT` in on-page.ts).
-      expect(r.category, r.id).toBe(r.id.startsWith("content.") ? "content" : "on-page");
+      // `url.too-long` reads only `p.url` and reports beside the URL rules.
+      expect(r.category, r.id).toBe(
+        r.id.startsWith("content.") ? "content" : r.id.startsWith("url.") ? "url" : "on-page",
+      );
       expect(r.title.length, r.id).toBeGreaterThan(5);
       expect(r.rulesetVersion, r.id).toBeTruthy();
     }
@@ -80,6 +89,8 @@ describe("onPageRules metadata", () => {
     expect(rule("title.missing").checkIds).toEqual(["CHECK-35"]);
     expect(rule("meta-description.missing").checkIds).toEqual(["CHECK-36"]);
     expect(rule("headings.h1-missing").checkIds).toEqual(["CHECK-37"]);
+    expect(rule("headings.h1-too-long").checkIds).toEqual(["CHECK-37"]);
+    expect(rule("url.too-long").checkIds).toEqual(["CHECK-28"]);
     expect(rule("content.placeholder").checkIds).toEqual(["CHECK-40"]);
   });
 
@@ -97,8 +108,8 @@ describe("onPageRules metadata", () => {
   });
 
   it("thresholds are the planned values the copy quotes", () => {
-    expect([TITLE_MIN, TITLE_MAX, META_MIN, META_MAX, THIN_WORDS]).toEqual([
-      10, 60, 70, 160, 150,
+    expect([TITLE_MIN, TITLE_MAX, META_MIN, META_MAX, H1_MAX, URL_MAX, THIN_WORDS]).toEqual([
+      30, 60, 70, 155, 70, 115, 150,
     ]);
   });
 
@@ -151,12 +162,12 @@ describe("title rules", () => {
     expect(rule("title.missing").run(mkPage())).toHaveLength(0);
   });
 
-  it("title.too-short boundary: 9 fires, 10 does not", () => {
-    const f = rule("title.too-short").run(mkPage({ title: "x".repeat(9) }));
+  it("title.too-short boundary: 29 fires, 30 does not", () => {
+    const f = rule("title.too-short").run(mkPage({ title: "x".repeat(29) }));
     expect(f).toHaveLength(1);
     expect(f[0]!.severity).toBe("info");
-    expect(f[0]!.evidence).toMatchObject({ title: "x".repeat(9), length: 9, min: 10 });
-    expect(rule("title.too-short").run(mkPage({ title: "x".repeat(10) }))).toHaveLength(0);
+    expect(f[0]!.evidence).toMatchObject({ title: "x".repeat(29), length: 29, min: 30 });
+    expect(rule("title.too-short").run(mkPage({ title: "x".repeat(30) }))).toHaveLength(0);
   });
 
   it("title.too-short leaves an absent title to title.missing", () => {
@@ -210,15 +221,15 @@ describe("meta description rules", () => {
       .toHaveLength(0);
   });
 
-  it("meta-description.too-long boundary: 161 fires, 160 does not", () => {
+  it("meta-description.too-long boundary: 156 fires, 155 does not", () => {
     const f = rule("meta-description.too-long").run(
-      mkPage({ metaDescription: "x".repeat(161) }),
+      mkPage({ metaDescription: "x".repeat(156) }),
     );
     expect(f).toHaveLength(1);
     expect(f[0]!.severity).toBe("info");
-    expect(f[0]!.evidence).toMatchObject({ length: 161, max: 160 });
+    expect(f[0]!.evidence).toMatchObject({ length: 156, max: 155 });
     expect(
-      rule("meta-description.too-long").run(mkPage({ metaDescription: "x".repeat(160) })),
+      rule("meta-description.too-long").run(mkPage({ metaDescription: "x".repeat(155) })),
     ).toHaveLength(0);
   });
 });
@@ -243,6 +254,30 @@ describe("heading rules", () => {
     expect(f[0]!.evidence).toMatchObject({ h1Count: 2 });
     expect(rule("headings.h1-multiple").run(mkPage({ h1Count: 1 }))).toHaveLength(0);
     expect(rule("headings.h1-multiple").run(mkPage({ h1Count: 0 }))).toHaveLength(0);
+  });
+
+  it("headings.h1-too-long boundary: 71 fires, 70 does not, null is silent", () => {
+    const f = rule("headings.h1-too-long").run(mkPage({ h1Text: "x".repeat(71) }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.evidence).toMatchObject({ h1Text: "x".repeat(71), length: 71, max: 70 });
+    expect(rule("headings.h1-too-long").run(mkPage({ h1Text: "x".repeat(70) }))).toHaveLength(0);
+    expect(rule("headings.h1-too-long").run(mkPage({ h1Text: null }))).toHaveLength(0);
+  });
+
+  it("headings.h1-too-long reports the analyzer's 300-character cap as 300", () => {
+    const f = rule("headings.h1-too-long").run(mkPage({ h1Text: "x".repeat(300) }));
+    expect(f[0]!.evidence).toMatchObject({ length: 300 });
+  });
+
+  it("url.too-long boundary: 116 fires, 115 does not, measured on the stored string", () => {
+    const base = "https://example.com/";
+    const at = (n: number) => base + "a".repeat(n - base.length);
+    const f = rule("url.too-long").run(mkPage({ url: at(116) }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.evidence).toMatchObject({ length: 116, max: 115 });
+    expect(rule("url.too-long").run(mkPage({ url: at(115) }))).toHaveLength(0);
   });
 
   it("headings.level-skip fires on 1 -> 3 and reports where", () => {

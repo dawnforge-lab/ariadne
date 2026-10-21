@@ -7,8 +7,8 @@
  * the difference. It is written against all 26 page rules and both query rules,
  * signal by signal:
  *
- *   title.missing / too-short / too-long        title is 38 chars (10..60)
- *   meta-description.missing / short / long     description is 110 chars (70..160)
+ *   title.missing / too-short / too-long        title is 38 chars (30..60)
+ *   meta-description.missing / short / long     description is 110 chars (70..155)
  *   headings.h1-missing / h1-multiple           exactly one h1
  *   headings.level-skip                         h1 -> h2 -> h3, one step at a time
  *   content.thin                                over 300 words of real prose

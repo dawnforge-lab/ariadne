@@ -6,10 +6,13 @@ import type { PageRule } from "../registry/types.js";
  * asserts the prose against these constants: change one here and the copy test
  * fails until the sentence is changed with it.
  */
-export const TITLE_MIN = 10;
+export const TITLE_MIN = 30;
 export const TITLE_MAX = 60;
 export const META_MIN = 70;
-export const META_MAX = 160;
+export const META_MAX = 155;
+export const H1_MAX = 70;
+/** Measured on the stored `url` string, as crawled, not a normalised form. */
+export const URL_MAX = 115;
 /**
  * The largest step a heading outline may take downwards: H2 to H3 is 1 and
  * fine, H2 to H4 is 2 and is the skip `headings.level-skip` reports. Exported
@@ -196,6 +199,39 @@ export const onPageRules: PageRule[] = [
         ? []
         : [finding(self, p, { headingOrder: p.headingOrder, skipAt })];
     },
+  ),
+
+  pageRule(
+    "headings.h1-too-long",
+    ["CHECK-37"],
+    CATEGORY,
+    "info",
+    [
+      { key: "h1Text", label: "H1-1" },
+      { key: "length", label: "H1-1 Length" },
+      { key: "max", label: "Maximum Length" },
+    ],
+    // `h1Text` is the analyzer's capped text (300 characters), so a longer H1
+    // reports 300; null (no H1, or a pre-Phase-7 row) is silent.
+    (p, self) =>
+      isJudged(p) && present(p.h1Text) && p.h1Text.length > H1_MAX
+        ? [finding(self, p, { h1Text: p.h1Text, length: p.h1Text.length, max: H1_MAX })]
+        : [],
+  ),
+
+  pageRule(
+    "url.too-long",
+    ["CHECK-28"],
+    "url",
+    "info",
+    [
+      { key: "length", label: "URL Length" },
+      { key: "max", label: "Maximum Length" },
+    ],
+    (p, self) =>
+      isJudged(p) && p.url.length > URL_MAX
+        ? [finding(self, p, { length: p.url.length, max: URL_MAX })]
+        : [],
   ),
 
   /**

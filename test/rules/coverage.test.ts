@@ -313,10 +313,17 @@ describe("checklist coverage", () => {
   //
   // The claimed-check arithmetic does not move: it claims CHECK-03, already
   // claimed by the three robots rules beside it.
-  it("pins the ruleset split the gate doc reports: 105 rules = 29 page + 62 query + 14 metric", () => {
+  //
+  // Phase 23 Task 4 adds TWO page rules, `headings.h1-too-long` (CHECK-37) and
+  // `url.too-long` (CHECK-28), both info and both claiming checks their
+  // neighbours already claim.
+  //
+  //   page    29 + 2 = 31
+  //   total   105 + 2 = 107
+  it("pins the ruleset split the gate doc reports: 107 rules = 31 page + 62 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(105);
-    expect(registry.byKind("page")).toHaveLength(29);
+    expect(registry.all()).toHaveLength(107);
+    expect(registry.byKind("page")).toHaveLength(31);
     expect(registry.byKind("query")).toHaveLength(62);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

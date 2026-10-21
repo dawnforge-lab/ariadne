@@ -20,8 +20,8 @@
  *
  *  1. Say only what the rule detects. The rule source is the contract; copy
  *     that promises more than the analyser measures is a defect.
- *  2. Thresholds in prose match the constants in the rules (title 10–60,
- *     meta description 70–160, thin content 150 words, near-duplicate 3 of 64
+ *  2. Thresholds in prose match the constants in the rules (title 30–60,
+ *     meta description 70–155, H1 70, URL 115, thin content 150 words, near-duplicate 3 of 64
  *     bits and 50 own words, soft 404 300 words, slow response 1500 ms, deep
  *     page 5, images 100,000 bytes, redirect chain 2 hops). Change one, change
  *     both; test/rules/copy.test.ts pins them.
@@ -437,6 +437,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Keep one H1 for the main heading and demote the rest to H2 or H3; mark up a logo with a non-heading element.",
   },
+  "headings.h1-too-long": {
+    title: "H1: Over 70 characters",
+    explanation:
+      "Indexable, self-canonical pages whose first H1 is longer than 70 characters; H1 text over 300 characters is reported as 300. A long H1 is usually a sentence of body copy marked up as a heading, which dilutes the one heading that names the page's subject.",
+    howToFix:
+      "Shorten the H1 to the page's subject in 70 characters or fewer and move the rest into the paragraph below it.",
+  },
   "headings.level-skip": {
     title: "Headings: Non-sequential levels (skip of more than 1)",
     explanation:
@@ -459,11 +466,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Add a unique meta description of 70 to 160 characters that summarises the page and gives a reason to click.",
   },
   "meta-description.too-long": {
-    title: "Meta description: Over 160 characters",
+    title: "Meta description: Over 155 characters",
     explanation:
-      "Indexable, self-canonical pages whose meta description exceeds 160 characters. Search results cut descriptions by pixel width, so the closing words are lost.",
+      "Indexable, self-canonical pages whose meta description exceeds 155 characters. Search results cut descriptions by pixel width, so the closing words are lost.",
     howToFix:
-      "Trim the description to 160 characters or fewer, keeping the core message and the reason to click in the first sentence.",
+      "Trim the description to 155 characters or fewer, keeping the core message and the reason to click in the first sentence.",
   },
   "meta-description.too-short": {
     title: "Meta description: Below 70 characters",
@@ -494,11 +501,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Shorten the title to 60 characters or fewer, front-loading the important words and moving or dropping the site name.",
   },
   "title.too-short": {
-    title: "Page titles: Below 10 characters",
+    title: "Page titles: Below 30 characters",
     explanation:
-      "Indexable, self-canonical pages whose title is under 10 characters. Titles this short are too generic to describe the page or earn a click.",
+      "Indexable, self-canonical pages whose title is under 30 characters. A title this short rarely says what the page is about and who it is for, and leaves most of the space in a search result unused.",
     howToFix:
-      "Expand the title to a descriptive phrase (the flag clears at 10 characters; 30 to 60 is the usual target). Where a whole section is short, add the missing part in the template.",
+      "Expand the title to a descriptive phrase of 30 to 60 characters: the page's subject first, then what sets it apart, then the brand. Where a whole section is short, add the missing part in the template.",
   },
 
   // -------------------------------------------------------------- redirects
@@ -791,6 +798,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "URLs with query parameters that return 200, carry no noindex and declare a canonical to themselves; parameter pages with no canonical are not included. On a filterable listing this is how a few pages become thousands of near-identical indexable URLs. Occasionally intended, for a search or feed page that should rank.",
     howToFix:
       "Canonicalise parameter combinations that should not be pages to the clean URL and keep them out of the sitemap and internal links. Sort, view and session parameters should never produce indexable URLs.",
+  },
+  "url.too-long": {
+    title: "URL: Over 115 characters",
+    explanation:
+      "Indexable, self-canonical pages whose URL is longer than 115 characters. Long URLs are truncated in search results, are hard to share and usually carry parameters, session values or repeated folders that should not be there.",
+    howToFix:
+      "Shorten the URL to the words that describe the page, drop needless folders and parameters, and 301 the old URL to the new one.",
   },
   "url.tracking-params-internal": {
     title: "URL: Internal links with tracking parameters",
