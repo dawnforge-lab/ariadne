@@ -185,7 +185,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "http.no-response": {
     title: "Response codes: Internal no response",
     explanation:
-      "Internal URLs that gave no HTTP response at all: the request timed out, or the connection or DNS lookup failed. Each was requested a second time at the end of the crawl; the row says whether the failure was confirmed, the second request got an answer that is not about the page (inconclusive), the re-check budget ran out (capped) or no second look was made (not run). A URL that does not answer cannot be crawled or indexed, and links to it lead visitors nowhere.",
+      "Internal URLs that gave no HTTP response at all: the request timed out, or the connection or DNS lookup failed. Each was requested a second time at the end of the crawl; the row says whether the failure was confirmed, no second request was made because robots.txt or the crawler's policy refused it (inconclusive), the re-check budget ran out or the host stopped answering altogether (capped), or no second look was made (not run). A URL that does not answer cannot be crawled or indexed, and links to it lead visitors nowhere.",
     howToFix:
       "Request the URL from outside your network and check the server, firewall and DNS for it. If it should not exist, remove the internal links pointing to it.",
   },

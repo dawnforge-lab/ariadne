@@ -89,7 +89,7 @@ import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 // the rule pair calls "the site answered, and not with a 5xx". See
 // `recheckCoverage`.
 import { RECHECK_CAP_REASON, RECHECK_CLASSES } from "../crawl/recheck/recheck-server-errors.js";
-import { NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../rules/page/status.js";
+import { NO_RESPONSE, NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../rules/page/status.js";
 import {
   RENDER_HTML_DIR,
   RenderPassRefusal,
@@ -932,10 +932,12 @@ export interface CrawlDetail extends CrawlListItem {
       pending: number;
     };
     /**
-     * True when the pass's own budget (`MAX_RECHECKS`, ONE budget shared by the
-     * 5xx and the no-response rows) stopped it short of at least one row — those
-     * rows carry `recheck_reason` with a null class and are counted in the
-     * `pending` of their block.
+     * True when one of the pass's two budgets (`MAX_RECHECKS` for the 5xx,
+     * `NO_RESPONSE_RECHECK_CAP` for the no-response rows) stopped it short of at
+     * least one row — those rows carry `recheck_reason` with a null class and are
+     * counted in the `pending` of their block. The no-response breaker's
+     * `host-unresponsive` rows are pending too, but do not set this flag: it
+     * matches the cap's literal only.
      *
      * ONE LITERAL, READ AS A CONSTANT (`RECHECK_CAP_REASON`), on
      * `resources.capped`'s model: the reasons on this column are the fetch
@@ -1863,12 +1865,12 @@ const SERVER_ERROR_CLASS: FetchClass = "server_error";
 
 /**
  * The first-observation classes `crawl_status.recheck.noResponse` counts:
- * `RECHECK_CLASSES` minus the 5xx, derived rather than listed so the block
- * follows the pass's own work list.
+ * the rule's own `NO_RESPONSE` set, so `noResponse.pages` is by construction the
+ * rows the `http.no-response` pair judges. EXPORTED for the cross-module test
+ * (test/rules/status.test.ts) that pins it, the pass's no-response walk and the
+ * rule to one set.
  */
-const NO_RESPONSE_CLASSES: readonly FetchClass[] = [...RECHECK_CLASSES].filter(
-  (c) => c !== SERVER_ERROR_CLASS,
-);
+export const NO_RESPONSE_CLASSES: readonly string[] = [...NO_RESPONSE];
 
 /**
  * What `markCrawlFailed` writes into `crawls.failure_reason` (migration 0017).

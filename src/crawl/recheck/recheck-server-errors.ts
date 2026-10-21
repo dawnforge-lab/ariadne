@@ -42,10 +42,35 @@
  * `RECHECK_CLASSES` rows is re-fetched — not 4xx (an answer), not `blocked`
  * (owner-ruled a fact about our CRAWLER, not the site), not `non_html` /
  * `too_large` / `unsupported_encoding` (deterministic non-answers). On a healthy
- * site the work list is empty and the pass costs one SQL query. The cap below
- * is ONE budget shared across the three classes, walked in one oldest-first
- * order, so a site that times out everywhere cannot buy itself 500 more
- * requests per class.
+ * site the work list is empty and the pass costs one SQL query.
+ *
+ * ## Two walks, two budgets: 5xx first, exactly as before Phase 23
+ *
+ * The pass walks the `server_error` rows FIRST, oldest-first, under
+ * `MAX_RECHECKS` (500) — byte-for-byte the pre-Phase-23 behaviour, so a site's
+ * no-response rows can never take a seat a 5xx would have had. Only then does it
+ * walk the `timeout` / `network_error` rows, oldest-first, under their OWN cap,
+ * `NO_RESPONSE_RECHECK_CAP` (100), stamping `recheck-cap` on the rows past it.
+ *
+ * Why a smaller, separate cap: a 5xx recheck costs one fast answer, a
+ * no-response recheck can cost the whole request deadline. And a per-host
+ * BREAKER on top of it: after `HOST_UNRESPONSIVE_THRESHOLD` (3) CONSECUTIVE
+ * confirmed no-response rechecks on one host — the second look timed out or
+ * failed to connect again — that host's remaining no-response rows are stamped
+ * `host-unresponsive` (`HOST_UNRESPONSIVE_REASON`) and NOT requested. A host
+ * that is down is down; asking it 97 more times proves nothing and costs 97
+ * deadlines. "Consecutive" is per host: any HTTP answer from that host resets
+ * its count; a refusal by our own policy or robots (no request made) leaves it
+ * where it was. Both stamps leave the class null with a reason, which the rule
+ * reads as `capped` and a resume re-asks, on the cap's doctrine. The breaker
+ * holds one counter per HOST, never a set of URLs — O(hosts), hard rule 6.
+ *
+ * WORST-CASE WALL TIME the no-response walk adds: at most
+ * `NO_RESPONSE_RECHECK_CAP` requests, each bounded by the request deadline
+ * (`FETCH_TIMEOUT_MS`, 20 s) plus the host's earned spacing (capped at the
+ * gate's 30 s maximum): ≈ 100 × (20 s + 30 s) ≈ 83 minutes, and in practice far
+ * less, because the breaker stops a dead host after three. The 5xx walk's bound
+ * is unchanged from before the phase.
  *
  * ## The three constants, and why they are these numbers
  *
@@ -122,8 +147,8 @@
  *
  * ## Resumable the frontier's way
  *
- * The work list IS `fetch_class in RECHECK_CLASSES and recheck_fetch_class is
- * null`, so an interrupted pass re-run asks exactly the rows the first one never
+ * Each walk's work list IS `fetch_class in <its classes> and
+ * recheck_fetch_class is null` (rows a cap or the breaker stamped included), so an interrupted pass re-run asks exactly the rows the first one never
  * reached and re-asks nothing it settled. An abort leaves BOTH nulls — nothing
  * was decided — and returns `aborted: true` so the crawl loop closes its row
  * `cancelled` rather than reporting a complete recheck it does not have.
@@ -177,6 +202,35 @@ export const MAX_RECHECKS = 500;
  */
 export const RECHECK_CAP_REASON = "recheck-cap";
 
+/** The first-observation class of the FIRST walk. */
+const SERVER_ERROR_CLASSES: ReadonlySet<FetchClass> = new Set<FetchClass>(["server_error"]);
+
+/**
+ * The first-observation classes of the SECOND walk: no HTTP response at all.
+ * `RECHECK_CLASSES` minus the 5xx.
+ */
+export const NO_RESPONSE_RECHECK_CLASSES: ReadonlySet<FetchClass> = new Set<FetchClass>([
+  "timeout",
+  "network_error",
+]);
+
+/**
+ * Rows the no-response walk will settle, on `MAX_RECHECKS`'s terms but its own
+ * budget, spent only after every 5xx row. See the module header for why it is
+ * separate and smaller.
+ */
+export const NO_RESPONSE_RECHECK_CAP = 100;
+
+/**
+ * Consecutive confirmed no-response rechecks on one host after which that
+ * host's remaining no-response rows are stamped `HOST_UNRESPONSIVE_REASON`
+ * and not requested. See the module header.
+ */
+export const HOST_UNRESPONSIVE_THRESHOLD = 3;
+
+/** The reason the breaker stamps, with the class left null. */
+export const HOST_UNRESPONSIVE_REASON = "host-unresponsive";
+
 /** The deadline one recheck gets. The crawl loop's own, passed in by it. */
 const DEFAULT_TIMEOUT_MS = 20_000;
 
@@ -222,6 +276,8 @@ export interface RecheckPassOpts {
   minGapMs?: number;
   /** TEST ONLY override of `MAX_RECHECKS`, so a cap can be provoked with two rows. */
   maxRechecks?: number;
+  /** TEST ONLY override of `NO_RESPONSE_RECHECK_CAP`. */
+  maxNoResponseRechecks?: number;
   signal?: AbortSignal;
 }
 
@@ -262,8 +318,15 @@ export interface RecheckPassSummary {
    * nothing that confirms or clears.
    */
   inconclusive: number;
-  /** `MAX_RECHECKS` stopped the walk; the rows past it say `recheck-cap`. */
+  /**
+   * A budget stopped a walk — `MAX_RECHECKS` on the 5xx walk or
+   * `NO_RESPONSE_RECHECK_CAP` on the no-response walk; the rows past it say
+   * `recheck-cap`. The breaker's `host-unresponsive` rows do not set it: they
+   * are counted in `hostsUnresponsive`.
+   */
   capped: boolean;
+  /** Hosts the breaker tripped on, whose remaining no-response rows were not asked. */
+  hostsUnresponsive: number;
   /**
    * The caller's signal fired and the pass stopped early. Distinct from
    * `capped` in the way it has to be: a cap is a budget the operator set and the
@@ -324,7 +387,7 @@ function outcomeOf(
  *   network_error  no answer at all.
  *   disallowed     no request was made (url-policy or robots, on recheck).
  */
-function serverErrorOutcome(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
+export function serverErrorOutcome(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
   switch (fetchClass) {
     case "server_error":
       return "confirmed";
@@ -353,7 +416,7 @@ function serverErrorOutcome(fetchClass: FetchClass): "confirmed" | "cleared" | "
  *   network_error  still no response: confirmed.
  *   disallowed     no request was made (url-policy or robots, on recheck).
  */
-function noResponseOutcome(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
+export function noResponseOutcome(fetchClass: FetchClass): "confirmed" | "cleared" | "inconclusive" {
   switch (fetchClass) {
     case "timeout":
     case "network_error":
@@ -420,8 +483,10 @@ export async function recheckServerErrors(
 ): Promise<RecheckPassSummary> {
   const minGapMs = opts.minGapMs ?? MIN_RECHECK_GAP_MS;
   const maxRechecks = opts.maxRechecks ?? MAX_RECHECKS;
+  const maxNoResponseRechecks = opts.maxNoResponseRechecks ?? NO_RESPONSE_RECHECK_CAP;
   nonNegativeInt("minGapMs", minGapMs);
   positiveInt("maxRechecks", maxRechecks);
+  positiveInt("maxNoResponseRechecks", maxNoResponseRechecks);
   if (opts.userAgent.trim() === "") {
     throw new Error("recheckServerErrors: userAgent must not be empty (rule 9: branded UA)");
   }
@@ -443,7 +508,7 @@ export async function recheckServerErrors(
   let confirmed = 0;
   let cleared = 0;
   let inconclusive = 0;
-  let capped = false;
+  let hostsUnresponsive = 0;
 
   /** Write one settled row, and count what it settled to. */
   const settle = async (
@@ -493,74 +558,165 @@ export async function recheckServerErrors(
     }
   };
 
-  // ---- the work list, cursor-paged so nothing accumulates (hard rule 6) ----
-  let cursor: WorkItem | null = null;
-  walk: for (;;) {
-    if (isAborted()) break;
-    const batch = await workList(db, crawlId, cursor, WORK_BATCH);
-    if (batch.length === 0) break;
-    cursor = batch[batch.length - 1]!;
+  /**
+   * One walk over the unsettled rows of `classes`, oldest first, settling at
+   * most `cap` rows. Cursor-paged so nothing accumulates (hard rule 6). Returns
+   * whether the cap stopped it; an abort is read by the caller.
+   *
+   * `breaker` is the no-response walk's per-host circuit breaker (see the module
+   * header): `streak` holds one counter per host and `tripped` one entry per
+   * tripped host — O(hosts), never O(URLs).
+   */
+  const walkClasses = async (
+    classes: ReadonlySet<FetchClass>,
+    cap: number,
+    breaker: boolean,
+  ): Promise<boolean> => {
+    let settledHere = 0;
+    const streak = new Map<string, number>();
+    const tripped = new Set<string>();
+    let cursor: WorkItem | null = null;
+    for (;;) {
+      if (isAborted()) return false;
+      const batch = await workList(db, crawlId, classes, cursor, WORK_BATCH);
+      if (batch.length === 0) return false;
+      cursor = batch[batch.length - 1]!;
 
-    for (const item of batch) {
-      // The caller's stop, honoured per ROW rather than per batch, and again
-      // inside the wait. The row is left exactly as it was: both nulls, nothing
-      // decided, and it is the resume's work list.
-      if (isAborted()) break walk;
+      for (const item of batch) {
+        // The caller's stop, honoured per ROW rather than per batch, and again
+        // inside the wait. The row is left exactly as it was: both nulls, nothing
+        // decided, and it is the resume's work list.
+        if (isAborted()) return false;
 
-      const host = hostOf(item.url);
-      // The gap this row owes, counted from ITS OWN first observation, with the
-      // host's earned spacing as the other floor — `MIN_RECHECK_GAP_MS` is a
-      // floor ON TOP of the gate's spacing, never instead of it (rule 9).
-      const base = item.fetchedAt?.getTime() ?? passStart;
-      const wait = Math.max(minGapMs, host === null ? 0 : gate.spacingMs(host));
-      if (!(await waitUntil(base + wait))) break walk;
+        const host = hostOf(item.url);
 
-      // After the wait, because the budget is about requests we are about to
-      // make and the wait may have been a minute long.
-      if (rechecked >= maxRechecks) {
-        capped = true;
-        break walk;
+        // THE BREAKER, before the wait and before the budget: a row on a host
+        // that has stopped answering is stamped and never requested, so it costs
+        // neither a deadline nor a seat. Class stays null, reason non-null — the
+        // cap's doctrine, which the rule reads as `capped` and a resume re-asks.
+        if (breaker && host !== null && tripped.has(host)) {
+          await db
+            .update(pages)
+            .set({ recheckReason: HOST_UNRESPONSIVE_REASON })
+            .where(and(eq(pages.id, item.id), isNull(pages.recheckFetchClass)));
+          continue;
+        }
+
+        // The gap this row owes, counted from ITS OWN first observation, with the
+        // host's earned spacing as the other floor — `MIN_RECHECK_GAP_MS` is a
+        // floor ON TOP of the gate's spacing, never instead of it (rule 9).
+        const base = item.fetchedAt?.getTime() ?? passStart;
+        const wait = Math.max(minGapMs, host === null ? 0 : gate.spacingMs(host));
+        if (!(await waitUntil(base + wait))) return false;
+
+        // After the wait, because the budget is about requests we are about to
+        // make and the wait may have been a minute long.
+        if (settledHere >= cap) return true;
+
+        // Hard rule 5, explicitly and every time. The policy is DNS-dependent and
+        // this URL was last vetted when it was enqueued; a refusal here is a
+        // classified row rather than the throw `fetchPage` would raise. A refusal
+        // made no request, so it leaves the breaker's streak where it was.
+        const policy = await isUrlAllowed(item.url, { allowPrivate });
+        if (!policy.allowed) {
+          await settle(item, "disallowed", null, policy.reason ?? "refused by the URL policy");
+          settledHere += 1;
+          continue;
+        }
+        if (!opts.robots.isAllowed(item.url)) {
+          await settle(
+            item,
+            "disallowed",
+            null,
+            opts.robots.note ?? `robots.txt (${host ?? "origin"}) disallows this URL`,
+          );
+          settledHere += 1;
+          continue;
+        }
+
+        // `host` is non-null from here: the policy accepted the URL, which it
+        // cannot do for a string `new URL` refused.
+        const gateHost = host ?? new URL(item.url).host;
+        await gate.acquire(gateHost);
+        const result = await fetchPage(item.url, {
+          userAgent: opts.userAgent,
+          allowPrivate,
+          timeoutMs,
+        });
+        // The gate hears about it before anything else does, so a 503 on recheck
+        // escalates this host for whatever comes next — the rest of this pass, and
+        // the resource pass that shares this gate.
+        gate.report(gateHost, {
+          fetchClass: result.fetchClass,
+          statusCode: result.statusCode,
+          retryAfterMs: result.retryAfterMs,
+          url: item.url,
+        });
+        // `result.body` is dropped on this line and never read: see the header.
+        await settle(item, result.fetchClass, result.statusCode, result.disallowedReason);
+        settledHere += 1;
+
+        if (breaker) {
+          // CONSECUTIVE per host: a confirmed no-response adds one, any HTTP
+          // answer from the host resets it.
+          if (noResponseOutcome(result.fetchClass) === "confirmed") {
+            const now = (streak.get(gateHost) ?? 0) + 1;
+            streak.set(gateHost, now);
+            if (now >= HOST_UNRESPONSIVE_THRESHOLD && !tripped.has(gateHost)) {
+              tripped.add(gateHost);
+              hostsUnresponsive += 1;
+            }
+          } else {
+            streak.set(gateHost, 0);
+          }
+        }
       }
-
-      // Hard rule 5, explicitly and every time. The policy is DNS-dependent and
-      // this URL was last vetted when it was enqueued; a refusal here is a
-      // classified row rather than the throw `fetchPage` would raise.
-      const policy = await isUrlAllowed(item.url, { allowPrivate });
-      if (!policy.allowed) {
-        await settle(item, "disallowed", null, policy.reason ?? "refused by the URL policy");
-        continue;
-      }
-      if (!opts.robots.isAllowed(item.url)) {
-        await settle(
-          item,
-          "disallowed",
-          null,
-          opts.robots.note ?? `robots.txt (${host ?? "origin"}) disallows this URL`,
-        );
-        continue;
-      }
-
-      // `host` is non-null from here: the policy accepted the URL, which it
-      // cannot do for a string `new URL` refused.
-      const gateHost = host ?? new URL(item.url).host;
-      await gate.acquire(gateHost);
-      const result = await fetchPage(item.url, {
-        userAgent: opts.userAgent,
-        allowPrivate,
-        timeoutMs,
-      });
-      // The gate hears about it before anything else does, so a 503 on recheck
-      // escalates this host for whatever comes next — the rest of this pass, and
-      // the resource pass that shares this gate.
-      gate.report(gateHost, {
-        fetchClass: result.fetchClass,
-        statusCode: result.statusCode,
-        retryAfterMs: result.retryAfterMs,
-        url: item.url,
-      });
-      // `result.body` is dropped on this line and never read: see the header.
-      await settle(item, result.fetchClass, result.statusCode, result.disallowedReason);
     }
+  };
+
+  /**
+   * Loud, not silent: every row a cap stopped short of says so, in ONE
+   * statement rather than one per row. Called only when the walk was capped AND
+   * not aborted — an abort's rows were not capped, they were interrupted, and
+   * stamping a reason on them would claim a decision nobody made
+   * (`RESOURCE_CAP_REASON`, P12-T2 review C-1). `recheck_reason is null` keeps
+   * it idempotent and off a row an earlier run, or the breaker, already claimed.
+   */
+  const stampCap = async (classes: ReadonlySet<FetchClass>): Promise<void> => {
+    await db
+      .update(pages)
+      .set({ recheckReason: RECHECK_CAP_REASON })
+      .where(
+        and(
+          eq(pages.crawlId, crawlId),
+          inArray(pages.fetchClass, [...classes]),
+          isNull(pages.recheckFetchClass),
+          isNull(pages.recheckReason),
+        ),
+      );
+  };
+
+  // WALK 1: the server errors, exactly as before Phase 23 — oldest first,
+  // `MAX_RECHECKS`, no breaker.
+  // `capped` is reported only for a cap that was STAMPED: a cap the abort
+  // pre-empted decided nothing, and the two flags must not claim one stop.
+  let capped = false;
+  if (await walkClasses(SERVER_ERROR_CLASSES, maxRechecks, false)) {
+    if (!isAborted()) {
+      await stampCap(SERVER_ERROR_CLASSES);
+      capped = true;
+    }
+  }
+
+  // WALK 2: the no-response rows, only after every 5xx row, under their own
+  // budget and the per-host breaker.
+  if (
+    !isAborted() &&
+    (await walkClasses(NO_RESPONSE_RECHECK_CLASSES, maxNoResponseRechecks, true)) &&
+    !isAborted()
+  ) {
+    await stampCap(NO_RESPONSE_RECHECK_CLASSES);
+    capped = true;
   }
 
   // Read once, at the end: the signal may have fired inside the wait rather than
@@ -568,37 +724,12 @@ export async function recheckServerErrors(
   // from "the pass was stopped".
   const aborted = isAborted();
 
-  if (capped && !aborted) {
-    // Loud, not silent: every row the cap stopped short of says so, in ONE
-    // statement rather than one per row. `&& !aborted` is what keeps that
-    // sentence true — an abort's rows were not capped, they were interrupted,
-    // and stamping a reason on them would claim a decision nobody made
-    // (`RESOURCE_CAP_REASON`, P12-T2 review C-1).
-    //
-    // `recheck_reason is null` in the predicate keeps it idempotent and off a
-    // row an earlier run already claimed.
-    await db
-      .update(pages)
-      .set({ recheckReason: RECHECK_CAP_REASON })
-      .where(
-        and(
-          eq(pages.crawlId, crawlId),
-          // ONE budget across the three classes, so the stamp covers all of
-          // them: a no-response row past the cap is as capped as a 5xx one.
-          inArray(pages.fetchClass, [...RECHECK_CLASSES]),
-          isNull(pages.recheckFetchClass),
-          isNull(pages.recheckReason),
-        ),
-      );
-  }
-
-  return { rechecked, confirmed, cleared, inconclusive, capped, aborted };
+  return { rechecked, confirmed, cleared, inconclusive, capped, hostsUnresponsive, aborted };
 }
 
 /**
- * The next slice of the work list: this crawl's `RECHECK_CLASSES` rows (5xx,
- * timeout, network error) that no pass has settled, OLDEST FIRST, all three
- * classes in one order — the order the shared cap is spent in.
+ * The next slice of one walk's work list: this crawl's rows of `classes` that
+ * no pass has settled, OLDEST FIRST — the order that walk's cap is spent in.
  *
  * The order is not cosmetic — it is what makes the 60-second wait cost 60
  * seconds instead of 60 per row (see the module header). `fetched_at` is
@@ -616,6 +747,7 @@ export async function recheckServerErrors(
 async function workList(
   db: Db,
   crawlId: string,
+  classes: ReadonlySet<FetchClass>,
   cursor: WorkItem | null,
   limit: number,
 ): Promise<WorkItem[]> {
@@ -628,7 +760,7 @@ async function workList(
     sql`select id, url, fetch_class, fetched_at
           from pages
          where crawl_id = ${crawlId}
-           and fetch_class in ${[...RECHECK_CLASSES]}
+           and fetch_class in ${[...classes]}
            and recheck_fetch_class is null
            ${
              cursor === null

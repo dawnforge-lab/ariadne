@@ -307,7 +307,8 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     the 5xx pair is; `page.html-too-large` (critical) over a 200 `too_large`
 //     row; and the `crawl.unreadable-encoding` marker over
 //     `unsupported_encoding`. The recheck pass now also re-asks the two
-//     no-response classes (`RECHECK_CLASSES`, one shared 500-row budget), and
+//     no-response classes after every 5xx, under their own 100-row cap and a
+//     per-host breaker (`host-unresponsive` after 3 consecutive), and
 //     `crawl_status.recheck` gained a `noResponse` block. A pre-Phase-23 crawl
 //     re-judged here has no recheck on those rows, so its no-response findings
 //     say `recheck: not run` and stay critical — the honest reading.

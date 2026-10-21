@@ -386,8 +386,11 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "finding into the http.no-response-transient warning, inconclusive is a " +
         "second look our policy or robots.txt refused, and pending is not asked " +
         "at all. confirmed + answered + inconclusive + pending = pages, always. " +
-        "These rows are NOT in serverErrors or its four counts. The 500-row " +
-        "budget is shared by both blocks, and capped is one flag over both.\n\n" +
+        "These rows are NOT in serverErrors or its four counts. Each block has its " +
+        "own budget (500 rows for the 5xx, walked first; 100 for no-response), and " +
+        "capped is one flag over both. A host whose no-response rechecks fail 3 " +
+        "times in a row has its remaining no-response rows stamped " +
+        "host-unresponsive and not requested; those count in noResponse.pending.\n\n" +
         "passAt is when a pass COMPLETED over this crawl, and null means no " +
         "complete pass is on record — never run, running right now, or stopped " +
         "part-way. READ IT WITH pending, because zeroes have two meanings here: " +

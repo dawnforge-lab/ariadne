@@ -3071,6 +3071,9 @@ describe("the 5xx re-verification pass ran on the fixture crawl", () => {
       cleared: 0,
       inconclusive: 0,
       capped: false,
+      // One no-response row on one host: a streak of one, under the breaker's
+      // threshold of three.
+      hostsUnresponsive: 0,
       aborted: false,
     });
     expect(pass.confirmed + pass.cleared + pass.inconclusive).toBe(pass.rechecked);

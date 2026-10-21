@@ -67,7 +67,7 @@ function recheckCleared(p: PageRecord): boolean {
  * or the connection or DNS lookup failed. Since Phase 23 (study D2) the recheck
  * pass re-asks these too, and the `http.no-response` pair judges them.
  */
-const NO_RESPONSE: ReadonlySet<string> = new Set<FetchClass>(["timeout", "network_error"]);
+export const NO_RESPONSE: ReadonlySet<string> = new Set<FetchClass>(["timeout", "network_error"]);
 
 /**
  * The recheck classes that mean THE SITE GAVE AN HTTP ANSWER to a URL that gave
@@ -250,13 +250,14 @@ export const statusRules: PageRule[] = [
 
   // No HTTP response at all, and the recheck did not get one either: still
   // timing out or failing to connect (confirmed), no second request because the
-  // policy or robots refused it (inconclusive), the shared recheck budget ran
-  // out (capped), or no pass reached the row (not run). `critical` on the
-  // `http.server-error` argument: a URL that does not answer cannot be crawled
-  // or indexed, and NOT a marker, because CHECK-12 was answered — the URL gave
-  // no response, which is a fact about the site. The loop already retried these
-  // up to MAX_ATTEMPTS before writing the row, so by the time this fires the URL
-  // has failed several times a minute or more apart.
+  // policy or robots refused it (inconclusive), the no-response recheck budget
+  // ran out or the host's breaker tripped (capped — both stamp a reason), or no
+  // pass reached the row (not run). `critical` on the `http.server-error`
+  // argument: a URL that does not answer cannot be crawled or indexed, and NOT
+  // a marker, because CHECK-12 was answered — the URL gave no response, which
+  // is a fact about the site. The loop already retried these up to MAX_ATTEMPTS
+  // before writing the row, within seconds of each other; only a `confirmed`
+  // row adds a failure a minute or more after the first.
   pageRule(
     "http.no-response",
     ["CHECK-12"],
@@ -313,15 +314,16 @@ export const statusRules: PageRule[] = [
         : [],
   ),
 
-  // A 200 HTML page whose decompressed body went past `MAX_BODY`. The crawler
+  // A 2xx HTML page whose decompressed body went past `MAX_BODY`. The crawler
   // stopped reading and kept no body, so nothing on the page was checked —
   // which is a defect of the PAGE, not a hole in our evidence: search engines
   // also stop reading HTML at a size limit, and the copy says so. `critical`
   // per the Phase 23 plan's table, and not a marker for that reason.
   //
-  // `statusCode === 200` because `too_large` is only ever reached from `ok`
-  // (fetch-page.ts: a non-2xx status wins over the size), and a 2xx that is not
-  // 200 is not the case the copy describes. `htmlBytes` is `pages.html_bytes`,
+  // Any 2xx (200–299): `too_large` is only ever reached from `ok` (fetch-page.ts:
+  // a non-2xx status wins over the size), and a 203 page over the cap is as
+  // unread as a 200. The range is still checked rather than assumed, so a row
+  // written some other way cannot fire it. `htmlBytes` is `pages.html_bytes`,
   // which for this class holds the byte count at which reading stopped — the
   // cap itself (`readCapped` sets it to `maxBytes` on truncation); `limit` is
   // the cap read off the constant, so the two columns say the same number and
@@ -332,11 +334,14 @@ export const statusRules: PageRule[] = [
     CATEGORY,
     "critical",
     [
-      { key: "htmlBytes", label: "Size (bytes)" },
+      { key: "htmlBytes", label: "Bytes Read" },
       { key: "limit", label: "Limit (bytes)" },
     ],
     (p, self) =>
-      p.fetchClass === "too_large" && p.statusCode === 200
+      p.fetchClass === "too_large" &&
+      p.statusCode !== null &&
+      p.statusCode >= 200 &&
+      p.statusCode <= 299
         ? [finding(self, p, { statusCode: p.statusCode, htmlBytes: p.htmlBytes, limit: MAX_BODY })]
         : [],
   ),

@@ -37,6 +37,9 @@ import {
   MIN_RECHECK_GAP_MS,
   RECHECK_CAP_REASON,
   RECHECK_CLASSES,
+  NO_RESPONSE_RECHECK_CAP,
+  HOST_UNRESPONSIVE_THRESHOLD,
+  HOST_UNRESPONSIVE_REASON,
   type RecheckPassSummary,
 } from "../../src/crawl/recheck/recheck-server-errors.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -114,7 +117,7 @@ beforeAll(async () => {
     // Never answers: the second look at a no-response page that is still not
     // responding. The socket is held open until the request's own deadline
     // gives up, and `afterAll` destroys whatever is left.
-    if (path === "/hang") {
+    if (path.startsWith("/hang")) {
       return;
     }
     res.writeHead(404, { "content-type": "text/html" });
@@ -175,6 +178,8 @@ interface SeedPage {
   statusCode: number | null;
   /** Seconds ago the first observation was taken. Controls the walk's order. */
   agoSec?: number;
+  /** The origin the row's URL is on. Default `base`; the breaker cases use a second host. */
+  origin?: string;
 }
 
 /** Rows in the shape `PageWriter` leaves them: fetched once, never rechecked. */
@@ -183,8 +188,8 @@ async function seedPages(crawlId: string, seeds: SeedPage[]): Promise<void> {
     seeds.map((seed, index) => ({
       id: `page_${crawlId}_${index}`,
       crawlId,
-      url: `${base}${seed.path}`,
-      urlNormalised: `${base}${seed.path}`,
+      url: `${seed.origin ?? base}${seed.path}`,
+      urlNormalised: `${seed.origin ?? base}${seed.path}`,
       fetchClass: seed.fetchClass,
       statusCode: seed.statusCode,
       depth: 0,
@@ -194,13 +199,13 @@ async function seedPages(crawlId: string, seeds: SeedPage[]): Promise<void> {
   );
 }
 
-async function rowFor(crawlId: string, path: string) {
+async function rowFor(crawlId: string, path: string, origin: string = base) {
   const rows = await db
     .select()
     .from(pages)
-    .where(and(eq(pages.crawlId, crawlId), eq(pages.url, `${base}${path}`)));
+    .where(and(eq(pages.crawlId, crawlId), eq(pages.url, `${origin}${path}`)));
   const row = rows[0];
-  if (row === undefined) throw new Error(`no pages row for ${path}`);
+  if (row === undefined) throw new Error(`no pages row for ${origin}${path}`);
   return row;
 }
 
@@ -392,24 +397,112 @@ describe("no-response rows", () => {
     });
   });
 
-  it("shares ONE cap across the three classes, and stamps the rows past it", async () => {
+  it("walks every 5xx before any no-response row, under a tight 5xx cap", async () => {
     const crawlId = await seedCrawl();
+    // The timeout row is the OLDEST, and still waits for the 5xx walk.
     await seedPages(crawlId, [
-      { path: "/broken-a", fetchClass: "server_error", statusCode: 500, agoSec: 3 },
-      { path: "/flaky", fetchClass: "timeout", statusCode: null, agoSec: 2 },
-      { path: "/broken-b", fetchClass: "network_error", statusCode: null, agoSec: 1 },
+      { path: "/flaky", fetchClass: "timeout", statusCode: null, agoSec: 5 },
+      { path: "/broken-a", fetchClass: "server_error", statusCode: 500, agoSec: 2 },
+      { path: "/broken-b", fetchClass: "server_error", statusCode: 500, agoSec: 1 },
     ]);
 
     const summary = await runPass(crawlId, { maxRechecks: 1 });
 
-    expect(summary).toMatchObject({ rechecked: 1, capped: true, aborted: false });
+    // 5xx behaviour as before Phase 23: the oldest 5xx asked, the next capped.
     expect((await rowFor(crawlId, "/broken-a")).recheckFetchClass).toBe("server_error");
-    for (const path of ["/flaky", "/broken-b"]) {
+    const capped = await rowFor(crawlId, "/broken-b");
+    expect(capped.recheckFetchClass).toBeNull();
+    expect(capped.recheckReason).toBe(RECHECK_CAP_REASON);
+    expect(hitCount("/broken-b")).toBe(0);
+    // The no-response row has its OWN budget: the 5xx cap did not touch it, and
+    // it was asked after the 5xx walk, however old it was.
+    const flaky = await rowFor(crawlId, "/flaky");
+    expect(flaky.recheckFetchClass).toBe("ok");
+    const order = hits.map((hit) => hit.path).filter((p) => p !== "/robots.txt");
+    expect(order).toEqual(["/broken-a", "/flaky"]);
+    expect(summary).toMatchObject({ rechecked: 2, capped: true, aborted: false });
+  });
+
+  it("caps the no-response walk at its own budget and stamps the rows past it", async () => {
+    expect(NO_RESPONSE_RECHECK_CAP).toBe(100);
+    const crawlId = await seedCrawl();
+    await seedPages(crawlId, [
+      { path: "/flaky", fetchClass: "timeout", statusCode: null, agoSec: 2 },
+      { path: "/ok", fetchClass: "network_error", statusCode: null, agoSec: 1 },
+    ]);
+
+    const summary = await runPass(crawlId, { maxNoResponseRechecks: 1 });
+
+    expect(summary).toMatchObject({ rechecked: 1, capped: true, aborted: false });
+    expect((await rowFor(crawlId, "/flaky")).recheckFetchClass).toBe("ok");
+    const past = await rowFor(crawlId, "/ok");
+    expect(past.recheckFetchClass).toBeNull();
+    expect(past.recheckReason).toBe(RECHECK_CAP_REASON);
+    expect(hitCount("/ok")).toBe(0);
+  });
+});
+
+describe("the per-host breaker on no-response rows", () => {
+  it("trips after three consecutive confirmed no-responses on one host, and leaves another host alone", async () => {
+    expect(HOST_UNRESPONSIVE_THRESHOLD).toBe(3);
+    // A second host name for the same fixture server: the gate keys on host,
+    // so `localhost:<port>` is a different host from `127.0.0.1:<port>`.
+    const other = base.replace("127.0.0.1", "localhost");
+    const crawlId = await seedCrawl();
+    await seedPages(crawlId, [
+      { path: "/hang-1", fetchClass: "timeout", statusCode: null, agoSec: 9 },
+      { path: "/hang-2", fetchClass: "timeout", statusCode: null, agoSec: 8 },
+      { path: "/hang-3", fetchClass: "network_error", statusCode: null, agoSec: 7 },
+      // Past the trip: one that would hang and one that would answer 200 —
+      // neither is asked, because the host has stopped answering.
+      { path: "/hang-4", fetchClass: "timeout", statusCode: null, agoSec: 6 },
+      { path: "/flaky", fetchClass: "timeout", statusCode: null, agoSec: 5 },
+      // The other host, after the trip: asked as usual.
+      { path: "/hang-5", fetchClass: "timeout", statusCode: null, agoSec: 4, origin: other },
+    ]);
+
+    const summary = await runPass(crawlId, { timeoutMs: 300 });
+
+    for (const path of ["/hang-1", "/hang-2", "/hang-3"]) {
+      expect((await rowFor(crawlId, path)).recheckFetchClass, path).toBe("timeout");
+    }
+    for (const path of ["/hang-4", "/flaky"]) {
       const row = await rowFor(crawlId, path);
       expect(row.recheckFetchClass, path).toBeNull();
-      expect(row.recheckReason, path).toBe(RECHECK_CAP_REASON);
+      expect(row.recheckAt, path).toBeNull();
+      expect(row.recheckReason, path).toBe(HOST_UNRESPONSIVE_REASON);
       expect(hitCount(path), path).toBe(0);
     }
+    // The other host's row was requested and settled: the breaker is per host.
+    const untouched = await rowFor(crawlId, "/hang-5", other);
+    expect(untouched.recheckFetchClass).not.toBeNull();
+    expect(untouched.recheckReason).not.toBe(HOST_UNRESPONSIVE_REASON);
+    expect(summary).toMatchObject({ rechecked: 4, hostsUnresponsive: 1, capped: false });
+  });
+
+  it("does not trip on a non-consecutive pattern (timeout, 200, timeout, timeout)", async () => {
+    const crawlId = await seedCrawl();
+    await seedPages(crawlId, [
+      { path: "/hang-1", fetchClass: "timeout", statusCode: null, agoSec: 4 },
+      { path: "/flaky", fetchClass: "timeout", statusCode: null, agoSec: 3 },
+      { path: "/hang-2", fetchClass: "timeout", statusCode: null, agoSec: 2 },
+      { path: "/hang-3", fetchClass: "timeout", statusCode: null, agoSec: 1 },
+    ]);
+
+    const summary = await runPass(crawlId, { timeoutMs: 300 });
+
+    expect((await rowFor(crawlId, "/flaky")).recheckFetchClass).toBe("ok");
+    for (const path of ["/hang-1", "/hang-2", "/hang-3"]) {
+      const row = await rowFor(crawlId, path);
+      expect(row.recheckFetchClass, path).toBe("timeout");
+      expect(row.recheckReason, path).toBeNull();
+    }
+    expect(summary).toMatchObject({
+      rechecked: 4,
+      confirmed: 3,
+      cleared: 1,
+      hostsUnresponsive: 0,
+    });
   });
 });
 

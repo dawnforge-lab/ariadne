@@ -714,11 +714,17 @@ together.
   policy or robots.txt refused, and `pending` is not asked.
   `confirmed + answered + inconclusive + pending == pages`. These rows are in
   none of the five 5xx numbers.
-- `capped` — the pass's own 500-row budget, ONE budget shared by the 5xx and the
-  no-response rows, stopped it short of at least one row. More than 500 server
-  errors is a site-wide outage, not a set of broken pages. Those rows are
-  counted in the `pending` of their block, because nothing about them was
-  decided.
+- `capped` — one of the pass's two budgets stopped it short of at least one row:
+  500 rows for the 5xx (walked first, exactly as before Phase 23) or 100 for the
+  no-response rows (walked after every 5xx). More than 500 server errors is a
+  site-wide outage, not a set of broken pages. Those rows are counted in the
+  `pending` of their block, because nothing about them was decided. The
+  no-response walk also has a per-host breaker: after 3 consecutive rechecks on
+  one host that still get no response, that host's remaining no-response rows
+  are stamped `host-unresponsive` and not requested — they are counted in
+  `noResponse.pending`, do not set `capped`, and their findings read
+  `recheck: "capped"` — which bounds the walk to about 100 × (20 s timeout + up
+  to 30 s spacing) in the worst case.
 - `passAt` — when a COMPLETE pass finished over this crawl (`crawls.recheck_pass_at`).
   Null means none is on record: never run, running now, or aborted part-way. An
   aborted pass keeps the rows it settled and stamps no time.

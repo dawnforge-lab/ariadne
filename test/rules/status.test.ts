@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { FETCH_CLASSES, MAX_BODY } from "../../src/crawl/fetch-page.js";
-import { NO_RESPONSE_ANSWERED, RECHECK_CLEARED, statusRules } from "../../src/rules/page/status.js";
+import {
+  NO_RESPONSE,
+  NO_RESPONSE_ANSWERED,
+  RECHECK_CLEARED,
+  statusRules,
+} from "../../src/rules/page/status.js";
+import {
+  NO_RESPONSE_RECHECK_CLASSES,
+  RECHECK_CLASSES,
+  noResponseOutcome,
+  serverErrorOutcome,
+} from "../../src/crawl/recheck/recheck-server-errors.js";
+import { NO_RESPONSE_CLASSES } from "../../src/api/service.js";
 import { mkPage, ruleLookup } from "./mk-page.js";
 
 /**
@@ -514,7 +526,7 @@ describe("page.html-too-large", () => {
     expect(r.category).toBe("crawl");
     expect(r.marker).toBeUndefined();
     expect(r.columns?.map((c) => [c.key, c.label])).toEqual([
-      ["htmlBytes", "Size (bytes)"],
+      ["htmlBytes", "Bytes Read"],
       ["limit", "Limit (bytes)"],
     ]);
   });
@@ -527,10 +539,23 @@ describe("page.html-too-large", () => {
     expect(f[0]!.evidence).toEqual({ statusCode: 200, htmlBytes: MAX_BODY, limit: 2_097_152 });
   });
 
-  it("is silent on a too_large row that is not a 200, and on every other class", () => {
-    expect(
-      rule("page.html-too-large").run(mkPage({ fetchClass: "too_large", statusCode: 206 })),
-    ).toHaveLength(0);
+  it("fires on any 2xx too_large row, a 203 included", () => {
+    for (const statusCode of [203, 206, 299]) {
+      const f = rule("page.html-too-large").run(
+        mkPage({ fetchClass: "too_large", statusCode, htmlBytes: MAX_BODY }),
+      );
+      expect(f, String(statusCode)).toHaveLength(1);
+      expect(f[0]!.evidence, String(statusCode)).toMatchObject({ statusCode, limit: MAX_BODY });
+    }
+  });
+
+  it("is silent on a too_large row that is not a 2xx, and on every other class", () => {
+    for (const statusCode of [null, 199, 300, 500]) {
+      expect(
+        rule("page.html-too-large").run(mkPage({ fetchClass: "too_large", statusCode })),
+        String(statusCode),
+      ).toHaveLength(0);
+    }
     for (const fetchClass of FETCH_CLASSES) {
       if (fetchClass === "too_large") continue;
       expect(
@@ -592,5 +617,40 @@ describe("every failed fetch outcome speaks", () => {
     expect(speaking.sort()).toEqual(
       ["blocked", "network_error", "server_error", "timeout", "too_large", "unsupported_encoding"].sort(),
     );
+  });
+});
+
+/**
+ * ONE PARTITION, THREE MODULES. The recheck pass counts its outcomes with
+ * `noResponseOutcome` / `serverErrorOutcome` (src/crawl/recheck), the rules
+ * judge with `NO_RESPONSE` / `NO_RESPONSE_ANSWERED` / `RECHECK_CLEARED`
+ * (here), and `crawl_status` counts with `NO_RESPONSE_CLASSES` (src/api). They
+ * are separate code because a rule must not run crawler code, so this is the
+ * guard that keeps them one partition: over every `FetchClass`, never a sample.
+ */
+describe("the recheck partitions agree across the pass, the rules and crawl_status", () => {
+  it("noResponseOutcome agrees with NO_RESPONSE and NO_RESPONSE_ANSWERED on every class", () => {
+    for (const cls of FETCH_CLASSES) {
+      const expected = NO_RESPONSE.has(cls)
+        ? "confirmed"
+        : NO_RESPONSE_ANSWERED.has(cls)
+          ? "cleared"
+          : "inconclusive";
+      expect(noResponseOutcome(cls), cls).toBe(expected);
+    }
+  });
+
+  it("serverErrorOutcome agrees with RECHECK_CLEARED on every class", () => {
+    for (const cls of FETCH_CLASSES) {
+      const expected =
+        cls === "server_error" ? "confirmed" : RECHECK_CLEARED.has(cls) ? "cleared" : "inconclusive";
+      expect(serverErrorOutcome(cls), cls).toBe(expected);
+    }
+  });
+
+  it("the pass's no-response walk, crawl_status and the rule read one class set", () => {
+    expect([...NO_RESPONSE_RECHECK_CLASSES].sort()).toEqual([...NO_RESPONSE].sort());
+    expect([...NO_RESPONSE_CLASSES].sort()).toEqual([...NO_RESPONSE].sort());
+    expect([...RECHECK_CLASSES].sort()).toEqual(["server_error", ...NO_RESPONSE].sort());
   });
 });
