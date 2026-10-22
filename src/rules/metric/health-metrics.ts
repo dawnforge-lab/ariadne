@@ -440,9 +440,13 @@ export const healthMetrics: MetricRule[] = [
       // silence (Phase 22 §3). They come last, after the census and its
       // buckets, because they are a footnote to `urlsTotal`: these are the
       // fetched, 200-answering URLs the ruleset deliberately did not judge.
+      // The third column, `urlsPaginated`, is a different kind: it OVERLAPS the
+      // judged buckets (those pages are inside `urlsTotal`) and is NOT a
+      // partition member; it counts judged pages left out of the three
+      // field-duplicate rules only.
       { key: "urlsCanonicalised", label: "Canonicalised (set aside)" },
       { key: "urlsNoindex", label: "Noindex (set aside)" },
-      { key: "urlsPaginated", label: "Paginated Pages Set Aside" },
+      { key: "urlsPaginated", label: "Paginated (duplicate checks only)" },
     ], 0),
     async (db, crawlId, self) => siteHealth(db, crawlId, self),
   ),

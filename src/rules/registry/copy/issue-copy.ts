@@ -255,7 +255,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "site.health": {
     title: "Site: Pages by worst finding severity",
     explanation:
-      "Of the pages the audit judges (200, HTML, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other crawled URLs (redirects, errors, blocked, failed, non-HTML). The four buckets plus the two set-aside counts plus the other URLs add up to every crawled URL; site-wide findings appear in none of the counts, and on a capped run pages past the cap count as clean. This table is the evidence for the engine-coverage check, not a finding about the site.",
+      "Of the pages the audit judges (200, HTML, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other crawled URLs (redirects, errors, blocked, failed, non-HTML). The four buckets plus the two set-aside counts plus the other URLs add up to every crawled URL; the paginated count is not part of that sum, because those pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only. Site-wide findings appear in none of the counts, on a capped run pages past the cap count as clean, and this table is the evidence for the engine-coverage check, not a finding about the site.",
     howToFix:
       "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, and the issue list says what is wrong. Read the set-aside counts to know how much of the site the audit judged; work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
   },
@@ -419,7 +419,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "h1.duplicate-text": {
     title: "H1: Duplicate",
     explanation:
-      "Groups of indexable, self-canonical pages whose first H1 is identical. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the H1, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside. Pages with the same H1 claim to be about the same thing.",
+      "Groups of indexable, self-canonical pages whose first H1 is identical. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the H1, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside across the site. Pages with the same H1 claim to be about the same thing.",
     howToFix:
       "Generate the H1 from the fields that make each page different. Where a layout puts the section name in the H1 and the real headline in a styled div, swap them.",
   },
@@ -468,7 +468,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "meta-description.duplicate": {
     title: "Meta description: Duplicate",
     explanation:
-      "Groups of indexable, self-canonical pages with an identical meta description. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the description, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside. Duplicate descriptions are replaced by search engines with text from the page.",
+      "Groups of indexable, self-canonical pages with an identical meta description. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the description, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside across the site. Duplicate descriptions are replaced by search engines with text from the page.",
     howToFix:
       "Write the description in the template from fields that differ per page. Where a section has nothing distinct to say, leave the description off rather than repeating one.",
   },
@@ -496,7 +496,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "title.duplicate": {
     title: "Page titles: Duplicate",
     explanation:
-      "Groups of indexable, self-canonical pages with an identical title. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the title, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside. Duplicate titles make pages indistinguishable in search results and are typically a template writing the same string for every item.",
+      "Groups of indexable, self-canonical pages with an identical title. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the title, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside across the site. Duplicate titles make pages indistinguishable in search results and are typically a template writing the same string for every item.",
     howToFix:
       "Build the title in the template from the fields that differ between pages (product, article, location, page number) with the shared part short and last. If the pages are the same page at several URLs, canonicalise or redirect the copies.",
   },

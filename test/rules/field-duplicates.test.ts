@@ -155,7 +155,7 @@ describe("the field duplicate rules against the database", () => {
         // pre-Phase-7 row, which is what the skip rule is about.
         h1Count: s.h1Count ?? (h1Text === null ? 0 : 1),
         canonicalHtml: s.canonical ?? null,
-        relPrev: s.relPrev === undefined ? null : url(s.relPrev),
+        relPrev: s.relPrev === undefined ? null : s.relPrev === "" ? "" : url(s.relPrev),
         relNext: s.relNext === undefined ? null : url(s.relNext),
         depth: 1,
         discoveredVia: "link",
@@ -905,6 +905,47 @@ describe("the field duplicate rules against the database", () => {
         pages: [url("/sale"), url("/shoes")],
         paginationExcluded: 2,
       });
+    });
+
+    it("excludes a rel=prev page that is also a reciprocal hreflang alternate, and folds nothing", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/shoes", title: SHARED, relNext: "/fr/shoes" },
+        { path: "/fr/shoes", title: SHARED, relPrev: "/shoes" },
+        { path: "/sale", title: SHARED },
+      ]);
+      await addHreflang(crawlId, ids, [
+        { from: "/shoes", code: "en", to: "/shoes" },
+        { from: "/shoes", code: "fr", to: "/fr/shoes" },
+        { from: "/fr/shoes", code: "en", to: "/shoes" },
+        { from: "/fr/shoes", code: "fr", to: "/fr/shoes" },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found).toHaveLength(1);
+      // The alternate left the cohort before the cluster fold, so there is
+      // nothing for the fold to collapse: members minus clusters is 0.
+      expect(found[0]!.evidence).toMatchObject({
+        count: 2,
+        pages: [url("/sale"), url("/shoes")],
+        alternatesCollapsed: 0,
+        paginationExcluded: 1,
+      });
+    });
+
+    it("treats a present-but-empty rel=prev as declared, as pagination.ts does", async () => {
+      // The analyzer stores `href ?? null` and an empty href attribute is "",
+      // not undefined, so the column holds '' — and pagination.ts reads
+      // `isNotNull(relPrev)` as a declared rel=prev. The rules here use the
+      // same test, so the page is paginated and set aside.
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", title: SHARED },
+        { path: "/b", title: SHARED },
+        { path: "/c?page=2", title: SHARED, relPrev: "" },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({ count: 2, paginationExcluded: 1 });
     });
 
     it("does not count a paginated page that is not judged", async () => {

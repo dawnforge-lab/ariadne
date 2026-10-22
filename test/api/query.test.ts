@@ -1567,7 +1567,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
       "With Info Only",
       "Clean",
       "Clean Ratio",
-      "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", "Paginated Pages Set Aside", // P22 §3, P23 T7
+      "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", "Paginated (duplicate checks only)", // P22 §3, P23 T7
     ]);
     // The site row prints `Site` in the scope column whatever that column is
     // headed, and every number crosses as a number for the client to format.
