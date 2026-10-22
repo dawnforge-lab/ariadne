@@ -11,7 +11,7 @@ export const TITLE_MAX = 60;
 export const META_MIN = 70;
 export const META_MAX = 155;
 export const H1_MAX = 70;
-/** Measured on the stored `url` string, as crawled, not a normalised form. */
+/** Measured on the stored `pages.url`, which is `normalizeUrl` output: the URL as the crawler normalised it, not the raw link text. */
 export const URL_MAX = 115;
 /**
  * The largest step a heading outline may take downwards: H2 to H3 is 1 and

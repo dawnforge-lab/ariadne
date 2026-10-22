@@ -79,9 +79,9 @@ read-only (Global Constraints; controller ruling). Instead one fresh crawl of
 config (`maxPages` 600, `fetchResources` false, concurrency 16, per-host delay
 1,000 ms, render knobs at their defaults) and the render pass on:
 
-- `crawl_6b8a04f5-937d-4e2e-a7b2-8b768ce63518`: 554 pages crawled (479 HTML
-  200, 73 × 301, 2 robots-blocked rows recorded and not requested, 1 × 404, 1
-  non-HTML), crawl 1,020 s; recheck pass ran with nothing to recheck (0 5xx, 0
+- `crawl_6b8a04f5-937d-4e2e-a7b2-8b768ce63518`: 554 pages fetched (479 HTML
+  200, 73 × 301, 1 × 404, 1 non-HTML) + 2 robots-blocked rows recorded and not
+  requested = 556 page rows, crawl 1,020 s; recheck pass ran with nothing to recheck (0 5xx, 0
   no-response); render pass 21 pages, 0 failures, 44.6 s (auto selection,
   budget 28, 21 sampled); rules pass 6.4 s, 556 pages scanned, 1,475 findings.
   Total wall time 17 min 53 s.
@@ -116,13 +116,13 @@ structure in the six weeks since.
 | hreflang.alternates-not-crawled | 1 | 1 | 1 | — |
 | hreflang.non-indexable-target | 4 | 4 | 4 | — |
 | images.missing-alt | 435 | 413 | 431 | site |
-| images.missing-dimensions | 65 | 48 | 106 | site (not a Phase 23 rule) |
+| images.missing-dimensions | 65 | 48 | 106 | site template change (24 shared pages went 0→2; 37 new pages); analyzer image code untouched |
 | indexability.noindex | 4 | 4 | 4 | — |
-| links.broken-internal | 91 | 91 | 0 | site: the one 404 on this crawl (`/products/mirabella-…-in-silver`) has no internal inlink; it is reported by `sitemap.non-200` |
-| links.orphan | 39 | 37 | 80 | site: all 80 are sitemap-only collection/blog pages (e.g. `/collections/aw26-part-1`); not a Phase 23 rule, not investigated further |
+| links.broken-internal | 91 | 91 | 0 | 90 of the 91 came from `/pages/avada-sitemap`, no longer linked or in the sitemap (site change); the 91st (`/collections/outlet-under-100` → `/collections/clutch-bags`) still exists but its target was never fetched because of the frontier stall (below): a probable 404 went unchecked |
+| links.orphan | 39 | 37 | 80 | pre-existing frontier stall on capped crawls (below), not Phase 23 code: link targets were never enqueued, so pages they point to read as orphans |
 | meta-description.missing | 65 | 74 | 75 | site |
 | meta-description.too-short | 2 | 2 | 2 | — |
-| pagination.next-target-uncrawled | 19 | 0 | 33 | site / crawl scope |
+| pagination.next-target-uncrawled | 19 | 0 | 33 | pre-existing frontier stall on capped crawls (below), not Phase 23 code |
 | performance.slow-response | 0 | 0 | 1 | network |
 | redirect.chain | 1 | 1 | 0 | site |
 | redirect.js | 0 | 0 | 2 | render on (`/?country=AT`, `/?country=GB`); b49eab7e was not rendered |
@@ -133,6 +133,13 @@ structure in the six weeks since.
 | url.parameter-pages-indexable | 10 | 39 | 0 | site / crawl scope |
 | images.legacy-format, images.oversized, resources.uncached, links.to-server-error, http.server-error-transient | 0 | 200 / 200 / 1 / 1 / 1 | 0 | resources off on b49eab7e and here; the 5xx was transient on 0d88567f |
 | **findings in total** | **1,563** | **1,863** | **1,475** | |
+
+**Attribution of the named moves (final review):**
+
+- `pagination.next-target-uncrawled` 0 → 33 and `links.orphan` 37 → 80 were caused by the pre-existing frontier stall on capped crawls, not by Phase 23 code and not by site or crawl scope: the frontier stopped taking link targets about 15 s in (430 depth-0 and 124 depth-1 rows, none at depth 2); 3,475 distinct followable internal targets were never enqueued; the crawl ended at 554 of 600.
+- `links.broken-internal` 91 → 0: 90 of the 91 came from `/pages/avada-sitemap`, no longer linked or in the sitemap (a site change). The 91st (`/collections/outlet-under-100` → `/collections/clutch-bags`) still exists but its target was never fetched because of the stall, so a probable 404 went unchecked.
+- `images.missing-dimensions` 48 → 106: a site template change (24 shared pages went 0 → 2; 37 new pages); the analyzer image code is untouched.
+- Proof that Phase 23 rules did not move them: a read-only re-judge of the stored rows of `crawl_b49eab7e` and `crawl_0d88567f` under 0.18.0 ran all 114 rules with 0 errors and gave identical counts for these four rules (script `/tmp/claude-1000/-home-eugen-dev-Workflows-ariadne/002c1ab6-3d41-46fc-8006-c1afc3e7c692/scratchpad/rejudge.mts`, connection forced `default_transaction_read_only=on`).
 
 Every other new rule (`http.no-response`, `-transient`, `page.html-too-large`,
 `crawl.unreadable-encoding`, `headings.h1-too-long`, `url.too-long`, both
@@ -201,7 +208,7 @@ polite single-site gate cannot reach 50k pages.
 | 2 | documents with no explicit `<head>`/`<body>`; heads holding `<noscript>`, `<template>`, `<script>`, `<style>`, whitespace, comments — a correctly placed canonical never reported outside | `test/crawl/page-analyzer.test.ts` › "implicit head close: Review Focus #2 and the tree builder's other rules" › "whitespace, comments, script, style, noscript and a doctype never close the head", "a fragment with no <html>, <head> or <body> at all"; › "implicit head close: the brief's six cases" › "a document with no <head> tag at all keeps a leading canonical in the head", "an <img> inside a <noscript> in the head does not close it", "a <div> inside a <template> in the head does not close it". Each case is checked against the cheerio/parse5 DOM oracle (`oracle parity` assertion in the same file) |
 | 3 | pages not rendered, or whose render failed: divergence rules silent, and "not rendered" never reads as "no divergence" | `test/rules/render-diff.test.ts` › "no divergence rule fires on an unrendered page or a failed render" (with the twin that fires all five once rendered); what was sampled stays `render.coverage`'s subject: `test/rules/render-metrics.test.ts` › "reads a failed render as proof a pass ran, with nothing rendered" and "answers none on a crawl nobody rendered, and still reports what a pass would choose" |
 | 4 | pagination without `rel=prev`, and page 1 carrying only `rel=next`: neither excluded; only `rel=prev` pages are | `test/rules/field-duplicates.test.ts` › "paginated pages" › "%s: a series of three reports nothing", "%s: the same three without rel=prev are one group of 3", "%s: page 1 duplicating an unrelated page is still reported, and the exclusion is counted" (each × title / meta description / H1) |
-| 5 | pre-0020 rows (all new columns null) — no new rule fires on a null | `test/rules/head.test.ts` › "is silent on a pre-0021 row: null is not measured, never 'inside'" and "is silent on a pre-0021 row"; `test/rules/render-diff.test.ts` › "a pre-0022 rendered row is silent for robots, description and H1, and judged on title and canonical", "a pre-Phase-8 rendered row is silent for title and canonical too", "render.h1-changed is silent when the raw H1 text was never measured"; `test/rules/robots-query.test.ts` › "reads a null overflow count (a crawl before 0020) as unmeasured, never as truncated"; `test/rules/on-page.test.ts` › "headings.h1-too-long boundary: 71 fires, 70 does not, null is silent". The status rules read `fetch_class`, which predates the phase. **The plan's second half — the kept lavishalice crawls re-judged without error — was not run**: kept crawls are read-only by ruling, and the fresh crawl is not a pre-0020 row. |
+| 5 | pre-0020 rows (all new columns null) — no new rule fires on a null | `test/rules/head.test.ts` › "is silent on a pre-0021 row: null is not measured, never 'inside'" and "is silent on a pre-0021 row"; `test/rules/render-diff.test.ts` › "a pre-0022 rendered row is silent for robots, description and H1, and judged on title and canonical", "a pre-Phase-8 rendered row is silent for title and canonical too", "render.h1-changed is silent when the raw H1 text was never measured"; `test/rules/robots-query.test.ts` › "reads a null overflow count (a crawl before 0020) as unmeasured, never as truncated"; `test/rules/on-page.test.ts` › "headings.h1-too-long boundary: 71 fires, 70 does not, null is silent". The status rules read `fetch_class`, which predates the phase. **The plan's second half is shown by a read-only re-judge** of the stored rows of `crawl_b49eab7e` and `crawl_0d88567f` under 0.18.0 (script `/tmp/claude-1000/-home-eugen-dev-Workflows-ariadne/002c1ab6-3d41-46fc-8006-c1afc3e7c692/scratchpad/rejudge.mts`, connection forced `default_transaction_read_only=on`): all 114 rules ran with 0 errors, and the counts of `links.broken-internal`, `links.orphan`, `pagination.next-target-uncrawled` and `images.missing-dimensions` were identical to the stored ones. |
 
 ## 6. The owner's `sf-*` skills
 
@@ -311,6 +318,12 @@ names shown).
 
 ## 8. Ledger for Phase 24
 
+### Pre-existing defects found by the final review (do first)
+
+- **Frontier stall on capped crawls (pre-existing, hard rule 7):** every maxPages-600 lavishalice crawl ends ~50 rows short with link targets unfollowed (9278877e 547; b49eab7e 547 with 69 unfollowed; 6b8a04f5 554 with 3,475 unfollowed); 20k-cap crawls reach 625/629. The `frontierRows` reservation counter (loop.ts ~1204-1380) drifts ~46-53 above the real frontier row count; leak not found by reading. Fix: instrument against `select count(*)`, and give orphan/pagination rules a completeness signal (`skipReason` in link-graph.ts:112 cannot see it).
+- **Politeness (hard rule 9):** after the gate crawl Shopify answered AriadneBot with 429 `local_rate_limited` on `/` (browser UA 200). Likely contributors: render-pass subresource loads under the branded UA, and the gate's hand checks right after the crawl. Investigate.
+- The copy/label/test minors listed as "can wait" in the final review triage (the deferred-minors list below).
+
 ### Owner rulings needed
 
 - **Effective canonical / robots when outside the head.** Values are still
@@ -343,7 +356,7 @@ names shown).
 - Evidence spellings: "meta robots", "text", element closers in angle brackets beside `</head>`, `</html>`.
 - `render.noindex-changed` compares META robots only (X-Robots-Tag cannot change by rendering).
 - Extra column `rendered_tags_read` accepted (tells a script-removed tag from an unread one).
-- `site.health` label "Paginated Pages Set Aside".
+- The paginated labels are "Paginated (duplicate checks only)" (`site.health`) and "Paginated Pages Set Aside (Site-Wide)" (the duplicate rules).
 - run.test ANALYZE flake fixed as its own task (7b) before the gate.
 - `maxBlockedUrls` stays an engine config budget, not a `crawl_start` input (API allowlist closed, Talos seam).
 - Gate: kept `crawl_b49eab7e` not re-judged in place; fresh crawl compared instead (§2). Memory recorded as peak RSS on the largest gate crawl; 50k owed (§4).
@@ -370,7 +383,8 @@ names shown).
 - T6: run.test ANALYZE flake from concurrent `runRules` callers — fixed in Task 7b.
 - T7: `registry.ts:370` history comment quotes the old label name.
 - T7b: the run.test ANALYZE test is coupled to `db.execute` and the exact statement form (fails loudly on a refactor).
-- Gate: the plan's "kept crawls re-judge without error" (Review Focus 5, second half) is not demonstrated; and a 50k-scale RSS measurement under this ruleset is owed.
+- Gate: a 50k-scale RSS measurement under this ruleset is owed. (The kept-crawl re-judge, Review Focus 5 second half, is now shown: 0 errors, §5.)
+- Final-review triage, "can wait": every deferred minor above (T2 to T7b, carried from the SDD ledger `progress.md`), plus the Task 9 wording minor (fixed in this wave).
 
 ### Carried from the plan's outline
 

@@ -185,7 +185,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "http.no-response": {
     title: "Response codes: Internal no response",
     explanation:
-      "Internal URLs that gave no HTTP response at all: the request timed out, or the connection or DNS lookup failed. Each was requested a second time at the end of the crawl; the row says whether the failure was confirmed, no second request was made because robots.txt or the crawler's policy refused it (inconclusive), the re-check budget ran out or the host stopped answering altogether (capped), or no second look was made (not run). A URL that does not answer cannot be crawled or indexed, and links to it lead visitors nowhere.",
+      "Internal URLs that gave no HTTP response at all: the request timed out, or the connection or DNS lookup failed. Each is requested a second time at the end of the crawl where the re-check budget allows; the row says whether the failure was confirmed, no second request was made because robots.txt or the crawler's policy refused it (inconclusive), the re-check budget ran out or the host stopped answering altogether (capped), or no second look was made (not run). A URL that does not answer cannot be crawled or indexed, and links to it lead visitors nowhere.",
     howToFix:
       "Request the URL from outside your network and check the server, firewall and DNS for it. If it should not exist, remove the internal links pointing to it.",
   },
@@ -213,7 +213,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "page.html-too-large": {
     title: "Response codes: HTML over 2 MB",
     explanation:
-      "Internal HTML pages that returned 200 with a body larger than 2 MB once decompressed. Nothing on them was checked, because the crawler stops reading at 2 MB; search engines also stop reading HTML at a size limit, so content and links past it may never be indexed.",
+      "Internal HTML pages that returned a 2xx status with a body larger than 2 MB (2,097,152 bytes) once decompressed. Nothing on them was checked, because the crawler stops reading at 2 MB; search engines also stop reading HTML at a size limit, so content and links past it may never be indexed.",
     howToFix:
       "Cut the HTML below 2 MB: move inline scripts, styles and embedded JSON into external files, paginate long lists and remove repeated markup.",
   },
@@ -255,7 +255,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "site.health": {
     title: "Site: Pages by worst finding severity",
     explanation:
-      "Of the pages the audit judges (200, HTML, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other crawled URLs (redirects, errors, blocked, failed, non-HTML). The four buckets plus the two set-aside counts plus the other URLs add up to every crawled URL; the paginated count is not part of that sum, because those pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only. Site-wide findings appear in none of the counts, on a capped run pages past the cap count as clean, and this table is the evidence for the engine-coverage check, not a finding about the site.",
+      "Of the pages the audit judges (200, HTML, indexable, self-canonical), how many carry a critical finding, how many a warning and no critical, how many only informational findings, and how many none, each page counted once at its worst severity, with the clean ratio; beside them, the 200 pages set aside as noindex or as canonicalised to another URL, and the other recorded URLs (redirects, errors, blocked by bot protection or by robots.txt, failed, non-HTML). The four buckets plus the two set-aside counts plus the other URLs add up to every URL the crawl recorded; the paginated count is not part of that sum, because those pages (pages 2 onwards of a series) are judged pages left out of the duplicate title, meta description and H1 checks only. Site-wide findings appear in none of the counts, on a capped run pages past the cap count as clean, and this table is the evidence for the engine-coverage check, not a finding about the site.",
     howToFix:
       "Read the counts as the shape of the work, not as a score: the critical count says how much of the site is affected, and the issue list says what is wrong. Read the set-aside counts to know how much of the site the audit judged; work percentages out from the counts, and check whether the run was capped before quoting the ratio.",
   },
