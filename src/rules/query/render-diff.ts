@@ -55,6 +55,14 @@
  *    rather than tolerated. Symmetry is worth having where it decides an
  *    answer; churn is what it is called where it does not.
  *
+ * **FIVE MORE, SINCE PHASE 23 (T6): raw versus rendered divergence** on the
+ * elements a search engine acts on — `render.noindex-changed`,
+ * `render.canonical-changed`, `render.title-changed`,
+ * `render.meta-description-changed` and `render.h1-changed`. They compare the
+ * analyzer's reading of the served bytes with the SAME analyzer's reading of
+ * the post-JS DOM (measurement family 2), and their account is at
+ * `divergenceFindings` below.
+ *
  * Everything here is SQL over `pages` and (for the filter rule) `links`.
  * Nothing fetches (hard rule 2), nothing loads the link table into memory
  * (hard rule 3), and nothing re-reads a page's HTML: both sides of every
@@ -62,8 +70,9 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 
+import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import type { Db } from "../../db/client.js";
-import { queryFinding, type RuleIdentity } from "../helpers.js";
+import { FETCHED_OK, present, queryFinding, saysNoindex, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -71,12 +80,27 @@ import {
   type Finding,
   type QueryRule,
 } from "../registry/registry.js";
-import type { RuleCaps } from "../registry/types.js";
+import type { RuleCaps, RuleCategory } from "../registry/types.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
 const CSR: RuleIdentity = { id: "content.csr-dependent", severity: "critical" };
 const NAV: RuleIdentity = { id: "nav.js-only", severity: "critical" };
 const FILTERS: RuleIdentity = { id: "filters.js-only", severity: "warning" };
+const NOINDEX_CHANGED: RuleIdentity = { id: "render.noindex-changed", severity: "critical" };
+const CANONICAL_CHANGED: RuleIdentity = { id: "render.canonical-changed", severity: "critical" };
+const TITLE_CHANGED: RuleIdentity = { id: "render.title-changed", severity: "warning" };
+const DESCRIPTION_CHANGED: RuleIdentity = {
+  id: "render.meta-description-changed",
+  severity: "warning",
+};
+const H1_CHANGED: RuleIdentity = { id: "render.h1-changed", severity: "warning" };
+
+/**
+ * Rendered rows read per round trip by the divergence scan — the memory
+ * contract: a batch, never the whole rendered set. Exported so a test can force
+ * the cursor to iterate without hardcoding the number.
+ */
+export const DIVERGENCE_BATCH = 500;
 
 /**
  * How many times the raw word count the rendered one must reach before the page
@@ -589,6 +613,270 @@ async function filtersJsOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): P
   return noteTruncation(findings, res.rows[0]?.total_matches ?? 0);
 }
 
+/**
+ * One raw-versus-rendered comparison: which two columns, what makes the
+ * rendered side a reading rather than a silence, and what "the same" means for
+ * the element.
+ */
+interface Divergence {
+  self: RuleIdentity;
+  /** The render check, and the element's own. */
+  checkIds: string[];
+  /** RuleCategory is closed and has no "rendering": each lands with the element it moved. */
+  category: RuleCategory;
+  /** The `raw` and `rendered` column labels. `sampled` is evidence only, never a column. */
+  labels: [string, string];
+  /** The raw column — the analyzer over the bytes the server sent. */
+  raw: string;
+  /** Its twin — the same analyzer over the serialised post-JS DOM. */
+  rendered: string;
+  /**
+   * The SQL that says this row's rendered column was READ, so that a null in it
+   * is "the rendered DOM had none" and not "no pass looked". A literal from this
+   * file, never a value from a caller.
+   */
+  measured: string;
+  /** Whether the two values declare the same thing, after the element's own normalisation. */
+  same: (raw: string | null, rendered: string | null, pageUrl: string) => boolean;
+}
+
+/**
+ * A text element's value for comparison: whitespace runs collapsed to one
+ * space and the ends trimmed, with a blank value read as no value at all
+ * (`present`: a `<title> </title>` declares nothing, exactly as a missing one
+ * does). A re-indented title is not a rewritten one.
+ */
+function collapsed(value: string | null): string | null {
+  return present(value) ? value.replace(/\s+/g, " ").trim() : null;
+}
+
+const sameText = (raw: string | null, rendered: string | null): boolean =>
+  collapsed(raw) === collapsed(rendered);
+
+/**
+ * A canonical href as the URL it names: resolved against the PAGE URL through
+ * `normalizeUrl`, the frontier's key authority, so `/a`, `https://Host/a` and
+ * `https://host/a#top` are one canonical. An href that will not resolve is
+ * compared as written (trimmed) rather than dropped: an unparseable canonical
+ * is still a declaration, and it is a different one from a URL.
+ *
+ * BOTH SIDES resolve against the page URL, not against the address the
+ * browser ended on: a page whose DOM is another URL's (a JavaScript redirect)
+ * is excluded from the scan before this runs, so the two are the same address.
+ */
+function canonicalKey(value: string | null, pageUrl: string): string | null {
+  if (!present(value)) return null;
+  const href = value.trim();
+  return normalizeUrl(href, pageUrl) ?? href;
+}
+
+/**
+ * Pages whose HTML and rendered DOM declare different values for an element a
+ * search engine acts on (study §4.2). Five rules share this scan.
+ *
+ * **THE COHORT: fetched OK with a 200, rendered, no render error, no
+ * JavaScript redirect.** Fetched-OK, not `JUDGED`, for the reason the three
+ * rules above keep `rendered = true` (Phase 22 §1): a render finding is
+ * evidence about the TEMPLATE the sampled page was rendered from, and a noindex
+ * or a canonical elsewhere on that one page does not repeal it — the noindex
+ * rule could not even exist under `JUDGED`, whose cohort is defined by the very
+ * flag it compares. `render_error is null` beside `rendered = true` is
+ * belt-and-braces (the writer cannot produce both), and it is what the review
+ * focus names: a failed render has no rendered side. A page that navigated
+ * itself elsewhere (`rendered_redirect_url` set) ended on ANOTHER document, so
+ * comparing its DOM with this page's HTML would report the destination's title
+ * as a rewrite; `redirect.js` speaks for that page.
+ *
+ * **"NOT RENDERED" IS SILENCE HERE, NOT A PASS.** The render pass samples, and
+ * a page outside the sample is not audited by any of the five. Every finding
+ * says so in its evidence (`sampled: true`), and how much of the crawl the
+ * sample covered is `render.coverage`'s number, not something these rules
+ * repeat.
+ *
+ * **A ROW NOBODY READ IS SILENT TOO** — `Divergence.measured`. The robots,
+ * description and H1 columns arrived in migration 0022, so a row rendered
+ * before it has null there with `rendered_tags_read` null; title and canonical
+ * arrived with the Phase 8 analysis, so a row rendered before THAT has
+ * `rendered_analyzer_word_count` null. A null on such a row means "not
+ * measured", and reading it as "removed by JavaScript" would invent findings
+ * on every re-judged crawl (hard rule 1, read in the other direction).
+ *
+ * **THE SCAN.** SQL keeps only rendered rows whose two columns differ as
+ * STRINGS (`is distinct from`) — two identical strings normalise identically,
+ * so nothing that could fire is dropped — and walks them by URL in batches;
+ * the element's own comparison then runs here, because canonical resolution is
+ * `normalizeUrl` and noindex is `saysNoindex`, and restating either in SQL
+ * would be a second definition waiting to drift. RAM is O(batch + cap). The
+ * count behind the cap is exact: only the listing stops.
+ *
+ * Evidence is the two values VERBATIM, as each document declared them, so a
+ * reader sees what changed rather than what this rule normalised it to.
+ */
+async function divergenceFindings(
+  d: Divergence,
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
+  // A crawl id nothing knows scans no pages, which reads exactly like a site
+  // whose scripts change nothing (`runRules`' precedent, hard rule 7).
+  await assertCrawl(db, crawlId, d.self.id);
+
+  // Every string interpolated raw is a literal from this file.
+  const raw = sql.raw(`p.${d.raw}`);
+  const rendered = sql.raw(`p.${d.rendered}`);
+  const measured = sql.raw(d.measured);
+
+  const findings: Finding[] = [];
+  let total = 0;
+  let cursor = "";
+  for (;;) {
+    const res = await db.execute<{
+      id: string;
+      url: string;
+      raw: string | null;
+      rendered: string | null;
+    }>(sql`
+      select p.id, p.url, ${raw} as raw, ${rendered} as rendered
+      from pages p
+      where p.crawl_id = ${crawlId}
+        and ${FETCHED_OK("p")}
+        and p.rendered = true
+        and p.render_error is null
+        and p.rendered_redirect_url is null
+        and ${measured}
+        and ${raw} is distinct from ${rendered}
+        and p.url > ${cursor}
+      order by p.url
+      limit ${DIVERGENCE_BATCH}`);
+    if (res.rows.length === 0) break;
+    cursor = res.rows[res.rows.length - 1]!.url;
+
+    for (const row of res.rows) {
+      if (d.same(row.raw, row.rendered, row.url)) continue;
+      total += 1;
+      if (caps.listing !== null && findings.length >= caps.listing) continue;
+      findings.push(
+        queryFinding(d.self, {
+          pageId: row.id,
+          pageUrl: row.url,
+          evidence: { raw: row.raw, rendered: row.rendered, sampled: true },
+          dedupeKey: row.url,
+        }),
+      );
+    }
+    if (res.rows.length < DIVERGENCE_BATCH) break;
+  }
+  return noteTruncation(findings, total);
+}
+
+/** The Phase 8 analysis ran over this row's DOM: `rendered_title` and `rendered_canonical` were read. */
+const FAMILY_2_READ = "p.rendered_analyzer_word_count is not null";
+/** A Phase 23 pass rendered this row: the three 0022 columns were read. */
+const TAGS_READ = "p.rendered_tags_read = true";
+
+const DIVERGENCES: Divergence[] = [
+  /**
+   * Noindex on one side and not the other (CHECK-01, CHECK-04).
+   *
+   * Compared as a DIRECTIVE, through `saysNoindex` — the one definition the
+   * indexability rules and the `is_indexable` stamp share — so a reordered or
+   * re-spaced token list, or `none` against `noindex`, is the same answer, and
+   * a `nofollow` added by script is not this rule's business.
+   *
+   * META AGAINST META ONLY. A page's raw indexability can also come from its
+   * `X-Robots-Tag` header, but that arrives with the response and no script can
+   * add or remove it, so it is the same on both sides by construction and has
+   * no place in a comparison of what JavaScript changed. A page noindexed by
+   * its header whose script adds a noindex meta is reported — the HTML said
+   * nothing and the DOM says noindex — and the header is the
+   * `indexability.meta-header-conflict` rule's subject, not this one's.
+   */
+  {
+    self: NOINDEX_CHANGED,
+    checkIds: ["CHECK-01", "CHECK-04"],
+    category: "indexability",
+    labels: ["Robots (HTML)", "Robots (Rendered)"],
+    raw: "robots_meta",
+    rendered: "rendered_robots_meta",
+    measured: TAGS_READ,
+    same: (raw, rendered) => saysNoindex(raw) === saysNoindex(rendered),
+  },
+  /**
+   * The canonical names another URL, or exists on one side only (CHECK-01,
+   * CHECK-18). The HTML `<link rel=canonical>` against the DOM's; the
+   * `Link: rel=canonical` header is out for the X-Robots-Tag reason above.
+   */
+  {
+    self: CANONICAL_CHANGED,
+    checkIds: ["CHECK-01", "CHECK-18"],
+    category: "canonical",
+    labels: ["Canonical (HTML)", "Canonical (Rendered)"],
+    raw: "canonical_html",
+    rendered: "rendered_canonical",
+    measured: FAMILY_2_READ,
+    same: (raw, rendered, pageUrl) =>
+      canonicalKey(raw, pageUrl) === canonicalKey(rendered, pageUrl),
+  },
+  /** The `<title>` changed, or exists on one side only (CHECK-01, CHECK-35). */
+  {
+    self: TITLE_CHANGED,
+    checkIds: ["CHECK-01", "CHECK-35"],
+    category: "on-page",
+    labels: ["Title (HTML)", "Title (Rendered)"],
+    raw: "title",
+    rendered: "rendered_title",
+    measured: FAMILY_2_READ,
+    same: sameText,
+  },
+  /** The meta description changed, or exists on one side only (CHECK-01, CHECK-36). */
+  {
+    self: DESCRIPTION_CHANGED,
+    checkIds: ["CHECK-01", "CHECK-36"],
+    category: "on-page",
+    labels: ["Meta Description (HTML)", "Meta Description (Rendered)"],
+    raw: "meta_description",
+    rendered: "rendered_meta_description",
+    measured: TAGS_READ,
+    same: sameText,
+  },
+  /**
+   * The first `<h1>`'s text changed, or exists on one side only (CHECK-01,
+   * CHECK-37).
+   *
+   * One more gate, on the RAW side: `h1_text` arrived in Phase 7, so a crawl
+   * from before it carries `h1_count > 0` with no text. That row's raw H1 was
+   * not read, and a rendered heading beside it is not one the script added.
+   */
+  {
+    self: H1_CHANGED,
+    checkIds: ["CHECK-01", "CHECK-37"],
+    category: "on-page",
+    labels: ["H1 (HTML)", "H1 (Rendered)"],
+    raw: "h1_text",
+    rendered: "rendered_h1_text",
+    measured: `${TAGS_READ} and not (p.h1_count > 0 and p.h1_text is null)`,
+    same: sameText,
+  },
+];
+
+const divergenceRules: QueryRule[] = DIVERGENCES.map((d) =>
+  defineRule<QueryRule>({
+    kind: "query",
+    id: d.self.id,
+    checkIds: d.checkIds,
+    category: d.category,
+    severity: d.self.severity,
+    columns: [
+      { key: "raw", label: d.labels[0] },
+      { key: "rendered", label: d.labels[1] },
+    ],
+    ...copyFor(d.self.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => divergenceFindings(d, db, crawlId, capsOr(caps)),
+  }),
+);
+
 export const renderDiffRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
@@ -652,4 +940,8 @@ export const renderDiffRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => filtersJsOnlyFindings(db, crawlId, capsOr(caps)),
   }),
+
+  // Raw versus rendered divergence on the elements a search engine acts on
+  // (P23-T6) — see `divergenceFindings`.
+  ...divergenceRules,
 ];

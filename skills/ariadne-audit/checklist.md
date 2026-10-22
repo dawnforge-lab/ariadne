@@ -452,6 +452,20 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
   5. The nav side of the same question is CHECK-34 (`nav.js-only`) and the facet
      side is CHECK-02 (`filters.js-only`). Read all three together before you
      conclude anything about crawlability without JS.
+  6. **What JavaScript changed in the head and the heading.** Five more CHECK-01
+     rules compare the HTML's value with the rendered page's, on rendered pages
+     only: `render.noindex-changed` (critical) and `render.canonical-changed`
+     (critical) — the directives; `render.title-changed` (warning),
+     `render.meta-description-changed` (warning) and `render.h1-changed`
+     (warning) — what a result shows. Each row's evidence is `{raw, rendered,
+     sampled}`: the two values verbatim and `sampled: true`, because only the
+     pages the render pass opened were compared — quote the denominator from
+     `render.coverage` (step 3), never "no page changed". Noindex is compared as
+     a directive (token order and `none` do not count as a change) and from the
+     robots META only, since no script can change an `X-Robots-Tag` header; the
+     canonical is compared as the URL it resolves to. A crawl rendered before
+     ruleset 0.18.0 (Phase 23) has no rendered robots, description or H1, so
+     those three rules are NOT MEASURED on it rather than clean.
 - **Evaluate**:
   - Do NOT assume SSR means everything is fine — read the raw-vs-rendered numbers
   - PASS if the render diff found no CSR-dependent pages and no JS-only navigation, across a sample that covered every page type
@@ -709,7 +723,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-04: Meta robots & X-Robots-Tag directives
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-04"`. Three rules:
+  1. `issues_list` with `checkId: "CHECK-04"`. Four rules:
      - `indexability.noindex` (info) — every page the crawl found excluded from the
        index, whether by meta tag or by header.
      - `indexability.meta-header-conflict` (critical) — a page whose robots meta and
@@ -717,6 +731,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        the outcome of, and it is a finding on its own.
      - `head.directives-outside-head` (critical) — a robots meta (or canonical, or
        hreflang) after the `<head>` ended, where search engines may not read it.
+     - `render.noindex-changed` (critical) — a rendered page whose noindex the
+       JavaScript added or removed (rendered pages only; see CHECK-01 step 6).
   2. `issue_urls` with `ruleId: "indexability.noindex"` for the FULL list — this is
      the export the check's Record line asks for, one row per URL, each carrying
      `{source: "meta" | "header", robotsMeta, xRobotsTag}`. Follow the cursors: the
@@ -1136,7 +1152,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-18: Conflicting canonical signals
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-18"` — three rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-18"` — four rules:
   - `canonical.multiple` (critical) — more than one canonical on the page
   - `canonical.html-header-conflict` (critical) — the HTML canonical and the
     `Link: rel=canonical` header name different URLs
@@ -1144,6 +1160,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     link after the point the `<head>` ended (at `</head>`, or implicitly at an element
     a head does not allow); Closed By names the element. Shared with CHECK-04 and
     CHECK-24.
+  - `render.canonical-changed` (critical) — a rendered page whose canonical the
+    JavaScript added, removed or pointed elsewhere (rendered pages only; see CHECK-01
+    step 6).
   `issue_urls` per rule; the evidence carries the competing targets.
 - **Evaluate**:
   - FAIL if multiple conflicting canonicals > 0
@@ -1730,10 +1749,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — five rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — six rules:
   `title.missing` (critical), `title.too-short` (info), `title.too-long` (info) and
   `title.duplicate` (warning), plus `head.tags-outside-head` (warning, a title or meta
-  description after the `<head>` ended). Use `pageType` on `issues_list` to get each count per
+  description after the `<head>` ended) and `render.title-changed` (warning, a
+  rendered page whose title JavaScript changed; see CHECK-01 step 6). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
   `issue_urls` gives the titles themselves in the evidence, which is where the
   template patterns and the samples come from.
@@ -1808,7 +1828,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
   (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
   and `meta-description.duplicate` (warning), plus `head.tags-outside-head` (warning,
-  a meta description or title after the `<head>` ended). Filter by `pageType` for the per-type
+  a meta description or title after the `<head>` ended) and
+  `render.meta-description-changed` (warning, a rendered page whose description
+  JavaScript changed; see CHECK-01 step 6). Filter by `pageType` for the per-type
   breakdown; `issue_urls` carries each description and its length, which is what the
   quality spot-check reads. The duplicate rule has CHECK-35's group shape exactly —
   one finding per shared description, evidence `{metaDescription, count, pages}` — so
@@ -1844,8 +1866,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-37"` — `headings.h1-missing`
   (warning), `headings.h1-multiple` (info), `headings.h1-too-long` (info, first H1
   over 70 characters), `headings.level-skip` (info),
-  `h1.duplicate-text` (warning) and `h1.duplicate-skipped` (info). Filter by
-  `pageType` for the per-template counts.
+  `h1.duplicate-text` (warning), `h1.duplicate-skipped` (info) and
+  `render.h1-changed` (warning, a rendered page whose first H1 JavaScript changed;
+  see CHECK-01 step 6). Filter by `pageType` for the per-template counts.
 
   **What the engine knows about heading TEXT, precisely.** It stores each page's
   FIRST H1 as text (collapsed, trimmed, capped at 300 characters) and compares those

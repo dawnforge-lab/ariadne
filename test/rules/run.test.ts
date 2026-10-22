@@ -128,7 +128,13 @@ describe("buildRegistry", () => {
     // Phase 23 Task 5: head elements after the point the head ended.
     expect(ids).toContain("head.directives-outside-head");
     expect(ids).toContain("head.tags-outside-head");
-    expect(ids.length).toBe(109);
+    // Phase 23 Task 6: raw versus rendered divergence.
+    expect(ids).toContain("render.noindex-changed");
+    expect(ids).toContain("render.canonical-changed");
+    expect(ids).toContain("render.title-changed");
+    expect(ids).toContain("render.meta-description-changed");
+    expect(ids).toContain("render.h1-changed");
+    expect(ids.length).toBe(114);
   });
 
   it("registers every kind the runner drives", () => {

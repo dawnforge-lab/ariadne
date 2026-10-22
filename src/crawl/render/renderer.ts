@@ -181,6 +181,12 @@ export interface RenderResult {
   h1Count: number | null;
   /** The first post-JS `<link rel=canonical>` href, or null if there is none. */
   canonical: string | null;
+  /** The first post-JS `<meta name=robots>` content, verbatim, or null if there is none (P23-T6). */
+  robotsMeta: string | null;
+  /** The first post-JS meta description, trimmed, or null if there is none (P23-T6). */
+  metaDescription: string | null;
+  /** The first post-JS `<h1>`'s text as `h1_text` stores it, or null if there is none (P23-T6). */
+  h1Text: string | null;
   /**
    * Where the serialised document was written — an ABSOLUTE path, because the
    * driver absolutises the directory before the renderer sees it (see
@@ -610,6 +616,9 @@ export class PageRenderer {
         title: analysis.title,
         h1Count: analysis.headingCounts[0],
         canonical: analysis.canonicalHtml,
+        robotsMeta: analysis.robotsMeta,
+        metaDescription: analysis.metaDescription,
+        h1Text: analysis.h1Text,
         // `analysis.resourceRefs` IS PRODUCED HERE AND DELIBERATELY DROPPED
         // (P11-T1). The `resources` table holds the SERVED HTML's references;
         // an asset a client-rendered page injects at runtime appears in this
@@ -663,6 +672,9 @@ function failure(
     title: null,
     h1Count: null,
     canonical: null,
+    robotsMeta: null,
+    metaDescription: null,
+    h1Text: null,
     htmlPath: null,
     redirectUrl,
     error,
@@ -720,6 +732,12 @@ function firstLine(error: unknown): string {
  * ever sees `rendered = true` with null measurements — and no reader ever sees
  * one family filled and the other empty, which would be a page measured by half
  * an instrument.
+ *
+ * `rendered_tags_read` (P23-T6) is TRUE exactly when `rendered` is, and null
+ * otherwise: it is how a reader tells this pass's null robots meta, description
+ * or H1 text ("the DOM had none") from a pre-0022 row's ("nobody read it").
+ * Derived here rather than carried on `RenderResult` because it is a fact
+ * about which writer stored the row, not about the page.
  */
 export async function writeRenderResult(
   db: Pick<Db, "execute">,
@@ -739,6 +757,10 @@ export async function writeRenderResult(
       rendered_title = ${result.title},
       rendered_h1_count = ${result.h1Count},
       rendered_canonical = ${result.canonical},
+      rendered_robots_meta = ${result.robotsMeta},
+      rendered_meta_description = ${result.metaDescription},
+      rendered_h1_text = ${result.h1Text},
+      rendered_tags_read = ${result.rendered ? true : null},
       rendered_html_path = ${result.htmlPath},
       rendered_redirect_url = ${result.redirectUrl},
       render_error = ${result.error}

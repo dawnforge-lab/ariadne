@@ -102,15 +102,28 @@ const NAV_TIMEOUT_MS = 1_000;
  * tokenizer — two adjacent inline anchors with no whitespace between them
  * render as ONE text run, so `<a>a</a><a>b</a>` is the single word "ab". That
  * is what a reader sees on the page, which is what this column is for.
+ *
+ * THE HEAD AND THE HEADING, REWRITTEN (P23-T6). The raw document has no robots
+ * meta, no description and no `<h1>`; the script adds a robots meta and a
+ * description to the head and writes the twelve words INTO an `<h1>` rather
+ * than into the div's text. The word counts do not move — the same twelve
+ * words, still the only text in `#app` — and the rendered DOM now carries the
+ * three values the render pass persists beside `rendered_title`.
  */
 const CSR_TEXT_WORDS = 12;
+const CSR_ROBOTS = "noindex, follow";
+const CSR_DESCRIPTION = "Written by the script after the page loaded";
+const CSR_H1 = "one two three four five six seven eight nine ten eleven twelve";
 const CSR_ANCHOR_WORDS = 3;
 const CSR_RENDERED_WORDS = CSR_TEXT_WORDS + CSR_ANCHOR_WORDS;
 function csrHtml(): string {
   return `<!doctype html><html lang="en"><head><title>CSR</title></head>
 <body><div id="app">Loading now</div>
 <script>
-document.getElementById('app').textContent = 'one two three four five six seven eight nine ten eleven twelve';
+document.getElementById('app').innerHTML = '<h1>${CSR_H1}</h1>';
+document.head.insertAdjacentHTML('beforeend',
+  '<meta name="robots" content="${CSR_ROBOTS}">' +
+  '<meta name="description" content="${CSR_DESCRIPTION}">');
 document.body.insertAdjacentHTML('beforeend',
   '<nav><a href="/a">a</a><a href="/b?sort=asc">b</a></nav>' +
   '<footer><a href="/c">c</a><a href="/d?page=2">d</a></footer>' +
@@ -349,8 +362,12 @@ describe("PageRenderer", () => {
     expect(result.analyzerWordCount).toBe(CSR_RENDERED_WORDS);
     expect(result.renderableWordCount).toBe(CSR_RENDERED_WORDS);
     expect(result.title).toBe("CSR");
-    expect(result.h1Count).toBe(0);
+    expect(result.h1Count).toBe(1);
     expect(result.canonical).toBeNull();
+    // P23-T6: the three values the script wrote, which the raw HTML lacks.
+    expect(result.robotsMeta).toBe(CSR_ROBOTS);
+    expect(result.metaDescription).toBe(CSR_DESCRIPTION);
+    expect(result.h1Text).toBe(CSR_H1);
   });
 
   it("keeps the document the numbers came from, named by the URL's hash", async () => {
@@ -364,7 +381,7 @@ describe("PageRenderer", () => {
     // the script wrote is in it and the `insertAdjacentHTML` call that wrote it
     // is still there too, which is what makes the file a document rather than a
     // diff.
-    expect(saved).toContain("<div id=\"app\">one two three four five six seven");
+    expect(saved).toContain("<div id=\"app\"><h1>one two three four five six seven");
     expect(saved).toContain("<nav><a href=\"/a\">a</a>");
 
     // 2. IT IS THE SAME STRING THE MEASUREMENT WAS TAKEN FROM. Re-running the
@@ -788,8 +805,15 @@ describe("runRenderPass", () => {
     expect(csr.renderedAnalyzerWordCount).toBe(CSR_RENDERED_WORDS);
     expect(csr.renderedRenderableWordCount).toBe(CSR_RENDERED_WORDS);
     expect(csr.renderedTitle).toBe("CSR");
-    expect(csr.renderedH1Count).toBe(0);
+    expect(csr.renderedH1Count).toBe(1);
     expect(csr.renderedCanonical).toBeNull();
+    // P23-T6, in the same statement: the three values the divergence rules
+    // compare, and the flag that says this pass read them — so a null among
+    // them on this row would mean "the DOM had none", not "nobody looked".
+    expect(csr.renderedRobotsMeta).toBe(CSR_ROBOTS);
+    expect(csr.renderedMetaDescription).toBe(CSR_DESCRIPTION);
+    expect(csr.renderedH1Text).toBe(CSR_H1);
+    expect(csr.renderedTagsRead).toBe(true);
     // …and the document itself, under the directory the PASS created for this
     // crawl. One file per rendered page, and the crawl id in the path is what
     // makes a run's evidence a thing a reader can archive or delete whole.
@@ -836,6 +860,12 @@ describe("runRenderPass", () => {
     expect(row.renderedWordCount).toBeNull();
     expect(row.renderedRenderableWordCount).toBeNull();
     expect(row.renderedHtmlPath).toBeNull();
+    // A failed render read nothing, so it says so: no tags-read flag, and no
+    // value for a divergence rule to mistake for an absence.
+    expect(row.renderedRobotsMeta).toBeNull();
+    expect(row.renderedMetaDescription).toBeNull();
+    expect(row.renderedH1Text).toBeNull();
+    expect(row.renderedTagsRead).toBeNull();
 
     const frontierRows = await db
       .select()
@@ -967,6 +997,9 @@ describe("runRenderPass", () => {
       title: "A ghost",
       h1Count: 0,
       canonical: null,
+      robotsMeta: null,
+      metaDescription: null,
+      h1Text: null,
       htmlPath: "/dev/null",
       redirectUrl: null,
       error: null,

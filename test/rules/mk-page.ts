@@ -128,6 +128,13 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     renderedTitle: null,
     renderedH1Count: null,
     renderedCanonical: null,
+    // P23-T6 (migration 0022): the three more values the render pass reads
+    // from the post-JS DOM, and the flag that says it read them. Null for the
+    // same reason as every render column above — this page was never rendered.
+    renderedRobotsMeta: null,
+    renderedMetaDescription: null,
+    renderedH1Text: null,
+    renderedTagsRead: null,
     renderedHtmlPath: null,
     renderedRedirectUrl: null,
     renderError: null,

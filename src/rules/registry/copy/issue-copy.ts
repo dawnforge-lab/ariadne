@@ -771,6 +771,41 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Give filtered views worth ranking a real link with a real URL that serves that view. Keep the rest out of the crawl deliberately with a canonical to the unfiltered listing or a robots.txt rule for the parameter.",
   },
+  "render.noindex-changed": {
+    title: "Rendering: Noindex differs between HTML and rendered page",
+    explanation:
+      "Pages rendered in a browser whose noindex state changes once JavaScript runs: noindex in the HTML and removed by the script, or added by it. Only the pages chosen for rendering are checked. A search engine that sees noindex in the HTML may never render the page, and one that renders it acts on the final state, so the page's indexing depends on which one reads it.",
+    howToFix:
+      "Set the robots directive in the server-side HTML to the value you want and stop scripts from changing it.",
+  },
+  "render.canonical-changed": {
+    title: "Rendering: Canonical differs between HTML and rendered page",
+    explanation:
+      "Pages rendered in a browser whose canonical URL changes once JavaScript runs, including a canonical that only one of the two versions has. Only the pages chosen for rendering are checked. Search engines receive two different canonical signals and may choose either, or neither.",
+    howToFix:
+      "Serve the correct canonical in the server-side HTML and stop scripts from adding, removing or rewriting it.",
+  },
+  "render.title-changed": {
+    title: "Rendering: Title changed by JavaScript",
+    explanation:
+      "Pages rendered in a browser whose title is different once JavaScript runs, or exists only in one of the two versions. Only the pages chosen for rendering are checked. Search engines may show either title.",
+    howToFix:
+      "Serve the final title in the server-side HTML so both versions match.",
+  },
+  "render.meta-description-changed": {
+    title: "Rendering: Meta description changed by JavaScript",
+    explanation:
+      "Pages rendered in a browser whose meta description is different once JavaScript runs, or exists only in one of the two versions. Only the pages chosen for rendering are checked. Search engines may show either description, or write their own.",
+    howToFix:
+      "Serve the final meta description in the server-side HTML so both versions match.",
+  },
+  "render.h1-changed": {
+    title: "Rendering: H1 changed by JavaScript",
+    explanation:
+      "Pages rendered in a browser whose first H1 is different once JavaScript runs, or exists only in one of the two versions. Only the pages chosen for rendering are checked. A heading that appears only after rendering is read late, or not at all, by crawlers that index the HTML first.",
+    howToFix:
+      "Serve the final H1 in the server-side HTML so both versions match.",
+  },
   "pagination.canonical-to-other": {
     title: "Pagination: Paginated page canonicalised to another URL",
     explanation:

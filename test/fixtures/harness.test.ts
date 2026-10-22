@@ -80,6 +80,11 @@ import {
 import {
   CSR_CHROME_WORDS,
   CSR_EXPECTED,
+  JS_FILTERS_RENDERED_CANONICAL,
+  JS_FILTERS_RENDERED_ROBOTS,
+  JS_NAV_RENDERED_DESCRIPTION,
+  JS_NAV_RENDERED_H1,
+  JS_NAV_RENDERED_TITLE,
   startOffsiteHost,
   type OffsiteHost,
 } from "./pages/render-p5.js";
@@ -1103,6 +1108,16 @@ describe("the fixture site end to end", () => {
    *    agree, so the second assertion below checks exactly that rather than
    *    trusting the paragraph.
    *
+   * And `sampled`, on the five raw-versus-rendered divergence rules only
+   * (`render.*-changed`, P23-T6), and only while it is the constant `true` on
+   * every one of their findings. It says the finding comes from a SAMPLE — the
+   * render pass opens a budgeted selection of pages — which is a property of the
+   * rule, not of the row: a column of it would print `true` under every finding
+   * the rule can ever produce. How much of the crawl the sample covered is the
+   * `render.coverage` metric's number, and the task that added the key ruled it
+   * evidence only, not a column. Checked below rather than listed, so a
+   * `sampled: false`, or the key on any other rule, still fails.
+   *
    * And one key a rule may write without declaring BECAUSE IT IS MEASURED to be
    * the address: a rule whose evidence restates the URL its finding is filed
    * against (`targetUrl` on the link rules, `url` on the sitemap rules,
@@ -1150,6 +1165,13 @@ describe("the fixture site end to end", () => {
 
       for (const key of written) {
         if (declared.has(key) || FRAMEWORK_KEYS.has(key)) continue;
+        if (
+          key === "sampled" &&
+          /^render\.[a-z0-9-]+-changed$/.test(ruleId) &&
+          blobs.every((blob) => blob[key] === true)
+        ) {
+          continue;
+        }
         // Measured, not listed: does this key just restate the finding's URL?
         const restatesAddress = blobs.every(
           (blob) => !(key in blob) || blob[key] === blob["pageUrl"],
@@ -2786,10 +2808,15 @@ describe("the fixture site end to end", () => {
     expect(page.renderedTitle).toBeNull();
     expect(page.renderedH1Count).toBeNull();
     expect(page.renderedCanonical).toBeNull();
+    // …and the P23-T6 three, with the flag that would say they were read.
+    expect(page.renderedRobotsMeta).toBeNull();
+    expect(page.renderedMetaDescription).toBeNull();
+    expect(page.renderedH1Text).toBeNull();
+    expect(page.renderedTagsRead).toBeNull();
     expect(page.renderedHtmlPath).toBeNull();
 
     // And the finding, which a `rendered = true` gate would have lost outright.
-    // It is the ONLY finding on the page: the three diff rules all open with
+    // It is the ONLY finding on the page: the eight diff rules all gate on
     // `p.rendered = true`, so they correctly say nothing about a page nobody
     // could measure, and the exact-set assertion is what proves they stayed
     // silent for that reason rather than by luck.
@@ -2836,8 +2863,8 @@ describe("the fixture site end to end", () => {
       "the class-hidden popover, seen by the analyzer and not by the browser",
     ).toBe(CSR_CHROME_WORDS);
     // The three head columns the same analysis produced. Nothing on this page
-    // rewrites its own head, so each is the raw column back again — which is
-    // the baseline a future `render.title-drift` would be a departure from.
+    // rewrites its own head, so each is the raw column back again — the
+    // baseline the P23-T6 divergence rules measure a departure from.
     expect(csr.renderedTitle).toBe(csr.title);
     expect(csr.renderedH1Count).toBe(1);
     expect(csr.renderedCanonical).toBe(`${app.base}/render/csr-content`);
@@ -2888,6 +2915,84 @@ describe("the fixture site end to end", () => {
       render.rendered,
     );
     expect(rows.filter((p) => !p.rendered && p.renderedHtmlPath !== null)).toHaveLength(0);
+  });
+
+  it("the render pass reads robots, description and H1 from the DOM, and the divergence rules compare them", () => {
+    // P23-T6 end to end, on the two render fixtures whose scripts rewrite
+    // their own head and heading (test/fixtures/pages/render-p5.ts).
+    const nav = pageByPath.get("/render/js-nav");
+    const filters = pageByPath.get("/render/js-filters");
+    const healthy = pageByPath.get("/render/healthy");
+    if (nav === undefined || filters === undefined || healthy === undefined) {
+      throw new Error("one of the three P23-T6 render fixtures has no pages row");
+    }
+
+    // The columns, as a real Chromium and the crawl's own analyzer wrote them.
+    expect(nav.renderedTagsRead).toBe(true);
+    expect(nav.renderedTitle).toBe(JS_NAV_RENDERED_TITLE);
+    expect(nav.renderedMetaDescription).toBe(JS_NAV_RENDERED_DESCRIPTION);
+    expect(nav.renderedH1Text).toBe(JS_NAV_RENDERED_H1);
+    expect(nav.renderedRobotsMeta).toBeNull();
+    expect(filters.renderedTagsRead).toBe(true);
+    expect(filters.robotsMeta).toBeNull();
+    expect(filters.renderedRobotsMeta).toBe(JS_FILTERS_RENDERED_ROBOTS);
+    expect(filters.renderedCanonical).toBe(JS_FILTERS_RENDERED_CANONICAL);
+
+    // The control renders exactly what it served, so every pair is equal and
+    // no divergence rule speaks about it.
+    expect(healthy.renderedTagsRead).toBe(true);
+    expect(healthy.renderedTitle).toBe(healthy.title);
+    expect(healthy.renderedMetaDescription).toBe(healthy.metaDescription);
+    expect(healthy.renderedRobotsMeta).toBe(healthy.robotsMeta);
+    expect(healthy.renderedH1Text).toBe(healthy.h1Text);
+    expect(healthy.renderedCanonical).toBe(healthy.canonicalHtml);
+
+    // The findings: both values verbatim, and `sampled` on every one.
+    expect(detailsByPath.get("/render/js-nav\nrender.title-changed")).toEqual({
+      pageUrl: `${app.base}/render/js-nav`,
+      raw: nav.title,
+      rendered: JS_NAV_RENDERED_TITLE,
+      sampled: true,
+    });
+    expect(detailsByPath.get("/render/js-nav\nrender.meta-description-changed")).toEqual({
+      pageUrl: `${app.base}/render/js-nav`,
+      raw: nav.metaDescription,
+      rendered: JS_NAV_RENDERED_DESCRIPTION,
+      sampled: true,
+    });
+    expect(detailsByPath.get("/render/js-nav\nrender.h1-changed")).toEqual({
+      pageUrl: `${app.base}/render/js-nav`,
+      raw: nav.h1Text,
+      rendered: JS_NAV_RENDERED_H1,
+      sampled: true,
+    });
+    expect(detailsByPath.get("/render/js-filters\nrender.noindex-changed")).toEqual({
+      pageUrl: `${app.base}/render/js-filters`,
+      raw: null,
+      rendered: JS_FILTERS_RENDERED_ROBOTS,
+      sampled: true,
+    });
+    expect(detailsByPath.get("/render/js-filters\nrender.canonical-changed")).toEqual({
+      pageUrl: `${app.base}/render/js-filters`,
+      raw: `${app.base}/render/js-filters`,
+      rendered: JS_FILTERS_RENDERED_CANONICAL,
+      sampled: true,
+    });
+
+    // And nowhere else: every divergence on the fixture site is one of these
+    // five, so no page whose script changes nothing is reported as changed.
+    const divergences = [...issuesByPath.entries()]
+      .flatMap(([path, ids]) =>
+        [...ids].filter((id) => id.startsWith("render.")).map((id) => `${path} ${id}`),
+      )
+      .sort();
+    expect(divergences).toEqual([
+      "/render/js-filters render.canonical-changed",
+      "/render/js-filters render.noindex-changed",
+      "/render/js-nav render.h1-changed",
+      "/render/js-nav render.meta-description-changed",
+      "/render/js-nav render.title-changed",
+    ]);
   });
 
   it("every registered rule fires on at least one fixture", () => {

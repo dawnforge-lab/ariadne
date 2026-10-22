@@ -328,11 +328,30 @@ function anchorsScript(container: string, links: readonly (readonly [string, str
   )});`;
 }
 
+/**
+ * THE HEAD AND HEADING THIS PAGE'S SCRIPT REWRITES (P23-T6). The same script
+ * that builds the menu also retitles the page, replaces its description and
+ * rewords its `<h1>` — the three on-page divergences — so the page carries
+ * `render.title-changed`, `render.meta-description-changed` and
+ * `render.h1-changed` beside `nav.js-only` rather than a new page shifting
+ * the harness censuses. The H1 keeps its word count (six words before and
+ * after), so no word-count reading on either side moves.
+ */
+export const JS_NAV_RENDERED_TITLE = "The menu this page builds in the browser";
+export const JS_NAV_RENDERED_DESCRIPTION =
+  "A script writes this page's menu, its title, this description and its heading after load.";
+export const JS_NAV_RENDERED_H1 = "The menu arrives with the script";
+
 const jsNav: Fixture = {
   path: "/render/js-nav",
   category: RENDER,
   name: "Navigation that only exists after JavaScript runs",
-  expectedIssues: ["nav.js-only"],
+  expectedIssues: [
+    "nav.js-only",
+    "render.title-changed",
+    "render.meta-description-changed",
+    "render.h1-changed",
+  ],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
@@ -361,6 +380,11 @@ const jsNav: Fixture = {
 <script>
 ${anchorsScript("nav", JS_NAV_LINKS)}
 ${anchorsScript("footer", JS_FOOTER_LINKS)}
+document.title = ${JSON.stringify(JS_NAV_RENDERED_TITLE)};
+document.querySelector('meta[name="description"]').setAttribute('content', ${JSON.stringify(
+        JS_NAV_RENDERED_DESCRIPTION,
+      )});
+document.querySelector('h1').textContent = ${JSON.stringify(JS_NAV_RENDERED_H1)};
 </script>`,
     })),
 };
@@ -394,11 +418,22 @@ const JS_FILTER_FACETS = [
   "on-offer",
 ] as const;
 
+/**
+ * THE DIRECTIVES THIS PAGE'S SCRIPT CHANGES (P23-T6). The served HTML carries
+ * no robots meta and a self-referencing canonical; the script adds a noindex
+ * and points the canonical at another page — the two directive divergences,
+ * `render.noindex-changed` and `render.canonical-changed`, on the page whose
+ * facets already only exist in the browser. Neither touches an anchor, so the
+ * filter-link counts on both sides are what they were.
+ */
+export const JS_FILTERS_RENDERED_ROBOTS = "noindex, follow";
+export const JS_FILTERS_RENDERED_CANONICAL = "/render/healthy";
+
 const jsFilters: Fixture = {
   path: "/render/js-filters",
   category: RENDER,
   name: "Faceted navigation that only exists after JavaScript runs",
-  expectedIssues: ["filters.js-only"],
+  expectedIssues: ["filters.js-only", "render.noindex-changed", "render.canonical-changed"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
@@ -443,6 +478,12 @@ document.body.insertAdjacentHTML('afterbegin', ${JSON.stringify(
         `<div class="facets">${JS_FILTER_FACETS.map(
           (facet) => `<a href="/render/js-filters?filter=${facet}">${facet}</a>`,
         ).join(" ")}</div>`,
+      )});
+document.head.insertAdjacentHTML('beforeend', ${JSON.stringify(
+        `<meta name="robots" content="${JS_FILTERS_RENDERED_ROBOTS}">`,
+      )});
+document.querySelector('link[rel="canonical"]').setAttribute('href', ${JSON.stringify(
+        JS_FILTERS_RENDERED_CANONICAL,
       )});
 </script>`,
     })),

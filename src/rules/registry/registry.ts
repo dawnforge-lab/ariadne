@@ -350,6 +350,19 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     occurrence anywhere, and whether a canonical outside the head should stop
 //     counting is left to an owner ruling. A pre-0021 crawl re-judged here has
 //     null flags and both rules are silent on it; a new crawl can GAIN them.
+//  5. (T6, study §4.2) The render pass persists three more values from its
+//     analysis of the post-JS DOM — `rendered_robots_meta`,
+//     `rendered_meta_description`, `rendered_h1_text` — and
+//     `rendered_tags_read`, which says this pass read them (migration 0022).
+//     Five query rules compare raw with rendered on rendered, fetched-OK pages
+//     with no render error and no JavaScript redirect:
+//     `render.noindex-changed` and `render.canonical-changed` (critical) and
+//     `render.title-changed`, `render.meta-description-changed`,
+//     `render.h1-changed` (warning), each claiming CHECK-01 and its element's
+//     check. Every finding carries `sampled: true`. A crawl rendered before
+//     0022 re-judged here keeps silence on robots, description and H1 (nothing
+//     read them) and CAN GAIN title and canonical findings, whose rendered
+//     columns Phase 8 already stored.
 export const RULESET_VERSION = "0.18.0";
 
 /**

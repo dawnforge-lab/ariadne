@@ -329,11 +329,21 @@ describe("checklist coverage", () => {
   //
   //   page    31 + 2 = 33
   //   total   107 + 2 = 109
-  it("pins the ruleset split the gate doc reports: 109 rules = 33 page + 62 query + 14 metric", () => {
+  //
+  // Phase 23 Task 6 adds FIVE query rules, raw versus rendered divergence:
+  // `render.noindex-changed`, `render.canonical-changed`,
+  // `render.title-changed`, `render.meta-description-changed` and
+  // `render.h1-changed`. Each claims CHECK-01 (the render check) and its
+  // element's own check (CHECK-04, -18, -35, -36, -37), every one of them
+  // already claimed, so the claimed-check arithmetic does not move.
+  //
+  //   query   62 + 5 = 67
+  //   total   109 + 5 = 114
+  it("pins the ruleset split the gate doc reports: 114 rules = 33 page + 67 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(109);
+    expect(registry.all()).toHaveLength(114);
     expect(registry.byKind("page")).toHaveLength(33);
-    expect(registry.byKind("query")).toHaveLength(62);
+    expect(registry.byKind("query")).toHaveLength(67);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

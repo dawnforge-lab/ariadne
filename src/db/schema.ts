@@ -593,8 +593,9 @@ export const pages = pgTable("pages", {
   // WHO READS THEM. `content.csr-dependent` (src/rules/query/render-diff.ts)
   // reads `rendered_renderable_word_count` against `renderable_word_count`;
   // `rendered_analyzer_word_count` travels in its evidence as the raw pair's
-  // partner. The other three carry no rule yet — they are the diff surface a
-  // later phase widens into (`render.title-drift` and its siblings), and an
+  // partner. Of the other three, `rendered_title` and `rendered_canonical` are
+  // read by `render.title-changed` and `render.canonical-changed` (P23-T6,
+  // the same file), and `rendered_h1_count` is still read by no rule — an
   // unread column is honest where a rule that always passes is not (hard
   // rule 1).
   //
@@ -619,6 +620,29 @@ export const pages = pgTable("pages", {
   // fact, exactly as on the raw side: the page was not rendered, or it was and
   // it declares no canonical.
   renderedCanonical: text("rendered_canonical"),
+  // Three more values from the same post-JS analysis (P23-T6, migration 0022),
+  // each stored exactly as its raw twin is: `robots_meta` (the first
+  // `<meta name=robots>` content, verbatim), `meta_description` (trimmed) and
+  // `h1_text` (the first `<h1>`, whitespace-collapsed and capped at 300).
+  // Their readers are the five raw-versus-rendered divergence rules in
+  // src/rules/query/render-diff.ts.
+  //
+  // NULL MEANS TWO THINGS HERE, as it does for `rendered_canonical`: the
+  // rendered DOM carried no such element, or no Phase-23 pass read it. The
+  // second case is a pre-0022 rendered row, which has null in all three and
+  // cannot be re-judged (the rendered DOM is not stored in the database). The
+  // two are told apart by `rendered_tags_read` below, never by guessing.
+  renderedRobotsMeta: text("rendered_robots_meta"),
+  renderedMetaDescription: text("rendered_meta_description"),
+  renderedH1Text: text("rendered_h1_text"),
+  // True on every row a Phase-23-or-later render pass rendered successfully:
+  // the three columns above were READ, so a null among them is "the rendered
+  // DOM had none". Null on a failed or never-rendered row and on every row a
+  // pre-0022 pass rendered — where a null in the three above is "not
+  // measured", and the divergence rules that read them are silent rather than
+  // reporting an element "removed by JavaScript" that nobody looked for
+  // (hard rule 1). There is no `false`: the render writer stores true or null.
+  renderedTagsRead: boolean("rendered_tags_read"),
   // Where this page's serialised post-JS DOM was written:
   // `<renderHtmlDir>/<crawlId>/<sha256(url)>.html`, git-ignored, one file per
   // rendered page. NOT in Postgres — a crawl's rendered HTML is tens of

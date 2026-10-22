@@ -35,6 +35,7 @@ import { crawls, links, pages } from "../../src/db/schema.js";
 import {
   CSR_MIN_ADDED_WORDS,
   CSR_WORD_MULTIPLE,
+  DIVERGENCE_BATCH,
   FILTER_RENDERED_MIN,
   NAV_RAW_MAX,
   NAV_RENDERED_MIN,
@@ -55,11 +56,16 @@ function rule(id: string): QueryRule {
 }
 
 describe("renderDiffRules metadata", () => {
-  it("defines the three rules of the plan's table", () => {
+  it("defines the three rules of the plan's table and the five divergence rules", () => {
     expect(renderDiffRules.map((r) => r.id).sort()).toEqual([
       "content.csr-dependent",
       "filters.js-only",
       "nav.js-only",
+      "render.canonical-changed",
+      "render.h1-changed",
+      "render.meta-description-changed",
+      "render.noindex-changed",
+      "render.title-changed",
     ]);
   });
 
@@ -75,6 +81,15 @@ describe("renderDiffRules metadata", () => {
       // Warning: a facet space that is not crawlable is a decision to make
       // rather than a fault, and either answer to it can be the right one.
       "filters.js-only": [["CHECK-02"], "warning", "url"],
+      // P23-T6. Every divergence is a render finding (CHECK-01) AND a finding
+      // about the element it moved, so each also claims that element's check.
+      // Critical where the element decides indexing; warning where it decides
+      // what a result shows.
+      "render.noindex-changed": [["CHECK-01", "CHECK-04"], "critical", "indexability"],
+      "render.canonical-changed": [["CHECK-01", "CHECK-18"], "critical", "canonical"],
+      "render.title-changed": [["CHECK-01", "CHECK-35"], "warning", "on-page"],
+      "render.meta-description-changed": [["CHECK-01", "CHECK-36"], "warning", "on-page"],
+      "render.h1-changed": [["CHECK-01", "CHECK-37"], "warning", "on-page"],
     });
   });
 
@@ -94,6 +109,27 @@ describe("renderDiffRules metadata", () => {
   // to the assertions below to imply. The hand-derived boundaries in this file
   // are computed FROM these numbers; if one moves, the arithmetic in the
   // comments stops describing the rule and this fails first.
+  it("declares raw and rendered columns on every divergence rule, and not `sampled`", () => {
+    const labels = Object.fromEntries(
+      renderDiffRules
+        .filter((r) => r.id.startsWith("render."))
+        .map((r) => [r.id, (r.columns ?? []).map((c) => [c.key, c.label])]),
+    );
+    expect(labels).toEqual({
+      "render.noindex-changed": [["raw", "Robots (HTML)"], ["rendered", "Robots (Rendered)"]],
+      "render.canonical-changed": [
+        ["raw", "Canonical (HTML)"],
+        ["rendered", "Canonical (Rendered)"],
+      ],
+      "render.title-changed": [["raw", "Title (HTML)"], ["rendered", "Title (Rendered)"]],
+      "render.meta-description-changed": [
+        ["raw", "Meta Description (HTML)"],
+        ["rendered", "Meta Description (Rendered)"],
+      ],
+      "render.h1-changed": [["raw", "H1 (HTML)"], ["rendered", "H1 (Rendered)"]],
+    });
+  });
+
   it("pins the thresholds the boundary cases below are derived from", () => {
     expect(CSR_WORD_MULTIPLE).toBe(2);
     expect(CSR_MIN_ADDED_WORDS).toBe(150);
@@ -157,6 +193,29 @@ describe("the render diff rules against the database", () => {
     renderedFilterLinkCount?: number | null;
     /** Absolute or site-relative targets stored as this page's outgoing links. */
     linkTargets?: string[];
+    // --- the raw-versus-rendered divergence columns (P23-T6) ----------------
+    // Raw side defaults: a page with a title, no robots meta, no description,
+    // no canonical and no h1. Rendered side defaults: THE SAME VALUES, read by
+    // a Phase-23 pass (`renderedTagsRead: true`) — so no divergence rule fires
+    // on a default page and each case overrides exactly the field it is about.
+    fetchClass?: string;
+    statusCode?: number;
+    title?: string | null;
+    renderedTitle?: string | null;
+    robotsMeta?: string | null;
+    renderedRobotsMeta?: string | null;
+    xRobotsTag?: string | null;
+    metaDescription?: string | null;
+    renderedMetaDescription?: string | null;
+    canonicalHtml?: string | null;
+    renderedCanonical?: string | null;
+    h1Count?: number;
+    h1Text?: string | null;
+    renderedH1Count?: number | null;
+    renderedH1Text?: string | null;
+    /** Defaults to true on a rendered row: null is a pre-0022 render. */
+    renderedTagsRead?: boolean | null;
+    renderedRedirectUrl?: string | null;
   }
 
   async function newCrawl(): Promise<string> {
@@ -178,17 +237,39 @@ describe("the render diff rules against the database", () => {
       const normalised = normalizeUrl(full);
       if (normalised === null) throw new Error(`${full} does not normalise`);
       const rendered = s.rendered ?? true;
+      const title = s.title === undefined ? "A perfectly reasonable page title here" : s.title;
+      const robotsMeta = s.robotsMeta ?? null;
+      const metaDescription = s.metaDescription ?? null;
+      const canonicalHtml = s.canonicalHtml ?? null;
+      const h1Text = s.h1Text ?? null;
+      const h1Count = s.h1Count ?? (h1Text === null ? 0 : 1);
+      const side = <T,>(value: T | undefined, raw: T): T | null =>
+        rendered ? (value === undefined ? raw : value) : null;
       return {
         id: `page_${randomUUID()}`,
         crawlId,
         url: full,
         urlNormalised: normalised,
-        fetchClass: "ok",
-        statusCode: 200,
+        fetchClass: s.fetchClass ?? "ok",
+        statusCode: s.statusCode ?? 200,
         isIndexable: true,
         depth: 1,
         discoveredVia: "link",
-        title: "A perfectly reasonable page title here",
+        title,
+        robotsMeta,
+        xRobotsTag: s.xRobotsTag ?? null,
+        metaDescription,
+        canonicalHtml,
+        h1Count,
+        h1Text,
+        renderedTitle: side(s.renderedTitle, title),
+        renderedRobotsMeta: side(s.renderedRobotsMeta, robotsMeta),
+        renderedMetaDescription: side(s.renderedMetaDescription, metaDescription),
+        renderedCanonical: side(s.renderedCanonical, canonicalHtml),
+        renderedH1Count: side(s.renderedH1Count, h1Count),
+        renderedH1Text: side(s.renderedH1Text, h1Text),
+        renderedTagsRead: side(s.renderedTagsRead, true),
+        renderedRedirectUrl: s.renderedRedirectUrl ?? null,
         htmlBytes: 40_000,
         wordCount: s.wordCount === undefined ? 400 : s.wordCount,
         renderableWordCount:
@@ -214,7 +295,9 @@ describe("the render diff rules against the database", () => {
             : s.renderedRenderableWordCount
           : null,
         renderedAnalyzerWordCount: rendered
-          ? (s.renderedAnalyzerWordCount ?? s.renderedRenderableWordCount ?? 400)
+          ? s.renderedAnalyzerWordCount === undefined
+            ? (s.renderedRenderableWordCount ?? 400)
+            : s.renderedAnalyzerWordCount
           : null,
         renderedWordCount: rendered
           ? (s.renderedWordCount ?? s.renderedRenderableWordCount ?? 400)
@@ -733,6 +816,285 @@ describe("the render diff rules against the database", () => {
     expect(await firedPaths("content.csr-dependent", crawlId)).toEqual([]);
     expect(await firedPaths("nav.js-only", crawlId)).toEqual([]);
   });
+
+  // ==========================================================================
+  // RAW VERSUS RENDERED DIVERGENCE (P23-T6). Five rules, one shape: the value
+  // the bytes the server sent declared, against the value the post-JavaScript
+  // DOM declared, compared on what the element MEANS rather than on its
+  // spelling — noindex by the robots token list, the canonical through
+  // `normalizeUrl` against the page URL, title / description / H1 after a
+  // whitespace collapse and trim. Evidence is `{raw, rendered, sampled: true}`.
+  // ==========================================================================
+
+  const DIVERGENCE = [
+    "render.noindex-changed",
+    "render.canonical-changed",
+    "render.title-changed",
+    "render.meta-description-changed",
+    "render.h1-changed",
+  ] as const;
+
+  it("render.noindex-changed compares noindex on the robots token list, not the string", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      // Raw noindex, removed by the script: fires.
+      { path: "/noindex-removed", robotsMeta: "noindex, follow", renderedRobotsMeta: null },
+      // No raw robots meta, noindex added by the script: fires.
+      { path: "/noindex-added", robotsMeta: null, renderedRobotsMeta: "noindex" },
+      // Both noindex, tokens reordered and respaced: silent.
+      {
+        path: "/noindex-reordered",
+        robotsMeta: "noindex, nofollow",
+        renderedRobotsMeta: "nofollow,noindex",
+      },
+      // `none` is noindex too: silent.
+      { path: "/none-then-noindex", robotsMeta: "none", renderedRobotsMeta: "NOINDEX" },
+      // The directive string changed but noindex did not: silent.
+      {
+        path: "/nofollow-added",
+        robotsMeta: "index, follow",
+        renderedRobotsMeta: "index, nofollow",
+      },
+      // A blank robots meta declares nothing, like an absent one: silent.
+      { path: "/blank-robots", robotsMeta: "", renderedRobotsMeta: null },
+      // THE HEADER IS NOT COMPARED. X-Robots-Tag arrives with the response and
+      // no script can change it; the rule compares meta to meta, so a page
+      // noindexed by its header and carrying no meta on either side is silent.
+      { path: "/header-noindex", xRobotsTag: "noindex", robotsMeta: null },
+    ]);
+    expect(await firedPaths("render.noindex-changed", crawlId)).toEqual([
+      "/noindex-added",
+      "/noindex-removed",
+    ]);
+    const findings = await rule("render.noindex-changed").run(db, crawlId);
+    expect(findings.map((f) => f.evidence)).toEqual([
+      { raw: null, rendered: "noindex", sampled: true },
+      { raw: "noindex, follow", rendered: null, sampled: true },
+    ]);
+    expect(findings[0]!.severity).toBe("critical");
+    expect(findings[0]!.dedupeKey).toBe(url("/noindex-added"));
+  });
+
+  it("render.canonical-changed compares canonicals resolved against the page URL", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      // Relative in the HTML, absolute in the DOM, the same URL: silent.
+      {
+        path: "/canon-relative",
+        canonicalHtml: "/canon-relative",
+        renderedCanonical: url("/canon-relative"),
+      },
+      // A fragment and a host case are spelling, not a different URL: silent.
+      {
+        path: "/canon-spelling",
+        canonicalHtml: "https://RENDER.example/canon-spelling#top",
+        renderedCanonical: "/canon-spelling",
+      },
+      // Rewritten to another URL: fires.
+      { path: "/canon-changed", canonicalHtml: "/canon-changed", renderedCanonical: "/elsewhere" },
+      // Only the DOM has one: fires.
+      { path: "/canon-added", canonicalHtml: null, renderedCanonical: "/canon-added" },
+      // Only the HTML has one: fires.
+      { path: "/canon-removed", canonicalHtml: "/canon-removed", renderedCanonical: null },
+      // A blank href declares nothing, like an absent one: silent.
+      { path: "/canon-blank", canonicalHtml: "  ", renderedCanonical: null },
+    ]);
+    expect(await firedPaths("render.canonical-changed", crawlId)).toEqual([
+      "/canon-added",
+      "/canon-changed",
+      "/canon-removed",
+    ]);
+    const findings = await rule("render.canonical-changed").run(db, crawlId);
+    // Verbatim on both sides: the reader is owed what each document said.
+    expect(findings[1]!.evidence).toEqual({
+      raw: "/canon-changed",
+      rendered: "/elsewhere",
+      sampled: true,
+    });
+    expect(findings[1]!.severity).toBe("critical");
+  });
+
+  it("the three text rules ignore whitespace and fire on a change, an addition or a removal", async () => {
+    const cases = [
+      ["render.title-changed", "title", "renderedTitle"],
+      ["render.meta-description-changed", "metaDescription", "renderedMetaDescription"],
+      ["render.h1-changed", "h1Text", "renderedH1Text"],
+    ] as const;
+    for (const [ruleId, rawKey, renderedKey] of cases) {
+      const crawlId = await newCrawl();
+      const spec = (path: string, raw: string | null, rendered: string | null): PageSpec =>
+        ({ path, [rawKey]: raw, [renderedKey]: rendered }) as PageSpec;
+      await addPages(crawlId, [
+        spec("/ws-only", "Spring  sale\n on now", "  Spring sale on now "),
+        spec("/changed", "Spring sale on now", "Summer sale on now"),
+        spec("/added", null, "Spring sale on now"),
+        spec("/removed", "Spring sale on now", null),
+        spec("/blank-vs-absent", "   ", null),
+        spec("/same", "Spring sale on now", "Spring sale on now"),
+      ]);
+      expect(await firedPaths(ruleId, crawlId), ruleId).toEqual(["/added", "/changed", "/removed"]);
+      const findings = await rule(ruleId).run(db, crawlId);
+      expect(findings[1]!.evidence, ruleId).toEqual({
+        raw: "Spring sale on now",
+        rendered: "Summer sale on now",
+        sampled: true,
+      });
+      expect(findings[1]!.severity, ruleId).toBe("warning");
+    }
+  });
+
+  /** A page on which every one of the five divergences holds. */
+  const divergent = (path: string, extra: Partial<PageSpec> = {}): PageSpec => ({
+    path,
+    robotsMeta: "noindex",
+    renderedRobotsMeta: null,
+    canonicalHtml: "/a",
+    renderedCanonical: "/b",
+    title: "Raw title of the page",
+    renderedTitle: "Rendered title of the page",
+    metaDescription: "Raw description",
+    renderedMetaDescription: "Rendered description",
+    h1Text: "Raw heading",
+    renderedH1Text: "Rendered heading",
+    ...extra,
+  });
+
+  // REVIEW FOCUS 3: "not rendered" must never read as "no divergence" — and
+  // must never read as a divergence either. A page the pass did not render, or
+  // rendered and failed on, has nothing on its rendered side, and every one of
+  // the five rules says nothing about it. What WAS sampled is
+  // `render.coverage`'s subject, not these rules'.
+  it("no divergence rule fires on an unrendered page or a failed render", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      divergent("/never-rendered", { rendered: false }),
+      divergent("/render-failed", {
+        rendered: false,
+        renderError: "navigation timeout after 15000ms",
+      }),
+      // A shape the writer cannot produce — rendered AND an error — is still
+      // not a page whose rendered side anyone may trust.
+      divergent("/rendered-with-error", { renderError: "navigation timeout after 15000ms" }),
+    ]);
+    for (const id of DIVERGENCE) expect(await firedPaths(id, crawlId), id).toEqual([]);
+
+    // …and the silence is the gate's: the same page rendered fires all five.
+    const twin = await newCrawl();
+    await addPages(twin, [divergent("/rendered-twin")]);
+    for (const id of DIVERGENCE) {
+      expect(await firedPaths(id, twin), id).toEqual(["/rendered-twin"]);
+    }
+  });
+
+  // The rendered DOM of a page that sent itself elsewhere is the OTHER page's
+  // DOM. Comparing it with this page's HTML would report the destination's
+  // title as a rewrite; `redirect.js` speaks for that page instead.
+  it("no divergence rule compares a page with the document it redirected to", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [divergent("/js-redirected", { renderedRedirectUrl: url("/target") })]);
+    for (const id of DIVERGENCE) expect(await firedPaths(id, crawlId), id).toEqual([]);
+  });
+
+  // The fetched-OK cohort: these columns come from the analyzer, which runs on
+  // an HTML 200, so a rendered row with any other answer has no raw side.
+  it("no divergence rule reads a page outside the fetched-OK cohort", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [divergent("/rendered-404", { statusCode: 404 })]);
+    for (const id of DIVERGENCE) expect(await firedPaths(id, crawlId), id).toEqual([]);
+  });
+
+  // REVIEW FOCUS 5: a row rendered before migration 0022 has null in the three
+  // new columns because nobody read them, not because the DOM lacked them. The
+  // three rules that need them are silent on it; title and canonical were
+  // already stored by the Phase 8 analysis and still judge.
+  it("a pre-0022 rendered row is silent for robots, description and H1, and judged on title and canonical", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      divergent("/pre-0022", {
+        renderedRobotsMeta: null,
+        renderedMetaDescription: null,
+        renderedH1Text: null,
+        renderedTagsRead: null,
+      }),
+    ]);
+    expect(await firedPaths("render.noindex-changed", crawlId)).toEqual([]);
+    expect(await firedPaths("render.meta-description-changed", crawlId)).toEqual([]);
+    expect(await firedPaths("render.h1-changed", crawlId)).toEqual([]);
+    expect(await firedPaths("render.title-changed", crawlId)).toEqual(["/pre-0022"]);
+    expect(await firedPaths("render.canonical-changed", crawlId)).toEqual(["/pre-0022"]);
+
+    // The same nulls on a row a Phase 23 pass read ARE absences, and fire.
+    const current = await newCrawl();
+    await addPages(current, [
+      divergent("/post-0022", {
+        renderedRobotsMeta: null,
+        renderedMetaDescription: null,
+        renderedH1Text: null,
+        renderedH1Count: 0,
+      }),
+    ]);
+    for (const id of DIVERGENCE) {
+      expect(await firedPaths(id, current), id).toEqual(["/post-0022"]);
+    }
+  });
+
+  // A row rendered before Phase 8 has no analyzer pass over its DOM at all, so
+  // `rendered_title` and `rendered_canonical` are null for the same reason.
+  it("a pre-Phase-8 rendered row is silent for title and canonical too", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      divergent("/pre-p8", {
+        renderedAnalyzerWordCount: null,
+        renderedTitle: null,
+        renderedCanonical: null,
+        renderedTagsRead: null,
+        renderedRobotsMeta: null,
+        renderedMetaDescription: null,
+        renderedH1Text: null,
+      }),
+    ]);
+    for (const id of DIVERGENCE) expect(await firedPaths(id, crawlId), id).toEqual([]);
+  });
+
+  // A raw H1 text that was never stored (a pre-Phase-7 crawl wrote the count
+  // and not the text) is not an H1 the script added.
+  it("render.h1-changed is silent when the raw H1 text was never measured", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/old-raw-h1", h1Count: 1, h1Text: null, renderedH1Text: "A heading" },
+    ]);
+    expect(await firedPaths("render.h1-changed", crawlId)).toEqual([]);
+  });
+
+  it("the divergence rules list to the cap and count every page behind it", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/t1", renderedTitle: "Another title one" },
+      { path: "/t2", renderedTitle: "Another title two" },
+      { path: "/t3", renderedTitle: "Another title three" },
+    ]);
+    const findings = await rule("render.title-changed").run(db, crawlId, { listing: 2 });
+    expect(findings.map((f) => (f.pageUrl ?? "").slice(SITE.length))).toEqual(["/t1", "/t2"]);
+    expect(findings[1]!.evidence["truncated"]).toEqual({ reported: 2, total: 3 });
+  });
+
+  // The scan walks the rendered rows in batches; one row past a batch is the
+  // case a cursor that stopped after its first round trip would lose.
+  it("the divergence scan walks every batch", async () => {
+    const crawlId = await newCrawl();
+    const n = DIVERGENCE_BATCH + 1;
+    await addPages(
+      crawlId,
+      Array.from({ length: n }, (_, i) => ({
+        path: `/batch-${String(i).padStart(4, "0")}`,
+        renderedTitle: `A rewritten title ${i}`,
+      })),
+    );
+    const findings = await rule("render.title-changed").run(db, crawlId, { listing: null });
+    expect(findings).toHaveLength(n);
+    expect(new Set(findings.map((f) => f.pageUrl)).size).toBe(n);
+  });
+
 
   // A crawl id nothing knows scans no pages, which is indistinguishable from a
   // site with no render problem at all (the `runRules` precedent, hard rule 7).
