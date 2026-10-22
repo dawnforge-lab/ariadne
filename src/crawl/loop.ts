@@ -1011,6 +1011,15 @@ async function storedSpacing(
 }
 
 /**
+ * How many candidate URLs `enqueue` gates and looks up in the frontier per
+ * round trip. A page's links fit in one; a sitemap's entries are taken this
+ * many at a time so they can stop at the cap. The lookup binds the chunk as
+ * ONE array parameter, so this is not a parameter-count limit, only a bound on
+ * the work done past a full frontier.
+ */
+const ENQUEUE_LOOKUP_CHUNK = 1_000;
+
+/**
  * `crawls.host_spacing_jsonb` as a `{host: earnedMs}` map, or null for the
  * honest "no per-host reading" (a fresh crawl, a pre-0015 row). Anything else is
  * a column we cannot read a politeness fact out of, and it stops the resume
@@ -1296,15 +1305,50 @@ async function runToCompletion(
    * past `maxPages` rows. The cap is on rows *ever inserted*, so a hub page
    * with 5000 links cannot turn a 100-page crawl into a 5000-row table.
    *
-   * `frontierRows` is *reserved* as each candidate is accepted, not compared
-   * once at the top: up to `maxConcurrency` calls of this function are in
-   * flight at any moment, and a check-then-insert separated by an `await`
+   * ROOM IS RESERVED ONLY FOR URLS THE FRONTIER DOES NOT ALREADY HOLD. Before
+   * reserving, one indexed lookup on `(crawl_id, url)` asks which of the
+   * candidates are queued already — a question put to the database, never to a
+   * set of seen URLs in memory (hard rules 3 and 6). Every page on a real site
+   * opens with the same site-wide nav, whose targets are always known; when
+   * room was reserved per candidate before that was known, the nav took the
+   * last of the room near the cap, the cap check tripped, and the page's
+   * genuinely new links behind it were skipped. The room came back after the
+   * insert, but those links were gone, and every later page did the same: a
+   * capped crawl froze short of `maxPages` with nothing pending, and read as a
+   * complete crawl of a smaller site (hard rule 7 — the gate crawl of
+   * lavishalice at maxPages 600 ended at 554 with 3,475 followable targets
+   * never queued). Candidates repeated within one call are collapsed here for
+   * the same reason: a page linking one new URL twice must not spend two slots.
+   *
+   * `frontierRows` is *reserved* as each unknown candidate is accepted, not
+   * compared once at the top: up to `maxConcurrency` calls of this function are
+   * in flight at any moment, and a check-then-insert separated by an `await`
    * would let every one of them spend the same remaining room. The check and
    * the increment sit in one synchronous step — no `await` between them — so
-   * the reservation is exact even with sixteen handlers interleaving. The
-   * count is corrected downwards afterwards by however many rows the
-   * `(crawl_id, url)` conflict dropped, so URLs already in the frontier do not
-   * permanently consume budget.
+   * the frontier can never pass `maxPages`, even with sixteen handlers
+   * interleaving.
+   *
+   * THE RESIDUAL RACE. The lookup is a snapshot: two calls in flight together
+   * can both find the same new URL unknown and both reserve a slot for it. One
+   * insert wins; the other's `(crawl_id, url)` conflict drops the row, and the
+   * correction after the insert gives that slot back. While both reservations
+   * stand, the frontier counts one row more than it will hold, so at the exact
+   * cap a third call can find no room and skip a new URL it would have had
+   * room for. That is bounded twice over: the over-count is at most the URLs
+   * new to more than one of the `maxConcurrency` in-flight calls at the same
+   * instant, and it lasts only until the losing insert returns — after which
+   * any later page that offers a new URL fills the slot. It errs in the safe
+   * direction (never past `maxPages`), and it can only leave the crawl short if
+   * no page fetched after that instant offers a single URL the frontier does
+   * not hold, which on a site larger than the cap is the exception rather than
+   * the rule it used to be. A URL found KNOWN cannot be wrong later: frontier
+   * rows are never deleted while the crawl runs.
+   *
+   * Candidates are taken in chunks of `ENQUEUE_LOOKUP_CHUNK`, one lookup per
+   * chunk. A page's links fit one chunk, so a link enqueue is one lookup; the
+   * chunking is for the sitemap, whose entries (up to the discovery cap) stop
+   * at the first chunk that fills the frontier, as they always stopped at the
+   * cap, instead of being gated and looked up in full.
    *
    * A candidate robots.txt disallows is NOT enqueued — it is never fetched —
    * and since Phase 23 T3 it is not dropped either: it is collected with the
@@ -1328,55 +1372,81 @@ async function runToCompletion(
     if (frontierRows >= config.maxPages && !recordsBlocked) return;
 
     const items: EnqueueItem[] = [];
+    // Every URL this call has already judged, so a repeat is neither reserved
+    // twice nor recorded twice. Distinct within the call, bounded by it.
+    const seen = new Set<string>();
     // url -> the `fetch_reason` it will be recorded with. Distinct within the
     // call, bounded by it.
     const blocked = new Map<string, string>();
-    for (const raw of urls) {
-      // normalizeUrl is the single frontier-key authority (url-utils). Links
-      // arrive already normalised from the analyzer; the seed and sitemap
-      // entries do not, and running it twice is idempotent.
-      const url = normalizeUrl(raw);
-      if (url === null) continue;
-      if (!isSameOrigin(url, config.siteUrl)) continue; // external: linked, never fetched
-      // Rule 5 first, for every candidate — a blocked row is recorded only for
-      // a URL the policy would have let us fetch; robots.txt is then the reason
-      // no fetch follows.
-      const verdict = await isUrlAllowed(url, { allowPrivate });
-      if (!verdict.allowed) continue;
-      // isSameOrigin admits www<->apex and http->https spellings, and the
-      // robots wrapper judges those by the same rules (RobotsInfo.isAllowed):
-      // a variant spelling is never a way around Disallow.
-      if (!discovery.robots.isAllowed(url)) {
-        if (recordsBlocked && !blocked.has(url)) {
-          // The line that decided, quoted from the robots.txt this crawl read.
-          // A disallow with no line behind it would be a row that cannot say
-          // why it was never requested — our defect, and loud (rule 7).
-          const line = discovery.robots.matchingRule(url);
-          if (line === null) {
-            throw new Error(
-              `enqueue: robots.txt disallows ${url} but names no line that decided it ` +
-                `(robots outcome '${discovery.robots.outcome}')`,
-            );
-          }
-          blocked.set(url, robotsBlockedReason(line));
-        }
-        continue;
-      }
+    for (let start = 0; start < urls.length; start += ENQUEUE_LOOKUP_CHUNK) {
+      // The sitemap stops at the cap; a page's links are scanned to the end
+      // for the robots-blocked ones (see the docblock).
+      if (frontierRows >= config.maxPages && !recordsBlocked) break;
 
-      // Reserve. Atomic with respect to the event loop, which is what makes
-      // the cap hold across concurrent handlers.
-      if (frontierRows >= config.maxPages) {
-        if (!recordsBlocked) break;
-        continue;
+      const candidates: string[] = [];
+      for (const raw of urls.slice(start, start + ENQUEUE_LOOKUP_CHUNK)) {
+        // normalizeUrl is the single frontier-key authority (url-utils). Links
+        // arrive already normalised from the analyzer; the seed and sitemap
+        // entries do not, and running it twice is idempotent.
+        const url = normalizeUrl(raw);
+        if (url === null || seen.has(url)) continue;
+        seen.add(url);
+        if (!isSameOrigin(url, config.siteUrl)) continue; // external: linked, never fetched
+        // Rule 5 first, for every candidate — a blocked row is recorded only
+        // for a URL the policy would have let us fetch; robots.txt is then the
+        // reason no fetch follows.
+        const verdict = await isUrlAllowed(url, { allowPrivate });
+        if (!verdict.allowed) continue;
+        // isSameOrigin admits www<->apex and http->https spellings, and the
+        // robots wrapper judges those by the same rules (RobotsInfo.isAllowed):
+        // a variant spelling is never a way around Disallow.
+        if (!discovery.robots.isAllowed(url)) {
+          if (recordsBlocked) {
+            // The line that decided, quoted from the robots.txt this crawl
+            // read. A disallow with no line behind it would be a row that
+            // cannot say why it was never requested — our defect, and loud
+            // (rule 7).
+            const line = discovery.robots.matchingRule(url);
+            if (line === null) {
+              throw new Error(
+                `enqueue: robots.txt disallows ${url} but names no line that decided it ` +
+                  `(robots outcome '${discovery.robots.outcome}')`,
+              );
+            }
+            blocked.set(url, robotsBlockedReason(line));
+          }
+          continue;
+        }
+        candidates.push(url);
       }
-      frontierRows += 1;
-      items.push({ url, depth, discoveredVia });
+      // Nothing new can be reserved into a full frontier, so it is not asked.
+      if (candidates.length === 0 || frontierRows >= config.maxPages) continue;
+
+      // Which of them the frontier already holds: one indexed lookup on the
+      // `(crawl_id, url)` unique index. They cost no room.
+      const known = await db.execute<{ url: string }>(sql`
+        select url from frontier
+        where crawl_id = ${crawlId} and url = any(${sql.param(candidates)}::text[])`);
+      const queued = new Set(known.rows.map((row) => row.url));
+
+      // Reserve, for the unknown ones only. Synchronous from the check to the
+      // increment — no `await` in this loop — which is what makes the cap hold
+      // across concurrent handlers.
+      for (const url of candidates) {
+        if (queued.has(url)) continue;
+        if (frontierRows >= config.maxPages) break;
+        frontierRows += 1;
+        items.push({ url, depth, discoveredVia });
+      }
     }
     if (items.length > 0) {
       // A throw here leaves the reservation standing, which is the safe
       // direction: the crawl is on its way out, and over-counting the frontier
       // can only stop work early, never run past maxPages.
       const inserted = await enqueueUrls(db, crawlId, items);
+      // The residual race's correction: a URL another call inserted between
+      // our lookup and our insert was dropped by the conflict, and its slot is
+      // returned here (see the docblock).
       frontierRows -= items.length - inserted;
     }
     // After the frontier: the URLs that will be fetched are queued before the

@@ -34,26 +34,31 @@ const GATE_PEAK_RSS_BYTES = 512 * 1024 * 1024;
  * what ends this crawl rather than the budget.
  *
  * That is deliberate, and it is the one place this script departs from the
- * brief's literal `maxPages: 50_000`. The gate asserts an exact page count, and
- * a budget set exactly to the site's size lands one page short every time — a
- * real wrinkle in the loop's frontier budgeting, measured here at 600 pages
- * (599 crawled, twice):
+ * brief's literal `maxPages: 50_000`. It was introduced in Phase 1 to work
+ * around a frontier-budgeting defect, and it is KEPT after that defect's fix
+ * for a different reason.
  *
- *  - The loop reserves a frontier slot per *candidate* and only returns the
- *    slot after the insert, when the `(crawl_id, url)` conflict reports the row
- *    was already there. Seeding reserves `maxPages` slots but inserts one row
- *    fewer, because the sitemap declares `/` and the seed already enqueued it.
- *    The frontier therefore settles at `maxPages - 1` rows.
- *  - Filling that last row then depends on some page offering a link that is
- *    not in the frontier yet, *as its first link* — once the reservation is
- *    taken, the rest of that page's links are skipped. Every page on a real
- *    site (and on this fixture) starts with the same site-wide nav, whose
- *    targets are always already known, so the slot is never filled.
+ * The defect (docs/gates/phase-1.md, finding 3; fixed in the Phase 23
+ * follow-up, `enqueue` in src/crawl/loop.ts): the loop reserved a frontier slot
+ * per *candidate* before knowing whether the URL was already queued, and
+ * returned it only after the insert. Every page opens with the same site-wide
+ * nav, whose targets are always known, so near the cap the nav took the last
+ * of the room and the page's new links behind it were skipped. Measured here
+ * as 599 of 600; on a real site (lavishalice, maxPages 600) as ~50 short with
+ * thousands of link targets never queued. `enqueue` now asks the frontier
+ * which candidates it already holds and reserves room only for the rest, so a
+ * budget set exactly to the site's size would crawl the whole site.
  *
- * Nothing about that costs a crawl any correctness — a budgeted crawl stopping
- * at 49,999 of 50,000 is a budget doing its job to within a rounding error —
- * so it is recorded in docs/gates/phase-1.md rather than fixed under a gate.
- * With headroom the whole site is crawled, exactly, every run.
+ * Why the headroom stays: a crawl that ends AT its budget is, correctly,
+ * indistinguishable from one the budget cut short. `pagesCrawled >= maxPages`
+ * is the completeness signal (`skipReason` in src/rules/query/link-graph.ts):
+ * on it `links.orphan` declines to run (`links.orphan-skipped` says why) and
+ * `structure.deep-page` caveats its depths. A gate crawl budgeted to the
+ * site's exact size would therefore be reported as capped, and
+ * scripts/gate-rules.ts would time the orphan query skipping rather than
+ * running. With headroom the *site* ends the crawl,
+ * the crawl is complete in the only sense the rules can verify, and the exact
+ * page-count assertion still holds.
  */
 function budgetHeadroom(pages: number): number {
   return Math.max(50, Math.ceil(pages * 0.1));

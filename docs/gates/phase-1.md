@@ -186,6 +186,13 @@ both scripts give `maxPages` 10% headroom over the fixture's size and let the
 *site* end the crawl. See the comment on `budgetHeadroom` in
 `scripts/gate-crawl.ts`.
 
+*Later note (Phase 23 follow-up):* the mechanism above was the visible end of a
+larger defect — near the cap, known nav links took the remaining room on every
+page and new links were lost, so real capped crawls ended ~50 short of 600.
+Fixed in `enqueue` (src/crawl/loop.ts): room is reserved only for URLs the
+frontier does not already hold. The headroom stays, for the reason now given on
+`budgetHeadroom`.
+
 ## Leftovers
 
 Both runs leave their rows in the dev database, identified by the crawl ids

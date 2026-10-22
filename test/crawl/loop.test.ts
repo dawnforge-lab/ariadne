@@ -18,6 +18,7 @@ import type { HostProbeResult } from "../../src/crawl/host-probe.js";
 import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { robotsRules } from "../../src/rules/query/robots.js";
+import { linkGraphRules } from "../../src/rules/query/link-graph.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -997,6 +998,79 @@ describe("runCrawl", () => {
  *   many:    /  -> /ok, /private/a, /private/b, /private/c
  *            /ok -> /private/a (already recorded by then: never "dropped")
  */
+/**
+ * A capped crawl must fill its budget when the site has more pages than the
+ * cap. The shape that used to stall it: every page opens with the same
+ * site-wide nav — targets already in the frontier — and only then links its
+ * own new pages. `enqueue` once reserved a slot per candidate before knowing
+ * whether the URL was queued, so near the cap the known nav links took the
+ * remaining room, the cap check tripped, and the new links behind them were
+ * skipped; the room came back after the insert, too late. The frontier froze
+ * short of maxPages with nothing pending, and the crawl read as complete.
+ *
+ *   every page    -> NAV (/, /n0../n4), then two children of its own
+ *   /             -> /c-0, /c-1
+ *   /x            -> /x-0, /x-1        (unbounded: the site outgrows any cap)
+ * robots.txt and every other path 404 (absent -> allow all, no sitemap).
+ */
+describe("a capped crawl fills its budget behind a site-wide nav", () => {
+  let navServer: Server;
+  let nav: string;
+  const NAV = ["/", "/n0", "/n1", "/n2", "/n3", "/n4"];
+  const PAGE = /^\/(n\d(-\d)*|c(-\d)+)?$/;
+
+  const linkRule = (id: string) => {
+    const r = linkGraphRules.find((rule) => rule.id === id);
+    if (r === undefined) throw new Error(`no ${id} rule`);
+    return r;
+  };
+
+  beforeAll(async () => {
+    navServer = createServer((req, res) => {
+      const path = req.url ?? "";
+      if (!PAGE.test(path)) {
+        res.writeHead(404, { "content-type": "text/html" });
+        res.end(html("<p>gone</p>"));
+        return;
+      }
+      const children = path === "/" ? ["/c-0", "/c-1"] : [`${path}-0`, `${path}-1`];
+      const anchors = [...NAV, ...children].map((p) => `<a href="${p}">${p}</a>`).join("");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html(anchors));
+    });
+    nav = await listen(navServer);
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => navServer.close(() => r()));
+  });
+
+  for (const maxConcurrency of [1, 4]) {
+    it(`queues and fetches exactly maxPages pages (concurrency ${maxConcurrency})`, async () => {
+      const maxPages = 20;
+      const summary = await crawl(
+        config({ siteUrl: nav, probeHosts: false, maxPages, maxConcurrency }),
+      );
+      const queued = await db
+        .select({ url: frontier.url })
+        .from(frontier)
+        .where(eq(frontier.crawlId, summary.crawlId));
+      expect(queued.length).toBe(maxPages);
+      expect(summary.pagesCrawled).toBe(maxPages);
+      const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+      expect(rows.filter((r) => r.fetchClass !== "disallowed").length).toBe(maxPages);
+
+      // The completeness signal: a crawl that stopped at its cap with link
+      // targets it never visited says the orphan check was not run, rather
+      // than running it over a link graph it knows is partial.
+      expect(await linkRule("links.orphan").run(db, summary.crawlId)).toEqual([]);
+      const skipped = await linkRule("links.orphan-skipped").run(db, summary.crawlId);
+      expect(skipped).toHaveLength(1);
+      expect(String(skipped[0]!.evidence["skipped"])).toContain(`${maxPages}-page limit`);
+    });
+  }
+});
+
 describe("robots-blocked internal URLs", () => {
   let linkedServer: Server;
   let linked: string;
