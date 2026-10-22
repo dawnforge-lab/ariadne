@@ -92,6 +92,10 @@ describe("the field duplicate rules against the database", () => {
      * which is "not canonicalised elsewhere" and therefore judged (Phase 22 §1).
      */
     canonical?: string;
+    /** `<link rel=prev>` href: set on pages 2+ of a paginated series. */
+    relPrev?: string;
+    /** `<link rel=next>` href: set on every page of a series but the last. */
+    relNext?: string;
   }
 
   /** One `<link rel=alternate hreflang>` declaration, as the crawler stores it. */
@@ -151,6 +155,8 @@ describe("the field duplicate rules against the database", () => {
         // pre-Phase-7 row, which is what the skip rule is about.
         h1Count: s.h1Count ?? (h1Text === null ? 0 : 1),
         canonicalHtml: s.canonical ?? null,
+        relPrev: s.relPrev === undefined ? null : url(s.relPrev),
+        relNext: s.relNext === undefined ? null : url(s.relNext),
         depth: 1,
         discoveredVia: "link",
       };
@@ -229,6 +235,7 @@ describe("the field duplicate rules against the database", () => {
         // the key is carried anyway, so a reader never has to guess whether a
         // group of two was really a group of three (Phase 22 §2).
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
 
       expect(found[1]!.pageId).toBe(ids.get("/shoes/marathon"));
@@ -238,6 +245,7 @@ describe("the field duplicate rules against the database", () => {
         // Alphabetical, and the same three on every run.
         pages: [url("/shoes/marathon"), url("/shoes/sprint"), url("/shoes/trail")],
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
     });
 
@@ -286,6 +294,7 @@ describe("the field duplicate rules against the database", () => {
         count: 2,
         pages: [url("/live-a"), url("/live-b")],
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
     });
 
@@ -410,6 +419,7 @@ describe("the field duplicate rules against the database", () => {
         count: 3,
         pages: [url("/bakery"), url("/florist"), url("/studio")],
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
     });
 
@@ -473,6 +483,7 @@ describe("the field duplicate rules against the database", () => {
         count: 2,
         pages: [url("/guides/returns"), url("/guides/sizing")],
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
       // And neither of the other two rules has anything to say about the same
       // pages, which is what makes the grouping column provable.
@@ -580,6 +591,7 @@ describe("the field duplicate rules against the database", () => {
         count: 2,
         pages: [url("/new-a"), url("/new-b")],
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
     });
 
@@ -622,6 +634,7 @@ describe("the field duplicate rules against the database", () => {
         // and the two must not be reported as one number. `site.health`'s
         // `urlsCanonicalised` is where this one is counted.
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
     });
 
@@ -688,6 +701,7 @@ describe("the field duplicate rules against the database", () => {
         // before `/legal/...` and `/policies/...`, and it is the pair's key.
         pages: [url(FR), url("/legal/refunds")],
         alternatesCollapsed: 1,
+        paginationExcluded: 0,
       });
     });
 
@@ -776,6 +790,7 @@ describe("the field duplicate rules against the database", () => {
           count: 2,
           pages: [url("/a"), url("/c")],
           alternatesCollapsed: 0,
+          paginationExcluded: 0,
         });
       });
     }
@@ -812,6 +827,7 @@ describe("the field duplicate rules against the database", () => {
         expect(found[0]!.evidence).toMatchObject({
           count: 3,
           alternatesCollapsed: 0,
+          paginationExcluded: 0,
         });
       });
     }
@@ -837,7 +853,69 @@ describe("the field duplicate rules against the database", () => {
         count: 2,
         pages: [url("/legal/refunds"), url(EN)],
         alternatesCollapsed: 0,
+        paginationExcluded: 0,
       });
+    });
+  });
+
+  /**
+   * PAGES 2+ OF A SERIES LEAVE THE FIELD RULES (Phase 23 T7, study 4.5). A
+   * paginated listing repeats its title, description and H1 on every page by
+   * construction; the page that declares `rel=prev` is page 2 or later. The
+   * exclusion is counted (`paginationExcluded`), not silent.
+   */
+  describe("paginated pages", () => {
+    const SHARED = "Shoes";
+    const series = (withPrev: boolean): PageSpec[] => [
+      { path: "/shoes", title: SHARED, metaDescription: SHARED, h1Text: SHARED, relNext: "/shoes?page=2" },
+      {
+        path: "/shoes?page=2", title: SHARED, metaDescription: SHARED, h1Text: SHARED,
+        ...(withPrev ? { relPrev: "/shoes" } : {}), relNext: "/shoes?page=3",
+      },
+      {
+        path: "/shoes?page=3", title: SHARED, metaDescription: SHARED, h1Text: SHARED,
+        ...(withPrev ? { relPrev: "/shoes?page=2" } : {}),
+      },
+    ];
+
+    it.each([TITLE, META, H1])("%s: a series of three reports nothing", async (id) => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, series(true));
+      expect(await run(id, crawlId)).toEqual([]);
+    });
+
+    it.each([TITLE, META, H1])("%s: the same three without rel=prev are one group of 3", async (id) => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, series(false));
+      const found = await run(id, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({ count: 3, paginationExcluded: 0 });
+    });
+
+    it.each([TITLE, META, H1])("%s: page 1 duplicating an unrelated page is still reported, and the exclusion is counted", async (id) => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        ...series(true),
+        { path: "/sale", title: SHARED, metaDescription: SHARED, h1Text: SHARED },
+      ]);
+      const found = await run(id, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        count: 2,
+        pages: [url("/sale"), url("/shoes")],
+        paginationExcluded: 2,
+      });
+    });
+
+    it("does not count a paginated page that is not judged", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", title: SHARED },
+        { path: "/b", title: SHARED },
+        { path: "/c?page=2", title: SHARED, relPrev: "/c", robotsMeta: "noindex" },
+      ]);
+      const found = await run(TITLE, crawlId);
+      expect(found[0]!.evidence).toMatchObject({ count: 2, paginationExcluded: 0 });
     });
   });
 });

@@ -171,6 +171,7 @@ type HealthRow = {
   clean_ratio: number | null;
   urls_canonicalised: number;
   urls_noindex: number;
+  urls_paginated: number;
   pages_not_auditable: number;
   /** Fetched OK with a 200: the three cohort counts above must sum to it. */
   fetched_ok: number;
@@ -203,6 +204,10 @@ type HealthRow = {
  *    signals to another URL and carry no noindex of their own.
  *  - `urlsNoindex` — fetched-OK 200s set aside because they carry a noindex,
  *    whether or not they also canonicalise elsewhere (the precedence above).
+ *  - `urlsPaginated` — JUDGED pages that declare rel=prev (page 2+ of a series),
+ *    left out of the three field-duplicate rules only (Phase 23 T7). Unlike the
+ *    two above this is NOT a partition member: these pages are inside
+ *    `urlsTotal` and every other rule still judges them.
  *
  * **The four buckets partition `urlsTotal` exactly**, and that is a property of
  * the statement rather than a hope: every cohort page appears once on the left
@@ -273,6 +278,14 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
       from pages p
       where p.crawl_id = ${crawlId}
     ),
+    paginated as (
+      -- Judged pages declaring rel=prev: left out of the three field-duplicate
+      -- rules (Phase 23 T7). NOT a partition member — these pages stay in
+      -- urlsTotal and every other rule still judges them.
+      select count(*)::int as n
+      from pages p
+      where p.crawl_id = ${crawlId} and ${JUDGED("p")} and p.rel_prev is not null
+    ),
     cohort as (
       select p.id
       from pages p
@@ -302,6 +315,7 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
             / nullif(count(*), 0), 4)::float8 as clean_ratio,
       (select canonicalised from census)::int as urls_canonicalised,
       (select noindex from census)::int as urls_noindex,
+      (select n from paginated)::int as urls_paginated,
       ((select crawled from census) - (select fetched_ok from census))::int
         as pages_not_auditable,
       (select fetched_ok from census)::int as fetched_ok,
@@ -352,6 +366,7 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
 
   const urlsCanonicalised = num(row.urls_canonicalised, "urls_canonicalised", self.id);
   const urlsNoindex = num(row.urls_noindex, "urls_noindex", self.id);
+  const urlsPaginated = num(row.urls_paginated, "urls_paginated", self.id);
   const pagesNotAuditable = num(row.pages_not_auditable, "pages_not_auditable", self.id);
   const fetchedOk = num(row.fetched_ok, "fetched_ok", self.id);
   const crawled = num(row.crawled, "crawled", self.id);
@@ -393,6 +408,7 @@ async function siteHealth(db: Db, crawlId: string, self: MetricIdentity): Promis
         pagesNotAuditable,
         urlsCanonicalised,
         urlsNoindex,
+        urlsPaginated,
       },
     }),
   ];
@@ -426,6 +442,7 @@ export const healthMetrics: MetricRule[] = [
       // fetched, 200-answering URLs the ruleset deliberately did not judge.
       { key: "urlsCanonicalised", label: "Canonicalised (set aside)" },
       { key: "urlsNoindex", label: "Noindex (set aside)" },
+      { key: "urlsPaginated", label: "Paginated Pages Set Aside" },
     ], 0),
     async (db, crawlId, self) => siteHealth(db, crawlId, self),
   ),

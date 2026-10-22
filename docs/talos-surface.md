@@ -1028,7 +1028,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:1936` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:1947` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1613,18 +1613,18 @@ filing (§7.3).
 **No grades, no labels, no thresholds** — here or anywhere else (§10). The row
 is ingredients; the judgement is the consumer's.
 
-Pinned: `test/rules/health-metrics.test.ts` (15 tests) —
+Pinned: `test/rules/health-metrics.test.ts` (16 tests) —
 `test/rules/health-metrics.test.ts:45` "carrying the engine-coverage check it is
-evidence for", `test/rules/health-metrics.test.ts:215` "partitions the census
-exactly", `test/rules/health-metrics.test.ts:248` "answers an empty census with a
-null ratio", `test/rules/health-metrics.test.ts:271` "lets no site-level finding
-poison a page bucket", `test/rules/health-metrics.test.ts:295` "keeps the pages
-it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:343`
+evidence for", `test/rules/health-metrics.test.ts:219` "partitions the census
+exactly", `test/rules/health-metrics.test.ts:253` "answers an empty census with a
+null ratio", `test/rules/health-metrics.test.ts:277` "lets no site-level finding
+poison a page bucket", `test/rules/health-metrics.test.ts:302` "keeps the pages
+it cannot judge out of the buckets", `test/rules/health-metrics.test.ts:351`
 "sets a noindex 200 aside in its own column rather than in a bucket",
-`test/rules/health-metrics.test.ts:381` "counts a page that both noindexes and
-canonicalises under noindex", `test/rules/health-metrics.test.ts:402`
+`test/rules/health-metrics.test.ts:390` "counts a page that both noindexes and
+canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 "partitions every fetched URL over the four columns",
-`test/rules/health-metrics.test.ts:532`
+`test/rules/health-metrics.test.ts:564`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
 `test/rules/copy.test.ts:1316` "names every column and the population they
 are over", `test/rules/copy.test.ts:1341` "says the counts are the authority, not the
@@ -1633,7 +1633,7 @@ threshold";
 `test/rules/coverage.test.ts:413` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2479` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2490` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

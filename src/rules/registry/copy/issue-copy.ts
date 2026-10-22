@@ -419,7 +419,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "h1.duplicate-text": {
     title: "H1: Duplicate",
     explanation:
-      "Groups of indexable, self-canonical pages whose first H1 is identical. Pages that declare each other as hreflang alternates count as one page; each row names the H1, the number of distinct pages, up to 20 of their URLs (one per hreflang set) and how many alternates were folded in. Pages with the same H1 claim to be about the same thing.",
+      "Groups of indexable, self-canonical pages whose first H1 is identical. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the H1, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside. Pages with the same H1 claim to be about the same thing.",
     howToFix:
       "Generate the H1 from the fields that make each page different. Where a layout puts the section name in the H1 and the real headline in a styled div, swap them.",
   },
@@ -468,7 +468,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "meta-description.duplicate": {
     title: "Meta description: Duplicate",
     explanation:
-      "Groups of indexable, self-canonical pages with an identical meta description. Pages that declare each other as hreflang alternates count as one page; each row names the description, the number of distinct pages, up to 20 of their URLs (one per hreflang set) and how many alternates were folded in. Duplicate descriptions are replaced by search engines with text from the page.",
+      "Groups of indexable, self-canonical pages with an identical meta description. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the description, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside. Duplicate descriptions are replaced by search engines with text from the page.",
     howToFix:
       "Write the description in the template from fields that differ per page. Where a section has nothing distinct to say, leave the description off rather than repeating one.",
   },
@@ -496,7 +496,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "title.duplicate": {
     title: "Page titles: Duplicate",
     explanation:
-      "Groups of indexable, self-canonical pages with an identical title. Pages that declare each other as hreflang alternates count as one page, so a French and an English version sharing a title are not a duplicate; each row names the title, the number of distinct pages, up to 20 of their URLs (one per hreflang set) and how many alternates were folded in. Duplicate titles make pages indistinguishable in search results and are typically a template writing the same string for every item.",
+      "Groups of indexable, self-canonical pages with an identical title. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series (those declaring rel=prev) are left out; each row names the title, the number of distinct pages, up to 20 of their URLs (one per hreflang set), how many alternates were folded in and how many paginated pages were set aside. Duplicate titles make pages indistinguishable in search results and are typically a template writing the same string for every item.",
     howToFix:
       "Build the title in the template from the fields that differ between pages (product, article, location, page number) with the shared part short and last. If the pages are the same page at several URLs, canonicalise or redirect the copies.",
   },

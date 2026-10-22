@@ -75,6 +75,8 @@ interface PageSpec {
   findings?: Severity[];
   /** The page's declared canonical, absolute. Undefined leaves it null. */
   canonical?: string;
+  /** The page's rel=prev href: set on pages 2+ of a paginated series. */
+  relPrev?: string;
   /** The writer's indexability stamp. Defaults to true. */
   isIndexable?: boolean;
 }
@@ -101,6 +103,7 @@ describe("site.health against the database", () => {
       statusCode: s.statusCode === undefined ? 200 : s.statusCode,
       isIndexable: s.isIndexable ?? true,
       canonicalHtml: s.canonical ?? null,
+      relPrev: s.relPrev ?? null,
       depth: 1,
       discoveredVia: "link",
     }));
@@ -209,6 +212,7 @@ describe("site.health against the database", () => {
       pagesNotAuditable: 0,
       urlsCanonicalised: 0,
       urlsNoindex: 0,
+      urlsPaginated: 0,
     });
   });
 
@@ -242,6 +246,7 @@ describe("site.health against the database", () => {
       pagesNotAuditable: 0,
       urlsCanonicalised: 0,
       urlsNoindex: 0,
+      urlsPaginated: 0,
     });
   });
 
@@ -265,6 +270,7 @@ describe("site.health against the database", () => {
       pagesNotAuditable: 2,
       urlsCanonicalised: 0,
       urlsNoindex: 0,
+      urlsPaginated: 0,
     });
   });
 
@@ -289,6 +295,7 @@ describe("site.health against the database", () => {
       pagesNotAuditable: 0,
       urlsCanonicalised: 0,
       urlsNoindex: 0,
+      urlsPaginated: 0,
     });
   });
 
@@ -324,6 +331,7 @@ describe("site.health against the database", () => {
       pagesNotAuditable: 5,
       urlsCanonicalised: 0,
       urlsNoindex: 0,
+      urlsPaginated: 0,
     });
   });
 
@@ -367,6 +375,7 @@ describe("site.health against the database", () => {
       pagesNotAuditable: 0,
       urlsCanonicalised: 0,
       urlsNoindex: 1,
+      urlsPaginated: 0,
     });
   });
 
@@ -389,6 +398,7 @@ describe("site.health against the database", () => {
       urlsTotal: 1,
       urlsCanonicalised: 0,
       urlsNoindex: 1,
+      urlsPaginated: 0,
     });
   });
 
@@ -419,6 +429,7 @@ describe("site.health against the database", () => {
       urlsTotal: 2,
       urlsCanonicalised: 1,
       urlsNoindex: 2,
+      urlsPaginated: 0,
       pagesNotAuditable: 2,
     });
     expect(
@@ -427,6 +438,27 @@ describe("site.health against the database", () => {
         Number(v["urlsNoindex"]) +
         Number(v["pagesNotAuditable"]),
     ).toBe(7);
+  });
+
+  it("counts judged pages declaring rel=prev, and leaves the partition alone", async () => {
+    const crawlId = await newCrawl();
+    await addPages(crawlId, [
+      { path: "/list" },
+      { path: "/list?page=2", relPrev: url("/list") },
+      { path: "/list?page=3", relPrev: url("/list?page=2") },
+      // Not judged: noindexed and canonicalised pages have their own columns,
+      // and a rel=prev on them does not add a second count here.
+      { path: "/hidden?page=2", relPrev: url("/hidden"), isIndexable: false },
+      { path: "/dup?page=2", relPrev: url("/dup"), canonical: url("/dup") },
+    ]);
+    const v = await health(crawlId);
+    expect(v).toMatchObject({
+      urlsTotal: 3,
+      urlsPaginated: 2,
+      urlsCanonicalised: 1,
+      urlsNoindex: 1,
+      pagesNotAuditable: 0,
+    });
   });
 
   it("refuses to place a severity its ranking does not know", async () => {
@@ -557,6 +589,7 @@ describe("site.health over a capped run", () => {
       pagesNotAuditable: 0,
       urlsCanonicalised: 0,
       urlsNoindex: 0,
+      urlsPaginated: 0,
     });
     expect(await siteRow(uncapped)).toEqual({
       urlsTotal: 10,
@@ -568,6 +601,7 @@ describe("site.health over a capped run", () => {
       pagesNotAuditable: 0,
       urlsCanonicalised: 0,
       urlsNoindex: 0,
+      urlsPaginated: 0,
     });
   });
 

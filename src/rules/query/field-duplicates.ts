@@ -72,6 +72,12 @@
  * first URL of each, and `alternatesCollapsed` says how many URLs were folded
  * in. A group that falls below two clusters produces no finding at all.
  *
+ * **Pages 2+ of a paginated series are left out** (Phase 23 T7, study 4.5): a
+ * judged page with `rel_prev` set repeats its listing's title, description and
+ * H1 by construction. They are counted, not hidden — `paginationExcluded` on
+ * every finding and `urlsPaginated` on `site.health`. `content.exact-duplicate`
+ * and `content.near-duplicate` keep them: a duplicated paginated BODY is real.
+ *
  * **Blank never groups.** `null` and `''` are dropped before the grouping, in
  * all three rules. Postgres groups nulls together, so without that guard every
  * page missing a title would be reported as sharing a title with every other
@@ -140,6 +146,8 @@ type GroupRow = {
   urls: string[];
   first_id: string;
   total_matches: number;
+  /** Judged pages declaring rel=prev, left out of the grouping. */
+  pagination_excluded: number;
 };
 
 /**
@@ -239,6 +247,17 @@ async function groupFindings(
       left join hreflang_cluster hc on hc.page_id = p.id
       where p.crawl_id = ${crawlId} and ${JUDGED("p")}
         and ${column} is not null and btrim(${column}) <> ''
+        -- Pages 2+ of a paginated series declare rel=prev and leave the rule
+        -- (Phase 23 T7). A bare IS NULL on a non-indexed column: the partial
+        -- pages_dupe_* index and its btrim() key are untouched.
+        and p.rel_prev is null
+    ),
+    paginated as (
+      -- The exclusion, counted: every judged page that declares rel=prev,
+      -- whatever its field holds, so the number is the one site.health shows.
+      select count(*)::int as n
+      from pages p
+      where p.crawl_id = ${crawlId} and ${JUDGED("p")} and p.rel_prev is not null
     ),
     dupes as (
       select m.value,
@@ -256,7 +275,8 @@ async function groupFindings(
       order by d.first_url
       ${limitTo(caps.listing)}
     )
-    select c.value, c.page_count, c.member_count, c.total_matches, s.urls, s.first_id
+    select c.value, c.page_count, c.member_count, c.total_matches, s.urls, s.first_id,
+           (select n from paginated) as pagination_excluded
     from capped c
     cross join lateral (
       select array_agg(sample.url) as urls, (array_agg(sample.id))[1] as first_id
@@ -288,6 +308,11 @@ async function groupFindings(
         // comparing `count` against a longer list of URLs elsewhere in the
         // report is owed the number rather than left to infer it (Phase 22 §3).
         alternatesCollapsed: row.member_count - row.page_count,
+        // Judged pages that declare rel=prev (page 2+ of a series), left out of
+        // the grouping altogether: a listing repeats its title, description and
+        // H1 across its pages by construction. Crawl-wide, the same on every
+        // finding and the same number `site.health` publishes (Phase 23 T7).
+        paginationExcluded: row.pagination_excluded,
       },
       dedupeKey: valueKey(row.value),
     }),
@@ -392,6 +417,7 @@ export const fieldDuplicateRules: QueryRule[] = [
       { key: "count", label: "Occurrences" },
       { key: "pages", label: "Addresses" },
       { key: "alternatesCollapsed", label: "Alternates Collapsed" },
+      { key: "paginationExcluded", label: "Paginated Pages Set Aside" },
     ],
     ...copyFor(TITLE.id),
     rulesetVersion: RULESET_VERSION,
@@ -410,6 +436,7 @@ export const fieldDuplicateRules: QueryRule[] = [
       { key: "count", label: "Occurrences" },
       { key: "pages", label: "Addresses" },
       { key: "alternatesCollapsed", label: "Alternates Collapsed" },
+      { key: "paginationExcluded", label: "Paginated Pages Set Aside" },
     ],
     ...copyFor(META.id),
     rulesetVersion: RULESET_VERSION,
@@ -453,6 +480,7 @@ export const fieldDuplicateRules: QueryRule[] = [
       { key: "count", label: "Occurrences" },
       { key: "pages", label: "Addresses" },
       { key: "alternatesCollapsed", label: "Alternates Collapsed" },
+      { key: "paginationExcluded", label: "Paginated Pages Set Aside" },
     ],
     ...copyFor(H1.id),
     rulesetVersion: RULESET_VERSION,

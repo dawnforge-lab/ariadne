@@ -363,6 +363,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     0022 re-judged here keeps silence on robots, description and H1 (nothing
 //     read them) and CAN GAIN title and canonical findings, whose rendered
 //     columns Phase 8 already stored.
+//  6. (T7, study §4.5) `title.duplicate`, `meta-description.duplicate` and
+//     `h1.duplicate-text` leave out judged pages that declare rel=prev (pages
+//     2+ of a paginated series), so a crawl re-judged at 0.18.0 can LOSE
+//     findings there; no migration. The exclusion is counted:
+//     `paginationExcluded` on every finding (a new "Paginated Pages Set Aside"
+//     column) and `urlsPaginated` on `site.health`. The content duplicate rules
+//     are unchanged.
 export const RULESET_VERSION = "0.18.0";
 
 /**

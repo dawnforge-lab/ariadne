@@ -2123,12 +2123,12 @@ describe("metric_table", () => {
     expect(String(body["title"] ?? "")).not.toBe("");
     expect((body["columns"] as { label: string }[]).map((c) => c.label)).toEqual([
       "Scope", "Pages Judged", "With Critical", "With Warning Only", "With Info Only",
-      "Clean", "Clean Ratio", "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)",
+      "Clean", "Clean Ratio", "URLs Not Judged", "Canonicalised (set aside)", "Noindex (set aside)", "Paginated Pages Set Aside",
     ]);
     expect(body["rows"]).toEqual([
       {
         scope: "Site", urlsTotal: 2, urlsWithCritical: 1, urlsWithWarningOnly: 0,
-        urlsWithInfoOnly: 0, urlsClean: 1, cleanRatio: 50, pagesNotAuditable: 0, urlsCanonicalised: null, urlsNoindex: null,
+        urlsWithInfoOnly: 0, urlsClean: 1, cleanRatio: 50, pagesNotAuditable: 0, urlsCanonicalised: null, urlsNoindex: null, urlsPaginated: null,
       },
     ]);
     expect(body["summary"]).toEqual([]);
@@ -2442,9 +2442,9 @@ describe("export_crawl — the CSV views", () => {
     const lines = read(body).split("\r\n");
     expect(lines[0]).toBe(
       "Scope,Pages Judged,With Critical,With Warning Only,With Info Only,Clean," +
-        "Clean Ratio,URLs Not Judged,Canonicalised (set aside),Noindex (set aside)",
+        "Clean Ratio,URLs Not Judged,Canonicalised (set aside),Noindex (set aside),Paginated Pages Set Aside",
     );
-    expect(lines[1]).toBe("Site,2,1,0,0,1,50,0,,"); // two empty: predates P22 §3
+    expect(lines[1]).toBe("Site,2,1,0,0,1,50,0,,,"); // two empty: predates P22 §3
 
     const noMetric = await call("export_crawl", {
       crawlId: seededCrawlId, format: "csv", view: "metric_table",

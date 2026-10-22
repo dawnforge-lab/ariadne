@@ -1727,6 +1727,11 @@ describe("the fixture site end to end", () => {
     // group in it — and both fixtures carry `exact: true` with no expected
     // issues, so the same fact is asserted from the page's side as well.
     const at = (path: string): string => `${app.base}${path}`;
+    let paginatedJudged = 0;
+    for (const page of pageByPath.values()) {
+      if (isJudged(page) && page.relPrev !== null) paginatedJudged += 1;
+    }
+    expect(paginatedJudged).toBeGreaterThan(0);
     const group = (value: Record<string, unknown>, paths: string[]): Record<string, unknown> => ({
       pageUrl: at(paths[0]!),
       ...value,
@@ -1739,6 +1744,12 @@ describe("the fixture site end to end", () => {
       // (Phase 22 §2). Every group below is a pair with no hreflang between
       // them, so nothing was folded into anything.
       alternatesCollapsed: 0,
+      // ONE JUDGED PAGE DECLARES rel=prev on this site (page 2 of a paginated
+      // fixture series) and so sits outside all three rules (Phase 23 T7). The
+      // number is crawl-wide, so it is the same on every group; it is derived
+      // below from the stored rows, not restated, so a fixture that gains or
+      // loses a prev page moves both sides.
+      paginationExcluded: paginatedJudged,
     });
 
     expect(await findingSet("title.duplicate")).toEqual([
@@ -2504,6 +2515,7 @@ describe("the fixture site end to end", () => {
     // the column this test counts the page under.
     let canonicalised = 0;
     let noindex = 0;
+    let paginatedJudged = 0;
     for (const [path, page] of pageByPath) {
       if (page.fetchClass !== "ok" || page.statusCode !== 200) continue;
       if (!isJudged(page)) {
@@ -2512,6 +2524,7 @@ describe("the fixture site end to end", () => {
         continue;
       }
       judged += 1;
+      if (page.relPrev !== null) paginatedJudged += 1;
       let worst = 4;
       for (const ruleId of issuesByPath.get(path) ?? []) {
         const severity = severityOf.get(ruleId);
@@ -2554,6 +2567,9 @@ describe("the fixture site end to end", () => {
       pagesNotAuditable: 88 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
+      // Inside `urlsTotal`, not a partition member: judged pages declaring
+      // rel=prev, left out of the three field-duplicate rules only (P23 T7).
+      urlsPaginated: paginatedJudged,
     });
     // THE PARTITION, end to end (Phase 22 §3): every URL this crawl has a row
     // for is in exactly one of the four columns. The rule asserts it over its
