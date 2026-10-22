@@ -28,7 +28,7 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
 
   Phase 23 (ruleset 0.18.0, 2026-10-21) — engine paragraphs only; no check's id,
   title, priority, Evaluate criteria or Record list moved.
-  - CHECK-12: four rules instead of two (`http.no-response`,
+  - CHECK-12: five rules instead of two (`http.no-response`,
     `http.no-response-transient`, `page.html-too-large` join the 5xx pair).
   - CHECK-03: `robots.blocks-internal-urls`, the `robotsBlocked` status block and
     its `maxBlockedUrls` budget.
@@ -1007,7 +1007,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-12: 5xx server errors
 - **Priority**: High | **Requires**: Engine
-- **Engine**: five rules. `http.server-error` (critical) and `http.server-error-transient` (warning) split 5xx responses by the end-of-crawl re-check; `http.no-response` (critical) and `http.no-response-transient` (warning) do the same for URLs that timed out or failed to connect; `page.html-too-large` (critical) reports 2xx HTML over 2 MB.
+- **Engine**: five rules. `http.server-error` (critical) and `http.server-error-transient` (warning) split 5xx responses by the end-of-crawl re-check; `http.no-response` (critical) and `http.no-response-transient` (warning) do the same for URLs that timed out or failed to connect; `page.html-too-large` (critical) reports 2xx HTML over 2 MiB.
   `issues_list` with `checkId: "CHECK-12"`. Every page whose fetch was classified a
   server error carries exactly one of the first pair, and every page that got no
   HTTP response at all carries exactly one of the second:

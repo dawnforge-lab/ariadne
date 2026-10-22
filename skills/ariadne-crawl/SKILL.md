@@ -321,12 +321,14 @@ What the fields mean when you are waiting:
   `noResponse` is the same second look over URLs that got no HTTP response at all
   (timed out, or the connection failed), in a block of its own because the partition differs:
   `{pages, confirmed, answered, inconclusive, pending}`, where `answered` is ANY
-  HTTP reply on the second look (a 5xx or a block too: the URL responded), and
+  HTTP reply on the second look (a 5xx or a block too: the URL responded),
+  `inconclusive` means no second request was made because robots.txt or the
+  crawler's own URL policy refused it, and
   `confirmed + answered + inconclusive + pending = pages`. Those rows are in none of
   the five 5xx numbers. The walk has its own 100-row budget (counted in `capped`
   and `pending`), runs after every 5xx, and a per-host breaker stops asking a host
-  after three consecutive rechecks that still get no response (those rows stay
-  `pending`). Bodies over 2 MiB are not read at all: such a 2xx page is classed
+  after three consecutive rechecks that still get no response (rows the breaker
+  skips stay in `pending`; no separate count is served). Bodies over 2 MiB are not read at all: such a 2xx page is classed
   as too large and reported by `page.html-too-large`, not re-checked.
   `passAt` is when a COMPLETE pass finished, and **null there is "nobody looked",
   not "nothing to look at"** — those pages keep their Errors, and their evidence
