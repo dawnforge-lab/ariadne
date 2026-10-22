@@ -466,25 +466,29 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   // off its template's children with no parent pointer back, so an upward
   // `parents('head')` would call a template's canonical in the head "outside".
   // A `<title>` under an `<svg>` is the svg's, never the document's.
-  let titleOutsideHead = false;
-  let metaDescriptionOutsideHead = false;
-  let robotsOutsideHead = false;
-  let canonicalOutsideHead = false;
+  // The four single-element flags are FIRST-OCCURRENCE (fix round 1): the
+  // first such element in tree order decides, inside or outside. The hreflang
+  // field counts every alternate outside.
+  let titleOutsideHead: boolean | undefined;
+  let metaDescriptionOutsideHead: boolean | undefined;
+  let robotsOutsideHead: boolean | undefined;
+  let canonicalOutsideHead: boolean | undefined;
   let hreflangOutsideHeadCount = 0;
   const walkOutsideHead = (node: DomNode, inHead: boolean, inSvg: boolean) => {
     const isElement =
       node.type === "tag" || node.type === "script" || node.type === "style";
     const name = isElement ? node.name?.toLowerCase() : undefined;
-    if (name !== undefined && !inHead) {
+    if (name !== undefined) {
       const attribs = node.attribs ?? {};
       const rel = relTokens(attribs["rel"]);
-      if (name === "title" && !inSvg) titleOutsideHead = true;
+      const outside = !inHead;
+      if (name === "title" && !inSvg) titleOutsideHead ??= outside;
       if (name === "meta" && fold(attribs["name"]) === "description") {
-        metaDescriptionOutsideHead = true;
+        metaDescriptionOutsideHead ??= outside;
       }
-      if (name === "meta" && fold(attribs["name"]) === "robots") robotsOutsideHead = true;
-      if (name === "link" && rel.includes("canonical")) canonicalOutsideHead = true;
-      if (name === "link" && rel.includes("alternate") && attribs["hreflang"]) {
+      if (name === "meta" && fold(attribs["name"]) === "robots") robotsOutsideHead ??= outside;
+      if (name === "link" && rel.includes("canonical")) canonicalOutsideHead ??= outside;
+      if (outside && name === "link" && rel.includes("alternate") && attribs["hreflang"]) {
         hreflangOutsideHeadCount += 1;
       }
     }
@@ -525,10 +529,11 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     navLinkCount,
     footerLinkCount,
     frameworkMarkers,
-    titleOutsideHead,
-    metaDescriptionOutsideHead,
-    robotsOutsideHead,
-    canonicalOutsideHead,
+    // Absent is not outside: a page with no such element says false.
+    titleOutsideHead: titleOutsideHead ?? false,
+    metaDescriptionOutsideHead: metaDescriptionOutsideHead ?? false,
+    robotsOutsideHead: robotsOutsideHead ?? false,
+    canonicalOutsideHead: canonicalOutsideHead ?? false,
     hreflangOutsideHeadCount,
     links: Array.from(linksByTarget.values()),
     bodyText,

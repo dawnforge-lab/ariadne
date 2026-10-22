@@ -337,9 +337,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //  4. (T5, study §4.1) The analyzer now runs the tree builder's head rules
 //     over the token stream: the head ends at `</head>`, at `<body>`, at the
 //     first element a head does not allow (an `<img>`, a `<div>`, an `<svg>`)
-//     or at the first non-whitespace text, and five flags record which head
+//     or at the first non-whitespace text, and five fields record which head
 //     elements came after that point (migration 0021, with `head_closed_by`
-//     naming an implicit closer). Two page rules read them:
+//     naming an implicit closer): four first-occurrence flags (the first
+//     title, description, robots meta, canonical — the one the value is read
+//     from — sits outside) and a count of hreflang alternates outside. Two page rules read them:
 //     `head.directives-outside-head` (critical, fetched-OK cohort, CHECK-18 /
 //     -04 / -24: canonical, robots or hreflang outside the head) and
 //     `head.tags-outside-head` (warning, judged, CHECK-35 / -36: title or meta

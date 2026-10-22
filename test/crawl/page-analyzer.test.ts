@@ -371,19 +371,28 @@ function domHeadView(html: string): HeadView & { bodyFirst: string | null } {
     hreflangOutsideHeadCount: 0,
   };
   const fold = (v: string | undefined) => v?.trim().toLowerCase();
+  // FIRST OCCURRENCE in tree order for the four single-element flags: the
+  // first one decides, and it decides whether it is inside or outside.
+  const seen = new Set<string>();
+  const first = (kind: keyof HeadView, outside: boolean) => {
+    if (seen.has(kind)) return;
+    seen.add(kind);
+    (view as unknown as Record<string, boolean>)[kind] = outside;
+  };
   const walk = (node: DomNode, inHead: boolean, inSvg: boolean) => {
     const isElement = node.type === "tag" || node.type === "script" || node.type === "style";
     const name = isElement ? node.name?.toLowerCase() : undefined;
     const attribs = node.attribs ?? {};
-    if (name !== undefined && !inHead) {
+    if (name !== undefined) {
       const rel = (fold(attribs["rel"]) ?? "").split(/\s+/);
-      if (name === "title" && !inSvg) view.titleOutsideHead = true;
+      const outside = !inHead;
+      if (name === "title" && !inSvg) first("titleOutsideHead", outside);
       if (name === "meta" && fold(attribs["name"]) === "description") {
-        view.metaDescriptionOutsideHead = true;
+        first("metaDescriptionOutsideHead", outside);
       }
-      if (name === "meta" && fold(attribs["name"]) === "robots") view.robotsOutsideHead = true;
-      if (name === "link" && rel.includes("canonical")) view.canonicalOutsideHead = true;
-      if (name === "link" && rel.includes("alternate") && attribs["hreflang"]) {
+      if (name === "meta" && fold(attribs["name"]) === "robots") first("robotsOutsideHead", outside);
+      if (name === "link" && rel.includes("canonical")) first("canonicalOutsideHead", outside);
+      if (outside && name === "link" && rel.includes("alternate") && attribs["hreflang"]) {
         view.hreflangOutsideHeadCount += 1;
       }
     }
@@ -393,9 +402,13 @@ function domHeadView(html: string): HeadView & { bodyFirst: string | null } {
   };
   walk($.root()[0] as unknown as DomNode, false, false);
   const body = $("body")[0] as unknown as DomNode | undefined;
-  const first = body?.children?.[0];
+  const firstChild = body?.children?.[0];
   const bodyFirst =
-    first === undefined ? null : first.type === "text" ? "#text" : (first.name ?? null);
+    firstChild === undefined
+      ? null
+      : firstChild.type === "text"
+        ? "#text"
+        : (firstChild.name ?? null);
   return { ...view, bodyFirst };
 }
 
@@ -581,6 +594,31 @@ describe("implicit head close: Review Focus #2 and the tree builder's other rule
     expect(a.headClosedBy).toBe("body");
   });
 
+  it("KNOWN LIMIT: a stray </body> in the head is invisible — a false negative, pinned", () => {
+    // parse5 reads `</body>` in the head as "anything else" and ends it, so the
+    // canonical after it is in the body. htmlparser2 drops the end tag (no
+    // <body> is open), the head stays open here, and the canonical reads as
+    // inside. Never the other way round: this can only under-report.
+    const html = `<html><head><title>T</title></body>${CANONICAL}</head><body><p>x</p></body></html>`;
+    const a = analyzePage(html, "https://x.test/");
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(domHeadView(html).canonicalOutsideHead).toBe(true);
+  });
+
+  it("KNOWN LIMIT: a stray </html> with no <html> open is invisible — a false negative, pinned", () => {
+    const html = `<title>T</title></html>${CANONICAL}<p>x</p>`;
+    const a = analyzePage(html, "https://x.test/");
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(domHeadView(html).canonicalOutsideHead).toBe(true);
+  });
+
+  it("</html> with <html> open ends the head in head mode, and is named as the closer", () => {
+    const a = headOf(`<html><head><title>T</title></html>${CANONICAL}`);
+    expect(a.headClosedBy).toBe("</html>");
+    expect(a.canonicalOutsideHead).toBe(true);
+    expect(a.titleOutsideHead).toBe(false);
+  });
+
   it("a second <head> in the body does not reopen it", () => {
     const a = headOf(`<html><head></head><body><head>${CANONICAL}</head><p>x</p></body></html>`);
     expect(a.canonicalOutsideHead).toBe(true);
@@ -629,5 +667,51 @@ describe("implicit head close: Review Focus #2 and the tree builder's other rule
     expect(a.canonicalHtml).toBe("https://x.test/");
     expect(a.title).toBe("Late");
     expect(a.robotsMeta).toBe("noindex");
+  });
+});
+
+// Fix round 1 ruling: the four single-element flags are FIRST-OCCURRENCE flags.
+// A correct in-head tag followed by a body duplicate is false (the duplicate is
+// `canonical.multiple`'s business for canonicals); a body copy with no in-head
+// one before it is true. The hreflang column stays a count.
+describe("outside-head flags are first-occurrence flags", () => {
+  const SHAPES = [
+    {
+      flag: "canonicalOutsideHead",
+      tag: `<link rel="canonical" href="https://x.test/">`,
+    },
+    { flag: "robotsOutsideHead", tag: `<meta name="robots" content="index, follow">` },
+    { flag: "titleOutsideHead", tag: `<title>T</title>` },
+    { flag: "metaDescriptionOutsideHead", tag: `<meta name="description" content="d">` },
+  ] as const;
+
+  for (const { flag, tag } of SHAPES) {
+    it(`${flag}: in the head, then a duplicate in the body -> false`, () => {
+      const a = headOf(`<html><head>${tag}</head><body><p>x</p>${tag}</body></html>`);
+      expect(a[flag]).toBe(false);
+    });
+
+    it(`${flag}: only in the body -> true`, () => {
+      const a = headOf(`<html><head></head><body><p>x</p>${tag}</body></html>`);
+      expect(a[flag]).toBe(true);
+    });
+
+    it(`${flag}: first after an implicit close, second in the body -> true`, () => {
+      const a = headOf(`<html><head><img src="/p.gif">${tag}</head><body>${tag}</body></html>`);
+      expect(a[flag]).toBe(true);
+    });
+  }
+
+  it("a title inside an svg in the head does not take the first-title slot", () => {
+    // The svg closes the head, so the document title after it is the first
+    // non-svg title and it is outside.
+    const a = headOf(`<html><head><title>T</title></head><body><svg><title>i</title></svg><title>U</title></body></html>`);
+    expect(a.titleOutsideHead).toBe(false);
+  });
+
+  it("hreflang stays a count: in-head alternates do not offset body ones", () => {
+    const a = headOf(`<html><head><link rel="alternate" hreflang="en" href="/en"></head><body>
+      <link rel="alternate" hreflang="en" href="/en"></body></html>`);
+    expect(a.hreflangOutsideHeadCount).toBe(1);
   });
 });

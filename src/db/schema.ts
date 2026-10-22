@@ -467,8 +467,11 @@ export const pages = pgTable("pages", {
   // `</head>`, at `<body>`, at the first element a head does not allow, or at
   // the first non-whitespace text. `head_closed_by` names the IMPLICIT closer
   // (`img`, `div`, `#text`, `body`, `</html>`); null when `</head>` closed it
-  // explicitly or it never closed. The five columns after it say which head
-  // elements appeared AFTER that point. ALL SIX ARE NULL ON PRE-0021 ROWS, and
+  // explicitly or it never closed. The four booleans after it are
+  // FIRST-OCCURRENCE flags: true when the first title, meta description, meta
+  // robots or canonical in the document (the one the stored value is read from)
+  // came after that point — a body duplicate of an in-head tag is false. The
+  // hreflang column counts every alternate after that point. ALL SIX ARE NULL ON PRE-0021 ROWS, and
   // the rules read a null flag as "not measured", never as "inside the head";
   // a 0021 row always carries all five flags, so `head_closed_by` alone being
   // null is only ever the explicit or never-closed case.

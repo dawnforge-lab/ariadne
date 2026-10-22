@@ -101,6 +101,12 @@ export interface PageSpec {
   viewport?: boolean;
   /** Raw HTML appended to `<head>` — extra link tags, JSON-LD, hreflang. */
   headExtra?: string;
+  /**
+   * Raw HTML written into `<head>` BEFORE the title, description, canonical and
+   * robots tags (after the charset and viewport metas). For markup that ends
+   * the head early, so the tags after it land in the body (P23-T5).
+   */
+  headPrefix?: string;
   bodyHtml: string;
 }
 
@@ -117,6 +123,7 @@ export function renderDocument(spec: PageSpec): string {
   if (spec.viewport !== false) {
     head.push('<meta name="viewport" content="width=device-width, initial-scale=1">');
   }
+  if (spec.headPrefix !== undefined) head.push(spec.headPrefix);
   if (spec.title !== undefined) head.push(`<title>${escapeHtml(spec.title)}</title>`);
   if (spec.metaDescription !== undefined) {
     head.push(`<meta name="description" content="${escapeHtml(spec.metaDescription)}">`);

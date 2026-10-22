@@ -137,34 +137,19 @@ const canonicalNone: Fixture = {
  * declaration, so the audited value is this page's own URL and
  * `canonical.points-elsewhere` correctly stays quiet. Only the count is wrong,
  * which is what `canonical.multiple` reports.
- *
- * PHASE 23 T5 put the outside-head pair on this page rather than on a new one,
- * because a new page moves the harness's pinned censuses (page counts, cohort
- * sizes, click-depth percentiles, the render budget) for no gain. The second
- * canonical and a second meta description now sit after an injected banner
- * `<div>` in `headExtra`, which a browser and this analyzer both read as the
- * end of the head: the canonical lands outside it
- * (`head.directives-outside-head`, closed by `div`) and so does the
- * description (`head.tags-outside-head`). Every extracted VALUE is still the
- * first occurrence — this page's own canonical and description — so the page
- * stays judged and nothing else about it moves. The `<div>` is empty, so no
- * word count on either side of the render changes.
  */
 const canonicalMultiple: Fixture = {
   path: "/authored/canonical-multiple",
   category: CANONICAL,
   name: "Two canonical links in one head",
-  expectedIssues: ["canonical.multiple", "head.directives-outside-head", "head.tags-outside-head"],
+  expectedIssues: ["canonical.multiple"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Two canonical links in one head",
       metaDescription:
         "This page ships two rel=canonical link tags, so a search engine gets two different answers to a question that has one.",
-      headExtra:
-        '<div class="promo-banner"></div>' +
-        '<link rel="canonical" href="/control">' +
-        '<meta name="description" content="A second description, written after the head has already ended.">',
+      headExtra: '<link rel="canonical" href="/control">',
       bodyHtml: healthyBody({
         h1: "Two canonicals, one page",
         lede: "The head of this page declares a canonical twice, and the two tags do not name the same URL.",
@@ -386,20 +371,38 @@ const hreflangNoXDefault: Fixture = {
 
 /**
  * The one page on the site with no `<meta name=viewport>`. The rule fires on
- * the tag's absence and nothing else; the page is otherwise the control.
+ * the tag's absence; the page is otherwise the control, save one more head
+ * fault.
+ *
+ * PHASE 23 T5 put the outside-head pair here rather than on a new page, because
+ * a new page moves the harness's pinned censuses (page counts, cohort sizes,
+ * click-depth percentiles, the render budget) for no gain — and this page is
+ * already about a broken head. An injected banner `<div>` sits in `headPrefix`,
+ * ABOVE the page's only title, description and canonical, so a browser and the
+ * analyzer both end the head there and the FIRST (and only) occurrence of each
+ * lands in the body: `head.directives-outside-head` (canonical, closed by
+ * `<div>`) and `head.tags-outside-head` (title, meta description). The values
+ * are unchanged — still this page's own — so it stays judged. The `<div>` is
+ * empty and a `<title>` in the body is not rendered text, so no word count on
+ * either side of the render moves.
  */
 const noViewport: Fixture = {
   path: "/authored/no-viewport",
   category: MOBILE,
-  name: "No viewport meta tag",
-  expectedIssues: ["mobile.viewport-missing"],
+  name: "No viewport meta tag, and a head ended early",
+  expectedIssues: [
+    "head.directives-outside-head",
+    "head.tags-outside-head",
+    "mobile.viewport-missing",
+  ],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "A page with no viewport meta on the fixture site",
       metaDescription:
-        "Everything about this page is healthy except the missing viewport meta tag, so phones render it at desktop width.",
+        "Healthy apart from two head faults: no viewport meta tag, and a banner div that ends the head before the title.",
       viewport: false,
+      headPrefix: '<div class="promo-banner"></div>',
       bodyHtml: healthyBody({
         h1: "A page that forgot it would be read on a phone",
         lede: "There is no viewport meta tag in the head of this page, and that one omission changes how every phone renders it.",

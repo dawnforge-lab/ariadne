@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { headRules } from "../../src/rules/page/head.js";
+import { closedByLabel, headRules } from "../../src/rules/page/head.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
 import {
   expectSilentOnNonOkFetches,
@@ -44,6 +44,17 @@ describe("head rule metadata", () => {
   });
 });
 
+describe("Closed By spelling", () => {
+  it("brackets element closers, says text for text, keeps end tags, and </head> for null", () => {
+    expect(closedByLabel("img")).toBe("<img>");
+    expect(closedByLabel("div")).toBe("<div>");
+    expect(closedByLabel("body")).toBe("<body>");
+    expect(closedByLabel("#text")).toBe("text");
+    expect(closedByLabel("</html>")).toBe("</html>");
+    expect(closedByLabel(null)).toBe("</head>");
+  });
+});
+
 describe("head.directives-outside-head", () => {
   it("is silent on the clean page: closed by </head>, nothing after it", () => {
     expect(directives.run(mkPage())).toHaveLength(0);
@@ -52,13 +63,13 @@ describe("head.directives-outside-head", () => {
   it("reports a canonical after an implicit close, naming the closer", () => {
     const f = directives.run(mkPage({ canonicalOutsideHead: true, headClosedBy: "img" }));
     expect(f).toHaveLength(1);
-    expect(f[0]?.evidence).toEqual({ elements: "canonical", headClosedBy: "img" });
+    expect(f[0]?.evidence).toEqual({ elements: "canonical", headClosedBy: "<img>" });
     expect(f[0]?.severity).toBe("critical");
   });
 
   it("shows </head> as the closer when the head was closed explicitly", () => {
     const f = directives.run(mkPage({ robotsOutsideHead: true, headClosedBy: null }));
-    expect(f[0]?.evidence).toEqual({ elements: "robots", headClosedBy: "</head>" });
+    expect(f[0]?.evidence).toEqual({ elements: "meta robots", headClosedBy: "</head>" });
   });
 
   it("lists every directive outside, hreflang with its count, in one row", () => {
@@ -72,8 +83,8 @@ describe("head.directives-outside-head", () => {
     );
     expect(f).toHaveLength(1);
     expect(f[0]?.evidence).toEqual({
-      elements: "canonical, robots, hreflang (3)",
-      headClosedBy: "#text",
+      elements: "canonical, meta robots, hreflang (3)",
+      headClosedBy: "text",
     });
   });
 
@@ -117,7 +128,7 @@ describe("head.tags-outside-head", () => {
   it("reports a title outside the head with its closer", () => {
     const f = tags.run(mkPage({ titleOutsideHead: true, headClosedBy: "svg" }));
     expect(f).toHaveLength(1);
-    expect(f[0]?.evidence).toEqual({ elements: "title", headClosedBy: "svg" });
+    expect(f[0]?.evidence).toEqual({ elements: "title", headClosedBy: "<svg>" });
     expect(f[0]?.severity).toBe("warning");
   });
 

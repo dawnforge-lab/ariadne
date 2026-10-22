@@ -9,6 +9,12 @@ import type { PageRecord, PageRule } from "../registry/types.js";
  * stream (src/crawl/parse/page-analyzer.ts, module header's Phase 23 block) and
  * writes five flags and the closer (migration 0021).
  *
+ * FIRST OCCURRENCE: the title, description, robots and canonical flags are true
+ * only when the FIRST such tag in the document — the one the stored value is
+ * read from — came after the head ended. A correct in-head canonical followed by
+ * a stray body copy is not reported here (`canonical.multiple` reports the
+ * copy). The hreflang column is a count of every alternate outside the head.
+ *
  * NULL IS NOT MEASURED. Every flag is null on a pre-0021 row, and both rules
  * fire only on an explicit `true` (or a positive count), so an old crawl
  * re-judged here is silent rather than clean-by-default.
@@ -21,19 +27,30 @@ import type { PageRecord, PageRule } from "../registry/types.js";
  */
 
 /**
- * The "Closed By" column. Null on a 0021 row means `</head>` closed the head
- * explicitly (or it never closed, in which case nothing is outside it and no
- * finding is written), so the column shows that end tag rather than a blank.
+ * The "Closed By" column, spelled for a reader (controller ruling, fix round
+ * 1): an element closer in angle brackets (`<img>`, `<div>`, `<body>`), the
+ * text closer as `text`, and an end tag as written (`</html>`). Null on a 0021
+ * row means `</head>` closed the head explicitly (or it never closed, in which
+ * case nothing is outside it and no finding is written), so the column shows
+ * that end tag rather than a blank. The stored column keeps the analyzer's
+ * spelling (`img`, `#text`); this is display only.
  */
+export function closedByLabel(stored: string | null): string {
+  if (stored === null) return "</head>";
+  if (stored === "#text") return "text";
+  if (stored.startsWith("</")) return stored;
+  return `<${stored}>`;
+}
+
 function closedBy(p: PageRecord): string {
-  return p.headClosedBy ?? "</head>";
+  return closedByLabel(p.headClosedBy);
 }
 
 /** The directives outside the head, in a fixed order, as one column value. */
 function directivesOutside(p: PageRecord): string[] {
   const out: string[] = [];
   if (p.canonicalOutsideHead === true) out.push("canonical");
-  if (p.robotsOutsideHead === true) out.push("robots");
+  if (p.robotsOutsideHead === true) out.push("meta robots");
   const hreflang = p.hreflangOutsideHeadCount;
   if (hreflang !== null && hreflang > 0) out.push(`hreflang (${hreflang})`);
   return out;

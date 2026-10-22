@@ -308,20 +308,34 @@
  * caused one is read on its own event. An `<svg>` or `<math>` in the head ends
  * it like any other disallowed tag, as it does in parse5.
  *
- * In body mode a non-svg `<title>`, a `<meta name=description|robots>`, a
- * `<link rel=canonical>` and a `<link rel=alternate hreflang>` raise the five
- * outside-head fields, in the SAME code paths that capture their values — so
- * the `<noscript>` exclusion and the template inclusion are the ones the values
- * already have, and the oracle's selectors agree. THE VALUES DO NOT MOVE: the
- * canonical, robots meta, title and hreflang pairs are still the first
- * occurrence anywhere. Whether an outside-head canonical should stop being the
- * page's canonical is an indexability verdict waiting on an owner ruling.
+ * The four single-element flags are FIRST-OCCURRENCE flags (controller ruling,
+ * fix round 1): `titleOutsideHead`, `metaDescriptionOutsideHead`,
+ * `robotsOutsideHead` and `canonicalOutsideHead` are true only when the FIRST
+ * non-svg `<title>`, `<meta name=description>`, `<meta name=robots>` or
+ * `<link rel=canonical>` in the document — the one the value is read from —
+ * arrives in body mode. A correct in-head canonical followed by a body
+ * duplicate is false here; `canonical.multiple` reports the duplicate.
+ * `hreflangOutsideHeadCount` stays a count of every `<link rel=alternate
+ * hreflang>` in body mode. All five are set in the SAME code paths that capture
+ * the values, so the `<noscript>` exclusion and the template inclusion are the
+ * ones the values already have, and the oracle's selectors agree. THE VALUES DO
+ * NOT MOVE: the canonical, robots meta, title and hreflang pairs are still the
+ * first occurrence anywhere. Whether an outside-head canonical should stop
+ * being the page's canonical is an indexability verdict waiting on an owner
+ * ruling.
  *
- * KNOWN LIMIT: htmlparser2 drops an end tag whose element is not open, so a
- * `</head>` written with no `<head>` before it is invisible here; the head then
- * ends at whatever opens the body, usually `<body>` (closer `body` where the
- * tree builder would say explicit). Head tags between the two still land in the
- * head on both sides, so only the closer's name differs, never a flag.
+ * KNOWN LIMITS, all from one htmlparser2 behaviour: it drops an end tag whose
+ * element is not open.
+ *  - A `</head>` with no `<head>` open is invisible; the head then ends at
+ *    whatever opens the body, usually `<body>` (closer `body` where the tree
+ *    builder would say explicit). Head tags between the two land in the head on
+ *    both sides, so only the closer's name differs, never a flag.
+ *  - A stray `</body>` in the head (no `<body>` can be open there), and a stray
+ *    `</html>` with no `<html>` open, are invisible too. The tree builder reads
+ *    either as "anything else" and ends the head; here the head stays open, so
+ *    a canonical (or robots, title, description, hreflang) after one is
+ *    reported INSIDE where parse5 says outside. A rare false negative, never a
+ *    false positive. Pinned in test/crawl/page-analyzer.test.ts.
  *
  * ONE KNOWN, PERMANENT DIVERGENCE, and it is a property of the port rather
  * than a defect in it. An `<a href>` left open across a container boundary —
@@ -576,13 +590,17 @@ export interface PageAnalysis {
    * block for the state machine.
    */
   headClosedBy: string | null;
-  /** A non-svg `<title>` appeared after the head ended. */
+  /**
+   * The FIRST non-svg `<title>` (the one `title` is read from) came after the
+   * head ended. A body duplicate of an in-head title does not raise it; this
+   * and the three flags below are first-occurrence flags.
+   */
   titleOutsideHead: boolean;
-  /** A `<meta name=description>` appeared after the head ended. */
+  /** The first `<meta name=description>` came after the head ended. */
   metaDescriptionOutsideHead: boolean;
-  /** A `<meta name=robots>` appeared after the head ended. */
+  /** The first `<meta name=robots>` came after the head ended. */
   robotsOutsideHead: boolean;
-  /** A `<link rel=canonical>` appeared after the head ended. */
+  /** The first `<link rel=canonical>` came after the head ended. */
   canonicalOutsideHead: boolean;
   /**
    * `<link rel=alternate hreflang=…>` elements (non-empty `hreflang`, any or no
@@ -1274,11 +1292,17 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     const name = attribs["name"]?.trim().toLowerCase();
     const property = attribs["property"]?.trim().toLowerCase();
     if (name === "description") {
-      if (headMode === "body") metaDescriptionOutsideHead = true;
-      if (metaDescription === undefined) metaDescription = content?.trim() ?? "";
+      // FIRST OCCURRENCE: the flag says the description the value is read
+      // from sits outside the head; a body duplicate of an in-head one is not.
+      if (metaDescription === undefined) {
+        metaDescription = content?.trim() ?? "";
+        metaDescriptionOutsideHead = headMode === "body";
+      }
     } else if (name === "robots") {
-      if (headMode === "body") robotsOutsideHead = true;
-      if (robotsMeta === undefined) robotsMeta = content ?? null;
+      if (robotsMeta === undefined) {
+        robotsMeta = content ?? null;
+        robotsOutsideHead = headMode === "body";
+      }
     } else if (name === "viewport") {
       // Presence is the whole signal; the content string is the agent's
       // business, not the evidence layer's.
@@ -1300,8 +1324,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     const tokens = rel.split(/\s+/);
     const href = attribs["href"];
     if (tokens.includes("canonical")) {
-      if (headMode === "body") canonicalOutsideHead = true;
-      if (canonical === undefined) canonical = href ?? null;
+      // First occurrence, as for the metas: a duplicate canonical in the body
+      // after a correct one in the head is `canonical.multiple`'s finding.
+      if (canonical === undefined) {
+        canonical = href ?? null;
+        canonicalOutsideHead = headMode === "body";
+      }
       canonicalCount += 1;
     }
     const code = attribs["hreflang"];
@@ -1459,9 +1487,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         switch (name) {
           case "title":
             // Ignore <title> inside <svg> — only the document title counts.
-            // The same guard holds for the outside-head flag, which is about
-            // any document title after the head, not only the first.
-            if (headMode === "body" && suppressDepth === 0) titleOutsideHead = true;
+            // The outside-head flag is about the FIRST document title, the one
+            // `title` is read from, under the same svg guard.
+            if (!sawTitle && suppressDepth === 0) titleOutsideHead = headMode === "body";
             if (!titleDone && suppressDepth === 0) {
               titleDepth += 1;
               sawTitle = true;
