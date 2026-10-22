@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -511,13 +512,17 @@ describe("runRules against the database", () => {
   // because autovacuum happened to analyze mid-crawl. Nothing about that is
   // observable from a run's output — a planner working from "0 rows" produces
   // the same findings, slowly — so the only way the ANALYZE can be known to
-  // still be there is to watch Postgres record it.
+  // still be there is to watch the run issue it.
   //
-  // Both statements are pinned here, by count rather than by timestamp: the
-  // top-of-run one over every table a rule reads, and the second one over the
-  // two tables the derivation phase rewrites in between. The measurement is
-  // taken against database-wide counters, so it is retried until a window is
-  // clean — see the comment on the loop.
+  // WHAT IS OBSERVED: the ANALYZE statements THIS `runRules` call sends, taken
+  // from a recording wrapper around the Db handed to it. It used to read
+  // `pg_stat_user_tables.analyze_count`, a database-wide counter: vitest runs
+  // test files in parallel against one database and several of them call
+  // `runRules` (the fixture harness, the API's rules endpoint), so another
+  // file's ANALYZE landing inside the window moved the counters and failed the
+  // test intermittently. A retry loop papered over that; it is gone, because
+  // a per-call recording has no other writer to race with. No production seam:
+  // the wrapper is a Proxy over the same Db, and `runRules` is unchanged.
   it("analyzes every table the rules read, and the derivation-fed pair twice", async () => {
     const crawlId = await newCrawl();
     const listing = mkRow(crawlId, "/list?colour=red", { depth: 0, discoveredVia: "seed" });
@@ -531,88 +536,56 @@ describe("runRules against the database", () => {
       },
     ]);
 
-    // `analyze_count`, not `last_analyze`: it counts MANUAL analyzes per table
-    // (autovacuum's are counted separately, in `autoanalyze_count`), so the
-    // delta says how many times the run analyzed each table and no ordering
-    // between tables has to be inferred from timestamps.
-    const analyzeCounts = async (): Promise<Record<string, number>> => {
-      const { rows } = await db.execute<{ relname: string; analyze_count: string }>(
-        sql`select relname, analyze_count from pg_stat_user_tables
-            where relname in ('pages', 'links', 'sitemap_urls', 'url_params',
-                              'hreflang', 'issues', 'structured_data', 'metrics')`,
-      );
-      return Object.fromEntries(rows.map((r) => [r.relname, Number(r.analyze_count)]));
-    };
-
-    // WHY THIS IS MEASURED REPEATEDLY RATHER THAN ONCE. The counters are
-    // database-wide, vitest runs test files in parallel against one database,
-    // and `runRules` is called from three of them (this one, the fixture
-    // harness, and the API's rules endpoint). Ratios against `pages` were the
-    // first attempt at absorbing that and they are NOT sufficient, because the
-    // run issues TWO statements: `ANALYZE pages, links, …` at the top and
-    // `ANALYZE url_params, structured_data` across the derivation seam. A
-    // concurrent run whose first statement landed before this window and whose
-    // second lands inside it moves the pair by 1 and `pages` by 0 — no ratio
-    // survives that, and the observed failure was exactly it (3 where 2 was
-    // expected, with `runs` = 1).
-    //
-    // So a window is either CLEAN — every invariant below holds together, which
-    // a sliced window cannot fake — or it is discarded and measured again.
-    // `runRules` is idempotent over the same crawl (the issue rows are deleted
-    // and rewritten, the derivations rebuild), so re-measuring is free of side
-    // effects — it leaves the same table, not a bigger one. A real
-    // regression fails every attempt and the last set of problems is reported.
-    const ATTEMPTS = 4;
-    let problems: string[] = [];
-    for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
-      const before = await analyzeCounts();
-      await runRules(db, crawlId, buildRegistry());
-      const after = await analyzeCounts();
-      const delta = (table: string) => (after[table] ?? 0) - (before[table] ?? 0);
-
-      // COUNTED OFF `links` RATHER THAN `pages`, since P7-T4: `pages` is now in
-      // both statements (the click-depth derivation rewrites a column of it), so
-      // it is no longer the table that moves once per run. `links` is — every
-      // rule reads it and no derivation writes it.
-      const runs = delta("links");
-      problems = [];
-      if (runs < 1) problems.push("the run did not analyze links at all");
-      // Once per run, at the top, before the first rule reads them.
-      for (const table of ["sitemap_urls", "hreflang", "issues"]) {
-        if (delta(table) !== runs) {
-          problems.push(`${table} moved ${delta(table)}, expected ${runs} (once per run)`);
+    // Every ANALYZE this run executes through `execute`, rendered to text.
+    const dialect = new PgDialect();
+    const analyzeStatements: string[] = [];
+    const recording = new Proxy(db, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        if (prop === "execute") {
+          return (query: SQL) => {
+            const text = dialect.sqlToQuery(query).sql;
+            if (/^\s*analyze\b/i.test(text)) analyzeStatements.push(text);
+            return value.call(target, query);
+          };
         }
-      }
-      // And twice per run for the three tables the derivation phase rewrites
-      // mid-run: once at the top (where, on a crawl's first run, `url_params` is
-      // still EMPTY and the planner is taught exactly that) and once across the
-      // derivation seam, before the query rules and the metrics that read them.
-      // `pages` is in this list for the same reason one level down — its
-      // `click_depth` column is entirely null when the top-of-run statement
-      // samples it, and `structure.click-depth-distribution` groups by it.
-      for (const table of ["pages", "url_params", "structured_data"]) {
-        if (delta(table) !== 2 * runs) {
-          problems.push(`${table} moved ${delta(table)}, expected ${2 * runs} (twice per run)`);
-        }
-      }
-      // `metrics` is deliberately absent from both statements: no rule reads it,
-      // the metric phase only writes it. That exclusion IS assertable here —
-      // unlike a claim about `last_analyze`, which autovacuum could move at any
-      // moment — because `analyze_count` only ever counts a manual ANALYZE.
-      if (delta("metrics") !== 0) {
-        problems.push(`metrics moved ${delta("metrics")}, expected 0 (no rule reads it)`);
-      }
-      if (problems.length === 0) break;
+        return value.bind(target);
+      },
+    }) as Db;
+
+    await runRules(recording, crawlId, buildRegistry());
+
+    // Tables named by each ANALYZE statement, in the order issued.
+    const tablesOf = (statement: string): string[] =>
+      statement
+        .replace(/^\s*analyze\s+/i, "")
+        .split(",")
+        .map((t) => t.trim().toLowerCase());
+    const issued = analyzeStatements.map(tablesOf);
+    const perTable = (table: string) => issued.filter((tables) => tables.includes(table)).length;
+
+    // Exactly two statements per run: the top-of-run one over every table a
+    // rule reads, and the one across the derivation seam.
+    expect(issued).toHaveLength(2);
+    // Once per run, at the top, before the first rule reads them.
+    for (const table of ["links", "sitemap_urls", "hreflang", "issues"]) {
+      expect(perTable(table), `${table}: once per run`).toBe(1);
     }
-    expect(
-      problems.join("; "),
-      `no clean ANALYZE measurement in ${ATTEMPTS} attempts — if this persists, the ` +
-        `run's ANALYZE statements have changed, not the concurrency`,
-    ).toBe("");
-    // Four full runs of the rule set, so the default 30s test timeout is not
-    // the thing that reports a regression: without this, a genuinely missing
-    // ANALYZE fails as "timed out" instead of naming the counter that moved.
-  }, 180_000);
+    // Twice per run for the three tables the derivation phase rewrites
+    // mid-run: once at the top (where, on a crawl's first run, `url_params` is
+    // still EMPTY and the planner is taught exactly that) and once across the
+    // derivation seam, before the query rules and the metrics that read them.
+    // `pages` is in this list for the same reason one level down — its
+    // `click_depth` column is entirely null when the top-of-run statement
+    // samples it, and `structure.click-depth-distribution` groups by it.
+    for (const table of ["pages", "url_params", "structured_data"]) {
+      expect(perTable(table), `${table}: twice per run`).toBe(2);
+    }
+    // `metrics` is deliberately absent from both statements: no rule reads it,
+    // the metric phase only writes it.
+    expect(perTable("metrics"), "metrics: no rule reads it").toBe(0);
+  });
 
   // A crawl id nothing knows produces no pages, which is indistinguishable
   // from a crawl that found nothing: the run would "succeed" over an empty
