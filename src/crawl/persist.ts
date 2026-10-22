@@ -717,6 +717,15 @@ export class PageWriter {
       // derives both from one match, so the writer cannot break the pairing by
       // writing one of them.
       placeholderSnippet: analysis?.placeholderSnippet ?? null,
+      // Where the head ended (migration 0021). All six null exactly when no
+      // analysis ran; with one, the five flags are always written, so a null
+      // `head_closed_by` beside them means `</head>` (or no close at all).
+      headClosedBy: analysis?.headClosedBy ?? null,
+      titleOutsideHead: analysis?.titleOutsideHead ?? null,
+      metaDescriptionOutsideHead: analysis?.metaDescriptionOutsideHead ?? null,
+      robotsOutsideHead: analysis?.robotsOutsideHead ?? null,
+      canonicalOutsideHead: analysis?.canonicalOutsideHead ?? null,
+      hreflangOutsideHeadCount: analysis?.hreflangOutsideHeadCount ?? null,
       responseTimeMs: fetch.responseTimeMs,
       // WHEN THIS OBSERVATION WAS TAKEN (migration 0016). One `new Date()` per
       // row on the hot path, which is what the row costs and nothing more.

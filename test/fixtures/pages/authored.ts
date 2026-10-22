@@ -137,19 +137,34 @@ const canonicalNone: Fixture = {
  * declaration, so the audited value is this page's own URL and
  * `canonical.points-elsewhere` correctly stays quiet. Only the count is wrong,
  * which is what `canonical.multiple` reports.
+ *
+ * PHASE 23 T5 put the outside-head pair on this page rather than on a new one,
+ * because a new page moves the harness's pinned censuses (page counts, cohort
+ * sizes, click-depth percentiles, the render budget) for no gain. The second
+ * canonical and a second meta description now sit after an injected banner
+ * `<div>` in `headExtra`, which a browser and this analyzer both read as the
+ * end of the head: the canonical lands outside it
+ * (`head.directives-outside-head`, closed by `div`) and so does the
+ * description (`head.tags-outside-head`). Every extracted VALUE is still the
+ * first occurrence — this page's own canonical and description — so the page
+ * stays judged and nothing else about it moves. The `<div>` is empty, so no
+ * word count on either side of the render changes.
  */
 const canonicalMultiple: Fixture = {
   path: "/authored/canonical-multiple",
   category: CANONICAL,
   name: "Two canonical links in one head",
-  expectedIssues: ["canonical.multiple"],
+  expectedIssues: ["canonical.multiple", "head.directives-outside-head", "head.tags-outside-head"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({
       title: "Two canonical links in one head",
       metaDescription:
         "This page ships two rel=canonical link tags, so a search engine gets two different answers to a question that has one.",
-      headExtra: '<link rel="canonical" href="/control">',
+      headExtra:
+        '<div class="promo-banner"></div>' +
+        '<link rel="canonical" href="/control">' +
+        '<meta name="description" content="A second description, written after the head has already ended.">',
       bodyHtml: healthyBody({
         h1: "Two canonicals, one page",
         lede: "The head of this page declares a canonical twice, and the two tags do not name the same URL.",

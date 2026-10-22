@@ -1,3 +1,4 @@
+import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 
@@ -326,5 +327,307 @@ describe("framework markers", () => {
       analyzePage(`<body><script id="__next_data__">{}</script></body>`, "https://x.test/")
         .frameworkMarkers,
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 23 T5 — where the <head> really ends.
+//
+// Every case is asserted twice: once against the value the case was written
+// for, and once against the DOM oracle — cheerio over parse5 with scripting
+// enabled, the HTML tree builder a browser and a search engine run. The oracle
+// answers "is this element inside <head>?" by walking DOWN from the root and
+// noting when it passes the head element (template content included: its
+// fragment hangs off the template's children but carries no parent pointer, so
+// an upward `parents('head')` would miss it). It is a reading of the tree, not
+// of the token stream. An svg `<title>` is not a document title on either side.
+// ---------------------------------------------------------------------------
+
+interface DomNode {
+  type?: string;
+  name?: string;
+  attribs?: Record<string, string>;
+  children?: DomNode[];
+}
+
+interface HeadView {
+  titleOutsideHead: boolean;
+  metaDescriptionOutsideHead: boolean;
+  robotsOutsideHead: boolean;
+  canonicalOutsideHead: boolean;
+  hreflangOutsideHeadCount: number;
+}
+
+/** The parse5 tree's answer to the five outside-head questions. */
+function domHeadView(html: string): HeadView & { bodyFirst: string | null } {
+  // A decoder strips the byte-order mark before any parser sees the text
+  // (TextDecoder does, in fetch); handing parse5 a raw string skips that step.
+  const $ = cheerio.load(html.replace(/^﻿/, ""));
+  const view: HeadView = {
+    titleOutsideHead: false,
+    metaDescriptionOutsideHead: false,
+    robotsOutsideHead: false,
+    canonicalOutsideHead: false,
+    hreflangOutsideHeadCount: 0,
+  };
+  const fold = (v: string | undefined) => v?.trim().toLowerCase();
+  const walk = (node: DomNode, inHead: boolean, inSvg: boolean) => {
+    const isElement = node.type === "tag" || node.type === "script" || node.type === "style";
+    const name = isElement ? node.name?.toLowerCase() : undefined;
+    const attribs = node.attribs ?? {};
+    if (name !== undefined && !inHead) {
+      const rel = (fold(attribs["rel"]) ?? "").split(/\s+/);
+      if (name === "title" && !inSvg) view.titleOutsideHead = true;
+      if (name === "meta" && fold(attribs["name"]) === "description") {
+        view.metaDescriptionOutsideHead = true;
+      }
+      if (name === "meta" && fold(attribs["name"]) === "robots") view.robotsOutsideHead = true;
+      if (name === "link" && rel.includes("canonical")) view.canonicalOutsideHead = true;
+      if (name === "link" && rel.includes("alternate") && attribs["hreflang"]) {
+        view.hreflangOutsideHeadCount += 1;
+      }
+    }
+    for (const child of node.children ?? []) {
+      walk(child, inHead || name === "head", inSvg || name === "svg");
+    }
+  };
+  walk($.root()[0] as unknown as DomNode, false, false);
+  const body = $("body")[0] as unknown as DomNode | undefined;
+  const first = body?.children?.[0];
+  const bodyFirst =
+    first === undefined ? null : first.type === "text" ? "#text" : (first.name ?? null);
+  return { ...view, bodyFirst };
+}
+
+/**
+ * The port's view, asserted equal to the oracle's on the five flags. When the
+ * port names an ELEMENT or `#text` as the closer, the oracle's body must begin
+ * with it, because the token that closes the head implicitly is the first thing
+ * the tree builder puts in the body. (`body` itself and an end tag such as
+ * `</html>` leave no node of their own at the body's start, so they are
+ * asserted by value only.)
+ */
+function headOf(html: string) {
+  const a = analyzePage(html, "https://x.test/");
+  const { bodyFirst, ...domView } = domHeadView(html);
+  const port: HeadView = {
+    titleOutsideHead: a.titleOutsideHead,
+    metaDescriptionOutsideHead: a.metaDescriptionOutsideHead,
+    robotsOutsideHead: a.robotsOutsideHead,
+    canonicalOutsideHead: a.canonicalOutsideHead,
+    hreflangOutsideHeadCount: a.hreflangOutsideHeadCount,
+  };
+  expect(port, `oracle parity: ${html}`).toEqual(domView);
+  const closer = a.headClosedBy;
+  if (closer !== null && closer !== "body" && !closer.startsWith("</")) {
+    expect(bodyFirst, `oracle: the body begins with the closer: ${html}`).toBe(closer);
+  }
+  return a;
+}
+
+const CANONICAL = `<link rel="canonical" href="https://x.test/">`;
+
+describe("implicit head close: the brief's six cases", () => {
+  it("an <img> in the head closes it: a canonical after it is outside", () => {
+    const a = headOf(
+      `<html><head><title>T</title><img src="/p.gif">${CANONICAL}</head><body><p>x</p></body></html>`,
+    );
+    expect(a.canonicalOutsideHead).toBe(true);
+    expect(a.headClosedBy).toBe("img");
+  });
+
+  it("an <img> inside a <noscript> in the head does not close it", () => {
+    const a = headOf(
+      `<html><head><title>T</title><noscript><img src="/p.gif"></noscript>${CANONICAL}</head><body><p>x</p></body></html>`,
+    );
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBeNull();
+  });
+
+  it("a document with no <head> tag at all keeps a leading canonical in the head", () => {
+    const a = headOf(`<!doctype html><html>${CANONICAL}<title>T</title><p>x</p></html>`);
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.titleOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBe("p");
+  });
+
+  it("text before the canonical closes the head", () => {
+    const a = headOf(`<html><head><title>T</title>hello${CANONICAL}</head><body></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(true);
+    expect(a.headClosedBy).toBe("#text");
+  });
+
+  it("a <div> inside a <template> in the head does not close it", () => {
+    const a = headOf(
+      `<html><head><template><div>tpl</div></template>${CANONICAL}</head><body></body></html>`,
+    );
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBeNull();
+  });
+
+  it("explicit </head>, canonical in the body: outside, closed by null", () => {
+    const a = headOf(`<html><head><title>T</title></head><body>${CANONICAL}<p>x</p></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(true);
+    expect(a.headClosedBy).toBeNull();
+  });
+});
+
+describe("implicit head close: Review Focus #2 and the tree builder's other rules", () => {
+  it("whitespace, comments, script, style, noscript and a doctype never close the head", () => {
+    const a = headOf(`<!DOCTYPE html>
+      <html lang="en">
+      <!-- before head -->
+      <head>
+        <!-- a comment -->
+        <meta charset="utf-8">
+        <script>document.write("<div>not a tag</div>")</script>
+        <style>body > p { color: red }</style>
+        <title>A <b>title</b> &amp; co</title>
+        <noscript><style>.x{}</style><img src="/n.gif"><p>no js</p></noscript>
+        <base href="/">
+        ${CANONICAL}
+        <meta name="robots" content="index">
+        <meta name="description" content="d">
+        <link rel="alternate" hreflang="de" href="/de">
+      </head>
+      <body><p>x</p></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.robotsOutsideHead).toBe(false);
+    expect(a.metaDescriptionOutsideHead).toBe(false);
+    expect(a.titleOutsideHead).toBe(false);
+    expect(a.hreflangOutsideHeadCount).toBe(0);
+    expect(a.headClosedBy).toBeNull();
+  });
+
+  it("a byte-order mark and whitespace before an attributed <html> do not close the head", () => {
+    const a = headOf(`﻿  \n<html lang="en" class="no-js">${CANONICAL}<p>x</p>`);
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBe("p");
+  });
+
+  it("a fragment with no <html>, <head> or <body> at all", () => {
+    const a = headOf(
+      `<title>T</title><meta name="robots" content="noindex"><p>x</p><meta name="description" content="d">`,
+    );
+    expect(a.titleOutsideHead).toBe(false);
+    expect(a.robotsOutsideHead).toBe(false);
+    expect(a.metaDescriptionOutsideHead).toBe(true);
+    expect(a.headClosedBy).toBe("p");
+  });
+
+  it("an <svg> in the head closes it, and a title after it is outside", () => {
+    const a = headOf(
+      `<html><head><svg><title>icon</title></svg><title>T</title></head><body></body></html>`,
+    );
+    expect(a.headClosedBy).toBe("svg");
+    expect(a.titleOutsideHead).toBe(true);
+  });
+
+  it("a <math> in the head closes it", () => {
+    const a = headOf(`<html><head><math></math>${CANONICAL}</head><body></body></html>`);
+    expect(a.headClosedBy).toBe("math");
+    expect(a.canonicalOutsideHead).toBe(true);
+  });
+
+  it("an svg <title> in the body is not a document title", () => {
+    const a = headOf(
+      `<html><head><title>T</title></head><body><svg><title>icon</title></svg></body></html>`,
+    );
+    expect(a.titleOutsideHead).toBe(false);
+  });
+
+  it("a non-breaking space is text, not whitespace, and closes the head", () => {
+    const a = headOf(`<html><head>&nbsp;${CANONICAL}</head><body></body></html>`);
+    expect(a.headClosedBy).toBe("#text");
+    expect(a.canonicalOutsideHead).toBe(true);
+  });
+
+  it("a stray </p> or </div> in the head is ignored, as the tree builder ignores it", () => {
+    const a = headOf(`<html><head></p></div>${CANONICAL}</head><body></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBeNull();
+  });
+
+  it("a stray </br> in the head closes it, as a <br>", () => {
+    const a = headOf(`<html><head></br>${CANONICAL}</head><body></body></html>`);
+    expect(a.headClosedBy).toBe("br");
+    expect(a.canonicalOutsideHead).toBe(true);
+  });
+
+  it("head tags between </head> and <body> go back into the head", () => {
+    // The "after head" insertion mode re-opens the head for these: a browser
+    // puts the canonical in the head, so it is not outside.
+    const a = headOf(
+      `<html><head><title>T</title></head>\n${CANONICAL}<meta name="robots" content="noindex"><body><p>x</p></body></html>`,
+    );
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.robotsOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBeNull();
+  });
+
+  it("text between </head> and <body> opens the body", () => {
+    const a = headOf(`<html><head></head>stray${CANONICAL}<body></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(true);
+    expect(a.headClosedBy).toBeNull();
+  });
+
+  it("KNOWN LIMIT: a </head> with no <head> open is invisible; only the closer's name differs", () => {
+    // htmlparser2 drops an end tag whose element is not open, so the head ends
+    // at <body> here, where the tree builder would call it explicit. The flags
+    // still agree with the oracle: the canonical between the two is in the head
+    // on both sides (the "after head" re-open).
+    const a = headOf(`<html><title>T</title></head>${CANONICAL}<body><p>x</p></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBe("body");
+  });
+
+  it("a second <head> in the body does not reopen it", () => {
+    const a = headOf(`<html><head></head><body><head>${CANONICAL}</head><p>x</p></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(true);
+  });
+
+  it("an unclosed head on a document with no body keeps everything inside", () => {
+    const a = headOf(`<html><head><title>T</title>${CANONICAL}`);
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.titleOutsideHead).toBe(false);
+    expect(a.headClosedBy).toBeNull();
+  });
+
+  it("<body> closes an unclosed head and is named as the closer", () => {
+    const a = headOf(`<html><head><title>T</title><body>${CANONICAL}</body></html>`);
+    expect(a.headClosedBy).toBe("body");
+    expect(a.canonicalOutsideHead).toBe(true);
+  });
+
+  it("a canonical inside a <noscript> in the body is raw text, not an element", () => {
+    const a = headOf(`<html><head></head><body><noscript>${CANONICAL}</noscript></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(false);
+  });
+
+  it("a canonical inside a <template> in the body is outside, as a selector sees it", () => {
+    const a = headOf(`<html><head></head><body><template>${CANONICAL}</template></body></html>`);
+    expect(a.canonicalOutsideHead).toBe(true);
+  });
+
+  it("counts every hreflang alternate outside the head and none inside it", () => {
+    const a = headOf(`<html><head><link rel="alternate" hreflang="en" href="/en"></head><body>
+      <link rel="alternate" hreflang="de" href="/de">
+      <link rel="Alternate" hreflang="fr" href="/fr">
+      <link rel="alternate" href="/no-code">
+      <link rel="alternate" hreflang="x-default">
+    </body></html>`);
+    expect(a.hreflangOutsideHeadCount).toBe(3);
+  });
+
+  it("leaves every extracted value as it was: first occurrence anywhere", () => {
+    const a = headOf(
+      `<html><head><img src="/p.gif">${CANONICAL}<title>Late</title><meta name="robots" content="noindex"></head><body></body></html>`,
+    );
+    expect(a.canonicalOutsideHead).toBe(true);
+    expect(a.titleOutsideHead).toBe(true);
+    expect(a.robotsOutsideHead).toBe(true);
+    expect(a.canonicalHtml).toBe("https://x.test/");
+    expect(a.title).toBe("Late");
+    expect(a.robotsMeta).toBe("noindex");
   });
 });

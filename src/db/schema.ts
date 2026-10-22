@@ -462,6 +462,22 @@ export const pages = pgTable("pages", {
   // rows carry a flag and no snippet and are not backfilled, for the same
   // reason as the pair above: the text is gone.
   placeholderSnippet: text("placeholder_snippet"),
+  // WHERE THE HEAD ENDED (migration 0021, Phase 23 T5). The analyzer runs the
+  // tree builder's head rules over the token stream: the head closes at
+  // `</head>`, at `<body>`, at the first element a head does not allow, or at
+  // the first non-whitespace text. `head_closed_by` names the IMPLICIT closer
+  // (`img`, `div`, `#text`, `body`, `</html>`); null when `</head>` closed it
+  // explicitly or it never closed. The five columns after it say which head
+  // elements appeared AFTER that point. ALL SIX ARE NULL ON PRE-0021 ROWS, and
+  // the rules read a null flag as "not measured", never as "inside the head";
+  // a 0021 row always carries all five flags, so `head_closed_by` alone being
+  // null is only ever the explicit or never-closed case.
+  headClosedBy: text("head_closed_by"),
+  titleOutsideHead: boolean("title_outside_head"),
+  metaDescriptionOutsideHead: boolean("meta_description_outside_head"),
+  robotsOutsideHead: boolean("robots_outside_head"),
+  canonicalOutsideHead: boolean("canonical_outside_head"),
+  hreflangOutsideHeadCount: integer("hreflang_outside_head_count"),
   // JSON-LD blocks on this page that would not parse (invalid JSON, or over
   // the analyzer's per-block cap). A count, not a silence: a page whose
   // structured data does not parse is an audit finding.

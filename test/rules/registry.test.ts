@@ -579,7 +579,9 @@ describe("check annotations", () => {
  * `http.no-response-transient` (warning) and the `crawl.unreadable-encoding`
  * marker (info). Task 3 adds one warning, `robots.blocks-internal-urls` (a
  * Disallow on a linked URL may be intended, so the site is asked to confirm
- * it). Two classes are fixed by
+ * it). Task 5 adds one critical, `head.directives-outside-head` (a canonical,
+ * robots or hreflang the head no longer holds may be ignored, which decides
+ * indexing), and one warning, `head.tags-outside-head`. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
  * the thirteen markers, which report a hole in OUR evidence and never a fault of
@@ -588,11 +590,11 @@ describe("check annotations", () => {
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 30 critical, 27 warning and 50 info rules", () => {
+  it("holds 31 critical, 28 warning and 50 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 30, warning: 27, info: 50 });
-    expect(all).toHaveLength(107);
+    expect(counts).toEqual({ critical: 31, warning: 28, info: 50 });
+    expect(all).toHaveLength(109);
   });
 
   it("names exactly the rules that are critical", () => {
@@ -606,6 +608,7 @@ describe("severity shape of the ruleset", () => {
       "content.placeholder",
       "content.soft-404",
       "directive.canonical-noindex-conflict",
+      "head.directives-outside-head",
       "host.duplicate-host-200",
       "host.http-serves-200",
       "hreflang.invalid-code",

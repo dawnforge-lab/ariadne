@@ -101,6 +101,13 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     mainWordCount: 260,
     // Null because `hasLoremIpsum` above is false: the two move together.
     placeholderSnippet: null,
+    // Where the head ended (P23-T5): closed by `</head>`, nothing after it.
+    headClosedBy: null,
+    titleOutsideHead: false,
+    metaDescriptionOutsideHead: false,
+    robotsOutsideHead: false,
+    canonicalOutsideHead: false,
+    hreflangOutsideHeadCount: 0,
     ...overrides,
   };
 }
@@ -666,9 +673,45 @@ describe("PageWriter", () => {
     expect(row?.navLinkCount).toBe(0);
     expect(row?.footerLinkCount).toBe(0);
     expect(row?.frameworkMarkers).toEqual([]);
+    // Where the head ended (0021): no HTML, nothing measured — all six null,
+    // which the outside-head rules read as silence.
+    expect(row?.headClosedBy).toBeNull();
+    expect(row?.titleOutsideHead).toBeNull();
+    expect(row?.metaDescriptionOutsideHead).toBeNull();
+    expect(row?.robotsOutsideHead).toBeNull();
+    expect(row?.canonicalOutsideHead).toBeNull();
+    expect(row?.hreflangOutsideHeadCount).toBeNull();
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);
+  });
+
+  it("writes where the head ended and what came after it (migration 0021)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/head-closed-early`;
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        headClosedBy: "img",
+        titleOutsideHead: true,
+        metaDescriptionOutsideHead: false,
+        robotsOutsideHead: true,
+        canonicalOutsideHead: true,
+        hreflangOutsideHeadCount: 4,
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.headClosedBy).toBe("img");
+    expect(row?.titleOutsideHead).toBe(true);
+    expect(row?.metaDescriptionOutsideHead).toBe(false);
+    expect(row?.robotsOutsideHead).toBe(true);
+    expect(row?.canonicalOutsideHead).toBe(true);
+    expect(row?.hreflangOutsideHeadCount).toBe(4);
   });
 
   it("ignores a second row for the same (crawl, url)", async () => {

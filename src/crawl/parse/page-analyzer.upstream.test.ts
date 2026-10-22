@@ -145,6 +145,12 @@ const EXTENSION_FIELDS = [
   // must not grow (a cheerio reference that reimplemented MAX_RESOURCE_REFS
   // would be pinning the port against a copy of itself).
   "resourceRefsCapped",
+  // P23-T5's closer. NOT a DOM read: the tree records where the head's
+  // children are, not what ended it, and an explicit `</head>` leaves no trace
+  // in it at all. The five outside-head FLAGS beside it are DOM reads and are
+  // modelled below; the closer is held to the oracle where the oracle can see
+  // it (the first node of the body) in test/crawl/page-analyzer.test.ts.
+  "headClosedBy",
 ] as const;
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
@@ -455,6 +461,39 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       : $(`[${marker}]`).length > 0,
   );
 
+  // P23-T5: the outside-head flags, read off the tree. Walked DOWN from the
+  // root noting the head element on the way, because template content hangs
+  // off its template's children with no parent pointer back, so an upward
+  // `parents('head')` would call a template's canonical in the head "outside".
+  // A `<title>` under an `<svg>` is the svg's, never the document's.
+  let titleOutsideHead = false;
+  let metaDescriptionOutsideHead = false;
+  let robotsOutsideHead = false;
+  let canonicalOutsideHead = false;
+  let hreflangOutsideHeadCount = 0;
+  const walkOutsideHead = (node: DomNode, inHead: boolean, inSvg: boolean) => {
+    const isElement =
+      node.type === "tag" || node.type === "script" || node.type === "style";
+    const name = isElement ? node.name?.toLowerCase() : undefined;
+    if (name !== undefined && !inHead) {
+      const attribs = node.attribs ?? {};
+      const rel = relTokens(attribs["rel"]);
+      if (name === "title" && !inSvg) titleOutsideHead = true;
+      if (name === "meta" && fold(attribs["name"]) === "description") {
+        metaDescriptionOutsideHead = true;
+      }
+      if (name === "meta" && fold(attribs["name"]) === "robots") robotsOutsideHead = true;
+      if (name === "link" && rel.includes("canonical")) canonicalOutsideHead = true;
+      if (name === "link" && rel.includes("alternate") && attribs["hreflang"]) {
+        hreflangOutsideHeadCount += 1;
+      }
+    }
+    for (const child of node.children ?? []) {
+      walkOutsideHead(child, inHead || name === "head", inSvg || name === "svg");
+    }
+  };
+  walkOutsideHead($.root()[0] as unknown as DomNode, false, false);
+
   const hasAmp =
     byRel("link", "amphtml").length > 0 ||
     $("html").attr("amp") !== undefined ||
@@ -486,6 +525,11 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     navLinkCount,
     footerLinkCount,
     frameworkMarkers,
+    titleOutsideHead,
+    metaDescriptionOutsideHead,
+    robotsOutsideHead,
+    canonicalOutsideHead,
+    hreflangOutsideHeadCount,
     links: Array.from(linksByTarget.values()),
     bodyText,
     h1s,
@@ -512,6 +556,7 @@ function expectParity(html: string) {
     h1Text: _h1Text,
     resourceRefs: _resourceRefs,
     resourceRefsCapped: _resourceRefsCapped,
+    headClosedBy: _headClosedBy,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);

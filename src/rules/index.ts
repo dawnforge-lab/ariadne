@@ -10,6 +10,7 @@ import { onPageRules } from "./page/on-page.js";
 import { statusRules } from "./page/status.js";
 import { canonicalRules } from "./page/canonical.js";
 import { indexabilityRules } from "./page/indexability.js";
+import { headRules } from "./page/head.js";
 import { technicalRules } from "./page/technical.js";
 import { resourceMetrics } from "./metric/resource-metrics.js";
 import { contentRules } from "./query/content.js";
@@ -42,6 +43,8 @@ export function buildRegistry(): Registry {
     ...statusRules,
     ...canonicalRules,
     ...indexabilityRules,
+    // Where the head ended, and which head elements came after it (P23-T5).
+    ...headRules,
     ...technicalRules,
     ...hreflangRules,
     ...redirectRules,

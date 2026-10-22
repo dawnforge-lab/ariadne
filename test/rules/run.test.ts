@@ -125,7 +125,10 @@ describe("buildRegistry", () => {
     // Phase 23 Task 4: the two length rules.
     expect(ids).toContain("headings.h1-too-long");
     expect(ids).toContain("url.too-long");
-    expect(ids.length).toBe(107);
+    // Phase 23 Task 5: head elements after the point the head ended.
+    expect(ids).toContain("head.directives-outside-head");
+    expect(ids).toContain("head.tags-outside-head");
+    expect(ids.length).toBe(109);
   });
 
   it("registers every kind the runner drives", () => {

@@ -880,7 +880,7 @@ a reader acts on", `test/rules/helpers.test.ts:712` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1115` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:724` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:727` "finds one defining file per rule, and the key
 spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -1630,7 +1630,7 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:402`
 are over", `test/rules/copy.test.ts:1341` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1358` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:394` "site.health is filed under the
+`test/rules/coverage.test.ts:403` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
 `test/fixtures/harness.test.ts:2457` "the health rollup agrees with a

@@ -334,6 +334,20 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `meta-description.too-long` findings. Two info page rules were added,
 //     both judged-only: `headings.h1-too-long` (first H1 over 70 characters,
 //     CHECK-37) and `url.too-long` (stored URL over 115 characters, CHECK-28).
+//  4. (T5, study §4.1) The analyzer now runs the tree builder's head rules
+//     over the token stream: the head ends at `</head>`, at `<body>`, at the
+//     first element a head does not allow (an `<img>`, a `<div>`, an `<svg>`)
+//     or at the first non-whitespace text, and five flags record which head
+//     elements came after that point (migration 0021, with `head_closed_by`
+//     naming an implicit closer). Two page rules read them:
+//     `head.directives-outside-head` (critical, fetched-OK cohort, CHECK-18 /
+//     -04 / -24: canonical, robots or hreflang outside the head) and
+//     `head.tags-outside-head` (warning, judged, CHECK-35 / -36: title or meta
+//     description outside it). No extracted value moved — the canonical, the
+//     robots meta, the title and the hreflang pairs are still the first
+//     occurrence anywhere, and whether a canonical outside the head should stop
+//     counting is left to an owner ruling. A pre-0021 crawl re-judged here has
+//     null flags and both rules are silent on it; a new crawl can GAIN them.
 export const RULESET_VERSION = "0.18.0";
 
 /**

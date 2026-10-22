@@ -320,10 +320,19 @@ describe("checklist coverage", () => {
   //
   //   page    29 + 2 = 31
   //   total   105 + 2 = 107
-  it("pins the ruleset split the gate doc reports: 107 rules = 31 page + 62 query + 14 metric", () => {
+  //
+  // Phase 23 Task 5 adds TWO page rules over where the head ended:
+  // `head.directives-outside-head` (CHECK-18, CHECK-04, CHECK-24) and
+  // `head.tags-outside-head` (CHECK-35, CHECK-36), every one of those checks
+  // already claimed by the canonical, indexability, hreflang, title and
+  // description rules, so the claimed-check arithmetic does not move.
+  //
+  //   page    31 + 2 = 33
+  //   total   107 + 2 = 109
+  it("pins the ruleset split the gate doc reports: 109 rules = 33 page + 62 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(107);
-    expect(registry.byKind("page")).toHaveLength(31);
+    expect(registry.all()).toHaveLength(109);
+    expect(registry.byKind("page")).toHaveLength(33);
     expect(registry.byKind("query")).toHaveLength(62);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

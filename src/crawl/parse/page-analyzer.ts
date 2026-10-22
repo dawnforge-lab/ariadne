@@ -272,6 +272,57 @@
  *    at the end of the parse from `bodyText`, like the flag itself, so it costs
  *    no second look at the document.
  *
+ * Phase 23 (P23-T5, study §4.1) taught the pass WHERE THE HEAD ENDS, which is
+ * not where `</head>` is written. A browser's tree builder (and a search
+ * engine's, which is the same algorithm) closes the head at the first token a
+ * head may not hold, and everything after that is in the body whatever the
+ * markup says: a tracking `<img>` injected at the top of the head pushes the
+ * canonical, the robots meta and the hreflang links below it out of the head.
+ * Three modes stand in for the HTML Living Standard's insertion modes
+ * (§13.2.6.4):
+ *  - **head** — "initial", "before html", "before head" and "in head" folded
+ *    into one: the head is open from the first byte, implied or not, so a
+ *    document with no `<head>` tag keeps a leading canonical in it. Whitespace
+ *    text, comments, the doctype and a leading byte-order mark change nothing.
+ *    `HEAD_ALLOWED` start tags stay; `<head>` and `<html>` are absorbed. The
+ *    head closes EXPLICITLY at a non-implied `</head>` (→ afterHead,
+ *    `headClosedBy` null) and IMPLICITLY at any other start tag — `<body>`
+ *    included — or at non-whitespace text (→ body, `headClosedBy` the tag name
+ *    or `#text`). `</html>` and `</body>` are "anything else" too and record
+ *    `</html>`. A stray `</p>` (which htmlparser2 hands over as an implied
+ *    `<p>`) is ignored, as the tree builder ignores that end tag; a stray `</br>`
+ *    is read as `<br>`, as the tree builder reads it, and closes the head.
+ *  - **afterHead** — "after head": whitespace stays; `AFTER_HEAD_REOPENS` start
+ *    tags are put BACK into the head (a canonical between `</head>` and `<body>`
+ *    is inside it in the DOM, so it is not flagged); everything else, `<body>`
+ *    and `<noscript>` included, opens the body.
+ *  - **body** — terminal. A second `<head>` is ignored by the tree builder and
+ *    here alike.
+ * `HEAD_CONTAINERS` (title, script, style, noframes, noscript, template) opened
+ * in either head mode suspend the machine until they close: their content is
+ * RCDATA, raw text (`<noscript>` with scripting on, which is how parse5, the
+ * cheerio oracle and Googlebot all parse it), or a template fragment — none of
+ * it ends the head, and text inside a `<title>` is not a closing text node.
+ * Implied closes are ignored: they are htmlparser2's own tree repair (it closes
+ * the head when `<body>` opens, and everything at EOF), and the token that
+ * caused one is read on its own event. An `<svg>` or `<math>` in the head ends
+ * it like any other disallowed tag, as it does in parse5.
+ *
+ * In body mode a non-svg `<title>`, a `<meta name=description|robots>`, a
+ * `<link rel=canonical>` and a `<link rel=alternate hreflang>` raise the five
+ * outside-head fields, in the SAME code paths that capture their values — so
+ * the `<noscript>` exclusion and the template inclusion are the ones the values
+ * already have, and the oracle's selectors agree. THE VALUES DO NOT MOVE: the
+ * canonical, robots meta, title and hreflang pairs are still the first
+ * occurrence anywhere. Whether an outside-head canonical should stop being the
+ * page's canonical is an indexability verdict waiting on an owner ruling.
+ *
+ * KNOWN LIMIT: htmlparser2 drops an end tag whose element is not open, so a
+ * `</head>` written with no `<head>` before it is invisible here; the head then
+ * ends at whatever opens the body, usually `<body>` (closer `body` where the
+ * tree builder would say explicit). Head tags between the two still land in the
+ * head on both sides, so only the closer's name differs, never a flag.
+ *
  * ONE KNOWN, PERMANENT DIVERGENCE, and it is a property of the port rather
  * than a defect in it. An `<a href>` left open across a container boundary —
  * `<a href="/x"><nav><a href="/y">y</a></nav></a>` — makes the DOM report 2
@@ -515,6 +566,29 @@ export interface PageAnalysis {
    * reported twice, and a rule may rely on that.
    */
   placeholderSnippet: string | null;
+  /**
+   * What ended the `<head>` IMPLICITLY: the tag name of the first element the
+   * HTML tree builder does not allow in a head (`img`, `div`, `svg`, `body`,
+   * a stray `</br>` read as `br`), `#text` for the first non-whitespace text,
+   * or `</html>` for that end tag. NULL when the head was closed EXPLICITLY by
+   * `</head>` — and also when it never closed at all (a document that is all
+   * head), where nothing can be outside it. See the module header's Phase 23
+   * block for the state machine.
+   */
+  headClosedBy: string | null;
+  /** A non-svg `<title>` appeared after the head ended. */
+  titleOutsideHead: boolean;
+  /** A `<meta name=description>` appeared after the head ended. */
+  metaDescriptionOutsideHead: boolean;
+  /** A `<meta name=robots>` appeared after the head ended. */
+  robotsOutsideHead: boolean;
+  /** A `<link rel=canonical>` appeared after the head ended. */
+  canonicalOutsideHead: boolean;
+  /**
+   * `<link rel=alternate hreflang=…>` elements (non-empty `hreflang`, any or no
+   * `href` — the `hreflangTags` condition) after the head ended. Uncapped.
+   */
+  hreflangOutsideHeadCount: number;
 }
 
 /**
@@ -547,6 +621,53 @@ const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
  * `normalizeUrl`, which returns null for any other scheme.
  */
 const SKIPPED_RESOURCE_PROTOCOLS = /^(data:|javascript:|#)/i;
+/**
+ * The start tags the tree builder's "in head" insertion mode keeps in the head
+ * (HTML Living Standard §13.2.6.4.4). Anything else — and `<body>` is anything
+ * else — ends it. See the module header's Phase 23 block.
+ */
+const HEAD_ALLOWED = new Set([
+  "base",
+  "basefont",
+  "bgsound",
+  "link",
+  "meta",
+  "title",
+  "noscript",
+  "noframes",
+  "style",
+  "script",
+  "template",
+  "head",
+  "html",
+]);
+/**
+ * Of `HEAD_ALLOWED`, the elements whose CONTENT never ends the head: RCDATA
+ * (`title`), raw text (`script`, `style`, `noframes`, and `noscript` with
+ * scripting enabled), and `template`, whose content is a separate fragment.
+ * htmlparser2 tokenizes `noscript`, `noframes` and `template` content as
+ * markup, so a `<div>` inside one reaches `onopentag` and must be ignored.
+ */
+const HEAD_CONTAINERS = new Set(["title", "noscript", "noframes", "style", "script", "template"]);
+/**
+ * The start tags the "after head" insertion mode (§13.2.6.4.6) puts BACK into
+ * the head: between `</head>` and `<body>` a canonical is still a head
+ * element. `noscript` is not on this list — after `</head>` it opens the body.
+ */
+const AFTER_HEAD_REOPENS = new Set([
+  "base",
+  "basefont",
+  "bgsound",
+  "link",
+  "meta",
+  "noframes",
+  "script",
+  "style",
+  "template",
+  "title",
+]);
+/** Text that is not ASCII whitespace as HTML defines it (tab, LF, FF, CR, space). */
+const NON_HTML_WHITESPACE = /[^\t\n\f\r ]/;
 /** Subtrees whose text is not visible content. */
 const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
 /**
@@ -1067,13 +1188,96 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     return name === "dialog" && !("open" in attribs);
   };
 
+  // WHERE THE HEAD ENDS (Phase 23 T5; module header). Three modes, named for
+  // the tree builder's insertion modes they stand in for: "head" covers
+  // "initial", "before html", "before head" and "in head" (the head is open,
+  // implicitly or not, from the first byte); "afterHead" is "after head",
+  // entered by an explicit `</head>`; "body" is everything after. The machine
+  // only ever moves forward — a second `<head>` is ignored by the tree builder
+  // and here alike. `headContainerDepth` counts the HEAD_CONTAINERS open while
+  // the head is, so a `<div>` in a `<noscript>` or a `<template>` is not read
+  // as ending it.
+  let headMode: "head" | "afterHead" | "body" = "head";
+  let headClosedBy: string | null = null;
+  let headContainerDepth = 0;
+  let titleOutsideHead = false;
+  let metaDescriptionOutsideHead = false;
+  let robotsOutsideHead = false;
+  let canonicalOutsideHead = false;
+  let hreflangOutsideHeadCount = 0;
+  // A decoder strips a leading byte-order mark before any parser sees the text
+  // (fetch's TextDecoder does); this is for callers who hand over a raw string.
+  // It can only sit in the first text event, which it necessarily is.
+  let bomPending = html.charCodeAt(0) === 0xfeff;
+  const headOnOpenTag = (name: string, isImplied: boolean) => {
+    if (headMode === "body") return;
+    if (headContainerDepth > 0) {
+      if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;
+      return;
+    }
+    // A stray `</p>` reaches us as an implied `<p></p>` pair; the tree builder
+    // ignores that end tag in both head modes. (A stray `</br>` is the other
+    // implied open htmlparser2 synthesises, and the tree builder does read it
+    // as a `<br>` — which ends the head — so it falls through.)
+    if (isImplied && name === "p") return;
+    if (headMode === "head") {
+      if (HEAD_ALLOWED.has(name)) {
+        if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;
+        return;
+      }
+      headClosedBy = name;
+      headMode = "body";
+      return;
+    }
+    // "after head": `<html>` merges into the root and a second `<head>` is
+    // ignored; the head elements go back into the head; anything else, and
+    // `<body>` itself, opens the body.
+    if (name === "html" || name === "head") return;
+    if (AFTER_HEAD_REOPENS.has(name)) {
+      if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;
+      return;
+    }
+    headMode = "body";
+  };
+  const headOnCloseTag = (name: string, isImplied: boolean) => {
+    if (headMode === "body") return;
+    if (headContainerDepth > 0) {
+      if (HEAD_CONTAINERS.has(name)) headContainerDepth -= 1;
+      return;
+    }
+    // Implied closes are htmlparser2's tree repair (it closes the head itself
+    // when `<body>` opens, and everything at EOF), not markup: the element that
+    // caused them is read on its own event.
+    if (isImplied) return;
+    if (name === "head" && headMode === "head") {
+      headMode = "afterHead";
+    } else if (name === "html" || name === "body") {
+      // `</html>` (and `</body>`) act as "anything else" in both head modes.
+      if (headMode === "head") headClosedBy = `</${name}>`;
+      headMode = "body";
+    }
+  };
+  const headOnText = (text: string) => {
+    let probe = text;
+    if (bomPending) {
+      bomPending = false;
+      probe = text.slice(1);
+    }
+    if (headMode === "body" || headContainerDepth > 0) return;
+    if (!NON_HTML_WHITESPACE.test(probe)) return;
+    if (headMode === "head") headClosedBy = "#text";
+    headMode = "body";
+  };
+
   const handleMetaTag = (attribs: Record<string, string>) => {
     const content = attribs["content"];
     const name = attribs["name"]?.trim().toLowerCase();
     const property = attribs["property"]?.trim().toLowerCase();
     if (name === "description") {
+      if (headMode === "body") metaDescriptionOutsideHead = true;
       if (metaDescription === undefined) metaDescription = content?.trim() ?? "";
     } else if (name === "robots") {
+      if (headMode === "body") robotsOutsideHead = true;
       if (robotsMeta === undefined) robotsMeta = content ?? null;
     } else if (name === "viewport") {
       // Presence is the whole signal; the content string is the agent's
@@ -1096,11 +1300,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     const tokens = rel.split(/\s+/);
     const href = attribs["href"];
     if (tokens.includes("canonical")) {
+      if (headMode === "body") canonicalOutsideHead = true;
       if (canonical === undefined) canonical = href ?? null;
       canonicalCount += 1;
     }
     const code = attribs["hreflang"];
     if (tokens.includes("alternate") && code) {
+      if (headMode === "body") hreflangOutsideHeadCount += 1;
       hreflangTags.push(code);
       // A pair with no href names no target, so it is not a pair. The code
       // itself survives on the raw `hreflangTags` list.
@@ -1218,8 +1424,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   const parser = new Parser(
     {
-      onopentag(name, attribs) {
+      onopentag(name, attribs, isImplied) {
         domSize += 1;
+        // The head machine reads every open tag, above the noscript return:
+        // a `<noscript>` in the head is a container it has to see open.
+        headOnOpenTag(name, isImplied);
         // Hidden-surface bookkeeping first, and unconditionally: the
         // `noscript` early return below skips the rest of this handler, and
         // `onclosetag` has the mirror of it, so anything that must stay
@@ -1250,6 +1459,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         switch (name) {
           case "title":
             // Ignore <title> inside <svg> — only the document title counts.
+            // The same guard holds for the outside-head flag, which is about
+            // any document title after the head, not only the first.
+            if (headMode === "body" && suppressDepth === 0) titleOutsideHead = true;
             if (!titleDone && suppressDepth === 0) {
               titleDepth += 1;
               sawTitle = true;
@@ -1394,6 +1606,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (isTextBoundary(name)) emitTextBoundary();
       },
       ontext(text) {
+        // Before every scoping rule below: text the head machine must see may
+        // sit anywhere, and the machine has its own container depth.
+        headOnText(text);
         // JSON-LD lives inside a suppressed subtree, so it is buffered before
         // the visible-text scoping rules get a say.
         if (inLdJson && !ldJsonOversize) {
@@ -1439,7 +1654,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           if (!inChrome) contentFallbackParts.push(text);
         }
       },
-      onclosetag(name) {
+      onclosetag(name, isImplied) {
+        // The head machine's mirror of its open-tag hook, above the noscript
+        // returns for the same reason.
+        headOnCloseTag(name, isImplied);
         // The mirror of `onopentag`'s first block, in the same position and
         // for the same reason. An element is popped by the DEPTH it opened at,
         // never by its name: `<div hidden><div>…</div></div>` closes an inner
@@ -1591,6 +1809,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     mainSimhash: mainWordCount === null ? null : simhash64(mainText),
     mainWordCount,
     placeholderSnippet: placeholderSnippetOf(bodyText),
+    headClosedBy,
+    titleOutsideHead,
+    metaDescriptionOutsideHead,
+    robotsOutsideHead,
+    canonicalOutsideHead,
+    hreflangOutsideHeadCount,
     bodyText,
     h1s,
     hasStructuredData,
@@ -1652,5 +1876,11 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     mainSimhash: raw.mainSimhash,
     mainWordCount: raw.mainWordCount,
     placeholderSnippet: raw.placeholderSnippet,
+    headClosedBy: raw.headClosedBy,
+    titleOutsideHead: raw.titleOutsideHead,
+    metaDescriptionOutsideHead: raw.metaDescriptionOutsideHead,
+    robotsOutsideHead: raw.robotsOutsideHead,
+    canonicalOutsideHead: raw.canonicalOutsideHead,
+    hreflangOutsideHeadCount: raw.hreflangOutsideHeadCount,
   };
 }

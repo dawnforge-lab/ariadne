@@ -423,6 +423,20 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Generate the H1 from the fields that make each page different. Where a layout puts the section name in the H1 and the real headline in a styled div, swap them.",
   },
+  "head.directives-outside-head": {
+    title: "Directives: Canonical, robots or hreflang outside <head>",
+    explanation:
+      "Pages whose canonical link, robots meta tag or hreflang links appear after the <head> has ended, either at </head> or where an element that is not allowed in the head (an image, a div, visible text) closed it early; the Closed By column names that element. Search engines read these directives only from the head and may ignore them here, so the page can be indexed under a URL, a language or an indexing state you did not choose.",
+    howToFix:
+      "Move the tags into the <head> above any other markup, and remove or move the element named in Closed By out of the head; it is usually a tracking pixel, an injected banner or a stray text node from a plugin.",
+  },
+  "head.tags-outside-head": {
+    title: "Page titles: Title or meta description outside <head>",
+    explanation:
+      "Indexable, self-canonical pages whose title or meta description appears after the <head> has ended, either at </head> or where an element that is not allowed in the head closed it early; the Closed By column names that element. Search engines may ignore a title or description outside the head and write their own.",
+    howToFix:
+      "Move the title and meta description into the <head> above any other markup, and remove or move the element named in Closed By out of the head.",
+  },
   "headings.h1-missing": {
     title: "H1: Missing",
     explanation:

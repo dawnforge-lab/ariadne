@@ -84,6 +84,15 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     // Null because `hasLoremIpsum` is false. The two are one observation:
     // a test that sets the flag sets the quotation with it.
     placeholderSnippet: null,
+    // Where the head ended (migration 0021). The clean page is a current
+    // crawl's row: `</head>` closed it (null closer) and nothing came after.
+    // A test about the pre-0021 null overrides all five flags.
+    headClosedBy: null,
+    titleOutsideHead: false,
+    metaDescriptionOutsideHead: false,
+    robotsOutsideHead: false,
+    canonicalOutsideHead: false,
+    hreflangOutsideHeadCount: 0,
     structuredDataParseErrors: 0,
     responseTimeMs: 200,
     htmlBytes: 40_000,

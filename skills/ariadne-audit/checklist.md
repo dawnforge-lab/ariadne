@@ -709,12 +709,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-04: Meta robots & X-Robots-Tag directives
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-04"`. Two rules:
+  1. `issues_list` with `checkId: "CHECK-04"`. Three rules:
      - `indexability.noindex` (info) — every page the crawl found excluded from the
        index, whether by meta tag or by header.
      - `indexability.meta-header-conflict` (critical) — a page whose robots meta and
        `X-Robots-Tag` header disagree. That is a directive the site cannot predict
        the outcome of, and it is a finding on its own.
+     - `head.directives-outside-head` (critical) — a robots meta (or canonical, or
+       hreflang) after the `<head>` ended, where search engines may not read it.
   2. `issue_urls` with `ruleId: "indexability.noindex"` for the FULL list — this is
      the export the check's Record line asks for, one row per URL, each carrying
      `{source: "meta" | "header", robotsMeta, xRobotsTag}`. Follow the cursors: the
@@ -1134,10 +1136,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-18: Conflicting canonical signals
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-18"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-18"` — three rules:
   - `canonical.multiple` (critical) — more than one canonical on the page
   - `canonical.html-header-conflict` (critical) — the HTML canonical and the
     `Link: rel=canonical` header name different URLs
+  - `head.directives-outside-head` (critical) — a canonical, robots meta or hreflang
+    link after the point the `<head>` ended (at `</head>`, or implicitly at an element
+    a head does not allow); Closed By names the element. Shared with CHECK-04 and
+    CHECK-24.
   `issue_urls` per rule; the evidence carries the competing targets.
 - **Evaluate**:
   - FAIL if multiple conflicting canonicals > 0
@@ -1290,6 +1296,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      defect repeated across every page it renders. Evidence carries the declared
      codes and the URLs they name; it carries NO "own language" URL, because the
      engine stores no language for a page and naming one would be a guess.
+     `head.directives-outside-head` (critical) also claims this check: hreflang links
+     after the `<head>` ended, with their count.
   4. `issues_list` with `checkId: "CHECK-24"` — `hreflang.alternates-not-crawled`
      (info) is a NOT MEASURED marker, not a finding about the site: it fires once
      when declared alternates have no page in this crawl, with the count of
@@ -1722,9 +1730,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — four rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — five rules:
   `title.missing` (critical), `title.too-short` (info), `title.too-long` (info) and
-  `title.duplicate` (warning). Use `pageType` on `issues_list` to get each count per
+  `title.duplicate` (warning), plus `head.tags-outside-head` (warning, a title or meta
+  description after the `<head>` ended). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
   `issue_urls` gives the titles themselves in the evidence, which is where the
   template patterns and the samples come from.
@@ -1798,7 +1807,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
   (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
-  and `meta-description.duplicate` (warning). Filter by `pageType` for the per-type
+  and `meta-description.duplicate` (warning), plus `head.tags-outside-head` (warning,
+  a meta description or title after the `<head>` ended). Filter by `pageType` for the per-type
   breakdown; `issue_urls` carries each description and its length, which is what the
   quality spot-check reads. The duplicate rule has CHECK-35's group shape exactly —
   one finding per shared description, evidence `{metaDescription, count, pages}` — so
