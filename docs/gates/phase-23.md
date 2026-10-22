@@ -311,7 +311,7 @@ names shown).
 | `npm test` | **84 files / 2,342 tests, 0 failures** (161.6 s; run 2026-10-22 on 676fde5, with the gate crawl running against the same database) |
 | `npx tsc --noEmit` | clean |
 | `git status` | clean before the gate doc; the gate crawl's scripts and logs live outside the tree |
-| migrations | 0000–0022 (23 files; the dev DB has all 23 applied) |
+| migrations | 0000–0022 at the gate (23 files); 0023 (`crawls.frontier_capped`) added by the frontier-stall follow-up below |
 | ruleset | **0.18.0** |
 | rules | **114**: 33 page / 67 query / 14 metric; severity over all 114: 33 critical / 31 warning / 50 info (Phase 22: 100 = 28 / 25 / 47) |
 | markers | **13** (Phase 22: 12; `crawl.unreadable-encoding` added) |
@@ -321,7 +321,7 @@ names shown).
 ### Pre-existing defects found by the final review (do first)
 
 - **Frontier stall on capped crawls (pre-existing, hard rule 7):** every maxPages-600 lavishalice crawl ends ~50 rows short with link targets unfollowed (9278877e 547; b49eab7e 547 with 69 unfollowed; 6b8a04f5 554 with 3,475 unfollowed); 20k-cap crawls reach 625/629. The `frontierRows` reservation counter (loop.ts ~1204-1380) drifts ~46-53 above the real frontier row count; leak not found by reading. Fix: instrument against `select count(*)`, and give orphan/pagination rules a completeness signal (`skipReason` in link-graph.ts:112 cannot see it).
-  **Fixed on this branch** (`fix(crawl): enqueue reserves frontier room only for URLs not already queued`). The counter did not leak: between calls it equals the row count. Near the cap, `enqueue` reserved room for each page's already-queued nav links first, the cap check tripped, and the new links behind them were skipped before the room came back. `enqueue` now looks up which candidates the frontier holds (one indexed query) and reserves room only for the rest. A capped crawl now reaches `pagesCrawled == maxPages`, so `skipReason` sees the cap and `links.orphan-skipped` fires (test/crawl/loop.test.ts, "a capped crawl fills its budget behind a site-wide nav"). Not re-measured on lavishalice.
+  **Fixed on this branch** (`fix(crawl): enqueue reserves frontier room only for URLs not already queued`). The counter did not leak: between calls it equals the row count. Near the cap, `enqueue` reserved room for each page's already-queued nav links first, the cap check tripped, and the new links behind them were skipped before the room came back. `enqueue` now looks up which candidates the frontier holds (one indexed query) and reserves room only for the rest. A capped crawl now reaches `pagesCrawled == maxPages`, so `skipReason` sees the cap and `links.orphan-skipped` fires (test/crawl/loop.test.ts, "a capped crawl fills its budget behind a site-wide nav"). Not re-measured on lavishalice. Follow-up: the residual reservation race can still end a crawl below `maxPages` with nothing pending, so `crawls.frontier_capped` (migration 0023) records the first new URL the cap turned away, and `skipReason` treats it as capped (ruleset 0.18.0 change-log item 7).
 - **Politeness (hard rule 9):** after the gate crawl Shopify answered AriadneBot with 429 `local_rate_limited` on `/` (browser UA 200). Likely contributors: render-pass subresource loads under the branded UA, and the gate's hand checks right after the crawl. Investigate.
 - The copy/label/test minors listed as "can wait" in the final review triage (the deferred-minors list below).
 

@@ -121,9 +121,10 @@ const REMEASURE_RULE_IDS = ["content.near-duplicate", "content.template-similari
 /**
  * Headroom between the fixture's page count and `maxPages`, so the *site* ends
  * the crawl rather than the budget: a crawl that ends at its budget reads as
- * capped, and the orphan rule this script times would skip instead of run. (Phase 1's finding 3, the one-page-short budgeting defect
- * the headroom first worked around, is fixed.) See the comment on
- * `budgetHeadroom` in scripts/gate-crawl.ts.
+ * capped, and the orphan rule this script times would skip instead of run.
+ * (Phase 1's finding 3, the one-page-short budgeting defect the headroom first
+ * worked around, is fixed.) See the comment on `budgetHeadroom` in
+ * scripts/gate-crawl.ts.
  */
 function budgetHeadroom(pages: number): number {
   return Math.max(50, Math.ceil(pages * 0.1));

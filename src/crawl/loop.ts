@@ -1217,11 +1217,42 @@ async function runToCompletion(
     crawledRows(startCounts);
 
   /**
+   * Whether the frontier cap has turned a NEW URL away on this crawl —
+   * `crawls.frontier_capped` (migration 0023), mirrored here so the hot path
+   * never reads it back. Set true by `enqueue` the first time a URL the
+   * frontier does not hold finds no room under `maxPages`, and stamped on the
+   * crawl row then, once.
+   *
+   * It exists for the case `pagesCrawled >= maxPages` cannot see: a crawl the
+   * residual reservation race (see `enqueue`) left short of its cap with
+   * nothing pending. That crawl's link graph is partial, and `links.orphan`
+   * reads this flag to say so instead of reporting the gap as orphans (hard
+   * rule 7).
+   *
+   * A fresh crawl stamps false before its first enqueue, so false is a
+   * measurement. A resume reads what the row holds: true stays true, and the
+   * null of a crawl first run before 0023 stays null unless this run meets the
+   * cap — the `robots_blocked_dropped` rule for a column nobody filled.
+   */
+  let frontierCapped: boolean | null;
+  if (resumed) {
+    const [capRow] = await db
+      .select({ frontierCapped: crawls.frontierCapped })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId));
+    if (capRow === undefined) throw new Error(`runToCompletion: no crawls row for ${crawlId}`);
+    frontierCapped = capRow.frontierCapped;
+  } else {
+    await db.update(crawls).set({ frontierCapped: false }).where(eq(crawls.id, crawlId));
+    frontierCapped = false;
+  }
+
+  /**
    * THE ROBOTS-BLOCKED BUDGET (Phase 23 T3, study D1), kept beside the frontier's
    * and never mixed with it: `blockedRows` counts the `disallowed` page rows
    * this crawl has RECORDED for robots.txt, against `maxBlockedUrls` (default
-   * `maxPages`). A counter, not a set — the dedupe is the `(crawl_id, url)`
-   * unique index's, exactly as the frontier's is (hard rule 6).
+   * `maxPages`). A counter, not a set — the dedupe is the `pages (crawl_id,
+   * url)` unique index's, as the frontier's is its primary key's (hard rule 6).
    *
    * Read off the table on every start rather than assumed zero, so a resume
    * spends what is left of the budget rather than a second one.
@@ -1344,6 +1375,13 @@ async function runToCompletion(
    * the rule it used to be. A URL found KNOWN cannot be wrong later: frontier
    * rows are never deleted while the crawl runs.
    *
+   * What the race can still do, then, is end a crawl below `maxPages` with
+   * nothing pending — which `pagesCrawled >= maxPages` would read as a crawl
+   * that reached every page. It is made visible rather than argued away: the
+   * first time a URL the frontier does not hold meets a full frontier, the
+   * crawl row is stamped `frontier_capped = true`, and `links.orphan` treats
+   * that crawl as capped whatever its page count.
+   *
    * Candidates are taken in chunks of `ENQUEUE_LOOKUP_CHUNK`, one lookup per
    * chunk. A page's links fit one chunk, so a link enqueue is one lookup; the
    * chunking is for the sitemap, whose entries (up to the discovery cap) stop
@@ -1369,7 +1407,10 @@ async function runToCompletion(
     // Sitemap entries robots.txt disallows are on record in `sitemap_urls` and
     // reported by `robots.blocks-sitemap-urls`; see `CrawlConfig.maxBlockedUrls`.
     const recordsBlocked = discoveredVia !== "sitemap";
-    if (frontierRows >= config.maxPages && !recordsBlocked) return;
+    // A full frontier is only taken at its word once the cap is on record: until
+    // then the candidates are looked up, so that a new URL turned away stamps
+    // `frontier_capped` rather than vanishing unrecorded.
+    if (frontierRows >= config.maxPages && frontierCapped === true && !recordsBlocked) return;
 
     const items: EnqueueItem[] = [];
     // Every URL this call has already judged, so a repeat is neither reserved
@@ -1378,10 +1419,12 @@ async function runToCompletion(
     // url -> the `fetch_reason` it will be recorded with. Distinct within the
     // call, bounded by it.
     const blocked = new Map<string, string>();
+    // Whether this call is the one that met the cap first (see below).
+    let stampCapped = false;
     for (let start = 0; start < urls.length; start += ENQUEUE_LOOKUP_CHUNK) {
       // The sitemap stops at the cap; a page's links are scanned to the end
       // for the robots-blocked ones (see the docblock).
-      if (frontierRows >= config.maxPages && !recordsBlocked) break;
+      if (frontierRows >= config.maxPages && frontierCapped === true && !recordsBlocked) break;
 
       const candidates: string[] = [];
       for (const raw of urls.slice(start, start + ENQUEUE_LOOKUP_CHUNK)) {
@@ -1419,11 +1462,13 @@ async function runToCompletion(
         }
         candidates.push(url);
       }
-      // Nothing new can be reserved into a full frontier, so it is not asked.
-      if (candidates.length === 0 || frontierRows >= config.maxPages) continue;
+      // Nothing new can be reserved into a full frontier, so once the cap is on
+      // record it is not asked.
+      if (candidates.length === 0) continue;
+      if (frontierRows >= config.maxPages && frontierCapped === true) continue;
 
       // Which of them the frontier already holds: one indexed lookup on the
-      // `(crawl_id, url)` unique index. They cost no room.
+      // `(crawl_id, url)` primary key. They cost no room.
       const known = await db.execute<{ url: string }>(sql`
         select url from frontier
         where crawl_id = ${crawlId} and url = any(${sql.param(candidates)}::text[])`);
@@ -1434,10 +1479,21 @@ async function runToCompletion(
       // across concurrent handlers.
       for (const url of candidates) {
         if (queued.has(url)) continue;
-        if (frontierRows >= config.maxPages) break;
+        if (frontierRows >= config.maxPages) {
+          // A new URL turned away. Flipped here, in the synchronous step, so
+          // exactly one call stamps the row.
+          if (frontierCapped !== true) {
+            frontierCapped = true;
+            stampCapped = true;
+          }
+          break;
+        }
         frontierRows += 1;
         items.push({ url, depth, discoveredVia });
       }
+    }
+    if (stampCapped) {
+      await db.update(crawls).set({ frontierCapped: true }).where(eq(crawls.id, crawlId));
     }
     if (items.length > 0) {
       // A throw here leaves the reservation standing, which is the safe

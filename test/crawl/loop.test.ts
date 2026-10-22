@@ -1012,6 +1012,7 @@ describe("runCrawl", () => {
  *   /             -> /c-0, /c-1
  *   /x            -> /x-0, /x-1        (unbounded: the site outgrows any cap)
  * robots.txt and every other path 404 (absent -> allow all, no sitemap).
+ * A second, table-driven server carries the sitemap and duplicate-link cases.
  */
 describe("a capped crawl fills its budget behind a site-wide nav", () => {
   let navServer: Server;
@@ -1019,11 +1020,33 @@ describe("a capped crawl fills its budget behind a site-wide nav", () => {
   const NAV = ["/", "/n0", "/n1", "/n2", "/n3", "/n4"];
   const PAGE = /^\/(n\d(-\d)*|c(-\d)+)?$/;
 
+  /** A small site per test, served from a path -> body table; anything else 404s. */
+  let tableServer: Server;
+  let table: string;
+  let tableBodies: Record<string, string> = {};
+
   const linkRule = (id: string) => {
     const r = linkGraphRules.find((rule) => rule.id === id);
     if (r === undefined) throw new Error(`no ${id} rule`);
     return r;
   };
+
+  async function queuedUrls(crawlId: string): Promise<string[]> {
+    const rows = await db
+      .select({ url: frontier.url })
+      .from(frontier)
+      .where(eq(frontier.crawlId, crawlId));
+    return rows.map((r) => r.url).sort();
+  }
+
+  async function frontierCappedOf(crawlId: string): Promise<boolean | null> {
+    const [row] = await db
+      .select({ frontierCapped: crawls.frontierCapped })
+      .from(crawls)
+      .where(eq(crawls.id, crawlId));
+    if (row === undefined) throw new Error(`no crawls row for ${crawlId}`);
+    return row.frontierCapped;
+  }
 
   beforeAll(async () => {
     navServer = createServer((req, res) => {
@@ -1039,26 +1062,48 @@ describe("a capped crawl fills its budget behind a site-wide nav", () => {
       res.end(html(anchors));
     });
     nav = await listen(navServer);
+
+    tableServer = createServer((req, res) => {
+      const body = tableBodies[req.url ?? ""];
+      if (body === undefined) {
+        res.writeHead(404, { "content-type": "text/html" });
+        res.end(html("<p>gone</p>"));
+        return;
+      }
+      const type = (req.url ?? "").endsWith(".xml")
+        ? "application/xml"
+        : (req.url ?? "") === "/robots.txt"
+          ? "text/plain"
+          : "text/html; charset=utf-8";
+      res.writeHead(200, { "content-type": type });
+      res.end(body);
+    });
+    table = await listen(tableServer);
   });
 
   afterAll(async () => {
     await new Promise<void>((r) => navServer.close(() => r()));
+    await new Promise<void>((r) => tableServer.close(() => r()));
   });
 
+  // Concurrency 4 runs the same shape with handlers interleaving, so the
+  // reservation is exercised under real concurrency. It does NOT reliably
+  // produce the residual race in `enqueue` (two in-flight calls finding the
+  // same new URL unknown at the same instant) and is not a test of it; the
+  // race's outcome — a crawl below maxPages with `frontier_capped` true — is
+  // pinned at the rule level in test/rules/link-graph-query.test.ts.
   for (const maxConcurrency of [1, 4]) {
     it(`queues and fetches exactly maxPages pages (concurrency ${maxConcurrency})`, async () => {
       const maxPages = 20;
       const summary = await crawl(
         config({ siteUrl: nav, probeHosts: false, maxPages, maxConcurrency }),
       );
-      const queued = await db
-        .select({ url: frontier.url })
-        .from(frontier)
-        .where(eq(frontier.crawlId, summary.crawlId));
-      expect(queued.length).toBe(maxPages);
+      expect(await queuedUrls(summary.crawlId)).toHaveLength(maxPages);
       expect(summary.pagesCrawled).toBe(maxPages);
       const rows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
       expect(rows.filter((r) => r.fetchClass !== "disallowed").length).toBe(maxPages);
+      // The site is larger than the cap, so the cap turned new URLs away.
+      expect(await frontierCappedOf(summary.crawlId)).toBe(true);
 
       // The completeness signal: a crawl that stopped at its cap with link
       // targets it never visited says the orphan check was not run, rather
@@ -1069,6 +1114,78 @@ describe("a capped crawl fills its budget behind a site-wide nav", () => {
       expect(String(skipped[0]!.evidence["skipped"])).toContain(`${maxPages}-page limit`);
     });
   }
+
+  // Phase 1's finding 3, as a regression: the sitemap declares `/`, which the
+  // seed already queued, and lists more entries than the cap. Reserving a slot
+  // for the known `/` left the frontier one short of maxPages for good.
+  it("fills the frontier to exactly maxPages from a sitemap that declares the seed", async () => {
+    const maxPages = 10;
+    const entries = ["/", ...Array.from({ length: 30 }, (_, i) => `/s-${i}`)];
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nAllow: /\nSitemap: ${table}/sitemap.xml\n`,
+      "/sitemap.xml":
+        `<?xml version="1.0" encoding="UTF-8"?>` +
+        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+        entries.map((p) => `<url><loc>${table}${p}</loc></url>`).join("") +
+        `</urlset>`,
+      ...Object.fromEntries(entries.map((p) => [p, html("<p>no links</p>")])),
+    };
+    const summary = await crawl(
+      config({ siteUrl: table, probeHosts: false, maxPages, maxConcurrency: 1 }),
+    );
+    expect(await queuedUrls(summary.crawlId)).toHaveLength(maxPages);
+    expect(summary.pagesCrawled).toBe(maxPages);
+    expect(await frontierCappedOf(summary.crawlId)).toBe(true);
+  });
+
+  // A page that links one new URL twice when two slots are left spends ONE of
+  // them on it, so the next new URL behind it still fits. On a page's links the
+  // analyzer already keeps one entry per target (`linksByTarget`), so this pins
+  // the property end to end rather than `enqueue`'s own collapse; the sitemap
+  // case below is the one that reaches `enqueue` with the repeat.
+  it("spends one slot on a new URL a page links twice, leaving room for the next", async () => {
+    tableBodies = {
+      "/": html(`<a href="/a">a</a>`),
+      "/a": html(`<a href="/x">x</a><a href="/x">x again</a><a href="/y">y</a>`),
+      "/x": html("<p>no links</p>"),
+      "/y": html("<p>no links</p>"),
+    };
+    const summary = await crawl(
+      config({ siteUrl: table, probeHosts: false, maxPages: 4, maxConcurrency: 1 }),
+    );
+    expect(await queuedUrls(summary.crawlId)).toEqual(
+      [`${table}/`, `${table}/a`, `${table}/x`, `${table}/y`].sort(),
+    );
+    expect(summary.pagesCrawled).toBe(4);
+    // The frontier filled exactly; nothing new was ever turned away.
+    expect(await frontierCappedOf(summary.crawlId)).toBe(false);
+  });
+
+  // The repeat that does reach `enqueue` in one call: a sitemap listing one new
+  // URL under two spellings — discovery keys entries on the parsed href, which
+  // keeps a fragment; the frontier key (`normalizeUrl`) drops it — with two
+  // slots left after the seed. One slot for the pair, one for the entry behind.
+  it("spends one slot on a new URL the sitemap lists twice, leaving room for the next", async () => {
+    tableBodies = {
+      "/robots.txt": `User-agent: *\nAllow: /\nSitemap: ${table}/sitemap.xml\n`,
+      "/sitemap.xml":
+        `<?xml version="1.0" encoding="UTF-8"?>` +
+        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+        ["/x", "/x#top", "/y"].map((p) => `<url><loc>${table}${p}</loc></url>`).join("") +
+        `</urlset>`,
+      "/": html("<p>no links</p>"),
+      "/x": html("<p>no links</p>"),
+      "/y": html("<p>no links</p>"),
+    };
+    const summary = await crawl(
+      config({ siteUrl: table, probeHosts: false, maxPages: 3, maxConcurrency: 1 }),
+    );
+    expect(await queuedUrls(summary.crawlId)).toEqual(
+      [`${table}/`, `${table}/x`, `${table}/y`].sort(),
+    );
+    expect(summary.pagesCrawled).toBe(3);
+    expect(await frontierCappedOf(summary.crawlId)).toBe(false);
+  });
 });
 
 describe("robots-blocked internal URLs", () => {

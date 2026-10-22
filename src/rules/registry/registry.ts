@@ -370,6 +370,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `paginationExcluded` on every finding (a new "Paginated Pages Set Aside"
 //     column) and `urlsPaginated` on `site.health`. The content duplicate rules
 //     are unchanged.
+//  7. (Frontier-stall follow-up) `links.orphan` / `links.orphan-skipped` treat
+//     a crawl whose frontier cap turned a new URL away
+//     (`crawls.frontier_capped = true`, migration 0023) as capped, whatever its
+//     page count: such a crawl can end below `maxPages` with nothing pending
+//     and a partial link graph. A NEW crawl re-judged here can therefore LOSE
+//     `links.orphan` findings and GAIN the skip (and `structure.deep-page`
+//     gains the matching `incompleteCrawl` caveat). A pre-0023 crawl has null
+//     in the column, and the page-count test is all it is judged on, as before.
 export const RULESET_VERSION = "0.18.0";
 
 /**

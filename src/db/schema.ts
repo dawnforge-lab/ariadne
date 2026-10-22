@@ -260,6 +260,19 @@ export const crawls = pgTable("crawls", {
   // writes 0 before its first enqueue, so 0 is a measurement: nothing was
   // turned away.
   robotsBlockedDropped: integer("robots_blocked_dropped"),
+  // WHETHER THE FRONTIER CAP TURNED A NEW URL AWAY (migration 0023). True the
+  // first time `enqueue` met a URL the frontier did not hold and had no room
+  // left under `maxPages` for it: from then on the crawl's link graph is known
+  // to be partial, whatever `pages_crawled` ends at. That is the case
+  // `pagesCrawled >= maxPages` cannot see — a crawl the residual reservation
+  // race left short of its cap with nothing pending (see `enqueue` in
+  // src/crawl/loop.ts) — and `links.orphan` reads it beside that comparison.
+  //
+  // NULLABLE, AND THE NULL IS LOAD-BEARING, exactly as `robots_blocked_dropped`'s:
+  // null means nobody watched — a crawl written before 0023, or a resume of one
+  // that never met the cap. Every crawl the 0023 loop starts writes false before
+  // its first enqueue, so false is a measurement: no new URL was turned away.
+  frontierCapped: boolean("frontier_capped"),
 });
 
 export const pages = pgTable("pages", {

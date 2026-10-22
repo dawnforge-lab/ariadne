@@ -1,0 +1,1 @@
+ALTER TABLE "crawls" ADD COLUMN "frontier_capped" boolean;

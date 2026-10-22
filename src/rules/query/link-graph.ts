@@ -55,6 +55,14 @@ interface Completeness {
   pending: number;
   leased: number;
   failed: number;
+  /**
+   * `crawls.frontier_capped` (migration 0023): true when the frontier cap
+   * turned a new URL away, which can happen on a crawl that still ends below
+   * `maxPages` (the residual race in `enqueue`, src/crawl/loop.ts). Null on a
+   * crawl no 0023 loop watched. Read by `skipReason`; it is not evidence, the
+   * reason sentence carries it.
+   */
+  frontierCapped: boolean | null;
 }
 
 /**
@@ -69,16 +77,18 @@ async function completeness(db: Db, crawlId: string, ruleId: string): Promise<Co
     pending: number;
     leased: number;
     failed: number;
+    frontier_capped: boolean | null;
   }>(sql`
     select c.pages_crawled,
            c.config_jsonb ->> 'maxPages' as max_pages,
+           c.frontier_capped,
            count(*) filter (where f.state = 'pending')::int as pending,
            count(*) filter (where f.state = 'leased')::int as leased,
            count(*) filter (where f.state = 'failed')::int as failed
     from crawls c
     left join frontier f on f.crawl_id = c.id
     where c.id = ${crawlId}
-    group by c.id, c.pages_crawled, c.config_jsonb`);
+    group by c.id, c.pages_crawled, c.config_jsonb, c.frontier_capped`);
   const row = rows.rows[0];
   // No crawl row means nothing can be said about completeness, and a rule that
   // answered anyway would be answering about a crawl that does not exist.
@@ -91,6 +101,7 @@ async function completeness(db: Db, crawlId: string, ruleId: string): Promise<Co
     pending: Number(row.pending),
     leased: Number(row.leased),
     failed: Number(row.failed),
+    frontierCapped: row.frontier_capped,
   };
 }
 
@@ -129,6 +140,17 @@ function skipReason(c: Completeness): string | null {
       `the crawl stopped at its ${c.maxPages}-page limit (${c.pagesCrawled} ` +
       "crawled), so the pages that would link to an apparent orphan may never " +
       "have been reached"
+    );
+  }
+  // The cap turned a new URL away even though fewer than maxPages pages were
+  // crawled (`Completeness.frontierCapped`). A page count alone would call this
+  // crawl complete; the link graph is not. Null — nobody watched — is not true,
+  // and leaves the page-count test above as the only one this crawl can have.
+  if (c.frontierCapped === true) {
+    return (
+      `the crawl's ${c.maxPages}-page limit turned link targets away before ` +
+      `they were queued (${c.pagesCrawled} crawled), so the pages that would ` +
+      "link to an apparent orphan may never have been reached"
     );
   }
   return null;
@@ -424,7 +446,16 @@ export const linkGraphRules: QueryRule[] = [
         queryFinding(SKIPPED, {
           pageId: null,
           pageUrl: null,
-          evidence: { skipped, ...state },
+          // `frontierCapped` stays out: the reason sentence says it, and the
+          // columns above are the report.
+          evidence: {
+            skipped,
+            pagesCrawled: state.pagesCrawled,
+            maxPages: state.maxPages,
+            pending: state.pending,
+            leased: state.leased,
+            failed: state.failed,
+          },
           dedupeKey: "site",
         }),
       ];

@@ -492,6 +492,29 @@ describe("the link-graph rules against the database", () => {
         });
       });
 
+      // The residual reservation race in `enqueue` can leave a crawl below its
+      // page cap with nothing pending after the cap turned a new URL away. The
+      // page count calls that crawl complete; `frontier_capped` says it is not.
+      it("skips when the frontier cap turned a URL away below the page cap", async () => {
+        const crawlId = await newCrawl({ frontierCapped: true });
+        await withAnOrphan(crawlId);
+
+        const found = await expectGated(crawlId, /turned link targets away/);
+        expect(found.evidence).toMatchObject({ pagesCrawled: 3, maxPages: MAX_PAGES });
+        expect(found.evidence).not.toHaveProperty("frontierCapped");
+      });
+
+      // False is a measurement (nothing was turned away) and null is a crawl no
+      // 0023 loop watched: neither is a cap, so the check runs on both.
+      it("runs the check when the frontier cap is false or unmeasured", async () => {
+        for (const frontierCapped of [false, null]) {
+          const crawlId = await newCrawl({ frontierCapped });
+          await withAnOrphan(crawlId);
+          expect(await rule("links.orphan-skipped").run(db, crawlId)).toEqual([]);
+          expect(await rule("links.orphan").run(db, crawlId)).toHaveLength(1);
+        }
+      });
+
       // Without a page cap on the crawl row there is no way to know whether the
       // crawl ran to completion or stopped early, and assuming it completed
       // would be a guess dressed up as a finding.
