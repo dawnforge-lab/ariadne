@@ -1,11 +1,48 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 22 (ruleset 0.17.0, migrations 0000–0019,
+**Status:** the contract as of Phase 23 (ruleset 0.18.0, migrations 0000–0022,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 23 changed here: proven behaviour.** Ruleset 0.18.0, migrations
+0020–0022, and no tool or route added: 14 rules joined (114 rows in
+`rules_catalog`, 13 of them markers), and the changes to what a served crawl
+carries are ADDITIVE except where a verdict moved (§11).
+- **New rules.** `http.no-response`, `http.no-response-transient` and
+  `page.html-too-large` (CHECK-12); `crawl.unreadable-encoding` (CHECK-05, a
+  marker); `robots.blocks-internal-urls` (CHECK-03); `headings.h1-too-long`
+  (CHECK-37) and `url.too-long` (CHECK-28); `head.directives-outside-head`
+  (CHECK-18/04/24) and `head.tags-outside-head` (CHECK-35/36); and the five
+  `render.*-changed` rules, raw versus rendered noindex, canonical, title,
+  meta description and H1 (CHECK-01 plus the element's own). Thresholds moved
+  with them: titles under 30 characters are `title.too-short` and meta
+  descriptions over 155 characters are `meta-description.too-long`.
+- **The recheck pass widened.** It re-asks `timeout` and `network_error` pages
+  too, walked after every 5xx under its own cap of 100 rows and a per-host
+  breaker (3 consecutive no-response rechecks on a host, the rest of its rows
+  are not asked). `crawl_status.recheck.noResponse` is the new block
+  `{pages, confirmed, answered, inconclusive, pending}` (§4.2).
+- **The body cap is 2 MiB.** A 2xx HTML page over it is classed `too_large`,
+  not analysed, and reported by `page.html-too-large`.
+- **Robots-disallowed internal URLs are recorded, not dropped.** They are
+  written as `disallowed` rows against their own budget, the crawl config's
+  `maxBlockedUrls` (default `maxPages`) — **an engine field, not an input
+  `crawl_start` accepts**, so every API crawl takes the default.
+  `crawl_status.robotsBlocked` is `{recorded, dropped}` (`dropped` null on a
+  crawl from before migration 0020), and `issue_inlinks` now answers for
+  `robots.blocks-internal-urls` as well (§4.4a).
+- **Pagination.** `title.duplicate`, `meta-description.duplicate` and
+  `h1.duplicate-text` leave out pages 2+ of a series (judged pages with
+  `rel=prev`); each group carries `paginationExcluded` and `site.health` gains
+  `urlsPaginated`, which is not a partition member.
+- **Migrations.** 0020 `crawls.robots_blocked_dropped`; 0021 the head-position
+  columns on `pages` (`head_closed_by`, the outside-head flags); 0022 the
+  rendered robots, description, H1 and `rendered_tags_read` columns. A crawl
+  rendered before 0.18.0 has no rendered values for those three, so the
+  `render.*-changed` rules for them are not measured on it rather than clean.
 
 **What Phase 20 changed here: a finding is a TABLE, not a URL beside a blob.**
 Every change is ADDITIVE on the JSON surfaces and no field changed type.
@@ -333,9 +370,12 @@ validator before the handler runs (`test/api/mcp.test.ts:805` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (100 rows at 0.17.0) rather than by the crawl. The
-catalog is ~99 KB (**101,010 bytes**, re-measured 2026-09-23 at the end of
-Phase 22 over all 100 rows of ruleset 0.17.0 — by serialising what
+bounded by the **ruleset** (114 rows at 0.18.0) rather than by the crawl. The
+catalog is ~113 KB (**115,443 bytes**, re-measured 2026-10-22 at the end of
+Phase 23 over all 114 rows of ruleset 0.18.0 — 13 markers at 2,020 bytes
+JSON-serialised and the fourteen tables at 5,166, measured one way for this
+figure and so not subtractable from the series below; the 101,010 before it was
+measured 2026-09-23 at the end of Phase 22 over all 100 rows of ruleset 0.17.0 — by serialising what
 `rulesCatalog` answers with no crawl id — of which **1,813 bytes** are the
 `marker` strings on the twelve markers and **5,098 bytes** are the `table`
 declarations on the fourteen metric rules. Phase 22 added 2,013 bytes and no
@@ -1936,7 +1976,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.17.0** as of Phase 22) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.18.0** as of Phase 23) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -1994,6 +2034,15 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 23 bumped to 0.18.0 because verdicts and thresholds MOVE.** Fourteen
+rules joined (see the top of this document), and existing ones changed what
+they say: `title.too-short` fires under 30 characters, `meta-description.too-long`
+over 155, the three field-duplicate rules leave out rel=prev pages, and a 5xx or
+no-response finding now depends on the widened second look. A crawl re-judged
+at 0.18.0 can GAIN findings from the new rules and LOSE duplicate findings on
+paginated pages; nothing is backfilled, and the rendered-value rules cannot
+fire on a crawl rendered before it.
 
 **Phase 22 bumped to 0.17.0 because verdicts MOVE on 26 rules.**
 A page defect is now reported only on a JUDGED page — fetched OK, 200,

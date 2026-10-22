@@ -275,7 +275,10 @@ What the fields mean when you are waiting:
   pages (`robots.blocks-internal-urls` lists them with their inlinks); `dropped` counts
   discoveries turned away once their own budget (default `maxPages`) was full — not
   distinct URLs — and non-zero means that rule's list is incomplete. `dropped: null`
-  is a crawl from before this was counted, not zero.
+  is a crawl from before this was counted, not zero. That budget is the crawl
+  config's `maxBlockedUrls`; `crawl_start` does not accept it, so every crawl you
+  start gets the default, and a site whose robots.txt blocks more internal URLs than
+  `maxPages` will report `dropped > 0`.
 - **`hostSpacingMs`** — how far the engine has already backed off: the widest gap it
   is enforcing between two requests to one host, in milliseconds. It starts at the
   crawl's `perHostDelayMs` and only ever rises. Null means no crawl loop reported one
@@ -315,6 +318,16 @@ What the fields mean when you are waiting:
   serverErrors`, always, and the counts are read live off the pages — so
   `pending` falling is the pass working while you poll. `capped: true` means the
   pass's own 500-row budget stopped it short; those rows stay in `pending`.
+  `noResponse` is the same second look over URLs that got no HTTP response at all
+  (timed out, or the connection failed), in a block of its own because the partition differs:
+  `{pages, confirmed, answered, inconclusive, pending}`, where `answered` is ANY
+  HTTP reply on the second look (a 5xx or a block too: the URL responded), and
+  `confirmed + answered + inconclusive + pending = pages`. Those rows are in none of
+  the five 5xx numbers. The walk has its own 100-row budget (counted in `capped`
+  and `pending`), runs after every 5xx, and a per-host breaker stops asking a host
+  after three consecutive rechecks that still get no response (those rows stay
+  `pending`). Bodies over 2 MiB are not read at all: such a 2xx page is classed
+  as too large and reported by `page.html-too-large`, not re-checked.
   `passAt` is when a COMPLETE pass finished, and **null there is "nobody looked",
   not "nothing to look at"** — those pages keep their Errors, and their evidence
   says `recheck: "not run"`.

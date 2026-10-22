@@ -24,6 +24,23 @@ WHAT CHANGED AT IMPORT — only where a check's "how" changed owner:
   4. Two evaluation principles were re-pointed at engine output, and a fourth was
      added: never re-judge a claimed check by eyeball.
 
+WHAT CHANGED AFTER IMPORT (the living authority's own change log):
+
+  Phase 23 (ruleset 0.18.0, 2026-10-21) — engine paragraphs only; no check's id,
+  title, priority, Evaluate criteria or Record list moved.
+  - CHECK-12: four rules instead of two (`http.no-response`,
+    `http.no-response-transient`, `page.html-too-large` join the 5xx pair).
+  - CHECK-03: `robots.blocks-internal-urls`, the `robotsBlocked` status block and
+    its `maxBlockedUrls` budget.
+  - CHECK-05: `crawl.unreadable-encoding` marker.
+  - CHECK-28: `url.too-long` filed here (the checklist has no URL-length check).
+  - CHECK-35 / 36 / 37: title floor 30, meta description ceiling 155,
+    `headings.h1-too-long`, rel=prev pages left out of the three duplicate rules.
+  - CHECK-04 / 18 / 24 / 35 / 36: `head.directives-outside-head` and
+    `head.tags-outside-head`.
+  - CHECK-01: the five `render.*-changed` rules, each also claiming its element's
+    check.
+
 WHAT DID NOT CHANGE, and must not: every CHECK id, every check's title, priority,
 `**Evaluate**` criteria and `**Record**` list. The rule registry's `checkIds`
 trace to the ids in this file and CI asserts the coverage.
@@ -378,7 +395,9 @@ answered from, and its verdict is the confidence interval around all of them.
 - **`site.health` is filed here** (`metrics_get` with `metricId: "site.health"`):
   the partition of the crawl's auditable pages by the worst severity each carries,
   plus the pages the census leaves out. It is a rollup of the audit's own findings —
-  a statement about how far the judgement reached, which is this check's subject —
+  a statement about how far the judgement reached, which is this check's subject
+  (it also carries `urlsPaginated`: judged rel=prev pages left out of the three
+  duplicate rules only, which is NOT part of the partition) —
   and Evaluation Principle 2 still applies: it is context for the coverage answer
   and never the verdict on any check below.
 
@@ -665,11 +684,24 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-03: robots.txt — reachable, valid, not over-blocking
 - **Priority**: Critical | **Requires**: Engine + DevTools
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-03"`. Three rules can answer:
+  1. `issues_list` with `checkId: "CHECK-03"`. Four rules can answer:
      - `robots.missing` (info) — the site answered 4xx for /robots.txt. The crawl
        treated that as allow-all, which is correct and is still worth reporting.
      - `robots.blocks-sitemap-urls` (critical) — URLs the site's own sitemap
        publishes and its own robots.txt forbids. `issue_urls` gives the list.
+     - `robots.blocks-internal-urls` (warning) — INTERNAL URLs that crawled pages
+       link to and the site's own robots.txt forbids. The crawl never requested them
+       (the finding is about the link, not a fetch); each row quotes the matching
+       robots.txt line, and `issue_inlinks` with
+       `ruleId: "robots.blocks-internal-urls"` lists the pages that link to each.
+       Read it with `crawl_status`'s `robotsBlocked: {recorded, dropped}`: blocked
+       URLs are written down against their own budget (`maxBlockedUrls`, default
+       `maxPages`, an engine setting rather than an API input), and a non-zero
+       `dropped` counts discoveries turned away after it filled, so the list is
+       incomplete and the finding count is a floor. `dropped: null` is a crawl
+       from before it was counted, not zero. This is a sibling of
+       `robots.blocks-sitemap-urls`, not a duplicate: that rule is about the sitemap
+       line, this one about the link, and one URL can raise both.
      - `robots.check-skipped` (info) — the stored robots.txt could not be re-parsed
        (too large to read, or never served). This is a NOT MEASURED marker: the
        robots questions below are unanswered on this crawl, not answered clean.
@@ -975,20 +1007,34 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-12: 5xx server errors
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-12"` — TWO rules, and every page
-  whose fetch was classified a server error carries exactly one of them:
+- **Engine**: four rules. `http.server-error` (critical) and `http.server-error-transient` (warning) split 5xx responses by the end-of-crawl re-check; `http.no-response` (critical) and `http.no-response-transient` (warning) do the same for URLs that timed out or failed to connect; `page.html-too-large` (critical) reports 2xx HTML over 2 MB.
+  `issues_list` with `checkId: "CHECK-12"`. Every page whose fetch was classified a
+  server error carries exactly one of the first pair, and every page that got no
+  HTTP response at all carries exactly one of the second:
   - `http.server-error` (critical) — the error was not cleared. One finding per
     page, with the status code in the evidence.
   - `http.server-error-transient` (warning) — the crawl looked again and the site
     answered with something that is not a 5xx, so the page failed once and serves
     now. Its evidence carries both status codes and the gap between them.
+  - `http.no-response` (critical) — the request timed out or the connection failed,
+    and the second look did not change that or was not made. There is no status code to quote; the evidence carries the same
+    `recheck*` fields and `gapSeconds` as the 5xx rule.
+  - `http.no-response-transient` (warning) — the second look got an HTTP answer of
+    ANY kind (a 5xx or a bot block included: the URL responded), so the first
+    failure was a blip rather than a dead URL.
+  - `page.html-too-large` (critical) — a 2xx HTML response whose body went over the
+    crawler's 2 MiB read cap. The page was NOT analysed — nothing on it was checked —
+    so it is a finding about the page's size and a gap in this crawl's coverage of
+    it. Evidence is `{statusCode, htmlBytes, limit}` (the bytes read when reading
+    stopped, and the cap). This one has no re-check.
 
-  `issue_urls` per rule for the two lists. A 5xx during a crawl can also be a
+  `issue_urls` per rule for the lists. A 5xx or a timeout during a crawl can also be a
   rate-limit symptom: check the crawl's pacing before reporting a site-wide outage
   (the engine paces itself, but a fragile host can still tip).
 
   **The second look is the engine's, not yours.** Before a crawl closes it
-  re-fetches every server error exactly once more — at least a minute after the
+  re-fetches every server error (5xx walked first, cap 500) and then every
+  no-response URL (cap 100) exactly once more — at least a minute after the
   first attempt, through the same politeness gate, and it never overwrites the
   first observation. The `recheck` key in `http.server-error`'s evidence says
   which of four states the finding is in, and the wording of the report depends
@@ -1006,6 +1052,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `recheckStatusCode`, `recheckFetchClass`, `recheckReason` and `gapSeconds` carry
   the detail behind the word.
 
+  **No-response rows have the same four words with a different partition**, counted
+  in the `noResponse` block inside `crawl_status`'s `recheck` `{pages, confirmed, answered,
+  inconclusive, pending}` (`confirmed + answered + inconclusive + pending = pages`;
+  these rows are in none of the 5xx numbers). The pass has a per-host breaker: after
+  three consecutive no-response rechecks on one host the rest of that host's
+  no-response rows are not asked (`recheck: "capped"`, reason `host-unresponsive`).
+  A host that gives no answer three times running is down or refusing us, and
+  hammering it would be the engine's fault; report those as "never re-verified".
+
   **The ruling: a 5xx whose re-check did not run is still an Error.** The site
   answered "server error" once and nothing has contradicted it; the unknown is
   whether it PERSISTS, not whether it happened. So the finding stays
@@ -1014,13 +1069,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `pending` (with `capped` true when a budget was what stopped the pass). Say it
   in the report in those words: N confirmed, M never re-verified.
 - **Evaluate**:
-  - FAIL if internal 5xx > 0 that the re-check did not clear (confirmed,
-    inconclusive, pending or capped)
-  - WARN if the only server errors seen were ones the re-check cleared: the site
-    is not serving errors now, but it did, and an intermittent 5xx still costs
-    crawl rate
-  - Record: count per rule, affected URLs, source pages, and for each URL the
-    recheck state and the gap between the two observations
+  - FAIL if internal 5xx or no-response URLs > 0 that the re-check did not clear
+    (confirmed, inconclusive, pending or capped), or any `page.html-too-large`
+    (a page over 2 MiB of HTML is itself the defect)
+  - WARN if the only server errors or no-response URLs seen were ones the re-check
+    cleared: the site is not failing now, but it did, and an intermittent 5xx or
+    timeout still costs crawl rate
+  - Record: count per rule (all five), affected URLs, source pages, and for each URL
+    the recheck state and the gap between the two observations; for
+    `page.html-too-large`, the size evidence
 
 ### CHECK-13: Soft-404s and thin OK responses
 - **Priority**: Medium | **Requires**: Engine
@@ -1397,7 +1454,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   parameters, which is how a site links itself into a parallel set of parameterised
   URLs. `issue_urls` for the list; `url.param-volumes`' `trackingParams` and the
   `isTracking` flag on `topParams` give the totals.
-  `url.too-long` (info) rides on this check as the one URL-shape rule: an indexable,
+  `url.too-long` (info) lives under this check because the checklist has no
+  URL-length check of its own: it is the one URL-shape rule, an indexable,
   self-canonical page whose stored URL is over 115 characters, which is usually a
   tracking or session parameter or a repeated folder.
 - **Evaluate**:
@@ -1750,8 +1808,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-35"` — six rules:
-  `title.missing` (critical), `title.too-short` (info), `title.too-long` (info) and
-  `title.duplicate` (warning), plus `head.tags-outside-head` (warning, a title or meta
+  `title.missing` (critical), `title.too-short` (info, under 30 characters),
+  `title.too-long` (info, over 60) and `title.duplicate` (warning), plus `head.tags-outside-head` (warning, a title or meta
   description after the `<head>` ended) and `render.title-changed` (warning, a
   rendered page whose title JavaScript changed; see CHECK-01 step 6). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
@@ -1766,6 +1824,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   count. Capped at 200 groups, with the usual `truncated`/`total` note when the site
   has more. Equality is exact after trimming — two titles differing by one character
   are two groups here, and near-duplication is CHECK-39's question, not this one.
+
+  **Pages 2+ of a paginated series are left out of the duplicate rules.** A judged
+  page that declares `rel=prev` repeats its listing's title by construction, so the
+  three field-duplicate rules (`title.duplicate`, `meta-description.duplicate`,
+  `h1.duplicate-text`) skip it. It is counted, not hidden: every group carries
+  `paginationExcluded`, and `site.health` has `urlsPaginated`. Quote that count
+  beside a duplicate total, and do not read the omission as "paginated pages were
+  clean" — the other rules still judge them.
 - **Important — Analyse by Page Type, Not Just Global Counts**: Saying "99% of titles are
   over 60 chars" tells the client nothing useful. Different page types have different title
   templates, different keyword needs, and different SERP competition. The analysis must
@@ -1834,7 +1900,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   breakdown; `issue_urls` carries each description and its length, which is what the
   quality spot-check reads. The duplicate rule has CHECK-35's group shape exactly —
   one finding per shared description, evidence `{metaDescription, count, pages}` — so
-  quote the group count and the page total together. A template dumping one
+  quote the group count and the page total together. The same rel=prev exclusion
+  as CHECK-35 applies (`paginationExcluded` on each group). The length rules: too
+  short is under 70 characters, too long is over 155. A template dumping one
   description across a whole cohort is a single group with a very large `count`, which
   is the shape the Analysis below calls a template-generated duplicate.
 - **Analysis** (break down by page type, same as CHECK-35):
@@ -1866,7 +1934,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-37"` — `headings.h1-missing`
   (warning), `headings.h1-multiple` (info), `headings.h1-too-long` (info, first H1
   over 70 characters), `headings.level-skip` (info),
-  `h1.duplicate-text` (warning), `h1.duplicate-skipped` (info) and
+  `h1.duplicate-text` (warning; rel=prev pages left out, see CHECK-35),
+  `h1.duplicate-skipped` (info) and
   `render.h1-changed` (warning, a rendered page whose first H1 JavaScript changed;
   see CHECK-01 step 6). Filter by `pageType` for the per-template counts.
 

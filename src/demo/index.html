@@ -578,6 +578,23 @@
         num(recheck.cleared) + " cleared, " + num(recheck.inconclusive) + " inconclusive, " +
         num(recheck.pending) + " left");
     }
+    // The same second look for URLs that gave no HTTP response at all.
+    var noResponse = recheck.noResponse || {};
+    if (typeof noResponse.pages === "number" && noResponse.pages > 0) {
+      cell(progressGrid, "re-checking no-response URLs",
+        num(noResponse.pages) + " seen: " + num(noResponse.confirmed) + " confirmed, " +
+        num(noResponse.answered) + " answered, " + num(noResponse.inconclusive) + " inconclusive, " +
+        num(noResponse.pending) + " left");
+    }
+    // Internal URLs the site's own robots.txt forbids: recorded, never requested.
+    var robotsBlocked = detail.robotsBlocked || {};
+    var robotsRecorded = typeof robotsBlocked.recorded === "number" ? robotsBlocked.recorded : 0;
+    var robotsDropped = typeof robotsBlocked.dropped === "number" ? robotsBlocked.dropped : 0;
+    if (robotsRecorded > 0 || robotsDropped > 0) {
+      cell(progressGrid, "blocked by robots.txt",
+        num(robotsRecorded) + " recorded" +
+        (robotsDropped > 0 ? ", " + num(robotsDropped) + " more not recorded (limit reached)" : ""));
+    }
   }
 
   // ---------------------------------------------------------------- judge
