@@ -172,6 +172,8 @@ const API_FIELDS = new Set<string>([
     "StartCrawlInput",
   ]),
   ...declaredFields(join(ROOT, "src/crawl/frontier.ts"), ["FrontierCounts"]),
+  // `crawl_status.throttle`'s per-host record (Phase 24a).
+  ...declaredFields(join(ROOT, "src/crawl/politeness.ts"), ["HostThrottle"]),
   ...declaredFields(join(ROOT, "src/rules/run.ts"), ["RunSummary"]),
   ...declaredFields(join(ROOT, "src/rules/registry/types.ts"), ["Finding", "Metric"]),
 ]);

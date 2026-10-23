@@ -261,7 +261,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, failureReason, queuePosition, liveLeases, blockedPages, robotsBlocked, " +
-        "hostSpacingMs, " +
+        "hostSpacingMs, throttle, " +
         "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount, " +
         "pagesScanned, fetchResources, resources and recheck.\n\n" +
         "WHY A FAILED CRAWL FAILED: failureReason, one sentence, and null on " +
@@ -429,6 +429,15 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "30000ms cap, is the engine out of room: re-crawl slower (maxConcurrency " +
         "1, perHostDelayMs 2000), or stop and talk to the site's owner. Never " +
         "faster.\n\n" +
+        "throttle is the per-host record behind hostSpacingMs, keyed by host: " +
+        "responses429, retryAfterSeen, escalations (cumulative; the level in force " +
+        "is escalations minus recoveries), recoveries, recoveryLocked, " +
+        "peakSpacingMs and finalSpacingMs. A host that stopped pushing back steps " +
+        "down one level per clean run; recoveryLocked true means it pushed back " +
+        "again after recovering and will not be stepped down further. It is crawl " +
+        "evidence, not a finding: say how the site received the crawl, do not " +
+        "report it as a defect of the site. Null means the crawl holds no record " +
+        "(it predates the field), which is not the same as no throttling.\n\n" +
         "robotsBlocked is NOT blockedPages: it is the internal URLs robots.txt " +
         "kept this crawl out of, which were never requested. recorded counts the " +
         "ones on record as pages (robots.blocks-internal-urls reports them with " +

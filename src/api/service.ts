@@ -89,6 +89,7 @@ import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 // the rule pair calls "the site answered, and not with a 5xx". See
 // `recheckCoverage`.
 import { RECHECK_CAP_REASON, RECHECK_CLASSES } from "../crawl/recheck/recheck-server-errors.js";
+import { throttleRecordOf, type HostThrottle } from "../crawl/politeness.js";
 import { NO_RESPONSE, NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../rules/page/status.js";
 import {
   RENDER_HTML_DIR,
@@ -584,6 +585,20 @@ export interface CrawlDetail extends CrawlListItem {
    * operator has to decide rather than wait.
    */
   hostSpacingMs: number | null;
+  /**
+   * How hard each host pushed back, per host, as the crawl loop persisted it
+   * (`crawls.host_spacing_jsonb`, Phase 24a): `responses429`, `retryAfterSeen`,
+   * `escalations` (cumulative; the level in force is `escalations - recoveries`),
+   * `recoveries`, `recoveryLocked`, `peakSpacingMs`, `finalSpacingMs`. Every host
+   * the crawl touched is in it, including ones that never pushed back (all
+   * counters zero).
+   *
+   * CRAWL EVIDENCE, NOT A FINDING (the Phase 16 ruling: how a site received the
+   * crawl is not a site issue). Null is a crawl that holds no record: one from
+   * before 24a (its column is a bare `{host: ms}` map, or null) or one that
+   * failed before touching a host. It is never a record of zeros.
+   */
+  throttle: Record<string, HostThrottle> | null;
   /**
    * The extra hosts this crawl was told the site used to live on, echoed from
    * its stored config. Empty when none were named.
@@ -2370,6 +2385,7 @@ export class ApiService {
       // the recorded rows are counted live, like `blockedPages` beside them.
       robotsBlocked: { recorded: robotsBlockedRows, dropped: row.robotsBlockedDropped },
       hostSpacingMs: row.hostSpacingMs,
+      throttle: throttleRecordOf(row.hostSpacingJsonb),
       legacyHosts: configStringList(row.config, "legacyHosts", crawlId),
       sitemapUrls: configStringList(row.config, "sitemapUrls", crawlId),
       findingCap: configFindingCap(row.config, crawlId),

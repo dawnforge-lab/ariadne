@@ -3077,3 +3077,64 @@ describe("crawl_status — why a failed crawl failed", () => {
     expect(final["failureReason"]).toBeNull();
   }, 120_000);
 });
+
+describe("crawl_status — the per-host throttle record", () => {
+  it("serves the persisted per-host throttle record as crawl_status.throttle", async () => {
+    const crawlId = await seedCrawl({ id: `crawl_mcp_throttle_${Date.now()}`, status: "finished" });
+    const stored = {
+      "shop.example": {
+        spacingMs: 4000,
+        baseMs: 1000,
+        responses429: 14,
+        retryAfterSeen: 2,
+        escalations: 3,
+        recoveries: 1,
+        recoveryLocked: true,
+        peakSpacingMs: 8000,
+      },
+      "cdn.example": {
+        spacingMs: 1000,
+        baseMs: 1000,
+        responses429: 0,
+        retryAfterSeen: 0,
+        escalations: 0,
+        recoveries: 0,
+        recoveryLocked: false,
+        peakSpacingMs: 1000,
+      },
+    };
+    await db.update(crawls).set({ hostSpacingJsonb: stored }).where(eq(crawls.id, crawlId));
+    const detail = await ok("crawl_status", { crawlId });
+    expect(detail["throttle"]).toEqual({
+      "shop.example": {
+        responses429: 14,
+        retryAfterSeen: 2,
+        escalations: 3,
+        recoveries: 1,
+        recoveryLocked: true,
+        peakSpacingMs: 8000,
+        finalSpacingMs: 4000,
+      },
+      "cdn.example": {
+        responses429: 0,
+        retryAfterSeen: 0,
+        escalations: 0,
+        recoveries: 0,
+        recoveryLocked: false,
+        peakSpacingMs: 1000,
+        finalSpacingMs: 1000,
+      },
+    });
+  });
+
+  it("serves crawl_status.throttle as null for a crawl with no record, and for a pre-24a {host: ms} map", async () => {
+    const none = await seedCrawl({ id: `crawl_mcp_throttle_none_${Date.now()}`, status: "finished" });
+    expect((await ok("crawl_status", { crawlId: none }))["throttle"]).toBeNull();
+    const legacy = await seedCrawl({ id: `crawl_mcp_throttle_old_${Date.now()}`, status: "finished" });
+    await db
+      .update(crawls)
+      .set({ hostSpacingJsonb: { "shop.example": 4000 } })
+      .where(eq(crawls.id, legacy));
+    expect((await ok("crawl_status", { crawlId: legacy }))["throttle"]).toBeNull();
+  });
+});

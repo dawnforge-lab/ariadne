@@ -973,6 +973,52 @@ export class HostGate {
 }
 
 /**
+ * The throttle record a crawl's STORED `host_spacing_jsonb` carries — what
+ * `crawl_status.throttle` serves, read without a gate (the crawl may be long
+ * finished and its gate gone).
+ *
+ *  - NULL column, or the pre-24a `{host: ms}` map: `null`. Those crawls never
+ *    counted anything, and a record of zeros would claim they did (rule 7).
+ *  - The 24a `{host: HostSpacingEntry}` map: one `HostThrottle` per host, the
+ *    same values `HostGate.throttleRecord()` held when it was snapshotted
+ *    (`finalSpacingMs` is the entry's `spacingMs`).
+ *  - Anything else — a mixed map, a non-object, a mistyped field — throws, as
+ *    `restore()` does, through the same `parseEntry`.
+ */
+export function throttleRecordOf(stored: unknown): Record<string, HostThrottle> | null {
+  if (stored === null || stored === undefined) return null;
+  if (typeof stored !== "object" || Array.isArray(stored)) {
+    throw new TypeError(
+      `throttleRecordOf: host_spacing_jsonb must be a {host: …} object, got ${
+        Array.isArray(stored) ? "an array" : typeof stored
+      }`,
+    );
+  }
+  const entries = Object.entries(stored as Record<string, unknown>);
+  const legacy = entries.filter(([, v]) => typeof v !== "object" || v === null).length;
+  if (legacy !== 0 && legacy !== entries.length) {
+    throw new TypeError(
+      "throttleRecordOf: host_spacing_jsonb mixes the pre-24a {host: ms} shape with the 24a {host: {…}} shape",
+    );
+  }
+  if (legacy !== 0) return null;
+  const out: Record<string, HostThrottle> = {};
+  for (const [host, value] of entries) {
+    const e = parseEntry(host, value as Record<string, unknown>);
+    out[host] = {
+      responses429: e.responses429,
+      retryAfterSeen: e.retryAfterSeen,
+      escalations: e.escalations,
+      recoveries: e.recoveries,
+      recoveryLocked: e.recoveryLocked,
+      peakSpacingMs: e.peakSpacingMs,
+      finalSpacingMs: e.spacingMs,
+    };
+  }
+  return out;
+}
+
+/**
  * One 24a `host_spacing_jsonb` entry, validated field by field (hard rule 7).
  * Every field is required: an entry missing one was not written by `snapshot()`.
  */

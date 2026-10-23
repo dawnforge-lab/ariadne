@@ -7,6 +7,21 @@ under the ruleset version the engine reports — `rules_catalog`'s
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
 
+**What Phase 24a changed here: `crawl_status.throttle`.** One field, additive, no
+tool or route added. `throttle` is the per-host record of how hard each host pushed
+back, keyed by host: `{responses429, retryAfterSeen, escalations, recoveries,
+recoveryLocked, peakSpacingMs, finalSpacingMs}`. `escalations` is cumulative and
+never decremented; the level in force is `escalations - recoveries`.
+`finalSpacingMs` is the spacing in force for that host when the record was last
+written, and `peakSpacingMs` the widest it was ever crawled at. Every host the crawl
+touched is in the record, including hosts whose counters are all zero. It is crawl
+evidence, not a finding (the Phase 16 ruling): no rule reads it and nothing in
+`issues` is raised from it. `throttle` is `null` on a crawl that holds no record —
+one from before 24a, or one that never touched a host — and never a record of
+zeros. `hostSpacingMs` keeps its meaning (the widest spacing any host reached)
+but is no longer monotonic over a crawl, because a host that stops pushing back
+can step back down.
+
 **What Phase 23 changed here: proven behaviour.** Ruleset 0.18.0, migrations
 0020–0022, and no tool or route added: 14 rules joined (114 rows in
 `rules_catalog`, 13 of them markers), and the changes to what a served crawl

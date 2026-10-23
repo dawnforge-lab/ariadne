@@ -219,7 +219,7 @@ target is not something this skill can crawl.
 {crawlId, siteUrl, status, startedAt, finishedAt, pagesCrawled, pagesTotal,
  renderPassCount, rulesetVersion, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
- queuePosition, liveLeases, blockedPages, hostSpacingMs,
+ queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
  robotsBlocked: {recorded, dropped},
  rulesRunAt, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
@@ -281,9 +281,20 @@ What the fields mean when you are waiting:
   `maxPages` will report `dropped > 0`.
 - **`hostSpacingMs`** — how far the engine has already backed off: the widest gap it
   is enforcing between two requests to one host, in milliseconds. It starts at the
-  crawl's `perHostDelayMs` and only ever rises. Null means no crawl loop reported one
+  crawl's `perHostDelayMs` and rises when a host pushes back; since Phase 24a it can
+  also come back down, because a host that stops pushing back is stepped down one level
+  per run of clean responses. Null means no crawl loop reported one
   (an old row, or a crawl that failed before it fetched anything) — which is not the
   same as `0`.
+- **`throttle`** — the per-host record behind `hostSpacingMs`, keyed by host:
+  `responses429`, `retryAfterSeen`, `escalations`, `recoveries`, `recoveryLocked`,
+  `peakSpacingMs`, `finalSpacingMs`. `escalations` is cumulative, so the level in force
+  is `escalations - recoveries`. `recoveryLocked: true` means the host pushed back
+  again after it had recovered, so it stays at its spacing for the rest of the crawl.
+  It is evidence about how the site received the crawl, not a finding: report it as
+  "the site throttled us, here is how", never as a defect to fix. Every host the crawl
+  touched is in it, including hosts with all-zero counters. Null means the crawl holds
+  no record (it predates the field) — that is not the same as "nothing throttled it".
 - **`resources` and `fetchResources`** — what this crawl knows about the images,
   stylesheets and scripts its pages point at, counted off the database rather than
   reported by any one pass (a resumed pass asks only what is still unfetched, so its

@@ -377,6 +377,20 @@
     return typeof value === "number" ? String(value) : "—";
   }
 
+  /**
+   * One host's line in the "throttled by site" cell, or null for a host that
+   * never pushed back (`responses429 + escalations == 0`). Seconds are printed
+   * the way `num()` prints any number: no padding, no rounding of its own.
+   * The record is crawl evidence served as `crawl_status.throttle`, not a finding.
+   */
+  function throttleLine(host, t) {
+    if (t.responses429 + t.escalations <= 0) return null;
+    return host + ": " + t.responses429 + " × 429, slowed " + t.escalations +
+      "×, recovered " + t.recoveries + "×" +
+      (t.recoveryLocked === true ? ", recovery locked" : "") +
+      ", spacing " + (t.finalSpacingMs / 1000) + " s (peak " + (t.peakSpacingMs / 1000) + " s)";
+  }
+
   /** `1m 04s`, from two ISO timestamps — the second may be absent (still running). */
   function duration(fromIso, toIso) {
     if (typeof fromIso !== "string") return "—";
@@ -559,6 +573,13 @@
     // how far apart we are spacing requests to it now.
     cell(progressGrid, "politeness — blocked pages", num(detail.blockedPages));
     cell(progressGrid, "politeness — host spacing", typeof detail.hostSpacingMs === "number" ? detail.hostSpacingMs + " ms" : "—");
+    // ONE CELL PER HOST THAT PUSHED BACK, and none on a crawl nobody throttled
+    // (null: a pre-24a crawl, which holds no record).
+    var throttle = detail.throttle || {};
+    Object.keys(throttle).forEach(function (host) {
+      var line = throttleLine(host, throttle[host]);
+      if (line !== null) cell(progressGrid, "throttled by site", line);
+    });
     if (detail.fetchResources === true) {
       var resources = detail.resources || {};
       cell(progressGrid, "resources seen", num(resources.seen));
