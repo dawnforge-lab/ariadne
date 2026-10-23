@@ -49,7 +49,7 @@ A Shopify crawl runs to completion at the rate Shopify accepts. It does not esca
 The ratchet keeps its yellow.com.mt guarantee, and gains one bounded way down:
 
 - After `RECOVERY_STREAK` consecutive clean responses on a host since its last escalation, the host steps down one escalation level (spacing halves), never below its base.
-  - A clean response is a 2xx, 3xx or 4xx other than 429, with no `Retry-After`.
+  - A clean response is a 2xx, 3xx or 4xx other than 429, with no `Retry-After` and not classified `blocked` (a 401/403 or challenge answer to our crawler is pushback, not clean — stricter by ruling of 2026-10-23).
 - **Two strikes.** If a host escalates again after having recovered, recovery is locked for that host for the rest of the crawl, and the ratchet behaves exactly as today. A token bucket that re-empties after we speed up gets one retry, not an oscillation.
 - The per-host state needs `escalations`, `recoveries` and `recoveryLocked`. It is persisted in `crawls.host_spacing_jsonb`, so a resume keeps it.
 - `RECOVERY_STREAK` starts at 50, is exported and test-pinned, and is calibrated at the gate (§5). The number is ours, not SF's: SF uses a fixed rate and does no adaptive back-off at all.
