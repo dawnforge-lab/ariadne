@@ -259,6 +259,71 @@ function limitedHtml(): string {
 <script src="/limited.js"></script></head><body><p>rate limited asset</p></body></html>`;
 }
 
+/**
+ * `/mispredict/{n}`: the cacheable `/volatile.js` twice — once as a script
+ * (the browser's cache answers it), once as `fetch(…, {cache: "no-store"})`,
+ * which the browser sends to the network although nothing in the paused
+ * request's headers says so. The ledger predicts the second one a cache hit
+ * exactly once; after that it must never predict that URL again.
+ */
+function mispredictHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Mispredict</title>
+<script src="/volatile.js"></script></head>
+<body><p>volatile</p><script>fetch('/volatile.js', { cache: 'no-store' });</script></body></html>`;
+}
+
+/**
+ * `/iso/unload`: state written where a clear-then-close teardown would let it
+ * through — every 5 ms on a timer, and in `pagehide` (a cookie too).
+ */
+function isoUnloadHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>unload</title></head>
+<body><p>writes on the way out</p><script>
+setInterval(function () { localStorage.setItem('x', 'interval'); }, 5);
+addEventListener('pagehide', function () {
+  localStorage.setItem('x', 'pagehide');
+  document.cookie = 'late=1; max-age=3600; path=/';
+});
+</script></body></html>`;
+}
+
+/**
+ * `/teardown`: a page that asks for more on its way out — a beacon, a
+ * keepalive fetch and an ordinary fetch in `pagehide` — and keeps asking on a
+ * timer. Nothing it asks for once the render has ended may reach the server.
+ */
+function teardownHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>teardown</title></head>
+<body><p>teardown</p><script>
+setInterval(function () { fetch('/teardown-tick'); }, 20);
+addEventListener('pagehide', function () {
+  navigator.sendBeacon('/teardown-beacon', 'x');
+  fetch('/teardown-keepalive', { keepalive: true });
+  fetch('/teardown-fetch');
+});
+</script></body></html>`;
+}
+
+/**
+ * `/escape`: the requests a page-session interception cannot see — a
+ * WebSocket to the origin and to another origin, a shared worker that would
+ * fetch, and speculation rules that prefetch and prerender.
+ */
+function escapeHtml(otherOrigin: string): string {
+  const otherWs = otherOrigin.replace(/^http/, "ws");
+  const rules = JSON.stringify({
+    prefetch: [{ source: "list", urls: ["/spec-pf", `${otherOrigin}/spec-x`], eagerness: "immediate" }],
+    prerender: [{ source: "list", urls: ["/spec-pre"], eagerness: "immediate" }],
+  });
+  return `<!doctype html><html lang="en"><head><title>escape</title>
+<script type="speculationrules">${rules}</script></head>
+<body><p>escape</p><script>
+try { new WebSocket('ws://' + location.host + '/socket'); } catch (e) {}
+try { new WebSocket('${otherWs}/socket'); } catch (e) {}
+try { new SharedWorker('/shared-worker.js'); } catch (e) {}
+</script></body></html>`;
+}
+
 /** `/one-script`: one uncacheable same-origin script, for the seeded-gate test. */
 function oneScriptHtml(): string {
   return `<!doctype html><html lang="en"><head><title>One</title>
@@ -295,6 +360,33 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/paced") return html(pacedHtml());
     if (path === "/limited") return html(limitedHtml());
     if (path === "/one-script") return html(oneScriptHtml());
+    if (path.startsWith("/mispredict/")) return html(mispredictHtml());
+    if (path === "/iso/unload") return html(isoUnloadHtml());
+    if (path === "/teardown") return html(teardownHtml());
+    if (path === "/escape") return html(escapeHtml(otherOrigin()));
+    if (path === "/spec-pre") {
+      return html(`<!doctype html><title>pre</title><script src="/spec-pre.js"></script>`);
+    }
+    if (path === "/shared-worker.js") {
+      res.writeHead(200, { "content-type": "text/javascript" });
+      res.end("fetch('/from-shared-worker');");
+      return;
+    }
+    if (path === "/volatile.js") {
+      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "max-age=3600" });
+      res.end("void 0;");
+      return;
+    }
+    if (path === "/redirect/policy") {
+      res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
+      res.end();
+      return;
+    }
+    if (path === "/redirect/hop") {
+      res.writeHead(302, { location: "/static/hop" });
+      res.end();
+      return;
+    }
     if (path === "/iso/read") return html(isoHtml(false));
     if (path === "/iso/set") {
       res.writeHead(200, {
@@ -340,6 +432,11 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
     res.end("<!doctype html><title>404</title>");
   });
+  // A WebSocket handshake is a request too: logged, then dropped.
+  server.on("upgrade", (req: IncomingMessage, socket) => {
+    hits.push({ path: `UPGRADE ${(req.url ?? "/").split("?")[0]}`, at: Date.now() });
+    socket.destroy();
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     base: siteBase(server),
@@ -363,6 +460,10 @@ async function startThirdParty(): Promise<Site> {
     hits.push({ path: (req.url ?? "/").split("?")[0] ?? "/", at: Date.now() });
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("hello from somewhere else");
+  });
+  server.on("upgrade", (req: IncomingMessage, socket) => {
+    hits.push({ path: `UPGRADE ${(req.url ?? "/").split("?")[0]}`, at: Date.now() });
+    socket.destroy();
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
@@ -859,6 +960,159 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     }
   }, 30_000);
 
+  it("never predicts a URL twice once a prediction for it was wrong", async () => {
+    // Fix round 1, I1. Page 1: the script fills the cache, then the no-store
+    // fetch is predicted a hit and goes to the network — the one unpaced miss.
+    // Pages 2 and 3: the URL is on the never-predict list, so both requests
+    // for it are paced, however cacheable its responses look.
+    const renderer = await launch();
+    try {
+      let unpaced = 0;
+      let paced = 0;
+      for (const n of [1, 2, 3]) {
+        const result = await renderer.render(`${site.base}/mispredict/${n}`);
+        expect(result.error).toBeNull();
+        unpaced += result.unpacedNetworkRequests;
+        paced += result.pacedRequests;
+      }
+      expect(unpaced).toBe(1);
+      // Page 1: document + script. Pages 2 and 3: document + script + fetch.
+      expect(paced).toBe(2 + 3 + 3);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("clears state AFTER the page is closed: unload and timer writes do not survive", async () => {
+    // Fix round 1, I2. A teardown that cleared storage and THEN closed the
+    // page left a window for these writes to land in the next page's context.
+    const renderer = await launch();
+    try {
+      const writer = await renderer.render(`${site.base}/iso/unload`);
+      expect(writer.error).toBeNull();
+
+      const reader = await renderer.render(`${site.base}/iso/read`);
+      expect(reader.error).toBeNull();
+      expect(reader.title).toBe("cookie=[] ls=[null]");
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("sends nothing a page asks for once its render has ended", async () => {
+    // SECURITY (fail-closed teardown). The traffic is shut before the page is
+    // closed, so the pagehide requests and the timer's next ticks are failed,
+    // never released — including the keepalive kinds that outlive a page.
+    const renderer = await launch({ perHostDelayMs: 0 });
+    try {
+      const result = await renderer.render(`${site.base}/teardown`);
+      expect(result.error).toBeNull();
+      const atReturn = site.hits.length;
+
+      await new Promise((resolve) => setTimeout(resolve, 750));
+
+      const late = site.hits.slice(atReturn).map((h) => h.path);
+      expect(late).toEqual([]);
+      const all = site.hits.map((h) => h.path);
+      expect(all).not.toContain("/teardown-beacon");
+      expect(all).not.toContain("/teardown-keepalive");
+      expect(all).not.toContain("/teardown-fetch");
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("fails the requests it holds when a protocol command breaks, and releases none", async () => {
+    // SECURITY (fail-closed on a session failure). The release of the third
+    // script fails as a refused protocol command would; the render must
+    // throw it (ours, not the site's), and neither that script nor the three
+    // still queued behind it may reach the server.
+    const before = site.hits.length;
+    const broken = new Error("injected: Fetch.continueRequest refused");
+    const renderer = await launch({
+      perHostDelayMs: 100,
+      testFaults: {
+        failRelease: (url) => (url.endsWith("/paced/3.js") ? broken : null),
+      },
+    });
+    try {
+      await expect(renderer.render(`${site.base}/paced`)).rejects.toBe(broken);
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      const paths = site.hits.slice(before).map((h) => h.path);
+      expect(paths).toEqual(["/paced", "/paced/1.js", "/paced/2.js"]);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("fences off what the interception cannot see, and counts what it cannot stop", async () => {
+    // Fix round 1, I3 + SECURITY (interception bypass). Measured bypasses of
+    // a page-session `Fetch` interception, each closed or accounted for:
+    //  - WebSockets (origin and elsewhere): the network fence drops them;
+    //  - a shared worker and its own fetch: shared workers are disabled;
+    //  - a prerender: disabled, so `/spec-pre.js` is never asked for;
+    //  - a speculation-rules prefetch of ANOTHER origin: fenced;
+    //  - a speculation-rules prefetch of THIS origin: not stoppable in this
+    //    build — it may arrive, and every one that does is counted.
+    const renderer = await launch();
+    try {
+      const beforeSite = site.hits.length;
+      const beforeThird = third.hits.length;
+
+      const result = await renderer.render(`${site.base}/escape`);
+      expect(result.error).toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const sitePaths = site.hits.slice(beforeSite).map((h) => h.path);
+      expect(sitePaths.filter((p) => p.startsWith("UPGRADE"))).toEqual([]);
+      expect(sitePaths).not.toContain("/shared-worker.js");
+      expect(sitePaths).not.toContain("/from-shared-worker");
+      expect(sitePaths).not.toContain("/spec-pre.js");
+      expect(third.hits.slice(beforeThird)).toEqual([]);
+      expect(renderer.fencedConnections()).toBeGreaterThanOrEqual(1);
+
+      // The same-origin prefetch does arrive (this build cannot be told not
+      // to), and every speculative arrival is in the count.
+      const speculative = sitePaths.filter((p) => p === "/spec-pf" || p === "/spec-pre");
+      expect(speculative).toContain("/spec-pf");
+      expect(result.unpacedNetworkRequests).toBe(speculative.length);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("puts every redirect hop through url-policy", async () => {
+    // Fix round 1, M4. The 302 names the metadata address, which url-policy
+    // refuses even with `allowPrivate` on.
+    const renderer = await launch();
+    try {
+      const result = await renderer.render(`${site.base}/redirect/policy`);
+      expect(result.rendered).toBe(false);
+      expect(result.error).toMatch(/^policy refusal: http:\/\/169\.254\.169\.254\/latest\/meta-data\/ \(/);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("paces a redirect hop like any other request", async () => {
+    const spacingMs = 300;
+    const renderer = await launch({ perHostDelayMs: spacingMs });
+    try {
+      await renderer.render(`${site.base}/static/warm-redirect`);
+      const before = site.hits.length;
+
+      const result = await renderer.render(`${site.base}/redirect/hop`);
+
+      expect(result.error).toBeNull();
+      const hits = site.hits.slice(before);
+      expect(hits.map((h) => h.path)).toEqual(["/redirect/hop", "/static/hop"]);
+      expect(hits[1]!.at - hits[0]!.at).toBeGreaterThanOrEqual(spacingMs - toleranceMs);
+      expect(result.pacedRequests).toBe(2);
+    } finally {
+      await renderer.close();
+    }
+  });
+
   it("refuses to launch over a spacing record it cannot read", async () => {
     await expect(launch({ hostSpacing: { "a.example": "fast" } })).rejects.toThrow(
       /host_spacing_jsonb cannot be restored/,
@@ -874,6 +1128,16 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     expect(freshLifetimeMs({ "cache-control": "no-store" })).toBeNull();
     expect(freshLifetimeMs({ "cache-control": "max-age=3" })).toBeNull();
     expect(freshLifetimeMs({ "cache-control": "max-age=3600", vary: "*" })).toBeNull();
+    // M8: Vary absent or exactly Accept-Encoding, and nothing else.
+    expect(freshLifetimeMs({ "cache-control": "max-age=3600", vary: "Accept-Encoding" })).toBe(
+      3_600_000 - 5_000,
+    );
+    expect(freshLifetimeMs({ "cache-control": "max-age=3600", vary: "Cookie" })).toBeNull();
+    expect(
+      freshLifetimeMs({ "cache-control": "max-age=3600", vary: "accept-encoding, User-Agent" }),
+    ).toBeNull();
+    // A repeated header arrives newline-joined: its no-store still counts.
+    expect(freshLifetimeMs({ "cache-control": "max-age=3600\nno-store" })).toBeNull();
     expect(freshLifetimeMs({ "last-modified": "Tue, 01 Jan 2030 00:00:00 GMT" })).toBeNull();
   });
 });
@@ -1305,6 +1569,41 @@ describe("runRenderPass", () => {
     // Base 0 escalates from the 500 ms seed: ×2 = 1000 ms.
     expect(record[host]!.finalSpacingMs).toBe(1_000);
     expect(row.hostSpacingMs).toBe(1_000);
+  });
+
+  it("refuses to overwrite a throttle record somebody else changed under the pass", async () => {
+    // Fix round 1, M6: the write-back is compare-and-set. A record that moved
+    // between the pass reading it and writing it is not ours to replace.
+    const crawlId = await newCrawl(["/limited"]);
+    const host = new URL(site.base).host;
+    const entry: HostSpacingEntry = {
+      spacingMs: 0,
+      baseMs: 0,
+      responses429: 0,
+      retryAfterSeen: 0,
+      escalations: 0,
+      recoveries: 0,
+      recoveryLocked: false,
+      peakSpacingMs: 0,
+    };
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: 0, hostSpacingJsonb: { [host]: entry } })
+      .where(eq(crawls.id, crawlId));
+    // The other writer, landing while the pass renders.
+    const other = { [host]: { ...entry, responses429: 7 } };
+    const before = site.hits.length;
+    const pass = runRenderPass(db, crawlId, passConfig());
+    // Once the page is being rendered the pass has read the record; it writes
+    // after the render (the 429 moves the spacing). Land in between.
+    while (!site.hits.slice(before).some((h) => h.path === "/limited")) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await db.update(crawls).set({ hostSpacingJsonb: other }).where(eq(crawls.id, crawlId));
+
+    await expect(pass).rejects.toThrow(/host_spacing_jsonb changed under the render pass/);
+    const row = (await db.select().from(crawls).where(eq(crawls.id, crawlId)))[0]!;
+    expect(row.hostSpacingJsonb).toEqual(other);
   });
 
   it("leaves a pre-24a spacing map exactly as it was: that crawl never counted", async () => {

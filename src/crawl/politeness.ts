@@ -968,6 +968,18 @@ export class HostGate {
   }
 
   /**
+   * How long from now until `host`'s next slot is free — WITHOUT claiming it.
+   * Zero when it is free already. For a caller that must spend a wait outside
+   * some budget and claim the slot inside it (the renderer's document: its
+   * wait is not the navigation's, and its claim belongs beside its request).
+   */
+  msUntilFree(host: string): number {
+    const state = this.hosts.get(host);
+    if (state === undefined) return 0;
+    return Math.max(0, state.nextAllowedAt - Date.now());
+  }
+
+  /**
    * Resolve when `host` may be hit again.
    *
    * The slot is claimed *before* sleeping, so N concurrent acquirers of one

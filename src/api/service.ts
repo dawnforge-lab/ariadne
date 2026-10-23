@@ -1112,7 +1112,8 @@ export interface RenderSummaryOut {
    * The pass's same-origin requests (Phase 24a): `paced` waited for the host
    * gate's slot, `fromCache` were answered by the shared HTTP cache without
    * reaching the site, `unpacedNetwork` reached the site without a slot (a
-   * cache hit predicted and missed). See `RenderPassSummary.requests`.
+   * cache hit predicted and missed, or a speculation-rules prefetch). See
+   * `RenderPassSummary.requests`.
    */
   requests: {
     paced: number;

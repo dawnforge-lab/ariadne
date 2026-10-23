@@ -520,9 +520,11 @@ defect.
 
 `requests` in the answer counts the pass's requests to the site: `paced` waited their
 turn (pages included), `fromCache` never reached the site, and `unpacedNetwork` reached
-the site without waiting because the cache was expected to answer and did not.
-`unpacedNetwork` should be 0 or close to it. If it is large, mention it to the operator
-as an engine problem, not a site problem.
+the site without waiting. That happens in two ways. Either the cache was expected to
+answer and did not, which happens at most once per URL. Or the page asked the browser
+to prefetch another page of the site ahead of time, which the engine cannot switch off.
+A few per page is normal on a site that prefetches. A count far above the number of
+pages rendered is an engine problem to mention to the operator, not a site problem.
 
 ### Rendering key templates
 

@@ -58,23 +58,37 @@ same-origin request the browser makes that reaches the network waits for that ga
 documents, redirect hops, scripts, stylesheets, xhr/fetch, same-origin iframes and
 worker scripts. Before 24a only the documents were paced. Paint-only requests (images,
 media, fonts) and third-party requests are still aborted, so they are never sent, paced
-or counted. Popups and service workers are disabled. Every answer is reported into the
-gate, so a subresource 429 escalates the host. At the end of the pass the gate's state
-is written back to `host_spacing_jsonb` and `host_spacing_ms`, so
-`crawl_status.throttle` includes the render's own 429s and the next pass inherits its
-escalations. That write happens only over a 24a record: a null column or a pre-24a
+or counted. Popups, service workers, shared workers and prerendering are disabled.
+Every connection except `http(s)://` to the crawl's origin goes through a local proxy
+that drops it. That covers WebSockets to any host, the origin included, and anything
+the interception cannot see, so no request reaches another host even if interception
+fails. Interception is fail-closed: when a render ends or one of our protocol commands
+fails, every request still paused is failed, never released. Script execution is
+switched off before the page closes, so `pagehide` handlers and timers cannot send
+anything. One same-origin request cannot be stopped in this Chromium build: a
+speculation-rules prefetch. It is counted in `unpacedNetwork`, reported to the gate,
+and given a slot after the fact. Every answer is reported into the gate, so a
+subresource 429 escalates the host. The gate's state is written back to
+`host_spacing_jsonb` and `host_spacing_ms` after every render that moved a host's
+spacing and once at the end of the pass, as a compare-and-set against the value last
+read. A record that changed under the pass makes the pass fail rather than overwrite
+it. So `crawl_status.throttle` includes the render's own 429s, and the next pass
+inherits its escalations. That write happens only over a 24a record: a null column or a pre-24a
 `{host: ms}` map is left alone and `throttle` stays `null`, because a record written
 then would present render counts as the crawl's. One browser context per render worker
 is reused across URLs, so the HTTP cache survives. Cookies, permissions and the
 origin's storage (`Storage.clearDataForOrigin`: cookies, local storage, IndexedDB,
 WebSQL, file systems, service workers, Cache API, shared storage, storage buckets) are
-cleared between URLs, and `sessionStorage` dies with the page. A request the cache is
-predicted to answer, from an earlier explicit `max-age`, is not paced. `crawl_render`'s
+cleared after the page is closed, through a blank page of the same context, and again
+before the next navigation. `sessionStorage` dies with the page. A request the cache is
+predicted to answer is not paced. A prediction needs an earlier explicit `max-age` and a
+`Vary` that is absent or exactly `Accept-Encoding`. `crawl_render`'s
 answer gains `requests: {paced, fromCache, unpacedNetwork}`, summed over the pass.
 `paced` counts requests that waited for a slot, documents included. `fromCache` counts
-responses the HTTP cache served. `unpacedNetwork` counts predicted cache hits that went
-to the network anyway: each one is a request that reached the site unpaced, so it is
-counted rather than hidden, and its URL is paced from then on. A render that runs out
+responses the HTTP cache served. `unpacedNetwork` counts same-origin requests that
+reached the site without a slot. There are two kinds: a predicted cache hit that went to
+the network anyway, after which that URL is never predicted again in that context, so it
+happens at most once per URL per worker; and a speculation-rules prefetch. A render that runs out
 of navigation budget is `renderError: "timeout under pacing (<n> requests paced):
 navigation did not reach domcontentloaded within <ms>ms"`. Before 24a it started
 `timeout: …`. The render lease is now derived as (2 × renderConcurrency + 1) × 30 s +

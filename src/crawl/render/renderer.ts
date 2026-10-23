@@ -13,9 +13,10 @@
  *
  *  - **url-policy on every navigation (rule 5).** `isUrlAllowed` runs before a
  *    page is even opened, and again inside the interception for every
- *    top-level document request after it — a document the page navigates
- *    *itself* to, and every redirect hop of the one we asked for. A refusal is
- *    a classified `render_error`, never a skipped URL.
+ *    document request after it — a document the page navigates *itself* to,
+ *    every redirect hop of the one we asked for, and every iframe's. A refused
+ *    top-level navigation is a classified `render_error`, never a skipped
+ *    URL; a refused iframe is failed and counted as blocked.
  *  - **Politeness (rule 9): every same-origin request is paced (Phase 24a).**
  *    The renderer owns a `HostGate`, seeded from the crawl's own per-host state
  *    (`crawls.host_spacing_jsonb`, through `HostGate.restore`), so a host that
@@ -40,13 +41,31 @@
  *    consent cookie set by page N cannot change page N+1's DOM. A request the
  *    cache will answer is not paced (see `FreshnessLedger`) — it never reaches
  *    the site.
- *  - **No third-party traffic.** Interception fails every request whose origin
- *    is not the crawl's — from the page, its iframes and its workers — and the
- *    browser runs with popups and service workers disabled, so no window or
- *    worker escapes the interception. We are auditing one site; pulling a
- *    client's analytics, ad and font vendors into the record would be both
- *    impolite and non-deterministic. A blocked request never fails the render:
- *    the page is measured as the site's own bytes render it.
+ *  - **No third-party traffic, fail-closed (rules 5 and 9).** Two layers,
+ *    each measured against a real Chromium (renderer.test.ts):
+ *     1. INTERCEPTED — the `Fetch` domain on the render's own page session
+ *        pauses every request of the page, its iframes (same- and
+ *        cross-origin documents) and its dedicated workers, redirect hops
+ *        included. Each is failed unless it is same-origin, not paint-only,
+ *        and (documents) allowed by url-policy; what survives is paced.
+ *     2. FENCED — the browser's proxy is a local listener that drops every
+ *        connection (`NetworkFence`), with ONE exception: `http(s)://` to the
+ *        crawl's origin. So whatever the interception cannot see still
+ *        reaches no other host: a WebSocket to ANY host (the origin included
+ *        — the exception is scheme-qualified), a speculation-rules prefetch
+ *        of another origin, a request from any target never attached to.
+ *    DISABLED, because their requests are outside a page's interception:
+ *    popups (`--block-new-web-contents`), service workers (`serviceWorkers:
+ *    "block"`), shared workers (`--disable-shared-workers`), prerendering
+ *    (`Page.setPrerenderingAllowed`). WHAT REMAINS, stated rather than hidden:
+ *    a speculation-rules PREFETCH of a same-origin URL is neither
+ *    interceptable nor switchable off in this Chromium build (tested:
+ *    `--disable-features=Prerender2,SpeculationRules,PrefetchProxy`,
+ *    `--disable-blink-features=SpeculationRules`); it reaches the origin
+ *    unpaced, is counted in `unpacedNetworkRequests`, is reported to the
+ *    gate, and claims a slot after the fact. Chrome caps them per page. A
+ *    blocked request never fails the render: the page is measured as the
+ *    site's own bytes render it.
  *  - **No silent fallbacks (rule 7).** A timeout, a navigation error and a
  *    policy refusal are three different classified strings on the page row, and
  *    every one of them leaves `rendered = false` with the five measurement
@@ -89,6 +108,7 @@
  */
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
+import { createServer as createTcpServer, type AddressInfo, type Server } from "node:net";
 import { join } from "node:path";
 
 import {
@@ -232,6 +252,8 @@ export interface RendererOptions {
   allowPrivate?: boolean;
   /** Told about every aborted request. Bounded work only — this is a hot path. */
   onRequestBlocked?: (url: string) => void;
+  /** TEST ONLY — see `RenderTestFaults`. Never wire it to an API field. */
+  testFaults?: RenderTestFaults;
 }
 
 /**
@@ -322,11 +344,12 @@ export interface RenderResult {
   /** Same-origin responses the HTTP cache answered: no request reached the site. */
   cachedResponses: number;
   /**
-   * Same-origin responses that came from the NETWORK although no gate slot was
-   * claimed for them: a request the ledger predicted the cache would answer and
-   * the browser fetched anyway (evicted, or re-validated). Each is a request
-   * that reached the site unpaced, so it is counted rather than assumed away;
-   * its URL leaves the ledger, so it is paced next time.
+   * Same-origin requests that reached the site although no gate slot was
+   * claimed for them, counted rather than assumed away: a request the ledger
+   * predicted the cache would answer and the browser fetched anyway (its URL
+   * is then never predicted again in that context, so at most once per URL),
+   * and a speculation-rules prefetch the browser sends on its own account
+   * (module header), which claims a slot after the fact.
    */
   unpacedNetworkRequests: number;
 }
@@ -451,7 +474,8 @@ async function writeSerialisedDom(dir: string, url: string, html: string): Promi
 }
 
 /**
- * One reusable browser context, and what it has learned about its own cache.
+ * One reusable browser context, what it has learned about its own cache, and
+ * the blank page its state is cleared through.
  *
  * A worker renders URL after URL in the same context (see `PageRenderer`), so
  * the context's HTTP cache — and the ledger that predicts it — outlive a page.
@@ -460,6 +484,13 @@ async function writeSerialisedDom(dir: string, url: string, html: string): Promi
 interface ContextSlot {
   context: BrowserContext;
   ledger: FreshnessLedger;
+  /**
+   * An `about:blank` page that lives as long as the context and never
+   * navigates, so it makes no request. Its session is the one storage is
+   * cleared through: the rendered page is CLOSED before its origin's storage
+   * is cleared (see `release`), and a closed page has no session left.
+   */
+  janitor: CDPSession;
 }
 
 /**
@@ -475,26 +506,33 @@ interface ContextSlot {
  * navigation budget (§3.4.4: about k × spacing for k UNCACHED assets) would be
  * spent on our own disk. So the ledger records what the browser was told: a
  * same-origin `GET` that came back `200` from the network with an explicit
- * `Cache-Control: max-age` (minus `Age`), and no `no-store`, `no-cache` or
- * `Vary: *`. Until that lifetime runs out (less `FRESHNESS_MARGIN_MS`) a
- * request for the same URL is predicted to be a cache hit. Heuristic freshness
- * (`Last-Modified` without `max-age`) is never predicted: the browser's own
- * arithmetic for it is not ours to guess.
+ * `Cache-Control: max-age` (minus `Age`), no `no-store` or `no-cache`, and a
+ * `Vary` that is absent or exactly `Accept-Encoding` (anything else keys the
+ * cache on a request header we cannot see). Until that lifetime runs out (less
+ * `FRESHNESS_MARGIN_MS`) a request for the same URL is predicted to be a cache
+ * hit. Heuristic freshness (`Last-Modified` without `max-age`) is never
+ * predicted: the browser's own arithmetic for it is not ours to guess.
  *
- * A WRONG PREDICTION IS COUNTED, NOT HIDDEN. The response says where it came
- * from (`fromDiskCache`). A predicted request that went to the network anyway
- * — the cache evicted it, or the page asked with `cache: "reload"` in a way the
- * request headers did not show — is `RenderResult.unpacedNetworkRequests`, its
- * outcome is still reported to the gate, and its URL leaves the ledger so the
- * next request for it is paced.
+ * A WRONG PREDICTION IS COUNTED, AND NEVER REPEATED. The response says where it
+ * came from (`fromDiskCache`). A predicted request that went to the network
+ * anyway — the cache evicted it, or the page fetched it with `cache:
+ * "no-store"` / `"reload"`, which the paused request's headers do not show — is
+ * `RenderResult.unpacedNetworkRequests`, its outcome is still reported to the
+ * gate, and its URL goes on this context's never-predict list: every later
+ * request for it is paced, however cacheable its next response looks. So one
+ * URL can reach the site unpaced at most once per context.
  *
- * Bounded at `FRESHNESS_LEDGER_CAPACITY` entries, oldest out first (rule 6).
+ * Both maps are bounded at `FRESHNESS_LEDGER_CAPACITY` entries, oldest out
+ * first (rule 6). A URL pushed off the never-predict list could be mispredicted
+ * once more — one unpaced request, counted — and is listed again at once.
  */
 class FreshnessLedger {
   private readonly freshUntil = new Map<string, number>();
+  private readonly neverPredict = new Set<string>();
 
   /** Whether a request for `url` is predicted to be answered from the cache. */
   isFresh(url: string, now: number): boolean {
+    if (this.neverPredict.has(url)) return false;
     const until = this.freshUntil.get(url);
     if (until === undefined) return false;
     if (until > now) return true;
@@ -505,18 +543,26 @@ class FreshnessLedger {
   /** A network response for `url`: remember its lifetime, or forget the URL. */
   record(url: string, headers: HeaderBag, now: number): void {
     this.freshUntil.delete(url);
+    if (this.neverPredict.has(url)) return;
     const lifetimeMs = freshLifetimeMs(headers);
     if (lifetimeMs === null) return;
     this.freshUntil.set(url, now + lifetimeMs);
-    if (this.freshUntil.size > FRESHNESS_LEDGER_CAPACITY) {
-      const oldest = this.freshUntil.keys().next().value;
-      if (oldest !== undefined) this.freshUntil.delete(oldest);
-    }
+    evictOldest(this.freshUntil);
   }
 
-  forget(url: string): void {
+  /** A prediction for `url` was wrong: never predict it again in this context. */
+  mispredicted(url: string): void {
     this.freshUntil.delete(url);
+    this.neverPredict.delete(url);
+    this.neverPredict.add(url);
+    evictOldest(this.neverPredict);
   }
+}
+
+function evictOldest(store: Map<string, unknown> | Set<string>): void {
+  if (store.size <= FRESHNESS_LEDGER_CAPACITY) return;
+  const oldest = store.keys().next().value;
+  if (oldest !== undefined) store.delete(oldest);
 }
 
 /**
@@ -528,9 +574,16 @@ export function freshLifetimeMs(headers: HeaderBag): number | null {
   const cacheControl = headerValue(headers, "cache-control");
   if (cacheControl === null) return null;
   const vary = headerValue(headers, "vary");
-  if (vary !== null && vary.split(",").some((v) => v.trim() === "*")) return null;
+  if (vary !== null) {
+    const keys = vary
+      .split(/[,\n]/)
+      .map((v) => v.trim().toLowerCase())
+      .filter((v) => v !== "");
+    if (keys.some((v) => v !== "accept-encoding")) return null;
+  }
   let maxAgeSec: number | null = null;
-  for (const raw of cacheControl.toLowerCase().split(",")) {
+  // The protocol joins a repeated header with a newline, so both separate.
+  for (const raw of cacheControl.toLowerCase().split(/[,\n]/)) {
     const directive = raw.trim();
     if (directive === "no-store" || directive === "no-cache") return null;
     const match = /^max-age\s*=\s*"?(\d+)"?$/.exec(directive);
@@ -577,11 +630,9 @@ const REQUEST_GONE = /Invalid InterceptionId/i;
  * session, not on Playwright's `route()`: Playwright disables the browser's
  * HTTP cache for any context or page that has a route (its own documented
  * "enabling routing disables http cache"), which would make the shared cache
- * this pass is built around impossible. `Fetch` interception on the page
- * session sees the page's requests, its iframes' and its dedicated workers',
- * and leaves the cache alone; service workers and popups — the two clients
- * it would not see — are disabled at the context and the browser
- * (`serviceWorkers: "block"`, `--block-new-web-contents`).
+ * this pass is built around impossible. What this sees, and what it cannot, is
+ * in the module header; the network fence (`PageRenderer.launch`) is what
+ * stops what it cannot see from reaching anyone but the origin.
  *
  * THE PACING IS SERIAL PER RENDER. A parser that meets thirty `<script>` tags
  * pauses thirty requests at once; were each to call `gate.acquire` on arrival,
@@ -593,6 +644,15 @@ const REQUEST_GONE = /Invalid InterceptionId/i;
  * outstanding, which is what bounds the render lease (see
  * `renderLeaseSeconds` in run-render.ts). The release does not wait for the
  * response, so at zero spacing the requests still go out together.
+ *
+ * FAIL-CLOSED. A paused request is released (`Fetch.continueRequest`) in
+ * exactly one place, `release`, and only while the render is OPEN. The moment
+ * the render ends (`shut`) or a protocol command of ours fails, the render is
+ * shut: every queued request is failed (`Fetch.failRequest`), a request that
+ * pauses after that is failed on arrival, and one that was waiting on its slot
+ * or on url-policy is failed when it wakes — never continued. The session is
+ * never detached while its page is open (a detached interceptor lets its
+ * paused requests go): the page is closed first and the session dies with it.
  *
  * Errors in a handler are OURS (a protocol command the browser refused for a
  * live request), and are kept in `failure` for `render` to throw — never
@@ -612,13 +672,34 @@ class RenderTraffic {
   /** The first error a handler hit that was ours. `render` throws it. */
   failure: Error | null = null;
 
-  private done = false;
-  /** The goto's own document request, whose slot `render` already claimed. */
-  private documentPreAcquired = true;
+  /** False from `shut()` on: nothing is released again, everything is failed. */
+  private open = true;
+  /**
+   * EVERY request paused and not yet answered with a command — queued, waiting
+   * on url-policy, waiting on its slot, or between. `shut` fails all of them:
+   * a paused request left unanswered when its page closes is let go by the
+   * browser (measured), so "not released" must mean "failed", never "left".
+   */
+  private readonly pending = new Map<string, PausedRequest>();
+  /** Rejects with `failure` the moment it is set; `render` races its waits on it. */
+  readonly broken: Promise<never>;
+  private breakWith: (error: Error) => void = () => undefined;
+  /** Network ids of requests the browser sent as speculation (never paused). */
+  private readonly speculative = new Set<string>();
+  /** Until the first document request has been seen: the goto's own. */
+  private firstDocument = true;
   private readonly queue: PausedRequest[] = [];
   private pumping = false;
+  /**
+   * Every network id this render paused — so a response for a request that
+   * was NEVER paused (one the interception cannot see) is recognised as such.
+   * Per render, freed with it: O(one page's requests).
+   */
+  private readonly pausedIds = new Set<string>();
   /** Network ids released WITHOUT a slot because the ledger predicted a cache hit. */
   private readonly predicted = new Set<string>();
+  /** Network ids the browser says its memory cache served (`requestServedFromCache`). */
+  private readonly servedFromCache = new Set<string>();
   /**
    * Requests released to the network and not yet answered: network id → URL
    * and method. Per render, freed with it — O(one page's requests).
@@ -631,10 +712,20 @@ class RenderTraffic {
     private readonly host: string,
     private readonly origin: string,
     private readonly mainFrameId: string,
+    /** The URL `render` navigates to, as the browser will spell it. */
+    private readonly requestedUrl: string,
     private readonly ledger: FreshnessLedger,
     private readonly allowPrivate: boolean,
     private readonly onRequestBlocked: ((url: string) => void) | null,
-  ) {}
+    private readonly testFaults: RenderTestFaults | null,
+  ) {
+    this.broken = new Promise<never>((_, reject) => {
+      this.breakWith = reject;
+    });
+    // Raced, not always awaited: a render that ends before anything broke
+    // must not leave an unhandled rejection behind.
+    this.broken.catch(() => undefined);
+  }
 
   /** Wire the listeners and turn interception on. Call before the navigation. */
   async start(): Promise<void> {
@@ -645,10 +736,22 @@ class RenderTraffic {
       const e = event as unknown as { requestId: string; response: NetworkResponse };
       this.onResponse(e.requestId, e.response);
     });
-    // A redirect hop's answer arrives here, not as a `responseReceived`.
     this.cdp.on("Network.requestWillBeSent", (event) => {
-      const e = event as unknown as { requestId: string; redirectResponse?: NetworkResponse };
+      const e = event as unknown as {
+        requestId: string;
+        type?: string;
+        request: { url: string };
+        redirectResponse?: NetworkResponse;
+      };
+      // A redirect hop's answer arrives here, not as a `responseReceived`.
       if (e.redirectResponse !== undefined) this.onResponse(e.requestId, e.redirectResponse);
+      // A speculation-rules prefetch is sent by the browser itself, outside
+      // the interception (module header): never paused, and announced only
+      // here. Counted the moment it is announced and given a slot.
+      else if (e.type === "Prefetch") this.onSpeculative(e.requestId, e.request.url);
+    });
+    this.cdp.on("Network.requestServedFromCache", (event) => {
+      this.servedFromCache.add((event as unknown as { requestId: string }).requestId);
     });
     this.cdp.on("Network.loadingFailed", (event) => {
       const e = event as unknown as {
@@ -663,14 +766,37 @@ class RenderTraffic {
       this.inFlight.delete((event as unknown as { requestId: string }).requestId);
     });
     await this.cdp.send("Network.enable");
+    // A prerendered page is a page this session does not intercept. The
+    // speculation-rules PREFETCH that may precede it cannot be switched off in
+    // this build (module header); it is fenced to the origin and counted.
+    await this.cdp.send("Page.setPrerenderingAllowed", { isAllowed: false });
     await this.cdp.send("Fetch.enable", {
       patterns: [{ urlPattern: "*", requestStage: "Request" }],
     });
   }
 
-  /** The render is over: nothing more is released, claimed or reported. */
-  finish(): void {
-    this.done = true;
+  /**
+   * The render is over, or broke: fail everything still queued, and from now
+   * on fail whatever pauses. Idempotent. Awaited by `render` before the page
+   * is closed, so nothing it held is let go by the close.
+   */
+  async shut(): Promise<void> {
+    this.open = false;
+    this.queue.length = 0;
+    const held = [...this.pending.values()];
+    for (const event of held) await this.fail(event);
+  }
+
+  /**
+   * Stop the page running script before it is closed, so its `pagehide` and
+   * `unload` handlers — and its timers — never get to ask for anything. A
+   * keepalive fetch or a beacon sent from `pagehide` is handed to the browser
+   * process as the page dies, where a closing page's interception no longer
+   * reaches it (measured); the only reliable way to fail it is never to let
+   * it be made.
+   */
+  async silence(): Promise<void> {
+    await this.cdp.send("Emulation.setScriptExecutionDisabled", { value: true });
   }
 
   counts(): TrafficCounts {
@@ -685,42 +811,68 @@ class RenderTraffic {
 
   private guard(work: Promise<void>): void {
     work.catch((error: unknown) => {
-      if (this.done) return; // the render ended under it; the page is going
-      this.failure ??= error instanceof Error ? error : new Error(String(error));
+      if (!this.open && this.failure === null) {
+        // The render ended under it and the page is going: a command that
+        // failed on a closing target is not news. Anything else after shut
+        // is still ours, and still recorded.
+        if (isTargetClosed(error)) return;
+      }
+      if (this.failure === null) {
+        this.failure = error instanceof Error ? error : new Error(String(error));
+        this.breakWith(this.failure);
+      }
+      // FAIL-CLOSED: one broken command shuts the render, so no request it
+      // was holding can be released by whatever happens next.
+      void this.shut().catch(() => undefined);
     });
   }
 
   private async onPaused(event: PausedRequest): Promise<void> {
-    if (this.done) return;
+    if (event.networkId !== undefined) this.pausedIds.add(event.networkId);
+    this.pending.set(event.requestId, event);
+    if (!this.open) {
+      await this.fail(event);
+      return;
+    }
     const target = event.request.url;
 
-    // A TOP-LEVEL DOCUMENT is evidence, not a subresource: the request we
-    // navigated to, one of its redirect hops, or a page sending itself
-    // somewhere (the JS redirect CHECK-10 exists to find). It goes through
-    // url-policy (rule 5) and it does not leave the site — we record where the
-    // page wanted to go and refuse to follow it, because another origin's DOM
-    // is not this page's evidence and crawling it was never budgeted.
-    if (event.resourceType === "Document" && event.frameId === this.mainFrameId) {
-      const allowed = await isUrlAllowed(target, { allowPrivate: this.allowPrivate });
-      if (!allowed.allowed) {
-        this.refusedNavigation = `${target} (${allowed.reason ?? "refused"})`;
+    // EVERY DOCUMENT goes through url-policy (rule 5): the top-level one we
+    // navigated to, each of its redirect hops, a page sending itself somewhere
+    // (the JS redirect CHECK-10 exists to find), and every iframe's.
+    if (event.resourceType === "Document") {
+      const topLevel = event.frameId === this.mainFrameId;
+      // The goto's own request is the URL `render` put through url-policy a
+      // moment ago; asking again would only put a lookup between its slot and
+      // its request.
+      const asked =
+        topLevel &&
+        this.firstDocument &&
+        event.redirectedRequestId === undefined &&
+        target === this.requestedUrl;
+      this.firstDocument = false;
+      const allowed = asked
+        ? { allowed: true as const, reason: null }
+        : await isUrlAllowed(target, { allowPrivate: this.allowPrivate });
+      if (!this.open) {
         await this.fail(event);
         return;
       }
-      if (!isSameOrigin(target, this.origin)) {
+      if (!allowed.allowed) {
+        if (topLevel) this.refusedNavigation = `${target} (${allowed.reason ?? "refused"})`;
+        else this.blocked += 1;
+        await this.fail(event);
+        return;
+      }
+      // A top-level document does not leave the site: we record where the
+      // page wanted to go and refuse to follow it, because another origin's
+      // DOM is not this page's evidence and crawling it was never budgeted.
+      if (topLevel && !isSameOrigin(target, this.origin)) {
         this.offSite = target;
         this.blocked += 1;
         this.onRequestBlocked?.(target);
         await this.fail(event);
         return;
       }
-      if (this.documentPreAcquired && event.redirectedRequestId === undefined) {
-        this.documentPreAcquired = false;
-        await this.release(event);
-        return;
-      }
-      this.enqueue(event);
-      return;
     }
 
     if (!isSameOrigin(target, this.origin)) {
@@ -740,16 +892,12 @@ class RenderTraffic {
       return;
     }
 
-    if (predictable(event) && this.ledger.isFresh(target, Date.now())) {
+    if (event.request.method === "GET" && this.ledger.isFresh(target, Date.now())) {
       if (event.networkId !== undefined) this.predicted.add(event.networkId);
       await this.release(event);
       return;
     }
 
-    this.enqueue(event);
-  }
-
-  private enqueue(event: PausedRequest): void {
     this.queue.push(event);
     if (!this.pumping) this.guard(this.pump());
   }
@@ -759,11 +907,15 @@ class RenderTraffic {
     this.pumping = true;
     try {
       for (;;) {
-        if (this.done) return;
+        if (!this.open) return;
         const next = this.queue.shift();
         if (next === undefined) return;
         await this.gate.acquire(this.host);
-        if (this.done) return;
+        if (!this.open) {
+          // Woke into a shut render: this request is failed, not released.
+          await this.fail(next);
+          return;
+        }
         this.paced += 1;
         await this.release(next);
       }
@@ -772,8 +924,19 @@ class RenderTraffic {
     }
   }
 
-  /** Let a paused request go to the browser's network stack (and its cache). */
+  /**
+   * Let a paused request go to the browser's network stack (and its cache) —
+   * the ONE place that ever happens, and only while the render is open. A shut
+   * render fails it instead.
+   */
   private async release(event: PausedRequest): Promise<void> {
+    if (!this.open) {
+      await this.fail(event);
+      return;
+    }
+    const injected = this.testFaults?.failRelease?.(event.request.url) ?? null;
+    if (injected !== null) throw injected;
+    if (!this.pending.delete(event.requestId)) return; // already answered (failed by shut)
     if (event.networkId !== undefined) {
       this.inFlight.set(event.networkId, { url: event.request.url, method: event.request.method });
     }
@@ -781,6 +944,7 @@ class RenderTraffic {
   }
 
   private async fail(event: PausedRequest): Promise<void> {
+    if (!this.pending.delete(event.requestId)) return; // already answered
     await this.command("Fetch.failRequest", {
       requestId: event.requestId,
       errorReason: "BlockedByClient",
@@ -788,14 +952,14 @@ class RenderTraffic {
   }
 
   private async command(method: "Fetch.continueRequest" | "Fetch.failRequest", params: object) {
-    if (this.done) return;
     try {
       // The protocol's typed overloads want a literal method name per call;
       // both commands here take `{requestId, …}` and answer nothing.
       await (this.cdp.send as (m: string, p: object) => Promise<unknown>)(method, params);
     } catch (error) {
-      if (this.done) return;
       if (REQUEST_GONE.test(error instanceof Error ? error.message : String(error))) return;
+      // A failRequest on a target that is closing has nothing left to fail.
+      if (method === "Fetch.failRequest" && !this.open && isTargetClosed(error)) return;
       throw error;
     }
   }
@@ -808,24 +972,33 @@ class RenderTraffic {
    * the same statement about the host as one on a page. No body is read, so a
    * 503 is not checked for challenge markers — the resource pass's reading,
    * and the honest one.
+   *
+   * A NETWORK answer for a request this render never paused is a request the
+   * interception could not see — in practice a speculation-rules prefetch
+   * (module header). It is counted in `unpacedNetwork`, reported like any
+   * other answer, and it claims a gate slot after the fact, so the next paced
+   * request still waits a spacing behind it.
    */
   private onResponse(requestId: string, response: NetworkResponse): void {
-    if (this.done || !isHttpUrl(response.url)) return;
+    if (!this.open || !isHttpUrl(response.url)) return;
     const sent = this.inFlight.get(requestId);
     this.inFlight.delete(requestId);
     const fromCache =
       response.fromDiskCache === true ||
       response.fromPrefetchCache === true ||
-      response.fromServiceWorker === true;
+      response.fromServiceWorker === true ||
+      this.servedFromCache.delete(requestId);
     const wasPredicted = this.predicted.delete(requestId);
     if (fromCache) {
       this.cached += 1;
       return;
     }
     if (!isSameOrigin(response.url, this.origin)) return;
-    if (wasPredicted) {
+    const unseen = !this.pausedIds.has(requestId) && !this.speculative.has(requestId);
+    if (wasPredicted || unseen) {
       this.unpacedNetwork += 1;
-      this.ledger.forget(response.url);
+      if (wasPredicted) this.ledger.mispredicted(response.url);
+      if (unseen) this.guard(this.gate.acquire(this.host));
     }
 
     const headers = lowerCaseHeaders(response.headers);
@@ -838,9 +1011,23 @@ class RenderTraffic {
       retryAfterMs: throttled ? parseRetryAfter(headerValue(headers, "retry-after")).ms : null,
       url: response.url,
     });
-    if (response.status === 200 && sent?.method === "GET") {
+    if (!wasPredicted && response.status === 200 && sent?.method === "GET") {
       this.ledger.record(response.url, headers, Date.now());
     }
+  }
+
+  /**
+   * A request the browser sent on its own account (a speculation-rules
+   * prefetch): same-origin ones reached the site without a slot, so they are
+   * counted and claim one after the fact; another origin's never left the
+   * fence.
+   */
+  private onSpeculative(requestId: string, url: string): void {
+    if (!isHttpUrl(url) || !isSameOrigin(url, this.origin)) return;
+    if (this.pausedIds.has(requestId) || this.speculative.has(requestId)) return;
+    this.speculative.add(requestId);
+    this.unpacedNetwork += 1;
+    this.guard(this.gate.acquire(this.host));
   }
 
   /**
@@ -859,7 +1046,7 @@ class RenderTraffic {
     const sent = this.inFlight.get(requestId);
     this.inFlight.delete(requestId);
     this.predicted.delete(requestId);
-    if (this.done || sent === undefined || canceled || blockedReason !== undefined) return;
+    if (!this.open || sent === undefined || canceled || blockedReason !== undefined) return;
     if (errorText === "net::ERR_BLOCKED_BY_CLIENT" || errorText === "net::ERR_ABORTED") return;
     this.gate.report(this.host, {
       fetchClass: "network_error",
@@ -870,19 +1057,88 @@ class RenderTraffic {
   }
 }
 
-/** A request the cache may answer: a plain `GET` that did not ask to bypass it. */
-function predictable(event: PausedRequest): boolean {
-  if (event.request.method !== "GET") return false;
-  const headers = lowerCaseHeaders(event.request.headers);
-  const cacheControl = headerValue(headers, "cache-control") ?? "";
-  const pragma = headerValue(headers, "pragma") ?? "";
-  return !/no-cache|no-store|max-age=0/i.test(cacheControl) && !/no-cache/i.test(pragma);
+/** A URL as the browser puts it on the wire: parsed, serialised, without its fragment. */
+function requestUrlOf(url: string): string {
+  const parsed = new URL(url);
+  parsed.hash = "";
+  return parsed.href;
+}
+
+/** The browser or Playwright telling us the page, context or session is gone. */
+function isTargetClosed(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /closed|detached|Target page|No target with given id|Session with given id not found/i.test(
+    message,
+  );
 }
 
 function lowerCaseHeaders(headers: Record<string, string>): HeaderBag {
   const out: HeaderBag = {};
   for (const [name, value] of Object.entries(headers)) out[name.toLowerCase()] = value;
   return out;
+}
+
+/**
+ * TEST ONLY — fault injection for the fail-closed guarantee, the way
+ * `allowPrivate` is the fixture-server escape hatch. Never wire it to an API
+ * field.
+ */
+export interface RenderTestFaults {
+  /**
+   * Called just before a paused request would be released. An `Error`
+   * returned is thrown in place of the release, exactly where a protocol
+   * command the browser refused would throw.
+   */
+  failRelease?: (url: string) => Error | null;
+}
+
+/**
+ * The network fence: a local TCP listener every proxied connection is sent to
+ * and dropped at. The browser runs with it as its proxy for EVERYTHING except
+ * http(s) to the crawl's own origin, so a request the `Fetch` interception
+ * cannot see — a WebSocket (any host, the origin included: the bypass is
+ * scheme-qualified, so `ws://` to the origin is proxied), a speculation-rules
+ * prefetch to another host, a request from any target this renderer never
+ * attached to — never reaches any host but the origin. A dropped connection
+ * fails the request on the browser side; it is counted here.
+ */
+class NetworkFence {
+  connections = 0;
+
+  private constructor(private readonly server: Server) {}
+
+  static async open(): Promise<NetworkFence> {
+    let fence: NetworkFence | null = null;
+    const server = createTcpServer((socket) => {
+      if (fence !== null) fence.connections += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    fence = new NetworkFence(server);
+    return fence;
+  }
+
+  /** The Chromium switches that put every connection but the origin's through it. */
+  switches(origin: string): string[] {
+    const { port } = this.server.address() as AddressInfo;
+    const parsed = new URL(origin);
+    // `<-loopback>` first: Chromium otherwise sends loopback addresses direct,
+    // and 127.0.0.1 is precisely where an SSRF aims. The origin rule is
+    // scheme-qualified, so only `http(s)://<origin>` goes direct.
+    return [
+      `--proxy-server=http://127.0.0.1:${port}`,
+      `--proxy-bypass-list=<-loopback>;${parsed.protocol}//${parsed.host}`,
+    ];
+  }
+
+  async close(): Promise<void> {
+    await new Promise<void>((resolve, reject) =>
+      this.server.close((error) => (error === undefined ? resolve() : reject(error))),
+    );
+  }
 }
 
 /**
@@ -894,9 +1150,10 @@ function lowerCaseHeaders(headers: Record<string, string>): HeaderBag {
  * at once, which `runRenderPass` bounds at `renderConcurrency` (rule 6). What a
  * reused context carries from one URL to the next is its HTTP cache and
  * nothing else: cookies, permissions and the origin's storage are cleared
- * before it is reused (`release`), `sessionStorage` and the JS heap die with
- * the page, and service workers never start. A context that cannot be shown
- * clean is closed rather than reused.
+ * after the page is closed and again before the next one navigates (`release`,
+ * `clearState`), `sessionStorage` and the JS heap die with the page, and
+ * service workers never start. A context that cannot be shown clean is closed
+ * rather than reused.
  */
 export class PageRenderer {
   private readonly idle: ContextSlot[] = [];
@@ -904,14 +1161,21 @@ export class PageRenderer {
 
   private constructor(
     private readonly browser: Browser,
+    private readonly fence: NetworkFence,
     private readonly opts: Required<
       Omit<
         RendererOptions,
-        "onRequestBlocked" | "robotsCrawlDelaySec" | "allowPrivate" | "earnedSpacingMs" | "hostSpacing"
+        | "onRequestBlocked"
+        | "robotsCrawlDelaySec"
+        | "allowPrivate"
+        | "earnedSpacingMs"
+        | "hostSpacing"
+        | "testFaults"
       >
     > & {
       allowPrivate: boolean;
       onRequestBlocked: ((url: string) => void) | null;
+      testFaults: RenderTestFaults | null;
     },
     private readonly gate: HostGate,
   ) {
@@ -951,12 +1215,28 @@ export class PageRenderer {
         );
       }
     }
-    // `--block-new-web-contents`: `window.open` answers null and no popup is
-    // ever created. A popup is a page this renderer did not open, so its
-    // requests would be outside the interception.
-    const browser = await chromium.launch({ headless: true, args: ["--block-new-web-contents"] });
+    const fence = await NetworkFence.open();
+    let browser: Browser;
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        args: [
+          // `window.open` answers null and no popup is ever created: a popup
+          // is a page this renderer did not open, outside its interception.
+          "--block-new-web-contents",
+          // A shared worker's own requests are outside a page's interception
+          // (measured), so there are none.
+          "--disable-shared-workers",
+          ...fence.switches(options.origin),
+        ],
+      });
+    } catch (error) {
+      await fence.close();
+      throw error;
+    }
     return new PageRenderer(
       browser,
+      fence,
       {
         origin: options.origin,
         htmlDir: options.htmlDir,
@@ -966,6 +1246,7 @@ export class PageRenderer {
         settleMs,
         allowPrivate: options.allowPrivate === true,
         onRequestBlocked: options.onRequestBlocked ?? null,
+        testFaults: options.testFaults ?? null,
       },
       gate,
     );
@@ -993,6 +1274,16 @@ export class PageRenderer {
   /** The widest spacing any host has reached, seeded peak included. */
   maxSpacingMs(): number {
     return this.gate.maxSpacingMs();
+  }
+
+  /** `HostGate.spacingGeneration`: moves whenever any host's spacing does. */
+  spacingGeneration(): number {
+    return this.gate.spacingGeneration();
+  }
+
+  /** Connections the network fence dropped: requests the interception could not see. */
+  fencedConnections(): number {
+    return this.fence.connections;
   }
 
   /**
@@ -1026,11 +1317,13 @@ export class PageRenderer {
 
     const slot = this.idle.pop() ?? (await this.openSlot());
     let page: Page;
-    let cdp: CDPSession;
     let traffic: RenderTraffic;
     try {
+      // Cleared again HERE, not only after the last page closed: DOM storage
+      // a closing renderer was still committing may land after that clear.
+      await this.clearState(slot);
       page = await slot.context.newPage();
-      cdp = await slot.context.newCDPSession(page);
+      const cdp = await slot.context.newCDPSession(page);
       const tree = (await cdp.send("Page.getFrameTree")) as { frameTree: { frame: { id: string } } };
       traffic = new RenderTraffic(
         cdp,
@@ -1038,9 +1331,11 @@ export class PageRenderer {
         this.originHost,
         this.opts.origin,
         tree.frameTree.frame.id,
+        requestUrlOf(url),
         slot.ledger,
         this.opts.allowPrivate,
         this.opts.onRequestBlocked,
+        this.opts.testFaults,
       );
       await traffic.start();
     } catch (error) {
@@ -1063,19 +1358,32 @@ export class PageRenderer {
       // ---------------------------------------------------------------------
       let navigated: { finalUrl: string; measured: Measurement };
       try {
-        // The DOCUMENT's slot is claimed HERE, after the page and its
+        // The DOCUMENT's wait is spent HERE, after the page and its
         // interception exist (that setup is ours and must not be spent out of
-        // the site's spacing, rule 9) and BEFORE `goto`, so the wait for it is
-        // not charged to the navigation budget. Every later request of the
-        // page claims its own slot inside the interception.
-        await this.gate.acquire(new URL(url).host);
-        traffic.paced += 1;
+        // the site's spacing, rule 9) and BEFORE `goto`, so it is not charged
+        // to the navigation budget. Its slot is CLAIMED in the interception,
+        // beside the request, like every other request's: a slot claimed here
+        // would be followed by our own navigation latency, which the site would
+        // see as a shorter gap before the document's first asset. (Another
+        // worker may claim the slot in between; the document then waits for
+        // the next one inside the budget, bounded as `renderLeaseSeconds`
+        // says.)
+        const wait = this.gate.msUntilFree(this.originHost);
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
 
-        await page.goto(url, {
-          waitUntil: "domcontentloaded",
-          timeout: this.opts.navigationTimeoutMs,
-        });
-        if (this.opts.settleMs > 0) await page.waitForTimeout(this.opts.settleMs);
+        // Raced against `traffic.broken`: a protocol command of ours that
+        // failed has shut the render, and waiting out the navigation budget
+        // for requests it will now never release would only delay the throw.
+        await Promise.race([
+          page.goto(url, {
+            waitUntil: "domcontentloaded",
+            timeout: this.opts.navigationTimeoutMs,
+          }),
+          traffic.broken,
+        ]);
+        if (this.opts.settleMs > 0) {
+          await Promise.race([page.waitForTimeout(this.opts.settleMs), traffic.broken]);
+        }
         if (traffic.failure !== null) throw traffic.failure;
 
         // WHERE THE BROWSER ENDED UP decides whether there is anything to
@@ -1103,8 +1411,8 @@ export class PageRenderer {
         navigated = { finalUrl, measured: (await page.evaluate(MEASURE_SCRIPT)) as Measurement };
       } catch (error) {
         // Ours first: a protocol command the interception could not issue
-        // leaves a request paused for ever, and the timeout that follows is
-        // our defect, not the site's.
+        // shut the render, and whatever failed after it is our defect, not
+        // the site's.
         if (traffic.failure !== null) throw traffic.failure;
         // Order matters: a page that redirected itself before it finished
         // loading aborts its own navigation, and "we stopped it" is a truer
@@ -1201,15 +1509,23 @@ export class PageRenderer {
         ...traffic.counts(),
       };
     } finally {
-      traffic.finish();
-      await this.release(slot, page, cdp, crashed);
+      // Shut FIRST — every queued request failed, every later one failed on
+      // arrival — and only then close the page, so nothing the page asks for
+      // while it unloads is released, and nothing it held is let go by the
+      // close. Then the state is cleared through the janitor.
+      await traffic.shut();
+      await this.release(slot, page, traffic, crashed);
     }
   }
 
   async close(): Promise<void> {
     // Closing the browser closes every context the pool still holds.
     this.idle.length = 0;
-    await this.browser.close();
+    try {
+      await this.browser.close();
+    } finally {
+      await this.fence.close();
+    }
   }
 
   private async openSlot(): Promise<ContextSlot> {
@@ -1224,43 +1540,57 @@ export class PageRenderer {
       // None controls a first load anyway, so blocking them changes no DOM.
       serviceWorkers: "block",
     });
-    return { context, ledger: new FreshnessLedger() };
+    try {
+      const janitorPage = await context.newPage();
+      const janitor = await context.newCDPSession(janitorPage);
+      return { context, ledger: new FreshnessLedger(), janitor };
+    } catch (error) {
+      await context.close();
+      throw error;
+    }
+  }
+
+  /** Clear the origin's storage, every cookie and every permission in the slot's context. */
+  private async clearState(slot: ContextSlot): Promise<void> {
+    await slot.janitor.send("Storage.clearDataForOrigin", {
+      origin: this.opts.origin,
+      storageTypes: ISOLATION_STORAGE_TYPES,
+    });
+    await slot.context.clearCookies();
+    await slot.context.clearPermissions();
   }
 
   /**
    * Put a context back in the pool, CLEAN, or close it.
    *
-   * Clean means: the origin's storage cleared through the page's own session
-   * (`ISOLATION_STORAGE_TYPES` — the HTTP cache is not among them), the page
-   * closed (its `sessionStorage` and heap with it), every cookie and every
-   * granted permission in the context cleared. Only then is the context reused.
+   * The page is CLOSED FIRST — after its traffic was shut and its script
+   * execution switched off (`silence`), so its timers, `pagehide` and `unload`
+   * handlers never run again and anything already asked for is failed. Only then is the state cleared, through the slot's
+   * janitor page (`clearState`): the origin's storage (`ISOLATION_STORAGE_TYPES`
+   * — the HTTP cache is not among them), every cookie, every permission.
+   * Clearing BEFORE the close would leave the page a window in which an
+   * unload handler or an interval could write state the next page inherits.
    *
-   * A page that CRASHED, or that is already closed, has no session to clear
-   * storage through. That is something the site's page did, it already came
-   * back as a classified render, and the context is closed rather than reused
-   * — the next render opens a fresh one, with an empty cache, which costs
-   * requests but never isolation. A clearing command that fails on a LIVE page
-   * is ours, and throws.
+   * A page that CRASHED has nothing left to close cleanly; that is something
+   * the site's page did, it already came back as a classified render, and the
+   * context is closed rather than reused — the next render opens a fresh one,
+   * with an empty cache, which costs requests but never isolation. A close or
+   * a clear that fails otherwise is ours, and throws.
    */
   private async release(
     slot: ContextSlot,
     page: Page,
-    cdp: CDPSession,
+    traffic: RenderTraffic,
     crashed: boolean,
   ): Promise<void> {
-    if (crashed || page.isClosed()) {
+    if (crashed) {
       await slot.context.close();
       return;
     }
     try {
-      await cdp.send("Storage.clearDataForOrigin", {
-        origin: this.opts.origin,
-        storageTypes: ISOLATION_STORAGE_TYPES,
-      });
-      await cdp.detach();
+      await traffic.silence();
       await page.close();
-      await slot.context.clearCookies();
-      await slot.context.clearPermissions();
+      await this.clearState(slot);
     } catch (error) {
       await slot.context.close();
       throw new Error(

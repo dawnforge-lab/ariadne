@@ -34,7 +34,7 @@
  *  4. **Record.** Every render — successful or failed — is written to its page
  *     row and its frontier row is completed in the SAME transaction, then the
  *     pass writes its count to `crawls.render_pass_count` and the gate's state
- *     back to `crawls.host_spacing_jsonb` (`recordRenderThrottle`), so a 429 a
+ *     back to `crawls.host_spacing_jsonb` (`RenderThrottleWriter`), so a 429 a
  *     theme asset answered during the render is in the crawl's throttle record
  *     and binds the next pass.
  *
@@ -274,8 +274,9 @@ export interface RenderPassSummary {
    * The pass's same-origin requests, summed over every render: `paced` waited
    * for a gate slot (documents included), `fromCache` were answered by the
    * shared HTTP cache without reaching the site, `unpacedNetwork` reached the
-   * site without a slot because the cache was predicted to answer and did not
-   * (see the renderer's `FreshnessLedger`). Paint-only and third-party
+   * site without a slot — a cache hit predicted and missed (at most once per
+   * URL, see the renderer's `FreshnessLedger`) or a speculation-rules prefetch
+   * (`RenderResult.unpacedNetworkRequests`). Paint-only and third-party
    * requests are never sent and are in none of the three.
    */
   requests: { paced: number; fromCache: number; unpacedNetwork: number };
@@ -468,6 +469,7 @@ export async function runRenderPass(
   let failures = 0;
   const requests = { paced: 0, fromCache: 0, unpacedNetwork: 0 };
   const workerIds: string[] = [];
+  const throttle = new RenderThrottleWriter(db, crawlId, hostSpacingJsonb, renderer);
 
   try {
     // STEP 3. `profiled.renderConcurrency` workers, each leasing one URL at a
@@ -484,6 +486,7 @@ export async function runRenderPass(
         renderer,
         leaseSeconds,
         opts.signal ?? null,
+        () => throttle.checkpoint(),
         (result) => {
           if (result.rendered) rendered += 1;
           else failures += 1;
@@ -501,7 +504,7 @@ export async function runRenderPass(
       // host it escalated must not be forgotten by the next pass (rule 9). If
       // that write fails too, both errors surface.
       try {
-        await recordRenderThrottle(db, crawlId, hostSpacingJsonb, renderer);
+        await throttle.final();
       } catch (writeError) {
         throw new AggregateError(
           [error, writeError],
@@ -510,7 +513,7 @@ export async function runRenderPass(
       }
       throw error;
     }
-    await recordRenderThrottle(db, crawlId, hostSpacingJsonb, renderer);
+    await throttle.final();
   } finally {
     await renderer.close();
     // A graceful shutdown returns its URLs immediately rather than leaving them
@@ -548,6 +551,18 @@ export async function runRenderPass(
  * (`maxSpacingMs`, which starts at the restored peak), the pair the crawl loop
  * always writes together.
  *
+ * WHEN. After every render whose answers MOVED a host's spacing (the gate's
+ * `spacingGeneration`, the crawl loop's own trigger), so a pass that dies
+ * mid-way keeps every escalation it caused; and once at the end of the pass,
+ * whatever moved, so counters that moved without the spacing (a `Retry-After`
+ * that escalated nothing) land too. Writes are serialised.
+ *
+ * COMPARE-AND-SET. Each write names the value it replaces (`where
+ * host_spacing_jsonb = <what we last read or wrote>`). Zero rows updated means
+ * somebody else wrote the column under this pass — a resumed crawl, another
+ * writer — and overwriting their record with ours would silently lose one of
+ * the two. It throws instead, naming the crawl (rule 7).
+ *
  * ONLY OVER A 24a RECORD. A NULL column (pre-0015, or a crawl that never wrote
  * one) and a pre-24a `{host: ms}` map are left exactly as they are: the crawl
  * counted nothing on them, `crawl_status.throttle` says so with `null`, and a
@@ -555,17 +570,70 @@ export async function runRenderPass(
  * record of zeros for a crawl that was never counted (rule 7; Task 2's
  * contract). Such a crawl's render escalations end with the pass.
  */
-async function recordRenderThrottle(
-  db: Db,
-  crawlId: string,
-  stored: unknown,
-  renderer: PageRenderer,
-): Promise<void> {
-  if (stored === null || throttleRecordOf(stored) === null) return;
-  await db
-    .update(crawls)
-    .set({ hostSpacingJsonb: renderer.throttleSnapshot(), hostSpacingMs: renderer.maxSpacingMs() })
-    .where(eq(crawls.id, crawlId));
+class RenderThrottleWriter {
+  private readonly enabled: boolean;
+  private last: unknown;
+  private lastGeneration: number;
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly db: Db,
+    private readonly crawlId: string,
+    stored: unknown,
+    private readonly renderer: PageRenderer,
+  ) {
+    this.enabled = stored !== null && throttleRecordOf(stored) !== null;
+    this.last = stored;
+    this.lastGeneration = renderer.spacingGeneration();
+  }
+
+  /** After a render: write if any host's spacing moved since the last write. */
+  checkpoint(): Promise<void> {
+    return this.enqueue(() => this.renderer.spacingGeneration() !== this.lastGeneration);
+  }
+
+  /** At the end of the pass: write if anything at all differs from the last write. */
+  final(): Promise<void> {
+    return this.enqueue(
+      () => JSON.stringify(this.renderer.throttleSnapshot()) !== JSON.stringify(this.last),
+    );
+  }
+
+  /** The write that failed, once one has: it is already on its way up. */
+  private failed: unknown = null;
+
+  private enqueue(due: () => boolean): Promise<void> {
+    if (!this.enabled) return Promise.resolve();
+    // One failed write is the pass's error; a second attempt at the end would
+    // only bury it under an AggregateError saying the same thing twice.
+    if (this.failed !== null) return Promise.resolve();
+    this.chain = this.chain.then(async () => {
+      if (!due()) return;
+      const generation = this.renderer.spacingGeneration();
+      const snapshot = this.renderer.throttleSnapshot();
+      const res = await this.db.execute(sql`
+        update crawls set
+          host_spacing_jsonb = ${JSON.stringify(snapshot)}::jsonb,
+          host_spacing_ms = ${this.renderer.maxSpacingMs()}
+        where id = ${this.crawlId}
+          and host_spacing_jsonb = ${JSON.stringify(this.last)}::jsonb
+        returning id`);
+      if (res.rows.length !== 1) {
+        throw new Error(
+          `runRenderPass: crawl ${this.crawlId}'s host_spacing_jsonb changed under the render ` +
+            `pass (${res.rows.length} rows matched the value it last read) — another writer ` +
+            "holds this crawl's throttle record, and overwriting it would lose one of the two",
+        );
+      }
+      this.last = snapshot;
+      this.lastGeneration = generation;
+    });
+    this.chain = this.chain.catch((error: unknown) => {
+      this.failed = error;
+      throw error;
+    });
+    return this.chain;
+  }
 }
 
 /**
@@ -708,6 +776,7 @@ async function runWorker(
   renderer: PageRenderer,
   leaseSeconds: number,
   signal: AbortSignal | null,
+  checkpoint: () => Promise<void>,
   onResult: (result: RenderResult) => void,
 ): Promise<void> {
   for (;;) {
@@ -735,5 +804,8 @@ async function runWorker(
     });
 
     onResult(result);
+    // The gate's state, on the crawl row, as soon as a render moved it — so a
+    // pass that dies before its end keeps every escalation it caused.
+    await checkpoint();
   }
 }
