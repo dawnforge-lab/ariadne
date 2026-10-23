@@ -89,7 +89,8 @@ const BACKPRESSURE: ReadonlySet<FetchClass> = new Set<FetchClass>([
 const DEFAULT_INITIAL_WINDOW = 4;
 const DEFAULT_SLOW_MS = 1500;
 const DEFAULT_BYTE_BUDGET = 64 * 1024 * 1024;
-const DEFAULT_MAX_DELAY_MS = 30_000;
+/** The cap on any spacing or `Retry-After` the gate honours, unless a caller names its own `maxDelayMs`. */
+export const DEFAULT_MAX_DELAY_MS = 30_000;
 
 /**
  * The spacing a block escalates FROM when the crawl was configured with no
@@ -341,9 +342,9 @@ export interface HostGateOptions {
    * talking to the same host. Rebuilding the gate from the configured floor
    * alone would hit that host at the pace it already refused, and the loop's
    * first `recordSpacing` would write the floor back over the evidence, so
-   * nobody could see it had happened. This is exactly the ruling `renderPaceMs`
-   * makes for the render pass (docs/gates/phase-6.md §c1633c4), applied to the
-   * pass that earned it.
+   * nobody could see it had happened. This is exactly the ruling the render
+   * pass makes (docs/gates/phase-6.md §c1633c4; since Phase 24a it seeds its
+   * own gate with this and `restore`), applied to the pass that earned it.
    *
    * `max`, not "replace": a caller who deliberately asks for a wider delay than
    * the crawl earned keeps it, and the cap binds it like everything else.

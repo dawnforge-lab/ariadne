@@ -560,8 +560,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "Re-fetch some of a finished crawl's pages in a real browser and store " +
         "what JavaScript added, so content that only exists after rendering is " +
         "measured rather than guessed at. Answers counts — " +
-        "{rendered, failures, unrendered, elapsedMs, selection:{mode, selected, " +
-        "budget, suspects, sampled, truncated}} — never a page list; read the pages " +
+        "{rendered, failures, unrendered, elapsedMs, requests:{paced, fromCache, " +
+        "unpacedNetwork}, selection:{mode, selected, budget, suspects, sampled, " +
+        "truncated}} — never a page list; read the pages " +
         "themselves with pages_query (rendered=true).\n\n" +
         "WHICH PAGES. Without urls the engine selects for itself: pages whose HTML " +
         "looks incomplete, plus a few of every page type, cut to a budget — " +

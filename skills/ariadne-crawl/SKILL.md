@@ -478,8 +478,9 @@ and the answer is Step 5.
 JavaScript added. It answers counts:
 
 ```
-{rendered, failures, unrendered,
- elapsedMs, selection: {mode, selected, budget, suspects, sampled, truncated}}
+{rendered, failures, unrendered, elapsedMs,
+ requests: {paced, fromCache, unpacedNetwork},
+ selection: {mode, selected, budget, suspects, sampled, truncated}}
 ```
 
 Run it when the audit needs to see what a crawler without JavaScript cannot — which
@@ -494,10 +495,34 @@ empty on evidence that exists.
 
 It is refused on a crawl that is still queued or running, on one another worker is
 already rendering, and on one with no discovery evidence (there would be no robots
-`crawl-delay` to honour). It paces itself with the crawl's user agent and the
-WIDER of the crawl's configured delay and the spacing the crawl earned
-(`hostSpacingMs`) — a site that pushed back during the crawl is not asked to say so
-twice. Expect the pass to take that long: 28 pages at 2000 ms is about a minute.
+`crawl-delay` to honour). It uses the crawl's user agent and picks up each host where
+the crawl left it: the spacing the crawl earned, its back-off level and its recovery
+lock (the per-host `throttle` record). A site that pushed back during the crawl is not
+asked to say so twice.
+
+**Every request the browser makes to the site is paced, not only the pages.** A page's
+own scripts, stylesheets and data requests wait the same spacing as a page fetch, one
+after another. Images, video, fonts and anything from another domain are never fetched
+at all. The browser keeps its cache from page to page, so a theme's scripts are fetched
+once and then served from the cache without asking the site again. Cookies and stored
+data are cleared between pages, so nothing one page sets changes how the next renders.
+If the site answers a render request with a 429, the engine slows down exactly as it
+does during the crawl, and the 429 shows up in the crawl's `throttle` record.
+
+So the time a render takes depends on how many uncached requests the page makes, not
+only on the number of pages. At 1 s spacing, a page with 20 uncached scripts and
+stylesheets takes about 20 s, and later pages on the same template take a few seconds
+once the cache holds the theme. A page that cannot load inside its navigation budget
+(15 s, or 60 s on a Shopify store) is recorded as a failure whose `renderError` starts
+`timeout under pacing (N requests paced)`. That means the page was too heavy to render
+at a polite pace. It does not mean the site is broken, so do not report it as a site
+defect.
+
+`requests` in the answer counts the pass's requests to the site: `paced` waited their
+turn (pages included), `fromCache` never reached the site, and `unpacedNetwork` reached
+the site without waiting because the cache was expected to answer and did not.
+`unpacedNetwork` should be 0 or close to it. If it is large, mention it to the operator
+as an engine problem, not a site problem.
 
 ### Rendering key templates
 

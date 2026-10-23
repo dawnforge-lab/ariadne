@@ -1108,6 +1108,17 @@ export interface RenderSummaryOut {
   failures: number;
   unrendered: number;
   elapsedMs: number;
+  /**
+   * The pass's same-origin requests (Phase 24a): `paced` waited for the host
+   * gate's slot, `fromCache` were answered by the shared HTTP cache without
+   * reaching the site, `unpacedNetwork` reached the site without a slot (a
+   * cache hit predicted and missed). See `RenderPassSummary.requests`.
+   */
+  requests: {
+    paced: number;
+    fromCache: number;
+    unpacedNetwork: number;
+  };
   selection: {
     /**
      * Which decision chose the pages: `auto` (the engine's suspicion-plus-sample
@@ -3206,6 +3217,7 @@ export class ApiService {
       failures: summary.failures,
       unrendered: summary.unrendered,
       elapsedMs: summary.elapsedMs,
+      requests: summary.requests,
       // The selection's URL list is a page list, and a page list is not a
       // response body (obligation 1: never a full export inline). Its size is.
       // `mode` rides beside it because the four numbers under it mean nothing

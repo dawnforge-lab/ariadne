@@ -21,16 +21,22 @@
  *  2. **Select.** One statement chooses the set and puts it in the frontier
  *     (src/crawl/render/select.ts).
  *  3. **Render.** `renderConcurrency` workers, each leasing ONE URL at a time
- *     and rendering it in its own browser context. One browser, at most
- *     `renderConcurrency` contexts, no page list in memory beyond the
- *     selection the budget already bounds (rule 6). Paced at
- *     `renderPaceMs(cfg.perHostDelayMs, crawls.host_spacing_ms)` — the crawl's
- *     configured delay OR the wider one its ratchet earned, whichever is
- *     larger; see that function — and never below the crawl's platform
- *     profile's `perHostDelayMs` (`renderPacing`).
+ *     and rendering it in a browser context it reuses from URL to URL (cache
+ *     kept, cookies and storage cleared — see the renderer). One browser, at
+ *     most `renderConcurrency` contexts, no page list in memory beyond the
+ *     selection the budget already bounds (rule 6). Paced by a host gate
+ *     SEEDED FROM THE CRAWL (Phase 24a §3.4): each host re-enters the render
+ *     where the crawl left it — `crawls.host_spacing_jsonb`, its spacing,
+ *     ratchet level, recovery count and lock — and every same-origin request
+ *     of every page waits for that gate, not only the documents. The base is
+ *     the configured delay, never below the crawl's platform profile's
+ *     `perHostDelayMs` (`renderPacing`).
  *  4. **Record.** Every render — successful or failed — is written to its page
  *     row and its frontier row is completed in the SAME transaction, then the
- *     pass writes its count to `crawls.render_pass_count`.
+ *     pass writes its count to `crawls.render_pass_count` and the gate's state
+ *     back to `crawls.host_spacing_jsonb` (`recordRenderThrottle`), so a 429 a
+ *     theme asset answered during the render is in the crawl's throttle record
+ *     and binds the next pass.
  *
  * AND ONE THING THAT IS NOT A STEP: the pass creates `<renderHtmlDir>/<crawlId>/`
  * between steps 2 and 3, because from Phase 8 the renderer writes each
@@ -42,7 +48,7 @@
  * WHY A FAILED RENDER IS NOT RETRIED. `leaseRenderUrls` increments `attempts`,
  * but nothing in this pass reads it, because nothing in this pass loops: a URL
  * is leased once, rendered once, and completed once, whatever the outcome. A
- * page whose render timed out is a page with `render_error = 'timeout: …'` and
+ * page whose render timed out is a page with `render_error = 'timeout under pacing (…'` and
  * `rendered = false`, which is evidence — the same shape a failed fetch takes
  * in the crawl pass, where a classified row beats a skipped URL. The retry that
  * would be worth having (a different network moment) is a re-run of the pass,
@@ -92,6 +98,7 @@ import {
   type RenderResult,
 } from "./renderer.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
+import { DEFAULT_MAX_DELAY_MS, throttleRecordOf } from "../politeness.js";
 import {
   selectExplicitRenderSet,
   selectRenderSet,
@@ -151,14 +158,54 @@ export const RENDER_PASS_DEFAULTS = {
    * because a machine looks idle.
    */
   renderConcurrency: 4,
-  /**
-   * A render's lease. The work it must cover is one host-gate wait plus one
-   * navigation (15s) plus the settle (3s); 120s leaves an order of magnitude
-   * for a slow host without stranding a crashed worker's URLs for long. It is
-   * a crash-resume deadline, not a lock — see the frontier module header.
-   */
-  leaseSeconds: 120,
 } as const;
+
+/**
+ * What a render may spend AFTER its navigation and settle: the in-page
+ * measurement, serialising and analysing the DOM, writing it to disk, clearing
+ * the context and the page-row transaction. All ours and all local — seconds
+ * at most; 30 s is the allowance, stated rather than folded into a round
+ * number.
+ */
+export const RENDER_POST_SETTLE_ALLOWANCE_MS = 30_000;
+
+/**
+ * A render's lease, DERIVED from what one render can take — never a guess.
+ *
+ * The lease is a crash-resume deadline (frontier module header), and it must
+ * outlast the longest render a LIVE worker can be in the middle of: a render
+ * whose lease ran out while it was still loading would be re-leased by a
+ * sibling worker of the same pass and fetched twice (rule 9). One render is:
+ *
+ *  1. **The document's gate wait.** The gate caps every spacing and every
+ *     `Retry-After` at `DEFAULT_MAX_DELAY_MS` (30 s). The interception claims
+ *     at most ONE slot per render at a time (the renderer's `RenderTraffic`),
+ *     and a render that has just ended may leave its last claim standing, so
+ *     ahead of a document there are at most 2 claims per OTHER worker, its own
+ *     worker's leftover one, and one `Retry-After` push: (2W + 1) × 30 s for W
+ *     workers, rounded up from 2W.
+ *  2. **The navigation budget** — every paced request the document needs
+ *     before `domcontentloaded` is inside it (15 s; 60 s under a profile).
+ *  3. **The settle** (3 s).
+ *  4. **`RENDER_POST_SETTLE_ALLOWANCE_MS`.**
+ *
+ * So four workers at 15 s: (9 × 30) + 15 + 3 + 30 = 318 s; a Shopify profile's
+ * one worker at 60 s: (3 × 30) + 60 + 3 + 30 = 183 s. The 120 s this replaced
+ * covered neither the profile's 60 s budget behind a 30 s wait nor four
+ * workers queued on one escalated host. The cost of a long lease is only how
+ * long a CRASHED worker's URL waits before a re-run may take it.
+ */
+export function renderLeaseSeconds(pacing: {
+  renderConcurrency: number;
+  navigationTimeoutMs: number;
+  settleMs: number;
+}): number {
+  const gateWaitMs = (2 * pacing.renderConcurrency + 1) * DEFAULT_MAX_DELAY_MS;
+  return Math.ceil(
+    (gateWaitMs + pacing.navigationTimeoutMs + pacing.settleMs + RENDER_POST_SETTLE_ALLOWANCE_MS) /
+      1000,
+  );
+}
 
 /**
  * The pass's configuration. A `CrawlConfig` satisfies it structurally, which is
@@ -200,39 +247,6 @@ export interface RenderPassConfig extends RenderSelectionConfig {
   allowPrivate?: boolean;
 }
 
-/**
- * The spacing the render pass paces at: the wider of what the caller
- * CONFIGURED and what the crawl EARNED.
- *
- * `crawls.host_spacing_ms` is the base delay the crawl's adaptive back-off
- * ratcheted to before it finished (src/crawl/loop.ts) — it is not a setting,
- * it is a finding, written because the site pushed back and the engine listened.
- * The render pass hits the same host minutes later, and taking its pace from
- * `cfg.perHostDelayMs` alone would throw that finding away: the first real-site
- * gate crawl escalated 1000 → 2000 ms and the render pass that followed went
- * straight back to 1000 ms with the answer sitting in the database. **A later
- * pass has no right to forget spacing the site's own responses taught us**
- * (rule 9).
- *
- * `max`, not "replace": a caller who deliberately asks for a wider delay than
- * the crawl earned keeps it, and a crawl that never escalated (`null`, or a
- * spacing at or below the configured one) changes nothing.
- *
- * CRAWL-WIDE ON PURPOSE, not per-host. Migration 0015 gave the crawl loop a
- * per-host earned map (`crawls.host_spacing_jsonb`) so a resume re-enters each
- * host at its own spacing rather than the crawl-wide widest — and the render
- * pass deliberately does NOT read it. The pass renders pages of the crawl, which
- * are same-origin by construction (the crawl only enqueues same-origin URLs), so
- * its workload is effectively one host and per-host fidelity would change
- * nothing; and `PageRenderer` takes a single `perHostDelayMs` scalar, not a
- * per-host gate seeded from a map. The crawl-wide widest is the polite direction
- * over that small, explicit set — the over-politeness cost is bounded by the
- * selection — so this stays one number (P13-T3).
- */
-export function renderPaceMs(configuredMs: number, earnedMs: number | null): number {
-  return Math.max(configuredMs, earnedMs ?? 0);
-}
-
 export interface RenderPassOptions {
   /** Graceful shutdown: leasing stops and held leases are released. */
   signal?: AbortSignal;
@@ -256,6 +270,15 @@ export interface RenderPassSummary {
   unrendered: number;
   /** Wall time of the whole pass, selection included. */
   elapsedMs: number;
+  /**
+   * The pass's same-origin requests, summed over every render: `paced` waited
+   * for a gate slot (documents included), `fromCache` were answered by the
+   * shared HTTP cache without reaching the site, `unpacedNetwork` reached the
+   * site without a slot because the cache was predicted to answer and did not
+   * (see the renderer's `FreshnessLedger`). Paint-only and third-party
+   * requests are never sent and are in none of the three.
+   */
+  requests: { paced: number; fromCache: number; unpacedNetwork: number };
 }
 
 /**
@@ -324,7 +347,10 @@ export async function runRenderPass(
   // (its next `leaseBatch` is coming for rows we would have promoted) or one
   // that died mid-run and was never resumed or marked failed. Both leave a
   // frontier in flight; `finished`, `cancelled` and `failed` do not.
-  const { status, hostSpacingMs, platformProfile } = await crawlRow(db, crawlId);
+  const { status, hostSpacingMs, hostSpacingJsonb, platformProfile } = await crawlRow(
+    db,
+    crawlId,
+  );
   // A crawl that has not started yet is unsafe for the same reason a live one
   // is, one step earlier: `queued` is the API queue's accepted-but-not-yet-run
   // state (src/api/service.ts), and the worker that picks it up will seed a
@@ -355,18 +381,28 @@ export async function runRenderPass(
   // rather than a `render_error` for being slow. `min` and `max` against what
   // the caller asked for, so the profile only ever slows the pass down. An
   // opted-out profile (`applied: null`) and a crawl with no platform change
-  // nothing. The spacing is floored by the profile's own `perHostDelayMs` as
-  // well as by what the crawl earned: `host_spacing_ms` usually carries it
-  // already, but a profile is a fact about the site in its own right and the
-  // pass does not depend on another column having recorded it.
+  // nothing. The BASE spacing is floored by the profile's own
+  // `perHostDelayMs`: the crawl's per-host state usually carries it already,
+  // but a profile is a fact about the site in its own right and the pass does
+  // not depend on another column having recorded it. What the crawl EARNED on
+  // top of its base is not folded in here — it is the gate's seed (below),
+  // where it keeps its ratchet level instead of being flattened into a base
+  // that a recovery could never step down from (and that the restored level
+  // would then double again).
   const profiled = renderPacing(
     {
       renderConcurrency: concurrency,
       navigationTimeoutMs: cfg.navigationTimeoutMs ?? RENDERER_DEFAULTS.navigationTimeoutMs,
-      perHostDelayMs: renderPaceMs(cfg.perHostDelayMs, hostSpacingMs),
+      perHostDelayMs: cfg.perHostDelayMs,
     },
     platformProfile,
   );
+  const settleMs = cfg.settleMs ?? RENDERER_DEFAULTS.settleMs;
+  const leaseSeconds = renderLeaseSeconds({
+    renderConcurrency: profiled.renderConcurrency,
+    navigationTimeoutMs: profiled.navigationTimeoutMs,
+    settleMs,
+  });
 
   // STEP 2. Choose the set. After this statement the frontier is the selection
   // — either the automatic one, or the list the caller named, which REPLACES it
@@ -408,13 +444,20 @@ export async function runRenderPass(
     origin: new URL(cfg.siteUrl).origin,
     htmlDir,
     userAgent: cfg.userAgent,
-    // NOT `cfg.perHostDelayMs`. The crawl's ratchet may have earned a wider
-    // spacing than the config asked for, and that lesson is the site's, not
-    // ours to discard between passes — see `renderPaceMs`.
     perHostDelayMs: profiled.perHostDelayMs,
     robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
+    // WHAT THE CRAWL EARNED, which a later pass has no right to forget (rule
+    // 9): the first real-site gate crawl escalated 1000 → 2000 ms and the
+    // render pass that followed went straight back to 1000 ms with the answer
+    // sitting in the database. The per-host state is restored into the gate
+    // as it stands — spacing, ratchet level, recovery count, lock — and the
+    // crawl-wide `host_spacing_ms` covers a host the map does not name (a
+    // pre-0015 crawl has no map at all). `HostGate.restore` throws on a map it
+    // cannot read, and so does the launch.
+    earnedSpacingMs: hostSpacingMs,
+    hostSpacing: hostSpacingJsonb,
     navigationTimeoutMs: profiled.navigationTimeoutMs,
-    ...(cfg.settleMs === undefined ? {} : { settleMs: cfg.settleMs }),
+    settleMs,
     allowPrivate: cfg.allowPrivate === true,
     ...(opts.onRequestBlocked === undefined
       ? {}
@@ -423,6 +466,7 @@ export async function runRenderPass(
 
   let rendered = 0;
   let failures = 0;
+  const requests = { paced: 0, fromCache: 0, unpacedNetwork: 0 };
   const workerIds: string[] = [];
 
   try {
@@ -433,12 +477,40 @@ export async function runRenderPass(
     const workers = Array.from({ length: profiled.renderConcurrency }, (_, i) => {
       const workerId = `render_${crawlId}_${i}`;
       workerIds.push(workerId);
-      return runWorker(db, crawlId, workerId, renderer, opts.signal ?? null, (result) => {
-        if (result.rendered) rendered += 1;
-        else failures += 1;
-      });
+      return runWorker(
+        db,
+        crawlId,
+        workerId,
+        renderer,
+        leaseSeconds,
+        opts.signal ?? null,
+        (result) => {
+          if (result.rendered) rendered += 1;
+          else failures += 1;
+          requests.paced += result.pacedRequests;
+          requests.fromCache += result.cachedResponses;
+          requests.unpacedNetwork += result.unpacedNetworkRequests;
+        },
+      );
     });
-    await Promise.all(workers);
+    try {
+      await Promise.all(workers);
+    } catch (error) {
+      // The pass is stopping on a defect of ours, but the requests it already
+      // made were made: what the site answered them is crawl evidence, and a
+      // host it escalated must not be forgotten by the next pass (rule 9). If
+      // that write fails too, both errors surface.
+      try {
+        await recordRenderThrottle(db, crawlId, hostSpacingJsonb, renderer);
+      } catch (writeError) {
+        throw new AggregateError(
+          [error, writeError],
+          "runRenderPass: the pass failed and its throttle record could not be written either",
+        );
+      }
+      throw error;
+    }
+    await recordRenderThrottle(db, crawlId, hostSpacingJsonb, renderer);
   } finally {
     await renderer.close();
     // A graceful shutdown returns its URLs immediately rather than leaving them
@@ -461,7 +533,39 @@ export async function runRenderPass(
     failures,
     unrendered: after.renderPending,
     elapsedMs: Date.now() - started,
+    requests,
   };
+}
+
+/**
+ * Write the render gate's per-host state back over the crawl's, so the
+ * render's own answers count (Phase 24a §3.4.5): a 429 on a theme script is in
+ * `crawl_status.throttle`, and the escalation it caused binds the next pass.
+ *
+ * The gate was restored FROM this column, so its snapshot is the crawl's record
+ * plus what the render added — counters, escalations, recoveries, lock — not a
+ * replacement of it. `host_spacing_ms` is rewritten from the same gate
+ * (`maxSpacingMs`, which starts at the restored peak), the pair the crawl loop
+ * always writes together.
+ *
+ * ONLY OVER A 24a RECORD. A NULL column (pre-0015, or a crawl that never wrote
+ * one) and a pre-24a `{host: ms}` map are left exactly as they are: the crawl
+ * counted nothing on them, `crawl_status.throttle` says so with `null`, and a
+ * record written now would present the render's counters as the crawl's — a
+ * record of zeros for a crawl that was never counted (rule 7; Task 2's
+ * contract). Such a crawl's render escalations end with the pass.
+ */
+async function recordRenderThrottle(
+  db: Db,
+  crawlId: string,
+  stored: unknown,
+  renderer: PageRenderer,
+): Promise<void> {
+  if (stored === null || throttleRecordOf(stored) === null) return;
+  await db
+    .update(crawls)
+    .set({ hostSpacingJsonb: renderer.throttleSnapshot(), hostSpacingMs: renderer.maxSpacingMs() })
+    .where(eq(crawls.id, crawlId));
 }
 
 /**
@@ -537,12 +641,14 @@ async function crawlRow(
 ): Promise<{
   status: string;
   hostSpacingMs: number | null;
+  hostSpacingJsonb: unknown;
   platformProfile: StoredPlatformProfile | null;
 }> {
   const rows = await db
     .select({
       status: crawls.status,
       hostSpacingMs: crawls.hostSpacingMs,
+      hostSpacingJsonb: crawls.hostSpacingJsonb,
       platformProfile: crawls.platformProfile,
     })
     .from(crawls)
@@ -555,6 +661,7 @@ async function crawlRow(
   return {
     status: row.status,
     hostSpacingMs: row.hostSpacingMs,
+    hostSpacingJsonb: row.hostSpacingJsonb,
     // Validated, not trusted: a profile we cannot read throws (rule 7) rather
     // than rendering a Shopify store with four browsers.
     platformProfile: parseStoredPlatformProfile(row.platformProfile, crawlId),
@@ -599,6 +706,7 @@ async function runWorker(
   crawlId: string,
   workerId: string,
   renderer: PageRenderer,
+  leaseSeconds: number,
   signal: AbortSignal | null,
   onResult: (result: RenderResult) => void,
 ): Promise<void> {
@@ -610,7 +718,7 @@ async function runWorker(
       crawlId,
       workerId,
       1,
-      RENDER_PASS_DEFAULTS.leaseSeconds,
+      leaseSeconds,
     );
     const next = leased[0];
     if (next === undefined) return;

@@ -37,6 +37,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, frontier, pages } from "../../src/db/schema.js";
+import { throttleRecordOf, type HostSpacingEntry } from "../../src/crawl/politeness.js";
 import {
   completeUrls,
   enqueueUrls,
@@ -48,6 +49,7 @@ import { selectRenderSet } from "../../src/crawl/render/select.js";
 import {
   PageRenderer,
   RENDERER_DEFAULTS,
+  freshLifetimeMs,
   renderedHtmlFilename,
   writeRenderResult,
   type RenderResult,
@@ -56,7 +58,7 @@ import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
 import {
   RENDER_PASS_DEFAULTS,
   RenderPassRefusal,
-  renderPaceMs,
+  renderLeaseSeconds,
   runRenderPass,
 } from "../../src/crawl/render/run-render.js";
 
@@ -215,18 +217,70 @@ function staticHtml(n: string): string {
 <body><p>page ${n} body text</p><a href="/a">a</a></body></html>`;
 }
 
+/**
+ * `/paced`: six same-origin, render-blocking, UNCACHEABLE scripts in the head
+ * (Phase 24a). The browser's preload scanner asks for all six at once; the
+ * pacing is what turns that burst into six requests a spacing apart, and the
+ * server's arrival log is the evidence. `no-store`, so no cache can answer one
+ * and every one of them is a real request at the site.
+ */
+const PACED_SCRIPTS = 6;
+function pacedHtml(): string {
+  const scripts = Array.from(
+    { length: PACED_SCRIPTS },
+    (_, i) => `<script src="/paced/${i + 1}.js"></script>`,
+  ).join("");
+  return `<!doctype html><html lang="en"><head><title>Paced</title>${scripts}</head>
+<body><p>six scripts above</p></body></html>`;
+}
+
+/**
+ * `/iso/set` and `/iso/read`: the isolation pair (Review Focus 4). Both load
+ * `/shared.js`, which is CACHEABLE (`max-age=3600`), so the second render can
+ * only avoid asking for it if the HTTP cache survived the first. `/iso/set`
+ * writes a cookie from script, gets one from the server (`Set-Cookie`), and
+ * writes `localStorage.x`; its title reads them straight back, which proves
+ * they were set at all. `/iso/read`'s title reports what IT can see.
+ */
+function isoHtml(write: boolean): string {
+  const writes = write
+    ? "document.cookie = 'js=1; max-age=3600; path=/'; localStorage.setItem('x', '1');"
+    : "";
+  return `<!doctype html><html lang="en"><head><title>pending</title>
+<script src="/shared.js"></script></head>
+<body><p>isolation</p><script>${writes}
+document.title = 'cookie=[' + document.cookie + '] ls=[' + localStorage.getItem('x') + ']';
+</script></body></html>`;
+}
+
+/** `/limited`: a page whose one script the server refuses with a 429. */
+function limitedHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Limited</title>
+<script src="/limited.js"></script></head><body><p>rate limited asset</p></body></html>`;
+}
+
+/** `/one-script`: one uncacheable same-origin script, for the seeded-gate test. */
+function oneScriptHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>One</title>
+<script src="/one.js"></script></head><body><p>one script</p></body></html>`;
+}
+
 interface Site {
   base: string;
-  /** Arrival time (ms) of every document request, in order. */
-  hits: Array<{ path: string; at: number }>;
+  /** Arrival time (ms) of every request, in order, and the cookie it carried. */
+  hits: Array<{ path: string; at: number; cookie?: string }>;
   close(): Promise<void>;
 }
 
 async function startSite(otherOrigin: () => string): Promise<Site> {
-  const hits: Array<{ path: string; at: number }> = [];
+  const hits: Array<{ path: string; at: number; cookie?: string }> = [];
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
-    hits.push({ path, at: Date.now() });
+    hits.push({
+      path,
+      at: Date.now(),
+      ...(req.headers.cookie === undefined ? {} : { cookie: req.headers.cookie }),
+    });
     const html = (body: string): void => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       res.end(body);
@@ -238,6 +292,34 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/offsite-redirect") return html(jsRedirectHtml(`${otherOrigin()}/elsewhere`));
     if (path === "/third-party") return html(thirdPartyHtml(otherOrigin()));
     if (path.startsWith("/static/")) return html(staticHtml(path.slice("/static/".length)));
+    if (path === "/paced") return html(pacedHtml());
+    if (path === "/limited") return html(limitedHtml());
+    if (path === "/one-script") return html(oneScriptHtml());
+    if (path === "/iso/read") return html(isoHtml(false));
+    if (path === "/iso/set") {
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "set-cookie": "srv=1; Max-Age=3600; Path=/",
+      });
+      res.end(isoHtml(true));
+      return;
+    }
+    if (path.startsWith("/paced/") || path === "/one.js") {
+      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
+      res.end("void 0;");
+      return;
+    }
+    if (path === "/shared.js") {
+      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "max-age=3600" });
+      res.end("window.shared = true;");
+      return;
+    }
+    if (path === "/limited.js") {
+      res.writeHead(429, { "content-type": "text/plain", "retry-after": "1" });
+      res.end("slow down");
+      return;
+    }
     if (path === "/own.png") {
       res.writeHead(200, { "content-type": "image/png" });
       res.end(Buffer.alloc(0));
@@ -581,8 +663,10 @@ describe("PageRenderer", () => {
       const result = await hangRenderer.render(`${site.base}/hang`);
 
       expect(result.rendered).toBe(false);
+      // `/hang` has no subresources, so the one request paced is the document.
       expect(result.error).toBe(
-        `timeout: navigation did not reach domcontentloaded within ${NAV_TIMEOUT_MS}ms`,
+        `timeout under pacing (1 requests paced): navigation did not reach ` +
+          `domcontentloaded within ${NAV_TIMEOUT_MS}ms`,
       );
       expect(result.wordCount).toBeNull();
       expect(result.redirectUrl).toBeNull();
@@ -599,6 +683,198 @@ describe("PageRenderer", () => {
     // filters to ok/200), so this only pins that nothing throws.
     expect(result.rendered).toBe(true);
     expect(result.error).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 24a: every same-origin request paced, the cache shared, state cleared.
+// ---------------------------------------------------------------------------
+
+describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
+  let site: Site;
+  let third: Site;
+  let htmlDir: string;
+  /** Timer and loopback noise allowed on a server-side gap (the brief's 20 ms). */
+  const toleranceMs = 20;
+
+  beforeAll(async () => {
+    third = await startThirdParty();
+    site = await startSite(() => third.base);
+    htmlDir = await mkdtemp(join(tmpdir(), "ariadne-render-paced-"));
+  }, 120_000);
+
+  afterAll(async () => {
+    await site.close();
+    await third.close();
+    await rm(htmlDir, { recursive: true, force: true });
+  });
+
+  function launch(overrides: Partial<Parameters<typeof PageRenderer.launch>[0]> = {}) {
+    return PageRenderer.launch({
+      origin: site.base,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render pacing test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      ...overrides,
+    });
+  }
+
+  it("starts every same-origin request at least one spacing after the last", async () => {
+    // Review Focus 5. The preload scanner asks for all six scripts the moment
+    // it sees them; the gate is what spaces them. Measured at the SERVER.
+    const spacingMs = 300;
+    const renderer = await launch({ perHostDelayMs: spacingMs });
+    try {
+      // WARM-UP (see the configured-delay test in the pass suite): the
+      // browser's first navigation is cold and arrives late, which would
+      // SHORTEN the gap after it by our own start-up cost.
+      await renderer.render(`${site.base}/static/warm`);
+      const before = site.hits.length;
+
+      const result = await renderer.render(`${site.base}/paced`);
+
+      expect(result.error).toBeNull();
+      expect(result.rendered).toBe(true);
+      const arrivals = site.hits.slice(before).filter((h) => h.path.startsWith("/paced"));
+      expect(arrivals.map((h) => h.path)).toEqual([
+        "/paced",
+        ...Array.from({ length: PACED_SCRIPTS }, (_, i) => `/paced/${i + 1}.js`),
+      ]);
+      for (let i = 1; i < arrivals.length; i += 1) {
+        expect(arrivals[i]!.at - arrivals[i - 1]!.at).toBeGreaterThanOrEqual(
+          spacingMs - toleranceMs,
+        );
+      }
+      // The document and six scripts, each through the gate; nothing cached.
+      expect(result.pacedRequests).toBe(1 + PACED_SCRIPTS);
+      expect(result.cachedResponses).toBe(0);
+      expect(result.unpacedNetworkRequests).toBe(0);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("clears cookies and storage between pages and keeps the HTTP cache", async () => {
+    // Review Focus 4, both halves on one pair of renders in ONE context.
+    const renderer = await launch();
+    try {
+      const before = site.hits.length;
+
+      const a = await renderer.render(`${site.base}/iso/set`);
+      // Page A really did set them: its own title reads all three back.
+      expect(a.error).toBeNull();
+      expect(a.title).toBe("cookie=[srv=1; js=1] ls=[1]");
+
+      const b = await renderer.render(`${site.base}/iso/read`);
+      expect(b.error).toBeNull();
+      // Page B, next in the same context, sees none of them…
+      expect(b.title).toBe("cookie=[] ls=[null]");
+      // …and the server was not sent the cookies either.
+      const readHit = site.hits.slice(before).find((h) => h.path === "/iso/read")!;
+      expect(readHit.cookie).toBeUndefined();
+
+      // THE CACHE SURVIVED: `/shared.js` was asked for once across two pages,
+      // and page B's copy came from the cache, without a gate slot.
+      const shared = site.hits.slice(before).filter((h) => h.path === "/shared.js");
+      expect(shared.length).toBe(1);
+      expect(b.cachedResponses).toBe(1);
+      expect(b.pacedRequests).toBe(1); // the document only
+      expect(b.unpacedNetworkRequests).toBe(0);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("classifies a page that cannot finish inside its budget at the site's pace", async () => {
+    // Review Focus 5's second half: six scripts at 500 ms need 3 s; the budget
+    // is 2 s. A classified `render_error`, never a dropped URL.
+    const renderer = await launch({ perHostDelayMs: 500, navigationTimeoutMs: 2_000 });
+    try {
+      const result = await renderer.render(`${site.base}/paced`);
+
+      expect(result.rendered).toBe(false);
+      expect(result.error).toMatch(
+        /^timeout under pacing \(\d+ requests paced\): navigation did not reach domcontentloaded within 2000ms$/,
+      );
+      expect(result.pacedRequests).toBeGreaterThan(1);
+      expect(result.wordCount).toBeNull();
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("escalates the host on a subresource 429 and counts it", async () => {
+    const renderer = await launch();
+    try {
+      const host = new URL(site.base).host;
+      expect(renderer.effectiveDelayMs()).toBe(0);
+
+      const result = await renderer.render(`${site.base}/limited`);
+
+      // The page still renders: a refused script is the site's, not a failure.
+      expect(result.rendered).toBe(true);
+      const record = renderer.throttleRecord()[host]!;
+      expect(record.responses429).toBe(1);
+      expect(record.retryAfterSeen).toBe(1);
+      expect(record.escalations).toBe(1);
+      // Base 0 escalates from the gate's 500 ms seed: ×2.
+      expect(renderer.effectiveDelayMs()).toBe(1_000);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("re-enters the host at the spacing the crawl earned, from its first render", async () => {
+    // §3.4.1: configured 1000 ms, escalated twice by the crawl to 4000 ms. The
+    // first render's script waits 4 s after its document, not 1 s.
+    const host = new URL(site.base).host;
+    const seeded: HostSpacingEntry = {
+      spacingMs: 4_000,
+      baseMs: 1_000,
+      responses429: 2,
+      retryAfterSeen: 0,
+      escalations: 2,
+      recoveries: 0,
+      recoveryLocked: false,
+      peakSpacingMs: 4_000,
+    };
+    const renderer = await launch({ perHostDelayMs: 1_000, hostSpacing: { [host]: seeded } });
+    try {
+      expect(renderer.effectiveDelayMs()).toBe(4_000);
+      const before = site.hits.length;
+
+      const result = await renderer.render(`${site.base}/one-script`);
+
+      expect(result.error).toBeNull();
+      const hits = site.hits.slice(before);
+      const doc = hits.find((h) => h.path === "/one-script")!;
+      const script = hits.find((h) => h.path === "/one.js")!;
+      expect(script.at - doc.at).toBeGreaterThanOrEqual(4_000 - toleranceMs);
+      // The crawl's counters ride on: the record is the crawl's plus the render's.
+      expect(renderer.throttleSnapshot()[host]!.responses429).toBe(2);
+    } finally {
+      await renderer.close();
+    }
+  }, 30_000);
+
+  it("refuses to launch over a spacing record it cannot read", async () => {
+    await expect(launch({ hostSpacing: { "a.example": "fast" } })).rejects.toThrow(
+      /host_spacing_jsonb cannot be restored/,
+    );
+  });
+
+  it("predicts the cache only from an explicit, positive max-age", () => {
+    expect(freshLifetimeMs({ "cache-control": "public, max-age=3600" })).toBe(3_600_000 - 5_000);
+    expect(freshLifetimeMs({ "cache-control": "max-age=3600", age: "600" })).toBe(
+      3_000_000 - 5_000,
+    );
+    expect(freshLifetimeMs({ "cache-control": "max-age=3600, no-cache" })).toBeNull();
+    expect(freshLifetimeMs({ "cache-control": "no-store" })).toBeNull();
+    expect(freshLifetimeMs({ "cache-control": "max-age=3" })).toBeNull();
+    expect(freshLifetimeMs({ "cache-control": "max-age=3600", vary: "*" })).toBeNull();
+    expect(freshLifetimeMs({ "last-modified": "Tue, 01 Jan 2030 00:00:00 GMT" })).toBeNull();
   });
 });
 
@@ -856,7 +1132,7 @@ describe("runRenderPass", () => {
 
     const row = await pageRow(crawlId, "/hang");
     expect(row.rendered).toBe(false);
-    expect(row.renderError).toMatch(/^timeout: /);
+    expect(row.renderError).toMatch(/^timeout under pacing \(\d+ requests paced\): /);
     expect(row.renderedWordCount).toBeNull();
     expect(row.renderedRenderableWordCount).toBeNull();
     expect(row.renderedHtmlPath).toBeNull();
@@ -956,14 +1232,107 @@ describe("runRenderPass", () => {
     expect(arrivals[2]! - arrivals[1]!).toBeGreaterThanOrEqual(earnedMs - epsilonMs);
   });
 
-  it("resolves the pace as the wider of configured and earned", () => {
-    // The rule itself, in the four cases that exist. `max`, not "replace": a
-    // caller who asks for wider spacing than the crawl earned keeps it, and a
-    // crawl that never escalated changes nothing.
-    expect(renderPaceMs(1_000, 2_000)).toBe(2_000); // the gate crawl
-    expect(renderPaceMs(2_000, 1_000)).toBe(2_000); // caller asked for wider
-    expect(renderPaceMs(1_000, null)).toBe(1_000); // never escalated
-    expect(renderPaceMs(0, null)).toBe(0); // the fixture-test case
+  it("paces from the per-host state the crawl earned, at its level, not doubled again", async () => {
+    // Phase 24a §3.4.1: the gate is seeded from `host_spacing_jsonb`. The crawl
+    // was configured at 1000 ms and escalated once to 2000 ms, and — as every
+    // real crawl does — wrote both the per-host entry and the crawl-wide
+    // `host_spacing_ms` = 2000. The render must pace at 2000: the BASE comes
+    // back as 1000 at level 1. Folding the crawl-wide 2000 into the base and
+    // then re-applying the level would pace at 4000 — the upper bound below is
+    // that defect's tripwire.
+    const crawlId = await newCrawl(["/static/11", "/static/12", "/static/13"]);
+    const host = new URL(site.base).host;
+    const entry: HostSpacingEntry = {
+      spacingMs: 2_000,
+      baseMs: 1_000,
+      responses429: 1,
+      retryAfterSeen: 0,
+      escalations: 1,
+      recoveries: 0,
+      recoveryLocked: false,
+      peakSpacingMs: 2_000,
+    };
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: 2_000, hostSpacingJsonb: { [host]: entry } })
+      .where(eq(crawls.id, crawlId));
+    const before = site.hits.length;
+
+    await runRenderPass(db, crawlId, passConfig({ perHostDelayMs: 1_000, renderConcurrency: 3 }));
+
+    // Warm-up discipline as above: arrivals[0] is the cold navigation.
+    const arrivals = site.hits
+      .slice(before)
+      .filter((h) => h.path.startsWith("/static/"))
+      .map((h) => h.at);
+    expect(arrivals.length).toBe(3);
+    const gap = arrivals[2]! - arrivals[1]!;
+    expect(gap).toBeGreaterThanOrEqual(2_000 - 50);
+    expect(gap).toBeLessThan(3_000);
+  });
+
+  it("writes the render's own throttle answers back into the crawl's record", async () => {
+    // §3.4.5: a 429 on a subresource during the render escalates the host AND
+    // counts in `crawl_status.throttle`, which is read from this column.
+    const crawlId = await newCrawl(["/limited"]);
+    const host = new URL(site.base).host;
+    const entry: HostSpacingEntry = {
+      spacingMs: 0,
+      baseMs: 0,
+      responses429: 0,
+      retryAfterSeen: 0,
+      escalations: 0,
+      recoveries: 0,
+      recoveryLocked: false,
+      peakSpacingMs: 0,
+    };
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: 0, hostSpacingJsonb: { [host]: entry } })
+      .where(eq(crawls.id, crawlId));
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.rendered).toBe(1);
+    // The document and the refused script, each through the gate.
+    expect(summary.requests.paced).toBe(2);
+    expect(summary.requests.unpacedNetwork).toBe(0);
+    const row = (await db.select().from(crawls).where(eq(crawls.id, crawlId)))[0]!;
+    const record = throttleRecordOf(row.hostSpacingJsonb)!;
+    expect(record[host]!.responses429).toBe(1);
+    expect(record[host]!.retryAfterSeen).toBe(1);
+    expect(record[host]!.escalations).toBe(1);
+    // Base 0 escalates from the 500 ms seed: ×2 = 1000 ms.
+    expect(record[host]!.finalSpacingMs).toBe(1_000);
+    expect(row.hostSpacingMs).toBe(1_000);
+  });
+
+  it("leaves a pre-24a spacing map exactly as it was: that crawl never counted", async () => {
+    // A record written over a `{host: ms}` map would present the render's
+    // counters as the crawl's (Task 2: `throttle` is null for such a crawl).
+    const crawlId = await newCrawl(["/limited"]);
+    const host = new URL(site.base).host;
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: 0, hostSpacingJsonb: { [host]: 0 } })
+      .where(eq(crawls.id, crawlId));
+
+    await runRenderPass(db, crawlId, passConfig());
+
+    const row = (await db.select().from(crawls).where(eq(crawls.id, crawlId)))[0]!;
+    expect(row.hostSpacingJsonb).toEqual({ [host]: 0 });
+    expect(row.hostSpacingMs).toBe(0);
+  });
+
+  it("derives the render lease from the gate cap, the navigation budget and the settle", () => {
+    // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance.
+    expect(
+      renderLeaseSeconds({ renderConcurrency: 4, navigationTimeoutMs: 15_000, settleMs: 3_000 }),
+    ).toBe(318);
+    // The Shopify profile: one browser, a 60 s budget.
+    expect(
+      renderLeaseSeconds({ renderConcurrency: 1, navigationTimeoutMs: 60_000, settleMs: 3_000 }),
+    ).toBe(183);
   });
 
   it("leaves its selection alone when the pass is aborted before it starts", async () => {
@@ -1005,6 +1374,9 @@ describe("runRenderPass", () => {
       error: null,
       blockedRequests: 0,
       skippedPaintRequests: 0,
+      pacedRequests: 0,
+      cachedResponses: 0,
+      unpacedNetworkRequests: 0,
     };
 
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);

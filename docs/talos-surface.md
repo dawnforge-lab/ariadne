@@ -49,6 +49,38 @@ record of zeros. `hostSpacingMs` keeps its meaning (the widest spacing any host 
 but is no longer monotonic over a crawl, because a host that stops pushing back
 can step back down.
 
+**Also Phase 24a: the render pass is paced like the crawl, and `crawl_render` answers
+`requests`.** One field, additive, no tool or route added. The render pass's host gate
+is seeded from the crawl's per-host state (`host_spacing_jsonb`): each host re-enters
+at the spacing, back-off level, recovery count and lock the crawl left it at, with the
+crawl-wide `hostSpacingMs` used only for a host the per-host map does not name. Every
+same-origin request the browser makes that reaches the network waits for that gate:
+documents, redirect hops, scripts, stylesheets, xhr/fetch, same-origin iframes and
+worker scripts. Before 24a only the documents were paced. Paint-only requests (images,
+media, fonts) and third-party requests are still aborted, so they are never sent, paced
+or counted. Popups and service workers are disabled. Every answer is reported into the
+gate, so a subresource 429 escalates the host. At the end of the pass the gate's state
+is written back to `host_spacing_jsonb` and `host_spacing_ms`, so
+`crawl_status.throttle` includes the render's own 429s and the next pass inherits its
+escalations. That write happens only over a 24a record: a null column or a pre-24a
+`{host: ms}` map is left alone and `throttle` stays `null`, because a record written
+then would present render counts as the crawl's. One browser context per render worker
+is reused across URLs, so the HTTP cache survives. Cookies, permissions and the
+origin's storage (`Storage.clearDataForOrigin`: cookies, local storage, IndexedDB,
+WebSQL, file systems, service workers, Cache API, shared storage, storage buckets) are
+cleared between URLs, and `sessionStorage` dies with the page. A request the cache is
+predicted to answer, from an earlier explicit `max-age`, is not paced. `crawl_render`'s
+answer gains `requests: {paced, fromCache, unpacedNetwork}`, summed over the pass.
+`paced` counts requests that waited for a slot, documents included. `fromCache` counts
+responses the HTTP cache served. `unpacedNetwork` counts predicted cache hits that went
+to the network anyway: each one is a request that reached the site unpaced, so it is
+counted rather than hidden, and its URL is paced from then on. A render that runs out
+of navigation budget is `renderError: "timeout under pacing (<n> requests paced):
+navigation did not reach domcontentloaded within <ms>ms"`. Before 24a it started
+`timeout: …`. The render lease is now derived as (2 × renderConcurrency + 1) × 30 s +
+navigation budget + settle + 30 s: 318 s at the defaults and 183 s under the Shopify
+profile, replacing a fixed 120 s.
+
 **What Phase 23 changed here: proven behaviour.** Ruleset 0.18.0, migrations
 0020–0022, and no tool or route added: 14 rules joined (114 rows in
 `rules_catalog`, 13 of them markers), and the changes to what a served crawl
