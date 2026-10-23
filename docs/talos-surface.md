@@ -59,8 +59,13 @@ documents, redirect hops, scripts, stylesheets, xhr/fetch, same-origin iframes a
 worker scripts. Before 24a only the documents were paced. Paint-only requests (images,
 media, fonts) and third-party requests are still aborted, so they are never sent, paced
 or counted. Popups, service workers, shared workers and prerendering are disabled.
-Every connection except `http(s)://` to the crawl's origin goes through a local proxy
-that drops it. That covers WebSockets to any host, the origin included, and anything
+Every connection except `http(s)://` to the crawl's origin host, at its exact port
+(pinned even when it is the default 443 or 80), goes through a local proxy that drops
+it. The origin's name is resolved and approved by url-policy once, at launch, and the
+browser is pinned to that address for the whole pass (`--host-resolver-rules`), so a
+DNS answer that changes mid-pass cannot redirect it. If the name has several A
+records, the first approved IPv4 is used. Every other name resolves to nothing, and a
+name with any answer in blocked address space stops the pass at launch. That covers WebSockets to any host, the origin included, and anything
 the interception cannot see, so no request reaches another host even if interception
 fails. Interception is fail-closed: when a render ends or one of our protocol commands
 fails, every request still paused is failed, never released. Script execution is

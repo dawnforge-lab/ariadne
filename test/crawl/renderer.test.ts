@@ -49,6 +49,7 @@ import { selectRenderSet } from "../../src/crawl/render/select.js";
 import {
   PageRenderer,
   RENDERER_DEFAULTS,
+  browserNetworkSwitches,
   freshLifetimeMs,
   renderedHtmlFilename,
   writeRenderResult,
@@ -1111,6 +1112,95 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     } finally {
       await renderer.close();
     }
+  });
+
+  it("renders a NAMED origin through the address url-policy approved, pinned", async () => {
+    // Fix round 2, DNS pin. `shop.test` resolves nowhere on this machine; the
+    // only way the browser reaches the fixture is the `--host-resolver-rules`
+    // mapping to the address the injected resolver gave url-policy. The
+    // resolver is asked once, at launch (A + AAAA) — a later change of answer
+    // is never asked for, so it cannot redirect the pass.
+    const port = new URL(site.base).port;
+    const origin = `http://shop.test:${port}`;
+    let lookups = 0;
+    let answer = "127.0.0.1";
+    const renderer = await PageRenderer.launch({
+      origin,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render pin test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      resolve: async (_host, type) => {
+        lookups += 1;
+        return type === "A" ? [answer] : [];
+      },
+    });
+    try {
+      expect(lookups).toBe(2);
+      const first = await renderer.render(`${origin}/csr`);
+      expect(first.error).toBeNull();
+      expect(first.wordCount).toBe(CSR_RENDERED_WORDS);
+      // Rebinding: the name now "answers" a private address elsewhere. The
+      // browser never asks; the pin holds.
+      answer = "10.9.9.9";
+      const second = await renderer.render(`${origin}/csr`);
+      expect(second.error).toBeNull();
+      expect(lookups).toBe(2);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("refuses to launch for an origin whose name resolves into blocked space", async () => {
+    await expect(
+      PageRenderer.launch({
+        origin: "http://shop.test:8080",
+        htmlDir,
+        userAgent: "AriadneBot/0.1 (render pin test)",
+        perHostDelayMs: 0,
+        resolve: async (_host, type) => (type === "A" ? ["93.184.216.34", "127.0.0.1"] : []),
+      }),
+    ).rejects.toThrow(/resolves into blocked address space/);
+  });
+
+  it("builds network switches that pin the origin's port and address", () => {
+    // Fix round 2, I-NEW-1: a bypass rule without a port matches EVERY port,
+    // and a default-port origin's `URL.host` has none.
+    expect(
+      browserNetworkSwitches({ origin: "https://shop.com", fencePort: 4100, pinnedAddress: "203.0.113.7" }),
+    ).toEqual([
+      "--proxy-server=http://127.0.0.1:4100",
+      "--proxy-bypass-list=<-loopback>;https://shop.com:443",
+      "--host-resolver-rules=MAP shop.com 203.0.113.7,MAP * ~NOTFOUND,EXCLUDE 127.0.0.1",
+    ]);
+    expect(
+      browserNetworkSwitches({ origin: "http://shop.com/", fencePort: 4100, pinnedAddress: "203.0.113.7" })[1],
+    ).toBe("--proxy-bypass-list=<-loopback>;http://shop.com:80");
+    expect(
+      browserNetworkSwitches({
+        origin: "https://shop.com:8443",
+        fencePort: 4100,
+        pinnedAddress: "2001:db8::7",
+      }).slice(1),
+    ).toEqual([
+      "--proxy-bypass-list=<-loopback>;https://shop.com:8443",
+      "--host-resolver-rules=MAP shop.com [2001:db8::7],MAP * ~NOTFOUND,EXCLUDE 127.0.0.1",
+    ]);
+    // An IP-literal origin: brackets kept, nothing to map, the catch-all stays.
+    expect(
+      browserNetworkSwitches({
+        origin: "http://[2001:db8::1]:8080",
+        fencePort: 4100,
+        pinnedAddress: "2001:db8::1",
+      }).slice(1),
+    ).toEqual([
+      "--proxy-bypass-list=<-loopback>;http://[2001:db8::1]:8080",
+      "--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE 127.0.0.1,EXCLUDE [2001:db8::1]",
+    ]);
+    expect(
+      browserNetworkSwitches({ origin: "https://[2001:db8::1]", fencePort: 4100, pinnedAddress: "2001:db8::1" })[1],
+    ).toBe("--proxy-bypass-list=<-loopback>;https://[2001:db8::1]:443");
   });
 
   it("refuses to launch over a spacing record it cannot read", async () => {

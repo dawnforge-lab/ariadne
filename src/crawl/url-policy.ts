@@ -580,6 +580,58 @@ export async function isUrlAllowed(
     : { allowed: false, reason };
 }
 
+export interface ApprovedAddressOpts extends UrlPolicyOpts {
+  /** Injected in tests; defaults to the real DoH resolver. */
+  resolve?: AddressResolver;
+}
+
+/**
+ * The ONE address a host may be reached at, approved by this policy — for a
+ * client that pins its resolution to it (the render pass's browser:
+ * `--host-resolver-rules`), so nothing resolved later can point the host
+ * somewhere else (DNS rebinding: a public answer at the check, a private one
+ * at the connect).
+ *
+ * An IP literal is its own address, checked as one. A name is resolved (A and
+ * AAAA) and refused if ANY answer is in blocked space — the same "mixed
+ * answers are refused" rule as the start URL (`hostnameResolvesToBlockedAddress`)
+ * — and refused if it has none. Of several approved answers the first IPv4 is
+ * returned (else the first IPv6): a host with several A records is pinned to
+ * one of them for the whole pass, which is a pin, not a load balancer, and the
+ * caller says so. `allowPrivate` (TEST ONLY) relaxes the address check to the
+ * same floor as everywhere else. A resolver failure throws (rule 7).
+ */
+export async function resolveApprovedAddress(
+  hostname: string,
+  opts: ApprovedAddressOpts = {},
+): Promise<string> {
+  const host = normalizeHost(hostname);
+  if (!host) throw new UrlPolicyError("VALIDATION_ERROR", "empty host");
+  const nameReason =
+    opts.allowPrivate === true ? hardBlockedReason(host) : blockedHostReason(host);
+  if (nameReason !== null) {
+    throw new UrlPolicyError("CRAWL_TARGET_BLOCKED", `${host}: ${nameReason}`);
+  }
+  if (parseIpv4(host) !== null || parseIpv6(host) !== null) return host;
+
+  const resolve = opts.resolve ?? resolveViaDoh;
+  const [v4, v6] = await Promise.all([resolve(host, "A"), resolve(host, "AAAA")]);
+  const addresses = [...v4, ...v6];
+  if (addresses.length === 0) {
+    throw new UrlPolicyError("DNS_RESOLUTION_FAILED", `${host} has no A or AAAA record`);
+  }
+  for (const address of addresses) {
+    const reason = blockedAddressReason(address, opts);
+    if (reason !== null) {
+      throw new UrlPolicyError(
+        "CRAWL_TARGET_BLOCKED",
+        `${host} resolves into blocked address space (${address}: ${reason})`,
+      );
+    }
+  }
+  return v4[0] ?? addresses[0]!;
+}
+
 export interface StartUrlOpts {
   /** Injected in tests; defaults to the real DoH resolver. */
   resolve?: AddressResolver;

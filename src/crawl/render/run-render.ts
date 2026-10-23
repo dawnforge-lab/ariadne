@@ -79,6 +79,7 @@
  */
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { eq, sql } from "drizzle-orm";
 
@@ -595,7 +596,9 @@ class RenderThrottleWriter {
   /** At the end of the pass: write if anything at all differs from the last write. */
   final(): Promise<void> {
     return this.enqueue(
-      () => JSON.stringify(this.renderer.throttleSnapshot()) !== JSON.stringify(this.last),
+      // Semantically: the stored value came back from jsonb, whose key order
+      // is not ours, so a string comparison would see changes that are not.
+      () => !isDeepStrictEqual(this.renderer.throttleSnapshot(), this.last),
     );
   }
 

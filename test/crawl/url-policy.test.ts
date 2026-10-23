@@ -3,6 +3,8 @@ import {
   blockedAddressReason,
   isCrawlableUrl,
   isUrlAllowed,
+  resolveApprovedAddress,
+  type AddressResolver,
 } from "../../src/crawl/url-policy.js";
 
 describe("isUrlAllowed", () => {
@@ -348,5 +350,52 @@ describe("isCrawlableUrl", () => {
     expect(isCrawlableUrl("http://127.0.0.1/")).toBe(false);
     expect(isCrawlableUrl("ftp://example.com/")).toBe(false);
     expect(isCrawlableUrl("nonsense")).toBe(false);
+  });
+});
+
+describe("resolveApprovedAddress", () => {
+  const answers =
+    (a: string[], aaaa: string[] = []): AddressResolver =>
+    async (_host, type) =>
+      type === "A" ? a : aaaa;
+
+  it("returns an IP literal as its own address, checked as one", async () => {
+    await expect(resolveApprovedAddress("203.0.113.7")).resolves.toBe("203.0.113.7");
+    await expect(resolveApprovedAddress("[2606:2800:220:1::1]")).resolves.toBe("2606:2800:220:1::1");
+    await expect(resolveApprovedAddress("[::1]")).rejects.toThrow(/loopback/);
+    await expect(resolveApprovedAddress("10.0.0.1")).rejects.toThrow(/private IPv4/);
+  });
+
+  it("pins a name to its first approved IPv4, else its first IPv6", async () => {
+    await expect(
+      resolveApprovedAddress("shop.example", {
+        resolve: answers(["93.184.216.34", "93.184.216.35"], ["2606:2800:220:1::1"]),
+      }),
+    ).resolves.toBe("93.184.216.34");
+    await expect(
+      resolveApprovedAddress("shop.example", { resolve: answers([], ["2606:2800:220:1::1"]) }),
+    ).resolves.toBe("2606:2800:220:1::1");
+  });
+
+  it("refuses a name with ANY answer in blocked space, and one with none", async () => {
+    await expect(
+      resolveApprovedAddress("shop.example", { resolve: answers(["93.184.216.34", "10.0.0.5"]) }),
+    ).rejects.toThrow(/resolves into blocked address space \(10\.0\.0\.5/);
+    await expect(
+      resolveApprovedAddress("shop.example", { resolve: answers([]) }),
+    ).rejects.toThrow(/no A or AAAA record/);
+    await expect(resolveApprovedAddress("metadata.google.internal")).rejects.toThrow(/blocked/);
+  });
+
+  it("relaxes only to the floor under the test-only allowPrivate", async () => {
+    await expect(
+      resolveApprovedAddress("shop.test", { allowPrivate: true, resolve: answers(["127.0.0.1"]) }),
+    ).resolves.toBe("127.0.0.1");
+    await expect(
+      resolveApprovedAddress("shop.test", {
+        allowPrivate: true,
+        resolve: answers(["169.254.169.254"]),
+      }),
+    ).rejects.toThrow(/blocked/);
   });
 });

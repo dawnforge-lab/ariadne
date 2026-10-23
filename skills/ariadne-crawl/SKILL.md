@@ -503,7 +503,10 @@ asked to say so twice.
 **Every request the browser makes to the site is paced, not only the pages.** A page's
 own scripts, stylesheets and data requests wait the same spacing as a page fetch, one
 after another. Images, video, fonts and anything from another domain are never fetched
-at all. The browser keeps its cache from page to page, so a theme's scripts are fetched
+at all. The browser can reach only the site's own address and port. It looks up the
+site's address once, when the pass starts, and keeps using that address. If the lookup
+fails, or any of the site's addresses is a private or internal one, the pass refuses to
+start, and the error says so. The browser keeps its cache from page to page, so a theme's scripts are fetched
 once and then served from the cache without asking the site again. Cookies and stored
 data are cleared between pages, so nothing one page sets changes how the next renders.
 If the site answers a render request with a 429, the engine slows down exactly as it

@@ -50,10 +50,17 @@
  *        and (documents) allowed by url-policy; what survives is paced.
  *     2. FENCED — the browser's proxy is a local listener that drops every
  *        connection (`NetworkFence`), with ONE exception: `http(s)://` to the
- *        crawl's origin. So whatever the interception cannot see still
- *        reaches no other host: a WebSocket to ANY host (the origin included
- *        — the exception is scheme-qualified), a speculation-rules prefetch
- *        of another origin, a request from any target never attached to.
+ *        crawl's origin host AT ITS PORT (pinned even when it is the default
+ *        one — a port-less rule would exempt every port). So whatever the
+ *        interception cannot see still reaches no other host or port: a
+ *        WebSocket to ANY host (the origin included — the exception is
+ *        scheme-qualified), a speculation-rules prefetch of another origin,
+ *        a request from any target never attached to.
+ *     3. PINNED — the origin's name resolves, for the whole pass, to the one
+ *        address url-policy approved at launch (`resolveApprovedAddress`,
+ *        `--host-resolver-rules`), and every other name to nothing. A DNS
+ *        answer that changes mid-pass cannot move the origin somewhere else.
+ *        See `browserNetworkSwitches`.
  *    DISABLED, because their requests are outside a page's interception:
  *    popups (`--block-new-web-contents`), service workers (`serviceWorkers:
  *    "block"`), shared workers (`--disable-shared-workers`), prerendering
@@ -127,7 +134,7 @@ import { headerValue, type HeaderBag } from "../http.js";
 import { HostGate, type HostSpacingEntry, type HostThrottle } from "../politeness.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
-import { isUrlAllowed } from "../url-policy.js";
+import { isUrlAllowed, resolveApprovedAddress, type AddressResolver } from "../url-policy.js";
 
 /**
  * The two waits, as production runs them.
@@ -254,6 +261,12 @@ export interface RendererOptions {
   onRequestBlocked?: (url: string) => void;
   /** TEST ONLY — see `RenderTestFaults`. Never wire it to an API field. */
   testFaults?: RenderTestFaults;
+  /**
+   * The resolver the origin's address is approved through before it is
+   * pinned. Defaults to url-policy's DoH resolver; injected by tests so they
+   * stay offline (an IP-literal origin resolves nothing).
+   */
+  resolve?: AddressResolver;
 }
 
 /**
@@ -783,8 +796,21 @@ class RenderTraffic {
   async shut(): Promise<void> {
     this.open = false;
     this.queue.length = 0;
-    const held = [...this.pending.values()];
-    for (const event of held) await this.fail(event);
+    // EVERY held request is tried, whatever the one before it did: a failure
+    // to fail one is not a reason to leave the rest paused for the close to
+    // let go. The errors are collected and thrown after.
+    const errors: unknown[] = [];
+    for (const event of [...this.pending.values()]) {
+      try {
+        await this.fail(event);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, `render interception: ${errors.length} held requests could not be failed`);
+    }
   }
 
   /**
@@ -1023,6 +1049,9 @@ class RenderTraffic {
    * fence.
    */
   private onSpeculative(requestId: string, url: string): void {
+    // After shut the render's counts are already taken; a prefetch announced
+    // then claims nothing in its name.
+    if (!this.open) return;
     if (!isHttpUrl(url) || !isSameOrigin(url, this.origin)) return;
     if (this.pausedIds.has(requestId) || this.speculative.has(requestId)) return;
     this.speculative.add(requestId);
@@ -1092,6 +1121,9 @@ export interface RenderTestFaults {
   failRelease?: (url: string) => Error | null;
 }
 
+/** Where the network fence listens. */
+const FENCE_HOST = "127.0.0.1";
+
 /**
  * The network fence: a local TCP listener every proxied connection is sent to
  * and dropped at. The browser runs with it as its proxy for EVERYTHING except
@@ -1115,23 +1147,15 @@ class NetworkFence {
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => resolve());
+      server.listen(0, FENCE_HOST, () => resolve());
     });
     fence = new NetworkFence(server);
     return fence;
   }
 
   /** The Chromium switches that put every connection but the origin's through it. */
-  switches(origin: string): string[] {
-    const { port } = this.server.address() as AddressInfo;
-    const parsed = new URL(origin);
-    // `<-loopback>` first: Chromium otherwise sends loopback addresses direct,
-    // and 127.0.0.1 is precisely where an SSRF aims. The origin rule is
-    // scheme-qualified, so only `http(s)://<origin>` goes direct.
-    return [
-      `--proxy-server=http://127.0.0.1:${port}`,
-      `--proxy-bypass-list=<-loopback>;${parsed.protocol}//${parsed.host}`,
-    ];
+  port(): number {
+    return (this.server.address() as AddressInfo).port;
   }
 
   async close(): Promise<void> {
@@ -1139,6 +1163,57 @@ class NetworkFence {
       this.server.close((error) => (error === undefined ? resolve() : reject(error))),
     );
   }
+}
+
+/**
+ * The Chromium switches that confine the browser's network to ONE place: the
+ * crawl's origin, at the address url-policy approved for it. Exported for its
+ * unit test.
+ *
+ *  - `--proxy-server` — every connection goes to the fence (`NetworkFence`),
+ *    which drops it…
+ *  - `--proxy-bypass-list` — …except `http(s)://<origin host>:<port>`.
+ *    `<-loopback>` first: Chromium otherwise sends loopback addresses direct,
+ *    and 127.0.0.1 is precisely where an SSRF aims. The rule names the scheme
+ *    (so `ws://` to the origin is fenced) AND THE EFFECTIVE PORT, always: a
+ *    rule without a port matches every port of the host, and
+ *    `new URL("https://shop.com").host` has none, so a default-port origin
+ *    would otherwise exempt `shop.com:22` and every other port from the
+ *    fence. IPv6 hosts keep their brackets (`URL.hostname` has them).
+ *  - `--host-resolver-rules` — the origin's NAME resolves to the approved
+ *    address and nothing else, for the whole pass: a DNS answer that changes
+ *    mid-pass (rebinding: public at the check, private at the connect) is
+ *    never asked for. Every other name resolves to nothing (`~NOTFOUND`) — a
+ *    second wall behind the fence, since nothing else should be resolved by
+ *    the browser at all. The catch-all excludes the fence's own address and
+ *    an IP-literal origin (which needs no mapping), because Chromium's `*`
+ *    matches literals as well.
+ */
+export function browserNetworkSwitches(opts: {
+  origin: string;
+  fencePort: number;
+  /** The address `resolveApprovedAddress` approved for the origin's host. */
+  pinnedAddress: string;
+}): string[] {
+  const parsed = new URL(opts.origin);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new RangeError(`browserNetworkSwitches: origin must be http(s), got ${opts.origin}`);
+  }
+  const port = parsed.port !== "" ? parsed.port : parsed.protocol === "https:" ? "443" : "80";
+  const host = parsed.hostname;
+  const literal = /^\[.*\]$/.test(host) || /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+  const pinned = opts.pinnedAddress.includes(":") ? `[${opts.pinnedAddress}]` : opts.pinnedAddress;
+  // `MAP *` matches IP literals too (measured: a 127.0.0.1 origin failed
+  // with ERR_NAME_NOT_RESOLVED), so the fence's own address and a literal
+  // origin are EXCLUDEd from the catch-all.
+  const resolverRules = literal
+    ? `MAP * ~NOTFOUND,EXCLUDE ${FENCE_HOST},EXCLUDE ${host}`
+    : `MAP ${host} ${pinned},MAP * ~NOTFOUND,EXCLUDE ${FENCE_HOST}`;
+  return [
+    `--proxy-server=http://${FENCE_HOST}:${opts.fencePort}`,
+    `--proxy-bypass-list=<-loopback>;${parsed.protocol}//${host}:${port}`,
+    `--host-resolver-rules=${resolverRules}`,
+  ];
 }
 
 /**
@@ -1171,6 +1246,7 @@ export class PageRenderer {
         | "earnedSpacingMs"
         | "hostSpacing"
         | "testFaults"
+        | "resolve"
       >
     > & {
       allowPrivate: boolean;
@@ -1215,6 +1291,14 @@ export class PageRenderer {
         );
       }
     }
+    // THE ORIGIN'S ADDRESS, approved once and pinned (see
+    // `browserNetworkSwitches`). A host with several A records is pinned to
+    // the first approved IPv4 for the whole pass: every answer was checked,
+    // one is used. A resolution failure or a blocked answer stops the launch.
+    const pinnedAddress = await resolveApprovedAddress(new URL(options.origin).hostname, {
+      allowPrivate: options.allowPrivate === true,
+      ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
+    });
     const fence = await NetworkFence.open();
     let browser: Browser;
     try {
@@ -1227,7 +1311,11 @@ export class PageRenderer {
           // A shared worker's own requests are outside a page's interception
           // (measured), so there are none.
           "--disable-shared-workers",
-          ...fence.switches(options.origin),
+          ...browserNetworkSwitches({
+            origin: options.origin,
+            fencePort: fence.port(),
+            pinnedAddress,
+          }),
         ],
       });
     } catch (error) {
@@ -1513,8 +1601,13 @@ export class PageRenderer {
       // arrival — and only then close the page, so nothing the page asks for
       // while it unloads is released, and nothing it held is let go by the
       // close. Then the state is cleared through the janitor.
-      await traffic.shut();
-      await this.release(slot, page, traffic, crashed);
+      // The page is released even if the shut threw — closed and cleaned
+      // either way — and then the shut's error surfaces.
+      try {
+        await traffic.shut();
+      } finally {
+        await this.release(slot, page, traffic, crashed);
+      }
     }
   }
 
