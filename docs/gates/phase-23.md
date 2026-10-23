@@ -200,6 +200,24 @@ commits, and **a 50k-scale measurement (`scripts/gate-rules.ts` under
 `--max-old-space-size=512`) remains owed** — the ruling of record is that a
 polite single-site gate cannot reach 50k pages.
 
+**Larger real-site measurement (owner's choice, 2026-10-22).** The owner asked
+for a 50k-capped crawl of yellow.com.mt; its WAF answered this machine 403 for
+any user agent (AriadneBot and a browser UA alike), so the crawl recorded one
+`crawl.blocked` row and stopped — a client allowlist is needed before that
+measurement can run. The owner then chose www.direct-fireplaces.com (Magento
+behind Cloudflare), crawled with the Phase 23 code at the pre-fix `enqueue`
+(before the capped-crawl link fix 1be838c), `maxPages` 50,000, per-host delay
+1 s, resource checks off, render off, under `--max-old-space-size=512`:
+
+| crawl | pages fetched | page rows | elapsed | per-host spacing at end | peak RSS |
+|---|---|---|---|---|---|
+| `crawl_dcf5d7da-49be-4ea5-84ee-4817c459bf79` | 3,131 (2,147 ok, 543 redirect, 441 4xx) | 5,154 (incl. 2,023 robots-blocked rows, never requested) | 13 h 50 m | 16,000 ms (adaptive back-off) | **155.9 MB**, reached at +72 s and flat for the rest of the run |
+
+The site ran out of URLs well below the cap, so this is a ~5k-row real-site
+figure, not 50k; a peak reached in the first minute and never exceeded over
+5,154 rows is consistent with O(concurrency), but the 50k measurement is still
+owed (yellow.com.mt once allowlisted, or another permitted site of that size).
+
 ## 5. Review Focus
 
 | # | focus | pinned by |
