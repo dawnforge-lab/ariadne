@@ -808,6 +808,28 @@ describe("HostGate recovery from back-off", () => {
     expect(g.throttleRecord()[H]?.recoveries).toBe(1);
   });
 
+  it("descends one level per RECOVERY_STREAK, all the way to base, then locks on the next escalation", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled());
+    g.report(H, throttled());
+    g.report(H, throttled());
+    expect(g.spacingMs(H)).toBe(8000);
+    const seen: number[] = [];
+    for (let step = 0; step < 3; step += 1) {
+      cleans(g, RECOVERY_STREAK);
+      seen.push(g.spacingMs(H));
+    }
+    expect(seen).toEqual([4000, 2000, 1000]);
+    expect(g.throttleRecord()[H]).toMatchObject({ recoveries: 3, recoveryLocked: false });
+
+    g.report(H, throttled()); // escalation after recovering → locked
+    expect(g.spacingMs(H)).toBe(2000);
+    expect(g.throttleRecord()[H]?.recoveryLocked).toBe(true);
+    cleans(g, 500);
+    expect(g.spacingMs(H)).toBe(2000);
+    expect(g.throttleRecord()[H]?.recoveries).toBe(3);
+  });
+
   it("never recovers below the host's base", () => {
     const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: 3 });
     cleans(g, 500);
@@ -943,6 +965,14 @@ describe("HostGate snapshot and restore", () => {
     expect(() => g().restore({ [H]: entry({ escalations: 1.5 }) })).toThrow(/escalations/);
     // More recoveries than escalations is impossible.
     expect(() => g().restore({ [H]: entry({ escalations: 1, recoveries: 2 }) })).toThrow(/recoveries/);
+    // A lock with no recovery behind it is impossible: only strike two locks.
+    expect(() =>
+      g().restore({ [H]: entry({ escalations: 1, recoveries: 0, recoveryLocked: true }) }),
+    ).toThrow(/recoveryLocked/);
+    // The possible locked state still loads.
+    expect(() =>
+      g().restore({ [H]: entry({ escalations: 2, recoveries: 1, recoveryLocked: true }) }),
+    ).not.toThrow();
     // A mixed map is neither shape.
     expect(() => g().restore({ [H]: 100, "b.example": entry() })).toThrow(/mix/);
   });

@@ -137,7 +137,11 @@ export interface HostThrottle {
    * is `escalations - recoveries`.
    */
   escalations: number;
-  /** How many times a clean run stepped the host down one level. 0 or 1. */
+  /**
+   * How many times a clean run stepped the host down one level. Any number up
+   * to `escalations`: a host descends one level per `RECOVERY_STREAK` clean
+   * responses until it reaches its base or escalates again (which locks it).
+   */
   recoveries: number;
   /** True once the host escalated after having recovered: no further recovery. */
   recoveryLocked: boolean;
@@ -409,8 +413,8 @@ interface HostState {
   baseMs: number;
   /**
    * The escalation LEVEL in force: the spacing is base × 2^escalations. An
-   * escalation increments it; the one bounded recovery (see `report`, "The
-   * ratchet") decrements it, never below 0.
+   * escalation increments it; each recovery (see `report`, "The ratchet")
+   * decrements it, never below 0.
    */
   escalations: number;
   /** Every escalation this host ever caused, for the throttle record. Never decremented. */
@@ -451,9 +455,9 @@ export class HostGate {
   private highWaterMs: number;
   /**
    * Bumped every time ANY host's spacing changes — an escalation, a recovery,
-   * or a `raiseHostFloor` that actually moved a base. The loop watches it to persist
-   * the per-host map (`maxSpacingMsByHost`) whenever a host moves, not only when
-   * the crawl-wide widest does: a non-widest host that escalates from a value it
+   * or a `raiseHostFloor` that actually moved a base. The loop watches it to
+   * persist the per-host state (`snapshot()`) whenever a host moves, not only
+   * when the crawl-wide widest does: a non-widest host that escalates from a value it
    * was resumed at would otherwise never be re-written, and a hard kill before
    * the close write would leave a resume re-entering that host BELOW what it
    * earned — faster than the site allowed, a rule-9 hole (P13-T3 fix round 1).
@@ -535,16 +539,17 @@ export class HostGate {
    *  - **The 24a `{host: HostSpacingEntry}` map** (`snapshot()`). The host
    *    re-enters at base `max(config, robots, baseMs)`, capped, at level
    *    `escalations - recoveries`, with its counters, its recovery count and its
-   *    lock. So a resumed host can still recover once, and a host that already
-   *    recovered still locks on its next escalation: a resume is not a way round
-   *    the two-strike rule. The clean streak and the pushback streak are NOT
+   *    lock. So an unlocked resumed host can keep descending, and a host that
+   *    already recovered still locks on its next escalation: a resume is not a
+   *    way round the two-strike rule. The clean streak and the pushback streak are NOT
    *    carried: a resume starts both from nothing, which is the slower direction.
    *    `spacingMs` is not read back — it is derived from base and level — and is
    *    stored for readers of the column (it is the number the old map held).
    *
    * A mixed map, a non-object, an array, null, a negative or non-finite number,
-   * a missing or mistyped field, or more recoveries than escalations (impossible:
-   * every recovery undoes an escalation) is a column we cannot read a politeness
+   * a missing or mistyped field, more recoveries than escalations (impossible:
+   * every recovery undoes an escalation), or a lock with no recovery behind it
+   * (impossible: only an escalation after a recovery locks) is a column we cannot read a politeness
    * fact out of, and it throws rather than quietly forgetting a host's earned
    * spacing — which would walk the resume back into the pace that host refused
    * (rules 7 and 9). A NULL column means "no map" and is the caller's to handle:
@@ -708,8 +713,9 @@ export class HostGate {
 
   /**
    * The widest spacing any host has reached — a crawl-wide PEAK, which a
-   * recovery does not lower — the number a lease has to be sized against, because a batch is leased before anyone knows which host's
-   * escalated queue its members will sit in (see the loop's `leaseSecondsFor`).
+   * recovery does not lower. It is the number a lease has to be sized against,
+   * because a batch is leased before anyone knows which host's escalated queue
+   * its members will sit in (see the loop's `leaseSecondsFor`).
    */
   maxSpacingMs(): number {
     return this.highWaterMs;
@@ -722,8 +728,8 @@ export class HostGate {
    * The per-host counterpart of `maxSpacingMs`: that returns the single widest
    * number for lease sizing, this returns each host's own so a resume can
    * re-enter each at ITS earned spacing rather than at the crawl-wide widest
-   * (`earnedSpacingByHost`). Since Phase 24a a host can recover one level, so
-   * this is each host's CURRENT spacing, not its high-water (that is
+   * (`earnedSpacingByHost`). Since Phase 24a a host can recover, so this is
+   * each host's CURRENT spacing, not its high-water (that is
    * `throttleRecord()[host].peakSpacingMs`), and the loop persists the richer
    * `snapshot()` rather than this. O(hosts touched); the map is empty until the
    * first host is seen, which is the honest "no host recorded yet".
@@ -785,12 +791,14 @@ export class HostGate {
    *
    * Until Phase 24a the spacing never wound back at all, which over-learned
    * that lesson: a store that 429s once early in a 10,000-page crawl stayed at
-   * double spacing for every page after it. So there is now exactly ONE bounded
-   * way down, and a lock behind it:
+   * double spacing for every page after it. So there is now a bounded way
+   * down, and a lock behind it:
    *
-   *  - **Recovery.** `RECOVERY_STREAK` (50) consecutive CLEAN responses since
-   *    the host's last escalation step it down one level — the spacing halves,
-   *    never below the host's base (at level 0 there is nothing to give back).
+   *  - **Recovery.** Every `RECOVERY_STREAK` (50) consecutive CLEAN responses
+   *    since the host's last escalation or recovery step it down one level —
+   *    the spacing halves, never below the host's base (at level 0 there is
+   *    nothing to give back). A host escalated three times and then served
+   *    cleanly descends 8× → 4× → 2× → base over 150 clean answers.
    *    Clean is a 2xx, 3xx or a 4xx other than 429, with no `Retry-After`. A
    *    429, any `Retry-After`, a `blocked` refusal (even one that did not
    *    escalate), a bare 503 or any other 5xx, and an outcome with no status at
@@ -801,8 +809,9 @@ export class HostGate {
    *
    * Why it cannot oscillate more than once: the first escalation after any
    * recovery sets the lock, and a locked host never recovers. So one host's
-   * spacing goes up, may come down ONE level ONE time after 50 clean answers in
-   * a row, and from its next escalation on only goes up. A token bucket that
+   * spacing goes up, may then come down (one level per 50 clean answers in a
+   * row), and from its next escalation on only goes up: the spacing turns from
+   * descending to ascending AT MOST ONCE per host per crawl. A token bucket that
    * re-empties after we speed up gets one retry, not an oscillation. A host
    * alternating 200 and 429 never produces 50 clean answers in a row, so it
    * never recovers at all. The lock and the recovery count are persisted with
@@ -862,7 +871,7 @@ export class HostGate {
         escalated = true;
         state.escalations += 1;
         state.escalationsTotal += 1;
-        // Strike two: this host already had its one recovery.
+        // Strike two: this host has already recovered at least once.
         if (state.recoveries > 0) state.recoveryLocked = true;
         this.spacingGen += 1;
         const spacing = this.spacingMs(host);
@@ -1003,6 +1012,11 @@ function parseEntry(host: string, raw: Record<string, unknown>): HostSpacingEntr
   if (entry.recoveries > entry.escalations) {
     throw new RangeError(
       `${where}: recoveries ${entry.recoveries} exceeds escalations ${entry.escalations}; every recovery undoes an escalation`,
+    );
+  }
+  if (entry.recoveryLocked && entry.recoveries === 0) {
+    throw new RangeError(
+      `${where}: recoveryLocked with recoveries 0; only an escalation after a recovery locks a host`,
     );
   }
   return entry;

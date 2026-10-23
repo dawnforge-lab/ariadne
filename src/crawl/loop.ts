@@ -1154,8 +1154,9 @@ async function runToCompletion(
    * floor) — the gate's `spacingGeneration`, not the crawl-wide widest. The
    * throttle counters ride along on those writes; a counter that moves WITHOUT
    * the spacing moving (a `Retry-After` on a response that was not a refusal)
-   * waits for the next move or the close write, which loses only evidence,
-   * never pace. Both are a handful of writes per crawl, but keying on the
+   * waits for the next move or the close write. A hard kill, or a run that
+   * fails by throwing (which skips the close write), loses that counter — only
+   * evidence, never pace. Both are a handful of writes per crawl, but keying on the
    * widest alone left a rule-9 hole: a non-widest host that a resume seeded from
    * the per-host map (say a CDN that earned 8s while the origin stayed at 1s, now
    * resuming with a NEW host wider than the origin) can escalate WITHOUT moving

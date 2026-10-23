@@ -73,8 +73,8 @@ export const crawls = pgTable("crawls", {
   //  - Phase 24a on: `{ host: HostSpacingEntry }` (`HostGate.snapshot()`) —
   //    `{ spacingMs, baseMs, responses429, retryAfterSeen, escalations,
   //    recoveries, recoveryLocked, peakSpacingMs }`, the host's current spacing
-  //    plus its whole ratchet state (base, cumulative escalations, the one
-  //    recovery, the two-strike lock) and its throttle counters, so a resume
+  //    plus its whole ratchet state (base, cumulative escalations, recoveries
+  //    — one level each — and the two-strike lock) and its throttle counters, so a resume
   //    keeps the host's place on the ratchet. No column change: jsonb shape only.
   // A row never mixes the two; `restore` throws on a mixed or malformed map.
   // `host_spacing_ms` above is the WIDEST spacing any single host reached, so a
