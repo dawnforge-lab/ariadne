@@ -216,12 +216,18 @@ describe("renderPacing", () => {
       { maxConcurrency: 16, perHostDelayMs: 0 },
       new Date(),
     );
-    expect(renderPacing(4, 15_000, profile)).toEqual({
+    const asked = { renderConcurrency: 4, navigationTimeoutMs: 15_000, perHostDelayMs: 250 };
+    expect(renderPacing(asked, profile)).toEqual({
       renderConcurrency: 1,
       navigationTimeoutMs: 60_000,
+      // Floored by the profile itself, not only by what host_spacing_ms says.
+      perHostDelayMs: 1000,
     });
-    // A caller already more patient than the profile keeps their budget.
-    expect(renderPacing(4, 90_000, profile).navigationTimeoutMs).toBe(90_000);
+    // A caller already more patient, or slower, than the profile keeps it.
+    expect(renderPacing({ ...asked, navigationTimeoutMs: 90_000 }, profile).navigationTimeoutMs).toBe(
+      90_000,
+    );
+    expect(renderPacing({ ...asked, perHostDelayMs: 4000 }, profile).perHostDelayMs).toBe(4000);
   });
 
   it("changes nothing for an opted-out profile or no platform", () => {
@@ -230,13 +236,8 @@ describe("renderPacing", () => {
       { maxConcurrency: 16, perHostDelayMs: 0, platformProfiles: false },
       new Date(),
     );
-    expect(renderPacing(4, 15_000, optedOut)).toEqual({
-      renderConcurrency: 4,
-      navigationTimeoutMs: 15_000,
-    });
-    expect(renderPacing(4, 15_000, null)).toEqual({
-      renderConcurrency: 4,
-      navigationTimeoutMs: 15_000,
-    });
+    const asked = { renderConcurrency: 4, navigationTimeoutMs: 15_000, perHostDelayMs: 250 };
+    expect(renderPacing(asked, optedOut)).toEqual(asked);
+    expect(renderPacing(asked, null)).toEqual(asked);
   });
 });

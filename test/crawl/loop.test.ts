@@ -2054,8 +2054,12 @@ describe("platform profile", () => {
   let storefrontHeaders: Record<string, string> = {};
   let inFlight = 0;
   let maxInFlight = 0;
-  /** Start times of every page request, robots.txt excluded. */
+  /** Start times of every page request, robots.txt and the sitemap excluded. */
   let starts: number[] = [];
+  /** Every request the site saw, robots.txt and the sitemap included. */
+  let hits: { path: string; start: number; end: number | null }[] = [];
+  /** When true, `/` answers 301 -> `/home` (a two-hop probe chain on one host). */
+  let rootRedirects = false;
 
   const SHOPIFY_HEADERS = {
     "powered-by": "Shopify",
@@ -2066,9 +2070,25 @@ describe("platform profile", () => {
   beforeAll(async () => {
     storefront = createServer((req, res) => {
       const path = req.url ?? "";
+      const hit = { path, start: Date.now(), end: null as number | null };
+      hits.push(hit);
       if (path === "/robots.txt") {
+        hit.end = Date.now();
         res.writeHead(404, { "content-type": "text/plain" });
         res.end("no robots here");
+        return;
+      }
+      if (path === "/sitemap.xml") {
+        hit.end = Date.now();
+        res.writeHead(200, { "content-type": "application/xml" });
+        res.end(
+          `<?xml version="1.0" encoding="UTF-8"?>` +
+            `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+            ["/p1", "/p2", "/p3", "/p4"]
+              .map((p) => `<url><loc>${storefrontBase}${p}</loc></url>`)
+              .join("") +
+            `</urlset>`,
+        );
         return;
       }
       starts.push(Date.now());
@@ -2076,13 +2096,20 @@ describe("platform profile", () => {
       maxInFlight = Math.max(maxInFlight, inFlight);
       setTimeout(() => {
         inFlight -= 1;
+        hit.end = Date.now();
+        if (rootRedirects && path === "/") {
+          res.writeHead(301, { location: "/home", ...storefrontHeaders });
+          res.end();
+          return;
+        }
+        const home = `<a href="/p1">1</a><a href="/p2">2</a><a href="/p3">3</a><a href="/p4">4</a>`;
         const body =
-          path === "/"
-            ? html(`<a href="/p1">1</a><a href="/p2">2</a><a href="/p3">3</a><a href="/p4">4</a>`)
+          path === "/" || path === "/home"
+            ? html(home)
             : path.startsWith("/p")
               ? html(`<p>product ${path}</p>`)
               : html("<p>gone</p>");
-        res.writeHead(path === "/" || path.startsWith("/p") ? 200 : 404, {
+        res.writeHead(path === "/" || path === "/home" || path.startsWith("/p") ? 200 : 404, {
           "content-type": "text/html; charset=utf-8",
           ...storefrontHeaders,
         });
@@ -2102,6 +2129,8 @@ describe("platform profile", () => {
     inFlight = 0;
     maxInFlight = 0;
     starts = [];
+    hits = [];
+    rootRedirects = false;
   }
 
   async function rowOf(crawlId: string) {
@@ -2300,6 +2329,113 @@ describe("platform profile", () => {
       expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
       // Unchanged: the record is when the profile was applied, not re-stamped.
       expect((await rowOf(first.crawlId)).platformProfile).toEqual(recorded);
+    },
+    30_000,
+  );
+
+  /** Page requests (robots.txt and the sitemap excluded), in the order they started. */
+  function pageHits() {
+    return hits
+      .filter((h) => h.path !== "/robots.txt" && h.path !== "/sitemap.xml")
+      .sort((a, b) => a.start - b.start);
+  }
+
+  it(
+    "holds the seed's batch siblings to the new pace when the clamp lands mid-batch",
+    async () => {
+      // The sitemap puts four leaves in the frontier beside the seed, so the
+      // first batch is the seed and three siblings, all inside handleOne at
+      // once. At 250 ms the siblings are asleep on slots at +250/+500/+750 when
+      // the seed's response names Shopify (~40 ms in). Those slots were claimed
+      // at the old pace and must not fire at it.
+      reset(SHOPIFY_HEADERS);
+      const summary = await crawl(
+        config({
+          siteUrl: storefrontBase,
+          maxConcurrency: 4,
+          perHostDelayMs: 250,
+          probeHosts: false,
+          sitemapUrls: [`${storefrontBase}/sitemap.xml`],
+        }),
+      );
+      expect(summary.status).toBe("finished");
+      const row = await rowOf(summary.crawlId);
+      expect(row.platformProfile?.applied?.maxConcurrency).toBe(1);
+      expect(row.platformProfile?.applied?.perHostDelayMs).toBe(1000);
+
+      const page = pageHits();
+      expect(page[0]?.path).toBe("/");
+      expect(page.length).toBeGreaterThanOrEqual(5);
+      for (let i = 1; i < page.length; i += 1) {
+        const prev = page[i - 1];
+        const cur = page[i];
+        if (prev === undefined || cur === undefined) throw new Error("hit missing");
+        // One at a time: nothing starts before the request before it answered…
+        expect(cur.start, `${cur.path} overlaps ${prev.path}`).toBeGreaterThanOrEqual(
+          prev.end ?? Infinity,
+        );
+        // …and a full profile spacing after it started.
+        expect(cur.start - prev.start, `${prev.path} -> ${cur.path}`).toBeGreaterThanOrEqual(
+          1000 - SLACK_MS,
+        );
+      }
+      expect(maxInFlight).toBe(1);
+    },
+    30_000,
+  );
+
+  it(
+    "walks the sitemap at the profile's pace once the probe has named the platform",
+    async () => {
+      reset(SHOPIFY_HEADERS);
+      const summary = await crawl(
+        config({
+          siteUrl: storefrontBase,
+          maxConcurrency: 4,
+          perHostDelayMs: 0,
+          sitemapUrls: [`${storefrontBase}/sitemap.xml`],
+          maxPages: 1,
+        }),
+      );
+      expect((await rowOf(summary.crawlId)).platform).toBe("shopify");
+      const robots = hits.find((h) => h.path === "/robots.txt");
+      const sitemap = hits.find((h) => h.path === "/sitemap.xml");
+      if (robots === undefined || sitemap === undefined) throw new Error("discovery not seen");
+      // Configured at 0 ms, and robots.txt asks for nothing: the floor is the
+      // profile's, carried into discover before it ran.
+      expect(sitemap.start - robots.start).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+    },
+    30_000,
+  );
+
+  it(
+    "paces a resumed profiled crawl's host probe at the profile's floor",
+    async () => {
+      // `/` redirects to `/home`, so the probe's first chain is two hops on one
+      // host — the pair whose spacing the resume must honour.
+      reset(SHOPIFY_HEADERS);
+      rootRedirects = true;
+      const ac = new AbortController();
+      setTimeout(() => ac.abort(), 1_500);
+      const first = await crawl(
+        config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 250 }),
+        ac.signal,
+      );
+      expect(first.status).toBe("cancelled");
+      expect((await rowOf(first.crawlId)).platform).toBe("shopify");
+
+      reset(SHOPIFY_HEADERS);
+      rootRedirects = true;
+      const resumed = await resumeCrawl(db, first.crawlId, {
+        config: config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 250 }),
+        reclaimLeases: true,
+      });
+      expect(resumed.status).toBe("finished");
+      const [root, home] = hits;
+      expect(root?.path).toBe("/");
+      expect(home?.path).toBe("/home");
+      // Configured at 250 ms; the profile the first run recorded floors it.
+      expect((home?.start ?? 0) - (root?.start ?? 0)).toBeGreaterThanOrEqual(1000 - SLACK_MS);
     },
     30_000,
   );

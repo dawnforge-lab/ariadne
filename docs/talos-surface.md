@@ -26,7 +26,12 @@ effect: before the first worker when the probe named the platform, mid-crawl
 when the seed fetch did (requests already in flight finished at the old
 settings). `optedOut: true` with `applied: null` and `appliedAt: null` means the
 operator turned profiles off for this crawl (engine config `platformProfiles:
-false`, which is not a `crawl_start` field) and nothing was clamped.
+false`, which is not a `crawl_start` field) and nothing was clamped. Pacing that
+changed with it, for every crawl: the sitemap walk now waits
+`max(perHostDelayMs, robots Crawl-delay)` between documents (before 24a only the
+robots number was honoured, so a site with no `Crawl-delay` had its shards read
+back-to-back). When the probe has already named the platform, that delay is the
+profile's floor.
 
 **Also Phase 24a: `crawl_status.throttle`.** One field, additive, no
 tool or route added. `throttle` is the per-host record of how hard each host pushed

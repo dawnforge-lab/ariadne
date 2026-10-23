@@ -1037,6 +1037,25 @@ async function storedSpacing(
 }
 
 /**
+ * The pace a crawl runs at under `profile`: the config, with concurrency capped
+ * and spacing floored by what the profile applied. A profile only ever slows a
+ * crawl down; no profile, or an opted-out one (`applied: null`), is the config.
+ */
+function pacingOf(
+  config: CrawlConfig,
+  profile: StoredPlatformProfile | null,
+): { maxConcurrency: number; perHostDelayMs: number } {
+  const applied = profile?.applied ?? null;
+  if (applied === null) {
+    return { maxConcurrency: config.maxConcurrency, perHostDelayMs: config.perHostDelayMs };
+  }
+  return {
+    maxConcurrency: Math.min(config.maxConcurrency, applied.maxConcurrency),
+    perHostDelayMs: Math.max(config.perHostDelayMs, applied.perHostDelayMs),
+  };
+}
+
+/**
  * The platform profile an earlier run of this crawl recorded, or null. The two
  * columns are written together (`recordPlatform`), so one set without the
  * other — or a `platform` that disagrees with the profile's — is a row we
@@ -1106,24 +1125,30 @@ async function runToCompletion(
   // everything after this line happens under the one spelling the crawl was
   // seeded with, robots.txt included. Four chains, up to five hops each, one
   // at a time and paced by `perHostDelayMs` — robots.txt is not readable yet,
-  // so the config delay is the spacing it can honour; see host-probe.
+  // so the config delay is the spacing it can honour; see host-probe. On a
+  // resume of a profiled crawl that delay is already the profile's floor
+  // (`pacingOf`), and on a fresh crawl the hop that names the platform raises
+  // the probe's own gate to it for every hop after (the `onResponse` floor).
   let probePlatform: Platform | null = null;
   if (config.probeHosts !== false) {
     const hostProbe = await probeHostVariants(config.siteUrl, {
       userAgent: config.userAgent,
       allowPrivate,
       legacyHosts: config.legacyHosts,
-      perHostDelayMs: config.perHostDelayMs,
+      perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
       timeoutMs: FETCH_TIMEOUT_MS,
       onResponse: (result) => {
-        probePlatform ??= classifyPlatform(result);
+        if (probePlatform !== null) return undefined;
+        probePlatform = classifyPlatform(result);
+        if (probePlatform === null) return undefined;
+        return pacingOf(config, platformProfileRecord(probePlatform, config, new Date()))
+          .perHostDelayMs;
       },
     });
     await db.update(crawls).set({ hostProbe }).where(eq(crawls.id, crawlId));
   }
   // Named by the probe: applied before the window and the gate exist, so no
-  // worker ever runs at the unclamped pace. (The probe's own remaining hops ran
-  // at the configured spacing: one chain at a time, a handful of requests.)
+  // worker ever runs at the unclamped pace — nor does discovery's sitemap walk.
   if (probePlatform !== null) {
     activeProfile = platformProfileRecord(probePlatform, config, new Date());
     await recordPlatform(activeProfile);
@@ -1132,6 +1157,9 @@ async function runToCompletion(
   const discovery = await discover(config.siteUrl, {
     userAgent: config.userAgent,
     allowPrivate,
+    // The sitemap walk's own spacing: the crawl's, floored by a profile already
+    // known (probe or resume). Robots' Crawl-delay is folded in by discover.
+    perHostDelayMs: pacingOf(config, activeProfile).perHostDelayMs,
     // The documents the client named, walked beside the declared ones. The
     // engine still probes nothing on its own (see discover's header).
     extraSitemaps: config.sitemapUrls,
@@ -1185,15 +1213,7 @@ async function runToCompletion(
   // The pace in force from the first worker: the config, clamped by a profile
   // the probe (or an earlier run of this crawl) already applied. `min`/`max`
   // against the config again, so a profile can only ever slow a crawl down.
-  const applied = activeProfile?.applied ?? null;
-  const maxConcurrency =
-    applied === null
-      ? config.maxConcurrency
-      : Math.min(config.maxConcurrency, applied.maxConcurrency);
-  const perHostDelayMs =
-    applied === null
-      ? config.perHostDelayMs
-      : Math.max(config.perHostDelayMs, applied.perHostDelayMs);
+  const { maxConcurrency, perHostDelayMs } = pacingOf(config, activeProfile);
   const window = new CrawlWindow({
     max: maxConcurrency,
     initial: Math.min(WINDOW_INITIAL, maxConcurrency),
@@ -1616,6 +1636,53 @@ async function runToCompletion(
     return true;
   };
 
+  /**
+   * THE MID-CRAWL CLAMP'S TWO HALVES THE GATE CANNOT DELIVER (Phase 24a fix
+   * round 1). A profile learned off the seed fetch lands while the rest of its
+   * batch is already inside `handleOne`: some siblings are sleeping in
+   * `gate.acquire` on a slot claimed at the OLD spacing, and the window's new
+   * size only binds the NEXT batch. Left alone, those siblings would fire at
+   * the old pace and several at once — exactly what the profile exists to stop.
+   *
+   *  - `platformEpoch` moves once, when the clamp lands. A handler that wakes
+   *    from `acquire` and sees it moved gives the slot up and claims again at
+   *    the new spacing.
+   *  - `sending` counts requests between their slot claim and their response.
+   *    A handler waits for it to drop below `window.maxSize()` before it claims
+   *    a slot at all, so after a clamp to 1 there is never a second request on
+   *    the wire, whatever the batch held. Before a clamp `maxSize()` is at least
+   *    the batch size, so the wait never binds and nothing changes.
+   *
+   * WHY HERE AND NOT IN `HostGate.acquire`. `acquire`'s contract is one claim
+   * per call — the slot it fixes is the slot it returns at — and the ratchet's
+   * timing, its tests and the resource pass all rest on that (see the
+   * `report` docblock on what "the next acquisition" means). Making it
+   * re-claim on every spacing change would quietly change escalation too, a
+   * behaviour Task 1 settled. The profile is a one-off, crawl-level event the
+   * loop owns, so the loop re-claims; the gate stays the gate.
+   */
+  let platformEpoch = 0;
+  let sending = 0;
+
+  /** Wait for the window to have room on the wire, or for the crawl to abort. */
+  const claimSend = async (host: string): Promise<boolean> => {
+    for (;;) {
+      while (sending >= window.maxSize()) {
+        if (signal?.aborted === true) return false;
+        await sleep(ADMIT_POLL_MS);
+      }
+      const epoch = platformEpoch;
+      sending += 1;
+      // Claimed immediately before a fetch we are certainly going to issue —
+      // acquiring earlier would burn the host's slot on work we then skip.
+      await gate.acquire(host);
+      if (platformEpoch === epoch) return true;
+      // The profile landed while we slept on a slot claimed at the old pace:
+      // that slot is void. Give the wire back and claim at the new one.
+      sending -= 1;
+    }
+  };
+
   /** Fetch, parse, persist and enqueue one leased URL. */
   const handleOne = async (
     item: LeasedUrl,
@@ -1623,15 +1690,19 @@ async function runToCompletion(
     if (!(await admit())) return { outcome: null, persisted: false };
     const host = new URL(item.url).host;
     try {
-      // Claimed immediately before a fetch we are certainly going to issue —
-      // acquiring earlier would burn the host's slot on work we then skip.
-      await gate.acquire(host);
-
-      const result = await fetchPage(item.url, {
-        userAgent: config.userAgent,
-        allowPrivate,
-        timeoutMs: FETCH_TIMEOUT_MS,
-      });
+      if (!(await claimSend(host))) return { outcome: null, persisted: false };
+      let result: FetchResult;
+      try {
+        result = await fetchPage(item.url, {
+          userAgent: config.userAgent,
+          allowPrivate,
+          timeoutMs: FETCH_TIMEOUT_MS,
+        });
+      } finally {
+        // Off the wire the moment the response is in: parsing and persisting
+        // are ours, not the site's.
+        sending -= 1;
+      }
 
       // The gate hears about it FIRST, and per fetch rather than per batch, so
       // the escalation is in force for the next ACQUISITION rather than only
@@ -1654,14 +1725,18 @@ async function runToCompletion(
       // the probe did not already answer the question. Workers are running, so
       // the clamp lands mid-crawl: synchronously, before anything else awaits,
       // so every LATER admission sees it — the next batch is leased at the new
-      // window and the next gate acquisition at the new base. Siblings already
-      // in flight finish at the old settings; `appliedAt` says when it changed.
+      // window and the next gate acquisition at the new base. Requests already
+      // SENT finish at the old settings — nothing can recall them — and
+      // `appliedAt` says when it changed. Siblings still waiting on a slot do
+      // NOT: the epoch voids their slot and `sending` holds them to the new
+      // window (see `claimSend`).
       const detected = classifyPlatform(result);
       if (detected !== null) {
         const record = platformProfileRecord(detected, config, new Date());
         if (record.applied !== null) {
           window.clampMax(record.applied.maxConcurrency);
           gate.raiseBase(record.applied.perHostDelayMs);
+          platformEpoch += 1;
         }
         await recordPlatform(record);
       }

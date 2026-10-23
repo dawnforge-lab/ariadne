@@ -26,7 +26,8 @@
  *     selection the budget already bounds (rule 6). Paced at
  *     `renderPaceMs(cfg.perHostDelayMs, crawls.host_spacing_ms)` — the crawl's
  *     configured delay OR the wider one its ratchet earned, whichever is
- *     larger; see that function.
+ *     larger; see that function — and never below the crawl's platform
+ *     profile's `perHostDelayMs` (`renderPacing`).
  *  4. **Record.** Every render — successful or failed — is written to its page
  *     row and its frontier row is completed in the SAME transaction, then the
  *     pass writes its count to `crawls.render_pass_count`.
@@ -354,10 +355,16 @@ export async function runRenderPass(
   // rather than a `render_error` for being slow. `min` and `max` against what
   // the caller asked for, so the profile only ever slows the pass down. An
   // opted-out profile (`applied: null`) and a crawl with no platform change
-  // nothing.
+  // nothing. The spacing is floored by the profile's own `perHostDelayMs` as
+  // well as by what the crawl earned: `host_spacing_ms` usually carries it
+  // already, but a profile is a fact about the site in its own right and the
+  // pass does not depend on another column having recorded it.
   const profiled = renderPacing(
-    concurrency,
-    cfg.navigationTimeoutMs ?? RENDERER_DEFAULTS.navigationTimeoutMs,
+    {
+      renderConcurrency: concurrency,
+      navigationTimeoutMs: cfg.navigationTimeoutMs ?? RENDERER_DEFAULTS.navigationTimeoutMs,
+      perHostDelayMs: renderPaceMs(cfg.perHostDelayMs, hostSpacingMs),
+    },
     platformProfile,
   );
 
@@ -404,7 +411,7 @@ export async function runRenderPass(
     // NOT `cfg.perHostDelayMs`. The crawl's ratchet may have earned a wider
     // spacing than the config asked for, and that lesson is the site's, not
     // ours to discard between passes — see `renderPaceMs`.
-    perHostDelayMs: renderPaceMs(cfg.perHostDelayMs, hostSpacingMs),
+    perHostDelayMs: profiled.perHostDelayMs,
     robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
     navigationTimeoutMs: profiled.navigationTimeoutMs,
     ...(cfg.settleMs === undefined ? {} : { settleMs: cfg.settleMs }),
@@ -554,21 +561,28 @@ async function crawlRow(
   };
 }
 
+export interface RenderPacing {
+  renderConcurrency: number;
+  navigationTimeoutMs: number;
+  perHostDelayMs: number;
+}
+
 /**
- * The render pass's concurrency and navigation budget once the crawl's
- * platform profile has had its say: `min(asked, profile)` contexts and
- * `max(asked, profile)` ms. Exported for its unit test.
+ * The render pass's concurrency, navigation budget and spacing once the
+ * crawl's platform profile has had its say: `min(asked, profile)` contexts,
+ * `max(asked, profile)` ms of navigation, and `max(asked, profile)` ms between
+ * two hits on the host. Exported for its unit test.
  */
 export function renderPacing(
-  renderConcurrency: number,
-  navigationTimeoutMs: number,
+  asked: RenderPacing,
   profile: StoredPlatformProfile | null,
-): { renderConcurrency: number; navigationTimeoutMs: number } {
+): RenderPacing {
   const applied = profile?.applied ?? null;
-  if (applied === null) return { renderConcurrency, navigationTimeoutMs };
+  if (applied === null) return { ...asked };
   return {
-    renderConcurrency: Math.min(renderConcurrency, applied.renderConcurrency),
-    navigationTimeoutMs: Math.max(navigationTimeoutMs, applied.navigationTimeoutMs),
+    renderConcurrency: Math.min(asked.renderConcurrency, applied.renderConcurrency),
+    navigationTimeoutMs: Math.max(asked.navigationTimeoutMs, applied.navigationTimeoutMs),
+    perHostDelayMs: Math.max(asked.perHostDelayMs, applied.perHostDelayMs),
   };
 }
 

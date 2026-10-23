@@ -21,9 +21,14 @@
  *    as opposed to an absent one, which is a 4xx and normal) is retried, and
  *    then means complete disallow, per RFC 9309 §2.3.1.4. A site whose server
  *    is erroring does not get crawled on the assumption it would have let us.
- *  - The crawl-delay it just parsed is applied to its own sitemap walk. Having
- *    read `Crawl-delay: 10` and then fetched 300 shards back-to-back would be
- *    the yellow.com.mt incident with extra steps.
+ *  - Its own sitemap walk is paced at the wider of the crawl's configured
+ *    `perHostDelayMs` (already floored by a platform profile when one is
+ *    known before discovery) and the crawl-delay it just parsed. Having read
+ *    `Crawl-delay: 10` and then fetched 300 shards back-to-back would be the
+ *    yellow.com.mt incident with extra steps — and so would fetching them at
+ *    0 ms on a site the crawl itself paces at 1 s. Until Phase 24a the walk
+ *    honoured only the robots number; a site with no `Crawl-delay` had its
+ *    shards read back-to-back whatever the crawl was configured at.
  *
  * Caps (RFC 9309 for robots, the sitemaps.org protocol and Google's published
  * limits for the rest):
@@ -247,6 +252,26 @@ export interface DiscoveryResult {
   /** Deduped by url, first source wins. */
   sitemapEntries: SitemapEntry[];
   truncation: DiscoveryTruncation;
+}
+
+/**
+ * `discover`'s options: everything `fetchRobots` takes, plus the spacing the
+ * sitemap walk honours.
+ */
+export interface DiscoverOpts extends DiscoveryOpts {
+  /**
+   * The crawl's own spacing between two requests, in ms — `CrawlConfig.
+   * perHostDelayMs`, floored by the crawl's platform profile when the host
+   * probe already named the platform (src/crawl/platform.ts). The sitemap walk
+   * waits `max(this, robots Crawl-delay)` between documents. Required, not
+   * defaulted, for the host probe's reason: a walk paced by a number nobody
+   * chose would be a politeness decision made by omission.
+   *
+   * Unlike the robots number it is NOT bounded by `maxCrawlDelayMs`, which is
+   * a ceiling on what a SITE may ask of us; this is what we asked of
+   * ourselves, and the crawl's gate bounds it the same way (30 s).
+   */
+  perHostDelayMs: number;
 }
 
 export interface DiscoveryOpts {
@@ -861,15 +886,20 @@ function startingSources(declared: readonly string[], supplied: readonly string[
  * The two lists are merged and deduplicated on the normalised spelling
  * (`startingSources`): a document both named is walked once.
  *
- * Documents are read one at a time, spaced by the crawl-delay robots.txt asked
- * for (capped, see MAX_CRAWL_DELAY_MS). Discovery is a handful of requests on
- * a normal site and 300 on a sharded one; reading a `Crawl-delay` and then
- * ignoring it for our own requests is the bug rule 9 exists to prevent.
+ * Documents are read one at a time, spaced by the wider of the crawl's own
+ * `perHostDelayMs` and the crawl-delay robots.txt asked for (the robots number
+ * capped, see MAX_CRAWL_DELAY_MS). Discovery is a handful of requests on a
+ * normal site and 300 on a sharded one; reading a `Crawl-delay` and then
+ * ignoring it for our own requests is the bug rule 9 exists to prevent, and so
+ * is walking 300 shards faster than the crawl that follows will read pages.
  */
 export async function discover(
   siteUrl: string,
-  opts: DiscoveryOpts,
+  opts: DiscoverOpts,
 ): Promise<DiscoveryResult> {
+  if (!Number.isFinite(opts.perHostDelayMs) || opts.perHostDelayMs < 0) {
+    throw new RangeError(`discover: perHostDelayMs must be ≥ 0, got ${opts.perHostDelayMs}`);
+  }
   const allowPrivate = opts.allowPrivate === true;
   const maxEntries = opts.maxEntries ?? MAX_SITEMAP_ENTRIES;
   const unreachableMode = opts.onUnreachableRobots ?? "disallow";
@@ -912,10 +942,11 @@ export async function discover(
   const entries = new Map<string, SitemapEntry>();
 
   // The delay applies from the robots.txt request onwards: that was a request
-  // to this origin too, and the delay it declared starts counting there.
-  const crawlDelayMs = Math.min(
-    (robots.crawlDelaySec ?? 0) * 1000,
-    Math.max(maxCrawlDelayMs, 0),
+  // to this origin too, and the delay it declared starts counting there. The
+  // site's number is capped (MAX_CRAWL_DELAY_MS); ours is the crawl's own.
+  const crawlDelayMs = Math.max(
+    opts.perHostDelayMs,
+    Math.min((robots.crawlDelaySec ?? 0) * 1000, Math.max(maxCrawlDelayMs, 0)),
   );
   let lastRequestAt = robots.attempts > 0 ? Date.now() : null;
 

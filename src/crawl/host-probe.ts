@@ -117,11 +117,17 @@ export interface HostProbeOpts {
    * Told about every hop's full `FetchResult`, in order, as soon as it lands —
    * before the next hop's gate wait. The crawl loop uses it to read the
    * platform off the first page response (src/crawl/platform.ts) without a
-   * second request for the same home page. Observation only: the probe's own
-   * record is unchanged by it, and an error it throws propagates (it is the
-   * caller's bug, not the site's behaviour).
+   * second request for the same home page. The probe's own record is unchanged
+   * by it, and an error it throws propagates (it is the caller's bug, not the
+   * site's behaviour).
+   *
+   * It may return a spacing FLOOR, in ms, for the rest of the probe: when a hop
+   * names Shopify the loop returns the profile's 1 s, and every remaining hop
+   * waits at least that long after the one before it on its host
+   * (`HostGate.raiseBase`). A floor only ever slows the probe down; returning
+   * nothing changes nothing.
    */
-  onResponse?: (result: FetchResult) => void;
+  onResponse?: (result: FetchResult) => number | undefined;
 }
 
 /** Follow one variant to wherever it lands, recording every hop. */
@@ -143,7 +149,8 @@ async function followChain(
       lookup: opts.lookup,
       timeoutMs: opts.timeoutMs,
     });
-    opts.onResponse?.(result);
+    const floorMs = opts.onResponse?.(result);
+    if (floorMs !== undefined) gate.raiseBase(floorMs);
     hops.push({
       url,
       statusCode: result.statusCode,

@@ -241,6 +241,41 @@ describe("probeHostVariants", () => {
     expect(elapsed).toBeGreaterThanOrEqual(2 * delay - 10);
   });
 
+  it("raises its own spacing to the floor a response hook returns, for every later hop", async () => {
+    // Unpaced, until the first 200 answers: the hook returns 300 ms (what the
+    // loop returns when a hop names Shopify). The apex is then asked twice
+    // more — the https spelling, and the www chain's hop back into it — and
+    // each of those must wait the floor after the one before it.
+    const floor = 300;
+    let raised = false;
+    const seen: number[] = [];
+    const t0 = Date.now();
+    const result = await probeHostVariants(`http://site.test:${port}/`, {
+      ...opts(),
+      onResponse: (hop) => {
+        if (new URL(hop.url).hostname === "site.test") seen.push(Date.now() - t0);
+        if (raised || hop.statusCode !== 200) return undefined;
+        raised = true;
+        return floor;
+      },
+    });
+    expect(result.variants).toHaveLength(4);
+    // apex http (200, raise), apex https (answered or not, it is a hop on the
+    // apex), the www chain's hop into the apex.
+    expect(seen.length).toBeGreaterThanOrEqual(3);
+    expect((seen[1] ?? 0) - (seen[0] ?? 0)).toBeGreaterThanOrEqual(floor - 10);
+    expect((seen[2] ?? 0) - (seen[1] ?? 0)).toBeGreaterThanOrEqual(floor - 10);
+  });
+
+  it("is unpaced when the response hook returns no floor", async () => {
+    const t0 = Date.now();
+    await probeHostVariants(`http://site.test:${port}/`, {
+      ...opts(),
+      onResponse: () => undefined,
+    });
+    expect(Date.now() - t0).toBeLessThan(300);
+  });
+
   it("probes legacy hosts alongside the site's own variants", async () => {
     const result = await probeHostVariants(
       `http://site.test:${port}/`,

@@ -20,6 +20,8 @@ const OPTS = {
   allowPrivate: true,
   maxCrawlDelayMs: 0,
   retryBackoffMs: 1,
+  // Unpaced by default; the politeness block sets a real one.
+  perHostDelayMs: 0,
 };
 
 /** The site with a robots.txt: the brief's fixture. */
@@ -38,6 +40,8 @@ let flakyRobotsHits = 0;
 /** A site that asks for a crawl-delay and serves three tiny sitemaps. */
 let paceServer: Server;
 let pace: string;
+/** When each request reached the pace site, robots.txt included, in order. */
+let paceHits: { path: string; at: number }[] = [];
 
 /**
  * Two sites for the origin-variant matrix (build-plan §7, item 4), addressed
@@ -240,6 +244,7 @@ beforeAll(async () => {
   flaky = await listen(flakyServer);
 
   paceServer = createServer((req, res) => {
+    paceHits.push({ path: req.url ?? "", at: Date.now() });
     if (req.url === "/robots.txt") {
       res.setHeader("content-type", "text/plain");
       res.end("User-agent: *\nCrawl-delay: 5\n");
@@ -497,6 +502,30 @@ describe("discover: politeness", () => {
     expect(elapsed).toBeGreaterThanOrEqual(340);
     expect(elapsed).toBeLessThan(3_000);
     expect(d.sitemapEntries).toHaveLength(2);
+  });
+
+  it("spaces sitemap fetches by the crawl's own delay when robots.txt asks for less", async () => {
+    // The pace site asks for 5 s; a ceiling of 0 silences it, so the only
+    // spacing left is the crawl's own. Before 24a this walk ran back-to-back.
+    paceHits = [];
+    const d = await discover(pace, {
+      ...OPTS,
+      extraSitemaps: [`${pace}/p1.xml`],
+      maxCrawlDelayMs: 0,
+      perHostDelayMs: 150,
+    });
+    expect(d.truncation.docsFetched).toBe(3);
+    expect(paceHits.map((h) => h.path)).toEqual(["/robots.txt", "/p1.xml", "/p2.xml", "/p3.xml"]);
+    // Measured at the site: every request starts at least the spacing after
+    // the one before it (the gap is counted from the previous one's end).
+    for (let i = 1; i < paceHits.length; i += 1) {
+      const gap = (paceHits[i]?.at ?? 0) - (paceHits[i - 1]?.at ?? 0);
+      expect(gap, `${paceHits[i]?.path}`).toBeGreaterThanOrEqual(150 - 5);
+    }
+  });
+
+  it("refuses a perHostDelayMs it cannot pace by", async () => {
+    await expect(discover(pace, { ...OPTS, perHostDelayMs: -1 })).rejects.toThrow(RangeError);
   });
 
   it("is fast when pacing is off, so the delay above is the delay", async () => {
