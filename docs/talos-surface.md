@@ -502,7 +502,7 @@ above the crawl's base is a finding — a host refused us and the engine backed 
 at 8s. Until Phase 12 it did not: the gate came up at the configured floor and
 the first spacing write put that floor back over the evidence, which made the
 regression invisible from `crawl_status` as well as rude to the site
-(`test/crawl/loop.test.ts:1557` "resumes at the spacing the crawl earned, not the
+(`test/crawl/loop.test.ts:1570` "resumes at the spacing the crawl earned, not the
 one it was configured with").
 
 Two things that column is not, because a reader will otherwise assume both:
@@ -511,7 +511,8 @@ Two things that column is not, because a reader will otherwise assume both:
   the whole crawl — the widest spacing any host reached — so on its own it would
   apply that width to *every* host a resume touches, including ones that never
   pushed back. Since Phase 13 (migration 0015) the per-host truth lives beside it
-  in `crawls.host_spacing_jsonb` (`{host: earnedMs}`): each host re-enters ITS OWN
+  in `crawls.host_spacing_jsonb` (`{host: earnedMs}` before Phase 24a; since then each
+  host's whole ratchet state, `HostGate.snapshot()`): each host re-enters ITS OWN
   earned spacing, so a crawl whose CDN earned 8s while the origin stayed at 1s
   resumes the CDN at 8s and the origin at 1s. `host_spacing_ms` stays as the
   fallback a host the map does not name falls back to — a URL discovered only on

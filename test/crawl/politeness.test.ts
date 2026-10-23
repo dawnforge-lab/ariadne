@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   CrawlWindow,
   HostGate,
+  RECOVERY_STREAK,
   type BatchOutcome,
+  type HostOutcome,
 } from "../../src/crawl/politeness.js";
 
 const ok = (ms = 100): BatchOutcome => ({
@@ -685,5 +687,269 @@ describe("HostGate escalation", () => {
       g.report("a.example", fine());
     }
     expect(g.spacingMs("a.example")).toBe(1000);
+  });
+});
+
+// --- Phase 24a: the bounded recovery, the two-strike lock, the throttle record ---
+
+describe("HostGate recovery from back-off", () => {
+  const H = "a.example";
+  const throttled = (url = "https://a.example/t"): HostOutcome => ({
+    fetchClass: "blocked",
+    statusCode: 429,
+    retryAfterMs: null,
+    url,
+  });
+  const clean = (i = 0): HostOutcome => ({
+    fetchClass: "ok",
+    statusCode: 200,
+    retryAfterMs: null,
+    url: `https://a.example/p${i}`,
+  });
+  const cleans = (g: HostGate, n: number) => {
+    for (let i = 0; i < n; i += 1) g.report(H, clean(i));
+  };
+
+  it("pins RECOVERY_STREAK at 50", () => {
+    expect(RECOVERY_STREAK).toBe(50);
+  });
+
+  it("2 x 429 then RECOVERY_STREAK x 200 halves the spacing once", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled());
+    g.report(H, throttled());
+    expect(g.spacingMs(H)).toBe(4000);
+
+    cleans(g, RECOVERY_STREAK - 1);
+    expect(g.spacingMs(H)).toBe(4000); // one short: nothing yet
+    g.report(H, clean());
+    expect(g.spacingMs(H)).toBe(2000); // halved, once
+    expect(g.throttleRecord()[H]?.recoveries).toBe(1);
+    // The crawl-wide peak is kept for lease sizing; only the host moved down.
+    expect(g.maxSpacingMs()).toBe(4000);
+  });
+
+  it("a recovery moves the spacing generation, so the loop re-persists it", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled());
+    const gen = g.spacingGeneration();
+    cleans(g, RECOVERY_STREAK);
+    expect(g.spacingGeneration()).toBe(gen + 1);
+  });
+
+  it("an escalation after a recovery locks recovery for the rest of the crawl", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled());
+    g.report(H, throttled());
+    cleans(g, RECOVERY_STREAK); // → 2000, recoveries 1
+    expect(g.throttleRecord()[H]?.recoveryLocked).toBe(false);
+    g.report(H, throttled()); // strike two → 4000, locked
+    expect(g.spacingMs(H)).toBe(4000);
+    expect(g.throttleRecord()[H]?.recoveryLocked).toBe(true);
+
+    cleans(g, 500);
+    expect(g.spacingMs(H)).toBe(4000);
+    expect(g.throttleRecord()[H]?.recoveries).toBe(1);
+  });
+
+  it("alternating 200/429 never recovers more than once (the token-bucket shape)", () => {
+    const g = new HostGate({ perHostDelayMs: 100, robotsCrawlDelaySec: null });
+    for (let i = 0; i < 200; i += 1) {
+      g.report(H, clean(i));
+      g.report(H, throttled());
+    }
+    expect(g.throttleRecord()[H]!.recoveries).toBeLessThanOrEqual(1);
+
+    // And with clean bursts long enough to recover every time, it still recovers
+    // exactly once, locks, and its spacing comes down at most once overall.
+    const b = new HostGate({ perHostDelayMs: 100, robotsCrawlDelaySec: null });
+    const seen: number[] = [];
+    for (let round = 0; round < 20; round += 1) {
+      b.report(H, throttled());
+      seen.push(b.spacingMs(H));
+      cleans(b, RECOVERY_STREAK);
+      seen.push(b.spacingMs(H));
+    }
+    expect(b.throttleRecord()[H]!.recoveries).toBe(1);
+    expect(b.throttleRecord()[H]!.recoveryLocked).toBe(true);
+    let downs = 0;
+    for (let i = 1; i < seen.length; i += 1) if (seen[i]! < seen[i - 1]!) downs += 1;
+    expect(downs).toBe(1);
+  });
+
+  it("a non-clean response breaks the clean streak", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled());
+    cleans(g, RECOVERY_STREAK - 1);
+    // A lone 403 (pushback that does not escalate) and a 500 are not clean.
+    g.report(H, { fetchClass: "blocked", statusCode: 403, retryAfterMs: null, url: "https://a.example/x" });
+    cleans(g, RECOVERY_STREAK - 1);
+    g.report(H, { fetchClass: "server_error", statusCode: 500, retryAfterMs: null, url: "https://a.example/y" });
+    cleans(g, RECOVERY_STREAK - 1);
+    // A 200 that carries a Retry-After is not clean either.
+    g.report(H, { fetchClass: "ok", statusCode: 200, retryAfterMs: 10, url: "https://a.example/z" });
+    cleans(g, RECOVERY_STREAK - 1);
+    // No status at all (a network error) is not clean.
+    g.report(H, { fetchClass: "network_error", statusCode: null, retryAfterMs: null, url: "https://a.example/n" });
+    cleans(g, RECOVERY_STREAK - 1);
+    expect(g.spacingMs(H)).toBe(2000);
+    expect(g.throttleRecord()[H]?.recoveries).toBe(0);
+    // A 3xx IS clean: it completes the streak.
+    g.report(H, { fetchClass: "redirect", statusCode: 301, retryAfterMs: null, url: "https://a.example/r" });
+    expect(g.spacingMs(H)).toBe(1000);
+  });
+
+  it("a non-429 4xx is clean", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled());
+    cleans(g, RECOVERY_STREAK - 1);
+    g.report(H, { fetchClass: "client_error", statusCode: 404, retryAfterMs: null, url: "https://a.example/404" });
+    expect(g.spacingMs(H)).toBe(1000);
+    expect(g.throttleRecord()[H]?.recoveries).toBe(1);
+  });
+
+  it("never recovers below the host's base", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: 3 });
+    cleans(g, 500);
+    expect(g.spacingMs(H)).toBe(3000);
+    expect(g.throttleRecord()[H]?.recoveries).toBe(0);
+
+    g.report(H, throttled());
+    cleans(g, RECOVERY_STREAK * 5);
+    expect(g.spacingMs(H)).toBe(3000);
+    expect(g.throttleRecord()[H]?.recoveries).toBe(1);
+  });
+
+  it("counts exactly what it was told", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled()); // 429 → escalation 1, 2000
+    g.report(H, { ...throttled(), retryAfterMs: 5 }); // 429 + Retry-After → escalation 2, 4000
+    g.report(H, { fetchClass: "server_error", statusCode: 503, retryAfterMs: 7, url: "https://a.example/s" }); // Retry-After → escalation 3, 8000
+    g.report(H, { fetchClass: "ok", statusCode: 200, retryAfterMs: 9, url: "https://a.example/o" }); // Retry-After, not pushback: no escalation
+    cleans(g, RECOVERY_STREAK); // recovery → 4000
+    g.report("b.example", { fetchClass: "ok", statusCode: 200, retryAfterMs: null, url: "https://b.example/" });
+
+    expect(g.throttleRecord()).toEqual({
+      [H]: {
+        responses429: 2,
+        retryAfterSeen: 3,
+        escalations: 3,
+        recoveries: 1,
+        recoveryLocked: false,
+        peakSpacingMs: 8000,
+        finalSpacingMs: 4000,
+      },
+      "b.example": {
+        responses429: 0,
+        retryAfterSeen: 0,
+        escalations: 0,
+        recoveries: 0,
+        recoveryLocked: false,
+        peakSpacingMs: 1000,
+        finalSpacingMs: 1000,
+      },
+    });
+  });
+});
+
+describe("HostGate snapshot and restore", () => {
+  const H = "a.example";
+  const throttled: HostOutcome = { fetchClass: "blocked", statusCode: 429, retryAfterMs: null, url: "https://a.example/t" };
+  const clean: HostOutcome = { fetchClass: "ok", statusCode: 200, retryAfterMs: null, url: "https://a.example/" };
+  const entry = (over: Record<string, unknown> = {}) => ({
+    spacingMs: 100,
+    baseMs: 100,
+    responses429: 0,
+    retryAfterSeen: 0,
+    escalations: 0,
+    recoveries: 0,
+    recoveryLocked: false,
+    peakSpacingMs: 100,
+    ...over,
+  });
+
+  it("round-trips the escalation state, so a resumed host can still recover and still locks", () => {
+    const g = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    g.report(H, throttled);
+    g.report(H, throttled);
+    g.report(H, throttled); // 8000
+    for (let i = 0; i < RECOVERY_STREAK; i += 1) g.report(H, clean); // → 4000, recoveries 1
+    const snap = g.snapshot();
+    expect(snap[H]).toEqual({
+      spacingMs: 4000,
+      baseMs: 1000,
+      responses429: 3,
+      retryAfterSeen: 0,
+      escalations: 3,
+      recoveries: 1,
+      recoveryLocked: false,
+      peakSpacingMs: 8000,
+    });
+    // Through JSON, as the jsonb column carries it.
+    const r = new HostGate({ perHostDelayMs: 1000, robotsCrawlDelaySec: null });
+    r.restore(JSON.parse(JSON.stringify(snap)));
+    expect(r.spacingMs(H)).toBe(4000);
+    expect(r.throttleRecord()).toEqual(g.throttleRecord());
+    expect(r.snapshot()).toEqual(snap);
+    expect(r.maxSpacingMs()).toBe(8000);
+    // Strike two after the resume still locks: the recovery was remembered.
+    r.report(H, throttled);
+    expect(r.throttleRecord()[H]?.recoveryLocked).toBe(true);
+  });
+
+  it("re-enters a restored host at its stored base and level, and recovers no lower than the base", () => {
+    const g = new HostGate({ perHostDelayMs: 0, robotsCrawlDelaySec: null });
+    g.restore({
+      [H]: entry({ spacingMs: 160, baseMs: 40, responses429: 2, escalations: 2, peakSpacingMs: 160 }),
+    });
+    expect(g.spacingMs(H)).toBe(160);
+    for (let i = 0; i < RECOVERY_STREAK; i += 1) g.report(H, clean);
+    expect(g.spacingMs(H)).toBe(80);
+  });
+
+  it("a restored base still loses to a wider config floor", () => {
+    const g = new HostGate({ perHostDelayMs: 500, robotsCrawlDelaySec: null });
+    g.restore({ [H]: entry({ spacingMs: 80, baseMs: 40, escalations: 1, responses429: 1, peakSpacingMs: 80 }) });
+    expect(g.spacingMs(H)).toBe(1000); // 500 base, one level
+  });
+
+  it("accepts the pre-24a {host: ms} map, and the earned spacing still binds", () => {
+    const g = new HostGate({ perHostDelayMs: 0, robotsCrawlDelaySec: null });
+    g.restore({ [H]: 250, "b.example": 40 });
+    expect(g.spacingMs(H)).toBe(250);
+    expect(g.spacingMs("b.example")).toBe(40);
+    // The old map carried no escalation level, so the number is the host's base:
+    // there is nothing to recover, and the earned spacing holds however clean.
+    for (let i = 0; i < RECOVERY_STREAK * 3; i += 1) g.report(H, clean);
+    expect(g.spacingMs(H)).toBe(250);
+    expect(g.maxSpacingMs()).toBe(250);
+  });
+
+  it("accepts an empty map", () => {
+    const g = new HostGate({ perHostDelayMs: 10, robotsCrawlDelaySec: null });
+    g.restore({});
+    expect(g.throttleRecord()).toEqual({});
+  });
+
+  it("throws on anything that is neither shape", () => {
+    const g = () => new HostGate({ perHostDelayMs: 10, robotsCrawlDelaySec: null });
+    expect(() => g().restore("{}")).toThrow(/host_spacing_jsonb/);
+    expect(() => g().restore(null)).toThrow(/host_spacing_jsonb/);
+    expect(() => g().restore([1, 2])).toThrow(/host_spacing_jsonb/);
+    expect(() => g().restore({ [H]: -1 })).toThrow(/a\.example/);
+    expect(() => g().restore({ [H]: "250" })).toThrow(/a\.example/);
+    expect(() => g().restore({ [H]: { spacingMs: 100 } })).toThrow(/baseMs/);
+    expect(() => g().restore({ [H]: entry({ recoveryLocked: "no" }) })).toThrow(/recoveryLocked/);
+    expect(() => g().restore({ [H]: entry({ escalations: 1.5 }) })).toThrow(/escalations/);
+    // More recoveries than escalations is impossible.
+    expect(() => g().restore({ [H]: entry({ escalations: 1, recoveries: 2 }) })).toThrow(/recoveries/);
+    // A mixed map is neither shape.
+    expect(() => g().restore({ [H]: 100, "b.example": entry() })).toThrow(/mix/);
+  });
+
+  it("refuses to restore over a gate that has already seen a host", () => {
+    const g = new HostGate({ perHostDelayMs: 10, robotsCrawlDelaySec: null });
+    g.report(H, clean);
+    expect(() => g.restore({ [H]: 100 })).toThrow(/already/);
   });
 });

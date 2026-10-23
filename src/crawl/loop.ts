@@ -599,10 +599,14 @@ export async function runCrawl(
  * as rude to the site.
  *
  * Since migration 0015 that re-entry is PER HOST. `crawls.host_spacing_jsonb`
- * ({host: earnedMs}, `HostGate.earnedSpacingByHost`) is the same finding split
- * by host, so each host resumes at ITS OWN earned spacing rather than at the
- * single crawl-wide widest — a crawl whose CDN earned 8s while the origin stayed
- * at 1s resumes the origin at 1s. A host the map does not name (discovered only
+ * (`HostGate.restore`) is the same finding split by host, so each host resumes
+ * at ITS OWN earned spacing rather than at the single crawl-wide widest — a
+ * crawl whose CDN earned 8s while the origin stayed at 1s resumes the origin at
+ * 1s. Since Phase 24a the map carries each host's whole ratchet state (base,
+ * level, recovery count, two-strike lock, throttle counters), so a resumed host
+ * keeps its place on the ratchet and a resume is not a way round the lock; a
+ * pre-24a `{host: ms}` map still loads, each number re-entering as that host's
+ * base. A host the map does not name (discovered only
  * on the continuation) and a pre-0015 crawl whose map is null both fall back to
  * the crawl-wide `host_spacing_ms`, which stays for exactly that — honest
  * degradation in the polite direction, never a fabricated per-host split.
@@ -974,7 +978,8 @@ async function execute(
 
 /**
  * The earned spacing the next run of this crawl must read back — the crawl-wide
- * `crawls.host_spacing_ms` AND the per-host `crawls.host_spacing_jsonb`.
+ * `crawls.host_spacing_ms` AND the per-host `crawls.host_spacing_jsonb` (raw:
+ * `HostGate.restore` validates it).
  *
  * A missing row is a defect rather than a null: `runToCompletion` is only ever
  * reached through a crawl whose row this process just wrote or just read, so a
@@ -984,17 +989,18 @@ async function execute(
  *
  * The jsonb is data this engine wrote, but it has been through a column and
  * possibly a schema change, so it is validated rather than trusted (the
- * `parseStoredConfig` precedent). Null is the honest "no map" — a fresh crawl,
- * or a pre-0015 row; the gate then falls each host back to the crawl-wide
- * number. A present-but-malformed map (not an object, or a value that is not a
- * finite ≥ 0 number) is not silently dropped: it throws, because a resume that
- * quietly forgot a host's earned spacing would walk back into the pace that
- * host refused (hard rules 7 and 9). The gate re-checks the ranges too.
+ * `parseStoredConfig` precedent) — by `HostGate.restore`, which owns both of its
+ * shapes (pre-24a `{host: ms}`, 24a `{host: HostSpacingEntry}`). Null is the
+ * honest "no map" — a fresh crawl, or a pre-0015 row; the gate then falls each
+ * host back to the crawl-wide number. A present-but-malformed map is not
+ * silently dropped: `restore` throws, because a resume that quietly forgot a
+ * host's earned spacing would walk back into the pace that host refused (hard
+ * rules 7 and 9).
  */
 async function storedSpacing(
   db: Db,
   crawlId: string,
-): Promise<{ earnedSpacingMs: number | null; earnedSpacingByHost: Record<string, number> | null }> {
+): Promise<{ earnedSpacingMs: number | null; hostSpacingJsonb: unknown }> {
   const rows = await db
     .select({ hostSpacingMs: crawls.hostSpacingMs, hostSpacingJsonb: crawls.hostSpacingJsonb })
     .from(crawls)
@@ -1004,10 +1010,7 @@ async function storedSpacing(
   if (row === undefined) {
     throw new Error(`crawl ${crawlId}: the crawls row is gone; cannot read its earned spacing`);
   }
-  return {
-    earnedSpacingMs: row.hostSpacingMs,
-    earnedSpacingByHost: parseHostSpacing(row.hostSpacingJsonb, crawlId),
-  };
+  return { earnedSpacingMs: row.hostSpacingMs, hostSpacingJsonb: row.hostSpacingJsonb };
 }
 
 /**
@@ -1018,27 +1021,6 @@ async function storedSpacing(
  * the work done past a full frontier.
  */
 const ENQUEUE_LOOKUP_CHUNK = 1_000;
-
-/**
- * `crawls.host_spacing_jsonb` as a `{host: earnedMs}` map, or null for the
- * honest "no per-host reading" (a fresh crawl, a pre-0015 row). Anything else is
- * a column we cannot read a politeness fact out of, and it stops the resume
- * rather than dropping a host's earned spacing silently (hard rule 7).
- */
-function parseHostSpacing(value: unknown, crawlId: string): Record<string, number> | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`crawl ${crawlId}: stored host_spacing_jsonb is not an object`);
-  }
-  for (const [host, ms] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
-      throw new Error(
-        `crawl ${crawlId}: stored host_spacing_jsonb[${host}] is not a number of ms ≥ 0`,
-      );
-    }
-  }
-  return value as Record<string, number>;
-}
 
 async function runToCompletion(
   db: Db,
@@ -1132,21 +1114,33 @@ async function runToCompletion(
   // the evidence with the configured floor on the very first `recordSpacing`
   // below. `HostGate` folds it into the same max as robots' `Crawl-delay`; see
   // `earnedSpacingMs` there for why the policy lives in that module.
-  const { earnedSpacingMs, earnedSpacingByHost } = await storedSpacing(db, crawlId);
+  const { earnedSpacingMs, hostSpacingJsonb } = await storedSpacing(db, crawlId);
   const gate = new HostGate({
     perHostDelayMs: config.perHostDelayMs,
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
     earnedSpacingMs,
-    // The PER-HOST map beside the crawl-wide number: each host re-enters its own
-    // earned spacing rather than the widest any host reached (migration 0015).
-    // Null on a fresh or pre-0015 crawl, when every host falls back to the
-    // crawl-wide `earnedSpacingMs`; see `earnedSpacingByHost` in politeness.
-    earnedSpacingByHost,
   });
+  // The PER-HOST state beside the crawl-wide number: each host re-enters its own
+  // earned spacing — and, since Phase 24a, its place on the ratchet — rather than
+  // the widest any host reached (migration 0015). Null on a fresh or pre-0015
+  // crawl, when every host falls back to the crawl-wide `earnedSpacingMs`. A
+  // column `restore` cannot read stops the run, naming the crawl (rule 7).
+  if (hostSpacingJsonb !== null) {
+    try {
+      gate.restore(hostSpacingJsonb);
+    } catch (error) {
+      throw new Error(
+        `crawl ${crawlId}: stored host_spacing_jsonb cannot be restored: ${(error as Error).message}`,
+        { cause: error },
+      );
+    }
+  }
 
   /**
    * The spacing, on the crawl row: the crawl-wide `host_spacing_ms` for whoever
-   * is polling, and the per-host `host_spacing_jsonb` for whoever resumes.
+   * is polling, and the per-host `host_spacing_jsonb` (`HostGate.snapshot()`:
+   * each host's spacing, ratchet state and throttle counters) for whoever
+   * resumes.
    *
    * The gate lives in this process and both readers read the database, so a
    * number nobody wrote down is a number they cannot act on — and acting on it
@@ -1156,8 +1150,12 @@ async function runToCompletion(
    * it already refused (hard rule 9). Written once up front (so the crawl-wide
    * column means "the base, so far" rather than "unknown" from the first poll,
    * and the map is `{}` rather than the null a pre-0015 row carries) and then
-   * whenever ANY host's spacing MOVES — the gate's `spacingGeneration`, not the
-   * crawl-wide widest. Both are a handful of writes per crawl, but keying on the
+   * whenever ANY host's spacing MOVES (an escalation, a recovery, a raised
+   * floor) — the gate's `spacingGeneration`, not the crawl-wide widest. The
+   * throttle counters ride along on those writes; a counter that moves WITHOUT
+   * the spacing moving (a `Retry-After` on a response that was not a refusal)
+   * waits for the next move or the close write, which loses only evidence,
+   * never pace. Both are a handful of writes per crawl, but keying on the
    * widest alone left a rule-9 hole: a non-widest host that a resume seeded from
    * the per-host map (say a CDN that earned 8s while the origin stayed at 1s, now
    * resuming with a NEW host wider than the origin) can escalate WITHOUT moving
@@ -1189,7 +1187,7 @@ async function runToCompletion(
   const recordSpacing = async (): Promise<void> => {
     await db
       .update(crawls)
-      .set({ hostSpacingMs: reportedSpacingMs, hostSpacingJsonb: gate.maxSpacingMsByHost() })
+      .set({ hostSpacingMs: reportedSpacingMs, hostSpacingJsonb: gate.snapshot() })
       .where(eq(crawls.id, crawlId));
   };
   await recordSpacing();
@@ -1930,7 +1928,7 @@ async function runToCompletion(
   // re-read from the gate so a resource-pass escalation shows on `crawl_status`,
   // and the per-host map lands complete: a per-host escalation that never moved
   // the crawl-wide widest was not captured at a batch boundary, and this is
-  // where a resume reads it (`earnedSpacingByHost`). One write, once, on the way
+  // where a resume reads it (`HostGate.restore`). One write, once, on the way
   // out — the same rarity the in-loop guard keeps.
   reportedSpacingMs = gate.maxSpacingMs();
   await recordSpacing();

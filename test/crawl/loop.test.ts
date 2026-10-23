@@ -19,6 +19,19 @@ import { hostProbeStarts } from "../../src/crawl/parse/url-utils.js";
 import { closeFetchAgents } from "../../src/crawl/http.js";
 import { robotsRules } from "../../src/rules/query/robots.js";
 import { linkGraphRules } from "../../src/rules/query/link-graph.js";
+import type { HostSpacingEntry, StoredHostSpacing } from "../../src/crawl/politeness.js";
+
+/**
+ * One host's 24a entry in `crawls.host_spacing_jsonb`. Every write a run makes
+ * is the 24a shape, so a missing host or a bare number here is a failure.
+ */
+function entryOf(map: StoredHostSpacing | null | undefined, host: string): HostSpacingEntry {
+  const v = map?.[host];
+  if (typeof v !== "object" || v === null) {
+    throw new Error(`host_spacing_jsonb[${host}] is not a 24a entry: ${JSON.stringify(v)}`);
+  }
+  return v;
+}
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -1608,7 +1621,7 @@ describe("resumeCrawl", () => {
     const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
     // The host re-entered its own 250 (config floor was 0), and the map is
     // re-persisted rather than dropped on the resume.
-    expect(row?.hostSpacingJsonb?.[host]).toBeGreaterThanOrEqual(250);
+    expect(entryOf(row?.hostSpacingJsonb, host).spacingMs).toBeGreaterThanOrEqual(250);
     expect(row?.hostSpacingMs).toBeGreaterThanOrEqual(250);
   });
 
@@ -1649,9 +1662,17 @@ describe("resumeCrawl", () => {
     // The map records BOTH hosts at DIFFERENT earned spacings, and the crawl-wide
     // column is the widest of the two.
     const [earned] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
-    expect(earned?.hostSpacingJsonb?.[hostA]).toBe(80);
-    expect(earned?.hostSpacingJsonb?.[hostB]).toBe(160);
+    expect(entryOf(earned?.hostSpacingJsonb, hostA).spacingMs).toBe(80);
+    expect(entryOf(earned?.hostSpacingJsonb, hostB).spacingMs).toBe(160);
     expect(earned?.hostSpacingMs).toBe(160);
+    // Phase 24a: the map carries the escalation STATE, not only the spacing —
+    // each host's base, its level, and its throttle counters.
+    expect(earned?.hostSpacingJsonb?.[hostA]).toMatchObject({
+      baseMs: 40, escalations: 1, recoveries: 0, recoveryLocked: false, responses429: 1,
+    });
+    expect(earned?.hostSpacingJsonb?.[hostB]).toMatchObject({
+      baseMs: 40, escalations: 2, recoveries: 0, recoveryLocked: false, responses429: 2,
+    });
 
     // Resume: the gate is rebuilt from the per-host map, so each host re-enters
     // ITS OWN earned spacing. Config floor is 0, so nothing lifts either host;
@@ -1662,8 +1683,17 @@ describe("resumeCrawl", () => {
     expect(resumed.status).toBe("finished");
 
     const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
-    expect(row?.hostSpacingJsonb?.[hostA]).toBe(80);
-    expect(row?.hostSpacingJsonb?.[hostB]).toBe(160);
+    expect(entryOf(row?.hostSpacingJsonb, hostA).spacingMs).toBe(80);
+    expect(entryOf(row?.hostSpacingJsonb, hostB).spacingMs).toBe(160);
+    // The resume RESTORED the escalation state rather than folding the earned
+    // spacing into a new base: the level, the base and the counters survive the
+    // round trip, so the resumed host could still recover (and still lock).
+    expect(row?.hostSpacingJsonb?.[hostA]).toMatchObject({
+      baseMs: 40, escalations: 1, responses429: 1, peakSpacingMs: 80,
+    });
+    expect(row?.hostSpacingJsonb?.[hostB]).toMatchObject({
+      baseMs: 40, escalations: 2, responses429: 2, peakSpacingMs: 160,
+    });
   });
 
   // A pre-0015 row has a null map, and the resume must fall back to the
@@ -1730,8 +1760,11 @@ describe("resumeCrawl", () => {
         .select({ m: crawls.hostSpacingJsonb })
         .from(crawls)
         .where(eq(crawls.id, first.crawlId));
-      const v = r?.m?.[originHost];
+      // The seeded row is the pre-24a {host: ms} shape; every write the
+      // resumed run makes is the 24a {host: {spacingMs, …}} shape.
+      const v: unknown = r?.m?.[originHost];
       if (typeof v === "number") observed.push(v);
+      else if (typeof v === "object" && v !== null) observed.push((v as { spacingMs: number }).spacingMs);
     };
     try {
       const resumed = await resumeCrawl(db, first.crawlId, {
@@ -1748,7 +1781,7 @@ describe("resumeCrawl", () => {
     // And the final row carries at least what the host earned, so a further
     // resume re-enters it no faster than the site allowed (rule 9).
     const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
-    expect(row?.hostSpacingJsonb?.[originHost]).toBeGreaterThanOrEqual(80);
+    expect(entryOf(row?.hostSpacingJsonb, originHost).spacingMs).toBeGreaterThanOrEqual(80);
   });
 
   it("re-fetches a URL whose page row a hard kill left in the buffer", async () => {

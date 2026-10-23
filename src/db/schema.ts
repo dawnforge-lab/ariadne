@@ -3,6 +3,7 @@ import {
   pgTable, text, integer, bigint, boolean, jsonb, timestamp, real,
   primaryKey, index, uniqueIndex,
 } from "drizzle-orm/pg-core";
+import type { StoredHostSpacing } from "../crawl/politeness.js";
 
 export const crawls = pgTable("crawls", {
   id: text("id").primaryKey(),                 // e.g. crawl_<ulid>
@@ -66,15 +67,23 @@ export const crawls = pgTable("crawls", {
   // conflates the two would report an unpaced crawl as un-instrumented, or the
   // reverse (hard rule 7).
   hostSpacingMs: integer("host_spacing_ms"),
-  // The SAME finding, per host: `{ host: earnedMs }`, `HostGate.maxSpacingMsByHost()`,
-  // written by the crawl loop beside `host_spacing_ms` (migration 0015, P13-T3).
+  // The SAME finding, per host, written by the crawl loop beside `host_spacing_ms`
+  // (migration 0015, P13-T3). TWO SHAPES, both read by `HostGate.restore()`:
+  //  - pre-24a: `{ host: earnedMs }` (the old `maxSpacingMsByHost()`);
+  //  - Phase 24a on: `{ host: HostSpacingEntry }` (`HostGate.snapshot()`) —
+  //    `{ spacingMs, baseMs, responses429, retryAfterSeen, escalations,
+  //    recoveries, recoveryLocked, peakSpacingMs }`, the host's current spacing
+  //    plus its whole ratchet state (base, cumulative escalations, the one
+  //    recovery, the two-strike lock) and its throttle counters, so a resume
+  //    keeps the host's place on the ratchet. No column change: jsonb shape only.
+  // A row never mixes the two; `restore` throws on a mixed or malformed map.
   // `host_spacing_ms` above is the WIDEST spacing any single host reached, so a
   // resume built from it alone widens EVERY host to the worst host's number — a
   // crawl whose CDN earned 8s while the origin stayed at 1s resumes the origin at
   // 8s too. This map is what lets each host re-enter ITS OWN earned spacing
-  // instead: on a resume `HostGate` folds `map[host]` (falling back to the
+  // instead: on a resume `HostGate.restore` folds each host's base (falling back to the
   // crawl-wide `host_spacing_ms`, then the config floor, for a host not in it)
-  // into the same max(config, robots, earned) capped at 30s (`earnedSpacingByHost`).
+  // into the same max(config, robots, earned) capped at 30s.
   //
   // NULLABLE, AND THE NULL IS LOAD-BEARING, as `host_spacing_ms`'s is — but it
   // means one thing more precisely: "no 0015-aware loop ever wrote this crawl a
@@ -88,7 +97,7 @@ export const crawls = pgTable("crawls", {
   // (hard rule 7). `host_spacing_ms` STAYS: it is that fallback, and it is the
   // number `crawl_status` already serves a poller (the per-host map is resume
   // machinery, not a poll surface).
-  hostSpacingJsonb: jsonb("host_spacing_jsonb").$type<Record<string, number>>(),
+  hostSpacingJsonb: jsonb("host_spacing_jsonb").$type<StoredHostSpacing>(),
   // Three crawl-level evidence blobs the query rules read instead of fetching
   // (hard rule 3: rules read the database). All three are nullable, and a null
   // does NOT mean the same thing in each — what a rule may conclude from one
