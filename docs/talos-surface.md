@@ -1,6 +1,6 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 23 (ruleset 0.18.0, migrations 0000–0023,
+**Status:** the contract as of Phase 24a (ruleset 0.18.0, migrations 0000–0024,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
@@ -47,7 +47,14 @@ pre-24a crawl, or one that failed before its first write) or holds a pre-24a
 `{host: ms}` map. It is `{}` when a 24a crawl touched no host. It is never a
 record of zeros. `hostSpacingMs` keeps its meaning (the widest spacing any host reached)
 but is no longer monotonic over a crawl, because a host that stops pushing back
-can step back down.
+can step back down. The way down is bounded: after `RECOVERY_STREAK` (50) clean
+answers in a row (a 2xx, 3xx or 4xx other than 429, with no `Retry-After`, and not a
+401/403/challenge refusal), a host steps down one escalation level and its spacing
+halves, never below its base. A host that escalates again after any recovery is
+`recoveryLocked` for the rest of the crawl and only goes up from there, so a host's
+spacing turns from falling to rising at most once per crawl. The whole state
+(level, recoveries, lock, counters) is persisted in `host_spacing_jsonb`, so a resume
+is not a second try.
 
 **Also Phase 24a: the render pass is paced like the crawl, and `crawl_render` answers
 `requests`.** One field, additive, no tool or route added. The render pass's host gate
@@ -1987,8 +1994,17 @@ both transports).
 **What the engine does on its own:** robots.txt `Crawl-delay` is honoured
 alongside the configured delay; a `blocked` answer halves the concurrency
 window; a refusal that NAMES a rate (429, or anything carrying `Retry-After`)
-doubles that host's spacing for the life of the crawl, capped at 30s; a refusal
-that names no rate escalates only after three refusals across two URLs. A
+doubles that host's spacing, capped at 30s; a refusal that names no rate
+escalates only after three refusals across two URLs. Since Phase 24a a host that
+then answers 50 times cleanly in a row steps down one level, and a host that
+escalates again after recovering is locked at its spacing for the rest of the
+crawl (`crawl_status.throttle` records 429s, escalations, recoveries and the lock
+per host). A site whose own headers name a platform gets that platform's profile
+before the first worker starts: Shopify runs at one request in flight and at least
+1000 ms per host, one render browser and a 60 s render budget, whatever
+`maxConcurrency` asked for (`crawl_status.platformProfile` records what was
+applied). The render pass inherits the crawl's per-host spacing and paces every
+same-origin request through the same gate. A
 blocked URL is retried up to three times under the widened spacing and then
 settles as a classified row.
 

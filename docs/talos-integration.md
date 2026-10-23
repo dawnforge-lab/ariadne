@@ -57,8 +57,8 @@ crawler inside Talos. The intended shape:
    Talos-driven crawl can present Talos's identity), back-off on 403/429.
    Met as of Phase 6 Task 6b: a `blocked` answer halves the concurrency window,
    and a refusal that NAMES A RATE (a 429, or anything carrying `Retry-After`)
-   also DOUBLES that host's spacing — ratcheted for the life of the crawl,
-   capped at 30s. A refusal that names no rate (401/403/challenge/bare 503)
+   also DOUBLES that host's spacing — capped at 30s (until Phase 24a, for the
+   life of the crawl; see below). A refusal that names no rate (401/403/challenge/bare 503)
    escalates only once the host has refused three times running across at least
    two different URLs, so one permanently forbidden path cannot tax a whole
    crawl. `Retry-After` is honoured as a floor on the host's next slot (capped
@@ -67,6 +67,22 @@ crawler inside Talos. The intended shape:
    classified row whose `fetch_reason` names the spacing reached. Both halves
    are on `crawl_status` — `blockedPages` and `hostSpacingMs` — so a driving
    agent can read what the site did and what the engine did about it.
+   Phase 24a bounded the ratchet and added a platform profile. Recovery: 50
+   clean answers in a row step a host down one level (spacing halves, never
+   below base); a host that escalates again after recovering is locked for the
+   rest of the crawl, so the spacing turns from falling to rising at most once
+   per host per crawl and a token bucket that re-empties gets one retry, not an
+   oscillation. The per-host record (429s, `Retry-After`s, escalations,
+   recoveries, lock, peak and final spacing) is persisted with the spacing and
+   served as `crawl_status.throttle` — crawl evidence, never a finding. Profile:
+   a site whose own response headers name Shopify is crawled at one request in
+   flight and at least 1000 ms per host (the owner's Screaming Frog setting),
+   with one render browser and a 60 s render budget; the profile only ever
+   slows a crawl down and is recorded as `crawl_status.platformProfile`. The
+   render pass is paced too: seeded with the crawl's per-host state, every
+   same-origin browser request waits for the same gate, the HTTP cache is
+   shared across renders, and its 429s escalate the host and are written back
+   to the record. The lavishalice evidence is in `docs/gates/phase-24a.md`.
 5. **SSRF policy equivalence.** Talos pins DNS resolution on every hop
    (`api/urlguard.py: pin_outbound_url/pinned_get`). Ariadne's absorbed
    `url-policy` must maintain the same properties: every hop revalidated,

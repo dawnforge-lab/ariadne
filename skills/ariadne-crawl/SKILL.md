@@ -185,7 +185,12 @@ spacing to 2000 ms within about a hundred pages and held it there for the remain
 and the first hundred pages were the question. The engine will earn the right number
 on its own; starting at it is simply politer, and it makes the ETA you quote the ETA
 you get. One real data point, not a law: record what the next Shopify crawl settles
-at.
+at. The Phase 24a gate recorded the next one. On lavishalice the engine's Shopify profile
+ran one request in flight at 1000 ms, the store 429'd twice, and the crawl settled at
+2000 ms (`throttle`: 2 × 429, one recovery, then locked). So 2000 ms is still the right
+start. Since 24a the profile clamps `maxConcurrency` to 1 on a detected Shopify store
+whatever you pass, so the row's `2` only matters when the store's headers hide the
+platform (`platform: null`).
 
 **Do the arithmetic before you promise anyone a time, and do it on
 `perHostDelayMs` alone.** The per-host gate serialises every request to one host at
@@ -415,10 +420,19 @@ The engine protects itself before you get a chance to. A refusal that names a ra
 429, or anything carrying a `Retry-After` — **doubles that host's spacing** (1s → 2s →
 4s → 8s, up to 30s), and a volley of refusals that named no rate (403s across several
 different URLs) does the same once it is clearly about the host rather than about one
-forbidden page. The ratchet never winds back inside a crawl, a `Retry-After` is
-honoured as a floor under the next request, and each blocked URL is **retried up to
-three times** under the widened spacing — so a page refused during a burst is usually
-served once the crawl has slowed down.
+forbidden page. A `Retry-After` is honoured as a floor under the next request, and each
+blocked URL is **retried up to three times** under the widened spacing — so a page
+refused during a burst is usually served once the crawl has slowed down.
+
+Since Phase 24a the ratchet can wind back, a bounded amount. After 50 clean answers in
+a row from a host (a 2xx, 3xx or 4xx other than 429, with no `Retry-After` and not
+a 401/403/challenge refusal), that host steps down one level and its spacing halves,
+never below where it started. If the host then pushes back again, recovery is locked
+for the rest of the crawl and the spacing only goes up from there. So a host's spacing
+turns from falling to rising at most once per crawl, and a site that alternates 200 and
+429 never recovers at all. `throttle` shows which of these happened: `recoveries` is how
+many steps it came down, `recoveryLocked` is whether it then tripped again. A
+`hostSpacingMs` that drops mid-crawl is this, not a reset.
 
 **Read `blockedPages` and `hostSpacingMs` together.** One is what the site did; the
 other is what the engine did about it. That pair is the whole diagnosis:
