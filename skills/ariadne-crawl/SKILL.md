@@ -293,8 +293,9 @@ What the fields mean when you are waiting:
   again after it had recovered, so it stays at its spacing for the rest of the crawl.
   It is evidence about how the site received the crawl, not a finding: report it as
   "the site throttled us, here is how", never as a defect to fix. Every host the crawl
-  touched is in it, including hosts with all-zero counters. Null means the crawl holds
-  no record (it predates the field) — that is not the same as "nothing throttled it".
+  touched is in it, including hosts with all-zero counters. Null means no record was ever
+  stored (the crawl predates the field, or failed before its first write) — that is
+  not the same as "nothing throttled it". `{}` means a crawl that touched no host.
 - **`resources` and `fetchResources`** — what this crawl knows about the images,
   stylesheets and scripts its pages point at, counted off the database rather than
   reported by any one pass (a resumed pass asks only what is still unfetched, so its

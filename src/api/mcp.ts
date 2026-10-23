@@ -436,8 +436,9 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "down one level per clean run; recoveryLocked true means it pushed back " +
         "again after recovering and will not be stepped down further. It is crawl " +
         "evidence, not a finding: say how the site received the crawl, do not " +
-        "report it as a defect of the site. Null means the crawl holds no record " +
-        "(it predates the field), which is not the same as no throttling.\n\n" +
+        "report it as a defect of the site. Null means no record was ever stored " +
+        "(the crawl predates the field, or failed before its first write), which " +
+        "is not the same as no throttling; {} means a crawl that touched no host.\n\n" +
         "robotsBlocked is NOT blockedPages: it is the internal URLs robots.txt " +
         "kept this crawl out of, which were never requested. recorded counts the " +
         "ones on record as pages (robots.blocks-internal-urls reports them with " +

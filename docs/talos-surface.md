@@ -16,9 +16,10 @@ never decremented; the level in force is `escalations - recoveries`.
 written, and `peakSpacingMs` the widest it was ever crawled at. Every host the crawl
 touched is in the record, including hosts whose counters are all zero. It is crawl
 evidence, not a finding (the Phase 16 ruling): no rule reads it and nothing in
-`issues` is raised from it. `throttle` is `null` on a crawl that holds no record —
-one from before 24a, or one that never touched a host — and never a record of
-zeros. `hostSpacingMs` keeps its meaning (the widest spacing any host reached)
+`issues` is raised from it. `throttle` is `null` only when no record was ever stored: the column is null (a
+pre-24a crawl, or one that failed before its first write) or holds a pre-24a
+`{host: ms}` map. It is `{}` when a 24a crawl touched no host. It is never a
+record of zeros. `hostSpacingMs` keeps its meaning (the widest spacing any host reached)
 but is no longer monotonic over a crawl, because a host that stops pushing back
 can step back down.
 

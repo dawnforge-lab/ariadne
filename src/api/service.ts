@@ -594,9 +594,10 @@ export interface CrawlDetail extends CrawlListItem {
    * counters zero).
    *
    * CRAWL EVIDENCE, NOT A FINDING (the Phase 16 ruling: how a site received the
-   * crawl is not a site issue). Null is a crawl that holds no record: one from
-   * before 24a (its column is a bare `{host: ms}` map, or null) or one that
-   * failed before touching a host. It is never a record of zeros.
+   * crawl is not a site issue). Null only when no record was ever stored: the
+   * column is null (a pre-24a crawl, or one that failed before its first write)
+   * or holds a pre-24a `{host: ms}` map. `{}` is a 24a crawl that touched no
+   * host. Null is never a record of zeros.
    */
   throttle: Record<string, HostThrottle> | null;
   /**
