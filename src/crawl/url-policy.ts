@@ -16,7 +16,9 @@
  *    Number() coercion read "10..0.1" as 10.0.0.1 and "0x7f.0.0.1" as
  *    127.0.0.1; WHATWG URL canonicalises those before we ever see them).
  *  - DoH resolution failures throw DNS_RESOLUTION_FAILED instead of being
- *    swallowed as "not blocked" (project rule: no silent fallbacks).
+ *    swallowed as "not blocked" (project rule: no silent fallbacks). The
+ *    resolver's own text stays out of the message a caller sees
+ *    (`resolveApprovedAddress`, "What the thrown message may say").
  *  - The DoH resolver is injectable so tests never touch the network.
  *  - resolveStartUrlRedirects validates its input before the first probe and
  *    sends Ariadne's user agent.
@@ -58,8 +60,14 @@ export type UrlPolicyErrorCode =
 export class UrlPolicyError extends Error {
   readonly code: UrlPolicyErrorCode;
 
-  constructor(code: UrlPolicyErrorCode, message?: string) {
-    super(message ?? code);
+  /**
+   * `message` is the sentence a caller of the API may be shown. `cause`, when
+   * present, is the operator's detail behind it (a resolver's transport error,
+   * a DoH HTTP status, a DNS rcode) and belongs in the server log only — see
+   * `resolveApprovedAddress`.
+   */
+  constructor(code: UrlPolicyErrorCode, message?: string, options?: { cause?: unknown }) {
+    super(message ?? code, options);
     this.name = "UrlPolicyError";
     this.code = code;
   }
@@ -600,6 +608,25 @@ export interface ApprovedAddressOpts extends UrlPolicyOpts {
  * one of them for the whole pass, which is a pin, not a load balancer, and the
  * caller says so. `allowPrivate` (TEST ONLY) relaxes the address check to the
  * same floor as everywhere else. A resolver failure throws (rule 7).
+ *
+ * ## What the thrown message may say
+ *
+ * The errors this function throws reach API callers verbatim (the render
+ * pass's 409 and its `unpinnedHosts[].reason`), so their text is bounded here:
+ *  - `CRAWL_TARGET_BLOCKED` names the host, the answer that was refused and
+ *    the range it fell in. The answer is public DNS data about the caller's own
+ *    site, and the same wording the crawl's own blocked-fetch rows carry
+ *    (src/crawl/http.ts); a caller with a site that resolves into private
+ *    space needs the address to see which record is wrong.
+ *  - `DNS_RESOLUTION_FAILED` for a name with no record says so (`<host> has no
+ *    A or AAAA record`): a fact about the site's DNS. For a RESOLVER failure
+ *    it says only `<host> could not be resolved`, and the resolver's own
+ *    message — the DoH transport error, its HTTP status, the DNS rcode, an
+ *    unparseable answer — rides on `cause`, for the server log. That text
+ *    describes our resolver path and whatever sat between it and Cloudflare,
+ *    not the caller's site, and a tenant has no business reading it
+ *    (docs/talos-integration.md, obligation 6).
+ * A resolver that throws anything else is a defect, and passes through as one.
  */
 export async function resolveApprovedAddress(
   hostname: string,
@@ -615,7 +642,18 @@ export async function resolveApprovedAddress(
   if (parseIpv4(host) !== null || parseIpv6(host) !== null) return host;
 
   const resolve = opts.resolve ?? resolveViaDoh;
-  const [v4, v6] = await Promise.all([resolve(host, "A"), resolve(host, "AAAA")]);
+  let v4: string[];
+  let v6: string[];
+  try {
+    [v4, v6] = await Promise.all([resolve(host, "A"), resolve(host, "AAAA")]);
+  } catch (cause) {
+    if (cause instanceof UrlPolicyError && cause.code === "DNS_RESOLUTION_FAILED") {
+      throw new UrlPolicyError("DNS_RESOLUTION_FAILED", `${host} could not be resolved`, {
+        cause,
+      });
+    }
+    throw cause;
+  }
   const addresses = [...v4, ...v6];
   if (addresses.length === 0) {
     throw new UrlPolicyError("DNS_RESOLUTION_FAILED", `${host} has no A or AAAA record`);

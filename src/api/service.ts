@@ -1123,7 +1123,10 @@ export interface RenderSummaryOut {
   /**
    * Spellings of the crawl's origin (`www.` / apex) the render browser could
    * not reach, because their address was not approved at launch — each with
-   * its reason. A page on one is a `policy refusal` render error.
+   * its reason. A page on one is a `policy refusal` render error. What the
+   * reason may say is bounded where it is written (`resolveApprovedAddress`):
+   * a refused answer keeps its address, a resolver failure is the bare
+   * sentence and its detail is in the log (see `mapRenderPassError`).
    */
   unpinnedHosts: Array<{
     host: string;
@@ -3216,9 +3219,12 @@ export class ApiService {
         // absolutised at construction, and no request may name it.
         renderHtmlDir: this.renderDir,
         allowPrivate: this.config.crawlDefaults?.allowPrivate === true,
+        ...(this.config.resolveAddress === undefined
+          ? {}
+          : { resolveAddress: this.config.resolveAddress }),
       });
     } catch (error) {
-      throw mapRenderPassError(error);
+      throw mapRenderPassError(error, crawlId, this.log);
     }
 
     return {
@@ -3228,7 +3234,16 @@ export class ApiService {
       unrendered: summary.unrendered,
       elapsedMs: summary.elapsedMs,
       requests: summary.requests,
-      unpinnedHosts: summary.unpinnedHosts,
+      // PROJECTED, not passed through: `detail` is the resolver's own message
+      // (`UnpinnedHost.detail`) and goes to the log under this crawl's id,
+      // the way the launch refusal's does below. The caller gets the host and
+      // the sentence url-policy wrote for them.
+      unpinnedHosts: summary.unpinnedHosts.map(({ host, reason, detail }) => {
+        if (detail !== null) {
+          this.log(`api: render launch crawl ${crawlId} did not pin ${host} — ${reason}: ${detail}`);
+        }
+        return { host, reason };
+      }),
       // The selection's URL list is a page list, and a page list is not a
       // response body (obligation 1: never a full export inline). Its size is.
       // `mode` rides beside it because the four numbers under it mean nothing
@@ -6132,7 +6147,11 @@ function capCaveat(base: CompareSide, head: CompareSide, caveats: CompareCaveat[
  * "the crawl is busy, try later". The type is carried by the throw now, and the
  * guards' wording is free to change without changing this function.
  */
-function mapRenderPassError(error: unknown): unknown {
+function mapRenderPassError(
+  error: unknown,
+  crawlId: string,
+  log: (line: string) => void,
+): unknown {
   // The render browser could not be launched against this crawl's site:
   // url-policy refused the address the site's name resolves to, or could not
   // resolve it (Phase 24a's DNS pin). A fact about the site and the network,
@@ -6140,11 +6159,27 @@ function mapRenderPassError(error: unknown): unknown {
   // the caller can do nothing with. Nothing was rendered; the rows the
   // selection put in `render_pending` stay there, exactly as any launch
   // failure leaves them, and a later pass re-selects.
+  //
+  // WHAT THE REASON MAY SAY is bounded where it is written
+  // (`resolveApprovedAddress`, "What the thrown message may say"): a refused
+  // address keeps the host, the answer and the range, because that is public
+  // DNS data about the caller's own site and the sentence the crawl's blocked
+  // fetches already carry. A resolver failure says only that the name could
+  // not be resolved; the resolver's own message rides on `cause` and goes
+  // where a 500's stack goes — the log, under a correlation id the caller is
+  // handed so an operator can find the line (obligation 6, same seam as
+  // `http.ts`'s 500).
   if (error instanceof UrlPolicyError) {
-    return new ServiceError(
-      "CONFLICT",
-      `the render pass could not start: ${error.message} (${error.code})`,
-    );
+    let reason = error.message;
+    if (error.cause !== undefined) {
+      const correlationId = randomUUID();
+      log(
+        `api: render launch ${correlationId} crawl ${crawlId} — ${error.message}: ` +
+          messageOf(error.cause),
+      );
+      reason = `${reason}; detail logged under ${correlationId}`;
+    }
+    return new ServiceError("CONFLICT", `the render pass could not start: ${reason} (${error.code})`);
   }
   if (!(error instanceof RenderPassRefusal)) return error;
   // The `runRenderPass: ` prefix is the driver naming itself to a log reader.

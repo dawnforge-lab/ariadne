@@ -31,6 +31,7 @@ import { closeFetchAgents } from "../../src/crawl/http.js";
 import { createApiServer, type ApiServer } from "../../src/api/http.js";
 import { isHostAllowed, loadApiConfig, parseAllowedDomains } from "../../src/api/config.js";
 import { MAX_SUPPLIED_SITEMAPS, MIN_PER_HOST_DELAY_MS } from "../../src/api/service.js";
+import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
 
@@ -263,6 +264,26 @@ async function seedCrawl(row: {
   return id;
 }
 
+/**
+ * The resolver the render pass's browser pin approves a site's name through
+ * (`ServiceConfig.resolveAddress`, TEST ONLY). Two names the suite seeds
+ * crawls over, each a launch refusal of a different kind; every other name is
+ * a lookup nobody expected, and says so. The fixture sites are IP literals and
+ * are never asked about.
+ */
+const TEST_RESOLVER: AddressResolver = async (host, type) => {
+  if (host === "doh-down.test" || host === "www.doh-down.test") {
+    throw new UrlPolicyError(
+      "DNS_RESOLUTION_FAILED",
+      `DoH ${type} lookup for ${host} failed: TypeError: fetch failed (ECONNREFUSED 10.0.0.53:443)`,
+    );
+  }
+  if (host === "rebind.test" || host === "www.rebind.test") {
+    return type === "A" ? ["169.254.169.254"] : [];
+  }
+  throw new Error(`TEST_RESOLVER: unexpected ${type} lookup of ${host}`);
+};
+
 /** The minimum `discovery_jsonb` the render endpoint needs to pace itself. */
 const DISCOVERY = {
   robots: { outcome: "absent", crawlDelaySec: null, note: null, raw: null, truncated: false },
@@ -380,6 +401,7 @@ beforeAll(async () => {
       allowedDomains: ["127.0.0.1", "*.localhost"],
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+      resolveAddress: TEST_RESOLVER,
       // WHERE THE RENDER PASS PUTS ITS DOCUMENTS, and it is not optional for a
       // test that renders. `POST /crawls/:id/render` writes one HTML file per
       // rendered page; without this the server's default puts them in
@@ -1491,6 +1513,50 @@ describe("POST /crawls/:id/render", () => {
     expect(String(res.body["error"])).toContain("the render pass could not start");
     expect(String(res.body["error"])).toContain("169.254.169.254");
     expect(String(res.body["error"])).toContain("CRAWL_TARGET_BLOCKED");
+  });
+
+  it("409s a site whose name resolves into blocked space, keeping the host, the answer and the range", async () => {
+    // Fix round 4: a refused ANSWER stays in the message. It is public DNS data
+    // about the caller's own site, and the sentence the crawl's blocked fetches
+    // already carry; a caller needs the address to see which record is wrong.
+    const id = await seedCrawl({
+      status: "finished",
+      siteUrl: "http://rebind.test/",
+      discovery: DISCOVERY,
+    });
+    const res = await call("POST", `/crawls/${id}/render`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain(
+      "rebind.test resolves into blocked address space (169.254.169.254",
+    );
+    expect(String(res.body["error"])).toContain("CRAWL_TARGET_BLOCKED");
+  });
+
+  it("409s a site whose name the resolver could not look up with that sentence only; the resolver's text goes to the log", async () => {
+    // Fix round 4: the DoH resolver's own message describes our resolver path
+    // and whatever sat between it and Cloudflare, not the caller's site. The
+    // caller gets `<host> could not be resolved` plus a correlation id; the
+    // text itself goes where a 500's stack goes, the server log, under that id.
+    const id = await seedCrawl({
+      status: "finished",
+      siteUrl: "http://doh-down.test/",
+      discovery: DISCOVERY,
+    });
+    const before = serverLog.length;
+    const res = await call("POST", `/crawls/${id}/render`);
+    expect(res.status).toBe(409);
+    const message = String(res.body["error"]);
+    expect(message).toContain("the render pass could not start: doh-down.test could not be resolved");
+    expect(message).toContain("DNS_RESOLUTION_FAILED");
+    expect(message).not.toContain("DoH");
+    expect(message).not.toContain("fetch failed");
+    expect(message).not.toContain("10.0.0.53");
+    const correlationId = /detail logged under ([0-9a-f-]{36})/.exec(message)?.[1];
+    expect(correlationId).toBeDefined();
+    const logged = serverLog.slice(before).filter((line) => line.includes(correlationId!));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain(`crawl ${id}`);
+    expect(logged[0]).toContain("DoH A lookup for doh-down.test failed: TypeError: fetch failed");
   });
 
   it("runs the pass over the finished crawl and returns counts, not a page list", async () => {

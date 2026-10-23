@@ -57,6 +57,8 @@ import {
   type RenderResult,
 } from "../../src/crawl/render/renderer.js";
 import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
+import { isSameOrigin } from "../../src/crawl/parse/url-utils.js";
+import { UrlPolicyError } from "../../src/crawl/url-policy.js";
 import {
   RENDER_PASS_DEFAULTS,
   RenderPassRefusal,
@@ -1201,6 +1203,67 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     }
   });
 
+  it("says a spelling's resolver failure plainly, and keeps the resolver's text for the log", async () => {
+    // Fix round 4: the DoH resolver's own message (transport error, HTTP
+    // status, rcode) reaches the API through `unpinnedHosts[].reason` and the
+    // render error, so `reason` says only that the name could not be resolved
+    // and `detail` carries the resolver's text for the server log alone.
+    const port = new URL(site.base).port;
+    const renderer = await PageRenderer.launch({
+      origin: `http://shop.test:${port}`,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render pin test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      resolve: async (host, type) => {
+        if (host === "www.shop.test") {
+          throw new UrlPolicyError(
+            "DNS_RESOLUTION_FAILED",
+            `DoH ${type} lookup for ${host} failed: TypeError: fetch failed (ECONNREFUSED 10.0.0.53:443)`,
+          );
+        }
+        return type === "A" ? ["127.0.0.1"] : [];
+      },
+    });
+    try {
+      const unpinned = renderer.unpinnedHosts();
+      expect(unpinned).toHaveLength(1);
+      expect(unpinned[0]!.host).toBe("www.shop.test");
+      expect(unpinned[0]!.reason).toBe("www.shop.test could not be resolved");
+      expect(unpinned[0]!.detail).toMatch(/^DoH A lookup for www\.shop\.test failed: TypeError: fetch failed/);
+
+      const result = await renderer.render(`http://www.shop.test:${port}/csr`);
+      expect(result.rendered).toBe(false);
+      expect(result.error).toBe(
+        "policy refusal: www.shop.test was not approved for this pass (www.shop.test could not be resolved)",
+      );
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("fails the launch on a resolver defect, even when it is the other spelling that hit it", async () => {
+    // Fix round 4, rule 7: only a `UrlPolicyError` is a fact about the site
+    // that leaves a spelling unpinned. A resolver that throws anything else is
+    // broken, and a launch over a broken resolver is a loud failure, not a
+    // pass that quietly renders without the `www.` spelling.
+    const defect = new Error("resolver exploded");
+    await expect(
+      PageRenderer.launch({
+        origin: "http://shop.test:8080",
+        htmlDir,
+        userAgent: "AriadneBot/0.1 (render pin test)",
+        perHostDelayMs: 0,
+        allowPrivate: true,
+        resolve: async (host, type) => {
+          if (host === "www.shop.test") throw defect;
+          return type === "A" ? ["127.0.0.1"] : [];
+        },
+      }),
+    ).rejects.toBe(defect);
+  });
+
   it("refuses to launch for an origin whose name resolves into blocked space", async () => {
     await expect(
       PageRenderer.launch({
@@ -1232,6 +1295,13 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     // An IP literal has no `www.` spelling.
     expect(originVariants("http://127.0.0.1:3000").hostnames).toEqual(["127.0.0.1"]);
     expect(originVariants("http://[2001:db8::1]:8080").hostnames).toEqual(["[2001:db8::1]"]);
+    // Fix round 4: the one spelling `isSameOrigin` admits that is NOT listed,
+    // deliberately — nobody owns `www.www.shop.com`, and a URL on it fails as a
+    // classified policy refusal instead. (`www.127.0.0.1` is not a hostname
+    // the URL parser accepts at all, so `isSameOrigin` never admits it.)
+    expect(isSameOrigin("http://www.www.shop.com/", "http://www.shop.com")).toBe(true);
+    expect(originVariants("http://www.shop.com").hostnames).not.toContain("www.www.shop.com");
+    expect(isSameOrigin("http://www.127.0.0.1:3000/", "http://127.0.0.1:3000")).toBe(false);
   });
 
   it("builds network switches that pin every approved spelling's port and address", () => {

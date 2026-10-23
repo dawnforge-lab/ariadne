@@ -18,6 +18,7 @@
 import { domainToASCII } from "node:url";
 
 import type { CrawlConfig } from "../crawl/loop.js";
+import type { AddressResolver } from "../crawl/url-policy.js";
 
 /**
  * What one engine instance may do, whoever is asking: POLICY, not identity.
@@ -67,6 +68,16 @@ export interface ServiceConfig {
   allowAnyPublicHost?: boolean;
   /** See the warning above. Code-level only; never wired to env or wire. */
   crawlDefaults?: Partial<CrawlConfig>;
+  /**
+   * TEST ONLY, and the third process-trust seam: the resolver the render
+   * pass's browser pin approves the site's name through
+   * (`RenderPassConfig.resolveAddress`). Absent, url-policy's DoH resolver.
+   * A suite sets it so a render over a name that resolves nowhere, or whose
+   * resolver fails, is answered without the network — and the same rule as
+   * `crawlDefaults`: `loadApiConfig` does not read it, the entrypoints never
+   * set it, no request field maps to it.
+   */
+  resolveAddress?: AddressResolver;
   /**
    * Where `GET /crawls/:id/export` (and the MCP `export_crawl` tool) writes its
    * files. Defaults to `exports/` under the process's working directory, and the

@@ -4,6 +4,7 @@ import {
   isCrawlableUrl,
   isUrlAllowed,
   resolveApprovedAddress,
+  UrlPolicyError,
   type AddressResolver,
 } from "../../src/crawl/url-policy.js";
 
@@ -385,6 +386,41 @@ describe("resolveApprovedAddress", () => {
       resolveApprovedAddress("shop.example", { resolve: answers([]) }),
     ).rejects.toThrow(/no A or AAAA record/);
     await expect(resolveApprovedAddress("metadata.google.internal")).rejects.toThrow(/blocked/);
+  });
+
+  it("says only that a name could not be resolved when the resolver fails, keeping its text on cause", async () => {
+    // Fix round 4: the resolver's own message names the DoH transport and
+    // whatever sat between us and Cloudflare. That is operator detail, not a
+    // fact about the caller's site, so the thrown message carries none of it
+    // and `cause` carries all of it for the server log.
+    const dohDown: AddressResolver = async (host, type) => {
+      throw new UrlPolicyError(
+        "DNS_RESOLUTION_FAILED",
+        `DoH ${type} lookup for ${host} failed: TypeError: fetch failed (ECONNREFUSED 10.0.0.53:443)`,
+      );
+    };
+    const error: unknown = await resolveApprovedAddress("shop.example", { resolve: dohDown }).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(UrlPolicyError);
+    const policy = error as UrlPolicyError;
+    expect(policy.code).toBe("DNS_RESOLUTION_FAILED");
+    expect(policy.message).toBe("shop.example could not be resolved");
+    expect(policy.cause).toBeInstanceOf(UrlPolicyError);
+    expect((policy.cause as Error).message).toMatch(/^DoH A lookup for shop\.example failed: TypeError: fetch failed/);
+  });
+
+  it("passes a resolver defect through untouched rather than dressing it as a DNS answer", async () => {
+    // Rule 7: a resolver that throws a plain Error is broken, not "unresolved".
+    const defect = new Error("resolver exploded");
+    await expect(
+      resolveApprovedAddress("shop.example", {
+        resolve: async () => {
+          throw defect;
+        },
+      }),
+    ).rejects.toBe(defect);
   });
 
   it("relaxes only to the floor under the test-only allowPrivate", async () => {

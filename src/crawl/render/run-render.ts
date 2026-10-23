@@ -101,6 +101,7 @@ import {
 } from "./renderer.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import { DEFAULT_MAX_DELAY_MS, throttleRecordOf } from "../politeness.js";
+import type { AddressResolver } from "../url-policy.js";
 import {
   selectExplicitRenderSet,
   selectRenderSet,
@@ -247,6 +248,13 @@ export interface RenderPassConfig extends RenderSelectionConfig {
   renderUrls?: readonly string[];
   /** TEST ONLY — the fixture-server escape hatch. See `CrawlConfig`. */
   allowPrivate?: boolean;
+  /**
+   * TEST ONLY — the resolver the browser's pin approves the origin through
+   * (`RendererOptions.resolve`), so a suite can hand the pass a name that
+   * resolves nowhere, or a resolver that fails, without touching the network.
+   * Never wire it to an API field.
+   */
+  resolveAddress?: AddressResolver;
 }
 
 export interface RenderPassOptions {
@@ -470,6 +478,7 @@ export async function runRenderPass(
     navigationTimeoutMs: profiled.navigationTimeoutMs,
     settleMs,
     allowPrivate: cfg.allowPrivate === true,
+    ...(cfg.resolveAddress === undefined ? {} : { resolve: cfg.resolveAddress }),
     ...(opts.onRequestBlocked === undefined
       ? {}
       : { onRequestBlocked: opts.onRequestBlocked }),

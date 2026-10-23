@@ -52,6 +52,7 @@ import {
   START_CRAWL_FIELDS,
 } from "../../src/api/service.js";
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
+import { UrlPolicyError, type AddressResolver } from "../../src/crawl/url-policy.js";
 import { DISCOVERED_VIA } from "../../src/crawl/frontier.js";
 import { METRIC_SCOPES } from "../../src/rules/registry/types.js";
 import { RENDER_PASS_EVIDENCE } from "../../src/rules/metric/render-metrics.js";
@@ -62,6 +63,24 @@ import { RULESET_VERSION } from "../../src/rules/registry/registry.js";
 const NO_RESPONSE_ZERO = { pages: 0, confirmed: 0, answered: 0, inconclusive: 0, pending: 0 };
 
 const SEEDED_SITE = "http://mcp-query.example";
+
+/**
+ * The resolver the render pass's browser pin approves a site's name through
+ * (`ServiceConfig.resolveAddress`, TEST ONLY) — the HTTP suite's twin. Two
+ * names, two kinds of launch refusal; any other lookup is one nobody expected.
+ */
+const TEST_RESOLVER: AddressResolver = async (host, type) => {
+  if (host === "doh-down.test" || host === "www.doh-down.test") {
+    throw new UrlPolicyError(
+      "DNS_RESOLUTION_FAILED",
+      `DoH ${type} lookup for ${host} failed: TypeError: fetch failed (ECONNREFUSED 10.0.0.53:443)`,
+    );
+  }
+  if (host === "rebind.test" || host === "www.rebind.test") {
+    return type === "A" ? ["169.254.169.254"] : [];
+  }
+  throw new Error(`TEST_RESOLVER: unexpected ${type} lookup of ${host}`);
+};
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -408,6 +427,7 @@ beforeAll(async () => {
       allowedDomains: ["127.0.0.1"],
       // PROCESS TRUST, NOT WIRE TRUST. See the module header.
       crawlDefaults: { allowPrivate: true, probeHosts: false, perHostDelayMs: 0 },
+      resolveAddress: TEST_RESOLVER,
       exportDir,
       renderDir,
       log: (line) => serverLog.push(line),
@@ -1268,6 +1288,59 @@ describe("crawl_render", () => {
     expect(String(answer.body["error"])).toContain("the render pass could not start");
     expect(String(answer.body["error"])).toContain("CRAWL_TARGET_BLOCKED");
     expect(String(answer.body["error"])).not.toContain("internal error");
+  });
+
+  it("keeps the refused answer in a launch refusal, and redacts a resolver failure to its sentence", async () => {
+    // Fix round 4, the HTTP suite's two 409s on this transport: a name that
+    // resolves into blocked space keeps the host, the answer and the range; a
+    // name the resolver could not look up says only that, and the resolver's
+    // own text goes to the server log under the correlation id the answer
+    // carries.
+    const stamp = Date.now();
+    const seed = (name: string) =>
+      seedCrawl({
+        id: `crawl_mcp_${name.replace(/\W/g, "_")}_${stamp}`,
+        status: "finished",
+        siteUrl: `http://${name}/`,
+        config: {
+          siteUrl: `http://${name}/`,
+          maxPages: 10,
+          maxDepth: 3,
+          userAgent: "AriadneBot/0.1 (test)",
+          perHostDelayMs: 0,
+          maxConcurrency: 2,
+        },
+        discovery: {
+          robots: { outcome: "absent", crawlDelaySec: null, note: null, raw: null, truncated: false },
+          sitemapSources: [],
+          truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+          docsFetched: 0,
+        },
+      });
+
+    const blocked = await call("crawl_render", { crawlId: await seed("rebind.test") });
+    expect(blocked.isError).toBe(true);
+    expect(String(blocked.body["error"])).toContain(
+      "rebind.test resolves into blocked address space (169.254.169.254",
+    );
+    expect(String(blocked.body["error"])).toContain("CRAWL_TARGET_BLOCKED");
+
+    const unresolvedId = await seed("doh-down.test");
+    const before = serverLog.length;
+    const unresolved = await call("crawl_render", { crawlId: unresolvedId });
+    expect(unresolved.isError).toBe(true);
+    const message = String(unresolved.body["error"]);
+    expect(message).toContain("the render pass could not start: doh-down.test could not be resolved");
+    expect(message).toContain("DNS_RESOLUTION_FAILED");
+    expect(message).not.toContain("DoH");
+    expect(message).not.toContain("fetch failed");
+    expect(message).not.toContain("internal error");
+    const correlationId = /detail logged under ([0-9a-f-]{36})/.exec(message)?.[1];
+    expect(correlationId).toBeDefined();
+    const logged = serverLog.slice(before).filter((line) => line.includes(correlationId!));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain(`crawl ${unresolvedId}`);
+    expect(logged[0]).toContain("DoH A lookup for doh-down.test failed: TypeError: fetch failed");
   });
 
   it("refuses a crawl id nothing knows", async () => {

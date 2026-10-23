@@ -139,8 +139,13 @@ import { classifyStatus, parseRetryAfter } from "../fetch-page.js";
 import { headerValue, type HeaderBag } from "../http.js";
 import { HostGate, type HostSpacingEntry, type HostThrottle } from "../politeness.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
-import { isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
-import { isUrlAllowed, resolveApprovedAddress, type AddressResolver } from "../url-policy.js";
+import { hostnameSpellings, isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
+import {
+  isUrlAllowed,
+  resolveApprovedAddress,
+  UrlPolicyError,
+  type AddressResolver,
+} from "../url-policy.js";
 
 /**
  * The two waits, as production runs them.
@@ -1262,15 +1267,26 @@ export function browserNetworkSwitches(opts: {
 }
 
 /**
- * Every spelling `isSameOrigin` admits as the crawl's own origin — and so
- * every one the interception lets through, which the fence and the pin must
- * therefore cover too (a spelling the interception admits and the fence
- * drops is a render that fails for no reason the site gave). Mirrors
- * src/crawl/parse/url-utils.ts: the hostname modulo one leading `www.`, the
- * origin's own scheme and effective port, and https:443 as well when the
- * origin is http:80 (the upgrade). An IP-literal hostname has no `www.`
- * spelling — `www.127.0.0.1` is a name, and a name nobody owns. Exported for
- * its unit test.
+ * The spellings of the crawl's own origin the fence exempts and the pin
+ * resolves: the crawl's hostname first, then its `www.`/apex twin
+ * (`hostnameSpellings`, the crawler's one definition of "the same site"), with
+ * the origin's own scheme and effective port, and https:443 as well when the
+ * origin is http:80 (the upgrade `isSameOrigin` allows).
+ *
+ * This is NARROWER than `isSameOrigin`, deliberately, and the gap is the
+ * interception's to close, not the fence's. `isSameOrigin` compares hostnames
+ * modulo one leading `www.` without asking what the hostname is, so for a
+ * `www.` origin it also admits `www.www.<host>` — a name nobody owns, which is
+ * not listed here and never resolved (resolving it would put a made-up name on
+ * the wire; `hostnameSpellings` says the same of `www.<ip>`, which the WHATWG
+ * URL parser refuses outright as a hostname, so `isSameOrigin` never sees it).
+ * A URL on `www.www.<host>` passes `isSameOrigin`, is not pinned, and so fails
+ * as a classified `policy refusal` (`unpinnedReason`: "not a spelling of this
+ * crawl's origin the render pass can reach") — the same path as a spelling
+ * url-policy refused, never a request the fence silently drops. `isSameOrigin`
+ * itself is not narrowed: sites redirect between the spellings it admits and
+ * the crawl's boundary must keep admitting them. Exported for its unit test,
+ * which pins the omission.
  */
 export function originVariants(origin: string): {
   hostnames: string[];
@@ -1281,11 +1297,9 @@ export function originVariants(origin: string): {
     throw new RangeError(`originVariants: origin must be http(s), got ${origin}`);
   }
   const host = parsed.hostname.toLowerCase();
-  const hostnames = [host];
-  if (!isIpLiteralHostname(host)) {
-    if (host.startsWith("www.") && host.length > 4) hostnames.push(host.slice(4));
-    else hostnames.push(`www.${host}`);
-  }
+  // Own spelling first: the launch requires it and tolerates the twin.
+  // `hostnameSpellings` answers apex-first and knows an IP literal has no twin.
+  const hostnames = [host, ...hostnameSpellings(host).filter((twin) => twin !== host && twin !== "")];
   const port = parsed.port !== "" ? parsed.port : parsed.protocol === "https:" ? "443" : "80";
   const schemePorts = [{ protocol: parsed.protocol, port }];
   if (parsed.protocol === "http:" && port === "80") schemePorts.push({ protocol: "https:", port: "443" });
@@ -1299,7 +1313,14 @@ function isIpLiteralHostname(hostname: string): boolean {
 /** A spelling of the origin that could not be approved, and why. */
 export interface UnpinnedHost {
   host: string;
+  /** The sentence a caller may be shown (`resolveApprovedAddress`'s message). */
   reason: string;
+  /**
+   * The resolver's own message behind a `reason` of `<host> could not be
+   * resolved` (`UrlPolicyError.cause`), else null. FOR THE SERVER LOG ONLY:
+   * the API projects it away before the summary is answered.
+   */
+  detail: string | null;
 }
 
 /**
@@ -1387,9 +1408,13 @@ export class PageRenderer {
     // was checked, one is used. The crawl's OWN hostname must be approved — a
     // resolution failure or a blocked answer there stops the launch (a
     // `UrlPolicyError`, which the API maps to a 409). The other spelling may
-    // fail: it is then left out of the pin and the bypass (so it is fenced),
-    // a render of a URL on it is a classified `policy refusal`, and the
-    // omission is in `unpinnedHosts()` and the pass summary.
+    // fail url-policy: it is then left out of the pin and the bypass (so it
+    // is fenced), a render of a URL on it is a classified `policy refusal`,
+    // and the omission is in `unpinnedHosts()` and the pass summary. Only a
+    // `UrlPolicyError` is that kind of failure — a refused address, no record,
+    // a resolver that could not answer. Anything else the resolver throws is a
+    // defect of ours (rule 7) and fails the launch, as it would on the
+    // crawl's own hostname.
     const policyOpts = {
       allowPrivate: options.allowPrivate === true,
       ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
@@ -1403,7 +1428,12 @@ export class PageRenderer {
       try {
         pinned.push({ hostname, address: await resolveApprovedAddress(hostname, policyOpts) });
       } catch (error) {
-        unpinned.push({ host: hostname, reason: firstLine(error) });
+        if (!(error instanceof UrlPolicyError)) throw error;
+        unpinned.push({
+          host: hostname,
+          reason: firstLine(error),
+          detail: error.cause === undefined ? null : firstLine(error.cause),
+        });
       }
     }
     const fence = await NetworkFence.open();

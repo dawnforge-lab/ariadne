@@ -510,7 +510,10 @@ a private or internal one, `crawl_render` refuses with an error that starts `the
 pass could not start:` and names the reason. That is a fact about the site's DNS, so
 report it as such. If only the other spelling (`www.` or bare) fails, the pass still
 runs, and `unpinnedHosts` in the answer names that spelling and why. Pages on it come
-back as `policy refusal` render errors. The browser keeps its cache from page to page, so a theme's scripts are fetched
+back as `policy refusal` render errors. An entry for `www.<host>` whose reason is
+`www.<host> has no A or AAAA record` is normal for a site that has no `www` record at
+all: nothing is wrong, and nothing is unrendered, because no page of the crawl lives
+there. The browser keeps its cache from page to page, so a theme's scripts are fetched
 once and then served from the cache without asking the site again. Cookies and stored
 data are cleared between pages, so nothing one page sets changes how the next renders.
 If the site answers a render request with a 429, the engine slows down exactly as it
