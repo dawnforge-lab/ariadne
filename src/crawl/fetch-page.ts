@@ -26,6 +26,7 @@
  */
 import { request } from "undici";
 import { isUrlAllowed } from "./url-policy.js";
+import { detectPlatform, type Platform } from "./platform.js";
 import {
   ACCEPT_ENCODING,
   blockedAddressMessage,
@@ -176,6 +177,15 @@ export interface FetchResult {
   /** From `Link: <...>; rel="canonical"`, verbatim (not normalised). */
   canonicalHeader: string | null;
   xRobotsTag: string | null;
+  /**
+   * The platform the response headers name (`detectPlatform`, src/crawl/
+   * platform.ts), or null when they name none or nothing answered. Computed
+   * here because this is the one place that holds the headers; the response's
+   * other headers are not kept. NOT persisted per page: the crawl loop reads
+   * it off the first classifiable response and records the verdict on the
+   * crawl row (`crawls.platform`).
+   */
+  platformHint: Platform | null;
   /**
    * Why this row has no usable body or target, in plain words. Set on
    * `disallowed` (the URL or the address it resolved to), on `redirect` when
@@ -408,6 +418,7 @@ function emptyResult(
     retryAfterMs: null,
     canonicalHeader: null,
     xRobotsTag: null,
+    platformHint: null,
     disallowedReason,
   };
 }
@@ -485,6 +496,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     const contentType = headerValue(headers, "content-type");
     const xRobotsTag = headerValue(headers, "x-robots-tag");
     const canonicalHeader = parseCanonicalLinkHeader(headerValue(headers, "link"));
+    const platformHint = detectPlatform(headers);
     const mime = mimeType(contentType);
     const isHtml = mime !== null && HTML_MIME_TYPES.has(mime);
     const isRedirect = statusCode >= 300 && statusCode < 400;
@@ -522,6 +534,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
         retryAfterMs: null, // a 3xx is an answer, not a throttle
         canonicalHeader,
         xRobotsTag,
+        platformHint,
         disallowedReason: target.droppedReason,
       };
     }
@@ -572,6 +585,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       retryAfterMs: retryAfter.ms,
       canonicalHeader,
       xRobotsTag,
+      platformHint,
       // Two reasons can want this field, and they never co-occur: an
       // unsupported coding is an `ok`-turned-`unsupported_encoding`, a refused
       // Retry-After is a throttle. The coding wins if that ever changes,

@@ -125,6 +125,7 @@ function makeFetch(url: string, overrides: Partial<FetchResult> = {}): FetchResu
     retryAfterMs: null,
     canonicalHeader: null,
     xRobotsTag: null,
+    platformHint: null,
     disallowedReason: null,
     ...overrides,
   };

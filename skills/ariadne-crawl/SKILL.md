@@ -220,6 +220,7 @@ target is not something this skill can crawl.
  renderPassCount, rulesetVersion, failureReason, legacyHosts, sitemapUrls, findingCap,
  frontier: {pending, leased, done, failed, renderPending},
  queuePosition, liveLeases, blockedPages, hostSpacingMs, throttle,
+ platform, platformProfile,
  robotsBlocked: {recorded, dropped},
  rulesRunAt, findingsCount, pagesScanned, fetchResources,
  resourceRefsCappedPages,
@@ -296,6 +297,23 @@ What the fields mean when you are waiting:
   touched is in it, including hosts with all-zero counters. Null means no record was ever
   stored (the crawl predates the field, or failed before its first write) — that is
   not the same as "nothing throttled it". `{}` means a crawl that touched no host.
+- **`platform` and `platformProfile`** — the platform the site's own response headers
+  named, and what that did to the crawl. `platform` is `"shopify"` (a `powered-by:
+  Shopify` header, or any `x-shopify-*` header, on the first `ok` HTML page from the
+  crawl's origin) or `null`. Detection reads headers only, so a Shopify store whose CDN
+  strips those headers shows `null`. `null` means the crawl ran at the settings you
+  gave it. `platformProfile` is `null` exactly when `platform` is. Otherwise `applied`
+  holds what the crawl actually ran at after the profile: `maxConcurrency`,
+  `perHostDelayMs`, `renderConcurrency`, `navigationTimeoutMs`. A profile only ever
+  slows a crawl down. Shopify means 1 request in flight, at least 1000 ms per host,
+  1 render browser and a 60 s render navigation budget. A setting you gave that was
+  already slower stands. So a Shopify crawl started at `maxConcurrency: 16` runs at 1:
+  that is the engine, not a bug, and a smaller `maxPages` is how to make it finish
+  sooner. `appliedAt` is when the profile took effect. It is mid-crawl when no host
+  probe ran, and requests already in flight then finished at the old settings.
+  `optedOut: true` (with `applied` and `appliedAt` null) means the operator turned
+  profiles off for this crawl, so nothing was clamped. You cannot opt out from
+  `crawl_start`. This is crawl configuration, not a finding about the site.
 - **`resources` and `fetchResources`** — what this crawl knows about the images,
   stylesheets and scripts its pages point at, counted off the database rather than
   reported by any one pass (a resumed pass asks only what is still unfetched, so its

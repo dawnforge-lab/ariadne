@@ -7,7 +7,28 @@ under the ruleset version the engine reports — `rules_catalog`'s
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
 
-**What Phase 24a changed here: `crawl_status.throttle`.** One field, additive, no
+**What Phase 24a changed here: `crawl_status.platform` and
+`crawl_status.platformProfile`.** Two fields, additive, migration 0024, no tool
+or route added. `platform` is the platform the site's own response headers named
+(`"shopify"` today: `powered-by: Shopify`, or any `x-shopify-*` header), read off
+the first `ok` HTML response from the crawl's origin — the host probe's, or the
+seed fetch's when the probe is off. Headers only: no body sniffing, no extra
+request. `null` means no platform was named (the headers named none, which
+includes a Shopify store whose CDN strips those headers; no page answered `ok`;
+or a pre-0024 crawl), and the crawl ran at its configured settings.
+`platformProfile` is `null` exactly when `platform` is; otherwise
+`{platform, applied, appliedAt, optedOut}`. `applied` is
+`{maxConcurrency, perHostDelayMs, renderConcurrency, navigationTimeoutMs}`, the
+values in force after the clamp. A profile only ever slows a crawl down: Shopify
+is `maxConcurrency = min(config, 1)`, `perHostDelayMs = max(config, 1000)`, one
+render browser, and a 60 s render navigation budget. `appliedAt` is when it took
+effect: before the first worker when the probe named the platform, mid-crawl
+when the seed fetch did (requests already in flight finished at the old
+settings). `optedOut: true` with `applied: null` and `appliedAt: null` means the
+operator turned profiles off for this crawl (engine config `platformProfiles:
+false`, which is not a `crawl_start` field) and nothing was clamped.
+
+**Also Phase 24a: `crawl_status.throttle`.** One field, additive, no
 tool or route added. `throttle` is the per-host record of how hard each host pushed
 back, keyed by host: `{responses429, retryAfterSeen, escalations, recoveries,
 recoveryLocked, peakSpacingMs, finalSpacingMs}`. `escalations` is cumulative and

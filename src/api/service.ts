@@ -90,6 +90,11 @@ import { ROBOTS_OUTCOMES } from "../crawl/discovery.js";
 // `recheckCoverage`.
 import { RECHECK_CAP_REASON, RECHECK_CLASSES } from "../crawl/recheck/recheck-server-errors.js";
 import { throttleRecordOf, type HostThrottle } from "../crawl/politeness.js";
+import {
+  readStoredPlatform,
+  type Platform,
+  type StoredPlatformProfile,
+} from "../crawl/platform.js";
 import { NO_RESPONSE, NO_RESPONSE_ANSWERED, RECHECK_CLEARED } from "../rules/page/status.js";
 import {
   RENDER_HTML_DIR,
@@ -234,6 +239,16 @@ export const MIN_PER_HOST_DELAY_MS = 250;
  * would leave the caller believing every document was walked (hard rule 7).
  */
 export const MAX_SUPPLIED_SITEMAPS = 50;
+
+/** `CrawlDetail.platform` and `.platformProfile`, off the two crawls columns. */
+function platformFields(
+  platformColumn: string | null,
+  profileColumn: unknown,
+  crawlId: string,
+): { platform: Platform | null; platformProfile: StoredPlatformProfile | null } {
+  const { platform, profile } = readStoredPlatform(platformColumn, profileColumn, crawlId);
+  return { platform, platformProfile: profile };
+}
 
 /** Rows per page when the caller does not say, and the ceiling when they do. */
 export const PAGE_SIZE_DEFAULT = 50;
@@ -600,6 +615,25 @@ export interface CrawlDetail extends CrawlListItem {
    * host. Null is never a record of zeros.
    */
   throttle: Record<string, HostThrottle> | null;
+  /**
+   * The platform the site's own response headers named (`crawls.platform`,
+   * migration 0024): `"shopify"` today, read off the first `ok` HTML response
+   * from the crawl's origin. Null means no platform was named — the headers
+   * named none (a Shopify store whose CDN strips its headers included), no
+   * page answered `ok`, or the crawl predates 0024 — and the crawl ran at its
+   * configured settings.
+   */
+  platform: Platform | null;
+  /**
+   * What the platform profile did to this crawl (`crawls.platform_profile_jsonb`),
+   * null exactly when `platform` is. `applied` holds the values in force after
+   * the clamp — `maxConcurrency`, `perHostDelayMs`, `renderConcurrency`,
+   * `navigationTimeoutMs`; a caller's own setting stands wherever it was already
+   * slower — and `appliedAt` when it took effect (mid-crawl when no host probe
+   * ran). `optedOut: true` with `applied: null` means the operator turned
+   * profiles off for this crawl and nothing was clamped.
+   */
+  platformProfile: StoredPlatformProfile | null;
   /**
    * The extra hosts this crawl was told the site used to live on, echoed from
    * its stored config. Empty when none were named.
@@ -2387,6 +2421,9 @@ export class ApiService {
       robotsBlocked: { recorded: robotsBlockedRows, dropped: row.robotsBlockedDropped },
       hostSpacingMs: row.hostSpacingMs,
       throttle: throttleRecordOf(row.hostSpacingJsonb),
+      // Validated, as the loop validates them before resuming: columns we
+      // cannot read are a defect of ours, and that is a 500, not a null.
+      ...platformFields(row.platform, row.platformProfile, crawlId),
       legacyHosts: configStringList(row.config, "legacyHosts", crawlId),
       sitemapUrls: configStringList(row.config, "sitemapUrls", crawlId),
       findingCap: configFindingCap(row.config, crawlId),

@@ -67,6 +67,13 @@ import {
 import { fetchPage, MAX_BODY, type FetchClass, type FetchResult } from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
 import {
+  isClassifiableResponse,
+  platformProfileRecord,
+  readStoredPlatform,
+  type Platform,
+  type StoredPlatformProfile,
+} from "./platform.js";
+import {
   crawledRows,
   enqueueUrls,
   failUrl,
@@ -275,6 +282,18 @@ export interface CrawlConfig extends RenderSelectionConfig {
    * closed, so every API crawl takes the `maxPages` default.
    */
   maxBlockedUrls?: number;
+  /**
+   * Apply a platform profile when the site's headers name its platform
+   * (src/crawl/platform.ts; Shopify: one request in flight, ≥1 s per host).
+   * Absent means on. `false` is the operator's opt-out: the platform is still
+   * detected and recorded, with `optedOut: true`, and nothing is clamped.
+   *
+   * ENGINE config, on `maxBlockedUrls`'s terms: stored on the row so a resume
+   * makes the same choice, and NOT accepted over the API — the
+   * `parseStartCrawlInput` allowlist is closed, so a client cannot opt a
+   * crawl out of the pace the platform tolerates.
+   */
+  platformProfiles?: boolean;
 }
 
 /**
@@ -745,6 +764,7 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
     maxResourceHosts: raw["maxResourceHosts"],
     fetchResources: raw["fetchResources"],
     maxBlockedUrls: raw["maxBlockedUrls"],
+    platformProfiles: raw["platformProfiles"],
   };
   for (const [field, expected] of [
     ["siteUrl", "string"],
@@ -767,7 +787,10 @@ export function parseStoredConfig(value: unknown, crawlId: string): CrawlConfig 
   // non-boolean: a stored `"false"` is truthy, so a resume would turn the pass
   // back ON for a client who asked us not to touch their servers, and a resume
   // that guessed `false` would silently stop asking about a crawl that did.
-  for (const field of ["probeHosts", "fetchResources"] as const) {
+  // `platformProfiles` joins them on the same terms: a stored `"false"` that
+  // resumed as "on" would clamp a crawl its operator opted out, and one that
+  // resumed as "off" would crawl a Shopify store at full width.
+  for (const field of ["probeHosts", "fetchResources", "platformProfiles"] as const) {
     if (config[field] !== undefined && typeof config[field] !== "boolean") {
       throw new Error(`crawl ${crawlId}: stored config.${field} is not a boolean`);
     }
@@ -1014,6 +1037,28 @@ async function storedSpacing(
 }
 
 /**
+ * The platform profile an earlier run of this crawl recorded, or null. The two
+ * columns are written together (`recordPlatform`), so one set without the
+ * other — or a `platform` that disagrees with the profile's — is a row we
+ * cannot read a pace out of, and it stops the run (rule 7).
+ */
+async function storedPlatformProfile(
+  db: Db,
+  crawlId: string,
+): Promise<StoredPlatformProfile | null> {
+  const rows = await db
+    .select({ platform: crawls.platform, platformProfile: crawls.platformProfile })
+    .from(crawls)
+    .where(eq(crawls.id, crawlId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error(`crawl ${crawlId}: the crawls row is gone; cannot read its platform profile`);
+  }
+  return readStoredPlatform(row.platform, row.platformProfile, crawlId).profile;
+}
+
+/**
  * How many candidate URLs `enqueue` gates and looks up in the frontier per
  * round trip. A page's links fit in one; a sitemap's entries are taken this
  * many at a time so they can stop at the cap. The lookup binds the chunk as
@@ -1030,12 +1075,39 @@ async function runToCompletion(
 ): Promise<CrawlSummary> {
   const allowPrivate = config.allowPrivate === true;
 
+  // THE PLATFORM PROFILE (Phase 24a §3.1; src/crawl/platform.ts). The first
+  // classifiable response — an `ok` HTML page from the crawl's origin — is
+  // asked which platform it runs on, from its headers alone. The host probe's
+  // responses come first when it runs; otherwise the seed fetch's (or whichever
+  // page is the first to answer `ok`, if the seed redirected). One verdict per
+  // crawl: once a response has been classified, later ones are not asked.
+  //
+  // A resume re-enters the profile an earlier run recorded and asks nothing:
+  // the pace it applied binds the continuation exactly as earned spacing does.
+  // A run that classified a response as "no platform" recorded nothing, so its
+  // resume asks again — the same verdict, from a fresh response.
+  let activeProfile: StoredPlatformProfile | null = await storedPlatformProfile(db, crawlId);
+  let platformDecided = activeProfile !== null;
+  /** The platform `result` names, if it is the crawl's one classifiable response. */
+  const classifyPlatform = (result: FetchResult): Platform | null => {
+    if (platformDecided || !isClassifiableResponse(result, config.siteUrl)) return null;
+    platformDecided = true;
+    return result.platformHint;
+  };
+  const recordPlatform = async (record: StoredPlatformProfile): Promise<void> => {
+    await db
+      .update(crawls)
+      .set({ platform: record.platform, platformProfile: record })
+      .where(eq(crawls.id, crawlId));
+  };
+
   // INSERTION 1 — the host probe, before discovery. It asks what the site's
   // *other names* do, which is a question the crawl proper can never answer:
   // everything after this line happens under the one spelling the crawl was
   // seeded with, robots.txt included. Four chains, up to five hops each, one
   // at a time and paced by `perHostDelayMs` — robots.txt is not readable yet,
   // so the config delay is the spacing it can honour; see host-probe.
+  let probePlatform: Platform | null = null;
   if (config.probeHosts !== false) {
     const hostProbe = await probeHostVariants(config.siteUrl, {
       userAgent: config.userAgent,
@@ -1043,8 +1115,18 @@ async function runToCompletion(
       legacyHosts: config.legacyHosts,
       perHostDelayMs: config.perHostDelayMs,
       timeoutMs: FETCH_TIMEOUT_MS,
+      onResponse: (result) => {
+        probePlatform ??= classifyPlatform(result);
+      },
     });
     await db.update(crawls).set({ hostProbe }).where(eq(crawls.id, crawlId));
+  }
+  // Named by the probe: applied before the window and the gate exist, so no
+  // worker ever runs at the unclamped pace. (The probe's own remaining hops ran
+  // at the configured spacing: one chain at a time, a handful of requests.)
+  if (probePlatform !== null) {
+    activeProfile = platformProfileRecord(probePlatform, config, new Date());
+    await recordPlatform(activeProfile);
   }
 
   const discovery = await discover(config.siteUrl, {
@@ -1100,9 +1182,21 @@ async function runToCompletion(
   }
 
   const writer = new PageWriter(db, crawlId);
+  // The pace in force from the first worker: the config, clamped by a profile
+  // the probe (or an earlier run of this crawl) already applied. `min`/`max`
+  // against the config again, so a profile can only ever slow a crawl down.
+  const applied = activeProfile?.applied ?? null;
+  const maxConcurrency =
+    applied === null
+      ? config.maxConcurrency
+      : Math.min(config.maxConcurrency, applied.maxConcurrency);
+  const perHostDelayMs =
+    applied === null
+      ? config.perHostDelayMs
+      : Math.max(config.perHostDelayMs, applied.perHostDelayMs);
   const window = new CrawlWindow({
-    max: config.maxConcurrency,
-    initial: Math.min(WINDOW_INITIAL, config.maxConcurrency),
+    max: maxConcurrency,
+    initial: Math.min(WINDOW_INITIAL, maxConcurrency),
   });
   // THE SPACING AN EARLIER RUN OF THIS CRAWL EARNED, read back off the row.
   //
@@ -1116,7 +1210,7 @@ async function runToCompletion(
   // `earnedSpacingMs` there for why the policy lives in that module.
   const { earnedSpacingMs, hostSpacingJsonb } = await storedSpacing(db, crawlId);
   const gate = new HostGate({
-    perHostDelayMs: config.perHostDelayMs,
+    perHostDelayMs,
     robotsCrawlDelaySec: discovery.robots.crawlDelaySec,
     earnedSpacingMs,
   });
@@ -1555,6 +1649,22 @@ async function runToCompletion(
         retryAfterMs: result.retryAfterMs,
         url: item.url,
       });
+
+      // The platform, if this is the crawl's first classifiable response and
+      // the probe did not already answer the question. Workers are running, so
+      // the clamp lands mid-crawl: synchronously, before anything else awaits,
+      // so every LATER admission sees it — the next batch is leased at the new
+      // window and the next gate acquisition at the new base. Siblings already
+      // in flight finish at the old settings; `appliedAt` says when it changed.
+      const detected = classifyPlatform(result);
+      if (detected !== null) {
+        const record = platformProfileRecord(detected, config, new Date());
+        if (record.applied !== null) {
+          window.clampMax(record.applied.maxConcurrency);
+          gate.raiseBase(record.applied.perHostDelayMs);
+        }
+        await recordPlatform(record);
+      }
 
       // A retryable failure with attempts left is not written yet: the row for
       // this URL records its *final* outcome, and writing a timeout — or a

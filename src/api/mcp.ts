@@ -261,7 +261,7 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "One crawl in full: status, siteUrl, timings, pagesCrawled, the frontier " +
         "counts (queued/leased/done/failed), the ruleset version it was judged " +
         "with, failureReason, queuePosition, liveLeases, blockedPages, robotsBlocked, " +
-        "hostSpacingMs, throttle, " +
+        "hostSpacingMs, throttle, platform, platformProfile, " +
         "legacyHosts, sitemapUrls, findingCap, rulesRunAt, findingsCount, " +
         "pagesScanned, fetchResources, resources and recheck.\n\n" +
         "WHY A FAILED CRAWL FAILED: failureReason, one sentence, and null on " +
@@ -439,6 +439,20 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "report it as a defect of the site. Null means no record was ever stored " +
         "(the crawl predates the field, or failed before its first write), which " +
         "is not the same as no throttling; {} means a crawl that touched no host.\n\n" +
+        "platform is the platform the site's own response headers named, read off " +
+        "the first ok HTML page from the crawl's origin: 'shopify' (powered-by: " +
+        "Shopify, or any x-shopify-* header) or null. Null means no platform was " +
+        "named and the crawl ran at its configured settings; a Shopify store whose " +
+        "CDN strips those headers is null too. platformProfile is null exactly when " +
+        "platform is; otherwise {platform, applied, appliedAt, optedOut}. applied " +
+        "holds what the crawl actually ran at after the profile: maxConcurrency, " +
+        "perHostDelayMs, renderConcurrency, navigationTimeoutMs. A profile only " +
+        "slows a crawl down (Shopify: 1 request in flight, at least 1000ms per " +
+        "host, 1 render browser, 60000ms render navigation budget), and your own " +
+        "setting stands wherever it was already slower. appliedAt is when it took " +
+        "effect, mid-crawl if no host probe ran. optedOut true (applied and " +
+        "appliedAt null) means the operator turned profiles off and nothing was " +
+        "clamped. It is crawl configuration, not a finding.\n\n" +
         "robotsBlocked is NOT blockedPages: it is the internal URLs robots.txt " +
         "kept this crawl out of, which were never requested. recorded counts the " +
         "ones on record as pages (robots.blocks-internal-urls reports them with " +

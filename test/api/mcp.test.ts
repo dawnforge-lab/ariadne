@@ -3138,3 +3138,52 @@ describe("crawl_status — the per-host throttle record", () => {
     expect((await ok("crawl_status", { crawlId: legacy }))["throttle"]).toBeNull();
   });
 });
+
+describe("crawl_status — the platform profile", () => {
+  it("serves the recorded platform and the values the profile applied", async () => {
+    const crawlId = await seedCrawl({ id: `crawl_mcp_platform_${Date.now()}`, status: "finished" });
+    const profile = {
+      platform: "shopify" as const,
+      applied: {
+        maxConcurrency: 1,
+        perHostDelayMs: 1000,
+        renderConcurrency: 1,
+        navigationTimeoutMs: 60_000,
+      },
+      appliedAt: "2026-10-23T12:00:00.000Z",
+      optedOut: false,
+    };
+    await db
+      .update(crawls)
+      .set({ platform: "shopify", platformProfile: profile })
+      .where(eq(crawls.id, crawlId));
+    const detail = await ok("crawl_status", { crawlId });
+    expect(detail["platform"]).toBe("shopify");
+    expect(detail["platformProfile"]).toEqual(profile);
+  });
+
+  it("serves an opt-out as recorded, with nothing applied", async () => {
+    const crawlId = await seedCrawl({ id: `crawl_mcp_platform_out_${Date.now()}`, status: "finished" });
+    const profile = { platform: "shopify" as const, applied: null, appliedAt: null, optedOut: true };
+    await db
+      .update(crawls)
+      .set({ platform: "shopify", platformProfile: profile })
+      .where(eq(crawls.id, crawlId));
+    const detail = await ok("crawl_status", { crawlId });
+    expect(detail["platform"]).toBe("shopify");
+    expect(detail["platformProfile"]).toEqual(profile);
+  });
+
+  it("serves null for both when no platform was named", async () => {
+    const crawlId = await seedCrawl({ id: `crawl_mcp_platform_none_${Date.now()}`, status: "finished" });
+    const detail = await ok("crawl_status", { crawlId });
+    expect(detail["platform"]).toBeNull();
+    expect(detail["platformProfile"]).toBeNull();
+  });
+
+  it("does not let crawl_start opt a crawl out of the profile", async () => {
+    const answer = await call("crawl_start", { siteUrl: `${site}/`, platformProfiles: false });
+    expect(answer.isError).toBe(true);
+    expect(answer.text).toContain("platformProfiles");
+  });
+});

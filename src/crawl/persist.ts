@@ -544,6 +544,7 @@ export class PageWriter {
           retryAfterMs: null,
           canonicalHeader: null,
           xRobotsTag: null,
+          platformHint: null,
           disallowedReason: reason,
         },
         null,

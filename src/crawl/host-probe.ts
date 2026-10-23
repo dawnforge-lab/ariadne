@@ -43,7 +43,7 @@
  *    governs the site is precisely what the probe exists to find out, and no
  *    host can be asked for its rules before we know whether it is the site.
  */
-import { fetchPage, type FetchClass } from "./fetch-page.js";
+import { fetchPage, type FetchClass, type FetchResult } from "./fetch-page.js";
 import type { DnsLookupFn } from "./http.js";
 import { hostProbeStarts } from "./parse/url-utils.js";
 import { HostGate } from "./politeness.js";
@@ -113,6 +113,15 @@ export interface HostProbeOpts {
    * is probed as written, at its origin root.
    */
   legacyHosts?: readonly string[];
+  /**
+   * Told about every hop's full `FetchResult`, in order, as soon as it lands —
+   * before the next hop's gate wait. The crawl loop uses it to read the
+   * platform off the first page response (src/crawl/platform.ts) without a
+   * second request for the same home page. Observation only: the probe's own
+   * record is unchanged by it, and an error it throws propagates (it is the
+   * caller's bug, not the site's behaviour).
+   */
+  onResponse?: (result: FetchResult) => void;
 }
 
 /** Follow one variant to wherever it lands, recording every hop. */
@@ -134,6 +143,7 @@ async function followChain(
       lookup: opts.lookup,
       timeoutMs: opts.timeoutMs,
     });
+    opts.onResponse?.(result);
     hops.push({
       url,
       statusCode: result.statusCode,

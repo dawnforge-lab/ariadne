@@ -1811,6 +1811,7 @@ describe("resumeCrawl", () => {
         retryAfterMs: null,
         canonicalHeader: null,
         xRobotsTag: null,
+        platformHint: null,
         disallowedReason: null,
       },
       null,
@@ -2032,4 +2033,274 @@ describe("the test-only config fields are not persisted", () => {
     expect(resumed.status).toBe("failed");
     expect(resumed.note).toMatch(/robots\.txt unreachable/);
   });
+});
+
+/**
+ * The platform profile (Phase 24a §3.1), end to end over a fixture storefront.
+ *
+ * The site answers every page with whatever `storefrontHeaders` holds — the
+ * real lavishalice.com set (`powered-by: Shopify`, `server: cloudflare`) by
+ * default — and counts requests IN FLIGHT at the server, which is the only
+ * honest place to measure "at most one request at a time": the loop's own
+ * window could say 1 and still be wrong about what reached the site. Every page
+ * holds its response for a beat so that two concurrent requests would overlap.
+ *   /         -> /p1 /p2 /p3 /p4
+ *   /pN       -> a leaf
+ * robots.txt 404s (absent -> allow all).
+ */
+describe("platform profile", () => {
+  let storefront: Server;
+  let storefrontBase: string;
+  let storefrontHeaders: Record<string, string> = {};
+  let inFlight = 0;
+  let maxInFlight = 0;
+  /** Start times of every page request, robots.txt excluded. */
+  let starts: number[] = [];
+
+  const SHOPIFY_HEADERS = {
+    "powered-by": "Shopify",
+    "shopify-complexity-score": "1640",
+    server: "cloudflare",
+  };
+
+  beforeAll(async () => {
+    storefront = createServer((req, res) => {
+      const path = req.url ?? "";
+      if (path === "/robots.txt") {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("no robots here");
+        return;
+      }
+      starts.push(Date.now());
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      setTimeout(() => {
+        inFlight -= 1;
+        const body =
+          path === "/"
+            ? html(`<a href="/p1">1</a><a href="/p2">2</a><a href="/p3">3</a><a href="/p4">4</a>`)
+            : path.startsWith("/p")
+              ? html(`<p>product ${path}</p>`)
+              : html("<p>gone</p>");
+        res.writeHead(path === "/" || path.startsWith("/p") ? 200 : 404, {
+          "content-type": "text/html; charset=utf-8",
+          ...storefrontHeaders,
+        });
+        res.end(body);
+      }, 40);
+    });
+    storefrontBase = await listen(storefront);
+  });
+
+  afterAll(async () => {
+    storefront.closeAllConnections();
+    await new Promise<void>((r) => storefront.close(() => r()));
+  });
+
+  function reset(headers: Record<string, string>): void {
+    storefrontHeaders = headers;
+    inFlight = 0;
+    maxInFlight = 0;
+    starts = [];
+  }
+
+  async function rowOf(crawlId: string) {
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, crawlId));
+    if (row === undefined) throw new Error(`no crawls row for ${crawlId}`);
+    return row;
+  }
+
+  /** The smallest gap between two consecutive page-request starts. */
+  function minGap(): number {
+    let gap = Infinity;
+    for (let i = 1; i < starts.length; i += 1) {
+      gap = Math.min(gap, (starts[i] as number) - (starts[i - 1] as number));
+    }
+    return gap;
+  }
+
+  // Timer slack: setTimeout may fire a few ms early relative to Date.now().
+  const SLACK_MS = 15;
+
+  it(
+    "names Shopify from the probe's headers and crawls at one request in flight, ≥1 s apart",
+    async () => {
+      reset(SHOPIFY_HEADERS);
+      const before = Date.now();
+      const summary = await crawl(
+        config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 0 }),
+      );
+      expect(summary.status).toBe("finished");
+      expect(summary.pagesCrawled).toBe(5);
+
+      const row = await rowOf(summary.crawlId);
+      expect(row.platform).toBe("shopify");
+      expect(row.platformProfile).toEqual({
+        platform: "shopify",
+        applied: {
+          maxConcurrency: 1,
+          perHostDelayMs: 1000,
+          renderConcurrency: 1,
+          navigationTimeoutMs: 60_000,
+        },
+        appliedAt: expect.any(String),
+        optedOut: false,
+      });
+      const appliedAt = Date.parse(row.platformProfile?.appliedAt ?? "");
+      expect(appliedAt).toBeGreaterThanOrEqual(before);
+      expect(row.hostSpacingMs).toBeGreaterThanOrEqual(1000);
+
+      expect(maxInFlight).toBe(1);
+      // The probe's own hops ran at the configured 0 ms (they precede the
+      // verdict), so the gap is measured over the crawl's requests only: the
+      // last six (five pages and the known-404 probe).
+      starts = starts.slice(-6);
+      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+    },
+    30_000,
+  );
+
+  it(
+    "clamps mid-crawl off the seed fetch when the host probe is off, and records when",
+    async () => {
+      reset(SHOPIFY_HEADERS);
+      const before = Date.now();
+      const summary = await crawl(
+        config({
+          siteUrl: storefrontBase,
+          maxConcurrency: 4,
+          perHostDelayMs: 0,
+          probeHosts: false,
+        }),
+      );
+      expect(summary.status).toBe("finished");
+      const row = await rowOf(summary.crawlId);
+      expect(row.platform).toBe("shopify");
+      expect(row.platformProfile?.applied?.maxConcurrency).toBe(1);
+      expect(row.platformProfile?.applied?.perHostDelayMs).toBe(1000);
+      const appliedAt = Date.parse(row.platformProfile?.appliedAt ?? "");
+      // After the crawl started and after the seed request reached the site:
+      // the clamp landed while the loop was running.
+      expect(appliedAt).toBeGreaterThanOrEqual(before);
+      expect(appliedAt).toBeGreaterThanOrEqual(starts[0] as number);
+
+      // The seed was the only URL in the first batch, so nothing was in flight
+      // beside it when the clamp landed: the whole crawl is one at a time.
+      expect(maxInFlight).toBe(1);
+      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+    },
+    30_000,
+  );
+
+  it(
+    "keeps a caller's delay that is already slower than the profile",
+    async () => {
+      reset(SHOPIFY_HEADERS);
+      const summary = await crawl(
+        config({
+          siteUrl: storefrontBase,
+          maxConcurrency: 4,
+          perHostDelayMs: 3000,
+          probeHosts: false,
+          maxPages: 2,
+        }),
+      );
+      const row = await rowOf(summary.crawlId);
+      expect(row.platformProfile?.applied?.perHostDelayMs).toBe(3000);
+      expect(row.hostSpacingMs).toBe(3000);
+      expect(minGap()).toBeGreaterThanOrEqual(3000 - SLACK_MS);
+    },
+    30_000,
+  );
+
+  it(
+    "records the opt-out and clamps nothing when platformProfiles is false",
+    async () => {
+      reset(SHOPIFY_HEADERS);
+      const summary = await crawl(
+        config({ siteUrl: storefrontBase, maxConcurrency: 4, platformProfiles: false }),
+      );
+      expect(summary.status).toBe("finished");
+      const row = await rowOf(summary.crawlId);
+      expect(row.platform).toBe("shopify");
+      expect(row.platformProfile).toEqual({
+        platform: "shopify",
+        applied: null,
+        appliedAt: null,
+        optedOut: true,
+      });
+      // The four leaves were leased as one batch at the configured window.
+      expect(maxInFlight).toBeGreaterThan(1);
+      expect(row.hostSpacingMs).toBe(0);
+      // And the choice is on the row, so a resume makes the same one.
+      expect(parseStoredConfig(row.config, summary.crawlId).platformProfiles).toBe(false);
+    },
+    30_000,
+  );
+
+  it(
+    "does not profile a storefront whose CDN strips the Shopify headers",
+    async () => {
+      // The same store, the same pages, minus the two headers we read. Headers
+      // only, no body sniffing: the configured settings apply, and visibly.
+      reset({ "shopify-complexity-score": "1640", server: "cloudflare" });
+      const summary = await crawl(config({ siteUrl: storefrontBase, maxConcurrency: 4 }));
+      expect(summary.status).toBe("finished");
+      const row = await rowOf(summary.crawlId);
+      expect(row.platform).toBeNull();
+      expect(row.platformProfile).toBeNull();
+      expect(maxInFlight).toBeGreaterThan(1);
+      expect(row.hostSpacingMs).toBe(0);
+    },
+    30_000,
+  );
+
+  it(
+    "never profiles a site that is not Shopify",
+    async () => {
+      reset({ server: "nginx", "x-powered-by": "PHP/8.3" });
+      const summary = await crawl(config({ siteUrl: storefrontBase, maxConcurrency: 4 }));
+      const row = await rowOf(summary.crawlId);
+      expect(row.platform).toBeNull();
+      expect(row.platformProfile).toBeNull();
+      expect(maxInFlight).toBeGreaterThan(1);
+    },
+    30_000,
+  );
+
+  it(
+    "re-enters the recorded profile on a resume without asking again",
+    async () => {
+      reset(SHOPIFY_HEADERS);
+      const ac = new AbortController();
+      // Long enough for the probe and the seed, short of the five pages at 1 s.
+      setTimeout(() => ac.abort(), 1_500);
+      const first = await crawl(
+        config({ siteUrl: storefrontBase, maxConcurrency: 4, perHostDelayMs: 0 }),
+        ac.signal,
+      );
+      expect(first.status).toBe("cancelled");
+      const recorded = (await rowOf(first.crawlId)).platformProfile;
+      expect(recorded?.applied?.maxConcurrency).toBe(1);
+
+      // The site stops naming itself. A resume that re-detected would now find
+      // no platform and crawl at four; the recorded profile must bind instead.
+      reset({ server: "cloudflare" });
+      const resumed = await resumeCrawl(db, first.crawlId, {
+        config: config({
+          siteUrl: storefrontBase,
+          maxConcurrency: 4,
+          perHostDelayMs: 0,
+          probeHosts: false,
+        }),
+        reclaimLeases: true,
+      });
+      expect(resumed.status).toBe("finished");
+      expect(maxInFlight).toBe(1);
+      expect(minGap()).toBeGreaterThanOrEqual(1000 - SLACK_MS);
+      // Unchanged: the record is when the profile was applied, not re-stamped.
+      expect((await rowOf(first.crawlId)).platformProfile).toEqual(recorded);
+    },
+    30_000,
+  );
 });

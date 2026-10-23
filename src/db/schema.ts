@@ -4,6 +4,7 @@ import {
   primaryKey, index, uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
+import type { StoredPlatformProfile } from "../crawl/platform.js";
 
 export const crawls = pgTable("crawls", {
   id: text("id").primaryKey(),                 // e.g. crawl_<ulid>
@@ -282,6 +283,19 @@ export const crawls = pgTable("crawls", {
   // that never met the cap. Every crawl the 0023 loop starts writes false before
   // its first enqueue, so false is a measurement: no new URL was turned away.
   frontierCapped: boolean("frontier_capped"),
+  // THE PLATFORM THE SITE'S OWN HEADERS NAMED, and the profile that followed
+  // (migration 0024; src/crawl/platform.ts). `platform` is read off the first
+  // classifiable response (an `ok` HTML page from the crawl's origin): the
+  // host probe's, or the seed fetch's when the probe is off.
+  //
+  // NULLABLE, AND THE NULL MEANS ONE THING: no platform was named — the
+  // headers named none (including a Shopify store whose CDN strips them), no
+  // classifiable response came back, or the crawl predates 0024. The caller's
+  // own settings applied. `platform_profile_jsonb` is null exactly when
+  // `platform` is; when it is set it holds what was applied and when, or that
+  // the operator opted out (`StoredPlatformProfile`).
+  platform: text("platform"),
+  platformProfile: jsonb("platform_profile_jsonb").$type<StoredPlatformProfile>(),
 });
 
 export const pages = pgTable("pages", {

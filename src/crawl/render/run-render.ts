@@ -84,7 +84,13 @@ import {
   leaseRenderUrls,
   releaseRenderLeases,
 } from "../frontier.js";
-import { PageRenderer, writeRenderResult, type RenderResult } from "./renderer.js";
+import {
+  PageRenderer,
+  RENDERER_DEFAULTS,
+  writeRenderResult,
+  type RenderResult,
+} from "./renderer.js";
+import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import {
   selectExplicitRenderSet,
   selectRenderSet,
@@ -317,7 +323,7 @@ export async function runRenderPass(
   // (its next `leaseBatch` is coming for rows we would have promoted) or one
   // that died mid-run and was never resumed or marked failed. Both leave a
   // frontier in flight; `finished`, `cancelled` and `failed` do not.
-  const { status, hostSpacingMs } = await crawlRow(db, crawlId);
+  const { status, hostSpacingMs, platformProfile } = await crawlRow(db, crawlId);
   // A crawl that has not started yet is unsafe for the same reason a live one
   // is, one step earlier: `queued` is the API queue's accepted-but-not-yet-run
   // state (src/api/service.ts), and the worker that picks it up will seed a
@@ -341,6 +347,19 @@ export async function runRenderPass(
       "live",
     );
   }
+
+  // THE CRAWL'S PLATFORM PROFILE binds the render pass too (Phase 24a §3.1):
+  // a site that tolerates one request at a time tolerates one browser at a
+  // time, and a slow storefront gets the profile's longer navigation budget
+  // rather than a `render_error` for being slow. `min` and `max` against what
+  // the caller asked for, so the profile only ever slows the pass down. An
+  // opted-out profile (`applied: null`) and a crawl with no platform change
+  // nothing.
+  const profiled = renderPacing(
+    concurrency,
+    cfg.navigationTimeoutMs ?? RENDERER_DEFAULTS.navigationTimeoutMs,
+    platformProfile,
+  );
 
   // STEP 2. Choose the set. After this statement the frontier is the selection
   // — either the automatic one, or the list the caller named, which REPLACES it
@@ -387,9 +406,7 @@ export async function runRenderPass(
     // ours to discard between passes — see `renderPaceMs`.
     perHostDelayMs: renderPaceMs(cfg.perHostDelayMs, hostSpacingMs),
     robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
-    ...(cfg.navigationTimeoutMs === undefined
-      ? {}
-      : { navigationTimeoutMs: cfg.navigationTimeoutMs }),
+    navigationTimeoutMs: profiled.navigationTimeoutMs,
     ...(cfg.settleMs === undefined ? {} : { settleMs: cfg.settleMs }),
     allowPrivate: cfg.allowPrivate === true,
     ...(opts.onRequestBlocked === undefined
@@ -402,11 +419,11 @@ export async function runRenderPass(
   const workerIds: string[] = [];
 
   try {
-    // STEP 3. `concurrency` workers, each leasing one URL at a time. One at a
-    // time rather than a batch: a batch leased and then rendered serially holds
+    // STEP 3. `profiled.renderConcurrency` workers, each leasing one URL at a
+    // time. One at a time rather than a batch: a batch leased and then rendered serially holds
     // its last URL's lease for the whole batch, and a worker that dies loses
     // the whole batch to a lease expiry instead of one URL.
-    const workers = Array.from({ length: concurrency }, (_, i) => {
+    const workers = Array.from({ length: profiled.renderConcurrency }, (_, i) => {
       const workerId = `render_${crawlId}_${i}`;
       workerIds.push(workerId);
       return runWorker(db, crawlId, workerId, renderer, opts.signal ?? null, (result) => {
@@ -510,9 +527,17 @@ async function recordRenderSelection(
 async function crawlRow(
   db: Db,
   crawlId: string,
-): Promise<{ status: string; hostSpacingMs: number | null }> {
+): Promise<{
+  status: string;
+  hostSpacingMs: number | null;
+  platformProfile: StoredPlatformProfile | null;
+}> {
   const rows = await db
-    .select({ status: crawls.status, hostSpacingMs: crawls.hostSpacingMs })
+    .select({
+      status: crawls.status,
+      hostSpacingMs: crawls.hostSpacingMs,
+      platformProfile: crawls.platformProfile,
+    })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
     .limit(1);
@@ -520,7 +545,31 @@ async function crawlRow(
   if (row === undefined) {
     throw new RenderPassRefusal(`runRenderPass: no such crawl '${crawlId}'`, "missing");
   }
-  return row;
+  return {
+    status: row.status,
+    hostSpacingMs: row.hostSpacingMs,
+    // Validated, not trusted: a profile we cannot read throws (rule 7) rather
+    // than rendering a Shopify store with four browsers.
+    platformProfile: parseStoredPlatformProfile(row.platformProfile, crawlId),
+  };
+}
+
+/**
+ * The render pass's concurrency and navigation budget once the crawl's
+ * platform profile has had its say: `min(asked, profile)` contexts and
+ * `max(asked, profile)` ms. Exported for its unit test.
+ */
+export function renderPacing(
+  renderConcurrency: number,
+  navigationTimeoutMs: number,
+  profile: StoredPlatformProfile | null,
+): { renderConcurrency: number; navigationTimeoutMs: number } {
+  const applied = profile?.applied ?? null;
+  if (applied === null) return { renderConcurrency, navigationTimeoutMs };
+  return {
+    renderConcurrency: Math.min(renderConcurrency, applied.renderConcurrency),
+    navigationTimeoutMs: Math.max(navigationTimeoutMs, applied.navigationTimeoutMs),
+  };
 }
 
 /**

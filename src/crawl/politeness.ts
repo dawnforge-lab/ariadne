@@ -204,7 +204,7 @@ function p95(values: readonly number[]): number {
 
 export class CrawlWindow {
   private current: number;
-  private readonly max: number;
+  private max: number;
   private readonly slowMs: number;
   private readonly byteBudget: number;
   private inFlightBytes = 0;
@@ -239,6 +239,26 @@ export class CrawlWindow {
   /** Concurrent fetches the loop may have in flight right now. */
   size(): number {
     return this.current;
+  }
+
+  /**
+   * Lower the window's ceiling to `n` for the rest of the crawl — a platform
+   * profile (src/crawl/platform.ts) learned mid-crawl that the site wants
+   * fewer concurrent requests. Never raises it: a call with a larger `n` than
+   * the current ceiling changes nothing. The current size drops with it, so the
+   * NEXT batch is leased at the new size; fetches already in flight finish.
+   */
+  clampMax(n: number): void {
+    if (!Number.isInteger(n) || n < 1) {
+      throw new RangeError(`CrawlWindow.clampMax: n must be an integer ≥ 1, got ${n}`);
+    }
+    this.max = Math.min(this.max, n);
+    this.current = Math.min(this.current, this.max);
+  }
+
+  /** The window's ceiling: `max` as constructed, or lower after `clampMax`. */
+  maxSize(): number {
+    return this.max;
   }
 
   /**
@@ -438,7 +458,8 @@ interface HostState {
 }
 
 export class HostGate {
-  private readonly delayMs: number;
+  /** Mutable only through `raiseBase`, which only ever raises it. */
+  private delayMs: number;
   /**
    * The base for a host with no earned reading of its own: max(config, robots),
    * capped, WITHOUT any earned term. `delayMs` folds the crawl-wide earned
@@ -447,7 +468,7 @@ export class HostGate {
    * does not inherit the crawl-wide widest through `delayMs` — which is the
    * whole point of the per-host map.
    */
-  private readonly configuredFloorMs: number;
+  private configuredFloorMs: number;
   private readonly maxDelayMs: number;
   /** host → everything the gate remembers about it. O(hosts touched). */
   private readonly hosts = new Map<string, HostState>();
@@ -709,6 +730,40 @@ export class HostGate {
     const spacing = this.spacingMs(host);
     state.peakSpacingMs = Math.max(state.peakSpacingMs, spacing);
     this.highWaterMs = Math.max(this.highWaterMs, spacing);
+  }
+
+  /**
+   * Raise the CRAWL-WIDE base spacing to at least `delayMs` — for every host the
+   * gate has already seen (through `raiseHostFloor`, so each host's ratchet level
+   * stands on the new base) and for every host it meets from now on. Never
+   * lowers anything, and `maxDelayMs` still caps it.
+   *
+   * The caller is a platform profile (src/crawl/platform.ts): a Shopify store
+   * named by its headers wants ≥1 s per host, and that may be learned after the
+   * gate was built (the seed fetch, when the host probe is off). The next
+   * ACQUISITION binds it, and a host whose base moved has its next slot pushed
+   * to at least one new spacing from now — the request that taught us the
+   * platform was the last one at the old pace, so the next one waits the new
+   * spacing after it rather than starting at the slot the old pace had already
+   * set. A slot already claimed is not pulled back, and none is pulled in.
+   */
+  raiseBase(delayMs: number): void {
+    if (!Number.isFinite(delayMs) || delayMs < 0) {
+      throw new RangeError(`HostGate.raiseBase: delayMs must be ≥ 0, got ${delayMs}`);
+    }
+    const floor = Math.min(this.maxDelayMs, Math.max(this.configuredFloorMs, delayMs));
+    this.configuredFloorMs = floor;
+    if (floor > this.delayMs) {
+      this.delayMs = floor;
+      this.highWaterMs = Math.max(this.highWaterMs, floor);
+      this.spacingGen += 1;
+    }
+    for (const host of this.hosts.keys()) {
+      const before = this.spacingMs(host);
+      this.raiseHostFloor(host, floor);
+      const after = this.spacingMs(host);
+      if (after > before) this.pushSlot(host, after);
+    }
   }
 
   /**
