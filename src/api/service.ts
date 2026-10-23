@@ -104,7 +104,7 @@ import {
 } from "../crawl/render/run-render.js";
 import { resolveRenderConfig } from "../crawl/render/select.js";
 import { hostProbeStarts, hostnameSpellings, normalizeUrl } from "../crawl/parse/url-utils.js";
-import { isUrlAllowed } from "../crawl/url-policy.js";
+import { isUrlAllowed, UrlPolicyError } from "../crawl/url-policy.js";
 import { buildRegistry } from "../rules/index.js";
 import { RULESET_VERSION, type Registry } from "../rules/registry/registry.js";
 import {
@@ -1120,6 +1120,15 @@ export interface RenderSummaryOut {
     fromCache: number;
     unpacedNetwork: number;
   };
+  /**
+   * Spellings of the crawl's origin (`www.` / apex) the render browser could
+   * not reach, because their address was not approved at launch — each with
+   * its reason. A page on one is a `policy refusal` render error.
+   */
+  unpinnedHosts: Array<{
+    host: string;
+    reason: string;
+  }>;
   selection: {
     /**
      * Which decision chose the pages: `auto` (the engine's suspicion-plus-sample
@@ -3219,6 +3228,7 @@ export class ApiService {
       unrendered: summary.unrendered,
       elapsedMs: summary.elapsedMs,
       requests: summary.requests,
+      unpinnedHosts: summary.unpinnedHosts,
       // The selection's URL list is a page list, and a page list is not a
       // response body (obligation 1: never a full export inline). Its size is.
       // `mode` rides beside it because the four numbers under it mean nothing
@@ -6123,6 +6133,19 @@ function capCaveat(base: CompareSide, head: CompareSide, caveats: CompareCaveat[
  * guards' wording is free to change without changing this function.
  */
 function mapRenderPassError(error: unknown): unknown {
+  // The render browser could not be launched against this crawl's site:
+  // url-policy refused the address the site's name resolves to, or could not
+  // resolve it (Phase 24a's DNS pin). A fact about the site and the network,
+  // not our defect, so a 409 naming the reason — never a 500 "internal error"
+  // the caller can do nothing with. Nothing was rendered; the rows the
+  // selection put in `render_pending` stay there, exactly as any launch
+  // failure leaves them, and a later pass re-selects.
+  if (error instanceof UrlPolicyError) {
+    return new ServiceError(
+      "CONFLICT",
+      `the render pass could not start: ${error.message} (${error.code})`,
+    );
+  }
   if (!(error instanceof RenderPassRefusal)) return error;
   // The `runRenderPass: ` prefix is the driver naming itself to a log reader.
   // A caller of the API already knows which endpoint they called.

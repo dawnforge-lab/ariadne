@@ -1242,6 +1242,34 @@ describe("crawl_render", () => {
     expect(JSON.stringify(summary)).not.toContain(`${site}/a`);
   }, 90_000);
 
+  it("answers a site whose address url-policy refuses as a classified refusal", async () => {
+    // Phase 24a fix round 3: the same mapping as the HTTP 409.
+    const id = await seedCrawl({
+      id: `crawl_mcp_blocked_${Date.now()}`,
+      status: "finished",
+      siteUrl: "http://169.254.169.254/",
+      config: {
+        siteUrl: "http://169.254.169.254/",
+        maxPages: 10,
+        maxDepth: 3,
+        userAgent: "AriadneBot/0.1 (test)",
+        perHostDelayMs: 0,
+        maxConcurrency: 2,
+      },
+      discovery: {
+        robots: { outcome: "absent", crawlDelaySec: null, note: null, raw: null, truncated: false },
+        sitemapSources: [],
+        truncation: { failures: [], oversizedDocsSkipped: 0, entryLimited: false, docsFetched: 0 },
+        docsFetched: 0,
+      },
+    });
+    const answer = await call("crawl_render", { crawlId: id });
+    expect(answer.isError).toBe(true);
+    expect(String(answer.body["error"])).toContain("the render pass could not start");
+    expect(String(answer.body["error"])).toContain("CRAWL_TARGET_BLOCKED");
+    expect(String(answer.body["error"])).not.toContain("internal error");
+  });
+
   it("refuses a crawl id nothing knows", async () => {
     const answer = await call("crawl_render", { crawlId: "crawl_missing" });
     expect(answer.isError).toBe(true);

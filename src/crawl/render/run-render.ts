@@ -97,6 +97,7 @@ import {
   RENDERER_DEFAULTS,
   writeRenderResult,
   type RenderResult,
+  type UnpinnedHost,
 } from "./renderer.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import { DEFAULT_MAX_DELAY_MS, throttleRecordOf } from "../politeness.js";
@@ -281,6 +282,14 @@ export interface RenderPassSummary {
    * requests are never sent and are in none of the three.
    */
   requests: { paced: number; fromCache: number; unpacedNetwork: number };
+  /**
+   * The spellings of the crawl's origin (`www.` and apex; see the renderer's
+   * `originVariants`) whose address could not be approved when the browser
+   * launched, each with its reason. The browser cannot reach them for the
+   * whole pass, and a page on one is a classified `policy refusal`. Empty
+   * when every spelling was approved.
+   */
+  unpinnedHosts: UnpinnedHost[];
 }
 
 /**
@@ -538,6 +547,7 @@ export async function runRenderPass(
     unrendered: after.renderPending,
     elapsedMs: Date.now() - started,
     requests,
+    unpinnedHosts: renderer.unpinnedHosts(),
   };
 }
 

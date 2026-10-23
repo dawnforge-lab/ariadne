@@ -1476,6 +1476,23 @@ describe("POST /crawls/:id/render", () => {
     expect(String(res.body["error"])).toContain("discovery evidence");
   });
 
+  it("409s a site whose address url-policy refuses, naming the reason, not a 500", async () => {
+    // Phase 24a fix round 3: the render browser pins the site's address at
+    // launch, and a refusal there is a fact about the site (CRAWL_TARGET_BLOCKED
+    // here; DNS_RESOLUTION_FAILED takes the same path), not an internal error.
+    // 169.254.169.254 is refused by url-policy's floor, with no DNS asked.
+    const id = await seedCrawl({
+      status: "finished",
+      siteUrl: "http://169.254.169.254/",
+      discovery: DISCOVERY,
+    });
+    const res = await call("POST", `/crawls/${id}/render`);
+    expect(res.status).toBe(409);
+    expect(String(res.body["error"])).toContain("the render pass could not start");
+    expect(String(res.body["error"])).toContain("169.254.169.254");
+    expect(String(res.body["error"])).toContain("CRAWL_TARGET_BLOCKED");
+  });
+
   it("runs the pass over the finished crawl and returns counts, not a page list", async () => {
     const res = await call("POST", `/crawls/${fixtureCrawlId}/render`);
     expect(res.status).toBe(200);

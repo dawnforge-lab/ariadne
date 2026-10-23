@@ -479,7 +479,7 @@ JavaScript added. It answers counts:
 
 ```
 {rendered, failures, unrendered, elapsedMs,
- requests: {paced, fromCache, unpacedNetwork},
+ requests: {paced, fromCache, unpacedNetwork}, unpinnedHosts: [{host, reason}],
  selection: {mode, selected, budget, suspects, sampled, truncated}}
 ```
 
@@ -503,10 +503,14 @@ asked to say so twice.
 **Every request the browser makes to the site is paced, not only the pages.** A page's
 own scripts, stylesheets and data requests wait the same spacing as a page fetch, one
 after another. Images, video, fonts and anything from another domain are never fetched
-at all. The browser can reach only the site's own address and port. It looks up the
-site's address once, when the pass starts, and keeps using that address. If the lookup
-fails, or any of the site's addresses is a private or internal one, the pass refuses to
-start, and the error says so. The browser keeps its cache from page to page, so a theme's scripts are fetched
+at all. The browser can reach only the site's own addresses and port, under both the
+`www.` and the bare name. It looks up each address once, when the pass starts, and
+keeps using it. If the crawl's own name cannot be looked up, or any of its addresses is
+a private or internal one, `crawl_render` refuses with an error that starts `the render
+pass could not start:` and names the reason. That is a fact about the site's DNS, so
+report it as such. If only the other spelling (`www.` or bare) fails, the pass still
+runs, and `unpinnedHosts` in the answer names that spelling and why. Pages on it come
+back as `policy refusal` render errors. The browser keeps its cache from page to page, so a theme's scripts are fetched
 once and then served from the cache without asking the site again. Cookies and stored
 data are cleared between pages, so nothing one page sets changes how the next renders.
 If the site answers a render request with a 429, the engine slows down exactly as it

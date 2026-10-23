@@ -50,17 +50,23 @@
  *        and (documents) allowed by url-policy; what survives is paced.
  *     2. FENCED — the browser's proxy is a local listener that drops every
  *        connection (`NetworkFence`), with ONE exception: `http(s)://` to the
- *        crawl's origin host AT ITS PORT (pinned even when it is the default
- *        one — a port-less rule would exempt every port). So whatever the
+ *        crawl's origin AT ITS PORT (pinned even when it is the default one —
+ *        a port-less rule would exempt every port), in every spelling
+ *        `isSameOrigin` admits (`originVariants`: `www.` and apex, and
+ *        https:443 beside an http:80 origin). So whatever the
  *        interception cannot see still reaches no other host or port: a
  *        WebSocket to ANY host (the origin included — the exception is
  *        scheme-qualified), a speculation-rules prefetch of another origin,
  *        a request from any target never attached to.
- *     3. PINNED — the origin's name resolves, for the whole pass, to the one
- *        address url-policy approved at launch (`resolveApprovedAddress`,
- *        `--host-resolver-rules`), and every other name to nothing. A DNS
- *        answer that changes mid-pass cannot move the origin somewhere else.
- *        See `browserNetworkSwitches`.
+ *     3. PINNED — each of the origin's hostname spellings resolves, for the
+ *        whole pass, to the one address url-policy approved for it at launch
+ *        (`resolveApprovedAddress`, `--host-resolver-rules`), and every other
+ *        name to nothing. A DNS answer that changes mid-pass cannot move the
+ *        origin somewhere else. The crawl's own hostname must be approved or
+ *        the launch fails; the other spelling, if refused, is left out of the
+ *        fence's exemption and the pin, its pages fail as a classified
+ *        `policy refusal`, and `unpinnedHosts()` says so. See
+ *        `browserNetworkSwitches`.
  *    DISABLED, because their requests are outside a page's interception:
  *    popups (`--block-new-web-contents`), service workers (`serviceWorkers:
  *    "block"`), shared workers (`--disable-shared-workers`), prerendering
@@ -724,6 +730,8 @@ class RenderTraffic {
     private readonly gate: HostGate,
     private readonly host: string,
     private readonly origin: string,
+    /** The origin spellings the browser can reach; anything else is failed here. */
+    private readonly pinnedHosts: ReadonlySet<string>,
     private readonly mainFrameId: string,
     /** The URL `render` navigates to, as the browser will spell it. */
     private readonly requestedUrl: string,
@@ -892,6 +900,13 @@ class RenderTraffic {
       // A top-level document does not leave the site: we record where the
       // page wanted to go and refuse to follow it, because another origin's
       // DOM is not this page's evidence and crawling it was never budgeted.
+      if (topLevel && isSameOrigin(target, this.origin) && !this.pinned(target)) {
+        // Our origin by `isSameOrigin`, but a spelling that was not approved
+        // at launch: refused, as the start of `render` refuses it.
+        this.refusedNavigation = `${target} (host not approved for this pass)`;
+        await this.fail(event);
+        return;
+      }
       if (topLevel && !isSameOrigin(target, this.origin)) {
         this.offSite = target;
         this.blocked += 1;
@@ -901,7 +916,7 @@ class RenderTraffic {
       }
     }
 
-    if (!isSameOrigin(target, this.origin)) {
+    if (!isSameOrigin(target, this.origin) || !this.pinned(target)) {
       this.blocked += 1;
       this.onRequestBlocked?.(target);
       await this.fail(event);
@@ -926,6 +941,10 @@ class RenderTraffic {
 
     this.queue.push(event);
     if (!this.pumping) this.guard(this.pump());
+  }
+
+  private pinned(url: string): boolean {
+    return this.pinnedHosts.has(new URL(url).hostname.toLowerCase());
   }
 
   /** One slot claimed at a time — see the class docblock. */
@@ -1086,6 +1105,23 @@ class RenderTraffic {
   }
 }
 
+/**
+ * Why `url` cannot be rendered by a browser whose network is pinned to
+ * `pinnedHosts`, or null when it can.
+ */
+function unpinnedReason(
+  url: string,
+  pinnedHosts: ReadonlySet<string>,
+  unpinned: readonly UnpinnedHost[],
+): string | null {
+  const host = new URL(url).hostname.toLowerCase();
+  if (pinnedHosts.has(host)) return null;
+  const known = unpinned.find((u) => u.host === host);
+  return known === undefined
+    ? `${host} is not a spelling of this crawl's origin the render pass can reach`
+    : `${host} was not approved for this pass (${known.reason})`;
+}
+
 /** A URL as the browser puts it on the wire: parsed, serialised, without its fragment. */
 function requestUrlOf(url: string): string {
   const parsed = new URL(url);
@@ -1127,7 +1163,8 @@ const FENCE_HOST = "127.0.0.1";
 /**
  * The network fence: a local TCP listener every proxied connection is sent to
  * and dropped at. The browser runs with it as its proxy for EVERYTHING except
- * http(s) to the crawl's own origin, so a request the `Fetch` interception
+ * http(s) to the crawl's own origin's approved hostnames AT THEIR PORTS
+ * (`browserNetworkSwitches`), so a request the `Fetch` interception
  * cannot see — a WebSocket (any host, the origin included: the bypass is
  * scheme-qualified, so `ws://` to the origin is proxied), a speculation-rules
  * prefetch to another host, a request from any target this renderer never
@@ -1192,28 +1229,77 @@ class NetworkFence {
 export function browserNetworkSwitches(opts: {
   origin: string;
   fencePort: number;
-  /** The address `resolveApprovedAddress` approved for the origin's host. */
-  pinnedAddress: string;
+  /**
+   * Every hostname spelling of the origin that url-policy approved, with the
+   * address it is pinned to (`resolveApprovedAddress`). An IP-literal
+   * hostname carries itself. A spelling absent from this list is fenced.
+   */
+  pinned: ReadonlyArray<{ hostname: string; address: string }>;
 }): string[] {
-  const parsed = new URL(opts.origin);
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new RangeError(`browserNetworkSwitches: origin must be http(s), got ${opts.origin}`);
+  const { schemePorts } = originVariants(opts.origin);
+  const bypass: string[] = [];
+  const maps: string[] = [];
+  const excludes: string[] = [FENCE_HOST];
+  for (const { hostname, address } of opts.pinned) {
+    for (const { protocol, port } of schemePorts) bypass.push(`${protocol}//${hostname}:${port}`);
+    if (isIpLiteralHostname(hostname)) {
+      // Chromium's EXCLUDE wants the bare address (measured: a bracketed
+      // IPv6 literal is not excluded); the bypass rule keeps the brackets.
+      excludes.push(hostname.replace(/^\[(.*)\]$/, "$1"));
+    } else {
+      maps.push(`MAP ${hostname} ${address.includes(":") ? `[${address}]` : address}`);
+    }
   }
-  const port = parsed.port !== "" ? parsed.port : parsed.protocol === "https:" ? "443" : "80";
-  const host = parsed.hostname;
-  const literal = /^\[.*\]$/.test(host) || /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
-  const pinned = opts.pinnedAddress.includes(":") ? `[${opts.pinnedAddress}]` : opts.pinnedAddress;
   // `MAP *` matches IP literals too (measured: a 127.0.0.1 origin failed
   // with ERR_NAME_NOT_RESOLVED), so the fence's own address and a literal
   // origin are EXCLUDEd from the catch-all.
-  const resolverRules = literal
-    ? `MAP * ~NOTFOUND,EXCLUDE ${FENCE_HOST},EXCLUDE ${host}`
-    : `MAP ${host} ${pinned},MAP * ~NOTFOUND,EXCLUDE ${FENCE_HOST}`;
+  const resolverRules = [...maps, "MAP * ~NOTFOUND", ...excludes.map((e) => `EXCLUDE ${e}`)];
   return [
     `--proxy-server=http://${FENCE_HOST}:${opts.fencePort}`,
-    `--proxy-bypass-list=<-loopback>;${parsed.protocol}//${host}:${port}`,
-    `--host-resolver-rules=${resolverRules}`,
+    `--proxy-bypass-list=${["<-loopback>", ...bypass].join(";")}`,
+    `--host-resolver-rules=${resolverRules.join(",")}`,
   ];
+}
+
+/**
+ * Every spelling `isSameOrigin` admits as the crawl's own origin — and so
+ * every one the interception lets through, which the fence and the pin must
+ * therefore cover too (a spelling the interception admits and the fence
+ * drops is a render that fails for no reason the site gave). Mirrors
+ * src/crawl/parse/url-utils.ts: the hostname modulo one leading `www.`, the
+ * origin's own scheme and effective port, and https:443 as well when the
+ * origin is http:80 (the upgrade). An IP-literal hostname has no `www.`
+ * spelling — `www.127.0.0.1` is a name, and a name nobody owns. Exported for
+ * its unit test.
+ */
+export function originVariants(origin: string): {
+  hostnames: string[];
+  schemePorts: Array<{ protocol: string; port: string }>;
+} {
+  const parsed = new URL(origin);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new RangeError(`originVariants: origin must be http(s), got ${origin}`);
+  }
+  const host = parsed.hostname.toLowerCase();
+  const hostnames = [host];
+  if (!isIpLiteralHostname(host)) {
+    if (host.startsWith("www.") && host.length > 4) hostnames.push(host.slice(4));
+    else hostnames.push(`www.${host}`);
+  }
+  const port = parsed.port !== "" ? parsed.port : parsed.protocol === "https:" ? "443" : "80";
+  const schemePorts = [{ protocol: parsed.protocol, port }];
+  if (parsed.protocol === "http:" && port === "80") schemePorts.push({ protocol: "https:", port: "443" });
+  return { hostnames, schemePorts };
+}
+
+function isIpLiteralHostname(hostname: string): boolean {
+  return /^\[.*\]$/.test(hostname) || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+}
+
+/** A spelling of the origin that could not be approved, and why. */
+export interface UnpinnedHost {
+  host: string;
+  reason: string;
 }
 
 /**
@@ -1237,6 +1323,9 @@ export class PageRenderer {
   private constructor(
     private readonly browser: Browser,
     private readonly fence: NetworkFence,
+    /** The hostname spellings the browser can reach (pinned and exempt from the fence). */
+    private readonly pinnedHosts: ReadonlySet<string>,
+    private readonly unpinned: readonly UnpinnedHost[],
     private readonly opts: Required<
       Omit<
         RendererOptions,
@@ -1291,14 +1380,32 @@ export class PageRenderer {
         );
       }
     }
-    // THE ORIGIN'S ADDRESS, approved once and pinned (see
-    // `browserNetworkSwitches`). A host with several A records is pinned to
-    // the first approved IPv4 for the whole pass: every answer was checked,
-    // one is used. A resolution failure or a blocked answer stops the launch.
-    const pinnedAddress = await resolveApprovedAddress(new URL(options.origin).hostname, {
+    // THE ORIGIN'S ADDRESSES, approved once and pinned (see
+    // `browserNetworkSwitches`), for every hostname spelling the
+    // interception admits (`originVariants`). A host with several A records
+    // is pinned to the first approved IPv4 for the whole pass: every answer
+    // was checked, one is used. The crawl's OWN hostname must be approved — a
+    // resolution failure or a blocked answer there stops the launch (a
+    // `UrlPolicyError`, which the API maps to a 409). The other spelling may
+    // fail: it is then left out of the pin and the bypass (so it is fenced),
+    // a render of a URL on it is a classified `policy refusal`, and the
+    // omission is in `unpinnedHosts()` and the pass summary.
+    const policyOpts = {
       allowPrivate: options.allowPrivate === true,
       ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
-    });
+    };
+    const [primary, ...others] = originVariants(options.origin).hostnames;
+    const pinned = [
+      { hostname: primary!, address: await resolveApprovedAddress(primary!, policyOpts) },
+    ];
+    const unpinned: UnpinnedHost[] = [];
+    for (const hostname of others) {
+      try {
+        pinned.push({ hostname, address: await resolveApprovedAddress(hostname, policyOpts) });
+      } catch (error) {
+        unpinned.push({ host: hostname, reason: firstLine(error) });
+      }
+    }
     const fence = await NetworkFence.open();
     let browser: Browser;
     try {
@@ -1311,11 +1418,7 @@ export class PageRenderer {
           // A shared worker's own requests are outside a page's interception
           // (measured), so there are none.
           "--disable-shared-workers",
-          ...browserNetworkSwitches({
-            origin: options.origin,
-            fencePort: fence.port(),
-            pinnedAddress,
-          }),
+          ...browserNetworkSwitches({ origin: options.origin, fencePort: fence.port(), pinned }),
         ],
       });
     } catch (error) {
@@ -1325,6 +1428,8 @@ export class PageRenderer {
     return new PageRenderer(
       browser,
       fence,
+      new Set(pinned.map((p) => p.hostname)),
+      unpinned,
       {
         origin: options.origin,
         htmlDir: options.htmlDir,
@@ -1369,6 +1474,15 @@ export class PageRenderer {
     return this.gate.spacingGeneration();
   }
 
+  /**
+   * The origin's spellings that could not be approved at launch and are
+   * therefore fenced for the whole pass, each with its reason. Empty when
+   * every spelling was approved.
+   */
+  unpinnedHosts(): UnpinnedHost[] {
+    return this.unpinned.map((u) => ({ ...u }));
+  }
+
   /** Connections the network fence dropped: requests the interception could not see. */
   fencedConnections(): number {
     return this.fence.connections;
@@ -1402,6 +1516,8 @@ export class PageRenderer {
     if (!verdict.allowed) {
       return failure(url, `policy refusal: ${verdict.reason ?? "refused"}`, null, NO_TRAFFIC);
     }
+    const unpinned = unpinnedReason(url, this.pinnedHosts, this.unpinned);
+    if (unpinned !== null) return failure(url, `policy refusal: ${unpinned}`, null, NO_TRAFFIC);
 
     const slot = this.idle.pop() ?? (await this.openSlot());
     let page: Page;
@@ -1418,6 +1534,7 @@ export class PageRenderer {
         this.gate,
         this.originHost,
         this.opts.origin,
+        this.pinnedHosts,
         tree.frameTree.frame.id,
         requestUrlOf(url),
         slot.ledger,

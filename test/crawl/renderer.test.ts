@@ -50,6 +50,7 @@ import {
   PageRenderer,
   RENDERER_DEFAULTS,
   browserNetworkSwitches,
+  originVariants,
   freshLifetimeMs,
   renderedHtmlFilename,
   writeRenderResult,
@@ -844,10 +845,20 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
         "/paced",
         ...Array.from({ length: PACED_SCRIPTS }, (_, i) => `/paced/${i + 1}.js`),
       ]);
+      // THE TOLERANCE, measured rather than assumed (fix round 3). The gate
+      // spaces the RELEASES exactly; what the server logs is each release plus
+      // its own trip through Chromium's network stack, and that trip varies.
+      // Over 9 recorded runs the gaps were 300 ± 3 except the first asset after
+      // the document, which sometimes arrives ~25 ms late (it is the one that
+      // needs a second connection) — making the gap after it look ~25 ms
+      // short (276-283 seen) while the gap before it is as much too long. So:
+      // the SPAN over all seven arrivals must be at least six spacings within
+      // the brief's 20 ms (no burst can hide in it), and each single gap within
+      // 30 ms (the one late arrival's mirror image).
+      const span = arrivals[arrivals.length - 1]!.at - arrivals[0]!.at;
+      expect(span).toBeGreaterThanOrEqual((arrivals.length - 1) * spacingMs - toleranceMs);
       for (let i = 1; i < arrivals.length; i += 1) {
-        expect(arrivals[i]!.at - arrivals[i - 1]!.at).toBeGreaterThanOrEqual(
-          spacingMs - toleranceMs,
-        );
+        expect(arrivals[i]!.at - arrivals[i - 1]!.at).toBeGreaterThanOrEqual(spacingMs - 30);
       }
       // The document and six scripts, each through the gate; nothing cached.
       expect(result.pacedRequests).toBe(1 + PACED_SCRIPTS);
@@ -1118,8 +1129,9 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     // Fix round 2, DNS pin. `shop.test` resolves nowhere on this machine; the
     // only way the browser reaches the fixture is the `--host-resolver-rules`
     // mapping to the address the injected resolver gave url-policy. The
-    // resolver is asked once, at launch (A + AAAA) — a later change of answer
-    // is never asked for, so it cannot redirect the pass.
+    // resolver is asked only at launch — A + AAAA for `shop.test` and for
+    // `www.shop.test` — and a later change of answer is never asked for, so
+    // it cannot redirect the pass.
     const port = new URL(site.base).port;
     const origin = `http://shop.test:${port}`;
     let lookups = 0;
@@ -1137,7 +1149,8 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       },
     });
     try {
-      expect(lookups).toBe(2);
+      expect(lookups).toBe(4);
+      expect(renderer.unpinnedHosts()).toEqual([]);
       const first = await renderer.render(`${origin}/csr`);
       expect(first.error).toBeNull();
       expect(first.wordCount).toBe(CSR_RENDERED_WORDS);
@@ -1146,7 +1159,43 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
       answer = "10.9.9.9";
       const second = await renderer.render(`${origin}/csr`);
       expect(second.error).toBeNull();
-      expect(lookups).toBe(2);
+      expect(lookups).toBe(4);
+      // Fix round 3: the `www.` spelling `isSameOrigin` admits is pinned and
+      // exempt from the fence too, so a page on it renders.
+      const www = await renderer.render(`http://www.shop.test:${port}/csr`);
+      expect(www.error).toBeNull();
+      expect(www.wordCount).toBe(CSR_RENDERED_WORDS);
+    } finally {
+      await renderer.close();
+    }
+  });
+
+  it("leaves a spelling whose address is refused out of the pin, and says so", async () => {
+    // Fix round 3: `www.shop.test` answers a metadata address, which url-policy
+    // refuses even under `allowPrivate`. The launch still succeeds on the
+    // crawl's own hostname; the refused spelling is recorded, and a page on it
+    // is a classified render error — never a silent drop.
+    const port = new URL(site.base).port;
+    const renderer = await PageRenderer.launch({
+      origin: `http://shop.test:${port}`,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render pin test)",
+      perHostDelayMs: 0,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+      resolve: async (host, type) =>
+        type !== "A" ? [] : host === "www.shop.test" ? ["169.254.169.254"] : ["127.0.0.1"],
+    });
+    try {
+      const unpinned = renderer.unpinnedHosts();
+      expect(unpinned.map((u) => u.host)).toEqual(["www.shop.test"]);
+      expect(unpinned[0]!.reason).toMatch(/blocked address space \(169\.254\.169\.254/);
+
+      const result = await renderer.render(`http://www.shop.test:${port}/csr`);
+      expect(result.rendered).toBe(false);
+      expect(result.error).toMatch(/^policy refusal: www\.shop\.test was not approved for this pass \(/);
+      // The crawl's own spelling is unaffected.
+      expect((await renderer.render(`http://shop.test:${port}/csr`)).error).toBeNull();
     } finally {
       await renderer.close();
     }
@@ -1164,42 +1213,82 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     ).rejects.toThrow(/resolves into blocked address space/);
   });
 
-  it("builds network switches that pin the origin's port and address", () => {
+  it("names every spelling isSameOrigin admits", () => {
+    expect(originVariants("https://shop.com")).toEqual({
+      hostnames: ["shop.com", "www.shop.com"],
+      schemePorts: [{ protocol: "https:", port: "443" }],
+    });
+    expect(originVariants("http://www.shop.com/")).toEqual({
+      hostnames: ["www.shop.com", "shop.com"],
+      schemePorts: [
+        { protocol: "http:", port: "80" },
+        { protocol: "https:", port: "443" },
+      ],
+    });
+    // An explicit port is as-is, and has no upgrade partner.
+    expect(originVariants("http://shop.com:8080").schemePorts).toEqual([
+      { protocol: "http:", port: "8080" },
+    ]);
+    // An IP literal has no `www.` spelling.
+    expect(originVariants("http://127.0.0.1:3000").hostnames).toEqual(["127.0.0.1"]);
+    expect(originVariants("http://[2001:db8::1]:8080").hostnames).toEqual(["[2001:db8::1]"]);
+  });
+
+  it("builds network switches that pin every approved spelling's port and address", () => {
     // Fix round 2, I-NEW-1: a bypass rule without a port matches EVERY port,
     // and a default-port origin's `URL.host` has none.
     expect(
-      browserNetworkSwitches({ origin: "https://shop.com", fencePort: 4100, pinnedAddress: "203.0.113.7" }),
+      browserNetworkSwitches({
+        origin: "https://shop.com",
+        fencePort: 4100,
+        pinned: [
+          { hostname: "shop.com", address: "203.0.113.7" },
+          { hostname: "www.shop.com", address: "203.0.113.8" },
+        ],
+      }),
     ).toEqual([
       "--proxy-server=http://127.0.0.1:4100",
-      "--proxy-bypass-list=<-loopback>;https://shop.com:443",
-      "--host-resolver-rules=MAP shop.com 203.0.113.7,MAP * ~NOTFOUND,EXCLUDE 127.0.0.1",
+      "--proxy-bypass-list=<-loopback>;https://shop.com:443;https://www.shop.com:443",
+      "--host-resolver-rules=MAP shop.com 203.0.113.7,MAP www.shop.com 203.0.113.8," +
+        "MAP * ~NOTFOUND,EXCLUDE 127.0.0.1",
     ]);
+    // Default-port http: both the origin's own :80 and the https:443 upgrade.
     expect(
-      browserNetworkSwitches({ origin: "http://shop.com/", fencePort: 4100, pinnedAddress: "203.0.113.7" })[1],
-    ).toBe("--proxy-bypass-list=<-loopback>;http://shop.com:80");
+      browserNetworkSwitches({
+        origin: "http://shop.com/",
+        fencePort: 4100,
+        pinned: [{ hostname: "shop.com", address: "203.0.113.7" }],
+      })[1],
+    ).toBe("--proxy-bypass-list=<-loopback>;http://shop.com:80;https://shop.com:443");
+    // Explicit port, and an IPv6 pinned address (bracketed in a MAP).
     expect(
       browserNetworkSwitches({
         origin: "https://shop.com:8443",
         fencePort: 4100,
-        pinnedAddress: "2001:db8::7",
+        pinned: [{ hostname: "shop.com", address: "2001:db8::7" }],
       }).slice(1),
     ).toEqual([
       "--proxy-bypass-list=<-loopback>;https://shop.com:8443",
       "--host-resolver-rules=MAP shop.com [2001:db8::7],MAP * ~NOTFOUND,EXCLUDE 127.0.0.1",
     ]);
-    // An IP-literal origin: brackets kept, nothing to map, the catch-all stays.
+    // An IP-literal origin: brackets kept in the bypass, BARE in the EXCLUDE
+    // (Chromium does not match a bracketed EXCLUDE — fix round 3).
     expect(
       browserNetworkSwitches({
         origin: "http://[2001:db8::1]:8080",
         fencePort: 4100,
-        pinnedAddress: "2001:db8::1",
+        pinned: [{ hostname: "[2001:db8::1]", address: "2001:db8::1" }],
       }).slice(1),
     ).toEqual([
       "--proxy-bypass-list=<-loopback>;http://[2001:db8::1]:8080",
-      "--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE 127.0.0.1,EXCLUDE [2001:db8::1]",
+      "--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE 127.0.0.1,EXCLUDE 2001:db8::1",
     ]);
     expect(
-      browserNetworkSwitches({ origin: "https://[2001:db8::1]", fencePort: 4100, pinnedAddress: "2001:db8::1" })[1],
+      browserNetworkSwitches({
+        origin: "https://[2001:db8::1]",
+        fencePort: 4100,
+        pinned: [{ hostname: "[2001:db8::1]", address: "2001:db8::1" }],
+      })[1],
     ).toBe("--proxy-bypass-list=<-loopback>;https://[2001:db8::1]:443");
   });
 
