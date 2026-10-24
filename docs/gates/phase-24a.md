@@ -10,6 +10,17 @@ AriadneBot request to `/` 61 s after the run was answered `429` with
 `Retry-After: 60`. That failure is recorded here as the gate requires, and was not retried.
 §6 sets out what the evidence does and does not show about its cause.
 
+**Owner ruling, 2026-10-24 ("Ok, I agree"):**
+
+1. The Shopify floor stays at 1000 ms with the bounded recovery. Two absorbed 429s per 600
+   pages, with every throttled URL retried and none lost, is Shopify braking and the crawler
+   handling it.
+2. Clause 6 as written cannot separate a penalty we left from the store's baseline treatment
+   of a first AriadneBot request, because the pre-run control was also 429'd. It is replaced
+   for future gates by a before-and-after probe pair, each probe retried once after its own
+   `Retry-After`. Clause 6 is therefore set aside as inconclusive rather than failed, and the
+   phase closes on clauses 1–5.
+
 ## Gate clauses (spec §5)
 
 | # | clause | result | where |
@@ -247,6 +258,9 @@ Docs and skills closed by this commit:
 ## 11. Ledger for what comes after 24a
 
 ### Owner rulings needed
+
+Both questions below were answered on 2026-10-24: keep 1000 ms, and use a before-and-after
+probe pair for future gates (see the verdict at the top).
 
 - **Clause 6 failed: is the Shopify floor 1000 ms right for AriadneBot?** Both runs on
   this site tripped at 1 s, and a cold single AriadneBot request to `/` was 429'd before
