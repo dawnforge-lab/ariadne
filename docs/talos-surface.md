@@ -21,7 +21,7 @@ or a pre-0024 crawl), and the crawl ran at its configured settings.
 `{maxConcurrency, perHostDelayMs, renderConcurrency, navigationTimeoutMs}`, the
 values in force after the clamp. A profile only ever slows a crawl down: Shopify
 is `maxConcurrency = min(config, 1)`, `perHostDelayMs = max(config, 1000)`, one
-render browser, and a 60 s render navigation budget. `appliedAt` is when it took
+render browser, and a render navigation budget of at least 60 s. `appliedAt` is when it took
 effect: before the first worker when the probe named the platform, mid-crawl
 when the seed fetch did (requests already in flight finished at the old
 settings). `optedOut: true` with `applied: null` and `appliedAt: null` means the
@@ -60,7 +60,10 @@ is not a second try.
 `requests`.** One field, additive, no tool or route added. The render pass's host gate
 is seeded from the crawl's per-host state (`host_spacing_jsonb`): each host re-enters
 at the spacing, back-off level, recovery count and lock the crawl left it at, with the
-crawl-wide `hostSpacingMs` used only for a host the per-host map does not name. Every
+crawl-wide `hostSpacingMs` used only for a host the per-host map does not name. The
+gate is keyed by each request's OWN host, not the origin's: a crawl started on the apex
+that crawled `www.` has its earned state under `www.`, and a render of `www.` pages
+paces at that state and records its 429s in the `www.` entry. Every
 same-origin request the browser makes that reaches the network waits for that gate:
 documents, redirect hops, scripts, stylesheets, xhr/fetch, same-origin iframes and
 worker scripts. Before 24a only the documents were paced. Paint-only requests (images,
@@ -100,7 +103,9 @@ switched off before the page closes, so `pagehide` handlers and timers cannot se
 anything. One same-origin request cannot be stopped in this Chromium build: a
 speculation-rules prefetch. It is counted in `unpacedNetwork`, reported to the gate,
 and given a slot after the fact. Every answer is reported into the gate, so a
-subresource 429 escalates the host. The gate's state is written back to
+subresource 429 escalates the host. That includes an answer that arrives after its
+render ended, for a request released before the end: the request was on the wire, and
+its 429 is the site speaking. The gate's state is written back to
 `host_spacing_jsonb` and `host_spacing_ms` after every render that moved a host's
 spacing and once at the end of the pass, as a compare-and-set against the value last
 read. A record that changed under the pass makes the pass fail rather than overwrite
@@ -123,9 +128,16 @@ the network anyway, after which that URL is never predicted again in that contex
 happens at most once per URL per worker; and a speculation-rules prefetch. A render that runs out
 of navigation budget is `renderError: "timeout under pacing (<n> requests paced):
 navigation did not reach domcontentloaded within <ms>ms"`. Before 24a it started
-`timeout: …`. The render lease is now derived as (2 × renderConcurrency + 1) × 30 s +
-navigation budget + settle + 30 s: 318 s at the defaults and 183 s under the Shopify
-profile, replacing a fixed 120 s.
+`timeout: …`. Because every same-origin request waits, the navigation budget of EVERY
+render pass grows with the spacing: `min(120 s, max(configured, 15 s + 30 × spacing))`,
+where the spacing is the widest in force when the pass starts (configured delay,
+profile floor, robots `Crawl-delay`, and what the crawl earned, per host and
+crawl-wide). That is 45 s at the default 1 s spacing and the 120 s cap from 3.5 s up;
+a profile's own budget (Shopify 60 s) still applies when it is larger, and the cap
+never lowers a caller's own larger setting. The render lease is derived from it as
+(2 × renderConcurrency + 1) × 30 s + navigation budget + settle + 30 s: 348 s at the
+defaults (four workers, 45 s), 423 s at the cap, 183 s under the Shopify profile at
+1 s, replacing a fixed 120 s.
 
 **What Phase 23 changed here: proven behaviour.** Ruleset 0.18.0, migrations
 0020–0022, and no tool or route added: 14 rules joined (114 rows in
@@ -751,6 +763,28 @@ nothing here is elided or tidied:
                           "inconclusive":0,"pending":0},
             "capped":false,"passAt":null}}
 ```
+
+Since Phase 24a the answer carries three more fields, after `hostSpacingMs`:
+`throttle`, `platform` and `platformProfile` (above, "What Phase 24a changed here").
+`crawl_02ff6f7a` predates them. The 24a gate crawl's live answer for them
+(`crawl_6fbf187a-9f17-4d15-9d0b-b4035a5c9234`, lavishalice, read 2026-10-24), as it
+came back:
+
+```json
+{"hostSpacingMs":2000,
+ "throttle":{"lavishalice.com":{"responses429":2,"retryAfterSeen":0,
+             "escalations":2,"recoveries":1,"recoveryLocked":true,
+             "peakSpacingMs":2000,"finalSpacingMs":2000}},
+ "platform":"shopify",
+ "platformProfile":{"platform":"shopify",
+                    "applied":{"maxConcurrency":1,"perHostDelayMs":1000,
+                               "renderConcurrency":1,"navigationTimeoutMs":60000},
+                    "appliedAt":"2026-10-23T21:08:29.024Z","optedOut":false}}
+```
+
+Read: the Shopify profile clamped the crawl to one request at a time at 1 s; the host
+pushed back twice, stepped down once after a clean run, then escalated again and is
+locked at 2 s for the rest of the crawl.
 
 Read as a Talos dashboard: `blockedPages` and `hostSpacingMs` are the
 politeness pair (§8) — this crawl was configured at `perHostDelayMs: 2000` and
@@ -2001,7 +2035,7 @@ escalates again after recovering is locked at its spacing for the rest of the
 crawl (`crawl_status.throttle` records 429s, escalations, recoveries and the lock
 per host). A site whose own headers name a platform gets that platform's profile
 before the first worker starts: Shopify runs at one request in flight and at least
-1000 ms per host, one render browser and a 60 s render budget, whatever
+1000 ms per host, one render browser and a render budget of at least 60 s, whatever
 `maxConcurrency` asked for (`crawl_status.platformProfile` records what was
 applied). The render pass inherits the crawl's per-host spacing and paces every
 same-origin request through the same gate. A

@@ -581,9 +581,36 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "the rules to judge rendered evidence. It is refused on a crawl that is " +
         "still queued or running, on one another worker is rendering, and on one " +
         "with no discovery evidence (there would be no robots crawl-delay to " +
-        "honour). The pass paces itself with the crawl's own delay and user " +
-        "agent, so it is not a second, ruder visit — a named list is no faster " +
-        "per page, only better spent.",
+        "honour). It is also refused before any page is rendered when the browser " +
+        "cannot be pointed at the site: the error starts 'the render pass could not " +
+        "start:' and ends with (CRAWL_TARGET_BLOCKED) — the crawl's own name " +
+        "resolves to a private or internal address — or (DNS_RESOLUTION_FAILED) — " +
+        "the name could not be looked up. That is a fact about the site's DNS; " +
+        "report it as such.\n\n" +
+        "PACING. The pass uses the crawl's user agent and a per-host gate seeded " +
+        "from the crawl itself: each host (www. and the bare name each under its " +
+        "own record) re-enters at the spacing it earned, its back-off level and its " +
+        "recovery lock. EVERY same-origin request a page makes is paced — the page, " +
+        "its scripts, stylesheets and data requests — not only the pages; images, " +
+        "video, fonts and other domains are never fetched. A 429 during the render " +
+        "slows the host exactly as during the crawl and is written into the crawl's " +
+        "throttle record. The navigation budget grows with the spacing (15 s + 30 " +
+        "spacings, at most 120 s; at least 60 s on Shopify); a page that cannot load " +
+        "inside it fails with renderError 'timeout under pacing (N requests paced)', " +
+        "which means too heavy to render politely, not a broken site. So this is " +
+        "not a second, ruder visit — a named list is no faster per page, only " +
+        "better spent.\n\n" +
+        "requests counts the pass's requests to the site: paced waited their turn " +
+        "(pages included); fromCache came from the browser's cache and never " +
+        "reached the site; unpacedNetwork reached the site without waiting — a " +
+        "cache answer that was expected and did not come (at most once per URL), or " +
+        "a prefetch the page asked the browser for, which cannot be switched off. A " +
+        "few per page is normal on a prefetching site; far more than the pages " +
+        "rendered is an engine problem for the operator. unpinnedHosts names a " +
+        "spelling of the site (www. or bare) that could not be approved when the " +
+        "pass started, with the reason: the pass still ran, and pages on that " +
+        "spelling come back as 'policy refusal' render errors. '<host> has no A or " +
+        "AAAA record' for www. is normal on a site with no www record.",
       inputSchema: z.strictObject({
         crawlId: crawlIdField(),
         urls: z

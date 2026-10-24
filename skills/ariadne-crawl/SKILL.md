@@ -311,7 +311,7 @@ What the fields mean when you are waiting:
   holds what the crawl actually ran at after the profile: `maxConcurrency`,
   `perHostDelayMs`, `renderConcurrency`, `navigationTimeoutMs`. A profile only ever
   slows a crawl down. Shopify means 1 request in flight, at least 1000 ms per host,
-  1 render browser and a 60 s render navigation budget. A setting you gave that was
+  1 render browser and a render navigation budget of at least 60 s. A setting you gave that was
   already slower stands. So a Shopify crawl started at `maxConcurrency: 16` runs at 1:
   that is the engine, not a bug, and a smaller `maxPages` is how to make it finish
   sooner. `appliedAt` is when the profile took effect. It is mid-crawl when no host
@@ -530,14 +530,21 @@ all: nothing is wrong, and nothing is unrendered, because no page of the crawl l
 there. The browser keeps its cache from page to page, so a theme's scripts are fetched
 once and then served from the cache without asking the site again. Cookies and stored
 data are cleared between pages, so nothing one page sets changes how the next renders.
+Each host spelling is paced and recorded under its own name: a `www.` page waits on
+what the crawl earned on `www.`, even when the crawl was started on the bare name.
 If the site answers a render request with a 429, the engine slows down exactly as it
-does during the crawl, and the 429 shows up in the crawl's `throttle` record.
+does during the crawl, and on a crawl with a 24a `throttle` record the 429 shows up in
+that record, under the host that answered it (pre-24a records are not written back).
 
 So the time a render takes depends on how many uncached requests the page makes, not
 only on the number of pages. At 1 s spacing, a page with 20 uncached scripts and
 stylesheets takes about 20 s, and later pages on the same template take a few seconds
-once the cache holds the theme. A page that cannot load inside its navigation budget
-(15 s, or 60 s on a Shopify store) is recorded as a failure whose `renderError` starts
+once the cache holds the theme. Because every request waits, the navigation budget
+grows with the spacing: 15 s plus 30 spacings, at most 120 s. That is 45 s at the
+default 1 s spacing, and 120 s from about 3.5 s up. A Shopify store gets at least
+60 s. The spacing is the widest one in force when the pass starts, including what the
+crawl earned. A page that cannot load inside its navigation budget is recorded as a
+failure whose `renderError` starts
 `timeout under pacing (N requests paced)`. That means the page was too heavy to render
 at a polite pace. It does not mean the site is broken, so do not report it as a site
 defect.

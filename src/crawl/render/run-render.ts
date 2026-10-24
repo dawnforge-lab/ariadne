@@ -30,7 +30,11 @@
  *     ratchet level, recovery count and lock — and every same-origin request
  *     of every page waits for that gate, not only the documents. The base is
  *     the configured delay, never below the crawl's platform profile's
- *     `perHostDelayMs` (`renderPacing`).
+ *     `perHostDelayMs` (`renderPacing`). Because every request waits, the
+ *     NAVIGATION BUDGET grows with the spacing: `min(120 s, max(configured,
+ *     15 s + 30 × the widest spacing in force at the start of the pass))`,
+ *     and a profile's own budget (Shopify 60 s) still applies when it is
+ *     larger (`renderNavigationBudgetMs`).
  *  4. **Record.** Every render — successful or failed — is written to its page
  *     row and its frontier row is completed in the SAME transaction, then the
  *     pass writes its count to `crawls.render_pass_count` and the gate's state
@@ -100,7 +104,7 @@ import {
   type UnpinnedHost,
 } from "./renderer.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
-import { DEFAULT_MAX_DELAY_MS, throttleRecordOf } from "../politeness.js";
+import { DEFAULT_MAX_DELAY_MS, HostGate, throttleRecordOf } from "../politeness.js";
 import type { AddressResolver } from "../url-policy.js";
 import {
   selectExplicitRenderSet,
@@ -188,16 +192,85 @@ export const RENDER_POST_SETTLE_ALLOWANCE_MS = 30_000;
  *     worker's leftover one, and one `Retry-After` push: (2W + 1) × 30 s for W
  *     workers, rounded up from 2W.
  *  2. **The navigation budget** — every paced request the document needs
- *     before `domcontentloaded` is inside it (15 s; 60 s under a profile).
+ *     before `domcontentloaded` is inside it (`renderNavigationBudgetMs`:
+ *     45 s at the default 1 s spacing, 60 s under a Shopify profile, never
+ *     more than 120 s unless a caller configured more).
  *  3. **The settle** (3 s).
  *  4. **`RENDER_POST_SETTLE_ALLOWANCE_MS`.**
  *
- * So four workers at 15 s: (9 × 30) + 15 + 3 + 30 = 318 s; a Shopify profile's
- * one worker at 60 s: (3 × 30) + 60 + 3 + 30 = 183 s. The 120 s this replaced
+ * So four workers at the default 1 s spacing (a 45 s budget): (9 × 30) + 45 +
+ * 3 + 30 = 348 s; four at the 120 s cap: 423 s; a Shopify profile's one worker
+ * at 60 s: (3 × 30) + 60 + 3 + 30 = 183 s. The 120 s this replaced
  * covered neither the profile's 60 s budget behind a 30 s wait nor four
  * workers queued on one escalated host. The cost of a long lease is only how
  * long a CRASHED worker's URL waits before a re-run may take it.
  */
+/** The render navigation budget's floor: a page at zero spacing (`renderNavigationBudgetMs`). */
+export const RENDER_BUDGET_BASE_MS = 15_000;
+/** Paced requests the budget makes room for: ms of budget per ms of spacing. */
+export const RENDER_BUDGET_PER_SPACING = 30;
+/** The most the spacing can grow the budget to (a caller's own larger setting stands). */
+export const RENDER_BUDGET_CAP_MS = 120_000;
+
+/**
+ * The navigation budget of a render pass, from the spacing it renders at.
+ *
+ * Since Phase 24a EVERY same-origin request a page makes waits for the host
+ * gate, not only its document, so a page that needs N scripts before
+ * `domcontentloaded` needs about N spacings of budget before it has done
+ * anything slow at all. A fixed 15 s made any page needing 15 or more
+ * uncached same-origin assets at 1 s spacing a `timeout under pacing` —
+ * coverage lost to our own politeness (final review, 24a). So the budget
+ * makes room for 30 paced requests on top of
+ * the 15 s floor: `min(120 s, max(configured, 15 s + 30 × spacing))` — 45 s
+ * at the default 1 s, the 120 s cap from 3.5 s up. The cap binds what the
+ * SPACING adds, never a caller's own larger setting: a caller who configured
+ * more patience keeps it, as a profile only ever slows the pass down.
+ *
+ * The cost if this is wrong is the slow direction only: a page that will
+ * never load waits longer before it becomes a classified timeout, and the
+ * render lease (`renderLeaseSeconds`, derived from this) grows with it.
+ */
+export function renderNavigationBudgetMs(configuredMs: number, effectiveSpacingMs: number): number {
+  const derived = Math.min(
+    RENDER_BUDGET_CAP_MS,
+    RENDER_BUDGET_BASE_MS + RENDER_BUDGET_PER_SPACING * effectiveSpacingMs,
+  );
+  return Math.max(configuredMs, derived);
+}
+
+/**
+ * The widest spacing in force when the pass starts: the gate the renderer
+ * will build, built here with the same inputs and read rather than
+ * re-derived — `max(base, robots Crawl-delay, crawl-wide earned)` and every
+ * host's restored spacing (its base at its ratchet level), capped at 30 s.
+ * One policy, in the module that owns spacing. A stored map the gate cannot
+ * read throws here, before the frontier is touched (rule 7).
+ */
+export function renderEffectiveSpacingMs(seed: {
+  perHostDelayMs: number;
+  robotsCrawlDelaySec: number | null;
+  hostSpacingMs: number | null;
+  hostSpacingJsonb: unknown;
+}): number {
+  const gate = new HostGate({
+    perHostDelayMs: seed.perHostDelayMs,
+    robotsCrawlDelaySec: seed.robotsCrawlDelaySec,
+    earnedSpacingMs: seed.hostSpacingMs,
+  });
+  if (seed.hostSpacingJsonb !== null && seed.hostSpacingJsonb !== undefined) {
+    try {
+      gate.restore(seed.hostSpacingJsonb);
+    } catch (error) {
+      throw new Error(
+        `runRenderPass: stored host_spacing_jsonb cannot be restored: ${(error as Error).message}`,
+        { cause: error },
+      );
+    }
+  }
+  return Math.max(gate.effectiveDelayMs(), ...Object.values(gate.maxSpacingMsByHost()));
+}
+
 export function renderLeaseSeconds(pacing: {
   renderConcurrency: number;
   navigationTimeoutMs: number;
@@ -408,6 +481,11 @@ export async function runRenderPass(
   // where it keeps its ratchet level instead of being flattened into a base
   // that a recovery could never step down from (and that the restored level
   // would then double again).
+  //
+  // THE NAVIGATION BUDGET is set here too, for EVERY pass, profiled or not:
+  // every same-origin request waits for the gate, so the budget grows with
+  // the spacing the pass starts at (`renderNavigationBudgetMs`), and the
+  // lease below is derived from it.
   const profiled = renderPacing(
     {
       renderConcurrency: concurrency,
@@ -415,6 +493,11 @@ export async function runRenderPass(
       perHostDelayMs: cfg.perHostDelayMs,
     },
     platformProfile,
+    {
+      robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
+      hostSpacingMs,
+      hostSpacingJsonb,
+    },
   );
   const settleMs = cfg.settleMs ?? RENDERER_DEFAULTS.settleMs;
   const leaseSeconds = renderLeaseSeconds({
@@ -764,22 +847,47 @@ export interface RenderPacing {
   perHostDelayMs: number;
 }
 
+/** What the crawl left behind that the render's spacing starts from. */
+export interface RenderSpacingSeed {
+  robotsCrawlDelaySec: number | null;
+  hostSpacingMs: number | null;
+  hostSpacingJsonb: unknown;
+}
+
+const NO_SEED: RenderSpacingSeed = {
+  robotsCrawlDelaySec: null,
+  hostSpacingMs: null,
+  hostSpacingJsonb: null,
+};
+
 /**
  * The render pass's concurrency, navigation budget and spacing once the
  * crawl's platform profile has had its say: `min(asked, profile)` contexts,
- * `max(asked, profile)` ms of navigation, and `max(asked, profile)` ms between
- * two hits on the host. Exported for its unit test.
+ * `max(asked, profile)` ms between two hits on the host, and a navigation
+ * budget that grows with the spacing the pass starts at
+ * (`renderNavigationBudgetMs` over `renderEffectiveSpacingMs`), never below
+ * the profile's own. Exported for its unit test.
  */
 export function renderPacing(
   asked: RenderPacing,
   profile: StoredPlatformProfile | null,
+  seed: RenderSpacingSeed = NO_SEED,
 ): RenderPacing {
   const applied = profile?.applied ?? null;
-  if (applied === null) return { ...asked };
+  const perHostDelayMs =
+    applied === null ? asked.perHostDelayMs : Math.max(asked.perHostDelayMs, applied.perHostDelayMs);
+  const budget = renderNavigationBudgetMs(
+    asked.navigationTimeoutMs,
+    renderEffectiveSpacingMs({ perHostDelayMs, ...seed }),
+  );
   return {
-    renderConcurrency: Math.min(asked.renderConcurrency, applied.renderConcurrency),
-    navigationTimeoutMs: Math.max(asked.navigationTimeoutMs, applied.navigationTimeoutMs),
-    perHostDelayMs: Math.max(asked.perHostDelayMs, applied.perHostDelayMs),
+    renderConcurrency:
+      applied === null
+        ? asked.renderConcurrency
+        : Math.min(asked.renderConcurrency, applied.renderConcurrency),
+    navigationTimeoutMs:
+      applied === null ? budget : Math.max(budget, applied.navigationTimeoutMs),
+    perHostDelayMs,
   };
 }
 

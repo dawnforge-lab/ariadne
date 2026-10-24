@@ -27,7 +27,15 @@
  *    worker's import — waits for that gate before it is released, and every
  *    answer is reported back into it (`gate.report`), so a 429 on a theme
  *    asset escalates the host exactly as a 429 on a page does and is counted in
- *    the throttle record the pass writes back. Until 24a the gate spaced the
+ *    the throttle record the pass writes back. The gate is keyed by each
+ *    request's OWN host (`gateKey`), the key the crawl loop uses, so a `www.`
+ *    page waits on — and reports into — what the crawl earned on `www.` even
+ *    when the crawl was given the apex. An answer that arrives after its render
+ *    was shut, for a request released before, is still reported: it was on the
+ *    wire, and a late 429 is the site speaking. Because every request waits,
+ *    the navigation budget the pass hands this class grows with the spacing
+ *    (`renderNavigationBudgetMs` in run-render.ts); a page that cannot finish
+ *    inside it is `timeout under pacing (…)`. Until 24a the gate spaced the
  *    DOCUMENTS only and each document was an unpaced burst of subresources;
  *    lavishalice serves its theme same-origin under `/cdn/shop/…`, so that
  *    burst landed on the very host the crawl had been asked to treat gently.
@@ -255,8 +263,9 @@ export interface RendererOptions {
    */
   hostSpacing?: unknown;
   /**
-   * Wait for `domcontentloaded`. Default 15s; 60s under a platform profile
-   * (the caller, run-render.ts, decides). Every paced request the document
+   * Wait for `domcontentloaded`. Default 15s here; the render pass hands it
+   * `renderNavigationBudgetMs` (run-render.ts): 15 s + 30 × the spacing, at
+   * most 120 s, at least a platform profile's 60 s. Every paced request the document
    * needs before that event is inside this budget, so a page with k uncached
    * same-origin render-blocking assets needs about k × spacing of it.
    */
@@ -733,7 +742,6 @@ class RenderTraffic {
   constructor(
     private readonly cdp: CDPSession,
     private readonly gate: HostGate,
-    private readonly host: string,
     private readonly origin: string,
     /** The origin spellings the browser can reach; anything else is failed here. */
     private readonly pinnedHosts: ReadonlySet<string>,
@@ -960,7 +968,10 @@ class RenderTraffic {
         if (!this.open) return;
         const next = this.queue.shift();
         if (next === undefined) return;
-        await this.gate.acquire(this.host);
+        // EACH REQUEST'S OWN HOST, not the origin's: `isSameOrigin` admits
+        // both `www.` and the apex, and the crawl earned its state under
+        // whichever one it actually fetched (`HostGate` keys by `URL.host`).
+        await this.gate.acquire(gateKey(next.request.url));
         if (!this.open) {
           // Woke into a shut render: this request is failed, not released.
           await this.fail(next);
@@ -1030,9 +1041,26 @@ class RenderTraffic {
    * request still waits a spacing behind it.
    */
   private onResponse(requestId: string, response: NetworkResponse): void {
-    if (!this.open || !isHttpUrl(response.url)) return;
+    if (!isHttpUrl(response.url)) return;
     const sent = this.inFlight.get(requestId);
     this.inFlight.delete(requestId);
+    // A SHUT RENDER STILL HEARS ITS OWN REQUESTS. One released before `shut`
+    // is on the wire whatever happens to the page, and its answer is the
+    // site's statement about the host: a late 429 is reported into the gate
+    // like any other. Everything else — counts already taken, the ledger, a
+    // claim for a request never paused — is this render's bookkeeping and
+    // stops at `shut`.
+    if (!this.open) {
+      const cachedLate =
+        response.fromDiskCache === true ||
+        response.fromPrefetchCache === true ||
+        response.fromServiceWorker === true ||
+        this.servedFromCache.delete(requestId);
+      if (sent !== undefined && !cachedLate && isSameOrigin(response.url, this.origin)) {
+        this.reportAnswer(response);
+      }
+      return;
+    }
     const fromCache =
       response.fromDiskCache === true ||
       response.fromPrefetchCache === true ||
@@ -1048,22 +1076,32 @@ class RenderTraffic {
     if (wasPredicted || unseen) {
       this.unpacedNetwork += 1;
       if (wasPredicted) this.ledger.mispredicted(response.url);
-      if (unseen) this.guard(this.gate.acquire(this.host));
+      if (unseen) this.guard(this.gate.acquire(gateKey(response.url)));
     }
 
+    const headers = this.reportAnswer(response);
+    if (!wasPredicted && response.status === 200 && sent?.method === "GET") {
+      this.ledger.record(response.url, headers, Date.now());
+    }
+  }
+
+  /**
+   * Report one network answer from the site into the gate, under the host
+   * that answered it, in the page vocabulary. The caller has already ruled
+   * out a cached answer and another origin's. Returns the lower-cased headers.
+   */
+  private reportAnswer(response: NetworkResponse): HeaderBag {
     const headers = lowerCaseHeaders(response.headers);
     const fetchClass = classifyStatus(response.status, headers, "");
     const throttled =
       fetchClass === "blocked" || (fetchClass === "server_error" && response.status === 503);
-    this.gate.report(this.host, {
+    this.gate.report(gateKey(response.url), {
       fetchClass,
       statusCode: response.status,
       retryAfterMs: throttled ? parseRetryAfter(headerValue(headers, "retry-after")).ms : null,
       url: response.url,
     });
-    if (!wasPredicted && response.status === 200 && sent?.method === "GET") {
-      this.ledger.record(response.url, headers, Date.now());
-    }
+    return headers;
   }
 
   /**
@@ -1080,7 +1118,7 @@ class RenderTraffic {
     if (this.pausedIds.has(requestId) || this.speculative.has(requestId)) return;
     this.speculative.add(requestId);
     this.unpacedNetwork += 1;
-    this.guard(this.gate.acquire(this.host));
+    this.guard(this.gate.acquire(gateKey(url)));
   }
 
   /**
@@ -1101,13 +1139,22 @@ class RenderTraffic {
     this.predicted.delete(requestId);
     if (!this.open || sent === undefined || canceled || blockedReason !== undefined) return;
     if (errorText === "net::ERR_BLOCKED_BY_CLIENT" || errorText === "net::ERR_ABORTED") return;
-    this.gate.report(this.host, {
+    this.gate.report(gateKey(sent.url), {
       fetchClass: "network_error",
       statusCode: null,
       retryAfterMs: null,
       url: sent.url,
     });
   }
+}
+
+/**
+ * The `HostGate` key for a request: its own `URL.host` (hostname and any
+ * explicit port), the key the crawl loop uses, so a host's earned state is
+ * found under the same spelling it was earned under.
+ */
+function gateKey(url: string): string {
+  return new URL(url).host;
 }
 
 /**
@@ -1160,6 +1207,12 @@ export interface RenderTestFaults {
    * command the browser refused would throw.
    */
   failRelease?: (url: string) => Error | null;
+  /**
+   * Awaited between the traffic's `shut` and the page's close, so a suite can
+   * hold the window in which an answer to a request released BEFORE the shut
+   * arrives after it (it must still be reported to the gate).
+   */
+  holdAfterShut?: () => Promise<void>;
 }
 
 /** Where the network fence listens. */
@@ -1562,7 +1615,6 @@ export class PageRenderer {
       traffic = new RenderTraffic(
         cdp,
         this.gate,
-        this.originHost,
         this.opts.origin,
         this.pinnedHosts,
         tree.frameTree.frame.id,
@@ -1603,7 +1655,9 @@ export class PageRenderer {
         // worker may claim the slot in between; the document then waits for
         // the next one inside the budget, bounded as `renderLeaseSeconds`
         // says.)
-        const wait = this.gate.msUntilFree(this.originHost);
+        // The document's OWN host (a `www.` page waits on `www.`'s state, not
+        // the apex's), as every request in the interception is keyed.
+        const wait = this.gate.msUntilFree(gateKey(url));
         if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
 
         // Raced against `traffic.broken`: a protocol command of ours that
@@ -1752,6 +1806,7 @@ export class PageRenderer {
       // either way — and then the shut's error surfaces.
       try {
         await traffic.shut();
+        await this.opts.testFaults?.holdAfterShut?.();
       } finally {
         await this.release(slot, page, traffic, crashed);
       }

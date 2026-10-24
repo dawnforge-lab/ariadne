@@ -8,7 +8,14 @@ import {
   readStoredPlatform,
 } from "../../src/crawl/platform.js";
 import { CrawlWindow, HostGate } from "../../src/crawl/politeness.js";
-import { renderPacing } from "../../src/crawl/render/run-render.js";
+import {
+  RENDER_BUDGET_BASE_MS,
+  RENDER_BUDGET_CAP_MS,
+  RENDER_BUDGET_PER_SPACING,
+  renderEffectiveSpacingMs,
+  renderNavigationBudgetMs,
+  renderPacing,
+} from "../../src/crawl/render/run-render.js";
 
 describe("detectPlatform", () => {
   it("names Shopify from powered-by, whatever its case", () => {
@@ -219,6 +226,7 @@ describe("renderPacing", () => {
     const asked = { renderConcurrency: 4, navigationTimeoutMs: 15_000, perHostDelayMs: 250 };
     expect(renderPacing(asked, profile)).toEqual({
       renderConcurrency: 1,
+      // 15 s + 30 × 1000 ms = 45 s from the spacing; the profile's 60 s is larger.
       navigationTimeoutMs: 60_000,
       // Floored by the profile itself, not only by what host_spacing_ms says.
       perHostDelayMs: 1000,
@@ -237,7 +245,83 @@ describe("renderPacing", () => {
       new Date(),
     );
     const asked = { renderConcurrency: 4, navigationTimeoutMs: 15_000, perHostDelayMs: 250 };
-    expect(renderPacing(asked, optedOut)).toEqual(asked);
-    expect(renderPacing(asked, null)).toEqual(asked);
+    // The profile changes nothing; the budget still grows with the spacing,
+    // as it does for every pass: 15 s + 30 × 250 ms.
+    const unprofiled = { ...asked, navigationTimeoutMs: 22_500 };
+    expect(renderPacing(asked, optedOut)).toEqual(unprofiled);
+    expect(renderPacing(asked, null)).toEqual(unprofiled);
+  });
+});
+
+describe("render navigation budget (every pass)", () => {
+  const asked = { renderConcurrency: 4, navigationTimeoutMs: 15_000, perHostDelayMs: 1000 };
+
+  it("grows with the spacing: 15 s + 30 spacings, capped at 120 s", () => {
+    expect(RENDER_BUDGET_BASE_MS).toBe(15_000);
+    expect(RENDER_BUDGET_PER_SPACING).toBe(30);
+    expect(RENDER_BUDGET_CAP_MS).toBe(120_000);
+    // The default 1000 ms spacing.
+    expect(renderPacing(asked, null).navigationTimeoutMs).toBe(45_000);
+    // 4000 ms would be 135 s: the cap.
+    expect(renderPacing({ ...asked, perHostDelayMs: 4000 }, null).navigationTimeoutMs).toBe(120_000);
+    // Zero spacing: the 15 s floor.
+    expect(renderPacing({ ...asked, perHostDelayMs: 0 }, null).navigationTimeoutMs).toBe(15_000);
+    // A caller's own larger budget stands, above the cap included.
+    expect(renderNavigationBudgetMs(150_000, 4000)).toBe(150_000);
+    expect(renderNavigationBudgetMs(50_000, 1000)).toBe(50_000);
+  });
+
+  it("keeps the profile's 60 s when it is larger: Shopify at 1000 ms", () => {
+    const profile = platformProfileRecord(
+      "shopify",
+      { maxConcurrency: 16, perHostDelayMs: 1000 },
+      new Date(),
+    );
+    expect(renderPacing(asked, profile).navigationTimeoutMs).toBe(60_000);
+    // …and the spacing's when that is: Shopify at 2000 ms = 75 s.
+    expect(renderPacing({ ...asked, perHostDelayMs: 2000 }, profile).navigationTimeoutMs).toBe(75_000);
+  });
+
+  it("sizes on the spacing the crawl left in force, not only the configured one", () => {
+    // Robots Crawl-delay 2 s.
+    expect(
+      renderPacing(asked, null, { robotsCrawlDelaySec: 2, hostSpacingMs: null, hostSpacingJsonb: null })
+        .navigationTimeoutMs,
+    ).toBe(75_000);
+    // A host the crawl escalated to 2000 ms (base 1000, level 1), crawl-wide column absent.
+    const entry = {
+      spacingMs: 2000,
+      baseMs: 1000,
+      responses429: 1,
+      retryAfterSeen: 0,
+      escalations: 1,
+      recoveries: 0,
+      recoveryLocked: false,
+      peakSpacingMs: 2000,
+    };
+    expect(
+      renderPacing(asked, null, {
+        robotsCrawlDelaySec: null,
+        hostSpacingMs: null,
+        hostSpacingJsonb: { "www.shop.example": entry },
+      }).navigationTimeoutMs,
+    ).toBe(75_000);
+    expect(
+      renderEffectiveSpacingMs({
+        perHostDelayMs: 1000,
+        robotsCrawlDelaySec: null,
+        hostSpacingMs: 2000,
+        hostSpacingJsonb: null,
+      }),
+    ).toBe(2000);
+    // A map the gate cannot read is an error here, before the frontier is touched.
+    expect(() =>
+      renderEffectiveSpacingMs({
+        perHostDelayMs: 1000,
+        robotsCrawlDelaySec: null,
+        hostSpacingMs: null,
+        hostSpacingJsonb: [1, 2],
+      }),
+    ).toThrow(/host_spacing_jsonb cannot be restored/);
   });
 });

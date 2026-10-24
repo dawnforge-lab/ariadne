@@ -328,6 +328,26 @@ try { new SharedWorker('/shared-worker.js'); } catch (e) {}
 </script></body></html>`;
 }
 
+/** `/many-scripts`: `MANY_SCRIPTS` uncacheable same-origin scripts, all before `domcontentloaded`. */
+const MANY_SCRIPTS = 32;
+function manyScriptsHtml(): string {
+  const scripts = Array.from(
+    { length: MANY_SCRIPTS },
+    (_, i) => `<script src="/many/${i + 1}.js"></script>`,
+  ).join("\n");
+  return `<!doctype html><html lang="en"><head><title>Many</title>
+${scripts}</head><body><p>many scripts</p></body></html>`;
+}
+
+/** How long `/late-429.json` holds its answer: past the render's settle. */
+const LATE_ANSWER_MS = SETTLE_MS + 700;
+
+/** `/late-429`: a fetch released during the render, answered 429 after it ended. */
+function late429Html(): string {
+  return `<!doctype html><html lang="en"><head><title>Late</title></head>
+<body><p>late answer</p><script>fetch('/late-429.json').catch(function () {});</script></body></html>`;
+}
+
 /** `/one-script`: one uncacheable same-origin script, for the seeded-gate test. */
 function oneScriptHtml(): string {
   return `<!doctype html><html lang="en"><head><title>One</title>
@@ -364,6 +384,15 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/paced") return html(pacedHtml());
     if (path === "/limited") return html(limitedHtml());
     if (path === "/one-script") return html(oneScriptHtml());
+    if (path === "/many-scripts") return html(manyScriptsHtml());
+    if (path === "/late-429") return html(late429Html());
+    if (path === "/late-429.json") {
+      setTimeout(() => {
+        res.writeHead(429, { "content-type": "text/plain", "retry-after": "1" });
+        res.end("slow down");
+      }, LATE_ANSWER_MS);
+      return;
+    }
     if (path.startsWith("/mispredict/")) return html(mispredictHtml());
     if (path === "/iso/unload") return html(isoUnloadHtml());
     if (path === "/teardown") return html(teardownHtml());
@@ -401,7 +430,7 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
       res.end(isoHtml(true));
       return;
     }
-    if (path.startsWith("/paced/") || path === "/one.js") {
+    if (path.startsWith("/paced/") || path.startsWith("/many/") || path === "/one.js") {
       res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
       res.end("void 0;");
       return;
@@ -1036,6 +1065,30 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
     }
   });
 
+  it("reports an answer that arrives after the render ended, for a request it released", async () => {
+    // Final review #3: a request released BEFORE the shut is on the wire, and
+    // its answer is the site speaking about the host. The fetch is released
+    // during the render and answered 429 only after it ended (the hold keeps
+    // the page open across the answer); the 429 still reaches the gate.
+    const renderer = await launch({
+      testFaults: { holdAfterShut: () => new Promise((resolve) => setTimeout(resolve, 2_000)) },
+    });
+    try {
+      const host = new URL(site.base).host;
+      const result = await renderer.render(`${site.base}/late-429`);
+
+      expect(result.error).toBeNull();
+      // Released inside the render: the document and the fetch, both paced.
+      expect(result.pacedRequests).toBe(2);
+      const record = renderer.throttleRecord()[host]!;
+      expect(record.responses429).toBe(1);
+      expect(record.retryAfterSeen).toBe(1);
+      expect(record.escalations).toBe(1);
+    } finally {
+      await renderer.close();
+    }
+  }, 30_000);
+
   it("fails the requests it holds when a protocol command breaks, and releases none", async () => {
     // SECURITY (fail-closed on a session failure). The release of the third
     // script fails as a refused protocol command would; the render must
@@ -1445,11 +1498,15 @@ describe("runRenderPass", () => {
    * so the whole set is selected. Rows are inserted rather than crawled: what
    * is under test is the pass, not the crawler that fed it.
    */
-  async function newCrawl(paths: string[]): Promise<string> {
+  async function newCrawl(
+    paths: string[],
+    where: { base?: string; siteUrl?: string } = {},
+  ): Promise<string> {
+    const base = where.base ?? site.base;
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
       id,
-      siteUrl: site.base,
+      siteUrl: where.siteUrl ?? site.base,
       config: {},
       rulesetVersion: "test",
       status: "finished",
@@ -1459,8 +1516,8 @@ describe("runRenderPass", () => {
       paths.map((path) => ({
         id: `page_${randomUUID()}`,
         crawlId: id,
-        url: `${site.base}${path}`,
-        urlNormalised: `${site.base}${path}`,
+        url: `${base}${path}`,
+        urlNormalised: `${base}${path}`,
         pageType: "content",
         fetchClass: "ok",
         statusCode: 200,
@@ -1474,7 +1531,7 @@ describe("runRenderPass", () => {
     );
     // Every page is `done` in the frontier, which is what a crawled URL is —
     // and what `selectRenderSet` promotes out of.
-    const urls = paths.map((path) => `${site.base}${path}`);
+    const urls = paths.map((path) => `${base}${path}`);
     await enqueueUrls(
       db,
       id,
@@ -1871,6 +1928,93 @@ describe("runRenderPass", () => {
     expect(row.hostSpacingJsonb).toEqual({ [host]: 0 });
     expect(row.hostSpacingMs).toBe(0);
   });
+
+  it("renders a page whose paced scripts need more than 15 s: the budget grows with the spacing", async () => {
+    // Final review #1. 32 same-origin scripts at 500 ms are 16 s of pacing
+    // before `domcontentloaded` — past the old fixed 15 s budget, inside the
+    // 15 s + 30 × 500 ms = 30 s it is now.
+    const crawlId = await newCrawl(["/many-scripts"]);
+    const spacingMs = 500;
+    const before = site.hits.length;
+
+    const summary = await runRenderPass(
+      db,
+      crawlId,
+      passConfig({ perHostDelayMs: spacingMs, renderConcurrency: 1 }),
+    );
+
+    expect(summary.failures).toBe(0);
+    expect(summary.rendered).toBe(1);
+    const row = await pageRow(crawlId, "/many-scripts");
+    expect(row.renderError).toBeNull();
+    expect(row.rendered).toBe(true);
+    // The pacing really did take longer than the old budget.
+    const arrivals = site.hits
+      .slice(before)
+      .filter((h) => h.path === "/many-scripts" || h.path.startsWith("/many/"));
+    expect(arrivals.length).toBe(1 + MANY_SCRIPTS);
+    expect(arrivals[arrivals.length - 1]!.at - arrivals[0]!.at).toBeGreaterThan(15_000);
+  }, 90_000);
+
+  it("keys the gate by each request's own host: www state earned by the crawl, apex siteUrl", async () => {
+    // Final review #2. The crawl was given the apex and crawled `www.`, so
+    // its earned state is under `www.`. A render of `www.` pages paces at
+    // THAT state (2000 ms: base 1000 at level 1, no crawl-wide column to
+    // hide behind), and a 429 a `www.` asset answers lands in the `www.`
+    // entry of the throttle record — no apex entry appears.
+    const port = new URL(site.base).port;
+    const apex = `http://shop.test:${port}`;
+    const www = `http://www.shop.test:${port}`;
+    const wwwHost = `www.shop.test:${port}`;
+    const crawlId = await newCrawl(["/static/21", "/static/22", "/static/23", "/limited"], {
+      base: www,
+      siteUrl: apex,
+    });
+    const entry: HostSpacingEntry = {
+      spacingMs: 2_000,
+      baseMs: 1_000,
+      responses429: 1,
+      retryAfterSeen: 0,
+      escalations: 1,
+      recoveries: 0,
+      recoveryLocked: false,
+      peakSpacingMs: 2_000,
+    };
+    await db
+      .update(crawls)
+      .set({ hostSpacingMs: null, hostSpacingJsonb: { [wwwHost]: entry } })
+      .where(eq(crawls.id, crawlId));
+    const before = site.hits.length;
+
+    const summary = await runRenderPass(
+      db,
+      crawlId,
+      passConfig({
+        siteUrl: apex,
+        perHostDelayMs: 1_000,
+        renderConcurrency: 1,
+        resolveAddress: async (_host: string, type: string) => (type === "A" ? ["127.0.0.1"] : []),
+      }),
+    );
+
+    expect(summary.failures).toBe(0);
+    expect(summary.rendered).toBe(4);
+    // Warm-to-warm gaps between `www.` documents: at least the earned 2000 ms
+    // (the apex, unseeded, would be at the configured 1000 ms).
+    const arrivals = site.hits
+      .slice(before)
+      .filter((h) => h.path.startsWith("/static/2"))
+      .map((h) => h.at);
+    expect(arrivals.length).toBe(3);
+    expect(arrivals[2]! - arrivals[1]!).toBeGreaterThanOrEqual(2_000 - 50);
+
+    const row = (await db.select().from(crawls).where(eq(crawls.id, crawlId)))[0]!;
+    const record = throttleRecordOf(row.hostSpacingJsonb)!;
+    expect(Object.keys(record)).toEqual([wwwHost]);
+    // The crawl's one 429 and the render's.
+    expect(record[wwwHost]!.responses429).toBe(2);
+    expect(record[wwwHost]!.escalations).toBe(2);
+  }, 90_000);
 
   it("derives the render lease from the gate cap, the navigation budget and the settle", () => {
     // (2W + 1) × 30 s of gate wait + navigation + settle + 30 s allowance.
