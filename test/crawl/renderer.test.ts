@@ -1811,12 +1811,19 @@ describe("runRenderPass", () => {
       } finally {
         spy.mockRestore();
       }
+      // The selection stands: the row the refused pass chose is still waiting
+      // to be rendered, exactly as after a browser that would not launch.
+      expect((await frontierCounts(db, crawlId)).renderPending).toBe(1);
       const recorded = await launchErrorOf(crawlId);
       expect(recorded).toBe(
         "address refused: host resolves to a private address (CRAWL_TARGET_BLOCKED)",
       );
       expect(recorded).not.toContain("getaddrinfo");
       expect(recorded).not.toContain("tenant.example");
+      // And the metric reads the same column: `failed`, with the reason beside it.
+      const value = await coverage(crawlId);
+      expect(value.renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+      expect(value.renderLaunchError).toBe(recorded);
     });
 
     it("records an uncreatable render directory without the path", async () => {
