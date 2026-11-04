@@ -10,16 +10,20 @@ engine produces facts (this URL 404s, these 340 URLs share a title, inlinks
 median is 4); the agent supplies judgement (severity in context, root cause,
 opportunity). Neither side does the other's job.
 
-**Status: planning complete, implementation not started.**
+**Status: implemented through Phase 24a** (each phase's gate evidence is in
+`docs/gates/`). What comes next is in the roadmap below.
 
 ## Documents — read in this order
 
 | Doc | What it is |
 |---|---|
-| `docs/crawl-audit-engine-spec.md` | Design: architecture, data contract, rule engine contract, rule map for the 47 crawl-derived checks, rendering strategy, validation approach. |
-| `docs/crawl-audit-build-plan.md` | Provenance and phasing: what gets lifted from where (licences verified), the 7 phases with gates, guardrails. |
+| `docs/crawl-audit-engine-spec.md` | Design: architecture, data contract, rule engine contract, rule map for the crawl-derived checks, rendering strategy, validation approach. |
+| `docs/crawl-audit-build-plan.md` | Provenance and phasing: what gets lifted from where (licences verified), the original phases with gates, guardrails. |
+| `docs/superpowers/specs/2026-11-04-roadmap-design.md` | The roadmap from Phase 25 on: audit-check parity, agent control plane, cloud foundations, integrations. |
 | `docs/talos-integration.md` | The seam to Talos — how the Talos SEO agent will consume this engine, and the design obligations that keep the seam open. |
-| `docs/superpowers/plans/2026-08-25-phase-0-1-foundation.md` | The executable implementation plan for Phase 0 (groundwork) and Phase 1 (crawl loop). Later phases get their own plans at their gates. |
+| `docs/talos-surface.md` | The API/MCP surface contract as Talos sees it. |
+| `docs/superpowers/plans/`, `docs/superpowers/specs/` | One plan per phase, and the design specs behind them. |
+| `docs/gates/` | Each phase's gate run: the evidence that it closed. |
 
 ## What it serves
 
