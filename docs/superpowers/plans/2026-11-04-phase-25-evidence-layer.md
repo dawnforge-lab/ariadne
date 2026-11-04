@@ -30,7 +30,7 @@
 - Ruleset 0.18.0 → **0.19.0**, for `render.coverage`'s new value only.
 - The suite leaves zero net crawl rows (house `createdCrawls` pattern).
 - `DATABASE_URL=postgresql://ariadne:ariadne@localhost:5440/ariadne`.
-- Commits are conventional and end `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` (CLAUDE.md).
+- Commits are conventional and end `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` (CLAUDE.md).
 
 ## Review Focus
 

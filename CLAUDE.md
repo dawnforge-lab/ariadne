@@ -98,4 +98,4 @@ test/fixtures/      fixture site pages (badseo content + our own)
 ## Commits
 
 Conventional, small, after each green test cycle. End commit messages with:
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
