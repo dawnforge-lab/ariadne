@@ -1296,6 +1296,9 @@ describe("copy: metric tables", () => {
     // projection (docs/gates/phase-11.md §6.3): an unexplained "18 selected" on
     // a crawl nobody rendered is read as eighteen pages somebody chose.
     expect(text, "renderPassEvidence").toMatch(/whether a render run happened/i);
+    // Phase 25: `failed`, and the column that says why, by its label.
+    expect(text, "renderPassEvidence: failed").toMatch(/the last one could not start/i);
+    expect(text, "renderLaunchError").toContain("Render Launch Error");
     expect(text, "the projection, said as one").toMatch(/would choose|a run would/i);
     expect(text, "selectionMode").toMatch(/selection mode/i);
     expect(text, "selectionBudget").toMatch(/budget/i);
@@ -1309,6 +1312,13 @@ describe("copy: metric tables", () => {
     expect(copy("render.coverage").howToFix, "the silence is not a clean site").toMatch(
       /silent|nothing was measured/i,
     );
+    // A run that could not start: its selection is still waiting, an earlier
+    // run's pages still count, and the rest is unmeasured — never "nothing".
+    const fix = copy("render.coverage").howToFix;
+    expect(fix, "could not start").toMatch(/if the last run could not start/i);
+    expect(fix, "its selection waits").toMatch(/still waiting to be rendered/i);
+    expect(fix, "an earlier run's pages stand").toMatch(/pages an earlier run rendered still count/i);
+    expect(fix, "only the rest is unmeasured").toMatch(/everything else is unmeasured until a run succeeds/i);
   });
 
   // Phase 10's rollup, and the things its copy has to say that no other
