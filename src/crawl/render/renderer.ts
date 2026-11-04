@@ -848,8 +848,9 @@ class RenderTraffic {
     this.cdp.on("Runtime.consoleAPICalled", (event) => {
       const e = event as unknown as { type: string; args: RemoteObject[] };
       if (!this.open) return;
-      if (e.type !== "error" && e.type !== "warning") return;
-      this.reported.addConsole(e.type, e.args.map(remoteText).join(" "));
+      const level = consoleLevel(e.type);
+      if (level === null) return;
+      this.reported.addConsole(level, e.args.map(remoteText).join(" "));
     });
     this.cdp.on("Runtime.exceptionThrown", (event) => {
       const d = (event as unknown as { exceptionDetails: ExceptionDetails }).exceptionDetails;
@@ -1231,6 +1232,18 @@ class RenderTraffic {
  */
 function gateKey(url: string): string {
   return new URL(url).host;
+}
+
+/**
+ * The level a `Runtime.consoleAPICalled` type is kept at, or null when it is
+ * not kept. A failed `console.assert` arrives as its own type, `assert`, and is
+ * an error the page reported — kept as `error`. `log`, `info`, `debug` and the
+ * rest are not kept.
+ */
+function consoleLevel(type: string): "error" | "warning" | null {
+  if (type === "error" || type === "assert") return "error";
+  if (type === "warning") return "warning";
+  return null;
 }
 
 /** The slice of a `Runtime.RemoteObject` a console line is written from. */

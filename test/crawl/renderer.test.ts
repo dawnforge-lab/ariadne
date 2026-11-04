@@ -404,6 +404,39 @@ function consoleHostileHtml(): string {
 </body></html>`;
 }
 
+/**
+ * `/console-assert`: a failed `console.assert`, which the protocol reports as
+ * its own type (`assert`), not as `error` — and a passing one, which logs nothing.
+ */
+function consoleAssertHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Assert</title></head>
+<body><p>assert console</p>
+<script>console.assert(1 === 2, "site asserts"); console.assert(true, "never logged");</script>
+</body></html>`;
+}
+
+/**
+ * `/gone-with-script`: a 404 DOCUMENT that still loads a script the site does
+ * not have. The script's 404 is a failed request; the document's is the page
+ * row's own status and must never be recorded beside it.
+ */
+function goneWithScriptHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Gone</title>
+<script src="/missing.js"></script></head>
+<body><p>this page is gone</p></body></html>`;
+}
+
+/**
+ * `/reset-script`: a same-origin script whose connection the server destroys
+ * before any response, so the browser fails it at the network level
+ * (`Network.loadingFailed` with a net error) rather than with a status.
+ */
+function resetScriptHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Reset</title>
+<script src="/reset.js"></script></head>
+<body><p>reset script</p></body></html>`;
+}
+
 interface Site {
   base: string;
   /** Arrival time (ms) of every request, in order, and the cookie it carried. */
@@ -433,6 +466,18 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/console-errors") return html(consoleErrorsHtml(otherOrigin()));
     if (path === "/console-clean") return html(consoleCleanHtml());
     if (path === "/console-hostile") return html(consoleHostileHtml());
+    if (path === "/console-assert") return html(consoleAssertHtml());
+    if (path === "/gone-with-script") {
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(goneWithScriptHtml());
+      return;
+    }
+    if (path === "/reset-script") return html(resetScriptHtml());
+    if (path === "/reset.js") {
+      // No response at all: the socket goes before a status line is written.
+      req.socket.destroy();
+      return;
+    }
     if (path === "/console-hang") {
       // A console error, then silence: the error is logged while the document
       // is still arriving, and the navigation never reaches domcontentloaded.
@@ -871,13 +916,56 @@ describe("PageRenderer", () => {
       reason: "http 404",
       cut: false,
     });
-    // The DOCUMENT's own status is the row's, never a failed request; and the
-    // browser's own "Failed to load resource" lines are not the site's console.
-    expect(evidence.failedRequests.some((f) => f.url === `${site.base}/console-errors`)).toBe(false);
+    // The browser's own "Failed to load resource" lines are not the site's
+    // console. (That the DOCUMENT is never a failed request is pinned on a 404
+    // document below: this one answered 200, so it could not have been.)
     expect(evidence.console.some((m) => m.text.includes("Failed to load resource"))).toBe(false);
     // Every total counts what was seen, and every entry kept is within it.
     expect(evidence.consoleTotal).toBe(evidence.console.length);
     expect(evidence.failedRequestsTotal).toBe(1);
+  });
+
+  it("records a failed console.assert at level error", async () => {
+    const result = await renderer.render(`${site.base}/console-assert`);
+
+    expect(result.rendered).toBe(true);
+    // The protocol's type for a failed assertion is `assert`; it is an error
+    // the page reported, and the passing assertion logged nothing at all.
+    expect(result.console!.console).toEqual([
+      { level: "error", text: "site asserts", cut: false },
+    ]);
+    expect(result.console!.consoleTotal).toBe(1);
+  });
+
+  it("never records the top-level document as a failed request, even when it is a 404", async () => {
+    const result = await renderer.render(`${site.base}/gone-with-script`);
+
+    // A 404 document is still a document the browser renders.
+    expect(result.rendered).toBe(true);
+    // The script's 404 is the page's failed request, so capture was running;
+    // the document's own 404 is the row's status and is not listed beside it.
+    expect(result.console!.failedRequests).toEqual([
+      { url: `${site.base}/missing.js`, status: 404, reason: "http 404", cut: false },
+    ]);
+    expect(result.console!.failedRequestsTotal).toBe(1);
+  });
+
+  it("records a request the network failed with Chromium's net error and no status", async () => {
+    const result = await renderer.render(`${site.base}/reset-script`);
+
+    expect(result.rendered).toBe(true);
+    const failed = result.console!.failedRequests;
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toEqual({
+      url: `${site.base}/reset.js`,
+      status: null,
+      reason: "net::ERR_EMPTY_RESPONSE",
+      cut: false,
+    });
+    // Not one of OUR aborts: those are counts, never failed requests.
+    expect(failed[0]!.reason).not.toBe("net::ERR_BLOCKED_BY_CLIENT");
+    expect(failed[0]!.reason).not.toBe("net::ERR_ABORTED");
+    expect(result.console!.blockedByRenderer).toEqual({ thirdParty: 0, sameOriginAssets: 0 });
   });
 
   it("a blocked third-party script is a count, not a failure", async () => {
@@ -2416,12 +2504,12 @@ describe("runRenderPass", () => {
     const row = await pageRow(crawlId, "/console-hostile");
     expect(row.renderVersion).toBe(1);
     const stored = row.renderConsole as RenderConsole;
-    // The NUL is spelled out, never dropped; the lone surrogate is U+FFFD.
+    // The NUL is marked as U+2400 (␀), never dropped; the lone surrogate is U+FFFD.
     expect(stored.console).toEqual([
-      { level: "error", text: "nul:\\u0000 lone:� end", cut: false },
+      { level: "error", text: "nul:\u2400 lone:\uFFFD end", cut: false },
     ]);
     expect(stored.exceptionsTotal).toBe(1);
-    expect(stored.exceptions[0]!.text).toContain("thrown nul:\\u0000 lone:�");
+    expect(stored.exceptions[0]!.text).toContain("thrown nul:\u2400 lone:\uFFFD");
   });
 
   it("a pre-browser policy refusal writes render_version 1 with render_console null", async () => {

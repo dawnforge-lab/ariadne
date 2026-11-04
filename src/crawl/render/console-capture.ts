@@ -1,6 +1,6 @@
 /**
  * What one render saw go wrong in the page (`pages.render_console`, migration
- * 0025, Phase 25 §4): console messages at level error and warning, uncaught
+ * 0025, Phase 25 §4): console messages at level error (a failed `console.assert` included) and warning, uncaught
  * exceptions, and requests the SITE failed — capped, with a total per kind so
  * "20 of 340" is visible.
  *
@@ -15,8 +15,10 @@
  * render writer throw and stop the whole pass:
  *
  *  1. made well-formed (`toWellFormed`: a lone surrogate becomes U+FFFD);
- *  2. every U+0000 spelled out as the six characters `\u0000`, so it is visible
- *     rather than silently dropped;
+ *  2. every U+0000 replaced by U+2400 (`␀`, SYMBOL FOR NULL), so it is visible
+ *     rather than silently dropped — one character, not the six of `\u0000`,
+ *     because a page can log that escape as literal text and the stored row
+ *     must not make the two indistinguishable;
  *  3. cut to `RENDER_CONSOLE_MAX_CHARS` UTF-16 units on a code-point boundary
  *     (never half a surrogate pair), with `cut: true` — a cut value is never
  *     mistaken for a whole one.
@@ -100,9 +102,12 @@ export class RenderConsoleCollector {
   }
 }
 
+/** What a U+0000 is stored as: U+2400 SYMBOL FOR NULL — see the module header. */
+const NUL_MARK = "\u2400";
+
 /** One site string, made storable in `jsonb` and capped — see the module header. */
 function storable(raw: string): { text: string; cut: boolean } {
-  const visible = wellFormed(raw).replaceAll("\u0000", "\\u0000");
+  const visible = wellFormed(raw).replaceAll("\u0000", NUL_MARK);
   if (visible.length <= RENDER_CONSOLE_MAX_CHARS) return { text: visible, cut: false };
   let end = RENDER_CONSOLE_MAX_CHARS;
   // Well-formed, so a high surrogate at the edge is the first half of a pair

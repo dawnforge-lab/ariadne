@@ -85,10 +85,10 @@ describe("RenderConsoleCollector", () => {
 
     const s = c.snapshot(NO_BLOCKS);
 
-    expect(s.console[0]!.text).toBe("nul:\\u0000 lone:\uFFFD end");
+    expect(s.console[0]!.text).toBe("nul:\u2400 lone:\uFFFD end");
     expect(s.console[0]!.cut).toBe(false);
     expect(s.exceptions[0]!.text).toBe("lone low \uFFFD");
-    expect(s.failedRequests[0]!.url).toBe("http://site.test/\\u0000");
+    expect(s.failedRequests[0]!.url).toBe("http://site.test/\u2400");
     // …and the whole snapshot survives a JSON round trip unchanged.
     expect(JSON.parse(JSON.stringify(s))).toEqual(s);
     for (const t of [s.console[0]!.text, s.exceptions[0]!.text, s.failedRequests[0]!.url]) {
@@ -97,14 +97,26 @@ describe("RenderConsoleCollector", () => {
     }
   });
 
-  it("cuts after making the NUL visible, so the stored text never exceeds the cap", () => {
+  it("marks a NUL as U+2400, so it cannot be mistaken for a site that logs the escape as text", () => {
+    // A page can log the six characters `\u0000` itself. Spelling a real NUL
+    // the same way would make the two indistinguishable in the stored row.
     const c = new RenderConsoleCollector();
-    c.addConsole("error", "\u0000".repeat(100));
+    c.addConsole("error", "literal:\\u0000 real:\u0000");
 
-    const entry = c.snapshot(NO_BLOCKS).console[0]!;
+    expect(c.snapshot(NO_BLOCKS).console[0]!.text).toBe("literal:\\u0000 real:\u2400");
+  });
 
-    expect(entry.cut).toBe(true);
-    expect(entry.text.length).toBeLessThanOrEqual(500);
+  it("marks a NUL in one character, so marking never pushes a value over the cap", () => {
+    const c = new RenderConsoleCollector();
+    c.addConsole("error", "\u0000".repeat(500));
+    c.addConsole("error", "\u0000".repeat(501));
+
+    const [whole, over] = c.snapshot(NO_BLOCKS).console;
+
+    // Exactly at the cap: marked, kept whole.
+    expect(whole).toEqual({ level: "error", text: "\u2400".repeat(500), cut: false });
+    // One over: cut at the cap like any other text.
+    expect(over).toEqual({ level: "error", text: "\u2400".repeat(500), cut: true });
   });
 
   it("reports a clean page as zero counts, not as nothing", () => {
