@@ -1250,11 +1250,14 @@ this crawl was written by a render pass — a rendered page, a `render_error`, a
 named URL list, the pass's stamped count, or a page still queued for a browser.
 `"none"` means none of that is there, so the selection numbers are what a pass
 WOULD choose and no absence of rendered evidence is a fact about the site.
-`"failed"` (Phase 25, ruleset 0.19.0) means a render pass was asked for and could
-not launch its browser: `renderLaunchError`, a sibling key in the same
+`"failed"` (Phase 25, ruleset 0.19.0) means the LAST render pass was asked for
+and could not start: `renderLaunchError`, a sibling key in the same
 `render.coverage` value, is a classified sentence (never raw resolver or
-transport text, a stack or a path) or null, the selected pages stay pending and
-a later pass retries them, and `"failed"` is neither "rendered" nor "no render
+transport text, a stack or a path) or null, the pages it selected stay pending
+and a later pass retries them. Rows an EARLIER pass rendered (`pagesRendered` or
+`renderFailures` above 0) remain that pass's evidence and its findings stand;
+NOT MEASURED applies only to what no pass rendered, and to the whole check only
+when both counts are 0. `"failed"` is neither "rendered" nor "no render
 needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
 `ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
 `test/api/mcp.test.ts:1499` "says over the wire whether a render pass ran, not

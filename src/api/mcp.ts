@@ -1036,9 +1036,12 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "rendered'. Check whether a pass ran before reading anything into a " +
         "rendered filter: render.coverage's renderPassEvidence answers it " +
         `('${RENDER_PASS_EVIDENCE.none}' means no pass left a trace; ` +
-        `'${RENDER_PASS_EVIDENCE.failed}' means a pass could not launch its browser — ` +
-        "renderLaunchError says why, the pages are still pending, a later crawl_render " +
-        "retries them, and it is neither 'rendered' nor 'no render needed'), while " +
+        `'${RENDER_PASS_EVIDENCE.failed}' means the LAST render pass could not start — ` +
+        "renderLaunchError says why, the pages it selected are still pending and a later " +
+        "crawl_render retries them; rows an earlier pass rendered (pagesRendered or " +
+        "renderFailures above 0) are still that pass's evidence and its findings stand, " +
+        "and NOT MEASURED applies only to what no pass rendered (to everything when both " +
+        "counts are 0); it is neither 'rendered' nor 'no render needed'), while " +
         "crawl_status's renderPassCount is only the LAST pass's rendered-page count — " +
         "its 0 is also what a crawl nobody rendered reports.\n\n" +
         "Filters:\n" +
