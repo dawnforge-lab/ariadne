@@ -64,7 +64,7 @@ import {
   type DiscoveryTruncation,
   type RobotsInfo,
 } from "./discovery.js";
-import { fetchPage, MAX_BODY, type FetchClass, type FetchResult } from "./fetch-page.js";
+import { fetchPage, MAX_BODY, pageRequestHeaders, type FetchClass, type FetchResult } from "./fetch-page.js";
 import { probeHostVariants } from "./host-probe.js";
 import {
   isClassifiableResponse,
@@ -105,6 +105,7 @@ import {
   type ResourcePassSummary,
 } from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
+import { engineVersion, redactRequestHeaders } from "./versions.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -976,6 +977,15 @@ async function execute(
   signal: AbortSignal | undefined,
 ): Promise<CrawlSummary> {
   try {
+    // What this run sent and which build sent it (Phase 25 §3). Latest wins on
+    // a resume: the column describes the process that finished the crawl.
+    await db
+      .update(crawls)
+      .set({
+        requestHeaders: redactRequestHeaders(pageRequestHeaders(config.userAgent)),
+        engineVersion: engineVersion(),
+      })
+      .where(eq(crawls.id, crawlId));
     return await runToCompletion(db, crawlId, config, signal);
   } catch (error) {
     try {

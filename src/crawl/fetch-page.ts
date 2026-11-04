@@ -435,6 +435,23 @@ function emptyResult(
 }
 
 /**
+ * The request headers every page fetch sends — one definition, read by
+ * `fetchPage` and recorded (redacted) on the crawl row.
+ */
+export function pageRequestHeaders(userAgent: string): Record<string, string> {
+  return {
+    "user-agent": userAgent,
+    accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    // undici's `request` does not decode transport encodings (unlike
+    // `fetch`), so asking for gzip means we own the inflating — see
+    // readCappedDecoded, which is also why only gzip is offered. Worth
+    // owning: HTML compresses 4-6x, and a crawl that refuses compression
+    // is four times the bandwidth on someone else's origin (rule 9).
+    "accept-encoding": ACCEPT_ENCODING,
+  };
+}
+
+/**
  * Fetch one URL and classify the result.
  *
  * Classification precedence, in order, so the reason a row carries is the
@@ -485,16 +502,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     const response = await request(url, {
       dispatcher,
       method: "GET",
-      headers: {
-        "user-agent": opts.userAgent,
-        accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        // undici's `request` does not decode transport encodings (unlike
-        // `fetch`), so asking for gzip means we own the inflating — see
-        // readCappedDecoded, which is also why only gzip is offered. Worth
-        // owning: HTML compresses 4-6x, and a crawl that refuses compression
-        // is four times the bandwidth on someone else's origin (rule 9).
-        "accept-encoding": ACCEPT_ENCODING,
-      },
+      headers: pageRequestHeaders(opts.userAgent),
       // Manual redirects: a 3xx is its own row and the crawl loop enqueues the
       // target (which re-enters url-policy on the way in), so chains and loops
       // are visible in the recorded rows instead of collapsed by the client.
