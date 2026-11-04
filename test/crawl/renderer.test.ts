@@ -56,6 +56,7 @@ import {
   writeRenderResult,
   type RenderResult,
 } from "../../src/crawl/render/renderer.js";
+import type { RenderConsole } from "../../src/crawl/render/console-capture.js";
 import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
 import { isSameOrigin } from "../../src/crawl/parse/url-utils.js";
 import { UrlPolicyError } from "../../src/crawl/url-policy.js";
@@ -354,6 +355,54 @@ function oneScriptHtml(): string {
 <script src="/one.js"></script></head><body><p>one script</p></body></html>`;
 }
 
+/** The function `/widget.js` on the other origin defines — never, because it is blocked. */
+const WIDGET_FN = "widgetInit";
+
+/**
+ * `/console-errors` (Phase 25): everything the render evidence records, once each.
+ *
+ *  - a third-party script (`/widget.js` on the other origin) the renderer aborts,
+ *    and an inline call to the function it would have defined: the
+ *    `widgetInit is not defined` that OUR blocking caused, which must be recorded
+ *    as the page's exception while the abort stays a count, never a failure;
+ *  - a same-origin SCRIPT that 404s (`/missing.js`): an image or font would be
+ *    aborted as paint-only before it was sent, so only a script is a request the
+ *    site can fail;
+ *  - a `console.error`, a `console.warn` and a `console.log` (not recorded: the
+ *    levels kept are error and warning);
+ *  - an uncaught `throw`.
+ */
+function consoleErrorsHtml(otherOrigin: string): string {
+  return `<!doctype html><html lang="en"><head><title>Console errors</title>
+<script src="${otherOrigin}/widget.js"></script>
+<script src="/missing.js"></script></head>
+<body><p>console errors</p>
+<script>console.error("site says no"); console.warn("site warns"); console.log("site chats");</script>
+<script>${WIDGET_FN}();</script>
+<script>throw new Error("site threw on purpose");</script>
+</body></html>`;
+}
+
+/** `/console-clean`: a page with script and nothing wrong. `console.log` is not a level kept. */
+function consoleCleanHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Clean</title>
+<script src="/one.js"></script></head>
+<body><p>clean page</p><script>console.log("all is well");</script></body></html>`;
+}
+
+/**
+ * `/console-hostile`: console text and an exception carrying a NUL and a lone
+ * surrogate, both of which Postgres `jsonb` rejects. The escapes are the
+ * page's JavaScript's, so the browser itself builds the hostile strings.
+ */
+function consoleHostileHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Hostile</title></head>
+<body><p>hostile console</p>
+<script>console.error("nul:\\u0000 lone:\\uD800 end");</script>
+<script>throw new Error("thrown nul:\\u0000 lone:\\uDC00");</script>
+</body></html>`;
+}
+
 interface Site {
   base: string;
   /** Arrival time (ms) of every request, in order, and the cookie it carried. */
@@ -380,6 +429,19 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/js-redirect") return html(jsRedirectHtml(`${siteBase(server)}/csr`));
     if (path === "/offsite-redirect") return html(jsRedirectHtml(`${otherOrigin()}/elsewhere`));
     if (path === "/third-party") return html(thirdPartyHtml(otherOrigin()));
+    if (path === "/console-errors") return html(consoleErrorsHtml(otherOrigin()));
+    if (path === "/console-clean") return html(consoleCleanHtml());
+    if (path === "/console-hostile") return html(consoleHostileHtml());
+    if (path === "/console-hang") {
+      // A console error, then silence: the error is logged while the document
+      // is still arriving, and the navigation never reaches domcontentloaded.
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.write(
+        "<!doctype html><html><head><title>Console hang</title>" +
+          '<script>console.error("logged before the hang");</script>',
+      );
+      return;
+    }
     if (path.startsWith("/static/")) return html(staticHtml(path.slice("/static/".length)));
     if (path === "/paced") return html(pacedHtml());
     if (path === "/limited") return html(limitedHtml());
@@ -490,7 +552,15 @@ function siteBase(server: Server): string {
 async function startThirdParty(): Promise<Site> {
   const hits: Array<{ path: string; at: number }> = [];
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    hits.push({ path: (req.url ?? "/").split("?")[0] ?? "/", at: Date.now() });
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    hits.push({ path, at: Date.now() });
+    if (path === "/widget.js") {
+      // Served, so a page whose call to it fails proves the script was never
+      // fetched: the renderer blocked it, the server did not refuse it.
+      res.writeHead(200, { "content-type": "text/javascript" });
+      res.end(`window.${WIDGET_FN} = function () {};`);
+      return;
+    }
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("hello from somewhere else");
   });
@@ -774,6 +844,106 @@ describe("PageRenderer", () => {
     expect(result.error).toMatch(/^policy refusal: /);
     expect(result.error).toContain("169.254.169.254");
     expect(result.wordCount).toBeNull();
+    // No page was opened, so nothing was looked at: null, not zero counts.
+    expect(result.console).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 25: render evidence — console, exceptions, failed requests.
+  // -------------------------------------------------------------------------
+
+  it("records a thrown error, a console.error and a missing same-origin script", async () => {
+    const result = await renderer.render(`${site.base}/console-errors`);
+
+    expect(result.rendered).toBe(true);
+    const evidence = result.console!;
+    expect(evidence).not.toBeNull();
+    expect(evidence.exceptionsTotal).toBeGreaterThanOrEqual(1);
+    expect(evidence.exceptions.some((e) => e.text.includes("site threw on purpose"))).toBe(true);
+    expect(evidence.console).toContainEqual({ level: "error", text: "site says no", cut: false });
+    expect(evidence.console).toContainEqual({ level: "warning", text: "site warns", cut: false });
+    // `console.log` is not a level kept.
+    expect(evidence.console.some((m) => m.text.includes("site chats"))).toBe(false);
+    expect(evidence.failedRequests).toContainEqual({
+      url: `${site.base}/missing.js`,
+      status: 404,
+      reason: "http 404",
+      cut: false,
+    });
+    // The DOCUMENT's own status is the row's, never a failed request; and the
+    // browser's own "Failed to load resource" lines are not the site's console.
+    expect(evidence.failedRequests.some((f) => f.url === `${site.base}/console-errors`)).toBe(false);
+    expect(evidence.console.some((m) => m.text.includes("Failed to load resource"))).toBe(false);
+    // Every total counts what was seen, and every entry kept is within it.
+    expect(evidence.consoleTotal).toBe(evidence.console.length);
+    expect(evidence.failedRequestsTotal).toBe(1);
+  });
+
+  it("a blocked third-party script is a count, not a failure", async () => {
+    const before = third.hits.length;
+
+    const result = await renderer.render(`${site.base}/console-errors`);
+
+    // The other origin was never asked: the call below failed because WE
+    // blocked its script.
+    expect(third.hits.length).toBe(before);
+    const evidence = result.console!;
+    expect(evidence.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
+    expect(evidence.blockedByRenderer).toEqual({
+      thirdParty: result.blockedRequests,
+      sameOriginAssets: result.skippedPaintRequests,
+    });
+    expect(evidence.failedRequests.some((f) => f.url.startsWith(third.base))).toBe(false);
+    // The error our blocking caused is recorded as the page's — telling it
+    // apart is a later rule's job, which `blockedByRenderer` is kept for.
+    expect(evidence.exceptions.some((e) => e.text.includes(`${WIDGET_FN} is not defined`))).toBe(true);
+    // Our abort is not a console line either.
+    expect(evidence.console.some((m) => m.text.includes("ERR_BLOCKED_BY_CLIENT"))).toBe(false);
+  });
+
+  it("a clean page has zero counts", async () => {
+    const result = await renderer.render(`${site.base}/console-clean`);
+
+    expect(result.rendered).toBe(true);
+    // Looked, found nothing: a fact, not a null.
+    expect(result.console).toEqual({
+      console: [],
+      consoleTotal: 0,
+      exceptions: [],
+      exceptionsTotal: 0,
+      failedRequests: [],
+      failedRequestsTotal: 0,
+      blockedByRenderer: { thirdParty: 0, sameOriginAssets: 0 },
+    });
+  });
+
+  it("keeps what it captured when the render then fails", async () => {
+    // Its own browser at the short navigation timeout, for the reason the
+    // `/hang` test below gives.
+    const hangRenderer = await PageRenderer.launch({
+      origin: site.base,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render test)",
+      perHostDelayMs: 0,
+      navigationTimeoutMs: NAV_TIMEOUT_MS,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+    try {
+      const result = await hangRenderer.render(`${site.base}/console-hang`);
+
+      expect(result.rendered).toBe(false);
+      expect(result.error).toMatch(/^timeout under pacing /);
+      expect(result.console).not.toBeNull();
+      expect(result.console!.consoleTotal).toBeGreaterThanOrEqual(1);
+      expect(result.console!.console).toContainEqual({
+        level: "error",
+        text: "logged before the hang",
+        cut: false,
+      });
+    } finally {
+      await hangRenderer.close();
+    }
   });
 
   it("classifies a navigation that never finishes as a timeout", async () => {
@@ -2069,8 +2239,97 @@ describe("runRenderPass", () => {
       pacedRequests: 0,
       cachedResponses: 0,
       unpacedNetworkRequests: 0,
+      console: null,
     };
 
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 25: render_console and render_version on the page row.
+  // -------------------------------------------------------------------------
+
+  it("writes render_console and render_version 1", async () => {
+    const crawlId = await newCrawl(["/console-errors", "/console-clean"]);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.failures).toBe(0);
+    const errors = await pageRow(crawlId, "/console-errors");
+    expect(errors.renderVersion).toBe(1);
+    const stored = errors.renderConsole as RenderConsole;
+    expect(stored.exceptionsTotal).toBeGreaterThanOrEqual(1);
+    expect(stored.console).toContainEqual({ level: "error", text: "site says no", cut: false });
+    expect(stored.failedRequests).toContainEqual({
+      url: `${site.base}/missing.js`,
+      status: 404,
+      reason: "http 404",
+      cut: false,
+    });
+    expect(stored.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
+
+    const clean = await pageRow(crawlId, "/console-clean");
+    expect(clean.renderVersion).toBe(1);
+    expect(clean.renderConsole).toEqual({
+      console: [],
+      consoleTotal: 0,
+      exceptions: [],
+      exceptionsTotal: 0,
+      failedRequests: [],
+      failedRequestsTotal: 0,
+      blockedByRenderer: { thirdParty: 0, sameOriginAssets: 0 },
+    });
+  });
+
+  it("stores a page that logs a NUL and a lone surrogate without error", async () => {
+    // Postgres jsonb rejects both; unsanitised, this one page would make the
+    // writer throw and stop the whole pass.
+    const crawlId = await newCrawl(["/console-hostile"]);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.rendered).toBe(1);
+    const row = await pageRow(crawlId, "/console-hostile");
+    expect(row.renderVersion).toBe(1);
+    const stored = row.renderConsole as RenderConsole;
+    // The NUL is spelled out, never dropped; the lone surrogate is U+FFFD.
+    expect(stored.console).toEqual([
+      { level: "error", text: "nul:\\u0000 lone:� end", cut: false },
+    ]);
+    expect(stored.exceptionsTotal).toBe(1);
+    expect(stored.exceptions[0]!.text).toContain("thrown nul:\\u0000 lone:�");
+  });
+
+  it("a pre-browser policy refusal writes render_version 1 with render_console null", async () => {
+    // `www.` answers a metadata address, so it is left out of the pin at
+    // launch and a page on it is refused before any browser page opens.
+    const port = new URL(site.base).port;
+    const apex = `http://shop.test:${port}`;
+    const www = `http://www.shop.test:${port}`;
+    const crawlId = await newCrawl(["/csr"], { base: www, siteUrl: apex });
+
+    const summary = await runRenderPass(
+      db,
+      crawlId,
+      passConfig({
+        siteUrl: apex,
+        resolveAddress: async (host: string, type: string) =>
+          type !== "A" ? [] : host === "www.shop.test" ? ["169.254.169.254"] : ["127.0.0.1"],
+      }),
+    );
+
+    expect(summary.failures).toBe(1);
+    const row = (
+      await db
+        .select()
+        .from(pages)
+        .where(and(eq(pages.crawlId, crawlId), eq(pages.url, `${www}/csr`)))
+    )[0]!;
+    expect(row.rendered).toBe(false);
+    expect(row.renderError).toMatch(/^policy refusal: www\.shop\.test was not approved/);
+    // The render writer wrote this row (its stamp says so), and nothing was
+    // looked at: null, which `render_version` tells apart from a pre-25 null.
+    expect(row.renderVersion).toBe(1);
+    expect(row.renderConsole).toBeNull();
   });
 });
