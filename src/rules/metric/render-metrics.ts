@@ -92,10 +92,12 @@ export const RENDER_PASS_EVIDENCE = {
   ran: "ran",
   none: "none",
   /**
-   * A pass was asked for and could not launch its browser
-   * (`crawls.render_launch_error` is set). The selected rows stay
-   * `render_pending`, which on their own would read as `ran`; `failed` takes
-   * precedence so the metric does not claim a render that never happened.
+   * The LAST pass was asked for and could not start (`crawls.render_launch_error`
+   * is set). Its selected rows stay `render_pending`, which on their own would
+   * read as `ran`; `failed` takes precedence so the metric does not claim a
+   * render the last pass never made. Rows an EARLIER pass rendered are still
+   * counted and still that pass's evidence — `failed` is never "nothing was
+   * rendered" unless `pagesRendered` and `renderFailures` are both zero.
    */
   failed: "failed",
 } as const;
@@ -214,11 +216,17 @@ async function readRenderConfig(
  *    same denominator the budget is a percentage OF, deliberately: `budget` is
  *    `min(ceil(pages × pct/100), renderMaxPages)` over this number, not over the
  *    renderable subset.
- *  - `renderPassEvidence` — `ran` or `none`: whether ANYTHING this crawl holds
- *    was written by a render pass. It comes before `selectionMode` because it
- *    governs the mode in turn: on `none`, the four automatic numbers below
- *    describe the selection a pass WOULD make if one were started now, and not
- *    one that was made. See the section on it below.
+ *  - `renderPassEvidence` — `ran`, `none` or `failed`. `failed` when the LAST
+ *    pass could not start (`crawls.render_launch_error` is set; checked first);
+ *    otherwise `ran` or `none`: whether ANYTHING this crawl holds was written by
+ *    a render pass. It comes before `selectionMode` because it governs the mode
+ *    in turn: on `none`, the four automatic numbers below describe the
+ *    selection a pass WOULD make if one were started now, and not one that was
+ *    made. On `failed`, `pagesRendered` and `renderFailures` still count what
+ *    any EARLIER pass wrote, and those rows stay that pass's evidence. See the
+ *    section on it below.
+ *  - `renderLaunchError` — the classified sentence saying why the last pass
+ *    could not start, or null. Set exactly when the evidence is `failed`.
  *  - `selectionMode` — `auto` or `explicit`: WHICH DECISION chose the pages, and
  *    therefore how the four numbers after it are to be read. It comes first
  *    among the selection columns because it governs them.
@@ -265,7 +273,17 @@ async function readRenderConfig(
  * A null here means "this question does not apply to how these pages were
  * chosen", which is what it means everywhere else in this engine.
  *
- * ## `renderPassEvidence`: `ran` and `none`, and why neither is `false`
+ * ## `renderPassEvidence`: `ran`, `none` and `failed`, and why none is `false`
+ *
+ * `failed` (Phase 25 T4) is decided first and from one column: the last pass
+ * recorded a launch error (`crawls.render_launch_error`). It is a claim about
+ * the LAST pass only. Rows an earlier pass rendered or failed are still on the
+ * crawl, still counted in `pagesRendered` and `renderFailures`, and still that
+ * pass's evidence; what is unmeasured is what no pass rendered. Both counts
+ * zero means nothing was ever measured. A later pass that launches clears the
+ * column, and the value returns to `ran`.
+ *
+ * The rest of this section is about telling `ran` from `none`.
  *
  * P12-T4, closing the residual the Phase 11 audit filed at
  * docs/gates/phase-11.md §6.3: on a crawl with no render pass this row read

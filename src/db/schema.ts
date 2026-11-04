@@ -303,23 +303,34 @@ export const crawls = pgTable("crawls", {
   // "[redacted]", never verbatim. Page-fetch headers only: resource and render
   // fetches send their own and are not recorded.
   //
-  // NULLABLE, AND THE NULL MEANS ONE THING: the crawl was created before
-  // migration 0025, so what it sent was not recorded. It never means "none sent".
+  // STAMPED WHEN THE CRAWL RUNS, not when it is created: `execute` (src/crawl/
+  // loop.ts) writes it as each run starts, the first one and every resume, and
+  // the latest run wins.
+  //
+  // NULLABLE. Null means the crawl has not run under 0025: it was created before
+  // the migration, or it never ran at all (still queued, or cancelled before
+  // `execute`). It never means "none sent".
   requestHeaders: jsonb("request_headers").$type<Record<string, string>>(),
   // THE BUILD THAT RAN THIS CRAWL (migration 0025): the package version plus the
-  // git sha the process was built from, stamped at creation and again on each
-  // resume (the latest wins). Informational only: no rule reads it.
+  // git sha the process was built from. Stamped beside `request_headers`, by
+  // `execute` as each run starts — the first one and every resume, the latest
+  // wins — never at creation. Informational only: no rule reads it.
   //
-  // NULLABLE: null means the crawl predates 0025. It never means "unknown build"
-  // on a crawl that was stamped.
+  // NULLABLE: null means the crawl has not run under 0025 — it predates the
+  // migration, or it never ran (queued, or cancelled before `execute`). It never
+  // means "unknown build" on a crawl that was stamped.
   engineVersion: text("engine_version"),
-  // WHY THE RENDER PASS COULD NOT START (migration 0025): the launch error's
-  // message when the browser failed to launch, so the failure is a fact on the
-  // crawl row rather than a log line.
+  // WHY THE LAST RENDER PASS COULD NOT START (migration 0025): the CLASSIFIED
+  // sentence `describeLaunchFailure` (src/crawl/render/run-render.ts) builds —
+  // "the render browser could not be launched", "the render directory could not
+  // be created", or "address refused: …" for a `UrlPolicyError` — NEVER the raw
+  // error's message. Tenant safety (Talos obligation 6): resolver and transport
+  // text, stack traces and local paths travel only on the rethrown error, to the
+  // log. A pass that launches clears it.
   //
-  // NULLABLE: null means no launch failure was recorded: the browser launched,
-  // the render pass never ran, or the crawl predates 0025. Read it beside the
-  // render pass columns, never alone.
+  // NULLABLE: null means no launch failure is on record: the last pass launched,
+  // no render pass was ever started, or the crawl predates 0025. Read it beside
+  // the render pass columns, never alone.
   renderLaunchError: text("render_launch_error"),
 });
 
@@ -823,15 +834,18 @@ export const pages = pgTable("pages", {
   // stored nor counted.
   //
   // WRITTEN ON EVERY ROW WHOSE FETCH RECEIVED RESPONSE HEADERS: redirects, 4xx and
-  // 5xx, and a `timeout` whose deadline expired DURING the body (its headers
-  // arrived and are real). NEVER REWRITTEN by the recheck pass: the first
+  // 5xx, a `timeout` whose deadline expired DURING the body and a `network_error`
+  // raised after the headers (theirs arrived and are real). NEVER REWRITTEN by the recheck pass: the first
   // observation's headers are the record.
   //
-  // NULLABLE. Null means no headers were received (connect or header timeout,
-  // `network_error`, `disallowed`, robots-blocked) OR the row predates 0025;
-  // `extraction_version` tells the two apart (null there = before 0025). A
-  // non-null object with an empty `values` means headers arrived and none were
-  // on the allowlist.
+  // NULLABLE, AND NULL EXACTLY WHEN NO RESPONSE HEADERS ARRIVED — the fetch class
+  // does not decide it. A connect or header timeout, a `disallowed` refusal, a
+  // robots-blocked row and a `network_error` before any response (a reset
+  // connection) are null; a `network_error` AFTER the headers arrived (a corrupt
+  // gzip body, a mid-body reset) keeps them, as a body-time `timeout` does.
+  // Null also on a row that predates 0025; `extraction_version` tells the two
+  // apart (null there = before 0025). A non-null object with an empty `values`
+  // means headers arrived and none were on the allowlist.
   responseHeaders: jsonb("response_headers").$type<StoredResponseHeaders>(),
   // WHICH EXTRACTION WROTE THIS ROW (migration 0025; `EXTRACTION_VERSION`,
   // src/crawl/versions.ts). Stamped by the page writer on every row it writes,

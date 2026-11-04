@@ -188,11 +188,14 @@ export interface FetchResult {
    */
   platformHint: Platform | null;
   /**
-   * The allowlisted response headers (`captureResponseHeaders`), or null when no
-   * response headers arrived (connect or header timeout, `network_error`,
-   * `disallowed`). Set on every class that SAW a response, including a `timeout`
-   * whose deadline expired during the body: those headers arrived and are real,
-   * while `statusCode` stays null there. Persisted as `pages.response_headers`.
+   * The allowlisted response headers (`captureResponseHeaders`), or null —
+   * EXACTLY when no response headers arrived, whatever the class: a connect or
+   * header timeout, a `disallowed` refusal, a `network_error` before any
+   * response. Set on every fetch that SAW a response, including a `timeout`
+   * whose deadline expired during the body and a `network_error` raised after
+   * the headers (a corrupt gzip body, a mid-body reset): those headers arrived
+   * and are real, while `statusCode` stays null there. Persisted as
+   * `pages.response_headers`.
    */
   responseHeaders: StoredResponseHeaders | null;
   /**

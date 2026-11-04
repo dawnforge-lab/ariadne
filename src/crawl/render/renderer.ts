@@ -374,8 +374,10 @@ export interface RenderResult {
   /** Why a render that was attempted produced nothing. Null on success. */
   error: string | null;
   /**
-   * Third-party requests aborted. Stored only inside `console`, as
-   * `blockedByRenderer.thirdParty`.
+   * Requests the fence aborted: another origin's (an off-site top-level
+   * navigation included), same-origin requests to a spelling not pinned at
+   * launch, and frame documents url-policy refused. Stored only inside
+   * `console`, as `blockedByRenderer.thirdParty` — one count, not split.
    */
   blockedRequests: number;
   /**

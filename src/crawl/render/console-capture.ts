@@ -1,8 +1,8 @@
 /**
  * What one render saw go wrong in the page (`pages.render_console`, migration
- * 0025, Phase 25 §4): console messages at level error (a failed `console.assert` included) and warning, uncaught
- * exceptions, and requests the SITE failed — capped, with a total per kind so
- * "20 of 340" is visible.
+ * 0025, Phase 25 §4): console messages at level error (a failed
+ * `console.assert` included) and warning, uncaught exceptions, and requests the
+ * SITE failed — capped, with a total per kind so "20 of 340" is visible.
  *
  * ONE COLLECTOR PER RENDER (`RenderTraffic` owns it), freed with the render:
  * at most `RENDER_CONSOLE_MAX_ENTRIES` entries per kind, so the memory is
@@ -52,8 +52,17 @@ export interface RenderConsole {
   /**
    * The renderer's OWN aborts, as counts only — so a later rule can caveat a
    * console error our blocking may have caused (a `gtag is not defined` after
-   * the analytics script was blocked). `thirdParty`: requests to another origin;
-   * `sameOriginAssets`: the site's own images, media and fonts.
+   * the analytics script was blocked).
+   *
+   * `thirdParty` is every request the renderer's fence refused, despite the
+   * name: requests to another origin (an off-site top-level navigation
+   * included), SAME-origin requests to a spelling that was not pinned at launch
+   * (`www.` when only the apex was approved, or the reverse), and frame
+   * documents url-policy refused. One count, deliberately not split. A
+   * top-level document the renderer refuses is the render's error, not a count.
+   *
+   * `sameOriginAssets`: the site's own images, media and fonts, aborted as
+   * paint-only.
    */
   blockedByRenderer: { thirdParty: number; sameOriginAssets: number };
 }
