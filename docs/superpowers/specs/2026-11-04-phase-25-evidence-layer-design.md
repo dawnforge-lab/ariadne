@@ -4,6 +4,8 @@ Date: 2026-11-04. Roadmap: `docs/superpowers/specs/2026-11-04-roadmap-design.md`
 Predecessor gate: Phase 24a (`docs/gates/phase-24a.md`, closed on clauses 1–5 by owner
 ruling 2026-10-24).
 
+Status: shipped, gate `docs/gates/phase-25.md`.
+
 ## Intent
 
 Checks wave 1 (Phase 26) and wave 2 (Phase 30) need facts the crawl does not keep
