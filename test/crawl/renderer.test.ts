@@ -26,12 +26,12 @@
  * pinned as constants, once, rather than paid for in every test.
  */
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -46,6 +46,7 @@ import {
   leaseRenderUrls,
 } from "../../src/crawl/frontier.js";
 import { selectRenderSet } from "../../src/crawl/render/select.js";
+import { RENDER_PASS_EVIDENCE, renderMetrics } from "../../src/rules/metric/render-metrics.js";
 import {
   PageRenderer,
   RENDERER_DEFAULTS,
@@ -1761,6 +1762,95 @@ describe("runRenderPass", () => {
       where crawl_id = ${crawlId} and leased_until is not null`);
     const summary = await runRenderPass(db, crawlId, passConfig());
     expect(summary.rendered).toBe(2);
+  });
+
+  describe("a pass that cannot launch (Phase 25 T4)", () => {
+    async function launchErrorOf(crawlId: string): Promise<string | null> {
+      const rows = await db
+        .select({ e: crawls.renderLaunchError })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId));
+      return rows[0]!.e;
+    }
+
+    async function coverage(crawlId: string): Promise<Record<string, unknown>> {
+      const rule = renderMetrics.find((r) => r.id === "render.coverage")!;
+      const rows = await rule.run(db, crawlId);
+      return rows[0]!.value as Record<string, unknown>;
+    }
+
+    it("leaves rows pending, records why, and coverage says failed", async () => {
+      const crawlId = await newCrawl(["/csr", "/js-redirect"]);
+      const raw = new Error("browserType.launch: /home/tenant/.cache/ms-playwright missing");
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(raw);
+      try {
+        // The original error is rethrown unchanged.
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toBe(raw);
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await frontierCounts(db, crawlId)).renderPending).toBe(2);
+      const recorded = await launchErrorOf(crawlId);
+      expect(recorded).toBe("the render browser could not be launched");
+      expect(recorded).not.toContain("/home/tenant");
+      const value = await coverage(crawlId);
+      expect(value.renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+      expect(value.renderLaunchError).toBe(recorded);
+    });
+
+    it("records a launch-time UrlPolicyError as an address refusal, with no resolver text", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const refusal = new UrlPolicyError(
+        "CRAWL_TARGET_BLOCKED",
+        "host resolves to a private address",
+        { cause: new Error("getaddrinfo ENOTFOUND resolver.internal.tenant.example") },
+      );
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(refusal);
+      try {
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toBe(refusal);
+      } finally {
+        spy.mockRestore();
+      }
+      const recorded = await launchErrorOf(crawlId);
+      expect(recorded).toBe(
+        "address refused: host resolves to a private address (CRAWL_TARGET_BLOCKED)",
+      );
+      expect(recorded).not.toContain("getaddrinfo");
+      expect(recorded).not.toContain("tenant.example");
+    });
+
+    it("records an uncreatable render directory without the path", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      // A directory beneath a regular file cannot be created.
+      const file = join(htmlRoot, `not-a-dir-${randomUUID()}`);
+      await writeFile(file, "x");
+      await expect(
+        runRenderPass(db, crawlId, passConfig({ renderHtmlDir: file })),
+      ).rejects.toThrow();
+      const recorded = await launchErrorOf(crawlId);
+      expect(recorded).toBe("the render directory could not be created");
+      expect((await coverage(crawlId)).renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+    });
+
+    it("a later pass that launches clears it", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const spy = vi
+        .spyOn(PageRenderer, "launch")
+        .mockRejectedValueOnce(new Error("no browser"));
+      try {
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow("no browser");
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await launchErrorOf(crawlId)).not.toBeNull();
+
+      const summary = await runRenderPass(db, crawlId, passConfig());
+      expect(summary.rendered).toBe(1);
+      expect(await launchErrorOf(crawlId)).toBeNull();
+      const value = await coverage(crawlId);
+      expect(value.renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.ran);
+      expect(value.renderLaunchError).toBeNull();
+    });
   });
 
   it("refuses to run while the crawl row still says running", async () => {

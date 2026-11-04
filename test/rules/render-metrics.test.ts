@@ -49,7 +49,7 @@ describe("renderMetrics metadata", () => {
   // drift would ship green. This is the one place that pins the shape against
   // hardcoded literals, restoring the net the literal→named refactor removed.
   it("pins the render-pass evidence wire shape against hardcoded literals", () => {
-    expect(RENDER_PASS_EVIDENCE).toEqual({ ran: "ran", none: "none" });
+    expect(RENDER_PASS_EVIDENCE).toEqual({ ran: "ran", none: "none", failed: "failed" });
   });
 });
 
@@ -217,6 +217,7 @@ describe("render.coverage against the database", () => {
       // over this crawl and the selection numbers below describe the decision
       // that produced them.
       renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
+      renderLaunchError: null,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -262,6 +263,7 @@ describe("render.coverage against the database", () => {
       // P12-T4: nothing on this crawl shows a pass ever ran, so the numbers
       // below are the selection a pass WOULD make and not one it made.
       renderPassEvidence: RENDER_PASS_EVIDENCE.none,
+      renderLaunchError: null,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -297,6 +299,7 @@ describe("render.coverage against the database", () => {
     expect(rows["site|"]).toEqual({
       pagesCrawled: 6,
       renderPassEvidence: RENDER_PASS_EVIDENCE.none,
+      renderLaunchError: null,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -323,6 +326,7 @@ describe("render.coverage against the database", () => {
       // honest answer — no pass left a trace here — and the row says so
       // rather than letting five zeroes stand for a decision.
       renderPassEvidence: RENDER_PASS_EVIDENCE.none,
+      renderLaunchError: null,
       // P8-T2: which decision chose these pages. Automatic here — no URL
       // list is on the crawl row.
       selectionMode: "auto",
@@ -368,6 +372,7 @@ describe("render.coverage against the database", () => {
       // transaction that made the selection — so `explicit` is proof a pass
       // ran, and this pair can never read `explicit` beside `none`.
       renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
+      renderLaunchError: null,
       selectionMode: "explicit",
       // Null, not 1 — the budget the automatic decision would have had — and
       // not 0 either, which reads as "a budget of none".
@@ -403,6 +408,7 @@ describe("render.coverage against the database", () => {
       // answer is still `ran`: the list on the crawl row was written by the
       // pass, so it is a record of a pass whatever came of it.
       renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
+      renderLaunchError: null,
     });
   });
 
@@ -460,6 +466,7 @@ describe("render.coverage against the database", () => {
       // are what this field exists to separate, and `pagesRendered: 0` beside
       // `renderFailures: 1` is a pass that ran and got nothing.
       renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
+      renderLaunchError: null,
       pagesRendered: 0,
       renderFailures: 1,
     });
@@ -490,6 +497,7 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toMatchObject({
       renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
+      renderLaunchError: null,
       pagesRendered: 0,
       renderFailures: 0,
     });
@@ -534,6 +542,7 @@ describe("render.coverage against the database", () => {
     const rows = await metricRowsByScope(db, rule("render.coverage"), crawlId);
     expect(rows["site|"]).toMatchObject({
       renderPassEvidence: RENDER_PASS_EVIDENCE.none,
+      renderLaunchError: null,
       selectionMode: "auto",
       selectionBudget: 1,
       selectionSuspects: 2,

@@ -1968,7 +1968,15 @@ describe("the fixture site end to end", () => {
         const filled =
           table.rows.some((row) => row[column.key] !== null && row[column.key] !== undefined) ||
           table.summary.some((entry) => entry.key === column.key && entry.value !== null);
-        if (!filled) emptyColumns.push(`${rule.id}.${column.key}`);
+        // A column that is null by design on every healthy crawl and filled only
+        // on a failure path this crawl does not take: `render.coverage`'s
+        // `renderLaunchError` is set when a render pass could not launch, and
+        // test/crawl/renderer.test.ts proves the filled case against a real
+        // database. The column stays declared so the guard below still demands
+        // every stored key be shown.
+        if (!filled && `${rule.id}.${column.key}` !== "render.coverage.renderLaunchError") {
+          emptyColumns.push(`${rule.id}.${column.key}`);
+        }
       }
 
       // (2) Every key the stored values carry is read by some column.
@@ -2434,6 +2442,7 @@ describe("the fixture site end to end", () => {
       // other end. `pagesRendered: 70` below is evidence enough on its own
       // here; the field matters on the crawls where there is none.
       renderPassEvidence: RENDER_PASS_EVIDENCE.ran,
+      renderLaunchError: null,
       // P8-T2. The harness renders the AUTOMATIC selection — it names no URLs —
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.

@@ -77,7 +77,8 @@ import { num } from "./cohort.js";
 
 /**
  * `renderPassEvidence`'s closed vocabulary: `ran` when this crawl holds anything
- * a render pass wrote, `none` when it holds nothing of the kind.
+ * a render pass wrote, `none` when it holds nothing of the kind, `failed` when
+ * the last pass could not launch (Phase 25 T4; checked before `ran`).
  *
  * Declared as a named constant on the `RESOURCE_FETCH_CLASSES` model
  * (src/crawl/resources/fetch-resources.ts): this rule WRITES the value, so it
@@ -90,6 +91,13 @@ import { num } from "./cohort.js";
 export const RENDER_PASS_EVIDENCE = {
   ran: "ran",
   none: "none",
+  /**
+   * A pass was asked for and could not launch its browser
+   * (`crawls.render_launch_error` is set). The selected rows stay
+   * `render_pending`, which on their own would read as `ran`; `failed` takes
+   * precedence so the metric does not claim a render that never happened.
+   */
+  failed: "failed",
 } as const;
 export type RenderPassEvidence = (typeof RENDER_PASS_EVIDENCE)[keyof typeof RENDER_PASS_EVIDENCE];
 
@@ -121,6 +129,8 @@ interface StoredRenderInputs {
    * happened. See `crawls.render_urls_jsonb` (src/db/schema.ts).
    */
   renderUrls: string[] | null;
+  /** `crawls.render_launch_error`: why the last pass could not launch, else null. */
+  renderLaunchError: string | null;
   /**
    * What the LAST render pass stamped on the crawl row: the number of pages it
    * rendered (`crawls.render_pass_count`, set — never incremented — by step 4
@@ -140,6 +150,7 @@ async function readRenderConfig(
       config: crawls.config,
       renderUrls: crawls.renderUrlsJsonb,
       renderPassCount: crawls.renderPassCount,
+      renderLaunchError: crawls.renderLaunchError,
     })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
@@ -185,7 +196,12 @@ async function readRenderConfig(
     renderUrls = named as string[];
   }
 
-  return { cfg, renderUrls, renderPassCount: row.renderPassCount };
+  return {
+    cfg,
+    renderUrls,
+    renderPassCount: row.renderPassCount,
+    renderLaunchError: row.renderLaunchError,
+  };
 }
 
 /**
@@ -294,7 +310,11 @@ async function readRenderConfig(
  * there would be a claim about the past that this rule cannot make.
  */
 async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
-  const { cfg, renderUrls, renderPassCount } = await readRenderConfig(db, crawlId, self.id);
+  const { cfg, renderUrls, renderPassCount, renderLaunchError } = await readRenderConfig(
+    db,
+    crawlId,
+    self.id,
+  );
   // Recomputed only when it describes something. On an explicit pass the
   // automatic decision is not merely unreported, it is not asked: running the
   // candidate SQL to throw the answer away would invite a later reader to
@@ -337,14 +357,21 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
       scope: "site",
       value: {
         pagesCrawled: num(row.pages_crawled, "pages_crawled", self.id),
+        // `failed` first: a pass that could not launch leaves its selection
+        // `render_pending`, which is also what the `ran` test reads as an
+        // aborted pass. The recorded launch error is the tie-breaker.
         renderPassEvidence:
-          renderUrls !== null ||
-          renderPassCount > 0 ||
-          pagesRendered > 0 ||
-          renderFailures > 0 ||
-          renderPending > 0
-            ? RENDER_PASS_EVIDENCE.ran
-            : RENDER_PASS_EVIDENCE.none,
+          renderLaunchError !== null
+            ? RENDER_PASS_EVIDENCE.failed
+            : renderUrls !== null ||
+                renderPassCount > 0 ||
+                pagesRendered > 0 ||
+                renderFailures > 0 ||
+                renderPending > 0
+              ? RENDER_PASS_EVIDENCE.ran
+              : RENDER_PASS_EVIDENCE.none,
+        // Why `failed`: a classified, tenant-safe sentence, or null.
+        renderLaunchError,
         selectionMode: selection === null ? "explicit" : "auto",
         selectionBudget: selection?.budget ?? null,
         selectionSuspects: selection?.suspects ?? null,
@@ -376,6 +403,7 @@ export const renderMetrics: MetricRule[] = [
     perScope("Scope", [
       { key: "pagesCrawled", label: "Pages Crawled" },
       { key: "renderPassEvidence", label: "Render Run" },
+      { key: "renderLaunchError", label: "Render Launch Error" },
       { key: "selectionMode", label: "Selection Mode" },
       { key: "selectionBudget", label: "Render Budget" },
       { key: "selectionSuspects", label: "Suspect Pages" },

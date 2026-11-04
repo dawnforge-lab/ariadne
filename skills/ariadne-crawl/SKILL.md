@@ -272,7 +272,10 @@ What the fields mean when you are waiting:
   does not mean one did not** — a pass that rendered nothing and a crawl nobody ever
   rendered both leave 0 here. `render.coverage`'s `renderPassEvidence` is the field
   that separates them, and `crawl_render`'s own `selection` block is the other place
-  the real coverage lives. The name is on the backlog.
+  the real coverage lives. `renderPassEvidence: "failed"` means a pass could not launch
+  its browser: `renderLaunchError` says why, the pages stay pending, and calling
+  `crawl_render` again retries them. Never read `failed` as rendered or as no render
+  needed. The name is on the backlog.
 - **`blockedPages`** — pages a WAF or rate limiter answered instead of the site
   (401, 403, 429, or a challenge page). Watch it across polls: the number matters far
   less than whether it is still rising. See the reaction loop below.

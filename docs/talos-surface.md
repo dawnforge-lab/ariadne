@@ -1253,7 +1253,7 @@ it before quoting any JavaScript finding. Pinned:
 `test/api/mcp.test.ts:1499` "says over the wire whether a render pass ran, not
 just how many pages it left", `test/api/http.test.ts:1806` "serves
 renderPassEvidence none beside the selection a pass would make",
-`test/rules/render-metrics.test.ts:528` "answers none on a crawl nobody
+`test/rules/render-metrics.test.ts:536` "answers none on a crawl nobody
 rendered, and still reports what a pass would choose".
 
 ### 4.6 `pages_query` → `{items: PageRow[], nextCursor}`
@@ -1828,7 +1828,7 @@ threshold";
 `test/rules/coverage.test.ts:413` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2490` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2499` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

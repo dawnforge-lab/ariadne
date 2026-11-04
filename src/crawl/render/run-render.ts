@@ -105,7 +105,7 @@ import {
 } from "./renderer.js";
 import { parseStoredPlatformProfile, type StoredPlatformProfile } from "../platform.js";
 import { DEFAULT_MAX_DELAY_MS, HostGate, throttleRecordOf } from "../politeness.js";
-import type { AddressResolver } from "../url-policy.js";
+import { UrlPolicyError, type AddressResolver } from "../url-policy.js";
 import {
   selectExplicitRenderSet,
   selectRenderSet,
@@ -374,6 +374,29 @@ export interface RenderPassSummary {
 }
 
 /**
+ * The sentence `crawls.render_launch_error` records for a pass that could not
+ * launch (Phase 25 §5; Talos obligation 6). CLASSIFIED, never the raw error:
+ * resolver and transport text, stack traces and local paths travel only on the
+ * error the caller rethrows, to the log.
+ *
+ *  - a `UrlPolicyError` is an address refusal; its message is already bounded
+ *    by the 24a redaction (`resolveApprovedAddress`);
+ *  - a failed `mkdir` (`stage: "mkdir"`) is the directory;
+ *  - anything else, including `HostGate.restore` throwing inside the launch,
+ *    is the browser.
+ */
+export function describeLaunchFailure(
+  error: unknown,
+  stage: "mkdir" | "launch" = "launch",
+): string {
+  if (error instanceof UrlPolicyError) {
+    return `address refused: ${error.message} (${error.code})`;
+  }
+  if (stage === "mkdir") return "the render directory could not be created";
+  return "the render browser could not be launched";
+}
+
+/**
  * Run the render pass for `crawlId`.
  *
  * Throws — loudly, before touching the frontier — if the crawl is still live,
@@ -540,32 +563,49 @@ export async function runRenderPass(
   // "under wherever the server runs" and the STORED value still says where that
   // was.
   const htmlDir = resolve(cfg.renderHtmlDir ?? RENDER_HTML_DIR, crawlId);
-  await mkdir(htmlDir, { recursive: true });
-
-  const renderer = await PageRenderer.launch({
-    origin: new URL(cfg.siteUrl).origin,
-    htmlDir,
-    userAgent: cfg.userAgent,
-    perHostDelayMs: profiled.perHostDelayMs,
-    robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
-    // WHAT THE CRAWL EARNED, which a later pass has no right to forget (rule
-    // 9): the first real-site gate crawl escalated 1000 → 2000 ms and the
-    // render pass that followed went straight back to 1000 ms with the answer
-    // sitting in the database. The per-host state is restored into the gate
-    // as it stands — spacing, ratchet level, recovery count, lock — and the
-    // crawl-wide `host_spacing_ms` covers a host the map does not name (a
-    // pre-0015 crawl has no map at all). `HostGate.restore` throws on a map it
-    // cannot read, and so does the launch.
-    earnedSpacingMs: hostSpacingMs,
-    hostSpacing: hostSpacingJsonb,
-    navigationTimeoutMs: profiled.navigationTimeoutMs,
-    settleMs,
-    allowPrivate: cfg.allowPrivate === true,
-    ...(cfg.resolveAddress === undefined ? {} : { resolve: cfg.resolveAddress }),
-    ...(opts.onRequestBlocked === undefined
-      ? {}
-      : { onRequestBlocked: opts.onRequestBlocked }),
-  });
+  // A pass that cannot launch is RECORDED on the crawl (Phase 25 §5): the
+  // selected rows stay `render_pending` so a later pass retries them, and
+  // `crawls.render_launch_error` carries a classified, tenant-safe reason that
+  // `render.coverage` reads as `failed`. The ORIGINAL error is rethrown
+  // unchanged — the API's 409/500 mapping and the log still see the raw text.
+  // A launch that succeeds clears a reason an earlier pass left.
+  let renderer: PageRenderer;
+  let launchStage: "mkdir" | "launch" = "mkdir";
+  try {
+    await mkdir(htmlDir, { recursive: true });
+    launchStage = "launch";
+    renderer = await PageRenderer.launch({
+      origin: new URL(cfg.siteUrl).origin,
+      htmlDir,
+      userAgent: cfg.userAgent,
+      perHostDelayMs: profiled.perHostDelayMs,
+      robotsCrawlDelaySec: cfg.robotsCrawlDelaySec ?? null,
+      // WHAT THE CRAWL EARNED, which a later pass has no right to forget (rule
+      // 9): the first real-site gate crawl escalated 1000 → 2000 ms and the
+      // render pass that followed went straight back to 1000 ms with the answer
+      // sitting in the database. The per-host state is restored into the gate
+      // as it stands — spacing, ratchet level, recovery count, lock — and the
+      // crawl-wide `host_spacing_ms` covers a host the map does not name (a
+      // pre-0015 crawl has no map at all). `HostGate.restore` throws on a map it
+      // cannot read, and so does the launch.
+      earnedSpacingMs: hostSpacingMs,
+      hostSpacing: hostSpacingJsonb,
+      navigationTimeoutMs: profiled.navigationTimeoutMs,
+      settleMs,
+      allowPrivate: cfg.allowPrivate === true,
+      ...(cfg.resolveAddress === undefined ? {} : { resolve: cfg.resolveAddress }),
+      ...(opts.onRequestBlocked === undefined
+        ? {}
+        : { onRequestBlocked: opts.onRequestBlocked }),
+    });
+  } catch (error) {
+    await db
+      .update(crawls)
+      .set({ renderLaunchError: describeLaunchFailure(error, launchStage) })
+      .where(eq(crawls.id, crawlId));
+    throw error;
+  }
+  await db.update(crawls).set({ renderLaunchError: null }).where(eq(crawls.id, crawlId));
 
   let rendered = 0;
   let failures = 0;
