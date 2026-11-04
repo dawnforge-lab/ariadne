@@ -42,7 +42,9 @@ import {
   resources,
   sitemapUrls,
 } from "../../src/db/schema.js";
-import { indexabilityOf, isJudged } from "../../src/rules/helpers.js";
+import { RESPONSE_HEADER_VALUE_CAP } from "../../src/crawl/response-headers.js";
+import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
+import { indexabilityOf, isJudged, ROBOTS_BLOCKED } from "../../src/rules/helpers.js";
 import { buildRegistry } from "../../src/rules/index.js";
 
 import {
@@ -56,6 +58,7 @@ import type { PageRecord } from "../../src/rules/registry/types.js";
 import { allFixtures } from "./fixture.js";
 import { startFixtureApp, type FixtureApp } from "./app.js";
 import { HEAVY_IMAGE_BYTES, startAssetHost, type AssetHost } from "./assets.js";
+import { LONG_CSP, P25_LONG_HEADER_PATH } from "./pages/authored-p25.js";
 import {
   P11_BROKEN_PATH,
   P11_HEAVY_IMAGE,
@@ -416,7 +419,7 @@ const FIXTURE_COLUMN_RULES: readonly string[] = [
  *
  * Deliberate, and the whole reason `render.coverage`'s row below can be pinned
  * as arithmetic rather than as an outcome. At 100% the budget is the crawl's
- * page count (87), which is comfortably more than the 71 pages suspicion and
+ * page count (88), which is comfortably more than the 71 pages suspicion and
  * the per-type sample between them nominate — so nothing is cut, `truncated` is
  * false, and the selected set is exactly the candidate set. A smaller percentage
  * would make the assertion a statement about which candidates happened to sort
@@ -1822,12 +1825,13 @@ describe("the fixture site end to end", () => {
     // `/redirect/trailing-slash`. The slash form `/redirect/trailing-slash/` is
     // the 200 at the end of that hop and is not one of them.
     //
-    // totalPages = 87, the whole crawl — the same count `render.coverage` above
-    // starts from, and deliberately not the 73-page cohort: a redirect is a
+    // totalPages = 88, the whole crawl — the same count `render.coverage` above
+    // starts from, and deliberately not the 67-page cohort: a redirect is a
     // share of what was fetched. (84 until Phase 23 added the three
-    // fetch-outcome fixtures, which are pages rows like any other.)
+    // fetch-outcome fixtures, which are pages rows like any other; 87 until
+    // Phase 25's plain-text `/authored25/long-csp.txt`, which is one too.)
     //
-    // ratioPct = 100 × 4 / 87 = 4.597… -> 4.6 at one decimal place.
+    // ratioPct = 100 × 4 / 88 = 4.545… -> 4.5 at one decimal place.
     //
     // redirectInlinks = 4, and the number being equal to `redirectPages` here is
     // a property of this site rather than of the metric: the hub links each of
@@ -1845,8 +1849,8 @@ describe("the fixture site end to end", () => {
     expect(siteMetric("redirect.volume")).toEqual({
       redirectPages: 4,
       redirectInlinks: 4,
-      totalPages: 87,
-      ratioPct: 4.6,
+      totalPages: 88,
+      ratioPct: 4.5,
       chains: 1,
       loops: 1,
     });
@@ -2104,9 +2108,14 @@ describe("the fixture site end to end", () => {
     // 404 row is. One page under `/private/` is under MIN_COHORT, so it is one
     // more parse-time type that stays its own: typesBefore 66 -> 67, typesAfter
     // 20 -> 21, pagesRetyped unchanged. Not judged, so no cohort moves.
+    //
+    // Phase 25's `/authored25/long-csp.txt` is the same shape again: one page
+    // under `/authored25/`, under MIN_COHORT, so one more parse-time type that
+    // stays its own — typesBefore 67 -> 68, typesAfter 21 -> 22, pagesRetyped
+    // unchanged. A `non_html` row is not judged, so the key set does not move.
     expect(summary.pageTemplates).toEqual({
-      typesBefore: 67,
-      typesAfter: 21,
+      typesBefore: 68,
+      typesAfter: 22,
       pagesRetyped: 51,
     });
   });
@@ -2117,9 +2126,10 @@ describe("the fixture site end to end", () => {
     // and the sitemap it publishes — rather than copied from what the SQL
     // produced, which would assert only that the query is deterministic.
     //
-    // THE COHORT, which two of the three are computed over. The crawl writes 87
-    // `pages` rows: the 86 fixtures plus the hub at `/`. Twenty of them are
-    // not a JUDGED page and are therefore outside the cohort every metric
+    // THE COHORT, which two of the three are computed over. The crawl requests
+    // 88 URLs: the 87 requested fixtures plus the hub at `/` (the robots-blocked
+    // `/private/linked` is a row nobody requested, and is in no count here).
+    // Twenty-one of them are not a JUDGED page and are therefore outside the cohort every metric
     // shares (fetched OK, 200, indexable, NOT canonicalised elsewhere —
     // `JUDGED`, src/rules/helpers.ts):
     //
@@ -2135,6 +2145,8 @@ describe("the fixture site end to end", () => {
     //   fetch outcomes (3), Phase 23: /authored23/no-response,
     //                /authored23/too-large, /authored23/brotli — none
     //                fetched OK
+    //   non-HTML (1), Phase 25: /authored25/long-csp.txt, a 200 that is
+    //                plain text (`non_html`)
     //   redirects(4): /redirect/chain-1, /redirect/chain-2, /redirect/loop,
     //                /redirect/trailing-slash
     //   canonicalised elsewhere (6), PHASE 22 §1's exclusion:
@@ -2143,7 +2155,7 @@ describe("the fixture site end to end", () => {
     //                /authored3/canonical-to-404,
     //                /authored3/canonical-to-noindex, /authored3/paged-2
     //
-    // 87 - 20 = 67 cohort pages, where before Phase 22 it was 73: the six pages
+    // 88 - 21 = 67 cohort pages, where before Phase 22 it was 73: the six pages
     // in the canonicalised list are what moved, all of them indexable.
     // `/authored/canonical-noindex` was outside the cohort before Phase 22 and
     // is outside it now, under the same word both times. The seven `/render/*`
@@ -2158,8 +2170,9 @@ describe("the fixture site end to end", () => {
     const COHORT = 67;
 
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
-    // kinds: the hub at `/` links the 75 fixtures whose `linkedFromHub` is not
-    // false; `/links/broken-internal-link` links `/status/not-found`;
+    // kinds: the hub at `/` links the 80 fixtures whose `linkedFromHub` is not
+    // false (Phase 23's four and Phase 25's one among them, none in the
+    // cohort); `/links/broken-internal-link` links `/status/not-found`;
     // `/deep/N` links `/deep/N+1` for N = 1…6 (the seventh rung ends the chain);
     // the paginated series links `paged-1 -> paged-2`, `paged-2 -> paged-1`,
     // `paged-3 -> paged-2` and `paged-3 -> paged-3`; and `/render/healthy`
@@ -2357,21 +2370,23 @@ describe("the fixture site end to end", () => {
     // comes from the fixture collection and the selection rules
     // (src/crawl/render/select.ts), not from what the SQL produced.
     //
-    // pagesCrawled = 87. The 86 fixtures plus the hub — the same count the
-    // cohort derivation two tests above starts from. (84 until Phase 23's three
-    // fetch-outcome fixtures, none of which is in the selection cohort below.)
+    // pagesCrawled = 88. The 87 requested fixtures plus the hub — the same count
+    // the cohort derivation two tests above starts from. (84 until Phase 23's
+    // three fetch-outcome fixtures, 87 until Phase 25's plain-text document;
+    // none of the four is in the selection cohort below.)
     //
-    // selectionBudget = min(ceil(87 × 100/100), renderMaxPages 500) = 87.
+    // selectionBudget = min(ceil(88 × 100/100), renderMaxPages 500) = 88.
     // The percentage is taken over EVERY crawled URL, not over the renderable
-    // ones, so the denominator is 87 and not the 77-page cohort below.
+    // ones, so the denominator is 88 and not the 77-page cohort below.
     //
     // THE SELECTION COHORT is `fetch_class = 'ok'` AND `status_code = 200`, and
     // deliberately NOT `is_indexable` — a noindex page built by JavaScript is
-    // exactly the evidence this pass collects. So it is 87 minus the ten
+    // exactly the evidence this pass collects. So it is 88 minus the eleven
     // pages that are neither: /status/not-found, /status/server-error,
-    // /status/blocked, the four `/redirect/*` hops, and Phase 23's three
+    // /status/blocked, the four `/redirect/*` hops, Phase 23's three
     // `/authored23/*` fetch outcomes (a no-response row, a `too_large` and an
-    // `unsupported_encoding` — the last two 200s, but not `ok`). 87 - 10 = 77.
+    // `unsupported_encoding` — the last two 200s, but not `ok`), and Phase 25's
+    // `/authored25/long-csp.txt` (a 200, but `non_html`). 88 - 11 = 77.
     //
     // selectionSuspects = 65. Only ONE of the four suspicion triggers can fire
     // on this site: no fixture is a 50KB document with under 50 words, and no
@@ -2384,7 +2399,7 @@ describe("the fixture site end to end", () => {
     // word one. The trigger that does fire is "this page links nowhere", and
     // the cohort pages that DO link somewhere are exactly twelve:
     //
-    //   /                            the hub, 75 links
+    //   /                            the hub, 80 links
     //   /links/broken-internal-link  1 link, to /status/not-found
     //   /deep/1 … /deep/6            1 link each, to the rung below (6 pages)
     //   /authored3/paged-1, -2, -3   the paginated series (3 pages)
@@ -2428,15 +2443,15 @@ describe("the fixture site end to end", () => {
     // go to templates instead (the Phase 7 gate crawl spent roughly half its
     // sample that way).
     //
-    // selectionSelected = min(87, 65 + 6) = 71, selectionTruncated = false:
-    // the budget is sixteen seats larger than the need, so nothing was cut.
+    // selectionSelected = min(88, 65 + 6) = 71, selectionTruncated = false:
+    // the budget is seventeen seats larger than the need, so nothing was cut.
     //
     // pagesRendered = 70 and renderFailures = 1, and the two are disjoint and
     // sum to the 71 selected — the single-pass invariant this crawl happens to
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
-      pagesCrawled: 87,
+      pagesCrawled: 88,
       // P12-T4. The end-to-end crawl really did render, so this is the `ran`
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 70` below is evidence enough on its own
@@ -2447,7 +2462,7 @@ describe("the fixture site end to end", () => {
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.
       selectionMode: "auto",
-      selectionBudget: 87,
+      selectionBudget: 88,
       selectionSuspects: 65,
       selectionSampled: 6,
       selectionSelected: 71,
@@ -2460,7 +2475,7 @@ describe("the fixture site end to end", () => {
     // the statement that actually promoted the frontier rows. Asserting both
     // is what proves `renderSelectionStats` describes the selection that
     // happened rather than one it would make today.
-    expect(render.selection.budget).toBe(87);
+    expect(render.selection.budget).toBe(88);
     expect(render.selection.suspects).toBe(65);
     expect(render.selection.sampled).toBe(6);
     expect(render.selection.truncated).toBe(false);
@@ -2567,13 +2582,14 @@ describe("the fixture site end to end", () => {
       urlsWithInfoOnly: infoOnly,
       urlsClean: clean,
       cleanRatio,
-      // 88 rows on record — 87 pages crawled plus (Phase 23 T3) the one
+      // 89 rows on record — 88 pages crawled (Phase 25 added the plain-text
+      // `/authored25/long-csp.txt`) plus (Phase 23 T3) the one
       // robots-blocked `/private/linked`, recorded and never requested — and the
       // census is the judged ones: the rest are this fixture site's redirects,
       // its 404s, its 5xx, its non-HTML, its three unread fetch outcomes and the
       // robots-blocked row (counted here DELIBERATELY: "URLs Not Judged" is over
       // every URL on record), plus the two set-aside columns beside them.
-      pagesNotAuditable: 88 - judged - canonicalised - noindex,
+      pagesNotAuditable: 89 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
       // Inside `urlsTotal`, not a partition member: judged pages declaring
@@ -2591,8 +2607,8 @@ describe("the fixture site end to end", () => {
         health["urlsCanonicalised"]! +
         health["urlsNoindex"]! +
         health["pagesNotAuditable"]!,
-    ).toBe(88);
-    expect(pageByPath.size).toBe(88);
+    ).toBe(89);
+    expect(pageByPath.size).toBe(89);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {
@@ -3283,5 +3299,77 @@ describe("the 5xx re-verification pass ran on the fixture crawl", () => {
       expect([...ids], path).not.toContain("http.server-error-transient");
     }
     expect([...siteFindings.keys()]).not.toContain("http.server-error-transient");
+  });
+});
+
+/**
+ * Phase 25 gate clauses 1 and 2, over the whole fixture crawl rather than over
+ * rows a unit test built: every row the real crawler wrote carries the
+ * evidence-layer columns their contracts promise.
+ *
+ *  - `pages.response_headers` is null EXACTLY when no response headers arrived.
+ *    A row with a status code saw a response, so its headers are never null; a
+ *    `disallowed` row (robots-blocked, or refused by url-policy) was never
+ *    requested, so its headers are never set.
+ *  - `pages.extraction_version` is stamped on every row the page writer wrote,
+ *    robots-blocked rows included.
+ *  - A value over `RESPONSE_HEADER_VALUE_CAP` is stored cut, and its header is
+ *    named in `truncated` (`/authored25/long-csp.txt`).
+ */
+describe("the evidence layer on the fixture crawl (Phase 25)", () => {
+  it("stores response headers on every row that has a status code", async () => {
+    const res = await db.execute<{ url: string; fetch_class: string }>(sql`
+      select url, fetch_class from pages
+      where crawl_id = ${summary.crawlId}
+        and status_code is not null and response_headers is null`);
+    expect(res.rows).toEqual([]);
+    // Non-vacuous: the site answered, and its answers were kept.
+    const withHeaders = await db.execute<{ n: number }>(sql`
+      select count(*)::int as n from pages
+      where crawl_id = ${summary.crawlId} and response_headers is not null`);
+    expect(withHeaders.rows[0]!.n).toBeGreaterThan(80);
+  });
+
+  it("stamps the current extraction version on every row", async () => {
+    expect(EXTRACTION_VERSION).toBe(1);
+    const res = await db.execute<{ url: string; extraction_version: number | null }>(sql`
+      select url, extraction_version from pages
+      where crawl_id = ${summary.crawlId}
+        and extraction_version is distinct from ${EXTRACTION_VERSION}`);
+    expect(res.rows).toEqual([]);
+  });
+
+  it("never stores response headers on a disallowed row, robots-blocked or refused", async () => {
+    const res = await db.execute<{ url: string }>(sql`
+      select url from pages
+      where crawl_id = ${summary.crawlId}
+        and fetch_class = 'disallowed' and response_headers is not null`);
+    expect(res.rows).toEqual([]);
+    // Non-vacuous: the site has a robots-blocked row (`/private/linked`).
+    const blocked = await db.execute<{ url: string }>(sql`
+      select url from pages p
+      where p.crawl_id = ${summary.crawlId} and ${ROBOTS_BLOCKED("p")}`);
+    expect(blocked.rows.map((row) => new URL(row.url).pathname)).toEqual(["/private/linked"]);
+  });
+
+  it("cuts a header value over the cap and names the header in truncated", () => {
+    const page = pageByPath.get(P25_LONG_HEADER_PATH);
+    if (page === undefined) throw new Error(`${P25_LONG_HEADER_PATH} was never crawled`);
+    expect(page.fetchClass).toBe("non_html");
+    expect(page.statusCode).toBe(200);
+    // The fixture's policy really is over the cap, or this proves nothing.
+    expect(RESPONSE_HEADER_VALUE_CAP).toBe(2_048);
+    expect(LONG_CSP.length).toBeGreaterThan(RESPONSE_HEADER_VALUE_CAP);
+
+    const stored = page.responseHeaders;
+    if (stored === null) throw new Error(`${P25_LONG_HEADER_PATH} stored no response headers`);
+    // Cut to exactly the first 2,048 characters the server sent…
+    expect(stored.values["content-security-policy"]).toEqual([
+      LONG_CSP.slice(0, RESPONSE_HEADER_VALUE_CAP),
+    ]);
+    // …and named, so the cut value is never read as the whole policy. Only
+    // that header: the content type beside it is whole.
+    expect(stored.truncated).toEqual(["content-security-policy"]);
+    expect(stored.values["content-type"]).toEqual(["text/plain; charset=utf-8"]);
   });
 });
