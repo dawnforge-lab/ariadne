@@ -1069,6 +1069,7 @@ class RenderTraffic {
     if (event.networkId !== undefined) {
       this.inFlight.set(event.networkId, { url: event.request.url, method: event.request.method });
     }
+    this.testFaults?.onRelease?.(event.request.url, Date.now());
     await this.command("Fetch.continueRequest", { requestId: event.requestId });
   }
 
@@ -1326,6 +1327,15 @@ export interface RenderTestFaults {
    * command the browser refused would throw.
    */
   failRelease?: (url: string) => Error | null;
+  /**
+   * Told each time a paused request is actually released — just before its
+   * `Fetch.continueRequest` — with `Date.now()`, the clock the host gate
+   * spaces slots on. Observes only; it changes nothing about the release. A
+   * suite measures pacing here, where the gate imposes it, rather than at the
+   * server, where each request's own trip through Chromium's network stack
+   * adds jitter that is not the gate's.
+   */
+  onRelease?: (url: string, atMs: number) => void;
   /**
    * Awaited between the traffic's `shut` and the page's close, so a suite can
    * hold the window in which an answer to a request released BEFORE the shut
