@@ -1,10 +1,11 @@
 import { sql } from "drizzle-orm";
 import {
-  pgTable, text, integer, bigint, boolean, jsonb, timestamp, real,
+  pgTable, text, integer, smallint, bigint, boolean, jsonb, timestamp, real,
   primaryKey, index, uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
+import type { StoredResponseHeaders } from "../crawl/response-headers.js";
 
 export const crawls = pgTable("crawls", {
   id: text("id").primaryKey(),                 // e.g. crawl_<ulid>
@@ -296,6 +297,30 @@ export const crawls = pgTable("crawls", {
   // the operator opted out (`StoredPlatformProfile`).
   platform: text("platform"),
   platformProfile: jsonb("platform_profile_jsonb").$type<StoredPlatformProfile>(),
+  // THE REQUEST HEADERS THE PAGE FETCHER SENT (migration 0025, Phase 25).
+  // `user-agent`, `accept`, `accept-encoding` and whatever later phases add; any
+  // `authorization`, `cookie` or `proxy-authorization` value is stored as
+  // "[redacted]", never verbatim. Page-fetch headers only: resource and render
+  // fetches send their own and are not recorded.
+  //
+  // NULLABLE, AND THE NULL MEANS ONE THING: the crawl was created before
+  // migration 0025, so what it sent was not recorded. It never means "none sent".
+  requestHeaders: jsonb("request_headers").$type<Record<string, string>>(),
+  // THE BUILD THAT RAN THIS CRAWL (migration 0025): the package version plus the
+  // git sha the process was built from, stamped at creation and again on each
+  // resume (the latest wins). Informational only: no rule reads it.
+  //
+  // NULLABLE: null means the crawl predates 0025. It never means "unknown build"
+  // on a crawl that was stamped.
+  engineVersion: text("engine_version"),
+  // WHY THE RENDER PASS COULD NOT START (migration 0025): the launch error's
+  // message when the browser failed to launch, so the failure is a fact on the
+  // crawl row rather than a log line.
+  //
+  // NULLABLE: null means no launch failure was recorded: the browser launched,
+  // the render pass never ran, or the crawl predates 0025. Read it beside the
+  // render pass columns, never alone.
+  renderLaunchError: text("render_launch_error"),
 });
 
 export const pages = pgTable("pages", {
@@ -789,6 +814,51 @@ export const pages = pgTable("pages", {
   // the whole table, and it is asserted rather than assumed. A `recheck-cap`
   // row is not settled, so it carries a reason and no time.
   recheckAt: timestamp("recheck_at", { withTimezone: true }),
+  // THE ALLOWLISTED RESPONSE HEADERS OF THE FIRST OBSERVATION (migration 0025,
+  // Phase 25; src/crawl/response-headers.ts): `{ values: { name: string[] },
+  // truncated: string[] }`. Keys are lower-cased allowlisted names; each value is
+  // an array in arrival order (a repeated `link` keeps every occurrence); a value
+  // cut at 2,048 characters has its name in `truncated`, so a reader can never
+  // mistake a cut value for a whole one. Headers off the allowlist are neither
+  // stored nor counted.
+  //
+  // WRITTEN ON EVERY ROW WHOSE FETCH RECEIVED RESPONSE HEADERS: redirects, 4xx and
+  // 5xx, and a `timeout` whose deadline expired DURING the body (its headers
+  // arrived and are real). NEVER REWRITTEN by the recheck pass: the first
+  // observation's headers are the record.
+  //
+  // NULLABLE. Null means no headers were received (connect or header timeout,
+  // `network_error`, `disallowed`, robots-blocked) OR the row predates 0025;
+  // `extraction_version` tells the two apart (null there = before 0025). A
+  // non-null object with an empty `values` means headers arrived and none were
+  // on the allowlist.
+  responseHeaders: jsonb("response_headers").$type<StoredResponseHeaders>(),
+  // WHICH EXTRACTION WROTE THIS ROW (migration 0025; `EXTRACTION_VERSION`,
+  // src/crawl/versions.ts). Stamped by the page writer on every row it writes,
+  // robots-blocked rows included; any change to what the fetch layer or analyzer
+  // extracts bumps the constant. Per page, not per crawl: a resumed crawl can hold
+  // rows from two extractions.
+  //
+  // NULLABLE: null means "written before Phase 25" and nothing else. A rule that
+  // reads a fact introduced at version N refuses rows below N (null included)
+  // loudly rather than reading a missing fact as an absent one
+  // (`extractionCoverage`, src/rules/helpers.ts).
+  extractionVersion: smallint("extraction_version"),
+  // WHICH RENDER CAPTURE WROTE THE RENDERED COLUMNS (migration 0025;
+  // `RENDER_CAPTURE_VERSION`, src/crawl/versions.ts). Stamped by the render writer
+  // only, so it is independent of `extraction_version`: re-rendering a pre-25 crawl
+  // must not claim its headers were extracted by the new code.
+  //
+  // NULLABLE: null means the row was never rendered, or was rendered before this
+  // column existed.
+  renderVersion: smallint("render_version"),
+  // THE BROWSER CONSOLE AND PAGE ERRORS OF THE RENDER (migration 0025). Written by
+  // the render writer; shape fixed by the render capture.
+  //
+  // NULLABLE: null means the console was not captured: the row was never rendered,
+  // or was rendered before this column existed. It never means "the console was
+  // clean"; a clean console is a non-null empty capture.
+  renderConsole: jsonb("render_console"),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),

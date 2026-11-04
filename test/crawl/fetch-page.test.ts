@@ -191,6 +191,16 @@ beforeAll(async () => {
       res.on("close", () => clearInterval(tick));
     } else if (req.url === "/hang") {
       // never responds
+    } else if (req.url === "/gone-with-headers") {
+      res.statusCode = 404;
+      res.setHeader("content-type", "text/html");
+      res.setHeader("x-custom-not-allowlisted", "x");
+      res.end("<html>gone</html>");
+    } else if (req.url === "/headers-then-stall") {
+      // Status line and headers go out, the body never follows: the deadline
+      // expires DURING the body.
+      res.writeHead(200, { "content-type": "text/html", server: "stall-fixture" });
+      res.write("<html>");
     } else if (req.url === "/boom") {
       res.statusCode = 500;
       res.end("err");
@@ -567,6 +577,27 @@ describe("fetchPage", () => {
     expect(r.fetchClass).toBe("timeout");
     expect(r.statusCode).toBeNull();
     expect(r.body).toBeNull();
+  });
+
+  it("stores allowlisted headers on a 404", async () => {
+    const r = await fetchPage(`${base}/gone-with-headers`, OPTS);
+    expect(r.fetchClass).toBe("client_error");
+    expect(r.responseHeaders?.values["content-type"]).toEqual(["text/html"]);
+    expect(r.responseHeaders?.values["x-custom-not-allowlisted"]).toBeUndefined();
+  });
+
+  it("keeps headers that arrived before a body timeout", async () => {
+    const r = await fetchPage(`${base}/headers-then-stall`, { ...OPTS, timeoutMs: 400 });
+    expect(r.fetchClass).toBe("timeout");
+    expect(r.statusCode).toBeNull();
+    expect(r.responseHeaders).not.toBeNull();
+    expect(r.responseHeaders?.values["server"]).toEqual(["stall-fixture"]);
+  });
+
+  it("has no headers when nothing answered", async () => {
+    const r = await fetchPage("http://127.0.0.1:1/", { ...OPTS, timeoutMs: 2_000 });
+    expect(r.fetchClass).toBe("network_error");
+    expect(r.responseHeaders).toBeNull();
   });
 
   it("bounds the whole operation, not just each phase", async () => {

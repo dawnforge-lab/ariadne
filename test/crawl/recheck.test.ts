@@ -272,6 +272,26 @@ describe("the constants the test-only overrides shadow", () => {
 // ---------------------------------------------------------------------------
 
 describe("the second observation", () => {
+  it("the recheck leaves response_headers as the first observation wrote them", async () => {
+    const crawlId = await seedCrawl();
+    await seedPages(crawlId, [{ path: "/flaky", fetchClass: "server_error", statusCode: 503 }]);
+    const first = {
+      values: { server: ["first-look"], "content-type": ["text/html"] },
+      truncated: [],
+    };
+    await db
+      .update(pages)
+      .set({ responseHeaders: first, extractionVersion: 1 })
+      .where(eq(pages.crawlId, crawlId));
+
+    await runPass(crawlId);
+
+    const row = await rowFor(crawlId, "/flaky");
+    expect(row.recheckFetchClass).toBe("ok");
+    expect(row.responseHeaders).toEqual(first);
+    expect(row.extractionVersion).toBe(1);
+  });
+
   it("records a cleared 5xx without touching the first observation", async () => {
     const crawlId = await seedCrawl();
     await seedPages(crawlId, [{ path: "/flaky", fetchClass: "server_error", statusCode: 503 }]);

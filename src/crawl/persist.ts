@@ -107,6 +107,7 @@ import type { PageAnalysis } from "./parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
+import { EXTRACTION_VERSION } from "./versions.js";
 
 const DEFAULT_BATCH_SIZE = 100;
 
@@ -545,6 +546,8 @@ export class PageWriter {
           canonicalHeader: null,
           xRobotsTag: null,
           platformHint: null,
+          // Never requested, so no response and no headers.
+          responseHeaders: null,
           disallowedReason: reason,
         },
         null,
@@ -746,6 +749,11 @@ export class PageWriter {
       // one `fetch_class` beside it describes, and re-stamping it would claim
       // the census was taken at a time it was not (hard rule 7).
       fetchedAt: new Date(),
+      // The allowlisted headers of THIS observation, or null when none arrived.
+      // The recheck pass never writes this column (first observation is the record).
+      responseHeaders: fetch.responseHeaders,
+      // Stamped on every row the writer shapes, robots-blocked rows included.
+      extractionVersion: EXTRACTION_VERSION,
       htmlBytes: fetch.htmlBytes,
       domSize: analysis?.domSize ?? null,
       imagesTotal: analysis?.imagesTotal ?? 0,

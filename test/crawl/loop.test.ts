@@ -1812,6 +1812,7 @@ describe("resumeCrawl", () => {
         canonicalHeader: null,
         xRobotsTag: null,
         platformHint: null,
+        responseHeaders: null,
         disallowedReason: null,
       },
       null,
