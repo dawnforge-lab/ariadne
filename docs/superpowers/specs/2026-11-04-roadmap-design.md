@@ -66,9 +66,9 @@ reports progress without extra tooling.
 
 ### Phase 25 — Evidence layer
 
-- Response headers and the request headers actually sent, per page (auth redacted).
-- Raw HTML in a content-addressed blob store with a retention policy and a hash-only
-  mode for very large crawls.
+Postgres rows only; no blob or file storage in this phase.
+
+- Response headers per page, and the request headers actually sent (auth redacted).
 - Engine and parser version stamps on the crawl, so rules can gate on extraction age.
 - Render evidence: console errors, page errors and failed requests, capped per page.
 - Carried debt: after a render launch failure, rows stay `render_pending` and
@@ -108,6 +108,11 @@ Absorbs the old Phase 25's priority axis.
 - Health and Prometheus metrics; the 50k memory gate as a scheduled CI job.
 - Scheduler (schedules table, advisory-lock leader, the existing queue) and crawl
   history events.
+- **Storage — open question, to be rediscussed (owner, 2026-11-04).** Whether Ariadne
+  stores raw or rendered HTML at all, and on-demand screenshots of named key pages, is
+  undecided. If it is wanted, it is designed here, with tenancy, quotas, cost and
+  retention, not before. Long-term crawl comparison does not depend on it: it runs on
+  the extracted facts, which are kept with the crawl.
 
 ### Phase 29 — Integrations
 
@@ -122,7 +127,7 @@ Needs Phase 28's tenancy.
 
 - Structured-data validation, JS errors and blocked resources, images larger than
   displayed, mobile render, the chosen accessibility subset.
-- Field-level crawl diff, external link checking (budgeted, off by default), link score
+- Field-level crawl diff (over extracted facts), external link checking (budgeted, off by default), link score
   and anchor aggregation.
 
 ## Not on this roadmap
