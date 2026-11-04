@@ -304,10 +304,11 @@ with `host_spacing_ms` staying as the fallback for a host the map does not name 
 a URL discovered only on the continuation, or a pre-0015 crawl whose map is null
 (§4.1a, §8). This is resume machinery, not a new surface field: `crawl_status`
 still serves the crawl-wide `hostSpacingMs`, and no served tool or route field
-was added, removed, or retyped. `renderPassEvidence`'s two values are unchanged —
+was added, removed, or retyped. `renderPassEvidence`'s values `"ran"` and `"none"` were unchanged —
 Phase 13 named them behind the wire (`RENDER_PASS_EVIDENCE.ran`/`.none`) and
-pinned the shape against hardcoded literals, but the strings a consumer reads
-(`"ran"`/`"none"`) are exactly what Phase 12 wrote (§4.5). Everything else in
+pinned the shape against hardcoded literals, and the strings a consumer reads
+were exactly what Phase 12 wrote (§4.5). Phase 25 later added a third, `"failed"`
+(§4.5). Everything else in
 Phase 13 was internal and never reaches the seam: the dev-database test residue
 was swept back to the four reference crawls and the leak fixed at its source, and
 the registry's NOT-MEASURED marker set is now derived from a per-rule flag rather
@@ -1239,7 +1240,7 @@ numbers with their copy joined".
 
 **One field inside one metric's value that this contract does pin, because it
 governs how the rest of that value is read** (P12-T4): `render.coverage`'s
-`renderPassEvidence`, `"ran"` or `"none"`. The four `selection*` numbers beside
+`renderPassEvidence`, `"ran"`, `"none"` or `"failed"`. The four `selection*` numbers beside
 it are RECOMPUTED from the crawl's own columns — the render selection has no
 table of its own — so before this field a crawl nobody had ever rendered
 answered `selectionSelected: 18` exactly as a crawl rendered last week does, and
@@ -1248,8 +1249,14 @@ that ran and rendered nothing writes the same zero. `"ran"` means something on
 this crawl was written by a render pass — a rendered page, a `render_error`, a
 named URL list, the pass's stamped count, or a page still queued for a browser.
 `"none"` means none of that is there, so the selection numbers are what a pass
-WOULD choose and no absence of rendered evidence is a fact about the site. Read
-it before quoting any JavaScript finding. Pinned:
+WOULD choose and no absence of rendered evidence is a fact about the site.
+`"failed"` (Phase 25, ruleset 0.19.0) means a render pass was asked for and could
+not launch its browser: `renderLaunchError`, a sibling key in the same
+`render.coverage` value, is a classified sentence (never raw resolver or
+transport text, a stack or a path) or null, the selected pages stay pending and
+a later pass retries them, and `"failed"` is neither "rendered" nor "no render
+needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
+`ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
 `test/api/mcp.test.ts:1499` "says over the wire whether a render pass ran, not
 just how many pages it left", `test/api/http.test.ts:1806` "serves
 renderPassEvidence none beside the selection a pass would make",

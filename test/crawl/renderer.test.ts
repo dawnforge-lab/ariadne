@@ -1832,6 +1832,33 @@ describe("runRenderPass", () => {
       expect((await coverage(crawlId)).renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
     });
 
+    it("keeps the original launch error when recording it fails too", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const raw = new Error("no browser");
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(raw);
+      const failing = {
+        update: () => {
+          throw new Error("db down");
+        },
+      } as unknown as Db;
+      // selection runs on the real db inside a transaction, so wrap only the
+      // post-selection update: proxy `update`, delegate everything else.
+      const proxy = new Proxy(db, {
+        get: (target, prop, receiver) =>
+          prop === "update" ? failing.update : Reflect.get(target, prop, receiver),
+      });
+      try {
+        const err = await runRenderPass(proxy, crawlId, passConfig()).then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(err).toBeInstanceOf(AggregateError);
+        expect((err as AggregateError).errors[0]).toBe(raw);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("a later pass that launches clears it", async () => {
       const crawlId = await newCrawl(["/csr"]);
       const spy = vi

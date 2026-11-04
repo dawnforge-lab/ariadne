@@ -462,7 +462,7 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
      and CHECK-01 is NOT MEASURED rather than clean — say that instead of quoting
      them. `failed` means the pass could not launch: report `renderLaunchError`,
      treat CHECK-01 as NOT MEASURED, and note the pages are still pending for a
-     later pass. Then **read `selectionMode`** — `auto` means the engine sampled and the budget
+     later pass. Never read `failed` as "rendered" or as "no render needed". Then **read `selectionMode`** — `auto` means the engine sampled and the budget
      numbers describe how; `explicit` means an auditor named the pages, and
      `selectionBudget`, `selectionSuspects`, `selectionSampled` and
      `selectionTruncated` are null rather than zero, because no automatic decision

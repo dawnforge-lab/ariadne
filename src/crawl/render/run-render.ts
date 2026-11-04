@@ -599,13 +599,20 @@ export async function runRenderPass(
         : { onRequestBlocked: opts.onRequestBlocked }),
     });
   } catch (error) {
-    await db
-      .update(crawls)
-      .set({ renderLaunchError: describeLaunchFailure(error, launchStage) })
-      .where(eq(crawls.id, crawlId));
+    try {
+      await db
+        .update(crawls)
+        .set({ renderLaunchError: describeLaunchFailure(error, launchStage) })
+        .where(eq(crawls.id, crawlId));
+    } catch (writeError) {
+      // Loud, and the true cause survives: both errors surface together.
+      throw new AggregateError(
+        [error, writeError],
+        "runRenderPass: the render launch failed and the failure could not be recorded on the crawl either",
+      );
+    }
     throw error;
   }
-  await db.update(crawls).set({ renderLaunchError: null }).where(eq(crawls.id, crawlId));
 
   let rendered = 0;
   let failures = 0;
@@ -614,6 +621,9 @@ export async function runRenderPass(
   const throttle = new RenderThrottleWriter(db, crawlId, hostSpacingJsonb, renderer);
 
   try {
+    // The browser is up: clear a reason an earlier pass left. Inside the try so
+    // a failed write still closes the renderer.
+    await db.update(crawls).set({ renderLaunchError: null }).where(eq(crawls.id, crawlId));
     // STEP 3. `profiled.renderConcurrency` workers, each leasing one URL at a
     // time. One at a time rather than a batch: a batch leased and then rendered serially holds
     // its last URL's lease for the whole batch, and a worker that dies loses
