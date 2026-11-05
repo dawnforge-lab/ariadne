@@ -2443,8 +2443,8 @@ describe("the fixture site end to end", () => {
     // hub, `/authored26/noindex-hub` links `/authored26/only-from-noindex` and
     // that page links it back, and `/authored26/private-host-link` links an
     // external address, which is no page of this site, and
-    // `/authored26/high-outlinks` links 101 distinct external addresses, none of
-    // them a page of this site either. Nothing else on the site renders an `<a>` — the render
+    // `/authored26/high-outlinks` links `HIGH_EXTERNAL_OUTLINKS + 1` (11)
+    // distinct external addresses, none of them a page of this site either. Nothing else on the site renders an `<a>` — the render
     // fixtures' menus and facets are built by JavaScript, which the crawl pass
     // never runs, and that is the whole point of them.
     //

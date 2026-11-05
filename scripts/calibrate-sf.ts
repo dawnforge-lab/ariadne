@@ -22,7 +22,7 @@
  *  2. crawls it with the SEO Spider headless, exporting every filter in
  *     `SF_FILTERS` and the data tabs in `SF_DATA_TABS`, into a fresh run
  *     directory under the git-ignored workspace (`CALIBRATE_OUT`, default
- *     below). A listed filter that produced no export file is a THROW: an
+ *     below; any path outside it is refused, see `assertUnderSfRun`). A listed filter that produced no export file is a THROW: an
  *     absent file would otherwise read as "SF flags nothing", the silent gap
  *     hard rule 7 forbids;
  *  3. crawls the same site with `runCrawl` and judges it with `runRules`, as
@@ -43,8 +43,8 @@
  * it, so an unexplained divergence cannot reach a green gate.
  */
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { eq } from "drizzle-orm";
@@ -79,6 +79,26 @@ const DEFAULT_OUT = join(
   ".superpowers/sdd/2026-11-05-phase-26a-rules-over-existing-data/sf-run",
 );
 const REPORT_PATH = join(REPO, "docs/gates/phase-26a-calibration.md");
+
+/**
+ * Refuse any output or run directory outside the git-ignored `sf-run/`
+ * workspace. Screaming Frog's exports must never land where `git add` could
+ * pick them up (licence hygiene, CLAUDE.md rule 8), so the path is checked
+ * twice: it must be `DEFAULT_OUT` or below it, and git must say it is ignored.
+ * Exported for the test.
+ */
+export function assertUnderSfRun(path: string): string {
+  const abs = resolve(path);
+  if (abs !== DEFAULT_OUT && !abs.startsWith(`${DEFAULT_OUT}${sep}`)) {
+    throw new Error(`refusing ${abs}: calibration output must live under ${DEFAULT_OUT}`);
+  }
+  try {
+    execFileSync("git", ["-C", REPO, "check-ignore", "-q", abs], { stdio: "ignore" });
+  } catch {
+    throw new Error(`refusing ${abs}: git does not ignore it, so Screaming Frog exports there could be committed`);
+  }
+  return abs;
+}
 const SF_BIN = "screamingfrogseospider";
 const SF_TASK_NAME = "ariadne-calibration-26a";
 /** Generous: the crawl is ~1,400 local URLs plus ~100 external checks. */
@@ -246,13 +266,61 @@ interface Reason {
   reason: string;
 }
 
-/** What a reason may consult: Screaming Frog's Internal row and Ariadne's findings. */
-interface ReasonContext {
+/**
+ * What a reason may consult: Screaming Frog's data and Ariadne's, so a reason
+ * states a fact the run CHECKS rather than one it assumes. Exported so the
+ * predicates can be tested against a hand-built context.
+ */
+export interface ReasonContext {
+  /** The scheme of the crawled fixture site, `http:` or `https:`. */
+  siteScheme: string;
+  /** Rows in THIS filter's Screaming Frog export (the context is per filter). */
+  sfRowCount: number;
   /** Screaming Frog's `Internal:HTML` row for the key, projected (see `readExport`). */
   sf(key: string): Record<string, string> | undefined;
+  /** Screaming Frog's own pixel width of the key's title or description, or null. */
+  sfWidth(kind: "title" | "description", key: string): number | null;
+  /** `serpWidth` of the title or description Ariadne stored for the key, or null. */
+  ourWidth(kind: "title" | "description", key: string): number | null;
   /** Whether Ariadne wrote a finding of this rule for the key. */
   fired(ruleId: string, key: string): boolean;
 }
+
+/** The largest |SF width − serpWidth| a title divergence may show and still be "the measure" (ladder: 0–12 px). */
+export const TITLE_WIDTH_GAP_PX = 12;
+/** …and a description divergence (ladder: within 2 px, SF in whole pixels). */
+export const META_WIDTH_GAP_PX = 2;
+
+/**
+ * Whether a pixel-filter divergence is the measurement difference and nothing
+ * else: both tools measured the string, each tool's verdict is the one its OWN
+ * width gives against the bound (strict, as both filters are), they disagree
+ * only because the bound lies between the two widths, and the widths are no
+ * further apart than the ladder showed. A `serpWidth` regression moves our
+ * width away from SF's and fails the gap test, so it is not explained away.
+ */
+export function measureExplains(
+  kind: "title" | "description",
+  bound: number,
+  dir: "over" | "below",
+  side: Reason["side"],
+  key: string,
+  ctx: ReasonContext,
+): boolean {
+  const sfw = ctx.sfWidth(kind, key);
+  const ours = ctx.ourWidth(kind, key);
+  if (sfw === null || ours === null) return false;
+  const flags = (w: number): boolean => (dir === "over" ? w > bound : w < bound);
+  const consistent = side === "sf-only" ? flags(sfw) && !flags(ours) : !flags(sfw) && flags(ours);
+  const gap = kind === "title" ? TITLE_WIDTH_GAP_PX : META_WIDTH_GAP_PX;
+  return consistent && Math.abs(sfw - ours) <= gap;
+}
+
+/** A reason that holds only when this filter's Screaming Frog export has no rows at all. */
+export const sfExportEmpty = (_key: string, ctx: ReasonContext): boolean => ctx.sfRowCount === 0;
+
+/** A reason that holds only on a plain-HTTP crawl, where the HTTPS-only rules have no cohort. */
+const httpSite = (_key: string, ctx: ReasonContext): boolean => ctx.siteScheme === "http:";
 
 /**
  * Screaming Frog's crawl analysis did not run. Its startup log prints the
@@ -264,6 +332,9 @@ interface ReasonContext {
  * that analysis looks like from outside. Black box: that is an inference from
  * the output, not a reading of how the SEO Spider works.
  */
+/** The fixture page with the site's one EXTERNAL private-address link (authored-p26.ts). */
+const PRIVATE_HOST_LINK_PATH = "/authored26/private-host-link";
+
 const ANALYSIS_OFF =
   "Screaming Frog's export is empty although the fixture has the condition. Its startup log reports `mAutoAnalyse=false`: the post-crawl analysis did not run at the configuration it starts with, and this filter is one it leaves empty without it (inferred from the output). Not calibratable at this configuration; see the controller decisions.";
 
@@ -281,20 +352,20 @@ const TRAP =
   "A URL of the canonical trap: `/index/canonical-conflict` declares its canonical as its own URL plus `?via=html`, so each canonical target names a deeper one. Screaming Frog fetches canonical targets and walked the trap over a thousand deep; Ariadne discovers URLs from links and sitemaps, not from canonical targets, so it never fetched one. A fixture artefact (absorbed.ts, `canonicalConflict`), not a rule difference.";
 
 const TITLE_MEASURE =
-  "Width measurement, not the bound: Screaming Frog measured this title wider than `serpWidth` does (by 4–12 px on the ladder; the gap tracks wide letters such as `m`, see the title ladder), so it crosses 561 in its measure and not in ours, or the other way round at 200. The bounds are the same numbers (561 / 200, named in its export file names, and its ladder boundary agrees). Our glyph table is measured by us in Chromium at 20px Arial (spec: nothing copied).";
+  "Width measurement, not the bound (checked per URL): both tools measured this title, each tool's verdict is the one its own width gives against the same bound (561 / 200), the bound lies between the two widths, and they differ by no more than 12 px. Screaming Frog's title widths run 0–12 px wider than `serpWidth` on the ladder (the gap tracks wide letters such as `m`). Our glyph table is measured by us in Chromium at 20px Arial (spec: nothing copied).";
 
 const META_ROUNDING =
-  "Sub-pixel: Screaming Frog reports description widths in whole pixels (985, 400 here) and the two measures agree within 2 px on every rung; ours is to one decimal (985.1 > 985, 399.1 < 400). The bounds are the same numbers.";
+  "Measurement at the bound (checked per URL): both tools measured this description, each tool's verdict is the one its own width gives against the same bound (985 / 400), the bound lies between the two widths, and they differ by no more than 2 px. Screaming Frog reports description widths in whole pixels; ours is to one decimal (985.1 > 985, 399.1 < 400 on the ladder).";
 
 const HTTPS_DESIGN =
   "Screaming Frog reports this on every page of a plain-HTTP site. Ariadne judges security headers only on pages fetched over https: (a plain-HTTP page cannot send HSTS, and on an http: site the missing HTTPS is the finding), and `security.http-url` only on an https: site that still serves pages over http:. HTTPS-only by design (plan deviation 1).";
 
 export const REASONS: Record<string, readonly Reason[]> = {
-  "Security:Missing Content-Security-Policy Header": [{ side: "sf-only", match: "*", reason: HTTPS_DESIGN }],
-  "Security:Missing X-Content-Type-Options Header": [{ side: "sf-only", match: "*", reason: HTTPS_DESIGN }],
-  "Security:Missing X-Frame-Options Header": [{ side: "sf-only", match: "*", reason: HTTPS_DESIGN }],
-  "Security:Missing Secure Referrer-Policy Header": [{ side: "sf-only", match: "*", reason: HTTPS_DESIGN }],
-  "Security:HTTP URLs": [{ side: "sf-only", match: "*", reason: HTTPS_DESIGN }],
+  "Security:Missing Content-Security-Policy Header": [{ side: "sf-only", match: httpSite, reason: HTTPS_DESIGN }],
+  "Security:Missing X-Content-Type-Options Header": [{ side: "sf-only", match: httpSite, reason: HTTPS_DESIGN }],
+  "Security:Missing X-Frame-Options Header": [{ side: "sf-only", match: httpSite, reason: HTTPS_DESIGN }],
+  "Security:Missing Secure Referrer-Policy Header": [{ side: "sf-only", match: httpSite, reason: HTTPS_DESIGN }],
+  "Security:HTTP URLs": [{ side: "sf-only", match: httpSite, reason: HTTPS_DESIGN }],
   "Canonicals:Canonical Is Relative": [
     { side: "sf-only", match: CANONICAL_TRAP_KEY, reason: TRAP },
     {
@@ -310,7 +381,7 @@ export const REASONS: Record<string, readonly Reason[]> = {
         "The relative canonical is in the HTTP `Link` header (`</index/canonical-conflict?via=header>`). `canonical.relative` judges the raw HTML `<link rel=canonical>` (spec: \"raw `canonical_html` is relative\"); a relative Link-header target is resolved against the request URL (RFC 8288), and this page is reported for the HTML/header disagreement as `canonical.html-header-conflict`.",
     },
   ],
-  "Canonicals:Unlinked": [{ side: "ariadne-only", match: "*", reason: ANALYSIS_OFF }],
+  "Canonicals:Unlinked": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
   "Canonicals:Canonical Chains": [
     { side: "sf-only", match: CANONICAL_TRAP_KEY, reason: TRAP },
     {
@@ -329,12 +400,12 @@ export const REASONS: Record<string, readonly Reason[]> = {
   "Hreflang:Self Reference Only": [
     {
       side: "ariadne-only",
-      match: "*",
+      match: sfExportEmpty,
       reason:
         "Screaming Frog's export is empty. The fixture's alternates (`en` and `x-default`) both name the page itself. Either its definition does not count an `x-default` to self as self-reference only, or the filter needs the post-crawl analysis that did not run (`mAutoAnalyse=false`); black-box, the two cannot be told apart at this configuration.",
     },
   ],
-  "Hreflang:Unlinked hreflang URLs": [{ side: "ariadne-only", match: "*", reason: ANALYSIS_OFF }],
+  "Hreflang:Unlinked hreflang URLs": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
   "Pagination:Non-Indexable": [
     {
       side: "sf-only",
@@ -343,7 +414,7 @@ export const REASONS: Record<string, readonly Reason[]> = {
         "Screaming Frog lists the series page that is itself non-indexable (canonicalised to page 1). `pagination.non-indexable-target` is about a rel=next/prev TARGET that is non-200 or noindex; a series page canonicalised to another is reported by `pagination.canonical-to-other`, which fires on this URL.",
     },
   ],
-  "Pagination:Pagination Loop": [{ side: "ariadne-only", match: "*", reason: ANALYSIS_OFF }],
+  "Pagination:Pagination Loop": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
   "Pagination:Sequence Error": [
     {
       side: "sf-only",
@@ -358,11 +429,13 @@ export const REASONS: Record<string, readonly Reason[]> = {
         "Screaming Frog also checks the REVERSE direction: this page's rel=prev names `/`, and `/` declares no rel=next back to it. `pagination.sequence-error` checks one direction — A's next is B, and B's prev is not A (the spec's definition) — and reports the pair once, on A (`/authored26/sequence-a`, in both). Design difference; whether to add the reverse check is a controller decision.",
     },
   ],
-  "Links:Non-Indexable Page Inlinks Only": [{ side: "ariadne-only", match: "*", reason: ANALYSIS_OFF }],
+  "Links:Non-Indexable Page Inlinks Only": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
   "Links:Outlinks To Localhost": [
     {
       side: "sf-only",
-      match: "*",
+      // Every SF-only page EXCEPT the one page whose external private link
+      // Ariadne must report: a miss there is a defect, never this reason.
+      match: (k) => k !== PRIVATE_HOST_LINK_PATH,
       reason:
         "The fixture site itself is served on 127.0.0.1, so Screaming Frog lists every page that links anywhere on its own (loopback) host. `links.localhost` reads EXTERNAL links only (plan deviation 7): a site crawled on a private address does not report itself. The one external private-address link on the site (`/authored26/private-host-link`, to 10.1.2.3) is in both.",
     },
@@ -375,7 +448,10 @@ export const REASONS: Record<string, readonly Reason[]> = {
         "The underscore is in the query string (`utm_source`), not the path. The `url.*` rules judge the path only (review focus 5); a tracking parameter on an internal URL is `url.tracking-params-internal`'s finding.",
     },
   ],
-  "Page Titles:Over X Pixels": [{ side: "sf-only", match: /^\/calib26\/title-px\//, reason: TITLE_MEASURE }],
+  "Page Titles:Over X Pixels": [
+    { side: "sf-only", match: (k, ctx) => measureExplains("title", T.TITLE_PX_MAX, "over", "sf-only", k, ctx), reason: TITLE_MEASURE },
+    { side: "ariadne-only", match: (k, ctx) => measureExplains("title", T.TITLE_PX_MAX, "over", "ariadne-only", k, ctx), reason: TITLE_MEASURE },
+  ],
   "Page Titles:Below X Pixels": [
     {
       side: "sf-only",
@@ -383,11 +459,18 @@ export const REASONS: Record<string, readonly Reason[]> = {
       reason:
         "A document over the 2 MiB body cap: Ariadne keeps no body for it (`page.html-too-large` fires here), so it has no title to measure. Screaming Frog read a title from it.",
     },
-    { side: "ariadne-only", match: /^\/(calib26\/title-px\/|authored26\/pixel-title-short$)/, reason: TITLE_MEASURE },
+    { side: "sf-only", match: (k, ctx) => measureExplains("title", T.TITLE_PX_MIN, "below", "sf-only", k, ctx), reason: TITLE_MEASURE },
+    { side: "ariadne-only", match: (k, ctx) => measureExplains("title", T.TITLE_PX_MIN, "below", "ariadne-only", k, ctx), reason: TITLE_MEASURE },
   ],
-  "Meta Description:Over X Pixels": [{ side: "ariadne-only", match: /^\/calib26\/meta-px\//, reason: META_ROUNDING }],
-  "Meta Description:Below X Pixels": [{ side: "ariadne-only", match: /^\/calib26\/meta-px\//, reason: META_ROUNDING }],
-  "Links:Pages With High Crawl Depth": [{ side: "ariadne-only", match: "*", reason: ANALYSIS_OFF }],
+  "Meta Description:Over X Pixels": [
+    { side: "sf-only", match: (k, ctx) => measureExplains("description", T.META_PX_MAX, "over", "sf-only", k, ctx), reason: META_ROUNDING },
+    { side: "ariadne-only", match: (k, ctx) => measureExplains("description", T.META_PX_MAX, "over", "ariadne-only", k, ctx), reason: META_ROUNDING },
+  ],
+  "Meta Description:Below X Pixels": [
+    { side: "sf-only", match: (k, ctx) => measureExplains("description", T.META_PX_MIN, "below", "sf-only", k, ctx), reason: META_ROUNDING },
+    { side: "ariadne-only", match: (k, ctx) => measureExplains("description", T.META_PX_MIN, "below", "ariadne-only", k, ctx), reason: META_ROUNDING },
+  ],
+  "Links:Pages With High Crawl Depth": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
   "Content:Low Content Pages": [
     {
       side: "sf-only",
@@ -634,7 +717,6 @@ function sfArgs(base: string, outDir: string): string[] {
 }
 
 async function runSf(args: string[], logFile: string): Promise<void> {
-  const { openSync, closeSync } = await import("node:fs");
   const fd = openSync(logFile, "w");
   try {
     await new Promise<void>((resolvePromise, reject) => {
@@ -683,40 +765,46 @@ async function runAriadne(base: string, legacyBase: string): Promise<AriadneResu
       findingCap: null,
     };
     const summary = await runCrawl(db, config);
-    if (summary.status !== "finished") throw new Error(`Ariadne crawl ended ${summary.status}`);
-    await runRules(db, summary.crawlId, buildRegistry());
+    // From here the crawl row exists: whatever throws below, it is deleted
+    // (with its pages and issues, by cascade) rather than left orphaned in a
+    // database the test suite shares.
+    try {
+      if (summary.status !== "finished") throw new Error(`Ariadne crawl ended ${summary.status}`);
+      await runRules(db, summary.crawlId, buildRegistry());
 
-    const origin = new URL(base).origin;
-    const pageRows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
-    const keyById = new Map<string, string>();
-    const outPages: AriadnePage[] = pageRows.map((p) => {
-      const key = keyOf(p.url, origin);
-      keyById.set(p.id, key);
+      const origin = new URL(base).origin;
+      const pageRows = await db.select().from(pages).where(eq(pages.crawlId, summary.crawlId));
+      const keyById = new Map<string, string>();
+      const outPages: AriadnePage[] = pageRows.map((p) => {
+        const key = keyOf(p.url, origin);
+        keyById.set(p.id, key);
+        return {
+          key,
+          url: p.url,
+          statusCode: p.statusCode,
+          title: p.title,
+          metaDescription: p.metaDescription,
+          responseTimeMs: p.responseTimeMs,
+          clickDepth: p.clickDepth,
+        };
+      });
+      const issueRows = await db.select().from(issues).where(eq(issues.crawlId, summary.crawlId));
+      const outIssues: AriadneIssue[] = issueRows.map((r) => {
+        const key = r.pageId === null ? null : keyById.get(r.pageId);
+        if (key === undefined) throw new Error(`issue ${r.ruleId} names page ${r.pageId}, which has no pages row`);
+        return { ruleId: r.ruleId, key, details: r.details };
+      });
       return {
-        key,
-        url: p.url,
-        statusCode: p.statusCode,
-        title: p.title,
-        metaDescription: p.metaDescription,
-        responseTimeMs: p.responseTimeMs,
-        clickDepth: p.clickDepth,
+        crawlId: summary.crawlId,
+        base,
+        pagesCrawled: pageRows.length,
+        rulesetVersion: RULESET_VERSION,
+        pages: outPages,
+        issues: outIssues,
       };
-    });
-    const issueRows = await db.select().from(issues).where(eq(issues.crawlId, summary.crawlId));
-    const outIssues: AriadneIssue[] = issueRows.map((r) => {
-      const key = r.pageId === null ? null : keyById.get(r.pageId);
-      if (key === undefined) throw new Error(`issue ${r.ruleId} names page ${r.pageId}, which has no pages row`);
-      return { ruleId: r.ruleId, key, details: r.details };
-    });
-    await db.delete(crawls).where(eq(crawls.id, summary.crawlId));
-    return {
-      crawlId: summary.crawlId,
-      base,
-      pagesCrawled: pageRows.length,
-      rulesetVersion: RULESET_VERSION,
-      pages: outPages,
-      issues: outIssues,
-    };
+    } finally {
+      await db.delete(crawls).where(eq(crawls.id, summary.crawlId));
+    }
   } finally {
     await closeDb(db);
   }
@@ -782,13 +870,25 @@ function listKeys(keys: readonly string[]): string {
   return parts.join(", ");
 }
 
-function reasonFor(filter: string, side: Reason["side"], key: string, ctx: ReasonContext): string | null {
+export function reasonFor(filter: string, side: Reason["side"], key: string, ctx: ReasonContext): string | null {
   for (const r of REASONS[filter] ?? []) {
     if (r.side !== side) continue;
     const hit = r.match === "*" ? true : r.match instanceof RegExp ? r.match.test(key) : r.match(key, ctx);
     if (hit) return r.reason;
   }
   return null;
+}
+
+/** Screaming Frog's ladder boundary for one pixel ladder, in its own widths. */
+interface PxBoundary {
+  /** Widest rung its "Over" filter leaves out. */
+  overClear: number | null;
+  /** Narrowest rung its "Over" filter lists. */
+  overFlagged: number | null;
+  /** Widest rung its "Below" filter lists. */
+  belowFlagged: number | null;
+  /** Narrowest rung its "Below" filter leaves out. */
+  belowClear: number | null;
 }
 
 interface Comparison {
@@ -798,6 +898,8 @@ interface Comparison {
   sfOnly: string[];
   ariadneOnly: string[];
   unexplained: number;
+  /** The context this filter's reasons were judged in (its own row count). */
+  ctx: ReasonContext;
 }
 
 function num(s: string | undefined): number | null {
@@ -870,7 +972,23 @@ function writeReport(runDir: string): number {
     ]).rows.map((r) => [sfKey(r), r]),
   );
   const fired = (ruleId: string, key: string): boolean => findingsByRule.get(ruleId)?.has(key) ?? false;
-  const ctx: ReasonContext = { sf: (key) => internal.get(key), fired };
+  const sfTitles = new Map(readExport(sfDir, SF_DATA[1]!, files, ["Title 1 Pixel Width"]).rows.map((r) => [sfKey(r), r]));
+  const sfMetas = new Map(readExport(sfDir, SF_DATA[2]!, files, ["Meta Description 1 Pixel Width"]).rows.map((r) => [sfKey(r), r]));
+  const ourPage = new Map(ariadne.pages.map((p) => [p.key, p]));
+  const baseCtx: Omit<ReasonContext, "sfRowCount"> = {
+    siteScheme: new URL(ariadne.base).protocol,
+    sf: (key) => internal.get(key),
+    sfWidth: (kind, key) =>
+      kind === "title"
+        ? num(sfTitles.get(key)?.["Title 1 Pixel Width"])
+        : num(sfMetas.get(key)?.["Meta Description 1 Pixel Width"]),
+    ourWidth: (kind, key) => {
+      const page = ourPage.get(key);
+      const text = kind === "title" ? page?.title : page?.metaDescription;
+      return text === undefined || text === null ? null : serpWidth(text, kind);
+    },
+    fired,
+  };
 
   // SF's list of URLs for a rule: the union over every filter mapped to it, so
   // a rule SF splits over several filters is compared against the union and a
@@ -890,16 +1008,15 @@ function writeReport(runDir: string): number {
     const both = [...sf].filter((k) => ours.has(k));
     const sfOnly = [...sf].filter((k) => !ours.has(k));
     const ariadneOnly = [...ours].filter((k) => !sf.has(k) && !sfSiblings.has(k));
+    const ctx: ReasonContext = { ...baseCtx, sfRowCount: exp.rows.length };
     let unexplained = 0;
     for (const k of sfOnly) if (reasonFor(f.name, "sf-only", k, ctx) === null) unexplained++;
     for (const k of ariadneOnly) if (reasonFor(f.name, "ariadne-only", k, ctx) === null) unexplained++;
     unexplainedTotal += unexplained;
-    comparisons.push({ filter: f, exp, both, sfOnly, ariadneOnly, unexplained });
+    comparisons.push({ filter: f, exp, both, sfOnly, ariadneOnly, unexplained, ctx });
   }
 
   // ---- ladders
-  const sfTitles = new Map(readExport(sfDir, SF_DATA[1]!, files, ["Title 1 Pixel Width"]).rows.map((r) => [sfKey(r), r]));
-  const sfMetas = new Map(readExport(sfDir, SF_DATA[2]!, files, ["Meta Description 1 Pixel Width"]).rows.map((r) => [sfKey(r), r]));
   const issuesOverview = readExport(sfDir, SF_DATA[3]!, files, ["Issue Name"]).rows;
   const sfFlagged = (filterName: string): Set<string> => {
     const c = comparisons.find((x) => x.filter.name === filterName);
@@ -908,7 +1025,6 @@ function writeReport(runDir: string): number {
   };
   const configured = (filterName: string): number | null =>
     comparisons.find((x) => x.filter.name === filterName)?.exp.configured ?? null;
-  const ourPage = new Map(ariadne.pages.map((p) => [p.key, p]));
   const details = (ruleId: string, key: string): Record<string, unknown> | undefined =>
     ariadne.issues.find((i) => i.ruleId === ruleId && i.key === key)?.details as Record<string, unknown> | undefined;
 
@@ -989,7 +1105,7 @@ function writeReport(runDir: string): number {
     belowFilter: string,
     overRule: string,
     belowRule: string,
-  ): void => {
+  ): PxBoundary => {
     const rungs = [...ourPage.values()]
       .filter((p) => p.key.startsWith(prefix))
       .map((p) => {
@@ -1028,11 +1144,19 @@ function writeReport(runDir: string): number {
         `Ariadne in \`serpWidth\`: widest flagged ${maxOf(oursMeasured.filter((r) => fired(belowRule, r.key)).map((r) => r.ours))} px, narrowest not flagged ${minOf(oursMeasured.filter((r) => !fired(belowRule, r.key)).map((r) => r.ours))} px.`,
     );
     w();
+    const maxN = (xs: number[]): number | null => (xs.length === 0 ? null : Math.max(...xs));
+    const minN = (xs: number[]): number | null => (xs.length === 0 ? null : Math.min(...xs));
+    return {
+      overClear: maxN(sfMeasured.filter((r) => !over.has(r.key)).map((r) => r.sfw)),
+      overFlagged: minN(sfMeasured.filter((r) => over.has(r.key)).map((r) => r.sfw)),
+      belowFlagged: maxN(sfMeasured.filter((r) => below.has(r.key)).map((r) => r.sfw)),
+      belowClear: minN(sfMeasured.filter((r) => !below.has(r.key)).map((r) => r.sfw)),
+    };
   };
 
   w(`### Title pixel width (\`TITLE_PX_MAX\` ${T.TITLE_PX_MAX}, \`TITLE_PX_MIN\` ${T.TITLE_PX_MIN})`);
   w();
-  pxLadder(
+  const titleBoundary = pxLadder(
     "title",
     `${CALIBRATION_PREFIX}/title-px/`,
     sfTitles,
@@ -1045,7 +1169,7 @@ function writeReport(runDir: string): number {
   );
   w(`### Description pixel width (\`META_PX_MAX\` ${T.META_PX_MAX}, \`META_PX_MIN\` ${T.META_PX_MIN})`);
   w();
-  pxLadder(
+  const metaBoundary = pxLadder(
     "description",
     `${CALIBRATION_PREFIX}/meta-px/`,
     sfMetas,
@@ -1169,13 +1293,30 @@ function writeReport(runDir: string): number {
     }
     return `| \`${name}\` | ${start} | clear at ${b.sfLastClear}, flagged at ${b.sfFirstFlagged} | ${current} | ${current === start ? "confirmed" : "**moved**"} |`;
   };
-  const pxVerdict = (name: string, start: number, current: number, filterName: string): string => {
+  // A pixel bound is confirmed only when SF's export NAMES it and SF's own
+  // ladder widths put it between the last clear rung and the first flagged one
+  // (strict, as the filters are). Either failing is a MISMATCH that fails the run.
+  const pxVerdict = (
+    name: string,
+    start: number,
+    current: number,
+    filterName: string,
+    dir: "over" | "below",
+    b: PxBoundary,
+  ): string => {
     const named = configured(filterName);
-    if (named !== current) {
+    const label = filterName.replace("X", String(named));
+    const [clear, flagged] = dir === "over" ? [b.overClear, b.overFlagged] : [b.belowClear, b.belowFlagged];
+    const observed = `SF's filter is "${label}"; in its own widths ${dir === "over" ? `${clear ?? "none"} px not flagged, ${flagged ?? "none"} px flagged` : `${flagged ?? "none"} px flagged, ${clear ?? "none"} px not flagged`}`;
+    const ladderAgrees =
+      clear !== null &&
+      flagged !== null &&
+      (dir === "over" ? clear <= current && current < flagged : flagged < current && current <= clear);
+    if (named !== current || !ladderAgrees) {
       unexplainedTotal++;
-      return `| \`${name}\` | ${start} | SF's filter is "${filterName.replace("X", String(named))}" | ${current} | **MISMATCH** |`;
+      return `| \`${name}\` | ${start} | ${observed} | ${current} | **MISMATCH** (${named !== current ? "export names another value" : "ladder boundary does not bracket the value"}) |`;
     }
-    return `| \`${name}\` | ${start} | SF's filter is "${filterName.replace("X", String(named))}"; its ladder boundary agrees in its own widths (above) | ${current} | ${current === start ? "confirmed" : "**moved**"} |`;
+    return `| \`${name}\` | ${start} | ${observed} | ${current} | ${current === start ? "confirmed" : "**moved**"} |`;
   };
   w("## Thresholds");
   w();
@@ -1187,10 +1328,10 @@ function writeReport(runDir: string): number {
   w("|---|---:|---|---:|---|");
   w(outlinkVerdict("HIGH_INTERNAL_OUTLINKS", 1000, T.HIGH_INTERNAL_OUTLINKS, internalBoundary));
   w(outlinkVerdict("HIGH_EXTERNAL_OUTLINKS", 100, T.HIGH_EXTERNAL_OUTLINKS, externalBoundary));
-  w(pxVerdict("TITLE_PX_MAX", 561, T.TITLE_PX_MAX, "Page Titles:Over X Pixels"));
-  w(pxVerdict("TITLE_PX_MIN", 200, T.TITLE_PX_MIN, "Page Titles:Below X Pixels"));
-  w(pxVerdict("META_PX_MAX", 985, T.META_PX_MAX, "Meta Description:Over X Pixels"));
-  w(pxVerdict("META_PX_MIN", 400, T.META_PX_MIN, "Meta Description:Below X Pixels"));
+  w(pxVerdict("TITLE_PX_MAX", 561, T.TITLE_PX_MAX, "Page Titles:Over X Pixels", "over", titleBoundary));
+  w(pxVerdict("TITLE_PX_MIN", 200, T.TITLE_PX_MIN, "Page Titles:Below X Pixels", "below", titleBoundary));
+  w(pxVerdict("META_PX_MAX", 985, T.META_PX_MAX, "Meta Description:Over X Pixels", "over", metaBoundary));
+  w(pxVerdict("META_PX_MIN", 400, T.META_PX_MIN, "Meta Description:Below X Pixels", "below", metaBoundary));
   w(
     `| \`SLOW_MS\` | 1500 | no response-time issue at its default configuration (Issues Overview, tab filters); its measured times match ours | ${T.SLOW_MS} | kept: no SF boundary to read |`,
   );
@@ -1225,7 +1366,7 @@ function writeReport(runDir: string): number {
       // Group by reason so a reason that covers many URLs is written once.
       const groups = new Map<string, string[]>();
       for (const k of keys) {
-        const r = reasonFor(c.filter.name, side, k, ctx) ?? "UNEXPLAINED";
+        const r = reasonFor(c.filter.name, side, k, c.ctx) ?? "UNEXPLAINED";
         groups.set(r, [...(groups.get(r) ?? []), k]);
       }
       w(`- ${label} (${keys.length}):`);
@@ -1249,14 +1390,14 @@ async function main(): Promise<void> {
     if (argv[1] === undefined || !existsSync(join(argv[1], "meta.json"))) {
       throw new Error("--report-only needs a run directory a full run wrote (it holds meta.json)");
     }
-    runDir = resolve(argv[1]);
+    runDir = assertUnderSfRun(argv[1]);
   } else if (argv[0] === "--resume-ariadne") {
     if (argv[1] === undefined || !existsSync(join(argv[1], "meta.json"))) {
       throw new Error("--resume-ariadne needs a run directory whose Screaming Frog half completed (it holds meta.json)");
     }
-    runDir = await fullRun(DEFAULT_OUT, resolve(argv[1]));
+    runDir = await fullRun(DEFAULT_OUT, assertUnderSfRun(argv[1]));
   } else if (argv.length === 0) {
-    runDir = await fullRun(process.env["CALIBRATE_OUT"] ?? DEFAULT_OUT);
+    runDir = await fullRun(assertUnderSfRun(process.env["CALIBRATE_OUT"] ?? DEFAULT_OUT));
   } else {
     throw new Error(`unknown arguments: ${argv.join(" ")}`);
   }
@@ -1267,7 +1408,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e: unknown) => {
-  console.error(e);
-  process.exitCode = 1;
-});
+// Run only when executed, not when a test imports the reasons and helpers.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e: unknown) => {
+    console.error(e);
+    process.exitCode = 1;
+  });
+}

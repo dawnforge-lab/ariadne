@@ -232,10 +232,10 @@ Set from the ladders only where the spec calls the value unknown (high outlinks,
 |---|---:|---|---:|---|
 | `HIGH_INTERNAL_OUTLINKS` | 1000 | clear at 1000, flagged at 1001 | 1000 | confirmed |
 | `HIGH_EXTERNAL_OUTLINKS` | 100 | clear at 10, flagged at 11 | 10 | **moved** |
-| `TITLE_PX_MAX` | 561 | SF's filter is "Page Titles:Over 561 Pixels"; its ladder boundary agrees in its own widths (above) | 561 | confirmed |
-| `TITLE_PX_MIN` | 200 | SF's filter is "Page Titles:Below 200 Pixels"; its ladder boundary agrees in its own widths (above) | 200 | confirmed |
-| `META_PX_MAX` | 985 | SF's filter is "Meta Description:Over 985 Pixels"; its ladder boundary agrees in its own widths (above) | 985 | confirmed |
-| `META_PX_MIN` | 400 | SF's filter is "Meta Description:Below 400 Pixels"; its ladder boundary agrees in its own widths (above) | 400 | confirmed |
+| `TITLE_PX_MAX` | 561 | SF's filter is "Page Titles:Over 561 Pixels"; in its own widths 559 px not flagged, 562 px flagged | 561 | confirmed |
+| `TITLE_PX_MIN` | 200 | SF's filter is "Page Titles:Below 200 Pixels"; in its own widths 199 px flagged, 203 px not flagged | 200 | confirmed |
+| `META_PX_MAX` | 985 | SF's filter is "Meta Description:Over 985 Pixels"; in its own widths 985 px not flagged, 986 px flagged | 985 | confirmed |
+| `META_PX_MIN` | 400 | SF's filter is "Meta Description:Below 400 Pixels"; in its own widths 397 px flagged, 400 px not flagged | 400 | confirmed |
 | `SLOW_MS` | 1500 | no response-time issue at its default configuration (Issues Overview, tab filters); its measured times match ours | 1500 | kept: no SF boundary to read |
 | `DEEP_DEPTH` | 5 | "Pages With High Crawl Depth" empty at every depth, 1 to over 1,000 (post-crawl analysis off); its depths match ours | 5 | kept: no SF boundary to read |
 | `THIN_WORDS` | 150 | low content below 200 words of the whole page (observed: 199 listed, 200 not) | 150 | kept (spec): ours counts main-content words, template-aware |
@@ -647,7 +647,7 @@ Export `page_titles_over_561_pixels.csv`; SF's configured value: 561.
 - Both (7): `/authored26/pixel-title-long`, `/calib26/title-px/12`, `/calib26/title-px/20`, `/calib26/title-px/21`, `/calib26/title-px/22`, `/head/title-too-long`, `/kitchen-sink`
 - SF only (5):
   - `/calib26/title-px/11`, `/calib26/title-px/18`, `/calib26/title-px/19`, `/calib26/title-px/26`, `/calib26/title-px/28`
-    - Reason: Width measurement, not the bound: Screaming Frog measured this title wider than `serpWidth` does (by 4–12 px on the ladder; the gap tracks wide letters such as `m`, see the title ladder), so it crosses 561 in its measure and not in ours, or the other way round at 200. The bounds are the same numbers (561 / 200, named in its export file names, and its ladder boundary agrees). Our glyph table is measured by us in Chromium at 20px Arial (spec: nothing copied).
+    - Reason: Width measurement, not the bound (checked per URL): both tools measured this title, each tool's verdict is the one its own width gives against the same bound (561 / 200), the bound lies between the two widths, and they differ by no more than 12 px. Screaming Frog's title widths run 0–12 px wider than `serpWidth` on the ladder (the gap tracks wide letters such as `m`). Our glyph table is measured by us in Chromium at 20px Arial (spec: nothing copied).
 - Ariadne only: —
 
 ### Page Titles:Below X Pixels → `title.pixel-too-short`
@@ -660,7 +660,7 @@ Export `page_titles_below_200_pixels.csv`; SF's configured value: 200.
     - Reason: A document over the 2 MiB body cap: Ariadne keeps no body for it (`page.html-too-large` fires here), so it has no title to measure. Screaming Frog read a title from it.
 - Ariadne only (2):
   - `/authored26/pixel-title-short`, `/calib26/title-px/14`
-    - Reason: Width measurement, not the bound: Screaming Frog measured this title wider than `serpWidth` does (by 4–12 px on the ladder; the gap tracks wide letters such as `m`, see the title ladder), so it crosses 561 in its measure and not in ours, or the other way round at 200. The bounds are the same numbers (561 / 200, named in its export file names, and its ladder boundary agrees). Our glyph table is measured by us in Chromium at 20px Arial (spec: nothing copied).
+    - Reason: Width measurement, not the bound (checked per URL): both tools measured this title, each tool's verdict is the one its own width gives against the same bound (561 / 200), the bound lies between the two widths, and they differ by no more than 12 px. Screaming Frog's title widths run 0–12 px wider than `serpWidth` on the ladder (the gap tracks wide letters such as `m`). Our glyph table is measured by us in Chromium at 20px Arial (spec: nothing copied).
 
 ### Meta Description:Over X Pixels → `meta-description.pixel-too-long`
 
@@ -670,7 +670,7 @@ Export `meta_description_over_985_pixels.csv`; SF's configured value: 985.
 - SF only: —
 - Ariadne only (1):
   - `/calib26/meta-px/20`
-    - Reason: Sub-pixel: Screaming Frog reports description widths in whole pixels (985, 400 here) and the two measures agree within 2 px on every rung; ours is to one decimal (985.1 > 985, 399.1 < 400). The bounds are the same numbers.
+    - Reason: Measurement at the bound (checked per URL): both tools measured this description, each tool's verdict is the one its own width gives against the same bound (985 / 400), the bound lies between the two widths, and they differ by no more than 2 px. Screaming Frog reports description widths in whole pixels; ours is to one decimal (985.1 > 985, 399.1 < 400 on the ladder).
 
 ### Meta Description:Below X Pixels → `meta-description.pixel-too-short`
 
@@ -680,7 +680,7 @@ Export `meta_description_below_400_pixels.csv`; SF's configured value: 400.
 - SF only: —
 - Ariadne only (1):
   - `/calib26/meta-px/14`
-    - Reason: Sub-pixel: Screaming Frog reports description widths in whole pixels (985, 400 here) and the two measures agree within 2 px on every rung; ours is to one decimal (985.1 > 985, 399.1 < 400). The bounds are the same numbers.
+    - Reason: Measurement at the bound (checked per URL): both tools measured this description, each tool's verdict is the one its own width gives against the same bound (985 / 400), the bound lies between the two widths, and they differ by no more than 2 px. Screaming Frog reports description widths in whole pixels; ours is to one decimal (985.1 > 985, 399.1 < 400 on the ladder).
 
 ### Links:Pages With High Crawl Depth → `structure.deep-page`
 

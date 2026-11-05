@@ -388,7 +388,7 @@ export const W3C_DATETIME =
  * Confirmed, not moved. Screaming Frog names these four numbers in its own
  * filters (Over 561 / Below 200 Pixels, Over 985 / Below 400 Pixels), and its
  * ladder boundaries agree in its own measure: descriptions 985 not flagged and
- * 986 flagged, 397 flagged and 400 not; titles 558 not flagged and 562
+ * 986 flagged, 397 flagged and 400 not; titles 559 not flagged and 562
  * flagged, 199 flagged and 203 not. Its DESCRIPTION widths match `serpWidth`
  * within 2 px; its TITLE widths run 0–12 px wider than ours on the ladder's
  * strings, so a title within a few pixels of a bound can be flagged by one
