@@ -16,21 +16,14 @@ import {
   limitTo,
   noteTruncation,
 } from "./crawl-evidence.js";
+import { DEEP_DEPTH } from "../thresholds.js";
 
 const ORPHAN: RuleIdentity = { id: "links.orphan", severity: "warning" };
 const SKIPPED: RuleIdentity = { id: "links.orphan-skipped", severity: "info" };
 const DEEP: RuleIdentity = { id: "structure.deep-page", severity: "info" };
 
-/**
- * Click depth above which a page is reported as buried — hops along internal
- * links from the home page, not hops through the crawler's frontier.
- *
- * Exported because the client-facing copy quotes the number and a test asserts
- * the prose against this constant: change it here and the copy test fails until
- * the sentence is changed with it. It moved from src/rules/page/technical.ts
- * with the rule (Phase 9).
- */
-export const DEEP_DEPTH = 5;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export { DEEP_DEPTH } from "../thresholds.js";
 
 /**
  * The pages these rules count as the site: the JUDGED cohort (fetched OK, 200,

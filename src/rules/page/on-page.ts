@@ -1,25 +1,25 @@
 import { finding, isJudged, pageRule, present } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
+import {
+  TITLE_MIN,
+  TITLE_MAX,
+  META_MIN,
+  META_MAX,
+  H1_MAX,
+  URL_MAX,
+  HEADING_MAX_STEP,
+} from "../thresholds.js";
 
-/**
- * Thresholds. Exported because the client-facing copy quotes them and a test
- * asserts the prose against these constants: change one here and the copy test
- * fails until the sentence is changed with it.
- */
-export const TITLE_MIN = 30;
-export const TITLE_MAX = 60;
-export const META_MIN = 70;
-export const META_MAX = 155;
-export const H1_MAX = 70;
-/** Measured on the stored `pages.url`, which is `normalizeUrl` output: the URL as the crawler normalised it, not the raw link text. */
-export const URL_MAX = 115;
-/**
- * The largest step a heading outline may take downwards: H2 to H3 is 1 and
- * fine, H2 to H4 is 2 and is the skip `headings.level-skip` reports. Exported
- * because the client-facing title states the number and the copy rubric pins
- * the two together (Phase 19 §7).
- */
-export const HEADING_MAX_STEP = 1;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export {
+  TITLE_MIN,
+  TITLE_MAX,
+  META_MIN,
+  META_MAX,
+  H1_MAX,
+  URL_MAX,
+  HEADING_MAX_STEP,
+} from "../thresholds.js";
 
 const CATEGORY = "on-page";
 

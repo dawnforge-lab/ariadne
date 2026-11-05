@@ -40,6 +40,10 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import {
+  BREADCRUMB_PAGE_FLOOR,
+  NONE_PAGE_FLOOR,
+} from "../thresholds.js";
 
 const CATEGORY = "structured-data" as const;
 
@@ -52,28 +56,12 @@ const SELF_SERVING: RuleIdentity = { id: "schema.self-serving-reviews", severity
 export const PRODUCT_TYPE = "Product";
 export const BREADCRUMB_TYPE = "BreadcrumbList";
 
-/**
- * How many indexable 200 pages a site needs before "nothing here marks up a
- * breadcrumb trail" is worth saying.
- *
- * A five-page brochure site has no hierarchy to describe, and telling its owner
- * to add breadcrumb markup would be advice about a navigation structure they do
- * not have. Exported because the client-facing copy quotes it and the test
- * drives the floor from it rather than from a literal.
- */
-export const BREADCRUMB_PAGE_FLOOR = 5;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export {
+  BREADCRUMB_PAGE_FLOOR,
+  NONE_PAGE_FLOOR,
+} from "../thresholds.js";
 
-/**
- * How many indexable 200 pages a crawl needs before "this site publishes no
- * structured data" is a statement about the site rather than about the crawl.
- *
- * One. The bar is deliberately at the bottom — the check is whether a site uses
- * structured data at all, and a single page is enough to have an answer — but it
- * is not zero: a crawl that read nothing has seen no markup and no absence of
- * markup either. See `noneOnSiteFindings` for what the floor does and does not
- * distinguish.
- */
-export const NONE_PAGE_FLOOR = 1;
 
 /**
  * The types Google's review-snippet policy calls self-serving when they carry

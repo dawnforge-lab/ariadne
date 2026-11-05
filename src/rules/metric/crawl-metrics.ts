@@ -25,16 +25,13 @@ import { CHAIN, LOOP } from "../query/redirects.js";
 import { perScope } from "../registry/metric-table.js";
 import type { Metric, MetricRule } from "../registry/registry.js";
 import { bool, nullableNum, num, text } from "./cohort.js";
+import { SITEMAP_URL_CAP } from "../thresholds.js";
 
 const REDIRECTS = "redirects";
 const SITEMAP = "sitemap";
 
-/**
- * The sitemaps protocol's per-document limit: 50,000 `<url>` entries. A
- * document past it is one search engines may read only the first 50,000 entries
- * of, which is why it is a column of this metric rather than a matter of taste.
- */
-export const SITEMAP_URL_CAP = 50_000;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export { SITEMAP_URL_CAP } from "../thresholds.js";
 
 /**
  * How many per-document rows `sitemap.structure` writes.

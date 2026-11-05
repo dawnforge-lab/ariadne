@@ -106,21 +106,10 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { IMAGE_WEIGHT_WARN } from "../thresholds.js";
 
-/**
- * The weight at which an image is worth reporting: 100,000 bytes.
- *
- * The checklist's own line — CHECK-49 evaluates `WARN if >100KB images on key
- * pages` — so the constant is the check's number rather than one we chose, and
- * the copy quotes it (the `DEEP_DEPTH` contract: change one, change both, and
- * `test/rules/copy.test.ts` fails until you do).
- *
- * Decimal 100,000 rather than 102,400: the checklist says 100KB in the sense a
- * client and a CDN dashboard mean it, and transferred bytes are what the pass
- * measured. The comparison is STRICTLY greater, so a file of exactly this size
- * is not reported — a threshold a rule fires ON is a threshold nobody can meet.
- */
-export const IMAGE_WEIGHT_WARN = 100_000;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export { IMAGE_WEIGHT_WARN } from "../thresholds.js";
 
 /** Broken resources listed on one page's finding. The count is never sampled. */
 export const BROKEN_SAMPLE_RESOURCES = 10;
