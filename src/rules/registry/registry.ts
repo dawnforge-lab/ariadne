@@ -418,6 +418,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     CHECK-17) are query rules over the resolved canonical pairs. The chain walk
 //     stops at `CANONICAL_MAX_HOPS` and reports a revisit as `loop`; both
 //     are filed on the page that declares the canonical.
+//  5. (T6) Hreflang integrity, query rules on CHECK-24 over HTML declarations of
+//     fetched, non-canonicalised pages: `hreflang.inconsistent-return-code`
+//     (warning) and `hreflang.multiple-entries` (warning), `hreflang.self-only`
+//     (info) and `hreflang.unlinked-target` (info). Codes compare as
+//     `lower(btrim(code))` and targets on `URL_MATCH_KEY`; `x-default` is not
+//     read as a language by the return-code rule.
 export const RULESET_VERSION = "0.20.0";
 
 /**

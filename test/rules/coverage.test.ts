@@ -367,11 +367,18 @@ describe("checklist coverage", () => {
   //   page    36 + 2 = 38
   //   query   73 + 2 = 75
   //   total   123 + 4 = 127
-  it("pins the ruleset split the gate doc reports: 127 rules = 38 page + 75 query + 14 metric", () => {
+  //
+  // Phase 26a Task 6 adds FOUR hreflang query rules, all on CHECK-24, which is
+  // claimed already: `hreflang.inconsistent-return-code`, `hreflang.multiple-
+  // entries`, `hreflang.self-only` and `hreflang.unlinked-target`.
+  //
+  //   query   75 + 4 = 79
+  //   total   127 + 4 = 131
+  it("pins the ruleset split the gate doc reports: 131 rules = 38 page + 79 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(127);
+    expect(registry.all()).toHaveLength(131);
     expect(registry.byKind("page")).toHaveLength(38);
-    expect(registry.byKind("query")).toHaveLength(75);
+    expect(registry.byKind("query")).toHaveLength(79);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

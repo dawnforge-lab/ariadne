@@ -382,6 +382,334 @@ const chainC = chainPage(
   },
 );
 
+// ---------------------------------------------------------------------------
+// Hreflang integrity. Every page here declares an x-default and names itself,
+// so `hreflang.missing-x-default` and `hreflang.missing-self-reference` stay
+// where Phases 2 and 19 put them. Each cluster breaks one thing.
+// ---------------------------------------------------------------------------
+
+const CODE_A = "/authored26/hreflang-code-a";
+const CODE_B = "/authored26/hreflang-code-b";
+const DUP_A = "/authored26/hreflang-dup-a";
+const DUP_B = "/authored26/hreflang-dup-b";
+const SELF_ONLY = "/authored26/hreflang-self-only";
+const LINK_A = "/authored26/hreflang-link-a";
+const LINK_B = "/authored26/hreflang-link-b";
+
+function alternate(code: string, path: string, self: string): string {
+  return `<link rel="alternate" hreflang="${code}" href="${new URL(path, self).href}">`;
+}
+
+interface HreflangCopy {
+  title: string;
+  description: string;
+  h1: string;
+  lede: string;
+  body: [string, string][];
+}
+
+function hreflangPage(
+  path: string,
+  block: Array<[code: string, path: string]>,
+  copy: HreflangCopy,
+  rest: Pick<Fixture, "expectedIssues" | "linkedFromHub" | "name">,
+): Fixture {
+  return {
+    path,
+    category: "hreflang",
+    ...rest,
+    exact: true,
+    handler: (req, res) =>
+      serve(req, res, (self) => ({
+        title: copy.title,
+        metaDescription: copy.description,
+        headExtra: block.map(([code, target]) => alternate(code, target, self)).join("\n"),
+        bodyHtml: article({
+          h1: copy.h1,
+          lede: copy.lede,
+          withImage: false,
+          sections: copy.body.map(([h2, body]) => ({ h2, body })),
+        }),
+      })),
+  };
+}
+
+/**
+ * A wrong return code: A calls itself `en`, and B, its French twin, calls A
+ * `en-gb`. B names itself `fr` and A names B `fr`, so B is consistent and only
+ * A fires.
+ */
+const codeA = hreflangPage(
+  CODE_A,
+  [
+    ["en", CODE_A],
+    ["fr", CODE_B],
+    ["x-default", CODE_A],
+  ],
+  {
+    title: "Shipping times for orders sent inside the country",
+    description:
+      "The English version of a shipping page. Its twin calls this page British English in its own annotations, while this page calls itself plain English.",
+    h1: "How long a domestic order takes to arrive",
+    lede: "This page calls itself English. The French version of it describes this page with a different code, so the two pages disagree about what language this one is.",
+    body: [
+      [
+        "What the two pages say",
+        "This page lists itself under en and its French twin under fr. The twin lists this page under en-gb and itself under fr, so each side has the other's address and the codes for this page do not match.",
+      ],
+      [
+        "Why the disagreement matters",
+        "A set of annotations is meant to be one statement made by every page in it. When two members give different answers about the same page, a search engine has to choose one or set the whole cluster aside, and nothing on either page says which it will do.",
+      ],
+      [
+        "Who notices first",
+        "Nobody sees this in a browser. It shows up when someone compares the two annotation blocks side by side, or when traffic from one country keeps landing on the wrong version and no setting in the analytics explains why.",
+      ],
+      [
+        "How it gets fixed",
+        "Choose the code this page should carry and write that same code on every page that names it, ideally by generating all the blocks from one table of pages and codes.",
+      ],
+    ],
+  },
+  {
+    name: "hreflang cluster where the return link calls this page another code",
+    expectedIssues: ["hreflang.inconsistent-return-code"],
+  },
+);
+
+const codeB = hreflangPage(
+  CODE_B,
+  [
+    ["en-gb", CODE_A],
+    ["fr", CODE_B],
+    ["x-default", CODE_A],
+  ],
+  {
+    title: "Délais de livraison pour les commandes nationales",
+    description:
+      "The French version of the shipping page. It names the English page with a regional code that the English page does not use for itself.",
+    h1: "Combien de jours pour recevoir une commande",
+    lede: "The French counterpart of the previous page, written for a different audience, and the one whose annotations name the English version with a code of its own choosing.",
+    body: [
+      [
+        "Where the code comes from",
+        "This page was annotated by a template that adds a region to every English entry, while the English page was annotated by another that does not. Neither is wrong on its own and together they describe two different languages.",
+      ],
+      [
+        "What stays consistent",
+        "This page calls itself fr and the English page calls it fr, so nothing is reported against it. The inconsistency belongs to the page whose own code does not match the return link.",
+      ],
+      [
+        "A check worth keeping",
+        "After any change to either template, compare what each page calls the other. A short script over the crawl's annotation export can list every pair of pages whose two codes for one address differ, which is cheaper than reading blocks by eye.",
+      ],
+      [
+        "How it gets fixed",
+        "Nothing on this page needs to change if the English page is brought into line, because the English code is the one that has to follow the return link or the other way round.",
+      ],
+    ],
+  },
+  {
+    name: "hreflang cluster, the side that is consistent with its twin",
+    expectedIssues: [],
+  },
+);
+
+/** Duplicate `en`: each page lists two different URLs as English, and both name each other. */
+const dupA = hreflangPage(
+  DUP_A,
+  [
+    ["en", DUP_A],
+    ["en", DUP_B],
+    ["x-default", DUP_A],
+  ],
+  {
+    title: "Gift wrapping options for the spring collection",
+    description:
+      "A page whose annotations give the English code to two different addresses, so a search engine cannot tell which of them the code means.",
+    h1: "Wrapping a gift in three styles",
+    lede: "This page lists itself as English and then lists a second page as English too, so the one code now points at two addresses.",
+    body: [
+      [
+        "What the block says",
+        "Three annotations sit in the head: this page as en, a second page as en, and this page again as the fallback. The second line was probably meant to carry another language or region and the code was never changed.",
+      ],
+      [
+        "Why a code needs one address",
+        "A language code is a lookup key. Two addresses under one key leave the engine to pick, and engines are told to ignore an annotation that contradicts itself, so both lines can be lost together.",
+      ],
+      [
+        "How the second line gets there",
+        "Usually somebody copies the first line to add a market, changes the address and forgets the code. The page keeps rendering and no error is raised, so the copy-paste survives until a crawl reads every block.",
+      ],
+      [
+        "How it gets fixed",
+        "Decide which address is the English version and give the other the code it really represents, or remove it if it is not an alternate at all.",
+      ],
+    ],
+  },
+  {
+    name: "hreflang page listing one code for two URLs (first)",
+    expectedIssues: ["hreflang.multiple-entries"],
+  },
+);
+
+const dupB = hreflangPage(
+  DUP_B,
+  [
+    ["en", DUP_A],
+    ["en", DUP_B],
+    ["x-default", DUP_A],
+  ],
+  {
+    title: "Presentes embrulhados para a coleção de primavera",
+    description:
+      "The second page of the pair carries the same block as the first, so it also gives the English code to two different addresses.",
+    h1: "Embrulhar um presente de três maneiras",
+    lede: "A sibling of the previous page written for another audience, whose head repeats the same two English entries because both pages share one template.",
+    body: [
+      [
+        "A shared template",
+        "The block is the same on both pages because it comes from one include. That is why the fault appears on every page of the cluster at once and why one correction in the include removes all of them.",
+      ],
+      [
+        "What is reported",
+        "One finding per page and code, naming the addresses listed. Here that is two findings in total, one on each page, each with the same two addresses.",
+      ],
+      [
+        "What a reader would see",
+        "Nothing at all. The two pages read like ordinary gift guides in different languages, and the fault is confined to the head, which is why it is the sort of mistake that is found by crawling and almost never by browsing.",
+      ],
+      [
+        "How it gets fixed",
+        "Correct the include so each code appears once with one address, then check that every page of the cluster renders the corrected block.",
+      ],
+    ],
+  },
+  {
+    name: "hreflang page listing one code for two URLs (second)",
+    expectedIssues: ["hreflang.multiple-entries"],
+  },
+);
+
+/** A page whose block names nobody but itself. */
+const selfOnly = hreflangPage(
+  SELF_ONLY,
+  [
+    ["en", SELF_ONLY],
+    ["x-default", SELF_ONLY],
+  ],
+  {
+    title: "Opening a trade account with the wholesale team",
+    description:
+      "A page whose annotations list only itself, once as English and once as the fallback, so the block names no other version of the page.",
+    h1: "Starting a wholesale account step by step",
+    lede: "The head of this page carries an annotations block, and every line in it points back at this very page.",
+    body: [
+      [
+        "A block with no alternates",
+        "The block declares this page as English and as the default, which is valid and tells a search engine nothing new. Pages like this usually come from a template that is switched on before the translations exist.",
+      ],
+      [
+        "Why it is reported",
+        "It is the commonest sign of an unfinished rollout: the markup exists on every page, and none of the pages is connected to a version in another language.",
+      ],
+      [
+        "What it costs",
+        "Very little in itself, because a page that names only itself does no harm. The cost is the missed benefit: visitors in other markets are never steered to a version written for them while the block sits there looking finished.",
+      ],
+      [
+        "How it gets fixed",
+        "Add the other language versions to the block once they exist, or remove the block until then so the markup says only what is true.",
+      ],
+    ],
+  },
+  {
+    name: "hreflang page that names only itself",
+    expectedIssues: ["hreflang.self-only"],
+  },
+);
+
+/**
+ * An alternate nothing links to. `link-a` is linked from the hub, `link-b` is
+ * not, so the only things that name `link-b` are the sitemap and the two
+ * annotation blocks. Both pages declare the same complete set.
+ */
+const linkBlock: Array<[string, string]> = [
+  ["en", LINK_A],
+  ["fr", LINK_B],
+  ["x-default", LINK_A],
+];
+
+const linkA = hreflangPage(
+  LINK_A,
+  linkBlock,
+  {
+    title: "Returning an item bought in one of our shops",
+    description:
+      "The linked half of a pair of pages. It names its French counterpart in its annotations, but nothing in its body links to that page.",
+    h1: "Sending back something you bought from a shop",
+    lede: "This page is reachable from the home page and annotates a French version of itself that no page on the site links to.",
+    body: [
+      [
+        "What the head says",
+        "Three annotations list this page as English, the French page as French and this page again as the fallback. The body has no link to the French page, and nor does any other page.",
+      ],
+      [
+        "Why the French page is hard to find",
+        "An annotation tells an engine two pages are versions of one another. It does not give a visitor, or a crawler that follows links, a way to reach the second page, which is why a page named only by annotations is easy to miss.",
+      ],
+      [
+        "What a switcher gives you",
+        "A visible link from this page to its French version lets people choose a language, gives crawlers an ordinary path to follow, and carries the usual signals of a link, so the second page stops depending on a hint alone to be found.",
+      ],
+      [
+        "How it gets fixed",
+        "Add a language switcher or a link to the French version, so the page is part of the site and not only of a list in the head.",
+      ],
+    ],
+  },
+  {
+    name: "hreflang pair, the half the hub links",
+    expectedIssues: [],
+  },
+);
+
+const linkB = hreflangPage(
+  LINK_B,
+  linkBlock,
+  {
+    title: "Retourner un article acheté dans l'un de nos magasins",
+    description:
+      "The French half of the pair: no page links to it, so the crawl reaches it only through the sitemap and the annotations on its English twin.",
+    h1: "Renvoyer un achat fait en magasin",
+    lede: "No page on this site links here. The English twin names this page in its annotations, and the sitemap lists it, and that is all that points at it.",
+    body: [
+      [
+        "An alternate with no way in",
+        "Visitors can reach this page only by typing the address or finding it in a search engine. The site itself offers no path to it, so the French version exists without being part of the French or the English navigation.",
+      ],
+      [
+        "What is reported",
+        "The alternate is reported once, with the pages that name it and how many there are, and the page is also an orphan because nothing links to it.",
+      ],
+      [
+        "Why the sitemap does not help",
+        "A sitemap lists the address, so a crawler can find it, but it says nothing about how the page relates to the rest of the site. A page that only the sitemap and a head annotation know about is treated as a loose end rather than as part of a section.",
+      ],
+      [
+        "How it gets fixed",
+        "Link this page from the language switcher of the English page and from the French section, so it is reachable by following links.",
+      ],
+    ],
+  },
+  {
+    name: "hreflang pair, the alternate no page links to",
+    linkedFromHub: false,
+    expectedIssues: ["links.orphan", "hreflang.unlinked-target"],
+  },
+);
+
 export const authoredP26Fixtures: Fixture[] = [
   wrongContentType,
   nofollow,
@@ -392,4 +720,11 @@ export const authoredP26Fixtures: Fixture[] = [
   chainA,
   chainB,
   chainC,
+  codeA,
+  codeB,
+  dupA,
+  dupB,
+  selfOnly,
+  linkA,
+  linkB,
 ];

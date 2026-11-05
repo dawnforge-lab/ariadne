@@ -391,6 +391,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add an alternate for the page's own URL with its language and region code. Generate the whole set from one mapping and render the identical block on every version.",
   },
+  "hreflang.inconsistent-return-code": {
+    title: "Hreflang: Return link uses a different code than the page itself",
+    explanation:
+      "Pages that list a crawled alternate which links back to them under a different language code than the page uses for itself, such as en-gb in the return link and en in the page's own entry. Pages with no entry for their own URL, alternates that do not link back and alternates that were not crawled are not judged here, and x-default is ignored on both sides. Search engines may discard a set whose pages disagree about which language a page is.",
+    howToFix:
+      "Give each page one code and write it the same way in every version's block. Generate the whole set from one mapping and render the identical block on every version.",
+  },
+  "hreflang.multiple-entries": {
+    title: "Hreflang: Same code listed for different URLs",
+    explanation:
+      "Pages whose hreflang block gives one language code to two or more different URLs; spellings of one URL that differ only by fragment, host case or query order count as one. Search engines cannot tell which URL the code stands for and may ignore both. Only the block on the page is read, and the alternates are not fetched.",
+    howToFix:
+      "Keep one URL per code and remove the stale or duplicate entry. Generate the block from one mapping so a code cannot be added twice.",
+  },
+  "hreflang.self-only": {
+    title: "Hreflang: Block names only the page itself",
+    explanation:
+      "Pages whose hreflang block lists only the page's own URL, so no other version is named; pages canonicalised to another URL are ignored. The block is valid but connects nothing, which usually means the other versions were left out of the template.",
+    howToFix:
+      "Add the other language versions to the block, or remove the block if the page has no alternate versions.",
+  },
+  "hreflang.unlinked-target": {
+    title: "Hreflang: Alternate has no internal links",
+    explanation:
+      "Crawled pages that other pages name as hreflang alternates but that no other page on the site links to; a link from the page to itself does not count. Search engines treat hreflang as a hint and not as a link, so an alternate that is only annotated is hard to discover. The Declaring Pages column lists up to 10 of the pages that name it and the count is exact; alternates the crawl did not fetch are not judged.",
+    howToFix:
+      "Link each alternate from its own section's navigation, a language switcher or a related-pages list.",
+  },
   "hreflang.missing-x-default": {
     title: "Hreflang: Missing x-default",
     explanation:

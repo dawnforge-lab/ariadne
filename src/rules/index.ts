@@ -19,6 +19,7 @@ import { contentRules } from "./query/content.js";
 import { fieldDuplicateRules } from "./query/field-duplicates.js";
 import { hostRules } from "./query/host.js";
 import { hreflangRules } from "./query/hreflang.js";
+import { hreflangIntegrityRules } from "./query/hreflang-integrity.js";
 import { linkGraphRules } from "./query/link-graph.js";
 import { linkTargetRules } from "./query/link-targets.js";
 import { paginationRules } from "./query/pagination.js";
@@ -51,6 +52,7 @@ export function buildRegistry(): Registry {
     ...headRules,
     ...technicalRules,
     ...hreflangRules,
+    ...hreflangIntegrityRules,
     ...redirectRules,
     ...linkTargetRules,
     ...canonicalGraphRules,

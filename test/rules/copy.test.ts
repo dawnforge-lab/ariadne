@@ -16,6 +16,7 @@ import { SLOW_MS } from "../../src/rules/page/technical.js";
 // `DEEP_DEPTH` moved with `structure.deep-page` in Phase 9: the rule reads
 // `click_depth` and therefore lives with the link-graph rules.
 import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
+import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
 import {
   DUPLICATE_SAMPLE_URLS,
@@ -800,6 +801,28 @@ describe("copy: directives (26a)", () => {
   it("names every restrictive directive the rule matches", () => {
     const text = copy("directives.restrictive").explanation;
     for (const d of RESTRICTIVE_DIRECTIVES) expect(text, d).toContain(d);
+  });
+});
+
+describe("copy: hreflang integrity (26a)", () => {
+  it("quotes the sample size the unlinked-target evidence uses", () => {
+    expect(SAMPLE_SOURCES).toBe(10);
+    expect(copy("hreflang.unlinked-target").explanation).toContain(`up to ${SAMPLE_SOURCES} of`);
+  });
+
+  // The standard of "the hreflang copy states which alternates were judged and
+  // which were not": every rule here says what it did not judge.
+  it("each rule says what it left unjudged", () => {
+    expect(copy("hreflang.inconsistent-return-code").explanation).toMatch(
+      /not judged here/i,
+    );
+    expect(copy("hreflang.inconsistent-return-code").explanation).toMatch(
+      /were not crawled|alternates that were not crawled/i,
+    );
+    expect(copy("hreflang.inconsistent-return-code").explanation).toMatch(/x-default is ignored/i);
+    expect(copy("hreflang.multiple-entries").explanation).toMatch(/not fetched/i);
+    expect(copy("hreflang.self-only").explanation).toMatch(/canonicalised to another URL are ignored/i);
+    expect(copy("hreflang.unlinked-target").explanation).toMatch(/did not fetch are not judged/i);
   });
 });
 

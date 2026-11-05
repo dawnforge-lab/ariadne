@@ -1468,6 +1468,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      of them. **When it is present, the return-link answer above covers only the
      alternates that were fetched** — mark this check SKIP for the rest rather than
      reading the silence as reciprocal.
+  5. `issues_list` with `checkId: "CHECK-24"` — four integrity rules over the
+     declarations in the page's HTML, each filed with the evidence that names the
+     fix:
+     - `hreflang.inconsistent-return-code` (warning) — page A lists B, B links back to
+       A, and the code B uses for A differs from the code A uses for itself.
+       `x-default` is not read as a language; a page with no self-reference is
+       left to `hreflang.missing-self-reference`.
+     - `hreflang.multiple-entries` (warning) — one page gives one code to two or
+       more different URLs (spellings of one URL are not different).
+     - `hreflang.self-only` (info) — every declaration names the page itself, so no
+       alternate is named.
+     - `hreflang.unlinked-target` (info) — a crawled alternate no other page links
+       to, filed on the alternate with up to 10 declaring pages and the exact count.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?
   2. If the site has multiple language/market versions, ALL equivalent pages should have hreflang
