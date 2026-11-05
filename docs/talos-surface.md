@@ -1838,7 +1838,7 @@ threshold";
 `test/rules/coverage.test.ts:445` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2600` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2602` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

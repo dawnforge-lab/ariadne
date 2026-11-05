@@ -250,7 +250,7 @@ describe("canonicalGraphRules against the database", () => {
       expect(await findings("canonical.chain", crawlId)).toHaveLength(0);
     });
 
-    it("stops at a hop that is not a 200 page, and does not list it", async () => {
+    it("stops at a hop that is not a 200 page, does not list it, and names it as the unresolved next URL", async () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, [
         { path: "/a", canonicalHtml: url("/b") },
@@ -263,7 +263,43 @@ describe("canonicalGraphRules against the database", () => {
         canonical: url("/b"),
         hops: [url("/b")],
         loop: false,
+        unresolvedNext: url("/gone"),
       });
+    });
+
+    it("names a next URL the crawl never fetched the same way", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", canonicalHtml: url("/b") },
+        { path: "/b", canonicalHtml: url("/never-fetched") },
+      ]);
+      const found = await findings("canonical.chain", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toMatchObject({
+        hops: [url("/b")],
+        unresolvedNext: url("/never-fetched"),
+      });
+    });
+
+    // The accepted limit: a cycle longer than CANONICAL_MAX_HOPS is cut by the
+    // cap before it can revisit anything, so it is a long chain, not a loop.
+    it("reports a cycle longer than the hop limit as hopLimitReached, not as a loop", async () => {
+      const crawlId = await newCrawl();
+      const n = CANONICAL_MAX_HOPS + 2;
+      const name = (i: number): string => `/c${String(i).padStart(2, "0")}`;
+      await addPages(
+        crawlId,
+        Array.from({ length: n }, (_, i) => ({
+          path: name(i),
+          canonicalHtml: url(name((i + 1) % n)),
+        })),
+      );
+      const found = await findings("canonical.chain", crawlId);
+      expect(found).toHaveLength(n);
+      for (const f of found) {
+        expect(f.evidence, f.pageUrl ?? "").toMatchObject({ loop: false, hopLimitReached: true });
+        expect((f.evidence.hops as string[]).length).toBe(CANONICAL_MAX_HOPS);
+      }
     });
 
     // Review Focus 4: a cycle terminates. Each member is reported once, as a

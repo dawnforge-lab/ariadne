@@ -90,9 +90,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "canonical.chain": {
     title: "Canonicals: Canonical chain or loop (followed up to 10 hops)",
     explanation:
-      "Pages whose canonical target is itself canonicalised to another URL, so the signals have to pass through more than one page. The Canonical Chain column lists the URLs after the first one, in order; Loop is true when the chain comes back to a page already on it, and Hop Limit Reached when it was still going after 10 hops and the walk stopped. Search engines may stop following a chain, and a loop gives them no final page at all.",
+      "Pages whose canonical target is itself canonicalised to another URL, so the signals have to pass through more than one page. The Canonical Chain column lists the URLs from the one this page's canonical names onward, in order; Loop is true when the chain comes back to a page already on it, Hop Limit Reached when it was still going after 10 hops and the walk stopped, and Next URL Not Crawled As 200 names where it was heading when it reached a page the crawl has no 200 for. Search engines may stop following a chain, and a loop gives them no final page at all.",
     howToFix:
-      "Point the canonical straight at the last URL of the chain, the one that canonicalises to itself. For a loop, decide which page should be the original and make it canonical to itself.",
+      "Point the canonical straight at the last URL of the chain, the one that canonicalises to itself (or, if the chain ends at an address that does not answer 200, at the live page that should hold the content). For a loop, decide which page should be the original and make it canonical to itself.",
   },
   "canonical.unlinked": {
     title: "Canonicals: Canonical target has no internal links",

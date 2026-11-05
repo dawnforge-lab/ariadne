@@ -1,7 +1,6 @@
 import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
-import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import { pages } from "../../db/schema.js";
 import {
   isAuditable,
@@ -65,6 +64,12 @@ interface Walk {
   next: string;
   loop: boolean;
   hopLimitReached: boolean;
+  /**
+   * The URL the walk could not follow because it is not a crawled 200 page
+   * (a 404, a redirect, or never fetched): where the chain ends as far as the
+   * crawl can tell. Null when the chain ended on a page that names itself.
+   */
+  unresolvedNext: string | null;
 }
 
 /**
@@ -114,10 +119,14 @@ async function chainFindings(
       walks.push({
         source: t,
         hops: [t.target.url],
-        seen: new Set([normalizeUrl(t.page.url) ?? t.page.url, t.target.url]),
+        // `pages.url` is the frontier key, which is `normalizeUrl` output
+        // (see `eachCanonicalTargetBatch`), so it is already the normalised
+        // form every resolved canonical is compared in.
+        seen: new Set([t.page.url, t.target.url]),
         next: onward.resolved,
         loop: false,
         hopLimitReached: false,
+        unresolvedNext: null,
       });
     }
 
@@ -154,7 +163,10 @@ async function chainFindings(
       active = [];
       for (const w of lookup) {
         const row = byUrl.get(w.next);
-        if (row === undefined || !isAuditable(row)) continue;
+        if (row === undefined || !isAuditable(row)) {
+          w.unresolvedNext = w.next;
+          continue;
+        }
         w.hops.push(row.url);
         w.seen.add(row.url);
         const onward = resolveEffectiveCanonical(row);
@@ -171,6 +183,9 @@ async function chainFindings(
         loop: w.loop,
         // Present only when true: an absent key is "the walk reached an end".
         ...(w.hopLimitReached ? { hopLimitReached: true } : {}),
+        // Likewise present only when the chain runs into a URL the crawl has
+        // no 200 page for, so the finding names where it was last seen going.
+        ...(w.unresolvedNext !== null ? { unresolvedNext: w.unresolvedNext } : {}),
       });
     }
   });
@@ -242,6 +257,7 @@ export const canonicalGraphRules: QueryRule[] = [
       { key: "hops", label: "Canonical Chain" },
       { key: "loop", label: "Loop" },
       { key: "hopLimitReached", label: "Hop Limit Reached", optional: true },
+      { key: "unresolvedNext", label: "Next URL Not Crawled As 200", optional: true },
     ],
     ...copyFor(CHAIN.id),
     rulesetVersion: RULESET_VERSION,

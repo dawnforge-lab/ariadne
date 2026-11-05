@@ -2232,7 +2232,8 @@ describe("the fixture site end to end", () => {
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
     // kinds: the hub at `/` links the 86 fixtures whose `linkedFromHub` is not
     // false (Phase 23's four and Phase 25's one among them, none in the
-    // cohort; Phase 26a's relative, fragment and chain-a pages are three more); `/links/broken-internal-link` links `/status/not-found`;
+    // cohort; Phase 26a's relative, fragment and chain-a pages are three
+    // more); `/links/broken-internal-link` links `/status/not-found`;
     // `/deep/N` links `/deep/N+1` for N = 1…6 (the seventh rung ends the chain);
     // the paginated series links `paged-1 -> paged-2`, `paged-2 -> paged-1`,
     // `paged-3 -> paged-2` and `paged-3 -> paged-3`; and `/render/healthy`
@@ -2362,11 +2363,11 @@ describe("the fixture site end to end", () => {
     // the paginated series, the one broken link and `/render/healthy`'s
     // self-link. Nothing else on this site renders an `<a>`.
     //
-    // The cohort is the same 71 JUDGED pages. Breadth-first from the hub at
+    // The cohort is the same 74 JUDGED pages. Breadth-first from the hub at
     // `/`, which is the crawl's seed:
     //
     //   0    `/`                     1 page, the entry point
-    //   1    every cohort page the hub links   62 pages —
+    //   1    every cohort page the hub links   64 pages —
     //        the hub links 82 fixtures, EIGHTEEN of which are outside the
     //        cohort (3 noindex, 3 errors, 4 redirects, 8 canonicalised
     //        elsewhere — the list at `COHORT` above, `/authored26/chain-a`
@@ -2384,7 +2385,7 @@ describe("the fixture site end to end", () => {
     // through the sitemap, all are recorded at DISCOVERY depth 0, and none is
     // one click from anywhere. `paged-3` is the load-bearing one — it renders its
     // own URL as a link, so a search that followed a page's self-link would
-    // have reached it and reported one null instead of two.
+    // have reached it and reported two nulls instead of three.
     //
     // The 71 pages that HAVE a depth, sorted: v0 = 0, v1…v64 = 1, then
     // v65…v70 = 2,3,4,5,6,7. n = 71, so `percentile_cont` interpolates at
@@ -2479,7 +2480,7 @@ describe("the fixture site end to end", () => {
     // word one. The trigger that does fire is "this page links nowhere", and
     // the cohort pages that DO link somewhere are exactly twelve:
     //
-    //   /                            the hub, 83 links
+    //   /                            the hub, 86 links
     //   /links/broken-internal-link  1 link, to /status/not-found
     //   /deep/1 … /deep/6            1 link each, to the rung below (6 pages)
     //   /authored3/paged-1, -2, -3   the paginated series (3 pages)
@@ -2499,10 +2500,11 @@ describe("the fixture site end to end", () => {
     // — so both are suspects, which is this commit's +2. Phase 26a's four
     // `/authored26/` pages are prose with no anchor as well, so all four are
     // suspects too: +1 for the wrong-content-type page and +3 for the directive
-    // pages. Task 5's five canonical pages are prose with no anchor too, so +5 more.
-    // None is a seat in any sample, since all nine share one type whose first
-    // three rows (`/authored26/chain-a`, `/chain-b` and `/chain-c` in URL order)
-    // are suspects already, which keeps `selectionSampled` at 6.
+    // pages. Task 5's five canonical pages are prose with no anchor too, so +5
+    // more. None is a seat in any sample, since all nine share one type whose
+    // first three rows (`/authored26/canonical-fragment`, `/canonical-relative`
+    // and `/chain-a` in URL order) are suspects already, which keeps
+    // `selectionSampled` at 6.
     //
     // selectionSampled = 6, and it MOVED FROM 9 IN P8-T5 — the one number in
     // this file that the template inference changes, and the change is the
