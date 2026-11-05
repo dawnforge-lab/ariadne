@@ -13,7 +13,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
 import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
-import { linkHygieneRules } from "../../src/rules/query/link-hygiene.js";
+import { LOCALHOST_HOST_BATCH, linkHygieneRules } from "../../src/rules/query/link-hygiene.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { HIGH_EXTERNAL_OUTLINKS, HIGH_INTERNAL_OUTLINKS } from "../../src/rules/thresholds.js";
 import { mkDiscovery } from "./mk-discovery.js";
@@ -409,6 +409,35 @@ describe("the link-hygiene rules against the database", () => {
       expect((ev["targets"] as string[]).length).toBe(10);
       expect(ev["targetCount"]).toBe(13);
       expect(ev["reason"]).toBe("private IPv4 address (10.0.0.0/8)");
+    });
+
+    it("finds every blocked host when there are more of them than one host batch", async () => {
+      const crawlId = await newCrawl();
+      const n = LOCALHOST_HOST_BATCH + 5;
+      // One page per host, hosts that are blocked, plus a public host between
+      // them in the ordering that must stay silent.
+      const specs = Array.from({ length: n }, (_, i) => ({
+        path: `/h${String(i).padStart(4, "0")}`,
+        host: `http://svc${String(i).padStart(4, "0")}.internal/`,
+      }));
+      const ids = await addPages(crawlId, [...specs, { path: "/public" }]);
+      for (const s of specs) await addLinks(crawlId, ids.get(s.path)!, [s.host]);
+      await addLinks(crawlId, ids.get("/public")!, ["https://svc0100.example.com/"]);
+      const found = await run(ID, crawlId, { listing: null });
+      expect(found.map((f) => f.pageUrl)).toEqual(specs.map((s) => url(s.path)));
+      expect(found[0]!.evidence["reason"]).toBe("internal host suffix (.internal)");
+    });
+
+    it("two runs at once on different crawls do not see each other's hosts", async () => {
+      const a = await newCrawl();
+      const b = await newCrawl();
+      const ia = await addPages(a, [{ path: "/a" }]);
+      const ib = await addPages(b, [{ path: "/b" }]);
+      await addLinks(a, ia.get("/a")!, ["http://10.0.0.1/"]);
+      await addLinks(b, ib.get("/b")!, ["http://192.168.0.1/"]);
+      const [fa, fb] = await Promise.all([run(ID, a), run(ID, b)]);
+      expect(fa.map((f) => f.evidence["targets"])).toEqual([["http://10.0.0.1/"]]);
+      expect(fb.map((f) => f.evidence["targets"])).toEqual([["http://192.168.0.1/"]]);
     });
 
     it("lists in URL order under a cap and keeps the exact total", async () => {

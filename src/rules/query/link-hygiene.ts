@@ -16,6 +16,8 @@
  * cohort is a guard against a stale row rather than a filter that removes
  * anything on a healthy crawl.
  */
+import { randomUUID } from "node:crypto";
+
 import { sql, type SQL } from "drizzle-orm";
 
 import { BLOCKED_HOSTS, BLOCKED_HOST_SUFFIXES, blockedHostReason } from "../../crawl/url-policy.js";
@@ -38,6 +40,13 @@ import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { SAMPLE_SOURCES } from "./link-targets.js";
 
 const CATEGORY = "links" as const;
+
+/**
+ * Distinct candidate hosts decided per round trip by `links.localhost`: the
+ * memory bound, a batch and never the number of hosts a crawl links to. Exported
+ * so a test can force the cursor past one batch.
+ */
+export const LOCALHOST_HOST_BATCH = 500;
 
 const NOFOLLOW: RuleIdentity = { id: "links.internal-nofollow", severity: "warning" };
 const NON_INDEXABLE_ONLY: RuleIdentity = {
@@ -238,94 +247,132 @@ function hostPrefilter(host: SQL): SQL {
  * The same-origin test that sets `is_internal` is the crawler's, so the rule
  * and the crawl agree about what the site is.
  *
- * TWO STATEMENTS, and the JavaScript sits between them. The first reads the
- * DISTINCT hosts of the external links that pass the SQL prefilter
- * (`hostPrefilter`, a superset) and `blockedHostReason` — the url-policy
- * authority the crawler itself refuses with — decides which are blocked, so a
- * link is reported as private exactly when the crawler would refuse to fetch
- * it. Dotless names such as `intranet` pass the prefilter and fail the policy,
- * and are not reported: the policy does not call them private, and the rule does
- * not either. The second statement is an ordinary capped aggregation, like the
- * other four rules': per source page, `host in (<the blocked hosts>)`, an exact
- * total from `count(*) over ()` before the `limit`, ordered by URL. Memory is
- * the set of distinct private-looking hosts, never the links.
+ * THE JAVASCRIPT SITS BETWEEN TWO STEPS, and Node holds one batch. The distinct
+ * hosts of the external links that pass the SQL prefilter (`hostPrefilter`, a
+ * superset) are read in keyset batches ordered by host (`LOCALHOST_HOST_BATCH`),
+ * and `blockedHostReason` — the url-policy authority the crawler itself refuses
+ * with — decides each batch, so a link is reported as private exactly when the
+ * crawler would refuse to fetch it. Dotless names such as `intranet` pass the
+ * prefilter and fail the policy, and are not reported: the policy does not call
+ * them private, and the rule does not either. The blocked hosts and their
+ * reasons go into a temporary table, and then one ordinary capped aggregation
+ * joins it, like the other four rules': per source page, an exact total from
+ * `count(*) over ()` before the `limit`, ordered by URL.
+ *
+ * The temporary table follows `pagination.loop`'s pattern: one transaction, so
+ * every statement shares a connection (a temp table is session-local), a random
+ * name so concurrent runs never meet, dropped before the transaction ends and
+ * rolled back with it if anything throws. Nothing is bound per host in the
+ * aggregation, so the number of blocked hosts cannot reach a bind-parameter
+ * limit either.
  */
 async function localhostFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
-  const candidates = await db.execute<{ host: string | null }>(sql`
-    select distinct b.host
-    from ${externalLinksWithHost(crawlId)} b
-    join pages p on p.id = b.source_page_id and p.crawl_id = ${crawlId}
-    where ${FETCHED_OK("p")} and ${hostPrefilter(sql`b.host`)}
-    order by b.host`);
+  const table = sql.raw(`links_blocked_hosts_${randomUUID().replace(/-/g, "")}`);
+  const external = externalLinksWithHost(crawlId);
 
-  const reasons = new Map<string, string>();
-  for (const { host } of candidates.rows) {
-    if (host === null) {
-      // `links.target_url` is `normalizeUrl` output, so a target with no
-      // readable host is our defect and not a link to skip.
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`create temporary table ${table} (host text primary key, reason text not null)`,
+    );
+
+    // `links.target_url` is `normalizeUrl` output, so a target with no readable
+    // host is our defect and not a link to skip.
+    const unreadable = await tx.execute(sql`
+      select 1
+      from ${external} b
+      join pages p on p.id = b.source_page_id and p.crawl_id = ${crawlId}
+      where ${FETCHED_OK("p")} and b.host is null
+      limit 1`);
+    if (unreadable.rows.length > 0) {
       throw new Error(`${LOCALHOST.id}: an external link target has no readable host`);
     }
-    const reason = blockedHostReason(host);
-    if (reason !== null) reasons.set(host, reason);
-  }
-  if (reasons.size === 0) return [];
 
-  const blocked = sql.join(
-    [...reasons.keys()].map((h) => sql`${h}`),
-    sql`, `,
-  );
-  const blockedLinks = sql`(
-    select b.source_page_id, b.target_url, b.host
-    from ${externalLinksWithHost(crawlId)} b
-    where b.host in (${blocked})
-  )`;
-  const result = await db.execute<{
-    page_id: string;
-    page_url: string;
-    target_count: number;
-    first_host: string;
-    total_matches: number;
-    targets: string[];
-  }>(sql`
-    with srcs as (
-      select p.id as page_id, p.url as page_url,
-             count(distinct x.target_url)::int as target_count,
-             (array_agg(x.host order by x.target_url))[1] as first_host,
-             count(*) over ()::int as total_matches
-      from ${blockedLinks} x
-      join pages p on p.id = x.source_page_id and p.crawl_id = ${crawlId}
-      where ${FETCHED_OK("p")}
-      group by p.id, p.url
-      order by p.url
-      ${limitTo(caps.listing)}
-    )
-    select s.page_id, s.page_url, s.target_count, s.first_host, s.total_matches, t.targets
-    from srcs s
-    cross join lateral (
-      select coalesce(array_agg(u.target_url order by u.target_url), array[]::text[]) as targets
-      from (
-        select distinct x.target_url
+    let cursor: string | null = null;
+    for (;;) {
+      const batch: { rows: { host: string }[] } = await tx.execute<{ host: string }>(sql`
+        select distinct b.host
+        from ${external} b
+        join pages p on p.id = b.source_page_id and p.crawl_id = ${crawlId}
+        where ${FETCHED_OK("p")} and b.host is not null
+          and ${cursor === null ? sql`true` : sql`b.host > ${cursor}`}
+          and ${hostPrefilter(sql`b.host`)}
+        order by b.host
+        limit ${LOCALHOST_HOST_BATCH}`);
+      if (batch.rows.length === 0) break;
+      cursor = batch.rows[batch.rows.length - 1]!.host;
+
+      const hosts: string[] = [];
+      const reasons: string[] = [];
+      for (const { host } of batch.rows) {
+        const reason = blockedHostReason(host);
+        if (reason === null) continue;
+        hosts.push(host);
+        reasons.push(reason);
+      }
+      if (hosts.length === 0) continue;
+      await tx.execute(sql`
+        insert into ${table} (host, reason)
+        select * from unnest(${sql.param(hosts)}::text[], ${sql.param(reasons)}::text[])`);
+    }
+
+    const blockedLinks = sql`(
+      select b.source_page_id, b.target_url, b.host, r.reason
+      from ${external} b
+      join ${table} r on r.host = b.host
+    )`;
+    const result = await tx.execute<{
+      page_id: string;
+      page_url: string;
+      target_count: number;
+      first_reason: string | null;
+      total_matches: number;
+      targets: string[];
+    }>(sql`
+      with srcs as (
+        select p.id as page_id, p.url as page_url,
+               count(distinct x.target_url)::int as target_count,
+               (array_agg(x.reason order by x.target_url))[1] as first_reason,
+               count(*) over ()::int as total_matches
         from ${blockedLinks} x
-        where x.source_page_id = s.page_id
-        order by x.target_url
-        limit ${SAMPLE_SOURCES}
-      ) u
-    ) t
-    order by s.page_url`);
+        join pages p on p.id = x.source_page_id and p.crawl_id = ${crawlId}
+        where ${FETCHED_OK("p")}
+        group by p.id, p.url
+        order by p.url
+        ${limitTo(caps.listing)}
+      )
+      select s.page_id, s.page_url, s.target_count, s.first_reason, s.total_matches, t.targets
+      from srcs s
+      cross join lateral (
+        select coalesce(array_agg(u.target_url order by u.target_url), array[]::text[]) as targets
+        from (
+          select distinct x.target_url
+          from ${blockedLinks} x
+          where x.source_page_id = s.page_id
+          order by x.target_url
+          limit ${SAMPLE_SOURCES}
+        ) u
+      ) t
+      order by s.page_url`);
 
-  const findings = result.rows.map((row) =>
-    queryFinding(LOCALHOST, {
-      pageId: row.page_id,
-      pageUrl: row.page_url,
-      evidence: {
-        targets: row.targets,
-        reason: reasons.get(row.first_host),
-        targetCount: row.target_count,
-      },
-      dedupeKey: row.page_url,
-    }),
-  );
-  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+    await tx.execute(sql`drop table ${table}`);
+
+    const findings = result.rows.map((row) => {
+      if (row.first_reason === null) {
+        throw new Error(`${LOCALHOST.id}: no reason recorded for the first target of ${row.page_url}`);
+      }
+      return queryFinding(LOCALHOST, {
+        pageId: row.page_id,
+        pageUrl: row.page_url,
+        evidence: {
+          targets: row.targets,
+          reason: row.first_reason,
+          targetCount: row.target_count,
+        },
+        dedupeKey: row.page_url,
+      });
+    });
+    return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+  });
 }
 
 /** Internal links whose whole anchor is on `NON_DESCRIPTIVE_ANCHORS`. */
