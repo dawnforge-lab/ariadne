@@ -1,11 +1,66 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 24a (ruleset 0.18.0, migrations 0000–0024,
+**Status:** the contract as of Phase 26a (ruleset 0.20.0, migrations 0000–0025,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 26a changed here: forty rule ids, and nothing else.** Ruleset
+0.20.0, no migration, no tool, route or field added. The new ids arrive through
+the listings that already exist — `issues_list`, `issue_urls`, `rules_catalog`,
+`crawl_compare` and the CSV `issues` view — each with its own copy and `columns`,
+so a client that renders those generically needs no change. `rules_catalog` now
+answers 154 rows (49 page, 91 query, 14 metric; 14 of them markers), and the
+finding rules split 33 critical / 54 warning / 53 info. Every new rule reads
+columns the crawl already stored, so `crawl_rules` over an existing crawl
+produces them without a re-crawl (§11). By family:
+- **Security** (CHECK-84, CHECK-14, CHECK-85): `security.hsts-missing`
+  (warning), `security.headers-missing` (info; the Missing Headers column names
+  which), `security.http-url` (warning, `category` `host`) and
+  `security.mixed-content` (warning). All four need a site crawled over HTTPS:
+  `security.http-url` reports its pages that still answer over `http:`, and the
+  other three judge its HTTPS pages. The two header
+  rules read the response headers Phase 25 stores, so on a crawl any of whose
+  pages predates migration 0025 they write nothing and the NOT MEASURED marker
+  `security.headers-not-recorded` (info) fires instead — the fourteenth marker
+  (§5.1).
+- **Served types** (CHECK-51): `resources.bad-content-type` (info), a stylesheet,
+  script or image answering 200 with a type that contradicts it. It reads the
+  resource pass, so on a `fetchResources: false` crawl it is silent and
+  `resources.not-fetched` says why (§5.3).
+- **Directives** (CHECK-04): `indexability.nofollow`, `directives.restrictive`
+  and `directives.unavailable-after` (all warning). An `unavailable_after` date is
+  judged against the page's own fetch time, so a re-judge gives the same answer.
+- **Canonicals** (CHECK-16, CHECK-17, CHECK-19): `canonical.relative` (info),
+  `canonical.fragment` (warning), `canonical.chain` (warning; a revisit is
+  reported as `loop`) and `canonical.unlinked` (info).
+- **Hreflang** (CHECK-24): `hreflang.inconsistent-return-code` and
+  `hreflang.multiple-entries` (warning), `hreflang.self-only` and
+  `hreflang.unlinked-target` (info).
+- **Pagination** (CHECK-22, CHECK-23): `pagination.non-indexable-target` and
+  `pagination.loop` (warning), `pagination.sequence-error` (info).
+- **Links** (CHECK-32, CHECK-33, CHECK-86): `links.internal-nofollow`,
+  `links.only-from-non-indexable` and `links.localhost` (warning),
+  `links.non-descriptive-anchor` and `links.high-outlinks` (info). The outlink
+  limits are 1,000 distinct internal or 10 distinct external targets.
+- **URL shape** (CHECK-30, CHECK-67), on the path of the page's own URL:
+  `url.uppercase`, `url.underscores` and `url.non-ascii` (info), `url.spaces`,
+  `url.multiple-slashes` and `url.repetitive-path` (warning), and
+  `url.internal-search` (warning, an indexable internal search result).
+- **Sitemap entries** (CHECK-07, CHECK-08): `sitemap.over-50k-urls` (warning; the
+  count is a lower bound, because a URL listed in two documents is stored once),
+  `sitemap.url-too-long` (info), `sitemap.cross-host-loc` (warning) and
+  `sitemap.lastmod-invalid` (info; `future` means dated after the crawl began).
+  CHECK-08 is no longer metric-only, so `issues_list` with `checkId: "CHECK-08"`
+  now answers rather than being refused.
+- **Pixel width** (CHECK-35, CHECK-36), beside the character rules rather than
+  replacing them: `title.pixel-too-long` (warning), `title.pixel-too-short`
+  (info), `meta-description.pixel-too-long` (warning) and
+  `meta-description.pixel-too-short` (info). A value holding a character outside
+  the measured glyph table is not pixel-judged, and the character rules still
+  apply to it.
 
 **What Phase 24a changed here: `crawl_status.platform` and
 `crawl_status.platformProfile`.** Two fields, additive, migration 0024, no tool
@@ -503,8 +558,13 @@ validator before the handler runs (`test/api/mcp.test.ts:825` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (114 rows at 0.18.0) rather than by the crawl. The
-catalog is ~113 KB (**115,443 bytes**, re-measured 2026-10-22 at the end of
+bounded by the **ruleset** (154 rows at 0.20.0) rather than by the crawl. The
+catalog is ~151 KB (**154,237 bytes**, re-measured 2026-11-05 at the end of
+Phase 26a over all 154 rows of ruleset 0.20.0 by serialising what
+`rulesCatalog` answers with no crawl id — 14 markers at 2,157 bytes, the
+`marker` values JSON-serialised as one array, and the fourteen tables at 5,239
+the same way; the
+115,443 before it was measured 2026-10-22 at the end of
 Phase 23 over all 114 rows of ruleset 0.18.0 — 13 markers at 2,020 bytes
 JSON-serialised and the fourteen tables at 5,166, measured one way for this
 figure and so not subtractable from the series below; the 101,010 before it was
@@ -2150,7 +2210,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.18.0** as of Phase 23) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.20.0** as of Phase 26a) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -2208,6 +2268,27 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 26a bumped to 0.20.0, once, on the additive ground.** Forty ids joined
+(listed by family at the top of this document), and no existing rule's verdict,
+severity or copy moved. Phase 25's bump to 0.19.0 was the `failed` value of
+`render.coverage` (§4.5). The new rules read only what a crawl already stores
+(stored response headers, robots values, canonicals, hreflang rows, links,
+sitemap entries, titles and descriptions), so `crawl_rules` over an existing
+crawl writes them with no re-crawl. Re-judging the Phase 25 gate crawl
+(lavishalice.com, 602 rows, `docs/gates/phase-26a.md`) left all 1,270
+findings of the older rules byte-identical, added 835 findings from ten of
+the new ids, and changed exactly one metric row. That row is `site.health`:
+its partition counts findings, so pages moved between `urlsWithInfoOnly` and
+`urlsWithWarningOnly` as the new warnings landed. A health gauge compared across
+the boundary moves because there is more to see, not because the site changed,
+which is the reason `crawl_compare` raises `ruleset-mismatch` across it. Two
+cases need a consumer's attention. First, the two security-header rules refuse a
+crawl with any page written before migration 0025 and fire
+`security.headers-not-recorded` instead, so an old crawl re-judged at 0.20.0
+gains a marker there, not a clean result. Second, `issues_list` with
+`checkId: "CHECK-08"` was refused as metric-only before 0.20.0 and answers
+now, because `sitemap.over-50k-urls` claims it.
 
 **Phase 23 bumped to 0.18.0 because verdicts and thresholds MOVE.** Fourteen
 rules joined (see the top of this document), and existing ones changed what

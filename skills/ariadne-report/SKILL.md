@@ -188,6 +188,56 @@ What legitimately moves a finding up or down:
 What never moves it: how a finding reads in a document, or how many findings a
 severity band already holds.
 
+**Ruleset 0.20.0 added forty rule ids, and several of them are the same problem
+seen twice.** A findings file from a crawl judged at 0.20.0 or later can carry any
+of them. They are grouped here by the problem a client reads:
+
+- **One defect, two ids.** `title.pixel-too-long` and `title.too-long`,
+  `title.pixel-too-short` and `title.too-short`, `meta-description.pixel-too-long`
+  and `meta-description.too-long`, `meta-description.pixel-too-short` and
+  `meta-description.too-short` each measure one field in two units. Where both fire
+  on a page, write one finding citing both. Lead with the pixel width, because that
+  is what the result page cuts on.
+- **Transport security** (CHECK-14, CHECK-84, CHECK-85): `security.http-url`,
+  `security.hsts-missing`, `security.headers-missing` and `security.mixed-content`.
+  None of them is a ranking factor except `security.http-url`, which is also a
+  duplicate-URL problem. Rank the rest by what they expose visitors to, and say so.
+  `security.headers-not-recorded` is a marker: the check was not run on this crawl,
+  which goes under "Not audited", never under findings.
+- **Indexing directives** (CHECK-04): `indexability.nofollow`,
+  `directives.restrictive` and `directives.unavailable-after`. A nofollow on pages
+  the site closes on purpose, such as internal search results, is the site working
+  as intended. Report it as context, not as a fix.
+- **Canonical and pagination integrity** (CHECK-16, CHECK-17, CHECK-19, CHECK-22,
+  CHECK-23): `canonical.relative`, `canonical.fragment`, `canonical.chain`,
+  `canonical.unlinked`, `pagination.non-indexable-target`, `pagination.loop` and
+  `pagination.sequence-error`. A chain and a loop are consolidation failures. A
+  relative canonical is hygiene unless the site also serves on a second host.
+- **Hreflang integrity** (CHECK-24): `hreflang.inconsistent-return-code`,
+  `hreflang.multiple-entries`, `hreflang.self-only` and `hreflang.unlinked-target`.
+  These compound with the older hreflang findings. Report the cluster as one
+  problem.
+- **Links** (CHECK-32, CHECK-33, CHECK-86): `links.only-from-non-indexable`,
+  `links.internal-nofollow`, `links.high-outlinks`, `links.localhost` and
+  `links.non-descriptive-anchor`. `links.localhost` is a development address
+  leaking into production and is worth a line on its own however few pages carry
+  it. `links.high-outlinks` on the external side fires above 10 targets, so a
+  policy or payment-provider page reaches it easily: weigh before reporting.
+- **URL shape** (CHECK-30, CHECK-67): `url.uppercase`, `url.underscores`,
+  `url.non-ascii`, `url.spaces`, `url.multiple-slashes`, `url.repetitive-path` and
+  `url.internal-search`. The first six are hygiene for new URLs. Changing a live
+  URL means a redirect and the risk that comes with it, so never recommend renaming
+  ranking URLs for case or underscores alone. `url.internal-search` is an index
+  bloat problem and ranks with the duplicate findings.
+- **Sitemap entries** (CHECK-07, CHECK-08): `sitemap.over-50k-urls`,
+  `sitemap.url-too-long`, `sitemap.cross-host-loc` and `sitemap.lastmod-invalid`.
+  When `sitemap.lastmod-invalid` reports `future` on every entry of a document with
+  one shared timestamp, the sitemap stamps the time it was generated. Report it in
+  those words: lastmod that always says "now" teaches search engines to ignore it.
+- **Served types** (CHECK-51): `resources.bad-content-type`. Rank it by what the
+  file does: a stylesheet or script refused by the browser breaks the page, and an
+  image sent with a wrong type usually does not.
+
 **Write both numbers.** Every finding in the report shows the engine's severity as
 it came and the report's priority as you argue it. When they differ, the reason
 goes in the finding, in one sentence: *"The engine grades this `warning`; on this

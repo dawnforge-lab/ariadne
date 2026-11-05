@@ -539,6 +539,67 @@ gate site CHECK-33b found 100% of products with no HTML link path, the symptom a
 client-side product grid produces, and CHECK-01 was the check that could not confirm
 it.
 
+**Forty rules joined at ruleset 0.20.0, and they need no re-crawl.** They read what
+the crawl already stored, so a crawl judged before 0.20.0 gets them from one
+`crawl_rules` run. An audit that copies an older findings file forward will miss
+every one of them. The checklist names each at its check, with its severity. By check:
+
+- **CHECK-04, directives:** `indexability.nofollow`, `directives.restrictive` (the
+  evidence names which snippet or image directive) and `directives.unavailable-after`.
+  A `noindex, nofollow` header on internal search results fires
+  `indexability.nofollow` correctly. Whether it is deliberate is your call, and the
+  rule's fix says to leave it on pages that are meant to be closed off.
+- **CHECK-07 and CHECK-08, sitemap entries:** `sitemap.url-too-long`,
+  `sitemap.cross-host-loc`, `sitemap.lastmod-invalid` and `sitemap.over-50k-urls`.
+  CHECK-08 is no longer metric-only. `sitemap.over-50k-urls`'s count is a lower bound,
+  because a URL listed in two documents is stored once. `sitemap.lastmod-invalid`'s
+  `future` means dated after the crawl BEGAN, not after the sitemap was fetched. A
+  sitemap that stamps every entry with the moment it was generated therefore fires on
+  every entry. Read the values before you report "future dates": if they are all one
+  instant a few seconds after the crawl's `startedAt`, report a generated lastmod,
+  which is the defect the rule's fix names.
+- **CHECK-14 and CHECK-84, CHECK-85, transport security:** `security.http-url`,
+  `security.hsts-missing`, `security.headers-missing` (its Missing Headers column
+  names which) and `security.mixed-content`. All four need a site crawled over HTTPS.
+  The two header rules read response headers, which only crawls from Phase 25 on
+  store. On an older crawl `security.headers-not-recorded` fires instead and both
+  are silent, so CHECK-84 is NOT MEASURED there, never a PASS.
+  `security.mixed-content` reads the same references as the resource pass, so
+  `resources.not-recorded` makes it unanswerable the same way.
+- **CHECK-16, CHECK-17 and CHECK-19, canonicals:** `canonical.relative`,
+  `canonical.fragment`, `canonical.chain` (a revisit is `loop: true`, not a long
+  chain) and `canonical.unlinked`.
+- **CHECK-22 and CHECK-23, pagination:** `pagination.non-indexable-target`,
+  `pagination.loop` and `pagination.sequence-error`. All three need the next page to
+  have been crawled. When `pagination.next-target-uncrawled` fires on the same series,
+  their silence there says nothing.
+- **CHECK-24, hreflang:** `hreflang.inconsistent-return-code`,
+  `hreflang.multiple-entries`, `hreflang.self-only` and `hreflang.unlinked-target`.
+- **CHECK-30 and CHECK-67, URL shape:** `url.uppercase`, `url.underscores`,
+  `url.non-ascii`, `url.spaces`, `url.multiple-slashes` and `url.repetitive-path` read
+  the path only, never the query. `url.internal-search` fires on an indexable page
+  whose path has a `search` segment or whose query has a search parameter. That
+  includes the bare search page with no query, and a search app's results page
+  served at a content path such as `/pages/search`. A search URL that is already
+  noindexed does not fire, so the rule's silence on `?q=` pages can be the site doing
+  the right thing.
+- **CHECK-32, CHECK-33 and CHECK-86, links:** `links.only-from-non-indexable`,
+  `links.internal-nofollow`, `links.high-outlinks`, `links.localhost` and
+  `links.non-descriptive-anchor`. CHECK-33 is no longer metric-only either. The
+  external limit in `links.high-outlinks` is 10 distinct targets, set from Screaming
+  Frog's own boundary. A policy page with a dozen outbound references reaches it, so
+  weigh the page before you call it a defect. `links.non-descriptive-anchor` reads
+  English phrases only.
+- **CHECK-35 and CHECK-36, pixel width:** `title.pixel-too-long`,
+  `title.pixel-too-short`, `meta-description.pixel-too-long` and
+  `meta-description.pixel-too-short`, beside the character-count rules. Where both
+  fire on one page, it is one defect: report it once and cite both ids. A value with a
+  character outside the measured scripts (Latin, Greek, Cyrillic) is not pixel-judged,
+  and its character rules still apply.
+- **CHECK-51, served types:** `resources.bad-content-type`. It reads the resource
+  pass, so on a `fetchResources: false` crawl it is silent and `resources.not-fetched`
+  is the marker that says so.
+
 ---
 
 ## Phase 3 — the agent checks
