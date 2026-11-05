@@ -895,7 +895,15 @@ describe("copy: sitemap entries (26a)", () => {
   });
 
   it("says the entry count is a lower bound", () => {
-    expect(copy("sitemap.over-50k-urls").explanation).toMatch(/lower bound/);
+    const text = copy("sitemap.over-50k-urls").explanation;
+    expect(text).toMatch(/lower bound/);
+    expect(text).toMatch(/counted once/);
+    expect(text).toMatch(/entry cap/);
+  });
+
+  it("names the cross-submission exception the cross-host rule honours", () => {
+    expect(copy("sitemap.cross-host-loc").explanation).toMatch(/robots\.txt declares it/);
+    expect(copy("sitemap.cross-host-loc").explanation).toMatch(/crawled site/);
   });
 });
 

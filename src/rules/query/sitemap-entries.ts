@@ -4,8 +4,8 @@
  *
  *  - `sitemap.over-50k-urls`  a document holding more entries than the cap
  *  - `sitemap.url-too-long`   a `<loc>` longer than `SITEMAP_LOC_MAX`
- *  - `sitemap.cross-host-loc` a `<loc>` whose scheme or host is not its
- *                             document's
+ *  - `sitemap.cross-host-loc` a `<loc>` whose scheme or host is neither its
+ *                             document's nor the crawled site's
  *  - `sitemap.lastmod-invalid` a `<lastmod>` outside the W3C date-time profile,
  *                             or one dated after the crawl began
  *
@@ -102,7 +102,7 @@ async function entryFindings(
   await assertNormalisedSitemap(db, crawlId, self.id);
   const result = await db.execute<EntryRow>(sql`
     with judged as (
-      select s.url, s.sitemap_source, s.url_normalised, s.lastmod,
+      select s.url, s.sitemap_source, s.url_normalised, s.lastmod, c.site_url,
              ${reason} as reason
       from sitemap_urls s
       join crawls c on c.id = s.crawl_id
@@ -223,9 +223,15 @@ export const sitemapEntryRules: QueryRule[] = [
   }),
 
   // The scheme AND host (with any port) of the `<loc>` against the document's
-  // own, from the `^[a-z]+://[^/]+` prefix both sides, lower-cased in SQL. The
-  // protocol requires a `<loc>` to share its document's location; `www.` or a
-  // port is a different host here, as it is to a search engine.
+  // own AND the crawled site's origin (`crawls.site_url`), from the
+  // `^[a-zA-Z]+://[^/]+` prefix, lower-cased in SQL. The protocol requires a
+  // `<loc>` to share its document's location, except that a document on host A
+  // may list host B's URLs when B's robots.txt declares it. This engine only
+  // reaches a sitemap through the crawled site's robots.txt (or its own
+  // /sitemap.xml and index children), so a document elsewhere that lists URLs on
+  // the CRAWLED SITE's origin is that allowed cross-submission and is not
+  // reported. `www.`, a port or http against https is a different host here, as
+  // it is to a search engine.
   defineRule<QueryRule>({
     kind: "query",
     id: CROSS_HOST.id,
@@ -244,7 +250,9 @@ export const sitemapEntryRules: QueryRule[] = [
         db,
         crawlId,
         sql`lower(substring(j.url from '^[a-zA-Z]+://[^/]+'))
-            <> lower(substring(j.sitemap_source from '^[a-zA-Z]+://[^/]+'))`,
+              <> lower(substring(j.sitemap_source from '^[a-zA-Z]+://[^/]+'))
+            and lower(substring(j.url from '^[a-zA-Z]+://[^/]+'))
+              <> lower(substring(j.site_url from '^[a-zA-Z]+://[^/]+'))`,
         NO_REASON,
         (row) => ({ sitemap: row.sitemap_source, loc: row.url }),
         capsOr(caps),

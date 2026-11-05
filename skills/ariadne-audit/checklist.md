@@ -900,7 +900,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   Three more rules read the entry itself, not the page it names:
   - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters
   - `sitemap.cross-host-loc` (warning) — a `<loc>` whose scheme or host (www and port
-    included) is not its sitemap document's
+    included) is neither its sitemap document's nor the crawled site's. A document on
+    another host (a CDN) that lists the crawled site's own URLs is an allowed
+    cross-submission and is not reported
   - `sitemap.lastmod-invalid` (info) — a `<lastmod>` that is not a W3C date or
     date-time (`reason: "format"`), or is dated after the crawl began
     (`reason: "future"`; a date-only value on the crawl's own UTC day is not future)
@@ -917,8 +919,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `issues_list` with `checkId: "CHECK-08"` for one finding rule:
   `sitemap.over-50k-urls` (warning), one site-scoped finding per sitemap document
   with more than 50,000 entries. Its count is a LOWER BOUND: a URL listed in two
-  documents is stored, and counted, once. No finding is not proof of a clean
-  sitemap when `entryCapReached` is true. The metric's rows:
+  documents is stored, and counted, once, and the crawl's entry cap can stop reading
+  before a document's end. No finding is not proof of a clean sitemap when
+  `entryCapReached` is true. The metric's rows:
   - the `site` row: `{docs, totalUrls, urlCapBreaches, entryCapReached, oversizedDocsSkipped}`
   - one `sitemap_doc` row per document (`scopeValue` is the document's URL) with
     `{urls, breaches50k}` — the largest 50 are listed

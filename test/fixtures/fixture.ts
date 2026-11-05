@@ -90,17 +90,17 @@ export interface Fixture {
    * of one URL. The rules join `sitemap_urls.url_normalised`, so they match;
    * this field is what puts a divergent spelling in front of them end to end
    * (see `/authored3/loc-variant`).
+   *
+   * It may begin with `{legacy}`, which the writer replaces with the site's
+   * second name (`FixtureApp.legacyBase`): the port is only known once the
+   * server listens, and an entry on that host is the cross-host `<loc>`
+   * (`sitemap.cross-host-loc`).
    */
   sitemapLoc?: string;
   /**
    * The `<lastmod>` `/sitemap.xml` publishes for this fixture, verbatim. Default:
    * none. Verbatim so a fixture can publish a value no W3C parser accepts
    * (`sitemap.lastmod-invalid`).
-   *
-   * `sitemapLoc` may begin with `{legacy}`, which the writer replaces with the
-   * site's second name (`FixtureApp.legacyBase`): the port is only known once
-   * the server listens, and an entry on that host is the cross-host `<loc>`
-   * (`sitemap.cross-host-loc`).
    */
   sitemapLastmod?: string;
   /**

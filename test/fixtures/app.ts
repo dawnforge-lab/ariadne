@@ -109,6 +109,11 @@ ${links}
 </html>`;
 }
 
+/** The site's second name on a port: what `FixtureApp.legacyBase` is, one place. */
+function legacyOriginOf(port: string | number): string {
+  return `http://localhost:${port}`;
+}
+
 /**
  * The declared sitemap: the hub, every fixture that did not opt out, and the
  * robots-blocked URL.
@@ -123,12 +128,17 @@ ${links}
  * `normalizeUrl` would sort. That is what a real CMS emits, and the entry still
  * names the page the crawl fetched — see `/authored3/loc-variant`.
  *
+ * `Fixture.sitemapLoc` may also start with `{legacy}`, which is replaced by the
+ * site's second host name (`legacyOriginOf`) so an entry can name a host other
+ * than the sitemap's own (`sitemap.cross-host-loc`); `Fixture.sitemapLastmod`
+ * is written verbatim as the entry's `<lastmod>`, valid or not
+ * (`sitemap.lastmod-invalid`).
+ *
  * The order is the fixture order, which puts the hub first and keeps a diff of
  * this document readable. Nothing reads the order.
  */
 function sitemapXml(fixtures: readonly Fixture[], origin: string): string {
-  const parsed = new URL(origin);
-  const legacyOrigin = `${parsed.protocol}//localhost:${parsed.port}`;
+  const legacyOrigin = legacyOriginOf(new URL(origin).port);
   const entries = [
     { loc: `${origin}/`, lastmod: undefined },
     ...fixtures
@@ -249,7 +259,7 @@ export async function startFixtureApp(fixtures: readonly Fixture[]): Promise<Fix
 
   return {
     base: `http://127.0.0.1:${address.port}`,
-    legacyBase: `http://localhost:${address.port}`,
+    legacyBase: legacyOriginOf(address.port),
     close: () => new Promise<void>((resolve, reject) =>
       server.close((error) => (error === undefined ? resolve() : reject(error))),
     ),

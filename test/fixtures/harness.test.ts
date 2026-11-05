@@ -920,7 +920,9 @@ describe("the fixture site end to end", () => {
   });
 
   it("the site-scoped findings are the two host names, the sitemap's own faults and the missing breadcrumbs", async () => {
-    // Seven rules write a null-page finding on this crawl, and each of them is a
+    // Nine rules write a null-page finding on this crawl (the nine ids asserted
+    // below; `resources.uncached` carries its own comment on the list), and each
+    // of them is a
     // statement about the SITE rather than about a URL:
     //
     //  - `host.http-serves-200` twice, because this server answers to two names
@@ -2751,9 +2753,11 @@ describe("the fixture site end to end", () => {
     // are past the third row of their family, and `/authored26/shop/shop/x` and
     // `/search` are each a type of one page that is already a suspect, which is
     // the side a page on both lists is counted on. None is a seat
-    // in any sample, since all thirty-three one-segment `/authored26/` pages share one type whose
-    // first three rows (`/authored26/canonical-fragment`, `/canonical-relative`
-    // and `/chain-a` in URL order) are suspects already, which keeps
+    // in any sample, since all thirty-six one-segment `/authored26/` pages (the
+    // thirty-five fixtures with a one-segment path, plus `/authored26//double`, which the
+    // segment filter reads as `/authored26/double`) share one type whose
+    // first three rows in the database's `url asc` order (`/authored26/bad-lastmod`,
+    // `/caf%C3%A9` and `/canonical-fragment`) are suspects already, which keeps
     // `selectionSampled` at 6.
     //
     // selectionSampled = 6, and it MOVED FROM 9 IN P8-T5 — the one number in

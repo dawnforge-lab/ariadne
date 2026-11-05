@@ -677,7 +677,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.cross-host-loc": {
     title: "Sitemaps: URL on another host or scheme than its sitemap",
     explanation:
-      "Sitemap entries whose scheme or host (www and port included) differs from the sitemap document that lists them. The sitemaps protocol only lets a document list URLs on its own host, so search engines may ignore these entries; the row gives the document and the URL.",
+      "Sitemap entries whose scheme or host (www and port included) differs from both the sitemap document that lists them and the crawled site. The sitemaps protocol only lets a document list URLs on its own host unless the other host's robots.txt declares it, so search engines may ignore these; a document elsewhere listing the crawled site's own URLs is that allowed exception and is not reported. The row gives the document and the URL.",
     howToFix:
       "Move each entry into a sitemap on its own host, or correct the generator that is writing the wrong host or scheme (often http against https, or www against the bare domain).",
   },
@@ -719,7 +719,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.over-50k-urls": {
     title: "Sitemaps: Sitemap over 50,000 URLs",
     explanation:
-      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document. Entries past the limit are not read. The row gives the document and its entry count, which is a lower bound because a URL listed in two documents is counted once.",
+      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, a lower bound because a URL listed in two documents is counted once and the crawl stops reading at its entry cap, which can fall before a document's end. No finding is therefore not proof that every document is under the limit.",
     howToFix:
       "Split the sitemap into several documents of 50,000 URLs or fewer and list them in a sitemap index.",
   },

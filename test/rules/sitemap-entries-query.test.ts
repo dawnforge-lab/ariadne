@@ -193,6 +193,32 @@ describe("the sitemap entry rules against the database", () => {
     expect(await run("sitemap.cross-host-loc", crawlId)).toHaveLength(0);
   });
 
+  it("is silent for a document on another host that lists the crawled site's own URLs", async () => {
+    // sitemaps.org cross-submission: the CDN-hosted document lists SITE's URLs.
+    const crawlId = await newCrawl();
+    await add(crawlId, [
+      { url: `${SITE}/a`, source: "https://cdn.example/sitemap.xml" },
+      { url: `${SITE}/b`, source: "https://cdn.example/sitemap.xml" },
+    ]);
+    expect(await run("sitemap.cross-host-loc", crawlId)).toHaveLength(0);
+  });
+
+  it("fires for a site sitemap listing a third host, and for http in an https sitemap", async () => {
+    const crawlId = await newCrawl();
+    await add(crawlId, [
+      { url: "https://third.example/x" },
+      { url: "http://entries.example/y" },
+      // Another host's document listing a third host: differs from both.
+      { url: "https://third.example/z", source: "https://cdn.example/sitemap.xml" },
+    ]);
+    const found = await run("sitemap.cross-host-loc", crawlId);
+    expect(found.map((f) => f.pageUrl)).toEqual([
+      "http://entries.example/y",
+      "https://third.example/x",
+      "https://third.example/z",
+    ]);
+  });
+
   // ------------------------------------------------------ lastmod-invalid
 
   it("reports a bad format and a future date, and accepts every W3C form", async () => {

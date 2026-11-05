@@ -8,8 +8,9 @@
  * be spending a fifth of its crawl budget on 301s, which is CHECK-10's
  * "redirect volume" half. `sitemap.missing`, `sitemap.uncrawled` and the rest
  * judge what the sitemap CLAIMS; whether the claims are split across documents
- * a large site can maintain is CHECK-08, and it is a description rather than a
- * fault.
+ * a large site can maintain is CHECK-08, and the metric is a description of
+ * that shape. One fault inside it has a finding rule of its own,
+ * `sitemap.over-50k-urls`, which also claims CHECK-08.
  *
  * Neither measures the metric cohort, and that is deliberate: both are about the
  * crawl, not about the site's indexable pages. A redirect is by definition not
