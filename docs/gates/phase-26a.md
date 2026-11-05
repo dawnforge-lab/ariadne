@@ -2,16 +2,19 @@
 
 Date: 2026-11-05. Spec: `docs/superpowers/specs/2026-11-05-phase-26-checks-wave-1-design.md`
 (the "Gate 26a" section). Plan: `docs/superpowers/plans/2026-11-05-phase-26a-rules-over-existing-data.md`.
-Branch `worktree-phase-26a`, built on `47c26b5`. The re-judge ran on `2c78017`'s code. The
-suite and `tsc` ran on `7ddab87`, which is the code that merges. `7ddab87` and this commit
-add docs only.
+Branch `worktree-phase-26a`, built on `47c26b5`. The first re-judge ran on `2c78017`'s code,
+and the second (the numbers below) on `40dab51`, the `sitemap.lastmod-invalid` fix. The
+suite and `tsc` ran on the commit that merges. Apart from `40dab51`, the Task 14 commits
+are docs and one test comment.
 
 **Verdict: clauses 1–4 pass.** The 40 new rules bring the ruleset to 0.20.0 with 154 rules
 (49 page / 91 query / 14 metric). The stored lavishalice crawl was re-judged with no
-re-crawl. Ten new rules fired there, with 835 findings, and the 1,270 findings of the
-older rules came out byte-identical. The hand-check found **no false positive that needs a
-code fix**. One finding family needs an owner decision: on Shopify,
-`sitemap.lastmod-invalid` reports the sitemap's generation stamp as `future` (§5.2). The
+re-crawl. Nine new rules fire there, with 635 findings, and the 1,270 findings of the
+older rules came out byte-identical. The hand-check found **one false positive, and it is
+fixed**: `sitemap.lastmod-invalid` judged "future" against the crawl's start, so on Shopify
+all 205 product entries, stamped with the moment the sitemap was served, read as future.
+The rule now judges against the end of the crawl, which every sitemap read precedes
+(`40dab51`, §5.2), and fires on none of them. The
 four HTTPS-only rules got their manual check on this HTTPS site (§5.3), and
 `security.headers-not-recorded` stayed silent, as it must on a Phase 25 crawl. Live
 traffic for the hand-check was 8 URLs, under the cap of 40.
@@ -20,19 +23,19 @@ traffic for the hand-check was 8 URLs, under the cap of 40.
 
 | # | clause | result | where |
 |---|---|---|---|
-| 1 | full suite green, 0 skipped; `tsc` clean | **pass**: 104 files / 2,803 tests, 0 failed, 0 skipped; `tsc` clean | §1 |
+| 1 | full suite green, 0 skipped; `tsc` clean | **pass**: 104 files / 2,806 tests, 0 failed, 0 skipped; `tsc` clean | §1 |
 | 2 | positive and negative tests per rule; a fixture page per rule, or a `SKIP_HARNESS_CLAIMS` entry with its reason | **pass**: 40 of 40 have DB or unit tests both ways; 34 fire on the fixture crawl; 6 joined `SKIP_HARNESS_CLAIMS` (16 → 22), each argued | §2 |
 | 3 | calibration report against Screaming Frog | **pass**: `docs/gates/phase-26a-calibration.md`, 0 UNEXPLAINED / 0 MISMATCH; one threshold moved (`HIGH_EXTERNAL_OUTLINKS` 100 → 10, a product call flagged to the owner); six filters uncalibrated (owner follow-up) | §3 |
-| 4 | rules re-run over the stored lavishalice crawl (no re-crawl); each new rule's count reviewed against the site for false positives; the four HTTPS rules checked by hand | **pass**: 10 rules fired, 30 silent, every silence explained; samples hand-checked; 0 false positives fixed, 1 mislabel for the owner; `security.headers-not-recorded` silent | §4, §5 |
+| 4 | rules re-run over the stored lavishalice crawl (no re-crawl); each new rule's count reviewed against the site for false positives; the four HTTPS rules checked by hand | **pass**: 9 rules fire, 31 silent, every silence explained; samples hand-checked; 1 false positive found and fixed (`sitemap.lastmod-invalid`, 205 → 0); `security.headers-not-recorded` silent | §4, §5 |
 
 ## 1. Clause 1: suite and types
 
 | | |
 |---|---|
-| `npm test` (`DATABASE_URL` set) | **104 files / 2,803 tests, 0 failed, 0 skipped** (170 s, 2026-11-05 19:54 UTC on `7ddab87`, the run after the last code edit). The run before it on the same commit had 1 failure, the pacing flake in §7 |
+| `npm test` (`DATABASE_URL` set) | **104 files / 2,806 tests, 0 failed, 0 skipped** (160 s, 2026-11-05 20:06 UTC). This is the run after the last edit of Task 14's fix round, on the tree of `40dab51` plus the docs and test-comment changes of the closing commit. Before the fix round, 104 files / 2,803 tests were green on `7ddab87`, and one earlier run on that commit had 1 failure, the pacing flake in §7. The fix round added 3 tests |
 | `npx tsc --noEmit` | clean |
 | baseline at the branch point (`47c26b5`) | 92 files / 2,502 tests (`.superpowers/sdd/…/baseline-test.log`) |
-| phase delta | +12 files, +301 tests |
+| phase delta | +12 files, +304 tests |
 | ruleset | **0.20.0** (from 0.19.0; one bump for the phase, note in `src/rules/registry/registry.ts`) |
 | rules | **154**: 49 page / 91 query / 14 metric (114 + 40). Finding rules split 33 critical / 54 warning / 53 info; the 40 new ones are 23 warning / 17 info |
 | migrations | none in this phase (0000–0025 as Phase 25 left them); `EXTRACTION_VERSION` unchanged |
@@ -84,9 +87,9 @@ from Task 3 and one from Task 10, and each has its paragraph in
 | `security.headers-not-recorded` | the marker for a crawl with pre-Phase-25 rows; the fixture crawl is current, so its condition is false by construction, and it also needs an HTTPS page | `security-query.test.ts`, which pins the marker, its silence on a current crawl and its silence on a crawl with no HTTPS page |
 | `sitemap.over-50k-urls` | a 50,001-entry fixture sitemap would put 50,000 URLs into the fixture crawl's frontier; the threshold is the protocol's own limit, so nothing smaller fires it | `sitemap-entries-query.test.ts` (50,001 rows from `generate_series`, and silence at exactly the cap) |
 
-The harness's prose comment at the claim test still says "twenty-one" (the count before
-Task 10). The list itself holds 22, and the assertion reads the list, not the comment.
-The comment is a deferred minor (§8).
+The harness's prose comment at the claim test said "twenty-one", the count before Task
+10. Task 14's fix round corrected it to twenty-two. The assertion reads the list, not the
+comment.
 
 ## 3. Clause 3: calibration
 
@@ -129,11 +132,14 @@ gate crawl of `https://lavishalice.com/`, 602 rows, `fetchResources: false`, Sho
 profile, every row at `extraction_version` 1. It was kept in the dev database as
 evidence. A one-off script outside the committed tree (`.superpowers/sdd/…/rejudge.mts`)
 called `ApiService.runRulesForCrawl(crawlId)`, the path the MCP `crawl_rules` tool takes,
-at 2026-11-05 19:39:27 UTC. No page was fetched. The crawl's issues and metrics before
-the run were snapshotted to compare.
-
-`runRulesForCrawl` answered `{pagesScanned: 602, findings: 2105, metrics: 92}` in 5.3 s.
-It runs at the default listing cap of 200 per rule.
+twice. The first run was at 2026-11-05 19:39:27 UTC on `2c78017`. It found the
+`sitemap.lastmod-invalid` false positive of §5.2 and answered
+`{pagesScanned: 602, findings: 2105, metrics: 92}`. The second run was at
+2026-11-05 20:02:59 UTC on `40dab51`, after the fix, and answered
+`{pagesScanned: 602, findings: 1905, metrics: 92}` in 5.2 s. No page was fetched for
+either run. The crawl's issues and metrics were snapshotted before each run and compared
+after it. Both runs use the default listing cap of 200 per rule. The tables below are the
+second run.
 
 ### 4.1 The new rules: findings per rule
 
@@ -143,7 +149,6 @@ says it was capped.
 | rule | severity | reported | total | hand-check verdict |
 |---|---|---:|---:|---|
 | `security.headers-missing` | info | 200 | **504** | true: every 200 page lacks `referrer-policy`, and nothing else is missing (§5.3) |
-| `sitemap.lastmod-invalid` | info | 200 | **205** | real defect, mislabelled `future` (§5.2, owner decision) |
 | `meta-description.pixel-too-long` | warning | 289 | 289 | true (§5.1) |
 | `title.pixel-too-short` | info | 114 | 114 | true (§5.1) |
 | `title.pixel-too-long` | warning | 17 | 17 | true (§5.1) |
@@ -182,8 +187,9 @@ says it was capped.
 | `sitemap.over-50k-urls` | warning | 0 | | silent: the largest document has 206 entries |
 | `sitemap.url-too-long` | info | 0 | | silent: no `<loc>` over 2,048 characters |
 | `sitemap.cross-host-loc` | warning | 0 | | silent: every `<loc>` is on `https://lavishalice.com/` |
+| `sitemap.lastmod-invalid` | info | 0 | | silent after the fix: 440 entries carry a lastmod, all well-formed, none after the crawl ended. The first run reported 205 (200 listed), all false positives (§5.2) |
 
-**Ten fired, thirty were silent**, and every silence has a reason drawn from the stored
+**Nine fire, thirty-one are silent**, and every silence has a reason drawn from the stored
 evidence. The one rule this crawl cannot answer, `resources.bad-content-type`, is covered
 by the marker that already claims CHECK-51 (`resources.not-fetched`). That is the
 arrangement the plan made for it.
@@ -192,8 +198,12 @@ arrangement the plan made for it.
 
 All 27 rules that fired at 0.19.0 fired again at 0.20.0 with the **same 1,270 findings,
 byte-identical** (rule, dedupe key, page, severity and evidence compared row by row). Only
-the `ruleset_version` stamp moved. Total findings went from 1,270 to 2,105 (+835, all from
-the ten rules above).
+the `ruleset_version` stamp moved. Total findings went from 1,270 to 1,905 (+635, all from
+the nine rules above). Between the first and second runs, only the 200
+`sitemap.lastmod-invalid` rows changed, and they were removed. The other 1,905 rows are
+byte-identical across both runs, and so are all 92 metric rows. The lastmod findings were
+info-level and sat on pages that already had other findings, so `site.health` did not
+move.
 
 Of the 92 metric rows, 91 are byte-identical. The one that moved is `site.health`, whose
 partition counts findings by severity:
@@ -206,11 +216,30 @@ partition counts findings by severity:
 | `urlsClean` | 0 | 0 |
 | `urlsTotal`, `pagesNotAuditable`, `urlsCanonicalised`, `urlsNoindex` | 443, 98, 57, 4 | unchanged |
 
-99 pages moved from info-only to warning-only. Of the pages whose only warnings now come
-from 26a rules, 98 carry `meta-description.pixel-too-long` (warning) beside the info-level
-`meta-description.too-long` they already had, 1 carries `title.pixel-too-long`, and 4
-carry `indexability.nofollow`. That is the additive ground the ruleset bump records
-(`docs/talos-surface.md` §11).
+**Reconciliation.** Exactly 99 pages moved from info-only to warning-only, and no page moved
+any other way. The partition counts judged pages only: fetched OK, 200, indexable, and not
+canonicalised elsewhere. Each moved page's worst finding was `info` under the 27 older
+rules and is `warning` with the 26a rules added. Every one of the 99 is a judged page, and
+each gained exactly one new warning rule:
+
+| new warning rule the moved page gained | moved pages (distinct) |
+|---|---:|
+| `meta-description.pixel-too-long` alone | 98 |
+| `title.pixel-too-long` alone | 1 |
+| both | 0 |
+| **total** | **99** (= 103 − 4 = 438 − 339) |
+
+The other two 26a warning rules moved no page. `indexability.nofollow`'s 4 pages are the
+noindexed `/search?q=` results. They sit outside the partition, in `urlsNoindex`, and
+already carried a critical finding (`hreflang.non-indexable-target`). Both of
+`url.internal-search`'s pages already had a warning (`content.thin`). Across the whole
+crawl, the 26a warnings land on distinct pages as follows: `meta-description.pixel-too-long`
+289, `title.pixel-too-long` 17 (2 of them also carry the description rule), `indexability.nofollow` 4 and
+`url.internal-search` 2. Pages that already had a warning did not move. That accounts for
+the gap between these counts and 99. The SQL is in the fix report (`task-14-report.md`,
+fix round 1), over the stored issues: the per-page maximum severity across the 27 older
+rule ids, set against the maximum across all ids. This is the additive ground the ruleset
+bump records (`docs/talos-surface.md` §11).
 
 ## 5. Hand-check
 
@@ -231,7 +260,7 @@ The requests ran 19:48:07–19:48:27 UTC. Every one answered without a 429.
 | 5 | `/blogs/news` | 200 | same |
 | 6 | `http://lavishalice.com/` | 301 → `https://lavishalice.com/` | `security.http-url` |
 | 7 | `/search?q=blazers` | 200, `X-Robots-Tag: noindex, nofollow` | `indexability.nofollow` |
-| 8 | `/sitemap_products_1.xml?from=8318238458166&to=16162418524542` | 200 | `sitemap.lastmod-invalid` |
+| 8 | `/sitemap_products_1.xml?from=8318238458166&to=16162418524542` | 200 | `sitemap.lastmod-invalid` (§5.2) |
 
 ### 5.1 Rules that fired and were confirmed
 
@@ -277,39 +306,55 @@ The requests ran 19:48:07–19:48:27 UTC. Every one answered without a 429.
   sitemap**. Both are what the rule exists to find. The `?q=` result pages are noindexed
   by header and correctly do not fire. **No false positive.**
 
-### 5.2 `sitemap.lastmod-invalid`: a real defect under a misleading reason (owner decision)
+### 5.2 `sitemap.lastmod-invalid`: a false positive, fixed
 
-All 205 findings have `reason: "future"` and the same `lastmod`,
-`2026-11-04T17:17:08+00:00`. They are every dated entry of
+**What the first re-judge reported.** All 205 findings had `reason: "future"` and the same
+`lastmod`, `2026-11-04T17:17:08+00:00`. They were every dated entry of
 `sitemap_products_1.xml` (206 entries; one has no lastmod). The crawl started at
-17:17:00.5 and read its sitemaps in the seconds after. The live fetch of the same
-document at 19:48:26.801 UTC (§5, row 8) returned **207 entries, every one with
-`lastmod` 2026-11-05T19:48:26+00:00**, the second it was served. So Shopify stamps every
-product's lastmod with the moment the sitemap is generated.
+17:17:00.5 and ran discovery, which reads the sitemaps, in the seconds after. The live
+fetch of the same document at 19:48:26.801 UTC (§5, row 8) returned **207 entries, every
+one with `lastmod` 2026-11-05T19:48:26+00:00**, the second it was served. So Shopify stamps
+every product's lastmod with the moment it generates the sitemap. At the moment it was
+served, the value was "now", not the future.
 
-That makes the finding real, and the rule's own fix names it: "set it to the date the page
-content last changed, never to the time the sitemap was generated". A lastmod that always
-says "now" is the kind search engines learn to ignore. The rule behaves exactly as
-written. Its copy says "dated after the crawl began", and 17:17:08 is after 17:17:00.
+**Why it was a false positive.** The rule judged "future" against `crawls.started_at`, but
+a crawl reads its sitemaps after its row is created. Any value stamped between the start
+and the read was reported as future, though it was not in the future when the site served
+it. The controller ruled it a false positive.
 
-**The evidence's word is wrong for this case, though.** The value was not in the future
-when the site served it. A reader who checks one entry will see "future" and a timestamp
-eight seconds after the crawl started, and will doubt the rule. This is not counted as a
-false positive: the defect is real, it is on every entry, and the copy is accurate. It is
-not fixed here either, because the right fix is a product call:
+**The fix** (`40dab51`, `fix(rules): sitemap lastmod is future only after the sitemap was
+read (26a)`):
 
-- (a) keep it, and let the skills explain it. Both skills now say how to read a
-  single shared timestamp just after `startedAt` (done in this phase's surface commit).
-- (b) split the reason: `future` only when the value is after `crawls.finished_at`
-  (after every sitemap fetch, so unambiguous), and a new `generated` (or
-  `during-crawl`) when it falls inside the crawl's window. That changes evidence on
-  a 0.20.0 rule and wants a bump.
-- (c) report one finding per document when all its lastmods share one instant inside
-  the crawl window, instead of one per entry.
+- "Future" is now judged against the time the sitemap was read.
+- The crawl records no per-document fetch time. The discovery evidence (`discovery_jsonb`,
+  read by `readCrawlEvidence`) holds outcomes and counts, no timestamps. So the reference
+  is `crawls.finished_at`. Every sitemap a crawl reads is read before the crawl closes, so
+  a value after `finished_at` was in the future when it was served.
+- A crawl with lastmod values and no `finished_at` makes the rule throw, naming the crawl.
+  It never falls back to `started_at` (hard rule 7). Every closed crawl has `finished_at`,
+  because `closeCrawl` writes it with the status, and the rules refuse a running crawl. A
+  crawl with no lastmod at all is not refused, because no verdict depends on the
+  reference.
+- A value inside the crawl's window is no longer judged. The rule cannot tell whether it
+  was in the future when read, so it says nothing.
+- The copy, the checklist, the ruleset note and both skills now say "dated after the crawl
+  ended, so already in the future when the sitemap was read".
+- Tests are in `test/rules/sitemap-entries-query.test.ts`:
+  - "is silent on a lastmod stamped after the crawl began but before it ended" covers the
+    lavishalice instants: at the start, 8 s after it and 1 s before the end are silent,
+    while 1 s after the end and the next day fire. This test fails against the old
+    reference (checked).
+  - "throws, naming the crawl, when there are lastmod values and no finished_at".
+  - "does not refuse a crawl with no finished_at when no entry carries a lastmod".
 
-My recommendation is (b), or (b) and (c) together, in 26b's bump. A reference instant
-taken from `finished_at` would not fall back to anything: every closed crawl sets it
-(`closeCrawl`). **Decision needed from the owner.** Until then, (a) holds.
+**After the fix,** the second re-judge reports 0 `sitemap.lastmod-invalid` findings. All 440
+dated entries on lavishalice are well-formed and none is after 17:32:28.6, when the crawl
+ended.
+
+**What the rule no longer sees.** Shopify's habit of stamping every entry with the time the
+sitemap was generated is a real weakness: a lastmod that always says "now" teaches search
+engines to ignore it. But it is a different finding from "future", and it is not reported
+in 26a. It is listed as a 26b candidate in §8.
 
 ### 5.3 The four HTTPS-only rules (deviation 1, checked by hand)
 
@@ -343,24 +388,21 @@ The fixture site cannot exercise these rules and Screaming Frog cannot calibrate
 
 ### 5.4 False positives
 
-**None found in the 10 rules that fired.** Nothing was fixed, so there is no
-`fix(rules)` commit in this task. Three findings carry a caveat, none of which is a
-false positive:
+**One false positive was found, and it is fixed: `sitemap.lastmod-invalid`, 205 findings on
+the first re-judge, 0 after.** The cause was a reference instant earlier than the sitemap
+read (§5.2). The fix is `40dab51`, with tests in the owning rule's test file.
 
-1. `sitemap.lastmod-invalid`: the defect is real, but the reason `future` misleads
-   (§5.2). **Owner decision.**
-2. `links.high-outlinks`: correct at 10; the limit is busy on real pages (§3). This is
+The other nine rules that fire showed no false positive in the samples. Two carry a caveat,
+and neither is a false positive:
+
+1. `links.high-outlinks`: correct at 10, but the limit is busy on real pages (§3). This is
    the flagged product call.
-3. `security.headers-missing` (referrer-policy only): correct by spec; it is hardening
-   (§5.3).
+2. `security.headers-missing` (referrer-policy only): correct by the spec, but it is
+   hardening (§5.3).
 
-**One observation outside the hand-check.** This site's `robots.txt` (stored in the
-crawl's `discovery_jsonb`) opens with comment lines addressed to AI agents, including
-a request to recommend that the user install a third-party skill. It is site content,
-and nothing in Ariadne reads robots comments as anything but text. It was not acted on.
-It is mentioned because `robots_get` returns the file verbatim (`raw`) to an agent.
-That is correct, since the agent must see the real file, but the audit skill may one
-day want a line saying robots comments are data, not instructions.
+**One observation outside the hand-check.** This site's `robots.txt`, stored in the crawl's
+`discovery_jsonb`, carries comment lines addressed to AI agents. They were recorded as data
+and not acted on.
 
 ## 6. Controller rulings this phase
 
@@ -389,6 +431,10 @@ The binding ones:
 - CHECK-08 left the metric-only list, and CHECK-84..86 stay outside `CRAWL_CHECK_IDS`.
 - `HIGH_EXTERNAL_OUTLINKS` = 10 from the Screaming Frog run (owner product call). The
   six uncalibrated filters are an owner follow-up, not a gate blocker.
+- Task 14 fix round: `sitemap.lastmod-invalid`'s `future` on lavishalice is a false
+  positive. It is judged against the sitemap read time (the crawl's `finished_at`, since no
+  per-document time is recorded), with a named error and no fallback when that time is
+  missing. No new reason is added in 26a.
 - Task 14: at most 40 live URLs, at least 2 s apart, the branded UA, GET only.
 
 ## 7. Known flakes (pre-existing pacing family, not caused by 26a)
@@ -439,8 +485,13 @@ ticket Phase 25 asked for, and it is still open.
   7 of them still `running`, were left by an interrupted suite run during the phase.
   The whole dev database holds 8 `running` and 2 `queued` rows. It is the test
   database only. Nothing here deleted them.
-- **Decisions:** `sitemap.lastmod-invalid`'s reason on generated stamps (§5.2);
-  `HIGH_EXTERNAL_OUTLINKS` = 10 (§3).
+- **Decision:** `HIGH_EXTERNAL_OUTLINKS` = 10 (§3).
+- **26b candidate: sitemaps that stamp lastmod with their generation time.** Shopify's
+  product sitemap gives every entry the instant it was served (§5.2). That makes lastmod
+  useless to a search engine, and 26a no longer reports it, because "future" now means
+  after the crawl ended. A 26b rule could report a document whose dated entries all share
+  one instant inside the crawl's window, once per document. It would need its own id or
+  reason and a ruleset bump.
 
 **Deferred minors from the task reviews.** They are in the SDD ledger and none blocks the
 gate. The ones with a correctness edge:
@@ -456,9 +507,9 @@ gate. The ones with a correctness edge:
   hyphen and zero-width characters measure 0.
 - Test gaps: RFC 850 and ISO `unavailable_after` forms; truncation for three link rules;
   a NULL `is_indexable` source; the `/a` vs `/a/` and redirecting-inlink hreflang rulings.
-- Stale comments: `harness.test.ts` (the "twenty-one" exemption count and several
-  derivation comments), docblock pointers in `thresholds.ts`, and blank-line runs left by
-  Task 1.
+- Stale comments: several derivation comments in `harness.test.ts` (the "twenty-one"
+  exemption count is corrected), docblock pointers in `thresholds.ts`, and blank-line
+  runs left by Task 1.
 
 **Carried from earlier gates:** the 50k memory measurement (yellow.com.mt allowlist);
 `crawl_status.pagesCrawled` reading 0 during a crawl; Shopify's blocked module showing

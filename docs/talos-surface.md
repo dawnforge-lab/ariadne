@@ -43,16 +43,21 @@ produces them without a re-crawl (§11). By family:
   `pagination.loop` (warning), `pagination.sequence-error` (info).
 - **Links** (CHECK-32, CHECK-33, CHECK-86): `links.internal-nofollow`,
   `links.only-from-non-indexable` and `links.localhost` (warning),
-  `links.non-descriptive-anchor` and `links.high-outlinks` (info). The outlink
-  limits are 1,000 distinct internal or 10 distinct external targets.
+  `links.non-descriptive-anchor` and `links.high-outlinks` (info). `links.localhost`
+  judges external links only, so a site crawled on a private address does not report
+  itself. The outlink limits are 1,000 distinct internal or 10 distinct external
+  targets.
 - **URL shape** (CHECK-30, CHECK-67), on the path of the page's own URL:
   `url.uppercase`, `url.underscores` and `url.non-ascii` (info), `url.spaces`,
   `url.multiple-slashes` and `url.repetitive-path` (warning), and
   `url.internal-search` (warning, an indexable internal search result).
 - **Sitemap entries** (CHECK-07, CHECK-08): `sitemap.over-50k-urls` (warning; the
   count is a lower bound, because a URL listed in two documents is stored once),
-  `sitemap.url-too-long` (info), `sitemap.cross-host-loc` (warning) and
-  `sitemap.lastmod-invalid` (info; `future` means dated after the crawl began).
+  `sitemap.url-too-long` (info), `sitemap.cross-host-loc` (warning; silent for a
+  document on another host that lists the crawled site's own URLs, a cross-submission)
+  and `sitemap.lastmod-invalid` (info; `future` means dated after the crawl ended, so
+  already in the future when the sitemap was read, and a value stamped while the
+  crawl ran is not judged).
   CHECK-08 is no longer metric-only, so `issues_list` with `checkId: "CHECK-08"`
   now answers rather than being refused.
 - **Pixel width** (CHECK-35, CHECK-36), beside the character rules rather than
@@ -2277,7 +2282,7 @@ severity or copy moved. Phase 25's bump to 0.19.0 was the `failed` value of
 sitemap entries, titles and descriptions), so `crawl_rules` over an existing
 crawl writes them with no re-crawl. Re-judging the Phase 25 gate crawl
 (lavishalice.com, 602 rows, `docs/gates/phase-26a.md`) left all 1,270
-findings of the older rules byte-identical, added 835 findings from ten of
+findings of the older rules byte-identical, added 635 findings from nine of
 the new ids, and changed exactly one metric row. That row is `site.health`:
 its partition counts findings, so pages moved between `urlsWithInfoOnly` and
 `urlsWithWarningOnly` as the new warnings landed. A health gauge compared across

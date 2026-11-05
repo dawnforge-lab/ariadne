@@ -219,9 +219,9 @@ of them. They are grouped here by the problem a client reads:
   problem.
 - **Links** (CHECK-32, CHECK-33, CHECK-86): `links.only-from-non-indexable`,
   `links.internal-nofollow`, `links.high-outlinks`, `links.localhost` and
-  `links.non-descriptive-anchor`. `links.localhost` is a development address
-  leaking into production and is worth a line on its own however few pages carry
-  it. `links.high-outlinks` on the external side fires above 10 targets, so a
+  `links.non-descriptive-anchor`. `links.localhost` reads external links only, and
+  a hit is a development address leaking into production. It is worth a line on its
+  own however few pages carry it. `links.high-outlinks` on the external side fires above 10 targets, so a
   policy or payment-provider page reaches it easily: weigh before reporting.
 - **URL shape** (CHECK-30, CHECK-67): `url.uppercase`, `url.underscores`,
   `url.non-ascii`, `url.spaces`, `url.multiple-slashes`, `url.repetitive-path` and
@@ -231,9 +231,11 @@ of them. They are grouped here by the problem a client reads:
   bloat problem and ranks with the duplicate findings.
 - **Sitemap entries** (CHECK-07, CHECK-08): `sitemap.over-50k-urls`,
   `sitemap.url-too-long`, `sitemap.cross-host-loc` and `sitemap.lastmod-invalid`.
-  When `sitemap.lastmod-invalid` reports `future` on every entry of a document with
-  one shared timestamp, the sitemap stamps the time it was generated. Report it in
-  those words: lastmod that always says "now" teaches search engines to ignore it.
+  `sitemap.cross-host-loc` is silent for a sitemap on another host that lists the
+  site's own URLs, which is an allowed cross-submission, so do not report one as a
+  fault. `sitemap.lastmod-invalid`'s `future` means dated after the crawl ended, so the
+  value was in the future when the sitemap was read. Report it as a lastmod no search
+  engine can trust.
 - **Served types** (CHECK-51): `resources.bad-content-type`. Rank it by what the
   file does: a stylesheet or script refused by the browser breaks the page, and an
   image sent with a wrong type usually does not.

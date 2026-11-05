@@ -552,12 +552,14 @@ every one of them. The checklist names each at its check, with its severity. By 
 - **CHECK-07 and CHECK-08, sitemap entries:** `sitemap.url-too-long`,
   `sitemap.cross-host-loc`, `sitemap.lastmod-invalid` and `sitemap.over-50k-urls`.
   CHECK-08 is no longer metric-only. `sitemap.over-50k-urls`'s count is a lower bound,
-  because a URL listed in two documents is stored once. `sitemap.lastmod-invalid`'s
-  `future` means dated after the crawl BEGAN, not after the sitemap was fetched. A
-  sitemap that stamps every entry with the moment it was generated therefore fires on
-  every entry. Read the values before you report "future dates": if they are all one
-  instant a few seconds after the crawl's `startedAt`, report a generated lastmod,
-  which is the defect the rule's fix names.
+  because a URL listed in two documents is stored once. `sitemap.cross-host-loc` stays
+  silent when a sitemap on another host lists the crawled site's own URLs, because that
+  is a cross-submission the protocol allows. `sitemap.lastmod-invalid`'s `future` means
+  dated after the crawl ENDED, so the value was already in the future when the sitemap
+  was read. A value stamped while the crawl ran is not judged, so a sitemap that stamps
+  every entry with the moment it was generated does not fire. If every lastmod in a
+  document is one instant inside the crawl's `startedAt`–`finishedAt` window, that is
+  worth a sentence in `notes`. The engine does not report it.
 - **CHECK-14 and CHECK-84, CHECK-85, transport security:** `security.http-url`,
   `security.hsts-missing`, `security.headers-missing` (its Missing Headers column
   names which) and `security.mixed-content`. All four need a site crawled over HTTPS.
@@ -588,8 +590,9 @@ every one of them. The checklist names each at its check, with its severity. By 
   `links.non-descriptive-anchor`. CHECK-33 is no longer metric-only either. The
   external limit in `links.high-outlinks` is 10 distinct targets, set from Screaming
   Frog's own boundary. A policy page with a dozen outbound references reaches it, so
-  weigh the page before you call it a defect. `links.non-descriptive-anchor` reads
-  English phrases only.
+  weigh the page before you call it a defect. `links.localhost` judges external links
+  only: a site crawled on a private address does not report its own internal links.
+  `links.non-descriptive-anchor` reads English phrases only.
 - **CHECK-35 and CHECK-36, pixel width:** `title.pixel-too-long`,
   `title.pixel-too-short`, `meta-description.pixel-too-long` and
   `meta-description.pixel-too-short`, beside the character-count rules. Where both

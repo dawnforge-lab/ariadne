@@ -3419,12 +3419,13 @@ describe("the fixture site end to end", () => {
       .filter((id) => !fired.has(id) && !exempt.has(id))
       .sort();
     // The strict form, over every kind at last: every registered rule speaks on
-    // this one crawl, save the twenty-one `SKIP_HARNESS_CLAIMS` names and
+    // this one crawl, save the twenty-two `SKIP_HARNESS_CLAIMS` names and
     // explains (the count was written as nine when the list held nine and has
     // been carried stale through four phases of markers; P17 corrected it,
     // P19-T2's near-duplicate marker made fifteen and Phase 23's
-    // `http.no-response-transient` made sixteen, and Phase 26a's four HTTPS
-    // rules and headers marker make twenty-one). A
+    // `http.no-response-transient` made sixteen, Phase 26a's four HTTPS
+    // rules and headers marker made twenty-one, and its
+    // `sitemap.over-50k-urls` makes twenty-two). A
     // new rule arrives here with no fixture and fails immediately, which is the
     // point — the alternative is a rule nobody has ever seen speak.
     expect(
