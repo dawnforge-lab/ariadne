@@ -57,6 +57,9 @@ export const crawls = pgTable("crawls", {
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   pagesCrawled: integer("pages_crawled").notNull().default(0),
   pagesTotal: integer("pages_total"),
+  // Pages the last render pass that LAUNCHED rendered. A pass that could not
+  // start (`render_launch_error`) does not write it, so an earlier pass's count
+  // — and the "a render happened" reading of ≥ 1 — stands.
   renderPassCount: integer("render_pass_count").notNull().default(0),
   // The widest per-host spacing the crawl's politeness gate has escalated to,
   // in milliseconds — `HostGate.maxSpacingMs()`, written by the crawl loop when
@@ -323,8 +326,8 @@ export const crawls = pgTable("crawls", {
   // WHY THE LAST RENDER PASS COULD NOT START (migration 0025): the CLASSIFIED
   // sentence `describeLaunchFailure` (src/crawl/render/run-render.ts) builds —
   // "the render browser could not be launched", "the render directory could not
-  // be created", or "address refused: …" for a `UrlPolicyError` — NEVER the raw
-  // error's message. Tenant safety (Talos obligation 6): resolver and transport
+  // be created", or "address refused: …" for a `UrlPolicyError` — never resolver
+  // or transport text. Tenant safety (Talos obligation 6): resolver and transport
   // text, stack traces and local paths travel only on the rethrown error, to the
   // log. A pass that launches clears it.
   //

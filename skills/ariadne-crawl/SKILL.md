@@ -268,7 +268,8 @@ What the fields mean when you are waiting:
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
 - **`renderPassCount`** — despite the name, it is **how many pages the last render
-  pass rendered**, not how many passes ran. `≥ 1` means a render pass happened; **`0`
+  pass that launched rendered**, not how many passes ran (a pass that could not start
+  leaves it unchanged). `≥ 1` means a render pass happened; **`0`
   does not mean one did not** — a pass that rendered nothing and a crawl nobody ever
   rendered both leave 0 here. `render.coverage`'s `renderPassEvidence` is the field
   that separates them, and `crawl_render`'s own `selection` block is the other place

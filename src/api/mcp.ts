@@ -1042,8 +1042,10 @@ export function createMcpServer({ db, config }: CreateMcpServerOpts): AriadneMcp
         "renderFailures above 0) are still that pass's evidence and its findings stand, " +
         "and NOT MEASURED applies only to what no pass rendered (to everything when both " +
         "counts are 0); it is neither 'rendered' nor 'no render needed'), while " +
-        "crawl_status's renderPassCount is only the LAST pass's rendered-page count — " +
-        "its 0 is also what a crawl nobody rendered reports.\n\n" +
+        "crawl_status's renderPassCount is only the rendered-page count of the last pass " +
+        "that LAUNCHED — a pass that could not start leaves it unchanged (read " +
+        "renderPassEvidence for that) — and its 0 is also what a crawl nobody rendered " +
+        "reports.\n\n" +
         "Filters:\n" +
         "  pageType   — a template cohort as this crawl typed it; '(untyped)' for " +
         "the pages it could not type\n" +

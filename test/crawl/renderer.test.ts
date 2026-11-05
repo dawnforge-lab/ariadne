@@ -1925,6 +1925,37 @@ describe("runRenderPass", () => {
       expect(value.renderLaunchError).toBe(recorded);
     });
 
+    it("keeps the last launched pass's renderPassCount when a later pass cannot start", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      // An earlier pass rendered 50 pages: that count is the "a render
+      // happened" signal the audit skill reads, and the failed launch must not
+      // erase it.
+      await db.update(crawls).set({ renderPassCount: 50 }).where(eq(crawls.id, crawlId));
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(new Error("no browser"));
+      try {
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow("no browser");
+      } finally {
+        spy.mockRestore();
+      }
+      const rows = await db
+        .select({ n: crawls.renderPassCount })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId));
+      expect(rows[0]!.n).toBe(50);
+      expect((await coverage(crawlId)).renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+    });
+
+    it("refuses a site URL that is not a URL before selecting, and records no launch error", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const before = await frontierCounts(db, crawlId);
+      await expect(
+        runRenderPass(db, crawlId, passConfig({ siteUrl: "not a url" })),
+      ).rejects.toThrow(/siteUrl is not a URL/);
+      // Nothing was selected and nothing was recorded as a launch failure.
+      expect(await frontierCounts(db, crawlId)).toEqual(before);
+      expect(await launchErrorOf(crawlId)).toBeNull();
+    });
+
     it("records a launch-time UrlPolicyError as an address refusal, with no resolver text", async () => {
       const crawlId = await newCrawl(["/csr"]);
       const refusal = new UrlPolicyError(

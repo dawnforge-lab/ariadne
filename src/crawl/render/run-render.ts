@@ -382,8 +382,10 @@ export interface RenderPassSummary {
  *  - a `UrlPolicyError` is an address refusal; its message is already bounded
  *    by the 24a redaction (`resolveApprovedAddress`);
  *  - a failed `mkdir` (`stage: "mkdir"`) is the directory;
- *  - anything else, including `HostGate.restore` throwing inside the launch,
- *    is the browser.
+ *  - anything else is the browser. The pass's own inputs cannot land here: the
+ *    site URL is parsed and the throttle record restored (`renderPacing`)
+ *    before anything is selected, so either one failing throws with nothing
+ *    pending and nothing recorded.
  */
 export function describeLaunchFailure(
   error: unknown,
@@ -422,6 +424,17 @@ export async function runRenderPass(
     throw new RangeError(
       `runRenderPass: renderConcurrency must be an integer ≥ 1, got ${concurrency}`,
     );
+  }
+  // Parsed before anything is selected, for the same reason: a site URL that
+  // is not a URL is our defect, not a launch failure, and recording it as
+  // "the render browser could not be launched" would point at the wrong cause.
+  let origin: string;
+  try {
+    origin = new URL(cfg.siteUrl).origin;
+  } catch (error) {
+    throw new TypeError(`runRenderPass: siteUrl is not a URL: ${JSON.stringify(cfg.siteUrl)}`, {
+      cause: error,
+    });
   }
 
   // STEP 1. NOBODY ELSE MAY BE WORKING THIS CRAWL. `selectRenderSet` promotes
@@ -575,7 +588,7 @@ export async function runRenderPass(
     await mkdir(htmlDir, { recursive: true });
     launchStage = "launch";
     renderer = await PageRenderer.launch({
-      origin: new URL(cfg.siteUrl).origin,
+      origin,
       htmlDir,
       userAgent: cfg.userAgent,
       perHostDelayMs: profiled.perHostDelayMs,
