@@ -150,6 +150,12 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     recheckStatusCode: null,
     recheckReason: null,
     recheckAt: null,
+    // The clean page was written by the current extraction, with headers that
+    // arrived and none worth a finding; never rendered, so no render stamp or console.
+    responseHeaders: { values: {}, truncated: [] },
+    extractionVersion: 1,
+    renderVersion: null,
+    renderConsole: null,
     ...overrides,
   };
 }

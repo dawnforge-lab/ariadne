@@ -378,7 +378,22 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `links.orphan` findings and GAIN the skip (and `structure.deep-page`
 //     gains the matching `incompleteCrawl` caveat). A pre-0023 crawl has null
 //     in the column, and the page-count test is all it is judged on, as before.
-export const RULESET_VERSION = "0.18.0";
+//
+// 0.19.0: Phase 25, evidence layer (docs/superpowers/specs/2026-11-04-phase-25-
+// evidence-layer-design.md §5). ONE BUMP FOR THE PHASE; later tasks append here.
+//
+//  8. (T4, closes the Phase 24a "T4" debt) `render.coverage` reads a third
+//     `renderPassEvidence` value, `failed`, and a new `renderLaunchError` key,
+//     when a render pass could not launch its browser. Before, the selection a
+//     failed launch left `render_pending` made the metric read `ran`. A launch
+//     failure now writes a classified, tenant-safe sentence to
+//     `crawls.render_launch_error` (migration 0025) and the rows stay
+//     `render_pending` for a later pass, which clears it on a successful
+//     launch. A crawl re-judged at 0.19.0 can therefore CHANGE `ran` to
+//     `failed` on a crawl whose last pass could not launch, and a pre-0025
+//     crawl, or one whose pass launched, reads exactly as before. The metric
+//     table gains a Render Launch Error column. No finding rule moves.
+export const RULESET_VERSION = "0.19.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

@@ -41,6 +41,7 @@ import {
   type DnsLookupFn,
   type HeaderBag,
 } from "./http.js";
+import { captureResponseHeaders, type StoredResponseHeaders } from "./response-headers.js";
 
 /**
  * The body cap, spent on **decompressed** bytes (see readCappedDecoded). It
@@ -186,6 +187,17 @@ export interface FetchResult {
    * crawl row (`crawls.platform`).
    */
   platformHint: Platform | null;
+  /**
+   * The allowlisted response headers (`captureResponseHeaders`), or null —
+   * EXACTLY when no response headers arrived, whatever the class: a connect or
+   * header timeout, a `disallowed` refusal, a `network_error` before any
+   * response. Set on every fetch that SAW a response, including a `timeout`
+   * whose deadline expired during the body and a `network_error` raised after
+   * the headers (a corrupt gzip body, a mid-body reset): those headers arrived
+   * and are real, while `statusCode` stays null there. Persisted as
+   * `pages.response_headers`.
+   */
+  responseHeaders: StoredResponseHeaders | null;
   /**
    * Why this row has no usable body or target, in plain words. Set on
    * `disallowed` (the URL or the address it resolved to), on `redirect` when
@@ -403,6 +415,7 @@ function emptyResult(
   fetchClass: FetchClass,
   responseTimeMs: number,
   disallowedReason: string | null = null,
+  responseHeaders: StoredResponseHeaders | null = null,
 ): FetchResult {
   return {
     url,
@@ -419,7 +432,25 @@ function emptyResult(
     canonicalHeader: null,
     xRobotsTag: null,
     platformHint: null,
+    responseHeaders,
     disallowedReason,
+  };
+}
+
+/**
+ * The request headers every page fetch sends — one definition, read by
+ * `fetchPage` and recorded (redacted) on the crawl row.
+ */
+export function pageRequestHeaders(userAgent: string): Record<string, string> {
+  return {
+    "user-agent": userAgent,
+    accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    // undici's `request` does not decode transport encodings (unlike
+    // `fetch`), so asking for gzip means we own the inflating — see
+    // readCappedDecoded, which is also why only gzip is offered. Worth
+    // owning: HTML compresses 4-6x, and a crawl that refuses compression
+    // is four times the bandwidth on someone else's origin (rule 9).
+    "accept-encoding": ACCEPT_ENCODING,
   };
 }
 
@@ -466,20 +497,15 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     deadline.abort();
   }, timeoutMs);
 
+  // Captured the moment response headers arrive, so the catch path can keep
+  // them when the body then fails (a deadline expiring mid-body).
+  let responseHeaders: StoredResponseHeaders | null = null;
+
   try {
     const response = await request(url, {
       dispatcher,
       method: "GET",
-      headers: {
-        "user-agent": opts.userAgent,
-        accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        // undici's `request` does not decode transport encodings (unlike
-        // `fetch`), so asking for gzip means we own the inflating — see
-        // readCappedDecoded, which is also why only gzip is offered. Worth
-        // owning: HTML compresses 4-6x, and a crawl that refuses compression
-        // is four times the bandwidth on someone else's origin (rule 9).
-        "accept-encoding": ACCEPT_ENCODING,
-      },
+      headers: pageRequestHeaders(opts.userAgent),
       // Manual redirects: a 3xx is its own row and the crawl loop enqueues the
       // target (which re-enters url-policy on the way in), so chains and loops
       // are visible in the recorded rows instead of collapsed by the client.
@@ -492,6 +518,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
 
     const responseTimeMs = Date.now() - started;
     const headers = response.headers as HeaderBag;
+    responseHeaders = captureResponseHeaders(headers);
     const statusCode = response.statusCode;
     const contentType = headerValue(headers, "content-type");
     const xRobotsTag = headerValue(headers, "x-robots-tag");
@@ -535,6 +562,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
         canonicalHeader,
         xRobotsTag,
         platformHint,
+        responseHeaders,
         disallowedReason: target.droppedReason,
       };
     }
@@ -586,6 +614,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       canonicalHeader,
       xRobotsTag,
       platformHint,
+      responseHeaders,
       // Two reasons can want this field, and they never co-occur: an
       // unsupported coding is an `ok`-turned-`unsupported_encoding`, a refused
       // Retry-After is a throttle. The coding wins if that ever changes,
@@ -606,12 +635,12 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
       return emptyResult(url, "disallowed", responseTimeMs, refusal);
     }
     if (deadlineHit || isTimeout(error)) {
-      return emptyResult(url, "timeout", responseTimeMs);
+      return emptyResult(url, "timeout", responseTimeMs, null, responseHeaders);
     }
     // Also where a body that claimed `content-encoding: gzip` and was not gzip
     // lands (zlib Z_DATA_ERROR / Z_BUF_ERROR out of readCappedDecoded): the
     // response was unreadable, which is a failed fetch and not an empty page.
-    return emptyResult(url, "network_error", responseTimeMs);
+    return emptyResult(url, "network_error", responseTimeMs, null, responseHeaders);
   } finally {
     clearTimeout(timer);
     if (ephemeral !== null) await ephemeral.destroy();

@@ -1812,6 +1812,7 @@ describe("resumeCrawl", () => {
         canonicalHeader: null,
         xRobotsTag: null,
         platformHint: null,
+        responseHeaders: null,
         disallowedReason: null,
       },
       null,
@@ -2439,4 +2440,34 @@ describe("platform profile", () => {
     },
     30_000,
   );
+});
+
+// Imported here, not at the top, so the line numbers docs/talos-surface.md cites
+// in this file stay where they are.
+const { pageRequestHeaders } = await import("../../src/crawl/fetch-page.js");
+const { engineVersion, redactRequestHeaders } = await import("../../src/crawl/versions.js");
+
+describe("crawl stamps (Phase 25)", () => {
+  it("stamps request_headers and engine_version when a crawl runs", async () => {
+    const summary = await crawl(config());
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, summary.crawlId));
+    expect(row?.requestHeaders).toEqual(
+      redactRequestHeaders(pageRequestHeaders("AriadneBot-test")),
+    );
+    expect(row?.engineVersion).toBe(engineVersion());
+  });
+
+  it("re-stamps engine_version on resume", async () => {
+    const first = await crawl(config());
+    await db
+      .update(crawls)
+      .set({ engineVersion: "stale", requestHeaders: null })
+      .where(eq(crawls.id, first.crawlId));
+    await resumeCrawl(db, first.crawlId, { config: config() });
+    const [row] = await db.select().from(crawls).where(eq(crawls.id, first.crawlId));
+    expect(row?.engineVersion).toBe(engineVersion());
+    expect(row?.requestHeaders).toEqual(
+      redactRequestHeaders(pageRequestHeaders("AriadneBot-test")),
+    );
+  });
 });

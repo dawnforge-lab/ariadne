@@ -176,6 +176,13 @@
       "when": 1792780280297,
       "tag": "0024_optimal_landau",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793797676497,
+      "tag": "0025_talented_morg",
+      "breakpoints": true
     }
   ]
 }

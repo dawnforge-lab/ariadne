@@ -11,11 +11,12 @@ produces judgement. Full design in `docs/crawl-audit-engine-spec.md`; phasing
 and provenance in `docs/crawl-audit-build-plan.md`.
 
 **Session start:** read `docs/crawl-audit-engine-spec.md` and
-`docs/crawl-audit-build-plan.md` before writing code. The active
-implementation plan is `docs/superpowers/plans/2026-08-25-phase-0-1-foundation.md`
-(Phase 0 + 1). Later phases get their own plan documents when their
-predecessor's gate is green — do not start a phase whose predecessor's gate
-has not been demonstrated.
+`docs/crawl-audit-build-plan.md` before writing code. Phases 0–24a are shipped
+(gate evidence in `docs/gates/`). The order from Phase 25 on is
+`docs/superpowers/specs/2026-11-04-roadmap-design.md`; the active phase is the
+newest plan in `docs/superpowers/plans/`. Each phase gets its own design and
+plan when its predecessor's gate is green — do not start a phase whose
+predecessor's gate has not been demonstrated.
 
 ## Relationship to Talos
 
@@ -97,4 +98,4 @@ test/fixtures/      fixture site pages (badseo content + our own)
 ## Commits
 
 Conventional, small, after each green test cycle. End commit messages with:
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

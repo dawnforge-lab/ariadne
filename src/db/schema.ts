@@ -1,10 +1,12 @@
 import { sql } from "drizzle-orm";
 import {
-  pgTable, text, integer, bigint, boolean, jsonb, timestamp, real,
+  pgTable, text, integer, smallint, bigint, boolean, jsonb, timestamp, real,
   primaryKey, index, uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
+import type { RenderConsole } from "../crawl/render/console-capture.js";
+import type { StoredResponseHeaders } from "../crawl/response-headers.js";
 
 export const crawls = pgTable("crawls", {
   id: text("id").primaryKey(),                 // e.g. crawl_<ulid>
@@ -56,6 +58,9 @@ export const crawls = pgTable("crawls", {
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   pagesCrawled: integer("pages_crawled").notNull().default(0),
   pagesTotal: integer("pages_total"),
+  // Pages the last render pass that LAUNCHED rendered. A pass that could not
+  // start (`render_launch_error`) does not write it, so an earlier pass's count
+  // — and the "a render happened" reading of ≥ 1 — stands.
   renderPassCount: integer("render_pass_count").notNull().default(0),
   // The widest per-host spacing the crawl's politeness gate has escalated to,
   // in milliseconds — `HostGate.maxSpacingMs()`, written by the crawl loop when
@@ -296,6 +301,41 @@ export const crawls = pgTable("crawls", {
   // the operator opted out (`StoredPlatformProfile`).
   platform: text("platform"),
   platformProfile: jsonb("platform_profile_jsonb").$type<StoredPlatformProfile>(),
+  // THE REQUEST HEADERS THE PAGE FETCHER SENT (migration 0025, Phase 25).
+  // `user-agent`, `accept`, `accept-encoding` and whatever later phases add; any
+  // `authorization`, `cookie` or `proxy-authorization` value is stored as
+  // "[redacted]", never verbatim. Page-fetch headers only: resource and render
+  // fetches send their own and are not recorded.
+  //
+  // STAMPED WHEN THE CRAWL RUNS, not when it is created: `execute` (src/crawl/
+  // loop.ts) writes it as each run starts, the first one and every resume, and
+  // the latest run wins.
+  //
+  // NULLABLE. Null means the crawl has not run under 0025: it was created before
+  // the migration, or it never ran at all (still queued, or cancelled before
+  // `execute`). It never means "none sent".
+  requestHeaders: jsonb("request_headers").$type<Record<string, string>>(),
+  // THE BUILD THAT RAN THIS CRAWL (migration 0025): the package version plus the
+  // git sha the process was built from. Stamped beside `request_headers`, by
+  // `execute` as each run starts — the first one and every resume, the latest
+  // wins — never at creation. Informational only: no rule reads it.
+  //
+  // NULLABLE: null means the crawl has not run under 0025 — it predates the
+  // migration, or it never ran (queued, or cancelled before `execute`). It never
+  // means "unknown build" on a crawl that was stamped.
+  engineVersion: text("engine_version"),
+  // WHY THE LAST RENDER PASS COULD NOT START (migration 0025): the CLASSIFIED
+  // sentence `describeLaunchFailure` (src/crawl/render/run-render.ts) builds —
+  // "the render browser could not be launched", "the render directory could not
+  // be created", or "address refused: …" for a `UrlPolicyError` — never resolver
+  // or transport text. Tenant safety (Talos obligation 6): resolver and transport
+  // text, stack traces and local paths travel only on the rethrown error, to the
+  // log. A pass that launches clears it.
+  //
+  // NULLABLE: null means no launch failure is on record: the last pass launched,
+  // no render pass was ever started, or the crawl predates 0025. Read it beside
+  // the render pass columns, never alone.
+  renderLaunchError: text("render_launch_error"),
 });
 
 export const pages = pgTable("pages", {
@@ -789,6 +829,59 @@ export const pages = pgTable("pages", {
   // the whole table, and it is asserted rather than assumed. A `recheck-cap`
   // row is not settled, so it carries a reason and no time.
   recheckAt: timestamp("recheck_at", { withTimezone: true }),
+  // THE ALLOWLISTED RESPONSE HEADERS OF THE FIRST OBSERVATION (migration 0025,
+  // Phase 25; src/crawl/response-headers.ts): `{ values: { name: string[] },
+  // truncated: string[] }`. Keys are lower-cased allowlisted names; each value is
+  // an array in arrival order (a repeated `link` keeps every occurrence); a value
+  // cut at 2,048 characters has its name in `truncated`, so a reader can never
+  // mistake a cut value for a whole one. Headers off the allowlist are neither
+  // stored nor counted.
+  //
+  // WRITTEN ON EVERY ROW WHOSE FETCH RECEIVED RESPONSE HEADERS: redirects, 4xx and
+  // 5xx, a `timeout` whose deadline expired DURING the body and a `network_error`
+  // raised after the headers (theirs arrived and are real). NEVER REWRITTEN by the recheck pass: the first
+  // observation's headers are the record.
+  //
+  // NULLABLE, AND NULL EXACTLY WHEN NO RESPONSE HEADERS ARRIVED — the fetch class
+  // does not decide it. A connect or header timeout, a `disallowed` refusal, a
+  // robots-blocked row and a `network_error` before any response (a reset
+  // connection) are null; a `network_error` AFTER the headers arrived (a corrupt
+  // gzip body, a mid-body reset) keeps them, as a body-time `timeout` does.
+  // Null also on a row that predates 0025; `extraction_version` tells the two
+  // apart (null there = before 0025). A non-null object with an empty `values`
+  // means headers arrived and none were on the allowlist.
+  responseHeaders: jsonb("response_headers").$type<StoredResponseHeaders>(),
+  // WHICH EXTRACTION WROTE THIS ROW (migration 0025; `EXTRACTION_VERSION`,
+  // src/crawl/versions.ts). Stamped by the page writer on every row it writes,
+  // robots-blocked rows included; any change to what the fetch layer or analyzer
+  // extracts bumps the constant. Per page, not per crawl: a resumed crawl can hold
+  // rows from two extractions.
+  //
+  // NULLABLE: null means "written before Phase 25" and nothing else. A rule that
+  // reads a fact introduced at version N refuses rows below N (null included)
+  // loudly rather than reading a missing fact as an absent one
+  // (`extractionCoverage`, src/rules/helpers.ts).
+  extractionVersion: smallint("extraction_version"),
+  // WHICH RENDER CAPTURE WROTE THE RENDERED COLUMNS (migration 0025;
+  // `RENDER_CAPTURE_VERSION`, src/crawl/versions.ts). Stamped by the render writer
+  // only, so it is independent of `extraction_version`: re-rendering a pre-25 crawl
+  // must not claim its headers were extracted by the new code.
+  //
+  // NULLABLE: null means the row was never rendered, or was rendered before this
+  // column existed.
+  renderVersion: smallint("render_version"),
+  // THE BROWSER CONSOLE AND PAGE ERRORS OF THE RENDER (migration 0025). Written by
+  // the render writer; shape fixed by the render capture.
+  //
+  // NULLABLE: null means the console was not captured: the row was never rendered,
+  // was rendered before this column existed (`render_version` null), or its render
+  // was refused before a browser page opened (`render_version` set). Test the
+  // column itself, never `render_error`: a refusal BEFORE the page opened and one
+  // DURING a navigation both read `policy refusal: …`, and the second keeps what
+  // the page reported before it. It never means "the console was clean"; a clean
+  // console is a non-null capture with zero counts. Shape: `RenderConsole`
+  // (src/crawl/render/console-capture.ts).
+  renderConsole: jsonb("render_console").$type<RenderConsole>(),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),

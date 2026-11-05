@@ -297,7 +297,13 @@ answered from, and its verdict is the confidence interval around all of them.
      coverage — `renderPassEvidence` says whether a pass ran at all, and the
      selection numbers say how the pages were chosen and how many seats the budget
      bought. On `renderPassEvidence: "none"` those numbers are what a pass WOULD
-     choose, not what one chose. Every check that reads rendered evidence (CHECK-01, CHECK-02, CHECK-34,
+     choose, not what one chose. On `"failed"` the LAST render pass could not
+     start: `renderLaunchError` says why, the pages it selected are still pending,
+     and a later render pass retries them. Rows an earlier pass rendered
+     (`pagesRendered` or `renderFailures` above 0) are still that pass's evidence
+     and its findings stand; NOT MEASURED applies only to what no pass rendered,
+     and to the whole check only when both counts are 0. `failed` is not
+     "rendered" and not "no render needed". Every check that reads rendered evidence (CHECK-01, CHECK-02, CHECK-34,
      the JS half of CHECK-10) is answered over that sample and no further.
   5. **How much of the site's own weight was measured?** `crawl_status`'s
      `resources` block: `seen` is the distinct files the served HTML points at,
@@ -457,7 +463,13 @@ checks are SKIP with `notes: "no render pass"`, not PASS.
      `renderPassEvidence` first**: `none` means no render pass has left a trace on
      this crawl, so the selection numbers beside it describe a pass that WOULD run
      and CHECK-01 is NOT MEASURED rather than clean — say that instead of quoting
-     them. Then **read `selectionMode`** — `auto` means the engine sampled and the budget
+     them. `failed` means the LAST render pass could not start: report
+     `renderLaunchError` and note its selected pages are still pending for a later
+     pass. Rows an earlier pass rendered (`pagesRendered` or `renderFailures`
+     above 0) remain that pass's evidence and the CHECK-01 findings on them
+     stand; only what no pass rendered is NOT MEASURED — and when both counts are
+     0, CHECK-01 as a whole is NOT MEASURED. Never read `failed` as "rendered" or
+     as "no render needed". Then **read `selectionMode`** — `auto` means the engine sampled and the budget
      numbers describe how; `explicit` means an auditor named the pages, and
      `selectionBudget`, `selectionSuspects`, `selectionSampled` and
      `selectionTruncated` are null rather than zero, because no automatic decision

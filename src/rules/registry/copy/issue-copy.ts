@@ -220,9 +220,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "render.coverage": {
     title: "Rendering: Browser render coverage",
     explanation:
-      "How much of the crawl was rendered in a browser: pages crawled, whether a render run happened, the selection mode (automatic or explicit), the render budget, how many pages looked incomplete from their HTML, how many were sampled site-wide, how many were selected, whether the selection was truncated, and how many pages rendered or failed. In explicit mode the budget, suspect, sample and truncation numbers are empty; when no render run happened, the selection numbers show what a run would choose.",
+      "How much of the crawl was rendered in a browser: pages crawled, whether a render run happened or the last one could not start (with the reason in Render Launch Error), the selection mode (automatic or explicit), the render budget, how many pages looked incomplete from their HTML, how many were sampled site-wide, how many were selected, whether the selection was truncated, and how many pages rendered or failed. In explicit mode the budget, suspect, sample and truncation numbers are empty; when no render run happened, the selection numbers show what a run would choose.",
     howToFix:
-      "Read this before quoting any rendering finding. If no run happened, the rendering findings are silent because nothing was measured. Rendered against crawled is the sample size; a truncated selection means the budget, not the site, decided where the run stopped.",
+      "Read this before quoting any rendering finding. If no run happened, the rendering findings are silent because nothing was measured. If the last run could not start, the pages it selected are still waiting to be rendered: pages an earlier run rendered still count, and everything else is unmeasured until a run succeeds. Rendered against crawled is the sample size; a truncated selection means the budget, not the site, decided where the run stopped.",
   },
   "robots.blocks-internal-urls": {
     title: "Robots.txt: Internal URLs blocked by robots.txt",

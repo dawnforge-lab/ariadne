@@ -156,7 +156,13 @@ give you no clear templates at all.
 trace on this crawl at all — a rendered page, a failed render, a named list, a
 stamped count, a page still waiting for a browser. On `none` everything after it
 is the selection a pass WOULD make, so the JavaScript checks are NOT MEASURED and
-the numbers are a quote for the work rather than a record of it. **Then the
+the numbers are a quote for the work rather than a record of it. On `failed` the LAST
+render pass could not start: `renderLaunchError` carries the reason, the pages it
+selected are still pending and a later `crawl_render` retries them. Rows an earlier
+pass rendered (`pagesRendered` or `renderFailures` above 0) are still that pass's
+evidence and its findings stand; NOT MEASURED applies only to what no pass rendered,
+and the JavaScript checks are wholly NOT MEASURED only when both counts are 0.
+`failed` is never "rendered" and never "no render needed". **Then the
 mode.** `selectionMode` says which decision chose the pages. On an `explicit` pass
 `selectionBudget`, `selectionSuspects`, `selectionSampled` and `selectionTruncated`
 are **null**, not zero: no automatic decision was taken, so quoting them as "no

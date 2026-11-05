@@ -268,11 +268,17 @@ What the fields mean when you are waiting:
 - **`rulesetVersion`** — stamped when the crawl was ACCEPTED. It does not tell you
   whether the rules have run.
 - **`renderPassCount`** — despite the name, it is **how many pages the last render
-  pass rendered**, not how many passes ran. `≥ 1` means a render pass happened; **`0`
+  pass that launched rendered**, not how many passes ran (a pass that could not start
+  leaves it unchanged). `≥ 1` means a render pass happened; **`0`
   does not mean one did not** — a pass that rendered nothing and a crawl nobody ever
   rendered both leave 0 here. `render.coverage`'s `renderPassEvidence` is the field
   that separates them, and `crawl_render`'s own `selection` block is the other place
-  the real coverage lives. The name is on the backlog.
+  the real coverage lives. `renderPassEvidence: "failed"` means the LAST render pass
+  could not start: `renderLaunchError` says why, the pages it selected stay pending,
+  and calling `crawl_render` again retries them. Pages an earlier pass rendered
+  (`pagesRendered` or `renderFailures` above 0) are still that pass's evidence and its
+  findings stand; only what no pass rendered is NOT MEASURED, and everything is when
+  both counts are 0. Never read `failed` as rendered or as no render needed. The name is on the backlog.
 - **`blockedPages`** — pages a WAF or rate limiter answered instead of the site
   (401, 403, 429, or a challenge page). Watch it across polls: the number matters far
   less than whether it is still rising. See the reaction loop below.

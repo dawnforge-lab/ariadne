@@ -26,12 +26,12 @@
  * pinned as constants, once, rather than paid for in every test.
  */
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
@@ -46,6 +46,7 @@ import {
   leaseRenderUrls,
 } from "../../src/crawl/frontier.js";
 import { selectRenderSet } from "../../src/crawl/render/select.js";
+import { RENDER_PASS_EVIDENCE, renderMetrics } from "../../src/rules/metric/render-metrics.js";
 import {
   PageRenderer,
   RENDERER_DEFAULTS,
@@ -56,6 +57,7 @@ import {
   writeRenderResult,
   type RenderResult,
 } from "../../src/crawl/render/renderer.js";
+import type { RenderConsole } from "../../src/crawl/render/console-capture.js";
 import { analyzeHtml } from "../../src/crawl/parse/page-analyzer.js";
 import { isSameOrigin } from "../../src/crawl/parse/url-utils.js";
 import { UrlPolicyError } from "../../src/crawl/url-policy.js";
@@ -354,6 +356,87 @@ function oneScriptHtml(): string {
 <script src="/one.js"></script></head><body><p>one script</p></body></html>`;
 }
 
+/** The function `/widget.js` on the other origin defines — never, because it is blocked. */
+const WIDGET_FN = "widgetInit";
+
+/**
+ * `/console-errors` (Phase 25): everything the render evidence records, once each.
+ *
+ *  - a third-party script (`/widget.js` on the other origin) the renderer aborts,
+ *    and an inline call to the function it would have defined: the
+ *    `widgetInit is not defined` that OUR blocking caused, which must be recorded
+ *    as the page's exception while the abort stays a count, never a failure;
+ *  - a same-origin SCRIPT that 404s (`/missing.js`): an image or font would be
+ *    aborted as paint-only before it was sent, so only a script is a request the
+ *    site can fail;
+ *  - a `console.error`, a `console.warn` and a `console.log` (not recorded: the
+ *    levels kept are error and warning);
+ *  - an uncaught `throw`.
+ */
+function consoleErrorsHtml(otherOrigin: string): string {
+  return `<!doctype html><html lang="en"><head><title>Console errors</title>
+<script src="${otherOrigin}/widget.js"></script>
+<script src="/missing.js"></script></head>
+<body><p>console errors</p>
+<script>console.error("site says no"); console.warn("site warns"); console.log("site chats");</script>
+<script>${WIDGET_FN}();</script>
+<script>throw new Error("site threw on purpose");</script>
+</body></html>`;
+}
+
+/** `/console-clean`: a page with script and nothing wrong. `console.log` is not a level kept. */
+function consoleCleanHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Clean</title>
+<script src="/one.js"></script></head>
+<body><p>clean page</p><script>console.log("all is well");</script></body></html>`;
+}
+
+/**
+ * `/console-hostile`: console text and an exception carrying a NUL and a lone
+ * surrogate, both of which Postgres `jsonb` rejects. The escapes are the
+ * page's JavaScript's, so the browser itself builds the hostile strings.
+ */
+function consoleHostileHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Hostile</title></head>
+<body><p>hostile console</p>
+<script>console.error("nul:\\u0000 lone:\\uD800 end");</script>
+<script>throw new Error("thrown nul:\\u0000 lone:\\uDC00");</script>
+</body></html>`;
+}
+
+/**
+ * `/console-assert`: a failed `console.assert`, which the protocol reports as
+ * its own type (`assert`), not as `error` — and a passing one, which logs nothing.
+ */
+function consoleAssertHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Assert</title></head>
+<body><p>assert console</p>
+<script>console.assert(1 === 2, "site asserts"); console.assert(true, "never logged");</script>
+</body></html>`;
+}
+
+/**
+ * `/gone-with-script`: a 404 DOCUMENT that still loads a script the site does
+ * not have. The script's 404 is a failed request; the document's is the page
+ * row's own status and must never be recorded beside it.
+ */
+function goneWithScriptHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Gone</title>
+<script src="/missing.js"></script></head>
+<body><p>this page is gone</p></body></html>`;
+}
+
+/**
+ * `/reset-script`: a same-origin script whose connection the server destroys
+ * before any response, so the browser fails it at the network level
+ * (`Network.loadingFailed` with a net error) rather than with a status.
+ */
+function resetScriptHtml(): string {
+  return `<!doctype html><html lang="en"><head><title>Reset</title>
+<script src="/reset.js"></script></head>
+<body><p>reset script</p></body></html>`;
+}
+
 interface Site {
   base: string;
   /** Arrival time (ms) of every request, in order, and the cookie it carried. */
@@ -379,7 +462,35 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/malformed") return html(malformedHtml());
     if (path === "/js-redirect") return html(jsRedirectHtml(`${siteBase(server)}/csr`));
     if (path === "/offsite-redirect") return html(jsRedirectHtml(`${otherOrigin()}/elsewhere`));
+    if (path === "/js-redirect-missing") {
+      return html(jsRedirectHtml(`${siteBase(server)}/no-such-page`));
+    }
     if (path === "/third-party") return html(thirdPartyHtml(otherOrigin()));
+    if (path === "/console-errors") return html(consoleErrorsHtml(otherOrigin()));
+    if (path === "/console-clean") return html(consoleCleanHtml());
+    if (path === "/console-hostile") return html(consoleHostileHtml());
+    if (path === "/console-assert") return html(consoleAssertHtml());
+    if (path === "/gone-with-script") {
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(goneWithScriptHtml());
+      return;
+    }
+    if (path === "/reset-script") return html(resetScriptHtml());
+    if (path === "/reset.js") {
+      // No response at all: the socket goes before a status line is written.
+      req.socket.destroy();
+      return;
+    }
+    if (path === "/console-hang") {
+      // A console error, then silence: the error is logged while the document
+      // is still arriving, and the navigation never reaches domcontentloaded.
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.write(
+        "<!doctype html><html><head><title>Console hang</title>" +
+          '<script>console.error("logged before the hang");</script>',
+      );
+      return;
+    }
     if (path.startsWith("/static/")) return html(staticHtml(path.slice("/static/".length)));
     if (path === "/paced") return html(pacedHtml());
     if (path === "/limited") return html(limitedHtml());
@@ -490,7 +601,15 @@ function siteBase(server: Server): string {
 async function startThirdParty(): Promise<Site> {
   const hits: Array<{ path: string; at: number }> = [];
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    hits.push({ path: (req.url ?? "/").split("?")[0] ?? "/", at: Date.now() });
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    hits.push({ path, at: Date.now() });
+    if (path === "/widget.js") {
+      // Served, so a page whose call to it fails proves the script was never
+      // fetched: the renderer blocked it, the server did not refuse it.
+      res.writeHead(200, { "content-type": "text/javascript" });
+      res.end(`window.${WIDGET_FN} = function () {};`);
+      return;
+    }
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("hello from somewhere else");
   });
@@ -774,6 +893,161 @@ describe("PageRenderer", () => {
     expect(result.error).toMatch(/^policy refusal: /);
     expect(result.error).toContain("169.254.169.254");
     expect(result.wordCount).toBeNull();
+    // No page was opened, so nothing was looked at: null, not zero counts.
+    expect(result.console).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 25: render evidence — console, exceptions, failed requests.
+  // -------------------------------------------------------------------------
+
+  it("records a thrown error, a console.error and a missing same-origin script", async () => {
+    const result = await renderer.render(`${site.base}/console-errors`);
+
+    expect(result.rendered).toBe(true);
+    const evidence = result.console!;
+    expect(evidence).not.toBeNull();
+    expect(evidence.exceptionsTotal).toBeGreaterThanOrEqual(1);
+    expect(evidence.exceptions.some((e) => e.text.includes("site threw on purpose"))).toBe(true);
+    expect(evidence.console).toContainEqual({ level: "error", text: "site says no", cut: false });
+    expect(evidence.console).toContainEqual({ level: "warning", text: "site warns", cut: false });
+    // `console.log` is not a level kept.
+    expect(evidence.console.some((m) => m.text.includes("site chats"))).toBe(false);
+    expect(evidence.failedRequests).toContainEqual({
+      url: `${site.base}/missing.js`,
+      status: 404,
+      reason: "http 404",
+      cut: false,
+    });
+    // The browser's own "Failed to load resource" lines are not the site's
+    // console. (That the DOCUMENT is never a failed request is pinned on a 404
+    // document below: this one answered 200, so it could not have been.)
+    expect(evidence.console.some((m) => m.text.includes("Failed to load resource"))).toBe(false);
+    // Every total counts what was seen, and every entry kept is within it.
+    expect(evidence.consoleTotal).toBe(evidence.console.length);
+    expect(evidence.failedRequestsTotal).toBe(1);
+  });
+
+  it("records a failed console.assert at level error", async () => {
+    const result = await renderer.render(`${site.base}/console-assert`);
+
+    expect(result.rendered).toBe(true);
+    // The protocol's type for a failed assertion is `assert`; it is an error
+    // the page reported, and the passing assertion logged nothing at all.
+    expect(result.console!.console).toEqual([
+      { level: "error", text: "site asserts", cut: false },
+    ]);
+    expect(result.console!.consoleTotal).toBe(1);
+  });
+
+  it("never records the top-level document as a failed request, even when it is a 404", async () => {
+    const result = await renderer.render(`${site.base}/gone-with-script`);
+
+    // A 404 document is still a document the browser renders.
+    expect(result.rendered).toBe(true);
+    // The script's 404 is the page's failed request, so capture was running;
+    // the document's own 404 is the row's status and is not listed beside it.
+    expect(result.console!.failedRequests).toEqual([
+      { url: `${site.base}/missing.js`, status: 404, reason: "http 404", cut: false },
+    ]);
+    expect(result.console!.failedRequestsTotal).toBe(1);
+  });
+
+  it("records a JS redirect the page made to a 404 as a failed request", async () => {
+    const result = await renderer.render(`${site.base}/js-redirect-missing`);
+
+    expect(result.redirectUrl).toBe(`${site.base}/no-such-page`);
+    // The navigated-to document answered 200 and is on the row; the page's
+    // own navigation answered 404 and is stored nowhere else.
+    expect(result.console!.failedRequests).toEqual([
+      { url: `${site.base}/no-such-page`, status: 404, reason: "http 404", cut: false },
+    ]);
+    expect(result.console!.failedRequestsTotal).toBe(1);
+  });
+
+  it("records a request the network failed with Chromium's net error and no status", async () => {
+    const result = await renderer.render(`${site.base}/reset-script`);
+
+    expect(result.rendered).toBe(true);
+    const failed = result.console!.failedRequests;
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toEqual({
+      url: `${site.base}/reset.js`,
+      status: null,
+      reason: "net::ERR_EMPTY_RESPONSE",
+      cut: false,
+    });
+    // Not one of OUR aborts: those are counts, never failed requests.
+    expect(failed[0]!.reason).not.toBe("net::ERR_BLOCKED_BY_CLIENT");
+    expect(failed[0]!.reason).not.toBe("net::ERR_ABORTED");
+    expect(result.console!.blockedByRenderer).toEqual({ thirdParty: 0, sameOriginAssets: 0 });
+  });
+
+  it("a blocked third-party script is a count, not a failure", async () => {
+    const before = third.hits.length;
+
+    const result = await renderer.render(`${site.base}/console-errors`);
+
+    // The other origin was never asked: the call below failed because WE
+    // blocked its script.
+    expect(third.hits.length).toBe(before);
+    const evidence = result.console!;
+    expect(evidence.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
+    expect(evidence.blockedByRenderer).toEqual({
+      thirdParty: result.blockedRequests,
+      sameOriginAssets: result.skippedPaintRequests,
+    });
+    expect(evidence.failedRequests.some((f) => f.url.startsWith(third.base))).toBe(false);
+    // The error our blocking caused is recorded as the page's — telling it
+    // apart is a later rule's job, which `blockedByRenderer` is kept for.
+    expect(evidence.exceptions.some((e) => e.text.includes(`${WIDGET_FN} is not defined`))).toBe(true);
+    // Our abort is not a console line either.
+    expect(evidence.console.some((m) => m.text.includes("ERR_BLOCKED_BY_CLIENT"))).toBe(false);
+  });
+
+  it("a clean page has zero counts", async () => {
+    const result = await renderer.render(`${site.base}/console-clean`);
+
+    expect(result.rendered).toBe(true);
+    // Looked, found nothing: a fact, not a null.
+    expect(result.console).toEqual({
+      console: [],
+      consoleTotal: 0,
+      exceptions: [],
+      exceptionsTotal: 0,
+      failedRequests: [],
+      failedRequestsTotal: 0,
+      blockedByRenderer: { thirdParty: 0, sameOriginAssets: 0 },
+    });
+  });
+
+  it("keeps what it captured when the render then fails", async () => {
+    // Its own browser at the short navigation timeout, for the reason the
+    // `/hang` test below gives.
+    const hangRenderer = await PageRenderer.launch({
+      origin: site.base,
+      htmlDir,
+      userAgent: "AriadneBot/0.1 (render test)",
+      perHostDelayMs: 0,
+      navigationTimeoutMs: NAV_TIMEOUT_MS,
+      settleMs: SETTLE_MS,
+      allowPrivate: true,
+    });
+    try {
+      const result = await hangRenderer.render(`${site.base}/console-hang`);
+
+      expect(result.rendered).toBe(false);
+      expect(result.error).toMatch(/^timeout under pacing /);
+      expect(result.console).not.toBeNull();
+      expect(result.console!.consoleTotal).toBeGreaterThanOrEqual(1);
+      expect(result.console!.console).toContainEqual({
+        level: "error",
+        text: "logged before the hang",
+        cut: false,
+      });
+    } finally {
+      await hangRenderer.close();
+    }
   });
 
   it("classifies a navigation that never finishes as a timeout", async () => {
@@ -830,6 +1104,11 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
   let htmlDir: string;
   /** Timer and loopback noise allowed on a server-side gap (the brief's 20 ms). */
   const toleranceMs = 20;
+  /**
+   * Clock slack on a release-time claim: `Date.now()` is read in the gate's
+   * `acquire` and again at the release, a millisecond tick can fall between.
+   */
+  const RELEASE_CLOCK_MS = 5;
 
   beforeAll(async () => {
     third = await startThirdParty();
@@ -857,40 +1136,59 @@ describe("PageRenderer under the crawl's pacing (Phase 24a)", () => {
 
   it("starts every same-origin request at least one spacing after the last", async () => {
     // Review Focus 5. The preload scanner asks for all six scripts the moment
-    // it sees them; the gate is what spaces them. Measured at the SERVER.
+    // it sees them; the gate is what spaces them.
     const spacingMs = 300;
-    const renderer = await launch({ perHostDelayMs: spacingMs });
+    /** Every release the renderer made, timed on the gate's own clock. */
+    const releases: Array<{ url: string; at: number }> = [];
+    const renderer = await launch({
+      perHostDelayMs: spacingMs,
+      testFaults: { onRelease: (url, at) => releases.push({ url, at }) },
+    });
     try {
       // WARM-UP (see the configured-delay test in the pass suite): the
       // browser's first navigation is cold and arrives late, which would
       // SHORTEN the gap after it by our own start-up cost.
       await renderer.render(`${site.base}/static/warm`);
       const before = site.hits.length;
+      releases.length = 0;
 
       const result = await renderer.render(`${site.base}/paced`);
 
       expect(result.error).toBeNull();
       expect(result.rendered).toBe(true);
-      const arrivals = site.hits.slice(before).filter((h) => h.path.startsWith("/paced"));
-      expect(arrivals.map((h) => h.path)).toEqual([
+      const expectedPaths = [
         "/paced",
         ...Array.from({ length: PACED_SCRIPTS }, (_, i) => `/paced/${i + 1}.js`),
-      ]);
-      // THE TOLERANCE, measured rather than assumed (fix round 3). The gate
-      // spaces the RELEASES exactly; what the server logs is each release plus
-      // its own trip through Chromium's network stack, and that trip varies.
-      // Over 9 recorded runs the gaps were 300 ± 3 except the first asset after
-      // the document, which sometimes arrives ~25 ms late (it is the one that
-      // needs a second connection) — making the gap after it look ~25 ms
-      // short (276-283 seen) while the gap before it is as much too long. So:
-      // the SPAN over all seven arrivals must be at least six spacings within
-      // the brief's 20 ms (no burst can hide in it), and each single gap within
-      // 30 ms (the one late arrival's mirror image).
+      ];
+      // THE RELEASES, measured where the gate imposes them. A server-side gap
+      // also carries each request's own trip through Chromium's network stack,
+      // and one late arrival shortens the gap after it (263-267 ms seen under a
+      // parallel suite) though the releases were spaced correctly.
+      //
+      // WHAT THE GATE GUARANTEES is a SLOT per request, `spacing` after the
+      // previous slot, and a release never before its slot. It does not
+      // guarantee a full spacing between two RELEASES: a release whose timer
+      // fires late under load shortens the gap after it by that lateness while
+      // the next release still lands on its own slot (measured beside a
+      // parallel full suite: 293 and 280 ms gaps at a 300 ms spacing, 2 runs in
+      // 40). So the claim is the slot claim, made on release times: the
+      // document is admitted at once (the warm-up's 500 ms settle is longer
+      // than the spacing, so it waits on no timer and its release IS its slot),
+      // and release i is at least i spacings after it. Timer lateness only
+      // ever makes a release later, so this needs no load allowance; a burst —
+      // two releases on one slot — still fails it.
+      const released = releases.filter((r) => new URL(r.url).pathname.startsWith("/paced"));
+      expect(released.map((r) => new URL(r.url).pathname)).toEqual(expectedPaths);
+      for (let i = 1; i < released.length; i += 1) {
+        expect(released[i]!.at - released[0]!.at).toBeGreaterThanOrEqual(i * spacingMs - RELEASE_CLOCK_MS);
+      }
+      // AT THE SERVER: the same requests in the same order, and the SPAN over
+      // all seven arrivals at least six spacings within the brief's 20 ms — no
+      // burst can hide in it, whatever the network stack did to one gap.
+      const arrivals = site.hits.slice(before).filter((h) => h.path.startsWith("/paced"));
+      expect(arrivals.map((h) => h.path)).toEqual(expectedPaths);
       const span = arrivals[arrivals.length - 1]!.at - arrivals[0]!.at;
       expect(span).toBeGreaterThanOrEqual((arrivals.length - 1) * spacingMs - toleranceMs);
-      for (let i = 1; i < arrivals.length; i += 1) {
-        expect(arrivals[i]!.at - arrivals[i - 1]!.at).toBeGreaterThanOrEqual(spacingMs - 30);
-      }
       // The document and six scripts, each through the gate; nothing cached.
       expect(result.pacedRequests).toBe(1 + PACED_SCRIPTS);
       expect(result.cachedResponses).toBe(0);
@@ -1593,6 +1891,160 @@ describe("runRenderPass", () => {
     expect(summary.rendered).toBe(2);
   });
 
+  describe("a pass that cannot launch (Phase 25 T4)", () => {
+    async function launchErrorOf(crawlId: string): Promise<string | null> {
+      const rows = await db
+        .select({ e: crawls.renderLaunchError })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId));
+      return rows[0]!.e;
+    }
+
+    async function coverage(crawlId: string): Promise<Record<string, unknown>> {
+      const rule = renderMetrics.find((r) => r.id === "render.coverage")!;
+      const rows = await rule.run(db, crawlId);
+      return rows[0]!.value as Record<string, unknown>;
+    }
+
+    it("leaves rows pending, records why, and coverage says failed", async () => {
+      const crawlId = await newCrawl(["/csr", "/js-redirect"]);
+      const raw = new Error("browserType.launch: /home/tenant/.cache/ms-playwright missing");
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(raw);
+      try {
+        // The original error is rethrown unchanged.
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toBe(raw);
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await frontierCounts(db, crawlId)).renderPending).toBe(2);
+      const recorded = await launchErrorOf(crawlId);
+      expect(recorded).toBe("the render browser could not be launched");
+      expect(recorded).not.toContain("/home/tenant");
+      const value = await coverage(crawlId);
+      expect(value.renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+      expect(value.renderLaunchError).toBe(recorded);
+    });
+
+    it("keeps the last launched pass's renderPassCount when a later pass cannot start", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      // An earlier pass rendered 50 pages: that count is the "a render
+      // happened" signal the audit skill reads, and the failed launch must not
+      // erase it.
+      await db.update(crawls).set({ renderPassCount: 50 }).where(eq(crawls.id, crawlId));
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(new Error("no browser"));
+      try {
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow("no browser");
+      } finally {
+        spy.mockRestore();
+      }
+      const rows = await db
+        .select({ n: crawls.renderPassCount })
+        .from(crawls)
+        .where(eq(crawls.id, crawlId));
+      expect(rows[0]!.n).toBe(50);
+      expect((await coverage(crawlId)).renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+    });
+
+    it("refuses a site URL that is not a URL before selecting, and records no launch error", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const before = await frontierCounts(db, crawlId);
+      await expect(
+        runRenderPass(db, crawlId, passConfig({ siteUrl: "not a url" })),
+      ).rejects.toThrow(/siteUrl is not a URL/);
+      // Nothing was selected and nothing was recorded as a launch failure.
+      expect(await frontierCounts(db, crawlId)).toEqual(before);
+      expect(await launchErrorOf(crawlId)).toBeNull();
+    });
+
+    it("records a launch-time UrlPolicyError as an address refusal, with no resolver text", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const refusal = new UrlPolicyError(
+        "CRAWL_TARGET_BLOCKED",
+        "host resolves to a private address",
+        { cause: new Error("getaddrinfo ENOTFOUND resolver.internal.tenant.example") },
+      );
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(refusal);
+      try {
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toBe(refusal);
+      } finally {
+        spy.mockRestore();
+      }
+      // The selection stands: the row the refused pass chose is still waiting
+      // to be rendered, exactly as after a browser that would not launch.
+      expect((await frontierCounts(db, crawlId)).renderPending).toBe(1);
+      const recorded = await launchErrorOf(crawlId);
+      expect(recorded).toBe(
+        "address refused: host resolves to a private address (CRAWL_TARGET_BLOCKED)",
+      );
+      expect(recorded).not.toContain("getaddrinfo");
+      expect(recorded).not.toContain("tenant.example");
+      // And the metric reads the same column: `failed`, with the reason beside it.
+      const value = await coverage(crawlId);
+      expect(value.renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+      expect(value.renderLaunchError).toBe(recorded);
+    });
+
+    it("records an uncreatable render directory without the path", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      // A directory beneath a regular file cannot be created.
+      const file = join(htmlRoot, `not-a-dir-${randomUUID()}`);
+      await writeFile(file, "x");
+      await expect(
+        runRenderPass(db, crawlId, passConfig({ renderHtmlDir: file })),
+      ).rejects.toThrow();
+      const recorded = await launchErrorOf(crawlId);
+      expect(recorded).toBe("the render directory could not be created");
+      expect((await coverage(crawlId)).renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.failed);
+    });
+
+    it("keeps the original launch error when recording it fails too", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const raw = new Error("no browser");
+      const spy = vi.spyOn(PageRenderer, "launch").mockRejectedValueOnce(raw);
+      const failing = {
+        update: () => {
+          throw new Error("db down");
+        },
+      } as unknown as Db;
+      // selection runs on the real db inside a transaction, so wrap only the
+      // post-selection update: proxy `update`, delegate everything else.
+      const proxy = new Proxy(db, {
+        get: (target, prop, receiver) =>
+          prop === "update" ? failing.update : Reflect.get(target, prop, receiver),
+      });
+      try {
+        const err = await runRenderPass(proxy, crawlId, passConfig()).then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(err).toBeInstanceOf(AggregateError);
+        expect((err as AggregateError).errors[0]).toBe(raw);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a later pass that launches clears it", async () => {
+      const crawlId = await newCrawl(["/csr"]);
+      const spy = vi
+        .spyOn(PageRenderer, "launch")
+        .mockRejectedValueOnce(new Error("no browser"));
+      try {
+        await expect(runRenderPass(db, crawlId, passConfig())).rejects.toThrow("no browser");
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await launchErrorOf(crawlId)).not.toBeNull();
+
+      const summary = await runRenderPass(db, crawlId, passConfig());
+      expect(summary.rendered).toBe(1);
+      expect(await launchErrorOf(crawlId)).toBeNull();
+      const value = await coverage(crawlId);
+      expect(value.renderPassEvidence).toBe(RENDER_PASS_EVIDENCE.ran);
+      expect(value.renderLaunchError).toBeNull();
+    });
+  });
+
   it("refuses to run while the crawl row still says running", async () => {
     const crawlId = await newCrawl(["/csr"]);
     // No lease outstanding — a live crawl between batches, or one that died
@@ -2069,8 +2521,97 @@ describe("runRenderPass", () => {
       pacedRequests: 0,
       cachedResponses: 0,
       unpacedNetworkRequests: 0,
+      console: null,
     };
 
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 25: render_console and render_version on the page row.
+  // -------------------------------------------------------------------------
+
+  it("writes render_console and render_version 1", async () => {
+    const crawlId = await newCrawl(["/console-errors", "/console-clean"]);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.failures).toBe(0);
+    const errors = await pageRow(crawlId, "/console-errors");
+    expect(errors.renderVersion).toBe(1);
+    const stored = errors.renderConsole as RenderConsole;
+    expect(stored.exceptionsTotal).toBeGreaterThanOrEqual(1);
+    expect(stored.console).toContainEqual({ level: "error", text: "site says no", cut: false });
+    expect(stored.failedRequests).toContainEqual({
+      url: `${site.base}/missing.js`,
+      status: 404,
+      reason: "http 404",
+      cut: false,
+    });
+    expect(stored.blockedByRenderer.thirdParty).toBeGreaterThanOrEqual(1);
+
+    const clean = await pageRow(crawlId, "/console-clean");
+    expect(clean.renderVersion).toBe(1);
+    expect(clean.renderConsole).toEqual({
+      console: [],
+      consoleTotal: 0,
+      exceptions: [],
+      exceptionsTotal: 0,
+      failedRequests: [],
+      failedRequestsTotal: 0,
+      blockedByRenderer: { thirdParty: 0, sameOriginAssets: 0 },
+    });
+  });
+
+  it("stores a page that logs a NUL and a lone surrogate without error", async () => {
+    // Postgres jsonb rejects both; unsanitised, this one page would make the
+    // writer throw and stop the whole pass.
+    const crawlId = await newCrawl(["/console-hostile"]);
+
+    const summary = await runRenderPass(db, crawlId, passConfig());
+
+    expect(summary.rendered).toBe(1);
+    const row = await pageRow(crawlId, "/console-hostile");
+    expect(row.renderVersion).toBe(1);
+    const stored = row.renderConsole as RenderConsole;
+    // The NUL is marked as U+2400 (␀), never dropped; the lone surrogate is U+FFFD.
+    expect(stored.console).toEqual([
+      { level: "error", text: "nul:\u2400 lone:\uFFFD end", cut: false },
+    ]);
+    expect(stored.exceptionsTotal).toBe(1);
+    expect(stored.exceptions[0]!.text).toContain("thrown nul:\u2400 lone:\uFFFD");
+  });
+
+  it("a pre-browser policy refusal writes render_version 1 with render_console null", async () => {
+    // `www.` answers a metadata address, so it is left out of the pin at
+    // launch and a page on it is refused before any browser page opens.
+    const port = new URL(site.base).port;
+    const apex = `http://shop.test:${port}`;
+    const www = `http://www.shop.test:${port}`;
+    const crawlId = await newCrawl(["/csr"], { base: www, siteUrl: apex });
+
+    const summary = await runRenderPass(
+      db,
+      crawlId,
+      passConfig({
+        siteUrl: apex,
+        resolveAddress: async (host: string, type: string) =>
+          type !== "A" ? [] : host === "www.shop.test" ? ["169.254.169.254"] : ["127.0.0.1"],
+      }),
+    );
+
+    expect(summary.failures).toBe(1);
+    const row = (
+      await db
+        .select()
+        .from(pages)
+        .where(and(eq(pages.crawlId, crawlId), eq(pages.url, `${www}/csr`)))
+    )[0]!;
+    expect(row.rendered).toBe(false);
+    expect(row.renderError).toMatch(/^policy refusal: www\.shop\.test was not approved/);
+    // The render writer wrote this row (its stamp says so), and nothing was
+    // looked at: null, which `render_version` tells apart from a pre-25 null.
+    expect(row.renderVersion).toBe(1);
+    expect(row.renderConsole).toBeNull();
   });
 });

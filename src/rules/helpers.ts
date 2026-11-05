@@ -854,3 +854,30 @@ export function metricRule(
     run: (db, crawlId) => run(db, crawlId, self),
   });
 }
+
+/**
+ * How much of a crawl was written by an extraction at or above `minVersion`
+ * (`pages.extraction_version`). A rule reading a fact introduced at version N
+ * calls this and refuses loudly (a `marker`, "not measured on this crawl") when
+ * `below` is not zero, rather than reading a missing fact as an absent one
+ * (hard rules 1 and 7). `below` counts rows under `minVersion` AND rows with a
+ * null stamp (written before Phase 25), so a mixed crawl is visible, never
+ * silently skipped.
+ */
+export async function extractionCoverage(
+  db: Db,
+  crawlId: string,
+  minVersion: number,
+): Promise<{ atOrAbove: number; below: number }> {
+  const rows = await db.execute<{ at_or_above: number; below: number }>(sql`
+    select
+      count(*) filter (where extraction_version >= ${minVersion})::int as at_or_above,
+      count(*) filter (where extraction_version is null
+                          or extraction_version < ${minVersion})::int as below
+    from pages
+    where crawl_id = ${crawlId}
+  `);
+  const row = rows.rows[0];
+  if (row === undefined) throw new Error("extractionCoverage: aggregate returned no row");
+  return { atOrAbove: row.at_or_above, below: row.below };
+}

@@ -13,6 +13,7 @@ import {
   structuredData,
 } from "../../src/db/schema.js";
 import { PageWriter } from "../../src/crawl/persist.js";
+import { EXTRACTION_VERSION } from "../../src/crawl/versions.js";
 import {
   enqueueUrls,
   failUrl,
@@ -126,6 +127,7 @@ function makeFetch(url: string, overrides: Partial<FetchResult> = {}): FetchResu
     canonicalHeader: null,
     xRobotsTag: null,
     platformHint: null,
+    responseHeaders: null,
     disallowedReason: null,
     ...overrides,
   };
@@ -426,6 +428,50 @@ describe("PageWriter", () => {
     expect(row?.textRatio).toBeCloseTo(0.31, 5);
     expect(row?.relNext).toBe(`${SITE}/page/2`);
     expect(row?.h2Count).toBe(2);
+  });
+
+  it("stamps extraction_version 1 on every row it writes, a robots-blocked row included", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    await writer.addPage(item(`${SITE}/a`), makeFetch(`${SITE}/a`), makeAnalysis(), {
+      complete: true,
+    });
+    await writer.addPage(item(`${SITE}/b`), makeFetch(`${SITE}/b`, { statusCode: 404, fetchClass: "client_error", body: null }), null, {
+      complete: true,
+    });
+    await writer.flush();
+    await writer.insertRobotsBlocked([
+      { item: item(`${SITE}/blocked`), reason: "robots.txt: Disallow: /blocked" },
+    ]);
+
+    const rows = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(rows).toHaveLength(3);
+    expect(EXTRACTION_VERSION).toBe(1);
+    for (const row of rows) expect(row.extractionVersion, row.url).toBe(1);
+    const blocked = rows.find((r) => r.url === `${SITE}/blocked`);
+    expect(blocked?.fetchClass).toBe("disallowed");
+    expect(blocked?.responseHeaders).toBeNull();
+    // render_version belongs to the render writer, never this one.
+    for (const row of rows) expect(row.renderVersion, row.url).toBeNull();
+  });
+
+  it("writes response_headers verbatim", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const responseHeaders = {
+      values: {
+        link: ["<a>; rel=x", "<b>; rel=y"],
+        "content-type": ["text/html; charset=utf-8"],
+      },
+      truncated: ["content-security-policy"],
+    };
+    const url = `${SITE}/h`;
+    await writer.addPage(item(url), makeFetch(url, { responseHeaders }), makeAnalysis(), {
+      complete: true,
+    });
+    await writer.flush();
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.responseHeaders).toEqual(responseHeaders);
   });
 
   // `fetched_at` is the FIRST of the two observations migration 0016 gave the

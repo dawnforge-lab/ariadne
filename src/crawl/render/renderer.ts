@@ -92,6 +92,14 @@
  *    every one of them leaves `rendered = false` with the five measurement
  *    columns null. "Rendered and empty" and "never rendered" stay different
  *    facts.
+ *  - **Render evidence (Phase 25).** Every render that opened a page carries
+ *    what the page itself reported going wrong (`RenderResult.console`,
+ *    `pages.render_console`): its console errors and warnings, its uncaught
+ *    exceptions and the requests the SITE failed, capped by
+ *    `RenderConsoleCollector` (console-capture.ts). Failed renders keep what
+ *    was captured before they failed — a page that throws and then times out
+ *    is where it matters most. The renderer's own aborts are never failures,
+ *    only the `blockedByRenderer` counts.
  *
  * THE DOM IS MEASURED TWICE, BY TWO DIFFERENT INSTRUMENTS, and the two answers
  * are kept in two families of columns that no rule may mix (see the family
@@ -146,6 +154,8 @@ import type { Db } from "../../db/client.js";
 import { classifyStatus, parseRetryAfter } from "../fetch-page.js";
 import { headerValue, type HeaderBag } from "../http.js";
 import { HostGate, type HostSpacingEntry, type HostThrottle } from "../politeness.js";
+import { RENDER_CAPTURE_VERSION } from "../versions.js";
+import { RenderConsoleCollector, type RenderConsole } from "./console-capture.js";
 import { analyzeHtml, type RawPageAnalysis } from "../parse/page-analyzer.js";
 import { hostnameSpellings, isSameOrigin, normalizeUrl } from "../parse/url-utils.js";
 import {
@@ -296,6 +306,8 @@ export interface RendererOptions {
  * they do every count is null — see the module header. `redirectUrl` is the
  * exception that may accompany either: a page that sent itself off-site is a
  * fact worth keeping even when the render that discovered it could not finish.
+ * `console` is the other: what the page reported before its render failed is
+ * kept beside the failure.
  */
 export interface RenderResult {
   /** The URL asked for — the frontier/page key, not `page.url()`. */
@@ -361,11 +373,17 @@ export interface RenderResult {
   redirectUrl: string | null;
   /** Why a render that was attempted produced nothing. Null on success. */
   error: string | null;
-  /** Third-party requests aborted. Diagnostic; not stored on the page row. */
+  /**
+   * Requests the fence aborted: another origin's (an off-site top-level
+   * navigation included), same-origin requests to a spelling not pinned at
+   * launch, and frame documents url-policy refused. Stored only inside
+   * `console`, as `blockedByRenderer.thirdParty` — one count, not split.
+   */
   blockedRequests: number;
   /**
    * Same-origin subresources aborted because they only affect paint (images,
-   * media, fonts). Diagnostic; not stored on the page row.
+   * media, fonts). Stored only inside `console`, as
+   * `blockedByRenderer.sameOriginAssets`.
    */
   skippedPaintRequests: number;
   /**
@@ -385,16 +403,32 @@ export interface RenderResult {
    * (module header), which claims a slot after the fact.
    */
   unpacedNetworkRequests: number;
+  /**
+   * What the page reported going wrong (Phase 25), as `pages.render_console`
+   * stores it: console errors and warnings, uncaught exceptions, the requests
+   * the site failed, and the renderer's own aborts as counts.
+   *
+   * Non-null on EVERY render that opened a page — failed ones included, with
+   * whatever was captured before the failure — and zero counts when the page
+   * reported nothing ("looked, found nothing" is a fact). Null only when the
+   * render was refused before a browser page opened (`NO_TRAFFIC`): nothing
+   * was looked at.
+   */
+  console: RenderConsole | null;
 }
 
-/** The request counters every `RenderResult` carries, success or failure. */
-type TrafficCounts = Pick<
+/**
+ * The request counters and the render evidence every `RenderResult` carries,
+ * success or failure.
+ */
+type TrafficEvidence = Pick<
   RenderResult,
   | "blockedRequests"
   | "skippedPaintRequests"
   | "pacedRequests"
   | "cachedResponses"
   | "unpacedNetworkRequests"
+  | "console"
 >;
 
 /** What `MEASURE_SCRIPT` hands back. Counts only — no HTML crosses the seam. */
@@ -738,6 +772,16 @@ class RenderTraffic {
    * and method. Per render, freed with it — O(one page's requests).
    */
   private readonly inFlight = new Map<string, { url: string; method: string }>();
+  /**
+   * The network id of the document `render` navigated to — its HTTP redirect
+   * hops share it. That document's status is the page's own, already on the
+   * row, so it is never a failed request. A navigation the PAGE makes itself
+   * (a JS redirect) gets a new id and is NOT excluded: its 4xx/5xx is stored
+   * nowhere else, and it is the broken JS redirect CHECK-10 exists to find.
+   */
+  private gotoNetworkId: string | null = null;
+  /** What the page reported going wrong — see console-capture.ts. Per render. */
+  private readonly reported = new RenderConsoleCollector();
 
   constructor(
     private readonly cdp: CDPSession,
@@ -799,7 +843,30 @@ class RenderTraffic {
     this.cdp.on("Network.loadingFinished", (event) => {
       this.inFlight.delete((event as unknown as { requestId: string }).requestId);
     });
+    // THE PAGE'S OWN CONSOLE, through `Runtime` on this session rather than
+    // Playwright's `console` event: Playwright also surfaces the browser's
+    // `Log` entries there, and those include a "Failed to load resource:
+    // net::ERR_BLOCKED_BY_CLIENT" line for every request WE abort — our
+    // blocking dressed as the site's console. `consoleAPICalled` is only what
+    // the page's script logged.
+    this.cdp.on("Runtime.consoleAPICalled", (event) => {
+      const e = event as unknown as { type: string; args: RemoteObject[] };
+      if (!this.open) return;
+      const level = consoleLevel(e.type);
+      if (level === null) return;
+      this.reported.addConsole(level, e.args.map(remoteText).join(" "));
+    });
+    this.cdp.on("Runtime.exceptionThrown", (event) => {
+      const d = (event as unknown as { exceptionDetails: ExceptionDetails }).exceptionDetails;
+      if (!this.open) return;
+      // `text` is the runtime's label ("Uncaught", "Uncaught (in promise)");
+      // the exception itself is the page's value, its stack the page's URLs.
+      this.reported.addException(
+        d.exception === undefined ? d.text : `${d.text} ${remoteText(d.exception)}`,
+      );
+    });
     await this.cdp.send("Network.enable");
+    await this.cdp.send("Runtime.enable");
     // A prerendered page is a page this session does not intercept. The
     // speculation-rules PREFETCH that may precede it cannot be switched off in
     // this build (module header); it is fenced to the origin and counted.
@@ -846,13 +913,15 @@ class RenderTraffic {
     await this.cdp.send("Emulation.setScriptExecutionDisabled", { value: true });
   }
 
-  counts(): TrafficCounts {
+  /** The counters, and a snapshot of what the page reported so far. */
+  evidence(): TrafficEvidence {
     return {
       blockedRequests: this.blocked,
       skippedPaintRequests: this.skipped,
       pacedRequests: this.paced,
       cachedResponses: this.cached,
       unpacedNetworkRequests: this.unpacedNetwork,
+      console: this.reported.snapshot({ thirdParty: this.blocked, sameOriginAssets: this.skipped }),
     };
   }
 
@@ -888,6 +957,9 @@ class RenderTraffic {
     // (the JS redirect CHECK-10 exists to find), and every iframe's.
     if (event.resourceType === "Document") {
       const topLevel = event.frameId === this.mainFrameId;
+      if (topLevel && this.gotoNetworkId === null && event.networkId !== undefined) {
+        this.gotoNetworkId = event.networkId;
+      }
       // The goto's own request is the URL `render` put through url-policy a
       // moment ago; asking again would only put a lookup between its slot and
       // its request.
@@ -1001,6 +1073,7 @@ class RenderTraffic {
     if (event.networkId !== undefined) {
       this.inFlight.set(event.networkId, { url: event.request.url, method: event.request.method });
     }
+    this.testFaults?.onRelease?.(event.request.url, Date.now());
     await this.command("Fetch.continueRequest", { requestId: event.requestId });
   }
 
@@ -1060,6 +1133,12 @@ class RenderTraffic {
         this.reportAnswer(response);
       }
       return;
+    }
+    // THE SITE FAILED A REQUEST WE SENT: a status of 400 or above on one this
+    // render released (a 404 never fires `loadingFailed`). Not the document
+    // `render` navigated to — its status is the page's own, on the row already.
+    if (sent !== undefined && response.status >= 400 && requestId !== this.gotoNetworkId) {
+      this.reported.addFailedRequest(sent.url, response.status, `http ${response.status}`);
     }
     const fromCache =
       response.fromDiskCache === true ||
@@ -1127,6 +1206,11 @@ class RenderTraffic {
    * host's recovery count exactly as a crawl fetch's would. A cancellation (the
    * page closed or dropped it) and our own `BlockedByClient` are not answers
    * from the site and are not reported.
+   *
+   * What IS reported is also the page's failed request (`render_console`), under
+   * Chromium's net error name — a classification, never transport text — unless
+   * it is the document `render` navigated to, whose failure is the render's
+   * own error.
    */
   private onFailed(
     requestId: string,
@@ -1139,6 +1223,7 @@ class RenderTraffic {
     this.predicted.delete(requestId);
     if (!this.open || sent === undefined || canceled || blockedReason !== undefined) return;
     if (errorText === "net::ERR_BLOCKED_BY_CLIENT" || errorText === "net::ERR_ABORTED") return;
+    if (requestId !== this.gotoNetworkId) this.reported.addFailedRequest(sent.url, null, errorText);
     this.gate.report(gateKey(sent.url), {
       fetchClass: "network_error",
       statusCode: null,
@@ -1155,6 +1240,46 @@ class RenderTraffic {
  */
 function gateKey(url: string): string {
   return new URL(url).host;
+}
+
+/**
+ * The level a `Runtime.consoleAPICalled` type is kept at, or null when it is
+ * not kept. A failed `console.assert` arrives as its own type, `assert`, and is
+ * an error the page reported — kept as `error`. `log`, `info`, `debug` and the
+ * rest are not kept.
+ */
+function consoleLevel(type: string): "error" | "warning" | null {
+  if (type === "error" || type === "assert") return "error";
+  if (type === "warning") return "warning";
+  return null;
+}
+
+/** The slice of a `Runtime.RemoteObject` a console line is written from. */
+interface RemoteObject {
+  type: string;
+  value?: unknown;
+  unserializableValue?: string;
+  description?: string;
+}
+
+/** The slice of `Runtime.ExceptionDetails` an exception entry is written from. */
+interface ExceptionDetails {
+  text: string;
+  exception?: RemoteObject;
+}
+
+/**
+ * One console argument or thrown value as text, the way DevTools prints it: a
+ * string as itself, anything else by the runtime's own description (an Error's
+ * is its message and the page's stack). Format specifiers (`%s`) are not
+ * applied; the arguments are joined with a space.
+ */
+function remoteText(o: RemoteObject): string {
+  if (o.type === "string") return String(o.value);
+  if (o.unserializableValue !== undefined) return o.unserializableValue;
+  if (o.description !== undefined) return o.description;
+  if (o.type === "undefined") return "undefined";
+  return JSON.stringify(o.value) ?? String(o.value);
 }
 
 /**
@@ -1207,6 +1332,15 @@ export interface RenderTestFaults {
    * command the browser refused would throw.
    */
   failRelease?: (url: string) => Error | null;
+  /**
+   * Told each time a paused request is actually released — just before its
+   * `Fetch.continueRequest` — with `Date.now()`, the clock the host gate
+   * spaces slots on. Observes only; it changes nothing about the release. A
+   * suite measures pacing here, where the gate imposes it, rather than at the
+   * server, where each request's own trip through Chromium's network stack
+   * adds jitter that is not the gate's.
+   */
+  onRelease?: (url: string, atMs: number) => void;
   /**
    * Awaited between the traffic's `shut` and the page's close, so a suite can
    * hold the window in which an answer to a request released BEFORE the shut
@@ -1688,7 +1822,7 @@ export class PageRenderer {
             url,
             `navigation error: browser ended on ${finalUrl}`,
             null,
-            traffic.counts(),
+            traffic.evidence(),
           );
         }
 
@@ -1717,10 +1851,10 @@ export class PageRenderer {
             `timeout under pacing (${traffic.paced} requests paced): navigation did not ` +
               `reach domcontentloaded within ${this.opts.navigationTimeoutMs}ms`,
             null,
-            traffic.counts(),
+            traffic.evidence(),
           );
         }
-        return failure(url, `navigation error: ${firstLine(error)}`, null, traffic.counts());
+        return failure(url, `navigation error: ${firstLine(error)}`, null, traffic.evidence());
       }
       const { finalUrl, measured } = navigated;
 
@@ -1795,7 +1929,7 @@ export class PageRenderer {
         // is about.
         redirectUrl: traffic.offSite ?? navigatedTo(url, finalUrl),
         error: null,
-        ...traffic.counts(),
+        ...traffic.evidence(),
       };
     } finally {
       // Shut FIRST — every queued request failed, every later one failed on
@@ -1905,21 +2039,23 @@ export class PageRenderer {
  */
 function stoppedNavigation(url: string, traffic: RenderTraffic): RenderResult | null {
   if (traffic.refusedNavigation !== null) {
-    return failure(url, `policy refusal: ${traffic.refusedNavigation}`, null, traffic.counts());
+    return failure(url, `policy refusal: ${traffic.refusedNavigation}`, null, traffic.evidence());
   }
   if (traffic.offSite !== null) {
     const offSite = traffic.offSite;
-    return failure(url, `off-site navigation: ${offSite}`, offSite, traffic.counts());
+    return failure(url, `off-site navigation: ${offSite}`, offSite, traffic.evidence());
   }
   return null;
 }
 
-const NO_TRAFFIC: TrafficCounts = {
+/** A render refused before a browser page opened: nothing sent, nothing looked at. */
+const NO_TRAFFIC: TrafficEvidence = {
   blockedRequests: 0,
   skippedPaintRequests: 0,
   pacedRequests: 0,
   cachedResponses: 0,
   unpacedNetworkRequests: 0,
+  console: null,
 };
 
 /** A render that produced no measurement, in the one shape all of them share. */
@@ -1927,7 +2063,7 @@ function failure(
   url: string,
   error: string,
   redirectUrl: string | null,
-  counts: TrafficCounts,
+  evidence: TrafficEvidence,
 ): RenderResult {
   return {
     url,
@@ -1948,7 +2084,7 @@ function failure(
     htmlPath: null,
     redirectUrl,
     error,
-    ...counts,
+    ...evidence,
   };
 }
 
@@ -2007,6 +2143,11 @@ function firstLine(error: unknown): string {
  * or H1 text ("the DOM had none") from a pre-0022 row's ("nobody read it").
  * Derived here rather than carried on `RenderResult` because it is a fact
  * about which writer stored the row, not about the page.
+ *
+ * `render_version` (Phase 25) is stamped on EVERY row this writer writes, a
+ * pre-browser refusal included, for the same reason: it says which render
+ * capture wrote the row, so its `render_console` null ("nothing was looked
+ * at") is never read as a pre-25 row's null ("nobody captured it").
  */
 export async function writeRenderResult(
   db: Pick<Db, "execute">,
@@ -2032,7 +2173,9 @@ export async function writeRenderResult(
       rendered_tags_read = ${result.rendered ? true : null},
       rendered_html_path = ${result.htmlPath},
       rendered_redirect_url = ${result.redirectUrl},
-      render_error = ${result.error}
+      render_error = ${result.error},
+      render_console = ${result.console === null ? null : JSON.stringify(result.console)}::jsonb,
+      render_version = ${RENDER_CAPTURE_VERSION}
     where crawl_id = ${crawlId} and url = ${result.url}
     returning id`);
 

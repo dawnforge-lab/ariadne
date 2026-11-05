@@ -304,10 +304,11 @@ with `host_spacing_ms` staying as the fallback for a host the map does not name 
 a URL discovered only on the continuation, or a pre-0015 crawl whose map is null
 (§4.1a, §8). This is resume machinery, not a new surface field: `crawl_status`
 still serves the crawl-wide `hostSpacingMs`, and no served tool or route field
-was added, removed, or retyped. `renderPassEvidence`'s two values are unchanged —
+was added, removed, or retyped. `renderPassEvidence`'s values `"ran"` and `"none"` were unchanged —
 Phase 13 named them behind the wire (`RENDER_PASS_EVIDENCE.ran`/`.none`) and
-pinned the shape against hardcoded literals, but the strings a consumer reads
-(`"ran"`/`"none"`) are exactly what Phase 12 wrote (§4.5). Everything else in
+pinned the shape against hardcoded literals, and the strings a consumer reads
+were exactly what Phase 12 wrote (§4.5). Phase 25 later added a third, `"failed"`
+(§4.5). Everything else in
 Phase 13 was internal and never reaches the seam: the dev-database test residue
 was swept back to the four reference crawls and the leak fixed at its source, and
 the registry's NOT-MEASURED marker set is now derived from a per-rule flag rather
@@ -1073,7 +1074,7 @@ not name", `test/api/query.test.ts:1445` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:692` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:712` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1130` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1133` "declares a column for every evidence key it
 writes, and writes every column it declares",
 `test/rules/registry.test.ts:733` "finds one defining file per rule, and the key
 spelled inside it".
@@ -1223,7 +1224,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:1947` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:1951` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1239,7 +1240,7 @@ numbers with their copy joined".
 
 **One field inside one metric's value that this contract does pin, because it
 governs how the rest of that value is read** (P12-T4): `render.coverage`'s
-`renderPassEvidence`, `"ran"` or `"none"`. The four `selection*` numbers beside
+`renderPassEvidence`, `"ran"`, `"none"` or `"failed"`. The four `selection*` numbers beside
 it are RECOMPUTED from the crawl's own columns — the render selection has no
 table of its own — so before this field a crawl nobody had ever rendered
 answered `selectionSelected: 18` exactly as a crawl rendered last week does, and
@@ -1248,12 +1249,21 @@ that ran and rendered nothing writes the same zero. `"ran"` means something on
 this crawl was written by a render pass — a rendered page, a `render_error`, a
 named URL list, the pass's stamped count, or a page still queued for a browser.
 `"none"` means none of that is there, so the selection numbers are what a pass
-WOULD choose and no absence of rendered evidence is a fact about the site. Read
-it before quoting any JavaScript finding. Pinned:
+WOULD choose and no absence of rendered evidence is a fact about the site.
+`"failed"` (Phase 25, ruleset 0.19.0) means the LAST render pass was asked for
+and could not start: `renderLaunchError`, a sibling key in the same
+`render.coverage` value, is a classified sentence (never raw resolver or
+transport text, a stack or a path) or null, the pages it selected stay pending
+and a later pass retries them. Rows an EARLIER pass rendered (`pagesRendered` or
+`renderFailures` above 0) remain that pass's evidence and its findings stand;
+NOT MEASURED applies only to what no pass rendered, and to the whole check only
+when both counts are 0. `"failed"` is neither "rendered" nor "no render
+needed". `"failed"` takes precedence over `"ran"`; the closed vocabulary is
+`ran`, `none`, `failed`. Read it before quoting any JavaScript finding. Pinned:
 `test/api/mcp.test.ts:1499` "says over the wire whether a render pass ran, not
 just how many pages it left", `test/api/http.test.ts:1806` "serves
 renderPassEvidence none beside the selection a pass would make",
-`test/rules/render-metrics.test.ts:528` "answers none on a crawl nobody
+`test/rules/render-metrics.test.ts:536` "answers none on a crawl nobody
 rendered, and still reports what a pass would choose".
 
 ### 4.6 `pages_query` → `{items: PageRow[], nextCursor}`
@@ -1821,14 +1831,14 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 "partitions every fetched URL over the four columns",
 `test/rules/health-metrics.test.ts:564`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1316` "names every column and the population they
-are over", `test/rules/copy.test.ts:1341` "says the counts are the authority, not the
-ratio", `test/rules/copy.test.ts:1358` "grades nothing: no score, no label, no
+`test/rules/copy.test.ts:1326` "names every column and the population they
+are over", `test/rules/copy.test.ts:1351` "says the counts are the authority, not the
+ratio", `test/rules/copy.test.ts:1368` "grades nothing: no score, no label, no
 threshold";
 `test/rules/coverage.test.ts:413` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2490` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2514` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

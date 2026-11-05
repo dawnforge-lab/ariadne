@@ -77,7 +77,8 @@ import { num } from "./cohort.js";
 
 /**
  * `renderPassEvidence`'s closed vocabulary: `ran` when this crawl holds anything
- * a render pass wrote, `none` when it holds nothing of the kind.
+ * a render pass wrote, `none` when it holds nothing of the kind, `failed` when
+ * the last pass could not launch (Phase 25 T4; checked before `ran`).
  *
  * Declared as a named constant on the `RESOURCE_FETCH_CLASSES` model
  * (src/crawl/resources/fetch-resources.ts): this rule WRITES the value, so it
@@ -90,6 +91,15 @@ import { num } from "./cohort.js";
 export const RENDER_PASS_EVIDENCE = {
   ran: "ran",
   none: "none",
+  /**
+   * The LAST pass was asked for and could not start (`crawls.render_launch_error`
+   * is set). Its selected rows stay `render_pending`, which on their own would
+   * read as `ran`; `failed` takes precedence so the metric does not claim a
+   * render the last pass never made. Rows an EARLIER pass rendered are still
+   * counted and still that pass's evidence — `failed` is never "nothing was
+   * rendered" unless `pagesRendered` and `renderFailures` are both zero.
+   */
+  failed: "failed",
 } as const;
 export type RenderPassEvidence = (typeof RENDER_PASS_EVIDENCE)[keyof typeof RENDER_PASS_EVIDENCE];
 
@@ -121,6 +131,8 @@ interface StoredRenderInputs {
    * happened. See `crawls.render_urls_jsonb` (src/db/schema.ts).
    */
   renderUrls: string[] | null;
+  /** `crawls.render_launch_error`: why the last pass could not launch, else null. */
+  renderLaunchError: string | null;
   /**
    * What the LAST render pass stamped on the crawl row: the number of pages it
    * rendered (`crawls.render_pass_count`, set — never incremented — by step 4
@@ -140,6 +152,7 @@ async function readRenderConfig(
       config: crawls.config,
       renderUrls: crawls.renderUrlsJsonb,
       renderPassCount: crawls.renderPassCount,
+      renderLaunchError: crawls.renderLaunchError,
     })
     .from(crawls)
     .where(eq(crawls.id, crawlId))
@@ -185,7 +198,12 @@ async function readRenderConfig(
     renderUrls = named as string[];
   }
 
-  return { cfg, renderUrls, renderPassCount: row.renderPassCount };
+  return {
+    cfg,
+    renderUrls,
+    renderPassCount: row.renderPassCount,
+    renderLaunchError: row.renderLaunchError,
+  };
 }
 
 /**
@@ -198,11 +216,17 @@ async function readRenderConfig(
  *    same denominator the budget is a percentage OF, deliberately: `budget` is
  *    `min(ceil(pages × pct/100), renderMaxPages)` over this number, not over the
  *    renderable subset.
- *  - `renderPassEvidence` — `ran` or `none`: whether ANYTHING this crawl holds
- *    was written by a render pass. It comes before `selectionMode` because it
- *    governs the mode in turn: on `none`, the four automatic numbers below
- *    describe the selection a pass WOULD make if one were started now, and not
- *    one that was made. See the section on it below.
+ *  - `renderPassEvidence` — `ran`, `none` or `failed`. `failed` when the LAST
+ *    pass could not start (`crawls.render_launch_error` is set; checked first);
+ *    otherwise `ran` or `none`: whether ANYTHING this crawl holds was written by
+ *    a render pass. It comes before `selectionMode` because it governs the mode
+ *    in turn: on `none`, the four automatic numbers below describe the
+ *    selection a pass WOULD make if one were started now, and not one that was
+ *    made. On `failed`, `pagesRendered` and `renderFailures` still count what
+ *    any EARLIER pass wrote, and those rows stay that pass's evidence. See the
+ *    section on it below.
+ *  - `renderLaunchError` — the classified sentence saying why the last pass
+ *    could not start, or null. Set exactly when the evidence is `failed`.
  *  - `selectionMode` — `auto` or `explicit`: WHICH DECISION chose the pages, and
  *    therefore how the four numbers after it are to be read. It comes first
  *    among the selection columns because it governs them.
@@ -249,7 +273,17 @@ async function readRenderConfig(
  * A null here means "this question does not apply to how these pages were
  * chosen", which is what it means everywhere else in this engine.
  *
- * ## `renderPassEvidence`: `ran` and `none`, and why neither is `false`
+ * ## `renderPassEvidence`: `ran`, `none` and `failed`, and why none is `false`
+ *
+ * `failed` (Phase 25 T4) is decided first and from one column: the last pass
+ * recorded a launch error (`crawls.render_launch_error`). It is a claim about
+ * the LAST pass only. Rows an earlier pass rendered or failed are still on the
+ * crawl, still counted in `pagesRendered` and `renderFailures`, and still that
+ * pass's evidence; what is unmeasured is what no pass rendered. Both counts
+ * zero means nothing was ever measured. A later pass that launches clears the
+ * column, and the value returns to `ran`.
+ *
+ * The rest of this section is about telling `ran` from `none`.
  *
  * P12-T4, closing the residual the Phase 11 audit filed at
  * docs/gates/phase-11.md §6.3: on a crawl with no render pass this row read
@@ -294,7 +328,11 @@ async function readRenderConfig(
  * there would be a claim about the past that this rule cannot make.
  */
 async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Promise<Metric[]> {
-  const { cfg, renderUrls, renderPassCount } = await readRenderConfig(db, crawlId, self.id);
+  const { cfg, renderUrls, renderPassCount, renderLaunchError } = await readRenderConfig(
+    db,
+    crawlId,
+    self.id,
+  );
   // Recomputed only when it describes something. On an explicit pass the
   // automatic decision is not merely unreported, it is not asked: running the
   // candidate SQL to throw the answer away would invite a later reader to
@@ -337,14 +375,21 @@ async function renderCoverage(db: Db, crawlId: string, self: MetricIdentity): Pr
       scope: "site",
       value: {
         pagesCrawled: num(row.pages_crawled, "pages_crawled", self.id),
+        // `failed` first: a pass that could not launch leaves its selection
+        // `render_pending`, which is also what the `ran` test reads as an
+        // aborted pass. The recorded launch error is the tie-breaker.
         renderPassEvidence:
-          renderUrls !== null ||
-          renderPassCount > 0 ||
-          pagesRendered > 0 ||
-          renderFailures > 0 ||
-          renderPending > 0
-            ? RENDER_PASS_EVIDENCE.ran
-            : RENDER_PASS_EVIDENCE.none,
+          renderLaunchError !== null
+            ? RENDER_PASS_EVIDENCE.failed
+            : renderUrls !== null ||
+                renderPassCount > 0 ||
+                pagesRendered > 0 ||
+                renderFailures > 0 ||
+                renderPending > 0
+              ? RENDER_PASS_EVIDENCE.ran
+              : RENDER_PASS_EVIDENCE.none,
+        // Why `failed`: a classified, tenant-safe sentence, or null.
+        renderLaunchError,
         selectionMode: selection === null ? "explicit" : "auto",
         selectionBudget: selection?.budget ?? null,
         selectionSuspects: selection?.suspects ?? null,
@@ -376,6 +421,7 @@ export const renderMetrics: MetricRule[] = [
     perScope("Scope", [
       { key: "pagesCrawled", label: "Pages Crawled" },
       { key: "renderPassEvidence", label: "Render Run" },
+      { key: "renderLaunchError", label: "Render Launch Error" },
       { key: "selectionMode", label: "Selection Mode" },
       { key: "selectionBudget", label: "Render Budget" },
       { key: "selectionSuspects", label: "Suspect Pages" },

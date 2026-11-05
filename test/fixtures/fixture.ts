@@ -15,6 +15,7 @@ import { authoredP3Fixtures } from "./pages/authored-p3.js";
 import { authoredP7Fixtures } from "./pages/authored-p7.js";
 import { authoredP11Fixtures } from "./pages/authored-p11.js";
 import { authoredP23Fixtures } from "./pages/authored-p23.js";
+import { authoredP25Fixtures } from "./pages/authored-p25.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -137,6 +138,10 @@ export function allFixtures(): Fixture[] {
     // over the 2 MiB cap, and a coding it did not ask for. Fetch outcomes no
     // rule judged before 0.18.0.
     ...authoredP23Fixtures,
+    // P25: a plain-text document whose content-security-policy runs past the
+    // 2,048-character cap `pages.response_headers` keeps — the stored value is
+    // cut, and the header is named in `truncated`.
+    ...authoredP25Fixtures,
     controlFixture,
   ];
 }

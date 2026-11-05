@@ -117,8 +117,9 @@ const ESCALATION_STREAK = 3;
  * halves, never below its base). See "The ratchet" in `report`.
  *
  * Clean means a 2xx, 3xx or 4xx other than 429, carrying no `Retry-After`. 50
- * is ours, not Screaming Frog's (SF uses a fixed rate and no adaptive back-off
- * at all); it is test-pinned and calibrated at the Phase 24a gate.
+ * is ours: Screaming Frog 25 has an auto-throttle and honours `Retry-After`, but
+ * it paces globally and has no per-host recovery step to borrow a number from.
+ * It is test-pinned and calibrated at the Phase 24a gate.
  */
 export const RECOVERY_STREAK = 50;
 
