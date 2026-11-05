@@ -412,6 +412,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `indexability.nofollow`, `directives.restrictive` and
 //     `directives.unavailable-after`. They compare whole tokens
 //     (`robotsTokens`), and judge a date against the page's own `fetched_at`.
+//  4. (T5) Canonical rules: `canonical.relative` (info, CHECK-16) and
+//     `canonical.fragment` (warning, CHECK-16) are page rules;
+//     `canonical.chain` (warning, CHECK-17/19) and `canonical.unlinked` (info,
+//     CHECK-17) are query rules over the resolved canonical pairs. The chain walk
+//     stops at `CANONICAL_MAX_HOPS` and reports a revisit as `loop`; both
+//     are filed on the page that declares the canonical.
 export const RULESET_VERSION = "0.20.0";
 
 /**

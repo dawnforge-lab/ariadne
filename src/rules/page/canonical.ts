@@ -166,4 +166,45 @@ export const canonicalRules: PageRule[] = [
         : [];
     },
   ),
+
+  // A canonical with no scheme is resolved against the page's own URL, so it
+  // works when the page is served at the address it was written for and names
+  // the wrong place when the same markup is served from a staging host, a
+  // mirror or a cache. Only the HTML element is judged: the header form is
+  // written by a server that knows its own host. The scheme test is the RFC 3986
+  // one (a letter, then letters, digits, `+`, `-` or `.`, then a colon), so
+  // `//host/x`, `/x`, `x/y`, `../x` and `?p=2` are relative and `HTTPS://host/x`
+  // is not.
+  pageRule(
+    "canonical.relative",
+    ["CHECK-16"],
+    CATEGORY,
+    "info",
+    [{ key: "canonical", label: "Canonical Link Element" }],
+    (p, self) => {
+      const value = p.canonicalHtml;
+      return isAuditable(p) && present(value) && !/^[a-z][a-z0-9+.-]*:/i.test(value.trim())
+        ? [finding(self, p, { canonical: value })]
+        : [];
+    },
+  ),
+
+  // A fragment is never part of the URL a search engine indexes, so a canonical
+  // carrying one names an address that does not exist as such. It is read from
+  // the EFFECTIVE canonical (HTML over header), the one audited everywhere
+  // else, and from the raw declaration: resolution would strip the fragment and
+  // hide it.
+  pageRule(
+    "canonical.fragment",
+    ["CHECK-16"],
+    CATEGORY,
+    "warning",
+    [{ key: "canonical", label: "Canonical Link Element" }],
+    (p, self) => {
+      const value = effectiveCanonical(p);
+      return isAuditable(p) && value !== null && value.includes("#")
+        ? [finding(self, p, { canonical: value })]
+        : [];
+    },
+  ),
 ];

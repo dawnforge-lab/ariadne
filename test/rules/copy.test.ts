@@ -49,7 +49,11 @@ import {
   SITEMAP_DOC_ROWS_CAP,
   SITEMAP_URL_CAP,
 } from "../../src/rules/metric/crawl-metrics.js";
-import { RESTRICTIVE_DIRECTIVES, UNAVAILABLE_AFTER_WARN_DAYS } from "../../src/rules/thresholds.js";
+import {
+  CANONICAL_MAX_HOPS,
+  RESTRICTIVE_DIRECTIVES,
+  UNAVAILABLE_AFTER_WARN_DAYS,
+} from "../../src/rules/thresholds.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
 import {
   BROKEN_SAMPLE_RESOURCES,
@@ -796,6 +800,14 @@ describe("copy: directives (26a)", () => {
   it("names every restrictive directive the rule matches", () => {
     const text = copy("directives.restrictive").explanation;
     for (const d of RESTRICTIVE_DIRECTIVES) expect(text, d).toContain(d);
+  });
+});
+
+describe("copy: canonicals (26a)", () => {
+  it("quotes the hop limit the chain walk actually uses", () => {
+    expect(CANONICAL_MAX_HOPS).toBe(10);
+    expect(copy("canonical.chain").title).toContain(`${CANONICAL_MAX_HOPS} hops`);
+    expect(copy("canonical.chain").explanation).toContain(`${CANONICAL_MAX_HOPS} hops`);
   });
 });
 
@@ -1709,6 +1721,9 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "images.oversized": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
     "images.legacy-format": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
     "directives.unavailable-after": String(UNAVAILABLE_AFTER_WARN_DAYS),
+    // Not a firing line (a chain fires at two hops) but the limit the walk
+    // stops at, which the evidence's `hopLimitReached` refers to.
+    "canonical.chain": String(CANONICAL_MAX_HOPS),
     // Two rules whose ids do not advertise a threshold but whose predicates are
     // one. `content.soft-404` fires on `SOFT_404_WORDS` OR `TEMPLATE_HAMMING`;
     // the word count is the half a title can carry, and the four bits are

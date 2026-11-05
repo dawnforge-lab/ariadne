@@ -1260,21 +1260,31 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-16: Self-referential canonicals on indexable pages
 - **Priority**: Critical | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-16"` — `canonical.missing`
-  (warning): an indexable page with no canonical at all. `issue_urls` for the list,
-  and group it by `pageType` (via `pages_query`) to say whether one template is
-  responsible. Pages that self-canonicalise produce no finding — that is the pass.
+- **Engine**: `issues_list` with `checkId: "CHECK-16"` — three rules:
+  - `canonical.missing` (warning) — an indexable page with no canonical at all.
+    `issue_urls` for the list, and group it by `pageType` (via `pages_query`) to say
+    whether one template is responsible. Pages that self-canonicalise produce no
+    finding — that is the pass.
+  - `canonical.relative` (info) — the HTML canonical is a path with no scheme and
+    host, so it resolves against whatever address served the page.
+  - `canonical.fragment` (warning) — the canonical carries a `#fragment`, which
+    search engines do not index as part of an address.
 - **Evaluate**:
   - FAIL if indexable pages missing canonical > 0
   - Record: self-referencing count, missing count, missing URLs by page type
 
 ### CHECK-17: Canonicalised URLs audit
 - **Priority**: Critical | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-17"` — `canonical.points-elsewhere`
-  (info): every page whose canonical names a different URL. The engine reports the
-  fact; whether each target is the RIGHT one is the judgement this check asks for,
-  so read the list from `issue_urls` (source and target per row) and assess the
-  patterns — do not report the count alone.
+- **Engine**: `issues_list` with `checkId: "CHECK-17"` — three rules:
+  - `canonical.points-elsewhere` (info) — every page whose canonical names a
+    different URL. The engine reports the fact; whether each target is the RIGHT one
+    is the judgement this check asks for, so read the list from `issue_urls` (source
+    and target per row) and assess the patterns — do not report the count alone.
+  - `canonical.chain` (warning) — the target is itself canonicalised to another URL;
+    the evidence lists the hops, and says when the chain loops or was cut at the hop
+    limit. Shared with CHECK-19.
+  - `canonical.unlinked` (info) — the canonical target is a crawled page that no
+    other page links to, filed on the page that names it.
 - **Evaluate**:
   - Review canonical targets — are they correct?
   - WARN if canonicalised count is high relative to total pages
@@ -1301,12 +1311,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-19: Canonical to non-200 / non-indexable target
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-19"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-19"` — three rules:
   - `canonical.non-200-target` (critical) — the canonical points at a URL that did
     not answer 200
   - `canonical.non-indexable-target` (critical) — it points at a page the crawl
     judged non-indexable
-  Both join the canonical to the target's own crawled row, so a target the crawl
+  - `canonical.chain` (warning) — the target canonicalises to yet another URL, so
+    the signals do not land on the first page named (also under CHECK-17)
+  All three join the canonical to the target's own crawled row, so a target the crawl
   never fetched produces no finding: check `pages_query` for the target URLs before
   reading a clean answer as "every canonical target is healthy".
 - **Evaluate**:

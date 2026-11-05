@@ -73,6 +73,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Point the canonical at the URL that serves the content with a 200. If the target redirects, canonicalise to its destination; if it is gone, canonicalise to the page itself or to the closest live replacement.",
   },
+  "canonical.relative": {
+    title: "Canonicals: Canonical is a relative URL",
+    explanation:
+      "Pages whose canonical link element gives a path such as /page instead of a full address with scheme and host. Search engines resolve it against whatever address served the page, so a copy on a staging host, a mirror or a cache names itself as the original.",
+    howToFix:
+      "Write the canonical as an absolute URL with the preferred scheme and host, generated in the template so every page carries one.",
+  },
+  "canonical.fragment": {
+    title: "Canonicals: Canonical contains a fragment",
+    explanation:
+      "Pages whose canonical URL ends in a # fragment. Search engines index addresses without the fragment, so the canonical names a URL that does not exist as written and may be ignored.",
+    howToFix:
+      "Remove the fragment from the canonical and point it at the clean address of the page.",
+  },
+  "canonical.chain": {
+    title: "Canonicals: Canonical chain or loop (followed up to 10 hops)",
+    explanation:
+      "Pages whose canonical target is itself canonicalised to another URL, so the signals have to pass through more than one page. The Canonical Chain column lists the URLs after the first one, in order; Loop is true when the chain comes back to a page already on it, and Hop Limit Reached when it was still going after 10 hops and the walk stopped. Search engines may stop following a chain, and a loop gives them no final page at all.",
+    howToFix:
+      "Point the canonical straight at the last URL of the chain, the one that canonicalises to itself. For a loop, decide which page should be the original and make it canonical to itself.",
+  },
+  "canonical.unlinked": {
+    title: "Canonicals: Canonical target has no internal links",
+    explanation:
+      "Pages whose canonical points at a crawled page that no other page on the site links to; a link from the page to itself does not count. Search engines treat a canonical as a hint, and a target with no links in is easy to overrule or to never find.",
+    howToFix:
+      "Link to the canonical target from the site's navigation or content, or choose a canonical that is part of the site's link structure.",
+  },
   "canonical.non-indexable-target": {
     title: "Canonicals: Canonical points to a noindex page",
     explanation:

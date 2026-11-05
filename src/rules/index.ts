@@ -14,6 +14,7 @@ import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
 import { technicalRules } from "./page/technical.js";
 import { resourceMetrics } from "./metric/resource-metrics.js";
+import { canonicalGraphRules } from "./query/canonical-graph.js";
 import { contentRules } from "./query/content.js";
 import { fieldDuplicateRules } from "./query/field-duplicates.js";
 import { hostRules } from "./query/host.js";
@@ -52,6 +53,7 @@ export function buildRegistry(): Registry {
     ...hreflangRules,
     ...redirectRules,
     ...linkTargetRules,
+    ...canonicalGraphRules,
     ...linkGraphRules,
     ...paginationRules,
     ...robotsRules,

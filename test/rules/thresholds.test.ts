@@ -42,6 +42,7 @@ describe("thresholds", () => {
       UNSAFE_REFERRER_POLICIES: ["unsafe-url", "no-referrer-when-downgrade"],
       UNAVAILABLE_AFTER_WARN_DAYS: 30,
       RESTRICTIVE_DIRECTIVES: ["nosnippet", "max-snippet:0", "max-image-preview:none", "noimageindex"],
+      CANONICAL_MAX_HOPS: 10,
     });
   });
 

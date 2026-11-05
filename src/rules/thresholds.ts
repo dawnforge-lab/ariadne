@@ -251,3 +251,14 @@ export const RESTRICTIVE_DIRECTIVES = [
   "max-image-preview:none",
   "noimageindex",
 ] as const;
+
+// ---- from src/rules/query/canonical-graph.ts
+/**
+ * How many canonical hops `canonical.chain` follows from a page before it
+ * stops and says so (`hopLimitReached`). A chain of ten is already far past what
+ * a search engine is documented to follow, and the walk costs one query per
+ * hop per batch, so the limit is also what bounds the work. A cycle that is
+ * longer than this is not recognised as a cycle: the walk stops at the limit
+ * first.
+ */
+export const CANONICAL_MAX_HOPS = 10;

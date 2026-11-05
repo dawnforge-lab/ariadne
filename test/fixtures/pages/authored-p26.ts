@@ -162,9 +162,234 @@ const unavailableAfter: Fixture = {
     })),
 };
 
+// ---------------------------------------------------------------------------
+// Canonicals (Task 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * A self-referential canonical written as a path. It resolves to the page's own
+ * URL, so `canonical.points-elsewhere` stays silent and the one defect is that
+ * the value has no scheme or host.
+ */
+const canonicalRelative: Fixture = {
+  path: "/authored26/canonical-relative",
+  category: "canonical",
+  name: "Page whose canonical is a relative path",
+  expectedIssues: ["canonical.relative"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "A page that names itself with only a path",
+      metaDescription:
+        "The canonical link on this page is a bare path with no scheme or host, so it is resolved against whichever address happened to serve the page.",
+      canonical: "/authored26/canonical-relative",
+      bodyHtml: article({
+        h1: "A canonical written as a bare path",
+        lede: "The head of this document declares itself canonical, but only as a path, leaving the scheme and the host for the reader to supply.",
+        withImage: false,
+        sections: [
+          {
+            h2: "What the path leaves open",
+            body: "A relative canonical works only while the page is fetched from the address it was written for. Served from a staging host, a mirror or a cached copy, the same markup names that copy as the original, which is the opposite of what a canonical is for.",
+          },
+          {
+            h2: "Why templates produce it",
+            body: "A template that prints the request path is the shortest thing to write, and on the production host it looks right in every test a developer runs. Nobody sees the other hosts until a crawler or a search engine does.",
+          },
+          {
+            h2: "How it gets fixed",
+            body: "Print the preferred scheme and host in front of the path, from configuration and not from the request, so every copy of the page agrees on one address.",
+          },
+        ],
+      }),
+    })),
+};
+
+/**
+ * A canonical that is the page's own address plus a `#fragment`. The fragment is
+ * stripped when the URL is normalised, so the canonical still resolves to the
+ * page itself and only the fragment rule fires.
+ */
+const canonicalFragment: Fixture = {
+  path: "/authored26/canonical-fragment",
+  category: "canonical",
+  name: "Page whose canonical carries a fragment",
+  expectedIssues: ["canonical.fragment"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, (self) => ({
+      title: "A page whose canonical ends in a fragment",
+      metaDescription:
+        "The canonical link on this page is the page's own address followed by a hash fragment, which no search engine treats as part of the URL it indexes.",
+      canonical: `${new URL("/authored26/canonical-fragment", self).href}#main`,
+      bodyHtml: article({
+        h1: "A canonical that ends in a hash",
+        lede: "This page declares its own absolute address as canonical and then appends a fragment to it, naming a place inside the page rather than the page.",
+        withImage: false,
+        sections: [
+          {
+            h2: "What the fragment does to a canonical",
+            body: "A fragment points at a spot inside a document and is never sent to the server, so every address that differs only by one is the same page. A canonical that carries one names an address that does not exist as written, and an engine is free to ignore the hint.",
+          },
+          {
+            h2: "Where it comes from",
+            body: "Single page layouts and tabbed templates often build the canonical from the browser location, hash included. The server never sees the hash, so the bug appears only where scripts or a copied link supply it.",
+          },
+          {
+            h2: "How it gets fixed",
+            body: "Build the canonical from the path and the preferred host alone, and leave anything after a hash out of it.",
+          },
+        ],
+      }),
+    })),
+};
+
+/**
+ * Chain a -> b -> c. Only `a` is linked from the hub, and neither `b` nor `c` is
+ * linked from anywhere, so every link into the chain is the hub's link to `a`.
+ * `c` is self-canonical. Each page canonicalises with an absolute URL, so the
+ * defects are the ones the chain itself produces and nothing about the value.
+ */
+const CHAIN_A = "/authored26/chain-a";
+const CHAIN_B = "/authored26/chain-b";
+const CHAIN_C = "/authored26/chain-c";
+
+function chainPage(
+  path: string,
+  canonicalPath: string,
+  copy: { title: string; description: string; h1: string; lede: string; body: [string, string][] },
+  rest: Pick<Fixture, "expectedIssues" | "linkedFromHub" | "inSitemap" | "name">,
+): Fixture {
+  return {
+    path,
+    category: "canonical",
+    ...rest,
+    exact: true,
+    handler: (req, res) =>
+      serve(req, res, (self) => ({
+        title: copy.title,
+        metaDescription: copy.description,
+        canonical: new URL(canonicalPath, self).href,
+        bodyHtml: article({
+          h1: copy.h1,
+          lede: copy.lede,
+          withImage: false,
+          sections: copy.body.map(([h2, body]) => ({ h2, body })),
+        }),
+      })),
+  };
+}
+
+const chainA = chainPage(
+  CHAIN_A,
+  CHAIN_B,
+  {
+    title: "The first page of a three step canonical chain",
+    description:
+      "This page canonicalises to a second page, and that second page canonicalises to a third, so the first signal has to pass through a page that hands it on.",
+    h1: "The head of a canonical chain",
+    lede: "This is the only page of the three that the home page links to, and its canonical names a page that itself points somewhere else.",
+    body: [
+      [
+        "Where the signal goes",
+        "The canonical of this page names the second page in the chain. That page declares a canonical of its own, so the consolidation this page asked for never lands on the page it named and depends on a search engine following one more step.",
+      ],
+      [
+        "Why a chain is a risk",
+        "Engines read a canonical as a hint and may stop after one hop, so a chain leaves it to chance which of the three addresses is kept. Redesigns and migrations leave them behind when one address is retired and its old canonical is pointed at the new one.",
+      ],
+      [
+        "How it gets fixed",
+        "Point this page straight at the last address in the chain, the one that names itself, so a single hop settles the question.",
+      ],
+    ],
+  },
+  {
+    name: "Canonical chain, first page (a -> b -> c)",
+    // Canonicalised pages stay out of the sitemap: listing one is
+    // `sitemap.non-indexable`, which is not what this fixture is about.
+    inSitemap: false,
+    expectedIssues: ["canonical.points-elsewhere", "canonical.chain", "canonical.unlinked"],
+  },
+);
+
+const chainB = chainPage(
+  CHAIN_B,
+  CHAIN_C,
+  {
+    title: "The middle page of a three step canonical chain",
+    description:
+      "This page is the target of the first page's canonical and carries a canonical of its own that names the third page, which is what makes the first a chain.",
+    h1: "The middle of a canonical chain",
+    lede: "No page on the site links to this one. It is reached only because the first page of the chain names it, and it names the third.",
+    body: [
+      [
+        "A target that defers",
+        "A canonical target is supposed to be the page that keeps the signals. This one passes them on, which is why the page before it is reported as a chain, while this page is reported only for pointing elsewhere.",
+      ],
+      [
+        "Why nobody links it",
+        "Pages like this are often old addresses that were replaced and left behind. Every link on the site was updated to the new address, so only a canonical still names the page.",
+      ],
+      [
+        "How it gets fixed",
+        "Update whichever page names this one so it points at the final address, and retire this page or redirect it.",
+      ],
+    ],
+  },
+  {
+    name: "Canonical chain, middle page (a -> b -> c)",
+    // Linked from nowhere, so the only way the crawl reaches it is the
+    // sitemap, which makes it a listed page that canonicalises elsewhere:
+    // `sitemap.non-indexable` is an arithmetic consequence of being reachable.
+    linkedFromHub: false,
+    expectedIssues: [
+      "canonical.points-elsewhere",
+      "canonical.unlinked",
+      "sitemap.non-indexable",
+    ],
+  },
+);
+
+const chainC = chainPage(
+  CHAIN_C,
+  CHAIN_C,
+  {
+    title: "The final page of a three step canonical chain",
+    description:
+      "This page is where the chain ends, because it canonicalises to itself, and it is linked from no other page on the site, only named by a canonical.",
+    h1: "The end of a canonical chain",
+    lede: "This page names itself as canonical, so it is where the signals of the other two pages are meant to land, and no page links to it.",
+    body: [
+      [
+        "The page that keeps the signals",
+        "A self-referencing canonical on an indexable page is the healthy end of any chain. Everything above it is asking for the signals to be consolidated here, so this is the address a search engine is meant to keep, to rank and to show to the people who search, and the page above it in the chain exists only to hand its signals on to this one.",
+      ],
+      [
+        "Why it needs a link",
+        "A canonical is a hint, and an address that nothing links to gives an engine little reason to prefer it over a page it can reach. A page that others point at is easier to keep, because the links are the evidence an engine weighs when it decides between two addresses that claim to be the same content, and this page has none of that evidence.",
+      ],
+      [
+        "How it gets fixed",
+        "Link to this page from the places a reader would expect to find it, such as a menu, a related list or the body of the page above it in the chain, and point the first two pages of the chain straight at it.",
+      ],
+    ],
+  },
+  {
+    name: "Canonical chain, final page (a -> b -> c, orphaned)",
+    linkedFromHub: false,
+    expectedIssues: ["links.orphan"],
+  },
+);
+
 export const authoredP26Fixtures: Fixture[] = [
   wrongContentType,
   nofollow,
   nosnippet,
   unavailableAfter,
+  canonicalRelative,
+  canonicalFragment,
+  chainA,
+  chainB,
+  chainC,
 ];
