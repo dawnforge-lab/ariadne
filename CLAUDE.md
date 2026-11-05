@@ -99,3 +99,8 @@ test/fixtures/      fixture site pages (badseo content + our own)
 
 Conventional, small, after each green test cycle. End commit messages with:
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+## Pull requests
+
+Every phase lands through a PR. Run a code review on the PR (`/code-review`) and
+fix what it confirms before merging — never merge an unreviewed PR.
