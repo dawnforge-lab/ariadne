@@ -14,6 +14,9 @@
  *     whose span is not painted by exactly one font from the allowed set (no
  *     glyph at all, or a fallback font) is EXCLUDED, never recorded with a
  *     fallback's width. serpWidth returns null for an excluded code point.
+ *     Control characters (Cc) are excluded outright. Probe text uses literal
+ *     characters, not `&#N;` references (the HTML parser remaps &#128;-&#159;
+ *     via Windows-1252, which once put 27 C1 controls in the table at width 0).
  *  4. Measure the kept code points with canvas `measureText(ch).width` at
  *     `20px Arial` / `14px Arial`, `fontKerning = "none"`, rounded to 3
  *     decimals: an advance sum, kerning off.
@@ -31,6 +34,7 @@ const RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x2000, 0x206f],
   [0x20a0, 0x20cf],
 ];
+const CONTROL = /^\p{Cc}$/u;
 const ALLOWED = new Set(["Arial", "Liberation Sans"]);
 const OUT = fileURLToPath(new URL("../src/rules/serp-glyphs.generated.ts", import.meta.url));
 
@@ -47,14 +51,25 @@ async function main(): Promise<void> {
     const codePoints: number[] = [];
     for (const [lo, hi] of RANGES) for (let cp = lo; cp <= hi; cp++) codePoints.push(cp);
 
-    // One document: a probe per size, then one span per code point.
+    // One document: a probe per size, then one span per code point. Span text
+    // is set from the LITERAL character via textContent, never a numeric
+    // character reference: the HTML parser remaps &#128;-&#159; through
+    // Windows-1252, so the probe would draw a different character than the
+    // canvas pass measures. (No nested named functions: tsx keepNames injects
+    // a `__name` helper that does not exist in the page.)
     await page.setContent(
       `<body style="margin:0"><span id="p20" style="font:20px Arial">Hamburgefonstiv</span>` +
         `<span id="p14" style="font:14px Arial">Hamburgefonstiv</span>` +
-        `<div id="g" style="font:20px Arial;white-space:pre">${codePoints
-          .map((cp) => `<span>&#${cp};</span>`)
-          .join("")}</div></body>`,
+        `<div id="g" style="font:20px Arial;white-space:pre"></div></body>`,
     );
+    await page.evaluate((cps) => {
+      const g = document.getElementById("g")!;
+      for (const cp of cps) {
+        const span = document.createElement("span");
+        span.textContent = String.fromCodePoint(cp);
+        g.appendChild(span);
+      }
+    }, codePoints);
     const { root } = await cdp.send("DOM.getDocument", { depth: -1 });
     const query = async (selector: string): Promise<number[]> =>
       (await cdp.send("DOM.querySelectorAll", { nodeId: root.nodeId, selector })).nodeIds;
@@ -81,6 +96,9 @@ async function main(): Promise<void> {
     const kept: number[] = [];
     for (let i = 0; i < spans.length; i++) {
       const families = await platformFamilies(spans[i]!);
+      // C0/C1 controls (general category Cc) are not glyphs: excluded
+      // explicitly, whatever font the browser claims drew them.
+      if (CONTROL.test(String.fromCodePoint(codePoints[i]!))) continue;
       if (families.length === 1 && ALLOWED.has(families[0]!)) kept.push(codePoints[i]!);
     }
     const excluded = codePoints.length - kept.length;
@@ -113,7 +131,7 @@ async function main(): Promise<void> {
  * Chromium:         ${version}
  * Platform font:    ${resolved} (verified via CDP CSS.getPlatformFontsForNode for both sizes)
  * Covered ranges:   U+0020-U+052F, U+2000-U+206F, U+20A0-U+20CF (${codePoints.length} code points)
- * Excluded:         ${excluded} code points (no glyph in the font, or painted by a fallback font; detected per code point over CDP)
+ * Excluded:         ${excluded} code points (control characters, or no glyph in the font, or painted by a fallback font; detected per code point over CDP)
  * Date:             omitted on purpose so a re-run on the same machine is byte-identical
  *
  * A code point missing from this table makes serpWidth() return null.

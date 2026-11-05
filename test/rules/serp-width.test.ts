@@ -56,6 +56,16 @@ describe("serpWidth", () => {
     expect(serpWidth("abc 日", "description")).toBeNull();
   });
 
+  it("returns null for C1 controls, which the HTML parser would remap to cp1252 glyphs", () => {
+    expect(serpWidth("\u0085", "title")).toBeNull();
+    expect(serpWidth("\u0080", "title")).toBeNull();
+    expect(serpWidth("\u0080", "description")).toBeNull();
+  });
+
+  it("keeps the euro sign (U+20AC)", () => {
+    expect(serpWidth("€", "title")!).toBeGreaterThan(0);
+  });
+
   it("rounds to one decimal", () => {
     const w = serpWidth("Hello world", "title")!;
     expect(Math.round(w * 10) / 10).toBe(w);
