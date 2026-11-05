@@ -711,8 +711,8 @@ const linkB = hreflangPage(
 );
 
 // ---------------------------------------------------------------------------
-// Pagination integrity. Three clusters, each breaking one thing, and each page
-// links the hub (the default) so `pagination.next-not-linked` and `links.orphan`
+// Pagination integrity. Three clusters, each breaking one thing, and the hub
+// links each page (the default) so `pagination.next-not-linked` and `links.orphan`
 // stay where Phase 3 put them. The Phase 3 series (`/authored3/paged-*`) is
 // untouched: it is wired correctly in both directions, so it proves
 // `pagination.sequence-error` does not fire on a series whose prevs are right.

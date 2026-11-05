@@ -268,8 +268,8 @@ export const CANONICAL_MAX_HOPS = 10;
  * How many `rel=next` steps `pagination.loop` follows from a page before it
  * stops. A page is in a loop when the walk comes back to it inside this many
  * steps, so a loop longer than the limit is not recognised: the walk stops
- * first. No paginated series is hundreds of pages deep by `rel=next` alone, and
- * the walk starts from every page of the crawl, so the limit is also what
- * bounds the work.
+ * first. Long archives exist, so the limit bounds the work and is not a claim
+ * about series length: the walk starts from every page of the crawl, so its
+ * cost is at most pages times this limit.
  */
 export const PAGINATION_WALK_MAX = 500;

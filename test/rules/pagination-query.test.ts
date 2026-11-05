@@ -388,6 +388,73 @@ describe("paginationRules against the database", () => {
         rel: "next",
         target: url("/blog?page=2"),
         targetStatus: 404,
+        targetFetchClass: "client_error",
+        targetNoindex: false,
+      });
+    });
+
+    it("says why a target with no status is not usable: a timeout, a refused URL", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", relNext: "/slow" },
+        { path: "/slow", fetchClass: "timeout", statusCode: null },
+        { path: "/b", relNext: "/refused" },
+      ]);
+      // A refusal by our own url-policy: `disallowed`, but NOT a robots.txt
+      // row, so it was a URL the crawl met and could not read.
+      await db.insert(pages).values({
+        id: `page_${randomUUID()}`,
+        crawlId,
+        url: url("/refused"),
+        urlNormalised: url("/refused"),
+        fetchClass: "disallowed",
+        fetchReason: "url-policy: private address",
+        statusCode: null,
+        depth: 1,
+        discoveredVia: "link",
+      });
+      const found = await findings("pagination.non-indexable-target", crawlId);
+      expect(
+        found.map((f) => [f.pageUrl, f.evidence]).sort((x, y) => String(x[0]).localeCompare(String(y[0]))),
+      ).toEqual([
+        [
+          url("/a"),
+          {
+            rel: "next",
+            target: url("/slow"),
+            targetStatus: null,
+            targetFetchClass: "timeout",
+            targetNoindex: false,
+          },
+        ],
+        [
+          url("/b"),
+          {
+            rel: "next",
+            target: url("/refused"),
+            targetStatus: null,
+            targetFetchClass: "disallowed",
+            targetNoindex: false,
+          },
+        ],
+      ]);
+    });
+
+    // A bot-protection block is a refusal, not a page, whatever status it was
+    // served with.
+    it("fires on a bot-protection block served with a 200", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", relNext: "/walled" },
+        { path: "/walled", fetchClass: "blocked", statusCode: 200 },
+      ]);
+      const found = await findings("pagination.non-indexable-target", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        rel: "next",
+        target: url("/walled"),
+        targetStatus: 200,
+        targetFetchClass: "blocked",
         targetNoindex: false,
       });
     });
@@ -405,6 +472,7 @@ describe("paginationRules against the database", () => {
         rel: "next",
         target: url("/blog?page=2"),
         targetStatus: 200,
+        targetFetchClass: "ok",
         targetNoindex: true,
       });
     });
@@ -487,15 +555,34 @@ describe("paginationRules against the database", () => {
         const { cycle, cycleLength } = f.evidence as { cycle: string[]; cycleLength: number };
         expect([...cycle].sort()).toEqual([url("/loop-1"), url("/loop-2"), url("/loop-3")]);
         expect(cycleLength).toBe(3);
-        // Walk order, from the page itself.
-        expect(cycle[0]).toBe(f.pageUrl);
+        // Walk order, from the loop's smallest URL, the same for every member.
+        expect(cycle).toEqual([url("/loop-1"), url("/loop-2"), url("/loop-3")]);
       }
-      const loop1 = found.find((f) => f.pageUrl === url("/loop-1"))!;
-      expect((loop1.evidence as { cycle: string[] }).cycle).toEqual([
-        url("/loop-1"),
-        url("/loop-2"),
-        url("/loop-3"),
-      ]);
+    });
+
+    // Near the walk limit: a loop of this length is DETECTED, and the quote does
+    // not cost a path per member. Measured: see the fix report.
+    it("detects a 450-page ring and quotes the same 20 urls on every member", async () => {
+      const crawlId = await newCrawl();
+      const n = 450;
+      expect(n).toBeLessThan(PAGINATION_WALK_MAX);
+      await addPages(
+        crawlId,
+        Array.from({ length: n }, (_, i) => ({
+          path: `/r-${String(i).padStart(3, "0")}`,
+          relNext: `/r-${String((i + 1) % n).padStart(3, "0")}`,
+        })),
+      );
+      const found = await rule("pagination.loop").run(db, crawlId, { listing: null });
+      expect(found).toHaveLength(n);
+      const quote = (f: Finding) => (f.evidence as { cycle: string[] }).cycle;
+      expect(quote(found[0]!)).toHaveLength(20);
+      expect(quote(found[0]!)[0]).toBe(url("/r-000"));
+      expect(quote(found[0]!)[19]).toBe(url("/r-019"));
+      for (const f of found) {
+        expect(quote(f)).toEqual(quote(found[0]!));
+        expect((f.evidence as { cycleLength: number }).cycleLength).toBe(n);
+      }
     });
 
     it("reports a page whose rel=next names itself", async () => {

@@ -951,7 +951,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "pagination.non-indexable-target": {
     title: "Pagination: Next or previous page not indexable",
     explanation:
-      "Pages whose rel=next or rel=prev names a crawled page that does not return 200 or that carries noindex; the Link Type column says which. A series that points at an error page or a noindexed page is broken for search engines at that step. Targets the crawl never fetched are reported under Next page not crawled instead.",
+      "Pages whose rel=next or rel=prev names a crawled page that does not return 200, is a bot-protection block or carries noindex; the Link Type column says which end of the series, and Target Fetch Result says why a target without a status failed. A series that points at an error page or a noindexed page is broken for search engines at that step. Targets the crawl never fetched are reported under Next page not crawled instead.",
     howToFix:
       "Point rel=next and rel=prev at working, indexable pages. If the target was removed, end the series at the last live page; if the noindex is wrong, remove it.",
   },

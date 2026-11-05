@@ -1393,12 +1393,12 @@ describe("the fixture site end to end", () => {
     const loop = ["/authored26/loop-1", "/authored26/loop-2", "/authored26/loop-3"];
 
     // The loop: each member once, each quoting the same three URLs, in walk
-    // order from itself. The existing `/authored3/paged-*` series, whose prevs
+    // order from the loop's smallest URL (`loop-1`). The existing `/authored3/paged-*` series, whose prevs
     // are right, fires no `pagination.sequence-error` (the exact-set assertion
     // on those pages already holds that), and neither do the loop pages, whose
     // prevs name their predecessors.
-    loop.forEach((path, i) => {
-      const cycle = [0, 1, 2].map((k) => url(loop[(i + k) % 3]!));
+    loop.forEach((path) => {
+      const cycle = loop.map((p) => url(p));
       expect(detailsByPath.get(`${path}\npagination.loop`), path).toEqual({
         pageUrl: url(path),
         cycle,
@@ -1413,6 +1413,7 @@ describe("the fixture site end to end", () => {
       rel: "next",
       target: url("/status/not-found"),
       targetStatus: 404,
+      targetFetchClass: "client_error",
       targetNoindex: false,
     });
 

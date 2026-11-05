@@ -1365,11 +1365,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     `pagination.next-target-uncrawled`.
   - `pagination.loop` (warning) — the page is in a `rel="next"` cycle (following next
     comes back to it), reported once per member page with the URLs in walk order. A loop
-    of hundreds of pages is not detected.
+    longer than 500 pages is not detected.
   - `pagination.sequence-error` (info) — the page's `rel="next"` names a crawled 200 page
     whose `rel="prev"` is absent or names a different page. A series that omits
     `rel="prev"` everywhere fires on every page of it; say so rather than listing it.
-  A JS-only "Load more" with no `rel="next"` at all leaves BOTH rules silent — the
+  A JS-only "Load more" with no `rel="next"` at all leaves ALL FIVE rules silent — the
   engine cannot report a declaration nobody made. That is what the DevTools steps
   below are for, and it is why this check keeps them.
 - **DevTools** — Check BOTH collection and blog pagination separately:

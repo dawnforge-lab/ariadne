@@ -1224,7 +1224,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2081` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2082` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1838,7 +1838,7 @@ threshold";
 `test/rules/coverage.test.ts:459` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2719` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2720` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

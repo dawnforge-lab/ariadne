@@ -290,7 +290,8 @@ async function paginationFindingsMany(
  * run nested inside another transaction.
  *
  * THE WALK starts from every edge and follows `next` until it arrives back at
- * its start or has taken `PAGINATION_WALK_MAX` steps. A start page is in a loop
+ * its start or has taken `PAGINATION_WALK_MAX` steps. Each row also carries the
+ * smallest URL it has passed, in O(1), which on arrival is the loop's identity. A start page is in a loop
  * exactly when its walk arrives back at it; a page that only leads into somebody
  * else's loop spins in that loop until the step limit and is not reported. Each
  * member of a loop is its own start, so each is reported once, and the number of
@@ -303,8 +304,10 @@ async function paginationFindingsMany(
  * (the worst case, every walk runs the full 500 steps) the first version, which
  * used it, took 26 s, and this version, whose rows are O(1), 0.4 s. A series of
  * a few hundred pages in a straight line costs the same order, and archives are
- * that long. The path is built only for the pages the finding lists, by a second
- * recursion from those pages that runs exactly their loop's length.
+ * that long. The quoted path is built ONCE PER DISTINCT LOOP, starting from its
+ * smallest URL and at most `LOOP_QUOTE_MAX` steps, and every listed member of
+ * the loop gets that same quote and the loop's true length, so the cost of the
+ * path does not grow with the loop's length or its member count.
  *
  * `isAuditable` gates the edges like the other pagination rules: a page that
  * was not served as an HTML 200 has no `rel=next` signal to follow.
@@ -354,64 +357,53 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
     const rows = await tx.execute<{
       start_id: string;
       start_url: string;
+      len: number;
       path: string[];
       total: string;
     }>(sql`
-      with recursive walk(start_id, start_url, cur, depth) as (
-        select e.src_id, e.src_url, e.dst_url, 1 from ${table} e
+      with recursive walk(start_id, start_url, cur, least_url, depth) as (
+        select e.src_id, e.src_url, e.dst_url, least(e.src_url, e.dst_url), 1 from ${table} e
         union all
-        select w.start_id, w.start_url, n.dst_url, w.depth + 1
+        select w.start_id, w.start_url, n.dst_url, least(w.least_url, n.dst_url), w.depth + 1
         from walk w
         join ${table} n on n.src_url = w.cur
         where w.depth < ${PAGINATION_WALK_MAX} and w.cur <> w.start_url
       ),
       members as (
-        select start_id, start_url, depth as len, count(*) over () as total
+        select start_id, start_url, depth as len, least_url, count(*) over () as total
         from walk
         where cur = start_url
         order by start_url
         ${limitTo(caps.listing)}
       ),
-      trail(start_url, cur, path, depth) as (
-        select m.start_url, m.start_url, array[m.start_url], 1 from members m
+      cycles as (select distinct least_url, len from members),
+      trail(least_url, len, cur, path, depth) as (
+        select c.least_url, c.len, c.least_url, array[c.least_url], 1 from cycles c
         union all
-        select t.start_url, n.dst_url, t.path || n.dst_url, t.depth + 1
+        select t.least_url, t.len, n.dst_url, t.path || n.dst_url, t.depth + 1
         from trail t
-        join members m on m.start_url = t.start_url
         join ${table} n on n.src_url = t.cur
-        where t.depth < m.len
+        where t.depth < least(t.len, ${LOOP_QUOTE_MAX})
       )
-      select m.start_id, m.start_url, t.path, m.total
+      select m.start_id, m.start_url, m.len, t.path, m.total
       from members m
-      join trail t on t.start_url = m.start_url and t.depth = m.len
+      join trail t on t.least_url = m.least_url and t.len = m.len
+        and t.depth = least(m.len, ${LOOP_QUOTE_MAX})
       order by m.start_url`);
 
     await tx.execute(sql`drop table ${table}`);
 
-    const findings = rows.rows.map((row) => {
-      const members = row.path;
-      return queryFinding(LOOP, {
+    const findings = rows.rows.map((row) =>
+      queryFinding(LOOP, {
         pageId: row.start_id,
         pageUrl: row.start_url,
-        evidence: { cycle: quoteCycle(members), cycleLength: members.length },
+        evidence: { cycle: row.path, cycleLength: Number(row.len) },
         dedupeKey: row.start_url,
-      });
-    });
+      }),
+    );
     const total = rows.rows.length === 0 ? 0 : Number(rows.rows[0]!.total);
     return noteTruncation(findings, total);
   });
-}
-
-/**
- * At most `LOOP_QUOTE_MAX` URLs of a cycle, in walk order. A cycle that fits is
- * quoted from the page itself. One that does not is rotated to start at its
- * smallest URL first, so every member of it quotes the SAME 20 URLs instead of
- * the 20 that follow itself.
- */
-function quoteCycle(members: string[]): string[] {
-  if (members.length <= LOOP_QUOTE_MAX) return members;
-  const smallest = members.reduce((best, u, i) => (u < members[best]! ? i : best), 0);
-  return [...members.slice(smallest), ...members.slice(0, smallest)].slice(0, LOOP_QUOTE_MAX);
 }
 
 /** What a page's `rel=next` and `rel=prev` say about targets the series cannot use. */
@@ -425,12 +417,15 @@ function nonIndexableTargets(
   ] as const) {
     if (target === null) continue;
     const noindex = hasNoindex(target);
-    if (target.statusCode === 200 && !noindex) continue;
+    // A bot-protection block is a refusal, not a page, whatever status it was
+    // served with (helpers.ts `indexabilityOf`): a `blocked` 200 is not usable.
+    if (target.statusCode === 200 && !noindex && target.fetchClass !== "blocked") continue;
     hits.push({
       evidence: {
         rel,
         target: target.url,
         targetStatus: target.statusCode,
+        targetFetchClass: target.fetchClass,
         targetNoindex: noindex,
       },
       dedupeKey: `${p.page.url}\n${rel}`,
@@ -561,6 +556,7 @@ export const paginationRules: QueryRule[] = [
       { key: "rel", label: "Link Type" },
       { key: "target", label: "Expected Link" },
       { key: "targetStatus", label: "Target Status" },
+      { key: "targetFetchClass", label: "Target Fetch Result" },
       { key: "targetNoindex", label: "Target Noindex" },
     ],
     ...copyFor(NON_INDEXABLE_TARGET.id),
