@@ -1138,9 +1138,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Replace each generic anchor with words that describe the page it points at, such as the name of the product or the question the page answers.",
   },
   "links.high-outlinks": {
-    title: "Links: Over 1,000 internal or 100 external links",
+    title: "Links: Over 1,000 internal or 10 external links",
     explanation:
-      "Pages that link to more than 1,000 different internal URLs or more than 100 different external URLs. Link value is shared between the links on a page, so every extra link dilutes the rest, and a crawler may stop reading a very long page. The row gives both counts and the limit that was crossed.",
+      "Pages that link to more than 1,000 different internal URLs or more than 10 different external URLs. Link value is shared between the links on a page, so every extra link dilutes the rest, and a crawler may stop reading a very long page. The row gives both counts and the limit that was crossed.",
     howToFix:
       "Cut the list down to the links a visitor needs, and move long lists into paginated or category pages that each carry a manageable number.",
   },

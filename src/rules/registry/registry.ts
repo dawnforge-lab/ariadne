@@ -443,7 +443,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     link whose whole normalised anchor is on `NON_DESCRIPTIVE_ANCHORS`) and
 //     `links.high-outlinks` (info, CHECK-33: distinct internal targets over
 //     `HIGH_INTERNAL_OUTLINKS` or distinct external targets over
-//     `HIGH_EXTERNAL_OUTLINKS`, starting values that T12 calibrates).
+//     `HIGH_EXTERNAL_OUTLINKS`, calibrated against Screaming Frog in T13).
 //  8. (T9) URL shape, seven page rules in `page/url-shape.ts`, all on the path of
 //     the stored URL and gated by `isJudged` like `url.too-long`: `url.uppercase`
 //     (info; the hex of a percent-escape is not a letter), `url.underscores`

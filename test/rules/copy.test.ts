@@ -848,7 +848,7 @@ describe("copy: pagination (26a)", () => {
 describe("copy: link hygiene (26a)", () => {
   it("quotes the outlink limits the rule actually uses, in the title and the explanation", () => {
     expect(HIGH_INTERNAL_OUTLINKS).toBe(1000);
-    expect(HIGH_EXTERNAL_OUTLINKS).toBe(100);
+    expect(HIGH_EXTERNAL_OUTLINKS).toBe(10);
     const { title, explanation } = copy("links.high-outlinks");
     const internal = HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US");
     expect(title).toContain(`Over ${internal} internal`);

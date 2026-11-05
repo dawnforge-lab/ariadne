@@ -35,7 +35,15 @@ export const HEADING_MAX_STEP = 1;
  * asserts the prose against these constants: change one here and the copy test
  * fails until the sentence is changed with it.
  */
-/** Time to first byte, in ms, above which the response is reported as slow. */
+/**
+ * Time to first byte, in ms, above which the response is reported as slow.
+ *
+ * Not calibrated: Screaming Frog 25.1 has no response-time issue at its
+ * default configuration (none in its Issues Overview or its tab filters; the
+ * one latency item needs the PageSpeed API), so there is no boundary to read.
+ * Its measured times on the 250 … 3,000 ms ladder match ours to within a few
+ * milliseconds (docs/gates/phase-26a-calibration.md).
+ */
 export const SLOW_MS = 1500;
 
 // ---- from src/rules/query/link-graph.ts
@@ -47,6 +55,11 @@ export const SLOW_MS = 1500;
  * the prose against this constant: change it here and the copy test fails until
  * the sentence is changed with it. It moved from src/rules/page/technical.ts
  * with the rule (Phase 9).
+ *
+ * Not calibrated: Screaming Frog's crawl depths on the 1 … 10 chain match
+ * ours exactly, but its "Pages With High Crawl Depth" filter came back empty
+ * at every depth, consistent with its post-crawl analysis being off at the
+ * configuration it starts with (docs/gates/phase-26a-calibration.md). Kept.
  */
 export const DEEP_DEPTH = 5;
 
@@ -307,13 +320,26 @@ export const NON_DESCRIPTIVE_ANCHORS = [
 
 /**
  * Distinct internal link targets on one page above which
- * `links.high-outlinks` fires. A STARTING VALUE: Task 12 of Phase 26a replaces
- * it with the value calibrated against the reference crawls.
+ * `links.high-outlinks` fires. Strictly greater: a page with exactly this many
+ * is not reported.
+ *
+ * Confirmed, not moved: Screaming Frog flags the ladder rung with 1,001
+ * distinct internal targets and not the one with 1,000, the same boundary as
+ * the starting value.
+ * calibrated against Screaming Frog 25.1 defaults, 2026-11-05 (docs/gates/phase-26a-calibration.md)
  */
 export const HIGH_INTERNAL_OUTLINKS = 1000;
 
-/** Distinct external link targets on one page above which `links.high-outlinks` fires. A starting value, replaced by Task 12's calibration like `HIGH_INTERNAL_OUTLINKS`. */
-export const HIGH_EXTERNAL_OUTLINKS = 100;
+/**
+ * Distinct external link targets on one page above which `links.high-outlinks`
+ * fires. Strictly greater: a page with exactly this many is not reported.
+ *
+ * Moved from the starting value of 100: Screaming Frog flags the ladder rung
+ * with 11 distinct external targets and not the one with 10 (every count from
+ * 11 to 25 is on the ladder and every one is flagged).
+ * calibrated against Screaming Frog 25.1 defaults, 2026-11-05 (docs/gates/phase-26a-calibration.md)
+ */
+export const HIGH_EXTERNAL_OUTLINKS = 10;
 
 /**
  * Query keys `url.internal-search` reads as a site search, compared whole and
@@ -353,12 +379,22 @@ export const W3C_DATETIME =
 // ---- from src/rules/page/pixel-width.ts
 /**
  * The pixel bounds of a search-result title and description, measured by
- * `serpWidth` (20px and 14px Arial, the font a result is drawn in). STARTING
- * VALUES: Task 13's Screaming Frog calibration confirms them or moves them, and
- * the client-facing copy quotes them, so a change here fails the copy test
- * until the sentence is changed with it.
+ * `serpWidth` (20px and 14px Arial, the font a result is drawn in). The
+ * client-facing copy quotes them, so a change here fails the copy test until
+ * the sentence is changed with it.
  *
  * All four are strict: a value exactly on a bound is not reported.
+ *
+ * Confirmed, not moved. Screaming Frog names these four numbers in its own
+ * filters (Over 561 / Below 200 Pixels, Over 985 / Below 400 Pixels), and its
+ * ladder boundaries agree in its own measure: descriptions 985 not flagged and
+ * 986 flagged, 397 flagged and 400 not; titles 558 not flagged and 562
+ * flagged, 199 flagged and 203 not. Its DESCRIPTION widths match `serpWidth`
+ * within 2 px; its TITLE widths run 0–12 px wider than ours on the ladder's
+ * strings, so a title within a few pixels of a bound can be flagged by one
+ * tool and not the other. That is the measurement, not the bound, and the
+ * table stays ours (spec: measured by us, nothing copied).
+ * calibrated against Screaming Frog 25.1 defaults, 2026-11-05 (docs/gates/phase-26a-calibration.md)
  */
 export const TITLE_PX_MAX = 561;
 export const TITLE_PX_MIN = 200;

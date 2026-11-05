@@ -50,7 +50,7 @@ describe("thresholds", () => {
         "more information", "details", "this page", "this", "link", "go", "website",
       ],
       HIGH_INTERNAL_OUTLINKS: 1000,
-      HIGH_EXTERNAL_OUTLINKS: 100,
+      HIGH_EXTERNAL_OUTLINKS: 10,
       INTERNAL_SEARCH_PARAMS: ["s", "q", "query", "search", "keyword", "keywords"],
       INTERNAL_SEARCH_PATH: /(?:^|\/)search(?:\/|$)/i,
       SITEMAP_LOC_MAX: 2048,
