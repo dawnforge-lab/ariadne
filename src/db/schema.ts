@@ -5,6 +5,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
+import type { RenderConsole } from "../crawl/render/console-capture.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
 
 export const crawls = pgTable("crawls", {
@@ -874,11 +875,13 @@ export const pages = pgTable("pages", {
   //
   // NULLABLE: null means the console was not captured: the row was never rendered,
   // was rendered before this column existed (`render_version` null), or its render
-  // was refused before a browser page opened (`render_version` set, `render_error`
-  // a `policy refusal`). It never means "the console was clean"; a clean console is
-  // a non-null capture with zero counts. Shape: `RenderConsole`
+  // was refused before a browser page opened (`render_version` set). Test the
+  // column itself, never `render_error`: a refusal BEFORE the page opened and one
+  // DURING a navigation both read `policy refusal: …`, and the second keeps what
+  // the page reported before it. It never means "the console was clean"; a clean
+  // console is a non-null capture with zero counts. Shape: `RenderConsole`
   // (src/crawl/render/console-capture.ts).
-  renderConsole: jsonb("render_console"),
+  renderConsole: jsonb("render_console").$type<RenderConsole>(),
 }, (t) => [
   uniqueIndex("pages_crawl_url").on(t.crawlId, t.url),
   index("pages_crawl_normalised").on(t.crawlId, t.urlNormalised),

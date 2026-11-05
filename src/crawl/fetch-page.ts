@@ -497,9 +497,9 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     deadline.abort();
   }, timeoutMs);
 
-  // Assigned the moment response headers arrive, so the catch path can keep
+  // Captured the moment response headers arrive, so the catch path can keep
   // them when the body then fails (a deadline expiring mid-body).
-  let received: HeaderBag | null = null;
+  let responseHeaders: StoredResponseHeaders | null = null;
 
   try {
     const response = await request(url, {
@@ -518,8 +518,7 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
 
     const responseTimeMs = Date.now() - started;
     const headers = response.headers as HeaderBag;
-    received = headers;
-    const responseHeaders = captureResponseHeaders(headers);
+    responseHeaders = captureResponseHeaders(headers);
     const statusCode = response.statusCode;
     const contentType = headerValue(headers, "content-type");
     const xRobotsTag = headerValue(headers, "x-robots-tag");
@@ -635,14 +634,13 @@ export async function fetchPage(url: string, opts: FetchOpts): Promise<FetchResu
     if (refusal !== null) {
       return emptyResult(url, "disallowed", responseTimeMs, refusal);
     }
-    const caughtHeaders = received === null ? null : captureResponseHeaders(received);
     if (deadlineHit || isTimeout(error)) {
-      return emptyResult(url, "timeout", responseTimeMs, null, caughtHeaders);
+      return emptyResult(url, "timeout", responseTimeMs, null, responseHeaders);
     }
     // Also where a body that claimed `content-encoding: gzip` and was not gzip
     // lands (zlib Z_DATA_ERROR / Z_BUF_ERROR out of readCappedDecoded): the
     // response was unreadable, which is a failed fetch and not an empty page.
-    return emptyResult(url, "network_error", responseTimeMs, null, caughtHeaders);
+    return emptyResult(url, "network_error", responseTimeMs, null, responseHeaders);
   } finally {
     clearTimeout(timer);
     if (ephemeral !== null) await ephemeral.destroy();
