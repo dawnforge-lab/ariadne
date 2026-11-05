@@ -17,6 +17,7 @@ import { SLOW_MS } from "../../src/rules/page/technical.js";
 // `click_depth` and therefore lives with the link-graph rules.
 import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
 import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
+import { PAGINATION_WALK_MAX } from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
 import {
   DUPLICATE_SAMPLE_URLS,
@@ -823,6 +824,13 @@ describe("copy: hreflang integrity (26a)", () => {
     expect(copy("hreflang.multiple-entries").explanation).toMatch(/not fetched/i);
     expect(copy("hreflang.self-only").explanation).toMatch(/canonicalised to another URL are ignored/i);
     expect(copy("hreflang.unlinked-target").explanation).toMatch(/did not fetch are not judged/i);
+  });
+});
+
+describe("copy: pagination (26a)", () => {
+  it("quotes the walk limit the loop rule actually uses", () => {
+    expect(PAGINATION_WALK_MAX).toBe(500);
+    expect(copy("pagination.loop").explanation).toContain(`${PAGINATION_WALK_MAX} pages`);
   });
 });
 

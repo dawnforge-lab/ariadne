@@ -948,6 +948,27 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Nothing if the crawl was bounded and the series continues. If the URL is wrong or gone, correct the rel=next in the template that generates the series.",
   },
+  "pagination.non-indexable-target": {
+    title: "Pagination: Next or previous page not indexable",
+    explanation:
+      "Pages whose rel=next or rel=prev names a crawled page that does not return 200 or that carries noindex; the Link Type column says which. A series that points at an error page or a noindexed page is broken for search engines at that step. Targets the crawl never fetched are reported under Next page not crawled instead.",
+    howToFix:
+      "Point rel=next and rel=prev at working, indexable pages. If the target was removed, end the series at the last live page; if the noindex is wrong, remove it.",
+  },
+  "pagination.loop": {
+    title: "Pagination: Next pages form a loop",
+    explanation:
+      "Pages that are part of a cycle of rel=next links, so that following next from the page leads back to it; the Pagination Loop column lists the URLs in order and Pages In Loop gives the full count. A series that loops has no last page. Loops longer than 500 pages are not detected.",
+    howToFix:
+      "Fix the template that writes rel=next so the last page of the series declares none, and no page names itself or an earlier page.",
+  },
+  "pagination.sequence-error": {
+    title: "Pagination: Next page does not point back",
+    explanation:
+      "Pages whose rel=next names a crawled page that has no rel=prev, or one that names a different page; the row quotes that rel=prev as written. Each page of a series should name its neighbours both ways, and a pair that disagrees usually means one template generates the two links differently. Next pages that were not crawled or did not return 200 are left to the other pagination checks.",
+    howToFix:
+      "Make rel=prev on each page name the page whose rel=next names it, or drop rel=prev everywhere if the site does not use it.",
+  },
   "url.normalisation-variants": {
     title: "URL: Same page served at several URLs (case or trailing slash)",
     explanation:

@@ -710,6 +710,230 @@ const linkB = hreflangPage(
   },
 );
 
+// ---------------------------------------------------------------------------
+// Pagination integrity. Three clusters, each breaking one thing, and each page
+// links the hub (the default) so `pagination.next-not-linked` and `links.orphan`
+// stay where Phase 3 put them. The Phase 3 series (`/authored3/paged-*`) is
+// untouched: it is wired correctly in both directions, so it proves
+// `pagination.sequence-error` does not fire on a series whose prevs are right.
+//
+//  - the loop (`loop-1` -> `loop-2` -> `loop-3` -> `loop-1`): every page names
+//    its neighbours both ways, so the only defect is that the series has no end.
+//    Each of the three fires `pagination.loop`.
+//  - the dead next page (`next-gone`): its `rel=next` names `/status/not-found`,
+//    a page the crawl fetched and which answered 404.
+//  - the one-way pair (`sequence-a` -> `sequence-b`): the second page's
+//    `rel=prev` names the home page instead of the first, so the first fires
+//    `pagination.sequence-error`.
+// ---------------------------------------------------------------------------
+
+const LOOP_1 = "/authored26/loop-1";
+const LOOP_2 = "/authored26/loop-2";
+const LOOP_3 = "/authored26/loop-3";
+const NEXT_GONE = "/authored26/next-gone";
+const SEQ_A = "/authored26/sequence-a";
+const SEQ_B = "/authored26/sequence-b";
+
+interface PaginationCopy {
+  title: string;
+  description: string;
+  h1: string;
+  lede: string;
+  body: [string, string][];
+}
+
+function paginationPage(
+  path: string,
+  links: { next?: string; prev?: string },
+  copy: PaginationCopy,
+  rest: Pick<Fixture, "expectedIssues" | "name">,
+): Fixture {
+  return {
+    path,
+    category: "pagination",
+    ...rest,
+    exact: true,
+    handler: (req, res) =>
+      serve(req, res, (self) => ({
+        title: copy.title,
+        metaDescription: copy.description,
+        headExtra: [
+          links.prev === undefined
+            ? null
+            : `<link rel="prev" href="${new URL(links.prev, self).href}">`,
+          links.next === undefined
+            ? null
+            : `<link rel="next" href="${new URL(links.next, self).href}">`,
+        ]
+          .filter((l): l is string => l !== null)
+          .join("\n"),
+        bodyHtml: article({
+          h1: copy.h1,
+          lede: copy.lede,
+          withImage: false,
+          sections: copy.body.map(([h2, body]) => ({ h2, body })),
+        }),
+      })),
+  };
+}
+
+const LOOP_BODY = (n: string): [string, string][] => [
+  [
+    "Where this page sits",
+    `This is page ${n} of a three page archive. Its rel=next names the page after it and its rel=prev names the page before it, so each page is wired correctly to its neighbours on its own.`,
+  ],
+  [
+    "What is wrong with the series",
+    "The third page names the first as its next page, so following the series never reaches an end. A crawler that follows rel=next walks around the three pages until it gives up, and a reader of the annotations cannot tell which page is last.",
+  ],
+  [
+    "How a loop gets made",
+    "Archive templates usually wrap the page number around when it passes the last page, so that the final page links back to the start. That is a reasonable thing for a visible carousel to do and a wrong thing for an annotation that says what comes next.",
+  ],
+  [
+    "How it gets fixed",
+    "Leave rel=next off the last page of the series, and make sure no template computes the page after the last as the first.",
+  ],
+];
+
+const loop1 = paginationPage(
+  LOOP_1,
+  { next: LOOP_2, prev: LOOP_3 },
+  {
+    title: "Archive page one of a three page loop",
+    description:
+      "The first page of an archive whose last page names it as the next one, so the series of next links has no end and runs in a circle.",
+    h1: "Archive page one in a loop of three",
+    lede: "Page one of three, linked to the second page ahead of it and to the third page behind it, which closes the circle.",
+    body: LOOP_BODY("one"),
+  },
+  { name: "Pagination loop, page 1 of 3", expectedIssues: ["pagination.loop"] },
+);
+
+const loop2 = paginationPage(
+  LOOP_2,
+  { next: LOOP_3, prev: LOOP_1 },
+  {
+    title: "Archive page two of a three page loop",
+    description:
+      "The middle page of an archive whose last page names the first as its next page, which makes the whole series of next links a circle.",
+    h1: "Archive page two in a loop of three",
+    lede: "Page two of three, linked to the third page ahead of it and to the first page behind it, with nothing wrong that shows on this page alone.",
+    body: LOOP_BODY("two"),
+  },
+  { name: "Pagination loop, page 2 of 3", expectedIssues: ["pagination.loop"] },
+);
+
+const loop3 = paginationPage(
+  LOOP_3,
+  { next: LOOP_1, prev: LOOP_2 },
+  {
+    title: "Archive page three of a three page loop",
+    description:
+      "The last page of an archive that names the first page as its next page, so the series never ends and a crawler following it goes round again.",
+    h1: "Archive page three in a loop of three",
+    lede: "Page three of three, whose next link wraps round to page one instead of being left out, which is the single fault in the series.",
+    body: LOOP_BODY("three"),
+  },
+  { name: "Pagination loop, page 3 of 3", expectedIssues: ["pagination.loop"] },
+);
+
+const nextGone = paginationPage(
+  NEXT_GONE,
+  { next: "/status/not-found" },
+  {
+    title: "A series whose next page answers not found",
+    description:
+      "This page declares a next page that the crawl fetched and that answered 404, so the series points at an address that no longer serves anything.",
+    h1: "A next page that no longer exists",
+    lede: "The only page of a short series that is still live, whose rel=next names an address on the same site that returns a not found response.",
+    body: [
+      [
+        "What the annotation says",
+        "The head of this page declares a next page. The crawl requested that address because the rest of the site links to it, and the server answered that nothing is there.",
+      ],
+      [
+        "Why it matters",
+        "A series that points at an error page tells a search engine that the next step is broken. The page itself is fine, so the fault shows only in the annotation and in no report that looks at the page alone.",
+      ],
+      [
+        "How it comes about",
+        "Archives lose their later pages when posts are deleted or a category is merged, and the template that writes rel=next keeps naming a page number that used to exist. Nothing in a browser shows it, because the visible pagination control is generated separately.",
+      ],
+      [
+        "How it gets fixed",
+        "Make the template drop rel=next when the next page does not exist, or point it at the page that now holds the following items.",
+      ],
+    ],
+  },
+  { name: "Pagination, next page answers 404", expectedIssues: ["pagination.non-indexable-target"] },
+);
+
+const seqA = paginationPage(
+  SEQ_A,
+  { next: SEQ_B },
+  {
+    title: "The first page of a pair that disagree on order",
+    description:
+      "This page names the second page as its next page, and the second page names a different page as its previous one, so the two disagree.",
+    h1: "Page one of a pair that disagree",
+    lede: "The first page of a two page series, whose next link is returned by no link back to it from the page it names.",
+    body: [
+      [
+        "What this page declares",
+        "The head of this page names the second page as the next one. That page is live and was crawled, so the declaration is a statement about two pages that the crawl can read side by side.",
+      ],
+      [
+        "What the second page says back",
+        "The second page declares a previous page of its own, and it is not this one. Two pages that describe the same step differently leave a search engine to decide which description to trust, or to ignore both.",
+      ],
+      [
+        "Why it happens",
+        "The previous link is often built from a different variable than the next link, and the two drift apart when a page is renamed or a series is reordered. Neither template looks wrong by itself.",
+      ],
+      [
+        "How it gets fixed",
+        "Generate the previous link of every page from the same list that generates the next link of the page before it, so the two always agree.",
+      ],
+    ],
+  },
+  {
+    name: "Pagination sequence, first page of a disagreeing pair",
+    expectedIssues: ["pagination.sequence-error"],
+  },
+);
+
+const seqB = paginationPage(
+  SEQ_B,
+  { prev: "/" },
+  {
+    title: "The second page of a pair that disagree on order",
+    description:
+      "This page names the home page as its previous page, while the first page of the series names this page as its next one, which is a mismatch.",
+    h1: "Page two of a pair that disagree",
+    lede: "The second page of a two page series, whose previous link goes to the home page of the site instead of to the page that names it.",
+    body: [
+      [
+        "What this page declares",
+        "The head of this page names the home page as its previous page. The first page of the series names this page as its next one, so the two ends of the step do not match.",
+      ],
+      [
+        "Where the finding goes",
+        "The report is filed against the first page, because that is the page whose declaration is not returned. This page is reported for nothing: the home page it names is an ordinary page that returns a success status and can be indexed.",
+      ],
+      [
+        "A common cause",
+        "A template that falls back to the site root when it cannot work out the previous address will write exactly this, and it does so on every page whose previous page is missing from its data.",
+      ],
+      [
+        "How it gets fixed",
+        "Point the previous link at the first page of the series, or leave it out on every page of the series if the site does not use rel=prev.",
+      ],
+    ],
+  },
+  { name: "Pagination sequence, second page of a disagreeing pair", expectedIssues: [] },
+);
+
 export const authoredP26Fixtures: Fixture[] = [
   wrongContentType,
   nofollow,
@@ -727,4 +951,10 @@ export const authoredP26Fixtures: Fixture[] = [
   selfOnly,
   linkA,
   linkB,
+  loop1,
+  loop2,
+  loop3,
+  nextGone,
+  seqA,
+  seqB,
 ];

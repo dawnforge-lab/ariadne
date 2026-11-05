@@ -262,3 +262,14 @@ export const RESTRICTIVE_DIRECTIVES = [
  * first.
  */
 export const CANONICAL_MAX_HOPS = 10;
+
+// ---- from src/rules/query/pagination.ts
+/**
+ * How many `rel=next` steps `pagination.loop` follows from a page before it
+ * stops. A page is in a loop when the walk comes back to it inside this many
+ * steps, so a loop longer than the limit is not recognised: the walk stops
+ * first. No paginated series is hundreds of pages deep by `rel=next` alone, and
+ * the walk starts from every page of the crawl, so the limit is also what
+ * bounds the work.
+ */
+export const PAGINATION_WALK_MAX = 500;

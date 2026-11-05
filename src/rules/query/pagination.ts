@@ -1,9 +1,17 @@
+import { randomUUID } from "node:crypto";
+
 import { and, asc, eq, gt, isNotNull, or, sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import { pages } from "../../db/schema.js";
-import { isAuditable, queryFinding, ROBOTS_BLOCKED, type RuleIdentity } from "../helpers.js";
+import {
+  hasNoindex,
+  isAuditable,
+  queryFinding,
+  ROBOTS_BLOCKED,
+  type RuleIdentity,
+} from "../helpers.js";
 import { resolveEffectiveCanonical } from "../page/canonical.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -14,7 +22,10 @@ import {
   type QueryRule,
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
-import { capsOr, noteTruncation } from "./crawl-evidence.js";
+import { PAGINATION_WALK_MAX } from "../thresholds.js";
+import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+
+export { PAGINATION_WALK_MAX };
 
 const CATEGORY = "url";
 
@@ -35,7 +46,33 @@ const CANONICAL_TO_OTHER: RuleIdentity = {
   severity: "info",
 };
 
-/** A page carrying `rel=next` and/or `rel=prev`, with its next target resolved. */
+/**
+ * Most URLs a loop finding quotes. The finding's `cycleLength` carries the true
+ * length, so a longer cycle is quoted in part and never silently.
+ */
+const LOOP_QUOTE_MAX = 20;
+
+const NON_INDEXABLE_TARGET: RuleIdentity = {
+  id: "pagination.non-indexable-target",
+  severity: "warning",
+};
+const LOOP: RuleIdentity = { id: "pagination.loop", severity: "warning" };
+const SEQUENCE_ERROR: RuleIdentity = { id: "pagination.sequence-error", severity: "info" };
+
+/** The columns of a `rel=next` / `rel=prev` target's `pages` row the rules read. */
+interface PageTarget {
+  url: string;
+  /** Whether any OTHER page links to it. */
+  linked: boolean;
+  fetchClass: string;
+  statusCode: number | null;
+  robotsMeta: string | null;
+  xRobotsTag: string | null;
+  /** The target's own `rel_prev`, exactly as authored. */
+  relPrev: string | null;
+}
+
+/** A page carrying `rel=next` and/or `rel=prev`, with its targets resolved. */
 interface PaginatedPage {
   page: PageRecord;
   /** `rel_next` as declared, or null when the page declares none. */
@@ -43,7 +80,11 @@ interface PaginatedPage {
   /** `rel_next` resolved against the page URL, or null when it will not resolve. */
   resolvedNext: string | null;
   /** The `pages` row for `resolvedNext`, or null when the crawl never fetched it. */
-  nextTarget: { url: string; linked: boolean } | null;
+  nextTarget: PageTarget | null;
+  /** `rel_prev` resolved against the page URL, or null when absent or it will not resolve. */
+  resolvedPrev: string | null;
+  /** The `pages` row for `resolvedPrev`, or null when the crawl never fetched it. */
+  prevTarget: PageTarget | null;
 }
 
 /**
@@ -91,13 +132,18 @@ async function eachPaginatedPage(
 
     const auditable = batch.filter((page) => isAuditable(page));
     const resolved = new Map<string, string | null>();
+    const resolvedPrevs = new Map<string, string | null>();
     for (const page of auditable) {
-      if (page.relNext === null) continue;
-      resolved.set(page.id, normalizeUrl(page.relNext, page.url));
+      if (page.relNext !== null) resolved.set(page.id, normalizeUrl(page.relNext, page.url));
+      if (page.relPrev !== null) resolvedPrevs.set(page.id, normalizeUrl(page.relPrev, page.url));
     }
 
-    const wanted = [...new Set([...resolved.values()].filter((u): u is string => u !== null))];
-    const targets = new Map<string, { url: string; linked: boolean }>();
+    const wanted = [
+      ...new Set(
+        [...resolved.values(), ...resolvedPrevs.values()].filter((u): u is string => u !== null),
+      ),
+    ];
+    const targets = new Map<string, PageTarget>();
     if (wanted.length > 0) {
       // One array parameter rather than one placeholder per URL, so the
       // statement's shape stays constant across batches (the link-targets
@@ -110,8 +156,16 @@ async function eachPaginatedPage(
       // and without this exclusion that self-link would answer "is anything
       // linking to page 2?" with a yes the reader can never follow, making the
       // rule silent on precisely the sites it is for.
-      const rows = await db.execute<{ url: string; linked: boolean }>(sql`
-        select p.url,
+      const rows = await db.execute<{
+        url: string;
+        linked: boolean;
+        fetch_class: string;
+        status_code: number | null;
+        robots_meta: string | null;
+        x_robots_tag: string | null;
+        rel_prev: string | null;
+      }>(sql`
+        select p.url, p.fetch_class, p.status_code, p.robots_meta, p.x_robots_tag, p.rel_prev,
                exists (
                  select 1 from links l
                  where l.crawl_id = ${crawlId}
@@ -126,24 +180,37 @@ async function eachPaginatedPage(
           -- as the absence of a row did before such rows existed.
           and not ${ROBOTS_BLOCKED("p")}`);
       for (const row of rows.rows) {
-        targets.set(String(row.url), { url: String(row.url), linked: row.linked });
+        targets.set(String(row.url), {
+          url: String(row.url),
+          linked: row.linked,
+          fetchClass: row.fetch_class,
+          statusCode: row.status_code,
+          robotsMeta: row.robots_meta,
+          xRobotsTag: row.x_robots_tag,
+          relPrev: row.rel_prev,
+        });
       }
     }
 
     for (const page of auditable) {
-      const next = page.relNext === null ? null : (resolved.get(page.id) ?? null);
+      // `?? null` is a Map miss (the page declares no such rel, or it will not
+      // resolve) read as the absence it is, not a default for a missing value.
+      const next = resolved.get(page.id) ?? null;
+      const prev = resolvedPrevs.get(page.id) ?? null;
       visit({
         page,
         relNext: page.relNext,
         resolvedNext: next,
         nextTarget: next === null ? null : (targets.get(next) ?? null),
+        resolvedPrev: prev,
+        prevTarget: prev === null ? null : (targets.get(prev) ?? null),
       });
     }
   }
 }
 
 /**
- * The shape all three pagination rules take: walk the paginated pages and keep
+ * The shape the pagination listing rules take: walk the paginated pages and keep
  * the ones the rule fires on.
  *
  * Capped at `caps.listing` like every other URL-scoped rule — an archive
@@ -159,23 +226,217 @@ async function paginationFindings(
   fires: (p: PaginatedPage) => Record<string, unknown> | null,
   caps: RuleCaps,
 ): Promise<Finding[]> {
+  return paginationFindingsMany(
+    self,
+    db,
+    crawlId,
+    (p) => {
+      const evidence = fires(p);
+      return evidence === null ? [] : [{ evidence, dedupeKey: p.page.url }];
+    },
+    caps,
+  );
+}
+
+/**
+ * `paginationFindings` for a rule that can fire more than once on one page
+ * (`rel=next` and `rel=prev` are two links with two targets). Each hit carries
+ * its own dedupe key, because two findings of one rule on one page may not
+ * share one.
+ */
+async function paginationFindingsMany(
+  self: RuleIdentity,
+  db: Db,
+  crawlId: string,
+  fires: (p: PaginatedPage) => Array<{ evidence: Record<string, unknown>; dedupeKey: string }>,
+  caps: RuleCaps,
+): Promise<Finding[]> {
   const findings: Finding[] = [];
   let total = 0;
   await eachPaginatedPage(db, crawlId, (p) => {
-    const evidence = fires(p);
-    if (evidence === null) return;
-    total += 1;
-    if (caps.listing !== null && findings.length >= caps.listing) return;
-    findings.push(
-      queryFinding(self, {
-        pageId: p.page.id,
-        pageUrl: p.page.url,
-        evidence,
-        dedupeKey: p.page.url,
-      }),
-    );
+    for (const hit of fires(p)) {
+      total += 1;
+      if (caps.listing !== null && findings.length >= caps.listing) continue;
+      findings.push(
+        queryFinding(self, {
+          pageId: p.page.id,
+          pageUrl: p.page.url,
+          evidence: hit.evidence,
+          dedupeKey: hit.dedupeKey,
+        }),
+      );
+    }
   });
   return noteTruncation(findings, total);
+}
+
+/**
+ * Every page in a `rel=next` cycle, with the cycle it is in.
+ *
+ * THE DESIGN, AGAINST HARD RULES 3 AND 6. A cycle can span any pages of the
+ * crawl, so the walk needs the next-edge of EVERY page at once, and building
+ * that page by page in Node is an O(pages) map. It is built in Postgres. The
+ * pages are read in batches (`PAGINATION_BATCH`), each page's `rel_next` is
+ * resolved with `normalizeUrl` (the only part that has to be JavaScript, as in
+ * `eachPaginatedPage`), and the batch's (page, next) edges are `unnest`ed into
+ * a temporary table and dropped from memory. One recursive query then walks the
+ * whole edge set inside the database. Node holds one batch.
+ *
+ * THE TEMPORARY TABLE lives inside one transaction, so every statement runs on
+ * the SAME connection (a pool would otherwise hand each statement to a
+ * different session, and a temp table is session-local). Its name carries a
+ * random suffix and it is dropped before the transaction ends, so two runs in
+ * one process (different crawls, see `RuleCaps`) never meet, and neither does a
+ * run nested inside another transaction.
+ *
+ * THE WALK starts from every edge and follows `next` until it arrives back at
+ * its start or has taken `PAGINATION_WALK_MAX` steps. A start page is in a loop
+ * exactly when its walk arrives back at it; a page that only leads into somebody
+ * else's loop spins in that loop until the step limit and is not reported. Each
+ * member of a loop is its own start, so each is reported once, and the number of
+ * steps it took is the loop's length. A loop longer than the limit is NOT
+ * recognised. Termination rests on the step limit, which bounds the work at
+ * pages times the limit.
+ *
+ * WHY NOT `CYCLE ... SET is_cycle`, which the plan names. It keeps the path so
+ * far on every row, so a row at step k costs O(k): measured on a 502-page ring
+ * (the worst case, every walk runs the full 500 steps) the first version, which
+ * used it, took 26 s, and this version, whose rows are O(1), 0.4 s. A series of
+ * a few hundred pages in a straight line costs the same order, and archives are
+ * that long. The path is built only for the pages the finding lists, by a second
+ * recursion from those pages that runs exactly their loop's length.
+ *
+ * `isAuditable` gates the edges like the other pagination rules: a page that
+ * was not served as an HTML 200 has no `rel=next` signal to follow.
+ */
+async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+  const table = sql.raw(`pagination_edges_${randomUUID().replace(/-/g, "")}`);
+
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`create temporary table ${table} (src_id text not null, src_url text primary key, dst_url text not null)`,
+    );
+
+    let cursor = "";
+    for (;;) {
+      const batch = await tx
+        .select({
+          id: pages.id,
+          url: pages.url,
+          relNext: pages.relNext,
+          fetchClass: pages.fetchClass,
+          statusCode: pages.statusCode,
+        })
+        .from(pages)
+        .where(and(eq(pages.crawlId, crawlId), gt(pages.id, cursor), isNotNull(pages.relNext)))
+        .orderBy(asc(pages.id))
+        .limit(PAGINATION_BATCH);
+      if (batch.length === 0) break;
+      cursor = batch[batch.length - 1]!.id;
+
+      const ids: string[] = [];
+      const srcs: string[] = [];
+      const dsts: string[] = [];
+      for (const page of batch) {
+        if (!isAuditable(page) || page.relNext === null) continue;
+        const next = normalizeUrl(page.relNext, page.url);
+        if (next === null) continue;
+        ids.push(page.id);
+        srcs.push(page.url);
+        dsts.push(next);
+      }
+      if (ids.length === 0) continue;
+      await tx.execute(sql`
+        insert into ${table} (src_id, src_url, dst_url)
+        select * from unnest(${sql.param(ids)}::text[], ${sql.param(srcs)}::text[], ${sql.param(dsts)}::text[])`);
+    }
+
+    const rows = await tx.execute<{
+      start_id: string;
+      start_url: string;
+      path: string[];
+      total: string;
+    }>(sql`
+      with recursive walk(start_id, start_url, cur, depth) as (
+        select e.src_id, e.src_url, e.dst_url, 1 from ${table} e
+        union all
+        select w.start_id, w.start_url, n.dst_url, w.depth + 1
+        from walk w
+        join ${table} n on n.src_url = w.cur
+        where w.depth < ${PAGINATION_WALK_MAX} and w.cur <> w.start_url
+      ),
+      members as (
+        select start_id, start_url, depth as len, count(*) over () as total
+        from walk
+        where cur = start_url
+        order by start_url
+        ${limitTo(caps.listing)}
+      ),
+      trail(start_url, cur, path, depth) as (
+        select m.start_url, m.start_url, array[m.start_url], 1 from members m
+        union all
+        select t.start_url, n.dst_url, t.path || n.dst_url, t.depth + 1
+        from trail t
+        join members m on m.start_url = t.start_url
+        join ${table} n on n.src_url = t.cur
+        where t.depth < m.len
+      )
+      select m.start_id, m.start_url, t.path, m.total
+      from members m
+      join trail t on t.start_url = m.start_url and t.depth = m.len
+      order by m.start_url`);
+
+    await tx.execute(sql`drop table ${table}`);
+
+    const findings = rows.rows.map((row) => {
+      const members = row.path;
+      return queryFinding(LOOP, {
+        pageId: row.start_id,
+        pageUrl: row.start_url,
+        evidence: { cycle: quoteCycle(members), cycleLength: members.length },
+        dedupeKey: row.start_url,
+      });
+    });
+    const total = rows.rows.length === 0 ? 0 : Number(rows.rows[0]!.total);
+    return noteTruncation(findings, total);
+  });
+}
+
+/**
+ * At most `LOOP_QUOTE_MAX` URLs of a cycle, in walk order. A cycle that fits is
+ * quoted from the page itself. One that does not is rotated to start at its
+ * smallest URL first, so every member of it quotes the SAME 20 URLs instead of
+ * the 20 that follow itself.
+ */
+function quoteCycle(members: string[]): string[] {
+  if (members.length <= LOOP_QUOTE_MAX) return members;
+  const smallest = members.reduce((best, u, i) => (u < members[best]! ? i : best), 0);
+  return [...members.slice(smallest), ...members.slice(0, smallest)].slice(0, LOOP_QUOTE_MAX);
+}
+
+/** What a page's `rel=next` and `rel=prev` say about targets the series cannot use. */
+function nonIndexableTargets(
+  p: PaginatedPage,
+): Array<{ evidence: Record<string, unknown>; dedupeKey: string }> {
+  const hits: Array<{ evidence: Record<string, unknown>; dedupeKey: string }> = [];
+  for (const [rel, target] of [
+    ["next", p.nextTarget],
+    ["prev", p.prevTarget],
+  ] as const) {
+    if (target === null) continue;
+    const noindex = hasNoindex(target);
+    if (target.statusCode === 200 && !noindex) continue;
+    hits.push({
+      evidence: {
+        rel,
+        target: target.url,
+        targetStatus: target.statusCode,
+        targetNoindex: noindex,
+      },
+      dedupeKey: `${p.page.url}\n${rel}`,
+    });
+  }
+  return hits;
 }
 
 export const paginationRules: QueryRule[] = [
@@ -280,6 +541,78 @@ export const paginationRules: QueryRule[] = [
             resolvedTo: canonical.resolved,
             relPrev: page.relPrev,
           };
+        },
+        capsOr(caps),
+      ),
+  }),
+
+  // The series points at a page it cannot use: a rel=next or rel=prev whose
+  // target the crawl FETCHED and that is not a 200, or is a 200 that says
+  // noindex. A target the crawl never fetched is `next-target-uncrawled`'s, and
+  // a robots-blocked one was never requested. A 404 here is a broken series; a
+  // noindex here is a series whose pages the site asked to be kept out.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: NON_INDEXABLE_TARGET.id,
+    checkIds: ["CHECK-22", "CHECK-23"],
+    category: CATEGORY,
+    severity: NON_INDEXABLE_TARGET.severity,
+    columns: [
+      { key: "rel", label: "Link Type" },
+      { key: "target", label: "Expected Link" },
+      { key: "targetStatus", label: "Target Status" },
+      { key: "targetNoindex", label: "Target Noindex" },
+    ],
+    ...copyFor(NON_INDEXABLE_TARGET.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) =>
+      paginationFindingsMany(NON_INDEXABLE_TARGET, db, crawlId, nonIndexableTargets, capsOr(caps)),
+  }),
+
+  // A page that is part of a rel=next cycle: following next from it comes back
+  // to it. A series that loops has no last page, and a crawler or reader
+  // following it never leaves.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: LOOP.id,
+    checkIds: ["CHECK-22"],
+    category: CATEGORY,
+    severity: LOOP.severity,
+    columns: [
+      { key: "cycle", label: "Pagination Loop" },
+      { key: "cycleLength", label: "Pages In Loop" },
+    ],
+    ...copyFor(LOOP.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => loopFindings(db, crawlId, capsOr(caps)),
+  }),
+
+  // A.next = B, and B does not say A is its previous page. Both pages are
+  // fetched 200s, so both declarations were served and they disagree. Info: a
+  // site may legitimately omit rel=prev altogether, but then it omits it
+  // everywhere, and a half-annotated series is a template fault.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: SEQUENCE_ERROR.id,
+    checkIds: ["CHECK-22"],
+    category: CATEGORY,
+    severity: SEQUENCE_ERROR.severity,
+    columns: [
+      { key: "next", label: "rel=\"next\"" },
+      { key: "nextsPrev", label: "rel=\"prev\" of Next Page", optional: true },
+    ],
+    ...copyFor(SEQUENCE_ERROR.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) =>
+      paginationFindings(
+        SEQUENCE_ERROR,
+        db,
+        crawlId,
+        (p) => {
+          const target = p.nextTarget;
+          if (target === null || !isAuditable(target)) return null;
+          const back = target.relPrev === null ? null : normalizeUrl(target.relPrev, target.url);
+          return back === p.page.url ? null : { next: target.url, nextsPrev: target.relPrev };
         },
         capsOr(caps),
       ),

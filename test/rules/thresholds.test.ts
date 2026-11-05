@@ -43,6 +43,7 @@ describe("thresholds", () => {
       UNAVAILABLE_AFTER_WARN_DAYS: 30,
       RESTRICTIVE_DIRECTIVES: ["nosnippet", "max-snippet:0", "max-image-preview:none", "noimageindex"],
       CANONICAL_MAX_HOPS: 10,
+      PAGINATION_WALK_MAX: 500,
     });
   });
 

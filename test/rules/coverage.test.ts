@@ -374,11 +374,18 @@ describe("checklist coverage", () => {
   //
   //   query   75 + 4 = 79
   //   total   127 + 4 = 131
-  it("pins the ruleset split the gate doc reports: 131 rules = 38 page + 79 query + 14 metric", () => {
+  //
+  // Phase 26a Task 7 adds THREE pagination query rules on CHECK-22 and CHECK-23,
+  // both claimed already: `pagination.non-indexable-target`, `pagination.loop`
+  // and `pagination.sequence-error`.
+  //
+  //   query   79 + 3 = 82
+  //   total   131 + 3 = 134
+  it("pins the ruleset split the gate doc reports: 134 rules = 38 page + 82 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(131);
+    expect(registry.all()).toHaveLength(134);
     expect(registry.byKind("page")).toHaveLength(38);
-    expect(registry.byKind("query")).toHaveLength(79);
+    expect(registry.byKind("query")).toHaveLength(82);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

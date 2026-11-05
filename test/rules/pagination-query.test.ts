@@ -15,6 +15,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
 import { URL_FINDING_CAP } from "../../src/rules/query/crawl-evidence.js";
 import { PAGINATION_BATCH, paginationRules } from "../../src/rules/query/pagination.js";
+import { PAGINATION_WALK_MAX } from "../../src/rules/thresholds.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { writerIndexable, type IndexabilitySpec } from "./mk-page.js";
 
@@ -34,11 +35,14 @@ function rule(id: string): QueryRule {
 }
 
 describe("paginationRules metadata", () => {
-  it("defines exactly the three pagination rules of the Phase 3 table", () => {
+  it("defines exactly the six pagination rules: the Phase 3 three and Phase 26a's three", () => {
     expect(paginationRules.map((r) => r.id).sort()).toEqual([
       "pagination.canonical-to-other",
+      "pagination.loop",
       "pagination.next-not-linked",
       "pagination.next-target-uncrawled",
+      "pagination.non-indexable-target",
+      "pagination.sequence-error",
     ]);
   });
 
@@ -49,6 +53,9 @@ describe("paginationRules metadata", () => {
       "pagination.next-target-uncrawled": [["CHECK-22"], "info", "url"],
       "pagination.next-not-linked": [["CHECK-22"], "warning", "url"],
       "pagination.canonical-to-other": [["CHECK-23"], "info", "url"],
+      "pagination.non-indexable-target": [["CHECK-22", "CHECK-23"], "warning", "url"],
+      "pagination.loop": [["CHECK-22"], "warning", "url"],
+      "pagination.sequence-error": [["CHECK-22"], "info", "url"],
     });
   });
 
@@ -68,6 +75,8 @@ describe("paginationRules against the database", () => {
 
   interface PageSpec extends IndexabilitySpec {
     path: string;
+    /** Pins the row id, for a test that needs two pages in different batches. */
+    id?: string;
     canonicalHtml?: string;
     relNext?: string;
     relPrev?: string;
@@ -82,7 +91,7 @@ describe("paginationRules against the database", () => {
 
   async function addPages(crawlId: string, specs: PageSpec[]): Promise<Map<string, string>> {
     const rows = specs.map((s) => ({
-      id: `page_${randomUUID()}`,
+      id: s.id ?? `page_${randomUUID()}`,
       crawlId,
       url: `${SITE}${s.path}`,
       urlNormalised: `${SITE}${s.path}`.toLowerCase().replace(/\/$/, ""),
@@ -355,6 +364,315 @@ describe("paginationRules against the database", () => {
       await addPages(crawlId, [{ path: "/blog?page=2", relPrev: "/blog" }]);
 
       expect(await findings("pagination.canonical-to-other", crawlId)).toHaveLength(0);
+    });
+  });
+
+  describe("pagination.non-indexable-target", () => {
+    it("fires on a rel=next that resolves to a crawled 404", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/blog", relNext: "/blog?page=2" },
+        { path: "/blog?page=2", fetchClass: "client_error", statusCode: 404 },
+      ]);
+
+      const found = await findings("pagination.non-indexable-target", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: "pagination.non-indexable-target",
+        severity: "warning",
+        pageId: ids.get("/blog"),
+        pageUrl: url("/blog"),
+        dedupeKey: `${url("/blog")}\nnext`,
+      });
+      expect(found[0]!.evidence).toEqual({
+        rel: "next",
+        target: url("/blog?page=2"),
+        targetStatus: 404,
+        targetNoindex: false,
+      });
+    });
+
+    it("fires on a rel=next at a 200 page that says noindex", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/blog", relNext: "/blog?page=2" },
+        { path: "/blog?page=2", robotsMeta: "noindex, follow", relPrev: "/blog" },
+      ]);
+
+      const found = await findings("pagination.non-indexable-target", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({
+        rel: "next",
+        target: url("/blog?page=2"),
+        targetStatus: 200,
+        targetNoindex: true,
+      });
+    });
+
+    it("reads rel=prev too, and reports next and prev as two findings of one page", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/blog?page=1", xRobotsTag: "noindex" },
+        { path: "/blog?page=2", relPrev: "/blog?page=1", relNext: "/blog?page=3" },
+        { path: "/blog?page=3", fetchClass: "server_error", statusCode: 500 },
+      ]);
+
+      const found = await findings("pagination.non-indexable-target", crawlId);
+      expect(found).toHaveLength(2);
+      expect(
+        found.map((f) => [f.pageUrl, f.dedupeKey, (f.evidence as { rel: string }).rel]).sort(),
+      ).toEqual([
+        [url("/blog?page=2"), `${url("/blog?page=2")}\nnext`, "next"],
+        [url("/blog?page=2"), `${url("/blog?page=2")}\nprev`, "prev"],
+      ]);
+    });
+
+    it("leaves uncrawled and robots-blocked targets to next-target-uncrawled", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", relNext: "/never-crawled" },
+        { path: "/b", relNext: "/blocked" },
+      ]);
+      await db.insert(pages).values({
+        id: `page_${randomUUID()}`,
+        crawlId,
+        url: url("/blocked"),
+        urlNormalised: url("/blocked"),
+        fetchClass: "disallowed",
+        fetchReason: "robots.txt: Disallow: /blocked",
+        statusCode: null,
+        depth: 1,
+        discoveredVia: "link",
+      });
+
+      expect(await findings("pagination.non-indexable-target", crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a healthy series", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/blog", relNext: "/blog?page=2" },
+        { path: "/blog?page=2", relPrev: "/blog" },
+      ]);
+      expect(await findings("pagination.non-indexable-target", crawlId)).toHaveLength(0);
+    });
+  });
+
+  describe("pagination.loop", () => {
+    const ring = (n: number, prefix = "/loop"): PageSpec[] =>
+      Array.from({ length: n }, (_, i) => ({
+        path: `${prefix}-${i + 1}`,
+        relNext: `${prefix}-${((i + 1) % n) + 1}`,
+      }));
+
+    // Review Focus 4: terminates, and reports each member once.
+    it("reports a 3-cycle once per member page, with one cycle shared by all", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, ring(3));
+
+      const found = await findings("pagination.loop", crawlId);
+      expect(found).toHaveLength(3);
+      expect(found.map((f) => f.pageUrl).sort()).toEqual([
+        url("/loop-1"),
+        url("/loop-2"),
+        url("/loop-3"),
+      ]);
+      for (const f of found) {
+        expect(f).toMatchObject({
+          ruleId: "pagination.loop",
+          severity: "warning",
+          pageId: ids.get(f.pageUrl!.slice(SITE.length)),
+          dedupeKey: f.pageUrl,
+        });
+        const { cycle, cycleLength } = f.evidence as { cycle: string[]; cycleLength: number };
+        expect([...cycle].sort()).toEqual([url("/loop-1"), url("/loop-2"), url("/loop-3")]);
+        expect(cycleLength).toBe(3);
+        // Walk order, from the page itself.
+        expect(cycle[0]).toBe(f.pageUrl);
+      }
+      const loop1 = found.find((f) => f.pageUrl === url("/loop-1"))!;
+      expect((loop1.evidence as { cycle: string[] }).cycle).toEqual([
+        url("/loop-1"),
+        url("/loop-2"),
+        url("/loop-3"),
+      ]);
+    });
+
+    it("reports a page whose rel=next names itself", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/self", relNext: "/self" }]);
+      const found = await findings("pagination.loop", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ cycle: [url("/self")], cycleLength: 1 });
+    });
+
+    it("reports the members of a loop and not the pages that lead into it", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [{ path: "/lead", relNext: "/loop-1" }, ...ring(3)]);
+      const found = await findings("pagination.loop", crawlId);
+      expect(found.map((f) => f.pageUrl).sort()).toEqual([
+        url("/loop-1"),
+        url("/loop-2"),
+        url("/loop-3"),
+      ]);
+    });
+
+    it("is silent on a straight series, and on one that ends uncrawled", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/s-1", relNext: "/s-2" },
+        { path: "/s-2", relNext: "/s-3", relPrev: "/s-1" },
+        { path: "/s-3", relNext: "/s-4", relPrev: "/s-2" },
+      ]);
+      expect(await findings("pagination.loop", crawlId)).toHaveLength(0);
+    });
+
+    // The edge set the walk reads covers the whole crawl, so a cycle whose
+    // members fall in different batches is still found.
+    it("finds a cycle whose members sit in different batches", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        ...Array.from({ length: PAGINATION_BATCH + 5 }, (_, i) => ({
+          path: `/fill-${String(i).padStart(4, "0")}`,
+          relNext: `/fill-never-${i}`,
+        })),
+        { id: "page_00-first", path: "/far-1", relNext: "/far-2" },
+        { id: "page_8-middle", path: "/far-2", relNext: "/far-3" },
+        { id: "page_zz-last", path: "/far-3", relNext: "/far-1" },
+      ]);
+      const found = await findings("pagination.loop", crawlId);
+      expect(found.map((f) => f.pageUrl).sort()).toEqual([
+        url("/far-1"),
+        url("/far-2"),
+        url("/far-3"),
+      ]);
+    });
+
+    it("quotes at most 20 urls, the same 20 on every member, with the true length", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, ring(25));
+      const found = await findings("pagination.loop", crawlId);
+      expect(found).toHaveLength(25);
+      const sets = new Set(
+        found.map((f) => JSON.stringify([...(f.evidence as { cycle: string[] }).cycle].sort())),
+      );
+      expect(sets.size).toBe(1);
+      for (const f of found) {
+        const e = f.evidence as { cycle: string[]; cycleLength: number };
+        expect(e.cycle).toHaveLength(20);
+        expect(e.cycleLength).toBe(25);
+      }
+    });
+
+    it("lists at most the cap and notes the exact total", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, ring(3));
+      const found = await rule("pagination.loop").run(db, crawlId, { listing: 2 });
+      expect(found).toHaveLength(2);
+      expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
+    });
+
+    it("does not recognise a cycle longer than the walk limit", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, ring(PAGINATION_WALK_MAX + 2));
+      expect(await findings("pagination.loop", crawlId)).toHaveLength(0);
+    });
+
+    it("reads only its own crawl", async () => {
+      const other = await newCrawl();
+      await addPages(other, ring(3));
+      const mine = await newCrawl();
+      await addPages(mine, [{ path: "/loop-1", relNext: "/loop-2" }, { path: "/loop-2" }]);
+      expect(await findings("pagination.loop", mine)).toHaveLength(0);
+      expect(await findings("pagination.loop", other)).toHaveLength(3);
+    });
+
+    it("two runs at once do not see each other's edges", async () => {
+      const a = await newCrawl();
+      await addPages(a, ring(3));
+      const b = await newCrawl();
+      await addPages(b, ring(4));
+      const [fa, fb] = await Promise.all([
+        findings("pagination.loop", a),
+        findings("pagination.loop", b),
+      ]);
+      expect([fa.length, fb.length]).toEqual([3, 4]);
+    });
+  });
+
+  describe("pagination.sequence-error", () => {
+    it("is silent on a straight 3-page series with correct prevs", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/s-1", relNext: "/s-2" },
+        { path: "/s-2", relNext: "/s-3", relPrev: "/s-1" },
+        { path: "/s-3", relPrev: url("/s-2") },
+      ]);
+      expect(await findings("pagination.sequence-error", crawlId)).toHaveLength(0);
+    });
+
+    it("fires on page 1 when page 2 has no rel=prev", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/s-1", relNext: "/s-2" },
+        { path: "/s-2", relNext: "/s-3" },
+        { path: "/s-3", relPrev: "/s-2" },
+      ]);
+      const found = await findings("pagination.sequence-error", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!).toMatchObject({
+        ruleId: "pagination.sequence-error",
+        severity: "info",
+        pageId: ids.get("/s-1"),
+        pageUrl: url("/s-1"),
+        dedupeKey: url("/s-1"),
+      });
+      expect(found[0]!.evidence).toEqual({ next: url("/s-2"), nextsPrev: null });
+    });
+
+    it("fires when the next page's rel=prev names a different page, quoted as authored", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/s-1", relNext: "/s-2" },
+        { path: "/s-2", relPrev: "/elsewhere" },
+      ]);
+      const found = await findings("pagination.sequence-error", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ next: url("/s-2"), nextsPrev: "/elsewhere" });
+    });
+
+    it("fires when the next page's rel=prev will not resolve", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/s-1", relNext: "/s-2" },
+        { path: "/s-2", relPrev: "javascript:void(0)" },
+      ]);
+      expect(await findings("pagination.sequence-error", crawlId)).toHaveLength(1);
+    });
+
+    it("leaves an uncrawled or non-200 next page to the other rules", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", relNext: "/never-crawled" },
+        { path: "/b", relNext: "/gone" },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+      ]);
+      expect(await findings("pagination.sequence-error", crawlId)).toHaveLength(0);
+    });
+
+    it("walks every page, not just the first batch, and caps what it lists", async () => {
+      const crawlId = await newCrawl();
+      const total = PAGINATION_BATCH + 5;
+      const specs: PageSpec[] = [];
+      for (let i = 0; i < total; i++) {
+        specs.push({ path: `/q-${i}`, relNext: `/r-${i}` }, { path: `/r-${i}` });
+      }
+      await addPages(crawlId, specs);
+      const found = await findings("pagination.sequence-error", crawlId);
+      expect(found).toHaveLength(URL_FINDING_CAP);
+      expect(found[found.length - 1]!.evidence).toMatchObject({
+        truncated: { reported: URL_FINDING_CAP, total },
+      });
     });
   });
 

@@ -1351,7 +1351,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-22: Pagination is HTML-based and crawlable
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-22"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-22"` — five rules:
   - `pagination.next-not-linked` (warning) — the page declares `rel="next"`, the
     target was crawled, and NO page on the site links to it. `rel="next"` has not
     been a discovery signal since 2019, so a series wired this way is one whose
@@ -1359,6 +1359,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `pagination.next-target-uncrawled` (info) — the declared `rel="next"` target was
     never fetched by this crawl (or would not resolve). NOT MEASURED beyond that
     point, not "the sequence ends here".
+  - `pagination.non-indexable-target` (warning) — a `rel="next"` or `rel="prev"` whose
+    target the crawl fetched and which is not a 200 or says noindex. It reads
+    `rel="prev"` too, so it also answers CHECK-23; an uncrawled target stays with
+    `pagination.next-target-uncrawled`.
+  - `pagination.loop` (warning) — the page is in a `rel="next"` cycle (following next
+    comes back to it), reported once per member page with the URLs in walk order. A loop
+    of hundreds of pages is not detected.
+  - `pagination.sequence-error` (info) — the page's `rel="next"` names a crawled 200 page
+    whose `rel="prev"` is absent or names a different page. A series that omits
+    `rel="prev"` everywhere fires on every page of it; say so rather than listing it.
   A JS-only "Load more" with no `rel="next"` at all leaves BOTH rules silent — the
   engine cannot report a declaration nobody made. That is what the DevTools steps
   below are for, and it is why this check keeps them.
@@ -1401,6 +1411,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   canonical points somewhere else, normally back to page 1. The engine states which
   strategy the site chose and leaves the verdict to you, which is exactly what this
   check asks for: a self-canonicalising paginated page fires nothing.
+  `pagination.non-indexable-target` (warning) also claims this check: a series step
+  whose target is a non-200 or a noindexed page (see CHECK-22).
   Cross-read `issues_list` with `checkId: "CHECK-04"` for whether those same pages
   are noindexed — the two together are the "pagination is being hidden" finding.
 - **DevTools** (rel=next/prev presence on a page the crawl typed, and the visible controls):

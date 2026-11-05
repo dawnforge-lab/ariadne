@@ -424,6 +424,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     (info) and `hreflang.unlinked-target` (info). Codes compare as
 //     `lower(btrim(code))` and targets on `URL_MATCH_KEY`; `x-default` is not
 //     read as a language by the return-code rule.
+//  6. (T7) Pagination, query rules: `pagination.non-indexable-target` (warning,
+//     CHECK-22/23: a `rel=next` or `rel=prev` target the crawl fetched that is not
+//     a 200 or says noindex), `pagination.loop` (warning, CHECK-22: a `rel=next`
+//     cycle, reported once per member, found by a walk of at most
+//     `PAGINATION_WALK_MAX` steps over the crawl's edges held in a temporary
+//     table) and `pagination.sequence-error` (info, CHECK-22: the next page's
+//     `rel=prev` is absent or names another page). The first two read targets
+//     the earlier pagination rules already looked up; no column is new.
 export const RULESET_VERSION = "0.20.0";
 
 /**
