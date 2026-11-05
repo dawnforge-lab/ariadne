@@ -52,7 +52,12 @@ describe("the sitemap entry rules against the database", () => {
   let db: Db;
   const created: string[] = [];
 
-  async function newCrawl(startedAt?: Date): Promise<string> {
+  // `finishedAt` defaults to the start (or now), so a test that names one
+  // instant judges against it; pass `null` for a row no crawl loop closed.
+  async function newCrawl(
+    startedAt?: Date,
+    finishedAt: Date | null = startedAt ?? new Date(),
+  ): Promise<string> {
     const id = `crawl_${randomUUID()}`;
     await db.insert(crawls).values({
       id,
@@ -62,6 +67,7 @@ describe("the sitemap entry rules against the database", () => {
       status: "finished",
       pagesCrawled: 1,
       discovery: mkDiscovery(),
+      finishedAt,
       ...(startedAt === undefined ? {} : { startedAt }),
     });
     created.push(id);
@@ -253,7 +259,7 @@ describe("the sitemap entry rules against the database", () => {
     });
   });
 
-  it("judges the future against the crawl's start, honouring the offset and treating zone-less forms as UTC", async () => {
+  it("judges the future against the crawl's end, honouring the offset and treating zone-less forms as UTC", async () => {
     const crawlId = await newCrawl(new Date("2026-11-05T12:00:00Z"));
     const lastmods: Record<string, string> = {
       // 12:30+01:00 is 11:30Z, before the crawl: valid.
@@ -273,6 +279,42 @@ describe("the sitemap entry rules against the database", () => {
     expect(found.map((f) => new URL(f.pageUrl!).pathname)).toEqual([
       "/next-month", "/next-year", "/offset-after", "/tomorrow",
     ]);
+  });
+
+  it("is silent on a lastmod stamped after the crawl began but before it ended", async () => {
+    // The Phase 26a gate's lavishalice crawl: discovery read a Shopify sitemap
+    // eight seconds after `started_at`, and the site stamped every entry with the
+    // moment it generated the file. That was "now" when served, not future.
+    const crawlId = await newCrawl(
+      new Date("2026-11-04T17:17:00.507Z"),
+      new Date("2026-11-04T17:32:28.598Z"),
+    );
+    await add(crawlId, [
+      { url: `${SITE}/at-start`, lastmod: "2026-11-04T17:17:00+00:00" },
+      { url: `${SITE}/seconds-after-start`, lastmod: "2026-11-04T17:17:08+00:00" },
+      { url: `${SITE}/just-before-end`, lastmod: "2026-11-04T17:32:28+00:00" },
+      { url: `${SITE}/after-end`, lastmod: "2026-11-04T17:32:29+00:00" },
+      { url: `${SITE}/next-day`, lastmod: "2026-11-05" },
+    ]);
+    const found = await run("sitemap.lastmod-invalid", crawlId);
+    expect(found.map((f) => [new URL(f.pageUrl!).pathname, f.evidence["reason"]])).toEqual([
+      ["/after-end", "future"],
+      ["/next-day", "future"],
+    ]);
+  });
+
+  it("throws, naming the crawl, when there are lastmod values and no finished_at", async () => {
+    const crawlId = await newCrawl(new Date("2026-11-04T17:17:00Z"), null);
+    await add(crawlId, [{ url: `${SITE}/dated`, lastmod: "2026-11-04T17:17:08+00:00" }]);
+    await expect(run("sitemap.lastmod-invalid", crawlId)).rejects.toThrow(
+      new RegExp(`sitemap\\.lastmod-invalid: crawl '${crawlId}' has sitemap lastmod values but no finished_at`),
+    );
+  });
+
+  it("does not refuse a crawl with no finished_at when no entry carries a lastmod", async () => {
+    const crawlId = await newCrawl(new Date("2026-11-04T17:17:00Z"), null);
+    await add(crawlId, [{ url: `${SITE}/undated`, lastmod: null }]);
+    expect(await run("sitemap.lastmod-invalid", crawlId)).toEqual([]);
   });
 
   // ------------------------------------------------------ caps

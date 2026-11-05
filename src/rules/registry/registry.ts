@@ -462,8 +462,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     over `SITEMAP_LOC_MAX` characters), `sitemap.cross-host-loc` (warning,
 //     CHECK-07: scheme or host differs from the document's) and
 //     `sitemap.lastmod-invalid` (info, CHECK-07: not `W3C_DATETIME`, or after
-//     `crawls.started_at`; zone-less forms are UTC at the period's start, so a
-//     date-only value on the crawl's own day is not future).
+//     `crawls.finished_at`, which every sitemap read precedes; zone-less forms
+//     are UTC at the period's start, so a date-only value on the crawl's own day
+//     is not future). T14's re-judge moved the reference off `started_at`: a
+//     sitemap stamped "now" when served read as future there.
 // 10. (T12) Pixel width, four page rules in `page/pixel-width.ts`, gated by
 //     `isJudged`, a present value and a measurable one: `title.pixel-too-long`
 //     (warning, CHECK-35, wider than `TITLE_PX_MAX`), `title.pixel-too-short`

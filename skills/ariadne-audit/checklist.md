@@ -904,8 +904,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     another host (a CDN) that lists the crawled site's own URLs is an allowed
     cross-submission and is not reported
   - `sitemap.lastmod-invalid` (info) — a `<lastmod>` that is not a W3C date or
-    date-time (`reason: "format"`), or is dated after the crawl began
-    (`reason: "future"`; a date-only value on the crawl's own UTC day is not future)
+    date-time (`reason: "format"`), or is dated after the crawl ended, so it was already
+    in the future when the sitemap was read (`reason: "future"`; a date-only value on
+    the crawl's own UTC day is not future)
   `issue_urls` per rule for the URL lists; `metrics_get` with
   `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
 - **Evaluate**:

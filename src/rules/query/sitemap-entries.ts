@@ -7,7 +7,7 @@
  *  - `sitemap.cross-host-loc` a `<loc>` whose scheme or host is neither its
  *                             document's nor the crawled site's
  *  - `sitemap.lastmod-invalid` a `<lastmod>` outside the W3C date-time profile,
- *                             or one dated after the crawl began
+ *                             or one dated after the crawl that read it ended
  *
  * Every question is one aggregate or one filtered scan in SQL, ordered and
  * capped by `caps.listing` with the exact total carried by `count(*) over ()`,
@@ -35,13 +35,33 @@
  * the value is also parsed by the database's own `timestamptz` input, guarded
  * with `pg_input_is_valid`; a value it refuses is `format` too.
  *
- * "Future" is against `crawls.started_at`, never the wall clock, so re-judging
- * an old crawl gives the same answer. Zone-less forms (`YYYY`, `YYYY-MM`,
- * `YYYY-MM-DD`) are read as UTC midnight at the START of the period they name,
- * and a value is future when that instant is after `started_at`. A date-only
- * value equal to the crawl's own UTC day therefore starts before the crawl and
- * is NOT future; so is the current month or the current year. A date-time is
- * compared as the instant it names, the offset honoured.
+ * "Future" means later than the moment the site served the sitemap, never the
+ * wall clock, so re-judging an old crawl gives the same answer. The crawl does
+ * not record when each sitemap document was read (the discovery evidence holds
+ * outcomes and counts, no timestamps), so the reference is `crawls.finished_at`:
+ * every sitemap a crawl reads is read before the crawl closes, so a value after
+ * it was in the future when it was served, whatever the document. It is NOT
+ * `started_at`. Discovery reads the sitemaps after the crawl row is created, and
+ * a site that stamps every entry with the moment it generated the file (Shopify
+ * does: the Phase 26a gate's lavishalice crawl read 205 entries stamped eight
+ * seconds after `started_at`) would read as "future" for a value that was "now"
+ * when served. The window between the start and the end of the crawl is
+ * therefore not judged: a value inside it may have been in the future when read,
+ * and this rule cannot tell, so it says nothing rather than guess.
+ *
+ * Every closed crawl has `finished_at` (`closeCrawl` writes it with the status,
+ * and the rules refuse a crawl that is still running). A crawl with lastmod
+ * values to judge and no `finished_at` is a row this engine did not produce,
+ * and the rule throws rather than judge it against some other instant (hard
+ * rule 7). A crawl with no lastmod at all has nothing whose verdict depends on
+ * the reference, so it is not refused.
+ *
+ * Zone-less forms (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`) are read as UTC midnight at
+ * the START of the period they name, and a value is future when that instant is
+ * after `finished_at`. A date-only value on the crawl's own UTC day therefore
+ * starts before the crawl ended and is NOT future; so is the current month or
+ * the current year. A date-time is compared as the instant it names, the offset
+ * honoured.
  */
 import { sql, type SQL } from "drizzle-orm";
 
@@ -87,7 +107,7 @@ interface EntryRow extends Record<string, unknown> {
 /**
  * Entries matching `condition`, joined to the page the entry names when the
  * crawl has one (the finding then sits on that page, as every sitemap rule's
- * does) and to the crawl row for `started_at`.
+ * does) and to the crawl row for `finished_at`.
  */
 async function entryFindings(
   self: RuleIdentity,
@@ -132,6 +152,30 @@ async function entryFindings(
 const NO_REASON = sql`null::text`;
 
 /**
+ * Refuse to judge lastmod values on a crawl with no `finished_at`, the instant
+ * "future" is measured from (see the header). One indexed lookup for the crawl
+ * row and one `exists` probe on `sitemap_urls`; a crawl with no lastmod at all
+ * is not refused, because no verdict depends on the reference.
+ */
+async function assertLastmodReference(db: Db, crawlId: string): Promise<void> {
+  const result = await db.execute<{ unfinished: boolean; has_lastmod: boolean }>(sql`
+    select c.finished_at is null as unfinished,
+           exists (select 1 from sitemap_urls s
+                   where s.crawl_id = c.id and s.lastmod is not null) as has_lastmod
+    from crawls c where c.id = ${crawlId}`);
+  const row = result.rows[0];
+  if (row === undefined) throw new Error(`${LASTMOD.id}: no such crawl '${crawlId}'`);
+  if (row.unfinished && row.has_lastmod) {
+    throw new Error(
+      `${LASTMOD.id}: crawl '${crawlId}' has sitemap lastmod values but no finished_at, ` +
+        `the instant a lastmod is judged "future" against: every closed crawl records it, ` +
+        `so this row was not closed by the crawl loop — re-crawl the site, or close the ` +
+        `crawl, before judging its sitemap dates`,
+    );
+  }
+}
+
+/**
  * `lastmod` as an ISO date-time `timestamptz` can read: the three zone-less
  * forms padded to UTC midnight of the period's first instant. A date-time
  * already carries its designator.
@@ -147,7 +191,7 @@ const LASTMOD_REASON = sql`case
   when s.lastmod is null then null
   when s.lastmod !~ ${W3C_DATETIME.source} then 'format'
   when not pg_input_is_valid(${LASTMOD_ISO}, 'timestamptz') then 'format'
-  when (${LASTMOD_ISO})::timestamptz > c.started_at then 'future'
+  when (${LASTMOD_ISO})::timestamptz > c.finished_at then 'future'
   else null end`;
 
 export const sitemapEntryRules: QueryRule[] = [
@@ -273,8 +317,9 @@ export const sitemapEntryRules: QueryRule[] = [
     ],
     ...copyFor(LASTMOD.id),
     rulesetVersion: RULESET_VERSION,
-    run: (db, crawlId, caps) =>
-      entryFindings(
+    run: async (db, crawlId, caps) => {
+      await assertLastmodReference(db, crawlId);
+      return entryFindings(
         LASTMOD,
         db,
         crawlId,
@@ -287,6 +332,7 @@ export const sitemapEntryRules: QueryRule[] = [
           reason: row.reason,
         }),
         capsOr(caps),
-      ),
+      );
+    },
   }),
 ];

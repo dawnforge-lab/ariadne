@@ -719,7 +719,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.lastmod-invalid": {
     title: "Sitemaps: Invalid lastmod date",
     explanation:
-      "Sitemap entries whose lastmod is not a W3C date or date-time (YYYY, YYYY-MM, YYYY-MM-DD, or a date-time with a Z or hh:mm zone), or is dated after the crawl began. The row gives the value and which of the two it is: format or future. Search engines ignore a lastmod they cannot trust.",
+      "Sitemap entries whose lastmod is not a W3C date or date-time (YYYY, YYYY-MM, YYYY-MM-DD, or a date-time with a Z or hh:mm zone), or is dated after the crawl ended, so it was already in the future when the sitemap was read. The row gives the value and which of the two it is: format or future. Search engines ignore a lastmod they cannot trust.",
     howToFix:
       "Output lastmod in W3C format with a zone, and set it to the date the page content last changed, never to the time the sitemap was generated.",
   },
