@@ -14,6 +14,7 @@
  * `/css/p26-wrong-type.css` answers 200 with `content-type: text/html`.
  */
 import type { Fixture } from "../fixture.js";
+import { HIGH_EXTERNAL_OUTLINKS } from "../../../src/rules/thresholds.js";
 import { article, serve } from "../render.js";
 
 /** The path whose stylesheet the fixture site serves as text/html. */
@@ -947,7 +948,11 @@ const seqB = paginationPage(
 //    sitemap and by the noindex page alone, so it is linked only from a page that
 //    is out of the index.
 //
-// `links.high-outlinks` has no page here: see `SKIP_HARNESS_CLAIMS`.
+//  - `high-outlinks`: `HIGH_EXTERNAL_OUTLINKS + 1` generated links to distinct
+//    external addresses, so the fixture follows the constant. They are external
+//    on purpose: the crawler follows internal links, and a page of more than
+//    `HIGH_INTERNAL_OUTLINKS` internal ones would grow the crawl by that many
+//    pages, so the internal limit is proven by the DB test alone.
 // ---------------------------------------------------------------------------
 
 interface LinkPageCopy {
@@ -1041,6 +1046,25 @@ const privateHostLink = linkPage(
   { name: "Page linking a private network address", expectedIssues: ["links.localhost"] },
 );
 
+const highOutlinks = linkPage(
+  "/authored26/high-outlinks",
+  {
+    title: "A page with a very long list of outgoing links",
+    description:
+      "This page carries a very long list of links to other sites, more than the limit this audit allows, which shares the page's link value too thinly.",
+    h1: "A page with a very long list of links to other sites",
+    lede: "Everything on this page is in order except the length of its list of outgoing links, which is longer than any reader will scan.",
+    what: "The list at the foot of the page links to one more distinct external address than the limit allows. Each link is to a different address, so the count is of places the page sends a visitor and not of repeated links to one place.",
+    why: "Every link on a page takes a share of the value the page can pass on, so a very long list dilutes each of them, and a crawler that reads only the start of a long document may never reach the end of the list. Pages like this are usually directories or link dumps that nobody curates.",
+    fix: "Cut the list to the links a visitor needs, and move the rest to pages of their own, each with a manageable number, or drop the ones that no longer earn a place.",
+    linkHtml: Array.from(
+      { length: HIGH_EXTERNAL_OUTLINKS + 1 },
+      (_, i) => `<a href="https://example.com/outlink/${i + 1}">Reference number ${i + 1}</a>`,
+    ).join(" "),
+  },
+  { name: "Page with more external links than the limit", expectedIssues: ["links.high-outlinks"] },
+);
+
 const NOINDEX_TARGET = "/authored26/only-from-noindex";
 
 const noindexHub = linkPage(
@@ -1115,4 +1139,5 @@ export const authoredP26Fixtures: Fixture[] = [
   privateHostLink,
   noindexHub,
   onlyFromNoindex,
+  highOutlinks,
 ];

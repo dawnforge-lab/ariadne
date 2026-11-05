@@ -13,7 +13,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pages } from "../../src/db/schema.js";
 import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
-import { LINK_HYGIENE_BATCH, linkHygieneRules } from "../../src/rules/query/link-hygiene.js";
+import { linkHygieneRules } from "../../src/rules/query/link-hygiene.js";
 import type { Finding, QueryRule } from "../../src/rules/registry/types.js";
 import { HIGH_EXTERNAL_OUTLINKS, HIGH_INTERNAL_OUTLINKS } from "../../src/rules/thresholds.js";
 import { mkDiscovery } from "./mk-discovery.js";
@@ -259,16 +259,26 @@ describe("the link-hygiene rules against the database", () => {
       expect(found.map((f) => f.pageUrl)).toEqual([url("/target")]);
     });
 
-    it("does not count a self-link, and an unlinked page is links.orphan's, not this rule's", async () => {
+    it("does not count a self-link: a page linked by itself and a noindex page still fires", async () => {
+      // Without `source_page_id <> p.id` the self-link would be an indexable
+      // inlink and the page would vanish from this rule.
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [
-        { path: "/" },
         { path: "/self" },
-        { path: "/lonely" },
+        { path: "/hidden-hub", robotsMeta: "noindex" },
       ]);
       await addLinks(crawlId, ids.get("/self")!, ["/self"]);
+      await addLinks(crawlId, ids.get("/hidden-hub")!, ["/self"]);
+      const found = await run(ID, crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/self")]);
+      expect(found[0]!.evidence).toEqual({ inlinkSources: 1, sample: [url("/hidden-hub")] });
+    });
+
+    it("is silent on a page only itself links to: that is links.orphan's", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/self" }]);
+      await addLinks(crawlId, ids.get("/self")!, ["/self"]);
       expect(await run(ID, crawlId)).toHaveLength(0);
-      void ids;
     });
 
     it("is silent on a target that is not itself judged", async () => {
@@ -401,14 +411,15 @@ describe("the link-hygiene rules against the database", () => {
       expect(ev["reason"]).toBe("private IPv4 address (10.0.0.0/8)");
     });
 
-    it("walks more source pages than one batch, in order, and keeps the cap's exact total", async () => {
+    it("lists in URL order under a cap and keeps the exact total", async () => {
       const crawlId = await newCrawl();
-      const n = LINK_HYGIENE_BATCH + 7;
+      const n = 250;
       const specs = Array.from({ length: n }, (_, i) => ({ path: `/s${String(i).padStart(4, "0")}` }));
       const ids = await addPages(crawlId, specs);
       for (const s of specs) await addLinks(crawlId, ids.get(s.path)!, ["http://localhost/"]);
       const all = await run(ID, crawlId, { listing: null });
       expect(all).toHaveLength(n);
+      expect(all.map((f) => f.pageUrl)).toEqual(specs.map((s) => url(s.path)));
       const capped = await run(ID, crawlId, { listing: 3 });
       expect(capped).toHaveLength(3);
       expect(capped[2]!.evidence["truncated"]).toEqual({ reported: 3, total: n });
@@ -459,6 +470,18 @@ describe("the link-hygiene rules against the database", () => {
         { target: "https://elsewhere.example/x", anchor: "click here" },
       ]);
       expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("treats a no-break space as whitespace, which Postgres \\s does not", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/" }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/a", anchor: "Read\u00a0More" },
+        { target: "/b", anchor: "\u00a0click\u00a0\u00a0here\u00a0" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ anchors: ["click here", "read more"], count: 2 });
     });
 
     it("lists at most 10 distinct anchors and counts every generic link", async () => {

@@ -5,9 +5,9 @@
  * Every question here is a question about the `links` table, and the table is
  * never loaded (hard rule 3): each rule groups by source (or target) page in
  * Postgres and takes a capped, ordered slice, with the exact total counted in
- * the same statement. The one exception in shape is `links.localhost`, whose
- * verdict is JavaScript's; it reads candidate source pages in keyset batches
- * and holds one batch at a time.
+ * the same statement. `links.localhost` has one extra step: its verdict is
+ * JavaScript's, so it first reads the DISTINCT candidate hosts, decides them,
+ * and then runs the same kind of capped aggregation over the blocked ones.
  *
  * THE SOURCE COHORT is the fetched-OK pages (`FETCHED_OK`): a link is judged on
  * the page that carries it whether or not that page is indexable, because a
@@ -48,23 +48,14 @@ const LOCALHOST: RuleIdentity = { id: "links.localhost", severity: "warning" };
 const ANCHOR: RuleIdentity = { id: "links.non-descriptive-anchor", severity: "info" };
 const HIGH_OUTLINKS: RuleIdentity = { id: "links.high-outlinks", severity: "info" };
 
-/** Targets (and anchors) quoted on one finding. The counts beside them are exact. */
-const QUOTED = 10;
-
-/**
- * Source pages read per round trip by the `links.localhost` scan: a batch of
- * pages and the few private-looking targets each carries, never the table.
- * Exported so a test can force the cursor past one batch.
- */
-export const LINK_HYGIENE_BATCH = 200;
-
 /**
  * An anchor as the comparison sees it: trimmed, lower-cased, runs of whitespace
- * collapsed. The analyzer collapses whitespace when it stores an anchor, and the
- * rule does not rely on that: `links.anchor` is a column other writers could
- * fill, and "Read  More" must match whichever wrote it.
+ * collapsed, a no-break space (U+00A0) counting as whitespace because Postgres'
+ * `\s` does not match it. The analyzer collapses whitespace when it stores an
+ * anchor, and the rule does not rely on that: `links.anchor` is a column other
+ * writers could fill, and "Read  More" must match whichever wrote it.
  */
-const NORMALISED_ANCHOR = sql`lower(btrim(regexp_replace(l.anchor, '\\s+', ' ', 'g')))`;
+const NORMALISED_ANCHOR = sql`lower(btrim(regexp_replace(l.anchor, '[\\s\\u00a0]+', ' ', 'g')))`;
 
 const anchorList = (): SQL =>
   sql.join(
@@ -186,18 +177,28 @@ async function nonIndexableOnlyFindings(
 }
 
 /**
- * The host of a stored link target, as the SQL prefilter below reads it: the
- * part after `scheme://` and any `user:pass@`, up to the port, path, query or
- * fragment — a bracketed IPv6 literal kept whole, brackets included.
+ * The host of a stored link target, as the SQL below reads it: the part after
+ * `scheme://` and any `user:pass@`, up to the port, path, query or fragment — a
+ * bracketed IPv6 literal kept whole, brackets included — lower-cased.
  */
 const HOST_PATTERN = String.raw`^[a-z][a-z0-9+.-]*://(?:[^/?#@]*@)?(\[[^]]*\]|[^/?#:]*)`;
 
+/** The external links of the crawl with their host, as a derived table `b`. */
+function externalLinksWithHost(crawlId: string): SQL {
+  return sql`(
+    select l.source_page_id, l.target_url,
+           lower(substring(l.target_url from ${HOST_PATTERN})) as host
+    from links l
+    where l.crawl_id = ${crawlId} and not l.is_internal
+  )`;
+}
+
 /**
- * A SUPERSET of the hosts `blockedHostReason` blocks, in SQL. The JavaScript
- * decides; this only has to never exclude a host it would block, so that the
- * rows read stay a small slice of the links table and none that matter are
- * lost. It admits a host that is:
- *  - unreadable by the pattern (kept, so JavaScript parses it or fails loudly);
+ * A SUPERSET of the hosts `blockedHostReason` blocks, in SQL, over a host column.
+ * The JavaScript decides; this only has to never exclude a host it would block,
+ * so that the distinct hosts read stay few and none that matter are lost. It
+ * admits a host that is:
+ *  - unreadable by the pattern (NULL, kept so the caller can fail loudly);
  *  - a bracketed IPv6 literal;
  *  - dotless (`localhost`, `metadata`, an intranet name — and the empty host);
  *  - spelled with a trailing dot (`localhost.`, which `blockedHostReason`
@@ -207,8 +208,7 @@ const HOST_PATTERN = String.raw`^[a-z][a-z0-9+.-]*://(?:[^/?#@]*@)?(\[[^]]*\]|[^
  *  - one of `BLOCKED_HOSTS`, or ending in one of `BLOCKED_HOST_SUFFIXES`, both
  *    read from the url-policy module itself rather than copied here.
  */
-function hostPrefilter(): SQL {
-  const host = sql`lower(substring(l.target_url from ${HOST_PATTERN}))`;
+function hostPrefilter(host: SQL): SQL {
   const exact = sql.join(
     [...BLOCKED_HOSTS].map((h) => sql`${h}`),
     sql`, `,
@@ -238,83 +238,94 @@ function hostPrefilter(): SQL {
  * The same-origin test that sets `is_internal` is the crawler's, so the rule
  * and the crawl agree about what the site is.
  *
- * The SQL prefilter (`hostPrefilter`) narrows the links to a superset, then
- * `blockedHostReason` — the url-policy authority the crawler itself refuses
- * with — decides, so a link is reported as private exactly when the crawler
- * would refuse to fetch it. Dotless names such as `intranet` pass the prefilter
- * and fail the policy, and are not reported: the policy does not call them
- * private, and the rule does not either.
- *
- * Source pages are read in keyset batches ordered by page id, each page with its
- * candidate targets aggregated in SQL (a page carries at most the analyzer's
- * per-page link cap), so memory is one batch. The scan continues past the cap so
- * the total is the real number of pages (the robots.txt precedent), and the
- * listing is sorted by URL afterwards like every other rule's.
+ * TWO STATEMENTS, and the JavaScript sits between them. The first reads the
+ * DISTINCT hosts of the external links that pass the SQL prefilter
+ * (`hostPrefilter`, a superset) and `blockedHostReason` — the url-policy
+ * authority the crawler itself refuses with — decides which are blocked, so a
+ * link is reported as private exactly when the crawler would refuse to fetch
+ * it. Dotless names such as `intranet` pass the prefilter and fail the policy,
+ * and are not reported: the policy does not call them private, and the rule does
+ * not either. The second statement is an ordinary capped aggregation, like the
+ * other four rules': per source page, `host in (<the blocked hosts>)`, an exact
+ * total from `count(*) over ()` before the `limit`, ordered by URL. Memory is
+ * the set of distinct private-looking hosts, never the links.
  */
 async function localhostFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
-  const hits: Array<{ pageId: string; pageUrl: string; targets: string[]; reason: string }> = [];
-  let total = 0;
-  let cursor = "";
-  for (;;) {
-    const batch = await db.execute<{ page_id: string; page_url: string; targets: string[] }>(sql`
-      select p.id as page_id, p.url as page_url,
-             array_agg(distinct l.target_url order by l.target_url) as targets
-      from links l
-      join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
-      where l.crawl_id = ${crawlId} and not l.is_internal and ${FETCHED_OK("p")}
-        and p.id > ${cursor} and ${hostPrefilter()}
-      group by p.id, p.url
-      order by p.id
-      limit ${LINK_HYGIENE_BATCH}`);
-    if (batch.rows.length === 0) break;
-    cursor = batch.rows[batch.rows.length - 1]!.page_id;
+  const candidates = await db.execute<{ host: string | null }>(sql`
+    select distinct b.host
+    from ${externalLinksWithHost(crawlId)} b
+    join pages p on p.id = b.source_page_id and p.crawl_id = ${crawlId}
+    where ${FETCHED_OK("p")} and ${hostPrefilter(sql`b.host`)}
+    order by b.host`);
 
-    for (const row of batch.rows) {
-      const blocked: Array<{ target: string; reason: string }> = [];
-      for (const target of row.targets) {
-        let hostname: string;
-        try {
-          hostname = new URL(target).hostname;
-        } catch {
-          // `links.target_url` is `normalizeUrl` output, so an unparseable one
-          // is our defect and not a link to skip.
-          throw new Error(`${LOCALHOST.id}: link target '${target}' is not a URL`);
-        }
-        const reason = blockedHostReason(hostname);
-        if (reason !== null) blocked.push({ target, reason });
-      }
-      if (blocked.length === 0) continue;
-      total++;
-      // The pages are visited in id order, so keeping the first `listing` of
-      // them would list an arbitrary slice. Keep every candidate until the cap
-      // is exceeded, then keep only the lexically smallest URLs.
-      hits.push({
-        pageId: row.page_id,
-        pageUrl: row.page_url,
-        targets: blocked.map((b) => b.target),
-        reason: blocked[0]!.reason,
-      });
-      if (caps.listing !== null && hits.length > caps.listing) {
-        hits.sort((a, b) => (a.pageUrl < b.pageUrl ? -1 : a.pageUrl > b.pageUrl ? 1 : 0));
-        hits.length = caps.listing;
-      }
+  const reasons = new Map<string, string>();
+  for (const { host } of candidates.rows) {
+    if (host === null) {
+      // `links.target_url` is `normalizeUrl` output, so a target with no
+      // readable host is our defect and not a link to skip.
+      throw new Error(`${LOCALHOST.id}: an external link target has no readable host`);
     }
+    const reason = blockedHostReason(host);
+    if (reason !== null) reasons.set(host, reason);
   }
+  if (reasons.size === 0) return [];
 
-  hits.sort((a, b) => (a.pageUrl < b.pageUrl ? -1 : a.pageUrl > b.pageUrl ? 1 : 0));
-  const findings = hits.map((hit) =>
+  const blocked = sql.join(
+    [...reasons.keys()].map((h) => sql`${h}`),
+    sql`, `,
+  );
+  const blockedLinks = sql`(
+    select b.source_page_id, b.target_url, b.host
+    from ${externalLinksWithHost(crawlId)} b
+    where b.host in (${blocked})
+  )`;
+  const result = await db.execute<{
+    page_id: string;
+    page_url: string;
+    target_count: number;
+    first_host: string;
+    total_matches: number;
+    targets: string[];
+  }>(sql`
+    with srcs as (
+      select p.id as page_id, p.url as page_url,
+             count(distinct x.target_url)::int as target_count,
+             (array_agg(x.host order by x.target_url))[1] as first_host,
+             count(*) over ()::int as total_matches
+      from ${blockedLinks} x
+      join pages p on p.id = x.source_page_id and p.crawl_id = ${crawlId}
+      where ${FETCHED_OK("p")}
+      group by p.id, p.url
+      order by p.url
+      ${limitTo(caps.listing)}
+    )
+    select s.page_id, s.page_url, s.target_count, s.first_host, s.total_matches, t.targets
+    from srcs s
+    cross join lateral (
+      select coalesce(array_agg(u.target_url order by u.target_url), array[]::text[]) as targets
+      from (
+        select distinct x.target_url
+        from ${blockedLinks} x
+        where x.source_page_id = s.page_id
+        order by x.target_url
+        limit ${SAMPLE_SOURCES}
+      ) u
+    ) t
+    order by s.page_url`);
+
+  const findings = result.rows.map((row) =>
     queryFinding(LOCALHOST, {
-      pageId: hit.pageId,
-      pageUrl: hit.pageUrl,
+      pageId: row.page_id,
+      pageUrl: row.page_url,
       evidence: {
-        targets: hit.targets.slice(0, QUOTED),
-        reason: hit.reason,
-        targetCount: hit.targets.length,
+        targets: row.targets,
+        reason: reasons.get(row.first_host),
+        targetCount: row.target_count,
       },
-      dedupeKey: hit.pageUrl,
+      dedupeKey: row.page_url,
     }),
   );
-  return noteTruncation(findings, total);
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
 /** Internal links whose whole anchor is on `NON_DESCRIPTIVE_ANCHORS`. */
@@ -348,7 +359,7 @@ async function anchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<
         where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
           and ${NORMALISED_ANCHOR} in (${anchorList()})
         order by 1
-        limit ${QUOTED}
+        limit ${SAMPLE_SOURCES}
       ) a
     ) x
     order by s.page_url`);
