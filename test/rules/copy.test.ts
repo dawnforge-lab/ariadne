@@ -49,6 +49,7 @@ import {
   SITEMAP_DOC_ROWS_CAP,
   SITEMAP_URL_CAP,
 } from "../../src/rules/metric/crawl-metrics.js";
+import { RESTRICTIVE_DIRECTIVES, UNAVAILABLE_AFTER_WARN_DAYS } from "../../src/rules/thresholds.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
 import {
   BROKEN_SAMPLE_RESOURCES,
@@ -782,6 +783,21 @@ describe("copy: structured data", () => {
 // ==========================================================================
 // IMAGES AND RESOURCES
 // ==========================================================================
+
+describe("copy: directives (26a)", () => {
+  it("quotes the unavailable_after window the rule actually uses", () => {
+    const days = `${UNAVAILABLE_AFTER_WARN_DAYS} days`;
+    expect(UNAVAILABLE_AFTER_WARN_DAYS).toBe(30);
+    expect(copy("directives.unavailable-after").title).toContain(days);
+    expect(copy("directives.unavailable-after").explanation).toContain(days);
+    expect(copy("directives.unavailable-after").howToFix).toContain(days);
+  });
+
+  it("names every restrictive directive the rule matches", () => {
+    const text = copy("directives.restrictive").explanation;
+    for (const d of RESTRICTIVE_DIRECTIVES) expect(text, d).toContain(d);
+  });
+});
 
 describe("copy: images and resources", () => {
   // The resource threshold, pinned against the rule's own constant the way the
@@ -1692,6 +1708,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "content.near-duplicate": String(NEAR_DUPLICATE_HAMMING),
     "images.oversized": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
     "images.legacy-format": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
+    "directives.unavailable-after": String(UNAVAILABLE_AFTER_WARN_DAYS),
     // Two rules whose ids do not advertise a threshold but whose predicates are
     // one. `content.soft-404` fires on `SOFT_404_WORDS` OR `TEMPLATE_HAMMING`;
     // the word count is the half a title can carry, and the four bits are

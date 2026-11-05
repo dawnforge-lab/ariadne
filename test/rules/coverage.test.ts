@@ -349,10 +349,18 @@ describe("checklist coverage", () => {
   //
   //   query   67 + 6 = 73
   //   total   114 + 6 = 120
-  it("pins the ruleset split the gate doc reports: 120 rules = 33 page + 73 query + 14 metric", () => {
+  //
+  // Phase 26a Task 4 adds THREE page rules over robots directives:
+  // `indexability.nofollow`, `directives.restrictive` and
+  // `directives.unavailable-after`, all warning and all CHECK-04, which the
+  // noindex rules claim already, so the claimed-check arithmetic does not move.
+  //
+  //   page    33 + 3 = 36
+  //   total   120 + 3 = 123
+  it("pins the ruleset split the gate doc reports: 123 rules = 36 page + 73 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(120);
-    expect(registry.byKind("page")).toHaveLength(33);
+    expect(registry.all()).toHaveLength(123);
+    expect(registry.byKind("page")).toHaveLength(36);
     expect(registry.byKind("query")).toHaveLength(73);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

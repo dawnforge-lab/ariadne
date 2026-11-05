@@ -408,6 +408,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     (CHECK-85) and `resources.bad-content-type` (CHECK-51). The header rules
 //     read `pages.response_headers` and refuse a crawl any of whose pages
 //     predates Phase 25, so a pre-25 crawl gets the marker, never a clean list.
+//  3. (T4) Robots directives, page rules, all warning on CHECK-04:
+//     `indexability.nofollow`, `directives.restrictive` and
+//     `directives.unavailable-after`. They compare whole tokens
+//     (`robotsTokens`), and judge a date against the page's own `fetched_at`.
 export const RULESET_VERSION = "0.20.0";
 
 /**

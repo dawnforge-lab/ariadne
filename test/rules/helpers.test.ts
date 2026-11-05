@@ -19,6 +19,8 @@ import {
   present,
   queryFinding,
   resolveEffectiveCanonical,
+  robotsTokens,
+  unavailableAfterOf,
   type MetricIdentity,
 } from "../../src/rules/helpers.js";
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
@@ -805,5 +807,58 @@ describe("indexabilityOf", () => {
 
   it("refuses a fetch class it has never met rather than labelling it", () => {
     expect(() => indexabilityOf(mkPage({ fetchClass: "teapot" }))).toThrow(/unknown fetch_class/);
+  });
+});
+
+describe("robotsTokens (26a)", () => {
+  it("splits on commas, lower-cases and trims", () => {
+    expect(robotsTokens(" NoIndex ,NoFollow,  max-snippet:-1 ")).toEqual([
+      "noindex",
+      "nofollow",
+      "max-snippet:-1",
+    ]);
+  });
+
+  it("is empty for null and for an empty or blank value", () => {
+    expect(robotsTokens(null)).toEqual([]);
+    expect(robotsTokens("")).toEqual([]);
+    expect(robotsTokens(" , ")).toEqual([]);
+  });
+
+  it("drops a leading bot prefix and ignores which bot it named", () => {
+    expect(robotsTokens("googlebot: nofollow, bingbot:noindex")).toEqual(["nofollow", "noindex"]);
+  });
+
+  it("keeps a value directive whole: its colon is not a bot prefix", () => {
+    expect(robotsTokens("max-snippet:0, max-image-preview: none")).toEqual([
+      "max-snippet:0",
+      "max-image-preview:none",
+    ]);
+    expect(robotsTokens("googlebot: max-snippet:0")).toEqual(["max-snippet:0"]);
+  });
+
+  it("keeps unavailable_after as one token whose date holds colons and commas", () => {
+    expect(
+      robotsTokens("nofollow, unavailable_after: 25 Jun 2010 15:00:00 PST, noarchive"),
+    ).toEqual(["nofollow", "unavailable_after: 25 jun 2010 15:00:00 pst", "noarchive"]);
+    expect(robotsTokens("unavailable_after: Fri, 25 Jun 2010 15:00:00 GMT, nosnippet")).toEqual([
+      "unavailable_after: fri, 25 jun 2010 15:00:00 gmt",
+      "nosnippet",
+    ]);
+    // An unparseable date must not swallow the next directive.
+    expect(robotsTokens("unavailable_after: soon, nofollow")).toEqual([
+      "unavailable_after: soon",
+      "nofollow",
+    ]);
+  });
+});
+
+describe("unavailableAfterOf (26a)", () => {
+  it("returns the raw date, case and all, or null", () => {
+    expect(unavailableAfterOf("noarchive, unavailable_after: 25 Jun 2010 15:00:00 PST")).toBe(
+      "25 Jun 2010 15:00:00 PST",
+    );
+    expect(unavailableAfterOf("noarchive")).toBeNull();
+    expect(unavailableAfterOf(null)).toBeNull();
   });
 });

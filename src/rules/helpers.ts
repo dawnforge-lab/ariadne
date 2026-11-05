@@ -477,6 +477,68 @@ export function hasNoindex(page: RobotsDeclaration): boolean {
 }
 
 /**
+ * `unavailable_after: <date>`. The date holds colons (the time) and may hold a
+ * comma (an RFC 850 / RFC 1123 weekday), and the directive list is itself comma
+ * separated, so a plain split would cut the date in two. A comma belongs to the
+ * date only when it follows a weekday name; anything else after a comma is the
+ * next directive. (The first draft of this pattern, in the 26a plan, accepted any
+ * `,[^,:]+` and so truncated "Fri, 25 Jun 2010 15:00:00" at the first colon.)
+ */
+const UNAVAILABLE_AFTER =
+  /unavailable_after:\s*((?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,\s*)?[^,]+)/i;
+
+/** The raw `unavailable_after` date of a robots directive string, or null. */
+export function unavailableAfterOf(value: string | null): string | null {
+  if (!present(value)) return null;
+  const match = UNAVAILABLE_AFTER.exec(value);
+  return match ? match[1]!.trim() : null;
+}
+
+/**
+ * Robots directives that carry a value after a colon. Their colon is part of
+ * the token, where any other `name:` prefix names a bot.
+ */
+const VALUE_DIRECTIVES = new Set(["max-snippet", "max-image-preview", "max-video-preview"]);
+
+/**
+ * The directive tokens of a robots meta or `X-Robots-Tag` value: split on
+ * commas, lower-cased and trimmed, with a leading `<bot>:` prefix dropped.
+ *
+ * The prefix is ignored, as `saysNoindex` ignores it: a directive for one bot is
+ * read as a directive for the page, and bot-specific judgement is 26b's job.
+ * `max-snippet:0` is one token and not a prefix, so the value directives keep
+ * their colon (whitespace around it is closed up). `unavailable_after: <date>`
+ * is one token whose date may hold commas and colons, taken first so the split
+ * does not cut it.
+ *
+ * Rules compare whole tokens, which is the point: `nofollowing` is not
+ * `nofollow`, and `max-snippet:-1` is not `max-snippet:0`.
+ */
+export function robotsTokens(value: string | null): string[] {
+  if (!present(value)) return [];
+  const tokens: string[] = [];
+  const plain = (part: string): void => {
+    for (const raw of part.split(",")) {
+      let token = raw.trim().toLowerCase().replace(/\s*:\s*/g, ":");
+      const colon = token.indexOf(":");
+      if (colon > 0 && !VALUE_DIRECTIVES.has(token.slice(0, colon))) {
+        token = token.slice(colon + 1);
+      }
+      if (token !== "") tokens.push(token);
+    }
+  };
+  const match = UNAVAILABLE_AFTER.exec(value);
+  if (match === null) {
+    plain(value);
+    return tokens;
+  }
+  plain(value.slice(0, match.index));
+  tokens.push(`unavailable_after: ${match[1]!.trim().toLowerCase()}`);
+  plain(value.slice(match.index + match[0].length));
+  return tokens;
+}
+
+/**
  * The columns `indexabilityOf` reads. A `Pick` rather than a whole `PageRecord`
  * for `isAuditable`'s reason: the API's listing query holds a narrow projection
  * of `pages` (`ISSUE_PAGE_COLUMNS`, src/api/service.ts) and must ask this

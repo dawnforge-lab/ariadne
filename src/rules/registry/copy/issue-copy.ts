@@ -393,6 +393,27 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "No action if the exclusion is deliberate. If the page should rank, remove the noindex and request re-indexing.",
   },
+  "indexability.nofollow": {
+    title: "Directives: Nofollow",
+    explanation:
+      "Pages with nofollow (or none) in the robots meta tag or the X-Robots-Tag header; the Directive Source column says which. Search engines are told to ignore every link on the page, so the pages it links to get no internal equity from it and may not be discovered through it.",
+    howToFix:
+      "Remove nofollow from the robots meta tag and the header so the page's links are followed. Leave it only if the page is deliberately closed off, such as a login or user-generated page.",
+  },
+  "directives.restrictive": {
+    title: "Directives: Snippet or image preview restricted",
+    explanation:
+      "Pages carrying nosnippet, max-snippet:0, max-image-preview:none or noimageindex in the robots meta tag or the X-Robots-Tag header; the Restrictive Directives column lists which. The page stays indexed but results show no text excerpt, no large image preview or no images from it, which usually costs clicks. These are often left over from a template copied from another site.",
+    howToFix:
+      "Remove the directive if the restriction is not intended. To limit rather than forbid a preview, use a value such as max-snippet:160 or max-image-preview:large.",
+  },
+  "directives.unavailable-after": {
+    title: "Directives: unavailable_after date within 30 days",
+    explanation:
+      "Pages whose unavailable_after directive names a date that had passed or fell within 30 days of the crawl, or a date search engines cannot read. A page leaves the index once the date passes, and a date that cannot be parsed is ignored, so the page stays indexed when its author expected it to leave. The Days From Fetch column counts the days from the crawl to the date; negative means already past.",
+    howToFix:
+      "Remove the directive if the page should stay indexed, or move the date well beyond 30 days. If the date cannot be read, rewrite it in a standard format such as 2027-01-31T00:00:00Z.",
+  },
 
   // ------------------------------------------------------------------ links
   "inlinks.distribution": {

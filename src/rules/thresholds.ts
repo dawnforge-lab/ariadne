@@ -227,3 +227,27 @@ export const SITEMAP_URL_CAP = 50_000;
  * understands, so the rule compares the last token.
  */
 export const UNSAFE_REFERRER_POLICIES = ["unsafe-url", "no-referrer-when-downgrade"] as const;
+
+// ---- from src/rules/page/directives.ts
+/**
+ * How far past a page's fetch an `unavailable_after` date may lie before the
+ * page is reported. A date inside the window means the page leaves the index
+ * within a month of the crawl that saw it, which is soon enough that nobody
+ * should be finding out from a traffic drop. The comparison is strictly less
+ * than, against the page's own `fetched_at` and not the wall clock, so
+ * re-judging an old crawl gives the same answer.
+ */
+export const UNAVAILABLE_AFTER_WARN_DAYS = 30;
+
+/**
+ * The robots tokens that restrict how a result may look without removing the
+ * page from the index: no snippet, no image preview, no image indexing. Each is
+ * matched as a whole token, and `max-snippet:0` exactly, so `max-snippet:-1`
+ * (no limit) and `max-snippet:50` do not count.
+ */
+export const RESTRICTIVE_DIRECTIVES = [
+  "nosnippet",
+  "max-snippet:0",
+  "max-image-preview:none",
+  "noimageindex",
+] as const;

@@ -768,9 +768,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-04: Meta robots & X-Robots-Tag directives
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-04"`. Four rules:
+  1. `issues_list` with `checkId: "CHECK-04"`. Seven rules:
      - `indexability.noindex` (info) — every page the crawl found excluded from the
        index, whether by meta tag or by header.
+     - `indexability.nofollow` (warning) — a page whose meta tag or header says
+       `nofollow` or `none`, so engines ignore every link on it.
+     - `directives.restrictive` (warning) — `nosnippet`, `max-snippet:0`,
+       `max-image-preview:none` or `noimageindex`: the page is indexed but its
+       result is stripped of text or images.
+     - `directives.unavailable-after` (warning) — an unavailable_after date that
+       had passed, falls within 30 days of the crawl, or cannot be parsed.
      - `indexability.meta-header-conflict` (critical) — a page whose robots meta and
        `X-Robots-Tag` header disagree. That is a directive the site cannot predict
        the outcome of, and it is a finding on its own.

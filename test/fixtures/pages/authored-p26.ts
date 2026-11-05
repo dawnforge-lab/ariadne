@@ -56,4 +56,115 @@ const wrongContentType: Fixture = {
     })),
 };
 
-export const authoredP26Fixtures: Fixture[] = [wrongContentType];
+/**
+ * The three robots-directive fixtures. Each is the control recipe with one
+ * robots meta added, so the one directive is the page's only defect.
+ */
+const nofollow: Fixture = {
+  path: "/authored26/nofollow",
+  category: "directives",
+  name: "Indexable page whose robots meta says nofollow",
+  expectedIssues: ["indexability.nofollow"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "A page that tells search engines to ignore its links",
+      metaDescription:
+        "The page may be indexed and ranked, but its robots meta carries nofollow, so none of the links it contains are followed or credited by a search engine.",
+      robotsMeta: "index, nofollow",
+      bodyHtml: article({
+        h1: "A page whose links are closed to crawlers",
+        lede: "This document is open to the index. Its robots meta also carries a directive that tells engines to disregard every link it contains.",
+        withImage: false,
+        sections: [
+          {
+            h2: "What the directive does",
+            body: "The nofollow value applies to the whole page and not to a single link. A search engine that reads it will neither follow the page's outgoing links to discover new addresses nor pass any credit through them, however deliberately the page was written to point elsewhere.",
+          },
+          {
+            h2: "When it is a mistake",
+            body: "Login pages and pages of user submitted content are sensible places for it. On an ordinary article it usually arrives from a template shared with such a page, and it quietly starves the pages that article links to of the internal links they depend on.",
+          },
+          {
+            h2: "How it gets fixed",
+            body: "Remove the nofollow value from the robots meta tag and from any matching header, leaving index and follow, and let the next crawl confirm the links are being followed again.",
+          },
+        ],
+      }),
+    })),
+};
+
+const nosnippet: Fixture = {
+  path: "/authored26/nosnippet",
+  category: "directives",
+  name: "Indexable page whose robots meta says nosnippet",
+  expectedIssues: ["directives.restrictive"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "A page that forbids a text excerpt in search results",
+      metaDescription:
+        "This page is indexed normally, yet its robots meta carries nosnippet, so a search result shows a title and an address and never any text from the page.",
+      robotsMeta: "index, follow, nosnippet",
+      bodyHtml: article({
+        h1: "A page that hides its own excerpt",
+        lede: "Search engines may list this page, but a directive in its head asks them to show no text from it beneath the title.",
+        withImage: false,
+        sections: [
+          {
+            h2: "What nosnippet takes away",
+            body: "With the directive present a result for this page carries no description line at all. Visitors choose between listings by reading those lines, so a page that suppresses its own is asking to be passed over for a neighbour that offers one.",
+          },
+          {
+            h2: "Where it comes from",
+            body: "Sites reach for it to stop an excerpt being quoted or reused by an answer feature. It is easily left behind when a template moves from one section to another, and nobody looks at a result listing once the launch is done.",
+          },
+          {
+            h2: "How it gets fixed",
+            body: "Delete the nosnippet value if the restriction was never meant. To cap the excerpt instead of forbidding it, replace the value with a limit on its length.",
+          },
+        ],
+      }),
+    })),
+};
+
+const unavailableAfter: Fixture = {
+  path: "/authored26/unavailable-after",
+  category: "directives",
+  name: "Indexable page whose robots meta names an expiry date long past",
+  expectedIssues: ["directives.unavailable-after"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "A page that asked to leave the index years ago",
+      metaDescription:
+        "This page carries an unavailable_after directive whose date fell in 2010, so a search engine reading it today is told the page has long since expired.",
+      robotsMeta: "index, follow, unavailable_after: 25 Jun 2010 15:00:00 PST",
+      bodyHtml: article({
+        h1: "A page with an expiry date in the past",
+        lede: "A directive in the head of this document names a date after which it should no longer be listed, and that date is more than a decade gone.",
+        withImage: false,
+        sections: [
+          {
+            h2: "What the date means",
+            body: "The unavailable_after directive schedules a page's removal from search results. Once the date passes, a search engine is entitled to drop the page on its next visit, which is exactly what a page promoting an event or an offer wants and exactly what an evergreen page does not.",
+          },
+          {
+            h2: "Why one lingers",
+            body: "A campaign page is published with an end date and then repurposed. Nobody edits the head, the date slides into the past, and the page loses its place in results with no deploy, no error and no alert to explain it.",
+          },
+          {
+            h2: "How it gets fixed",
+            body: "If the page should stay listed, remove the directive or move the date far into the future. If it was meant to expire, redirect it or take it down on purpose.",
+          },
+        ],
+      }),
+    })),
+};
+
+export const authoredP26Fixtures: Fixture[] = [
+  wrongContentType,
+  nofollow,
+  nosnippet,
+  unavailableAfter,
+];
