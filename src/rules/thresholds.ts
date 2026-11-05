@@ -349,3 +349,18 @@ export const SITEMAP_LOC_MAX = 2048;
  */
 export const W3C_DATETIME =
   /^\d{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01])(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?)?)?$/;
+
+// ---- from src/rules/page/pixel-width.ts
+/**
+ * The pixel bounds of a search-result title and description, measured by
+ * `serpWidth` (20px and 14px Arial, the font a result is drawn in). STARTING
+ * VALUES: Task 13's Screaming Frog calibration confirms them or moves them, and
+ * the client-facing copy quotes them, so a change here fails the copy test
+ * until the sentence is changed with it.
+ *
+ * All four are strict: a value exactly on a bound is not reported.
+ */
+export const TITLE_PX_MAX = 561;
+export const TITLE_PX_MIN = 200;
+export const META_PX_MAX = 985;
+export const META_PX_MIN = 400;

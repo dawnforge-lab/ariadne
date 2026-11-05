@@ -406,10 +406,18 @@ describe("checklist coverage", () => {
   //
   //   query   87 + 4 = 91
   //   total   146 + 4 = 150
-  it("pins the ruleset split the gate doc reports: 150 rules = 45 page + 91 query + 14 metric", () => {
+  //
+  // Phase 26a Task 12 adds FOUR pixel-width PAGE rules in
+  // `src/rules/page/pixel-width.ts`: `title.pixel-too-long` and
+  // `title.pixel-too-short` on CHECK-35, `meta-description.pixel-too-long` and
+  // `meta-description.pixel-too-short` on CHECK-36. The last rule task.
+  //
+  //   page    45 + 4 = 49
+  //   total   150 + 4 = 154
+  it("pins the ruleset split the gate doc reports: 154 rules = 49 page + 91 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(150);
-    expect(registry.byKind("page")).toHaveLength(45);
+    expect(registry.all()).toHaveLength(154);
+    expect(registry.byKind("page")).toHaveLength(49);
     expect(registry.byKind("query")).toHaveLength(91);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

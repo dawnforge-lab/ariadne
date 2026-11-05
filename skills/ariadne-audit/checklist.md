@@ -1976,9 +1976,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — six rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — eight rules:
   `title.missing` (critical), `title.too-short` (info, under 30 characters),
-  `title.too-long` (info, over 60) and `title.duplicate` (warning), plus `head.tags-outside-head` (warning, a title or meta
+  `title.too-long` (info, over 60) and `title.duplicate` (warning), plus
+  `title.pixel-too-long` (warning, wider than 561 pixels) and
+  `title.pixel-too-short` (info, narrower than 200 pixels), which measure the
+  title in the search result's font and do not judge a title with a character
+  outside the Latin, Greek and Cyrillic scripts (the character rules still apply
+  to it), plus `head.tags-outside-head` (warning, a title or meta
   description after the `<head>` ended) and `render.title-changed` (warning, a
   rendered page whose title JavaScript changed; see CHECK-01 step 6). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
@@ -2062,7 +2067,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
   (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
-  and `meta-description.duplicate` (warning), plus `head.tags-outside-head` (warning,
+  and `meta-description.duplicate` (warning), plus `meta-description.pixel-too-long`
+  (warning, wider than 985 pixels) and `meta-description.pixel-too-short` (info,
+  narrower than 400 pixels), which measure the description in the search result's
+  font and do not judge one with a character outside the Latin, Greek and Cyrillic
+  scripts, plus `head.tags-outside-head` (warning,
   a meta description or title after the `<head>` ended) and
   `render.meta-description-changed` (warning, a rendered page whose description
   JavaScript changed; see CHECK-01 step 6). Filter by `pageType` for the per-type

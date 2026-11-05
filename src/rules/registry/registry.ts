@@ -464,6 +464,17 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `sitemap.lastmod-invalid` (info, CHECK-07: not `W3C_DATETIME`, or after
 //     `crawls.started_at`; zone-less forms are UTC at the period's start, so a
 //     date-only value on the crawl's own day is not future).
+// 10. (T12) Pixel width, four page rules in `page/pixel-width.ts`, gated by
+//     `isJudged`, a present value and a measurable one: `title.pixel-too-long`
+//     (warning, CHECK-35, wider than `TITLE_PX_MAX`), `title.pixel-too-short`
+//     (info, CHECK-35, narrower than `TITLE_PX_MIN`),
+//     `meta-description.pixel-too-long` (warning, CHECK-36, over `META_PX_MAX`)
+//     and `meta-description.pixel-too-short` (info, CHECK-36, under
+//     `META_PX_MIN`). Width is `serpWidth` (measured Chromium advances at
+//     20px / 14px Arial); a value with a character outside the measured table
+//     is NOT pixel-judged (the character-count rules still apply), and the
+//     copy says so. The four bounds are starting values that T13's Screaming
+//     Frog calibration confirms or moves. This is the last rule task: 154 rules.
 export const RULESET_VERSION = "0.20.0";
 
 /**

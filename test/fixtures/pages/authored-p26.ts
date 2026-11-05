@@ -14,7 +14,14 @@
  * `/css/p26-wrong-type.css` answers 200 with `content-type: text/html`.
  */
 import type { Fixture } from "../fixture.js";
-import { HIGH_EXTERNAL_OUTLINKS } from "../../../src/rules/thresholds.js";
+import {
+  HIGH_EXTERNAL_OUTLINKS,
+  META_PX_MAX,
+  META_PX_MIN,
+  TITLE_PX_MAX,
+  TITLE_PX_MIN,
+} from "../../../src/rules/thresholds.js";
+import { serpWidth } from "../../../src/rules/serp-width.js";
 import { article, serve } from "../render.js";
 
 /** The path whose stylesheet the fixture site serves as text/html. */
@@ -1360,7 +1367,132 @@ const crossHostLoc: Fixture = {
     })),
 };
 
+/**
+ * The four pixel-width fixtures (Task 12). The page is the control recipe and
+ * the defect is the WIDTH of one head string, so each is `exact`.
+ *
+ * Each string is chosen to be inside the character rules' range and outside the
+ * pixel bound where that is possible, so the page trips the pixel rule alone:
+ *
+ * - the long title is 54 upper-case characters (under `TITLE_MAX`'s 60) and
+ *   wider than `TITLE_PX_MAX`; the long description is 148 characters (under
+ *   `META_MAX`'s 155) and wider than `META_PX_MAX`;
+ * - the short description is 72 characters (over `META_MIN`'s 70) and narrower
+ *   than `META_PX_MIN`;
+ * - the short title is the exception: 32 characters (over `TITLE_MIN`'s 30) in
+ *   the narrowest letters English has, and it is the nearest a real title gets.
+ *   It is narrower than `TITLE_PX_MIN` and not shorter than 30 characters, so
+ *   `title.too-short` stays silent here too.
+ *
+ * The widths are asserted when the module loads, against the same `serpWidth`
+ * the rule calls, so a regenerated glyph table that moves one of them throws
+ * here instead of turning the fixture into a page the rule does not flag.
+ */
+const PX_LONG_TITLE = "WHY WE MEASURE WIDTH: A MIDWEEK GUIDE TO SEARCH TITLES";
+const PX_SHORT_TITLE = "Flit, flit: it fills little jars";
+const PX_LONG_META =
+  "WE MEASURE WIDTH: A MIDWEEK GUIDE TO WIDE MEMBERS, MOMENTS AND MEETINGS IN WELLINGTON, WARSAW AND MADRID, MADE FOR WEEKLY WORKSHOPS WITH MORE WOMEN.";
+const PX_SHORT_META = "Fill in a little more of the line here, still brief but not tiny at all.";
+
+function assertWidth(
+  text: string,
+  kind: "title" | "description",
+  test: (w: number) => boolean,
+  what: string,
+): void {
+  const w = serpWidth(text, kind);
+  if (w === null || !test(w)) {
+    throw new Error(`authored-p26 pixel fixture drifted: ${what} measures ${w} px`);
+  }
+}
+assertWidth(PX_LONG_TITLE, "title", (w) => w > TITLE_PX_MAX, "the long title");
+assertWidth(PX_SHORT_TITLE, "title", (w) => w < TITLE_PX_MIN, "the short title");
+assertWidth(PX_LONG_META, "description", (w) => w > META_PX_MAX, "the long description");
+assertWidth(PX_SHORT_META, "description", (w) => w < META_PX_MIN, "the short description");
+
+function pixelPage(
+  path: string,
+  copy: ShapePageCopy,
+  rest: Pick<Fixture, "expectedIssues" | "name">,
+): Fixture {
+  return { ...shapePage(path, copy, rest), category: "head-tags" };
+}
+
+const pixelTitleLong = pixelPage(
+  "/authored26/pixel-title-long",
+  {
+    title: PX_LONG_TITLE,
+    description:
+      "The title of this page is under sixty characters and still too wide for a search result, because it is set in capitals, the widest letters there are.",
+    h1: "A title that is wide although it is not long",
+    lede: "The text of the page is in order. Its title is short in characters, and set in capital letters it needs more room than a result gives it.",
+    what: "The title runs to fifty-four characters, which passes any count of letters. A search result draws it in a fixed font and cuts it where the line ends, and capitals are about a third wider than lower-case letters, so the last words of this title are the ones that go.",
+    why: "A title that is cut loses its ending, and the ending is often where the brand or the qualifier sits. Counting characters does not catch it, because the same number of capitals takes far more room than the same number of ordinary letters. The fault appears most often in headings that were set in capitals for emphasis and then reused as the title of the page without anyone measuring them again.",
+    fix: "Write the title in ordinary capitalisation, or shorten it until it fits in the width a result offers, and keep the words that matter most at the front.",
+  },
+  {
+    name: "Title that is too wide in pixels but within the character limit",
+    expectedIssues: ["title.pixel-too-long"],
+  },
+);
+
+const pixelTitleShort = pixelPage(
+  "/authored26/pixel-title-short",
+  {
+    title: PX_SHORT_TITLE,
+    description:
+      "The title of this page has more than thirty characters and still fills only a small part of a result line, because it is made of the narrowest letters.",
+    h1: "A title that is long enough and still narrow",
+    lede: "The page is complete. Its title passes a count of characters and leaves most of the line in a search result unused.",
+    what: "The title is thirty-two characters of thin letters, such as i, l and t, and of spaces and punctuation. A result gives a title about five hundred and sixty pixels, and this one takes a third of that, so most of the line is left empty.",
+    why: "A title is the largest piece of text a result shows. One that fills a third of its line carries less than a third of what it could, and gives a searcher fewer reasons to choose it than the titles on either side. The words it leaves out are the ones that would have told the searcher what the page is for, which is why a title that looks complete to its author can still look thin in a list of results.",
+    fix: "Add the words people search for, such as the product, the place or the benefit, until the title fills more of the line.",
+  },
+  {
+    name: "Title that is too narrow in pixels but above the character minimum",
+    expectedIssues: ["title.pixel-too-short"],
+  },
+);
+
+const pixelMetaLong = pixelPage(
+  "/authored26/pixel-meta-long",
+  {
+    title: "A description that is wide although it is not long",
+    description: PX_LONG_META,
+    h1: "A description that needs more room than it gets",
+    lede: "The page is correct. Its meta description is under the character limit and wider than a search result will draw.",
+    what: "The description is a hundred and forty-eight characters, which passes any count. It is written in capitals, which are about a third wider than ordinary letters, so a result cuts it well before the end and the closing words are lost.",
+    why: "A description that is cut leaves the searcher with half a sentence. The reason to click is usually in the second half, which is the half that goes, and a count of characters does not tell you that it will. The same text in ordinary capitalisation would fit with room to spare, which is why the fault is easy to miss when the copy is read on a screen where it looks like a normal sentence of normal length.",
+    fix: "Write the description in ordinary capitalisation or trim it until it fits in the width of a result, with the reason to click in the first sentence.",
+  },
+  {
+    name: "Meta description too wide in pixels but within the character limit",
+    expectedIssues: ["meta-description.pixel-too-long"],
+  },
+);
+
+const pixelMetaShort = pixelPage(
+  "/authored26/pixel-meta-short",
+  {
+    title: "A description that is long enough and still narrow",
+    description: PX_SHORT_META,
+    h1: "A description that leaves most of its space unused",
+    lede: "The page is complete. Its meta description passes the count of characters and fills less of a result than it could.",
+    what: "The description is seventy-two characters of short words, which is just over the character minimum. A result gives a description about nine hundred pixels, and this one takes less than half of that, so most of the space is left empty.",
+    why: "A description is the one place a result lets you argue for the click. One that fills less than half of its space leaves that argument unmade, and the search engine may write a longer one of its own from the text of the page. A snippet written by an engine from the page text reads as an excerpt rather than as an invitation, and it changes from one search to the next, so the owner of the page no longer controls what a searcher sees.",
+    fix: "Expand the description with what the page offers and a reason to click, until it fills more of the result.",
+  },
+  {
+    name: "Meta description too narrow in pixels but above the character minimum",
+    expectedIssues: ["meta-description.pixel-too-short"],
+  },
+);
+
 export const authoredP26Fixtures: Fixture[] = [
+  pixelTitleLong,
+  pixelTitleShort,
+  pixelMetaLong,
+  pixelMetaShort,
   upperCase,
   underScore,
   nonAscii,

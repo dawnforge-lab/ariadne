@@ -600,6 +600,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Trim the description to 155 characters or fewer, keeping the core message and the reason to click in the first sentence.",
   },
+  "title.pixel-too-long": {
+    title: "Page titles: Wider than 561 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose title is wider than 561 pixels in the font search results use, so the end is likely to be cut off. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Shorten the title or swap wide letters for narrower words so it fits in 561 pixels, keeping the important words at the front.",
+  },
+  "title.pixel-too-short": {
+    title: "Page titles: Narrower than 200 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose title is narrower than 200 pixels in the font search results use, so it leaves most of the line unused. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Add the words people search for to the title, such as the product, the place or the benefit, until it fills more of the line.",
+  },
+  "meta-description.pixel-too-long": {
+    title: "Meta description: Wider than 985 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose meta description is wider than 985 pixels in the font search results use, so its ending is likely to be cut off. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Trim the description so it fits in 985 pixels, keeping the core message and the reason to click in the first sentence.",
+  },
+  "meta-description.pixel-too-short": {
+    title: "Meta description: Narrower than 400 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose meta description is narrower than 400 pixels in the font search results use, so it fills little of the space a result offers. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Expand the description with what the page offers and a reason to click, until it fills more of the result.",
+  },
   "meta-description.too-short": {
     title: "Meta description: Below 70 characters",
     explanation:

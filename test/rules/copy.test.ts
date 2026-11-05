@@ -24,6 +24,10 @@ import {
   INTERNAL_SEARCH_PARAMS,
   SITEMAP_LOC_MAX,
   PAGINATION_WALK_MAX,
+  TITLE_PX_MAX,
+  TITLE_PX_MIN,
+  META_PX_MAX,
+  META_PX_MIN,
 } from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
 import {
@@ -872,6 +876,36 @@ describe("copy: link hygiene (26a)", () => {
   it("says internal and external, so neither rule over-claims its cohort", () => {
     expect(copy("links.localhost").explanation).toMatch(/Links to the site's own host are not judged/);
     expect(copy("links.non-descriptive-anchor").title).toMatch(/Internal links/);
+  });
+});
+
+describe("copy: pixel width (26a)", () => {
+  it("quotes the pixel bounds the rules actually use, in the title and the fix", () => {
+    const bounds: Array<[string, number]> = [
+      ["title.pixel-too-long", TITLE_PX_MAX],
+      ["title.pixel-too-short", TITLE_PX_MIN],
+      ["meta-description.pixel-too-long", META_PX_MAX],
+      ["meta-description.pixel-too-short", META_PX_MIN],
+    ];
+    for (const [id, px] of bounds) {
+      expect(copy(id).title, id).toMatch(new RegExp(`(?<![0-9,])${px} pixels$`));
+    }
+    expect(copy("title.pixel-too-long").howToFix).toContain(`${TITLE_PX_MAX} pixels`);
+    expect(copy("meta-description.pixel-too-long").howToFix).toContain(`${META_PX_MAX} pixels`);
+  });
+
+  it("says in plain words that the width is the search result's font and that other scripts are not judged", () => {
+    for (const id of [
+      "title.pixel-too-long",
+      "title.pixel-too-short",
+      "meta-description.pixel-too-long",
+      "meta-description.pixel-too-short",
+    ]) {
+      const text = copy(id).explanation;
+      expect(text, id).toMatch(/font search results use/);
+      expect(text, id).toMatch(/outside the Latin, Greek and Cyrillic scripts is not judged/);
+      expect(text, id).not.toMatch(/glyph|table|serpWidth/i);
+    }
   });
 });
 
@@ -1839,6 +1873,10 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "links.high-outlinks": HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US"),
     "sitemap.url-too-long": SITEMAP_LOC_MAX.toLocaleString("en-US"),
     "sitemap.over-50k-urls": SITEMAP_URL_CAP.toLocaleString("en-US"),
+    "title.pixel-too-long": String(TITLE_PX_MAX),
+    "title.pixel-too-short": String(TITLE_PX_MIN),
+    "meta-description.pixel-too-long": String(META_PX_MAX),
+    "meta-description.pixel-too-short": String(META_PX_MIN),
   };
 
   it("states the number in the title of every rule that fires on one", () => {

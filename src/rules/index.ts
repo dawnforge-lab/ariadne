@@ -11,6 +11,7 @@ import { statusRules } from "./page/status.js";
 import { canonicalRules } from "./page/canonical.js";
 import { directiveRules } from "./page/directives.js";
 import { urlShapeRules } from "./page/url-shape.js";
+import { pixelWidthRules } from "./page/pixel-width.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
 import { technicalRules } from "./page/technical.js";
@@ -52,6 +53,7 @@ export function buildRegistry(): Registry {
     ...indexabilityRules,
     ...directiveRules,
     ...urlShapeRules,
+    ...pixelWidthRules,
     // Where the head ended, and which head elements came after it (P23-T5).
     ...headRules,
     ...technicalRules,
