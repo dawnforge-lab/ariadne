@@ -21,6 +21,7 @@ import { hostRules } from "./query/host.js";
 import { hreflangRules } from "./query/hreflang.js";
 import { hreflangIntegrityRules } from "./query/hreflang-integrity.js";
 import { linkGraphRules } from "./query/link-graph.js";
+import { linkHygieneRules } from "./query/link-hygiene.js";
 import { linkTargetRules } from "./query/link-targets.js";
 import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
@@ -57,6 +58,7 @@ export function buildRegistry(): Registry {
     ...linkTargetRules,
     ...canonicalGraphRules,
     ...linkGraphRules,
+    ...linkHygieneRules,
     ...paginationRules,
     ...robotsRules,
     ...sitemapRules,

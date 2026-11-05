@@ -44,6 +44,13 @@ describe("thresholds", () => {
       RESTRICTIVE_DIRECTIVES: ["nosnippet", "max-snippet:0", "max-image-preview:none", "noimageindex"],
       CANONICAL_MAX_HOPS: 10,
       PAGINATION_WALK_MAX: 500,
+      NON_DESCRIPTIVE_ANCHORS: [
+        "click here", "click", "here", "read more", "more", "learn more", "find out more",
+        "continue reading", "continue", "see more", "view more", "more info",
+        "more information", "details", "this page", "this", "link", "go", "website",
+      ],
+      HIGH_INTERNAL_OUTLINKS: 1000,
+      HIGH_EXTERNAL_OUTLINKS: 100,
     });
   });
 

@@ -934,6 +934,159 @@ const seqB = paginationPage(
   { name: "Pagination sequence, second page of a disagreeing pair", expectedIssues: [] },
 );
 
+// ---------------------------------------------------------------------------
+// Link hygiene (Task 8). Each page is the control recipe plus one link, so the
+// link is its only defect:
+//
+//  - `internal-nofollow`: one rel=nofollow link back to the home page.
+//  - `generic-anchor`: one internal link whose whole anchor is "click here".
+//  - `private-host-link`: one external link to a private address.
+//  - `noindex-hub` and `only-from-noindex`: a noindexed page (off the sitemap, as
+//    every noindex fixture is) that links a page nothing else links to. The hub
+//    links the noindex page but not its target, and the target is reached by the
+//    sitemap and by the noindex page alone, so it is linked only from a page that
+//    is out of the index.
+//
+// `links.high-outlinks` has no page here: see `SKIP_HARNESS_CLAIMS`.
+// ---------------------------------------------------------------------------
+
+interface LinkPageCopy {
+  title: string;
+  description: string;
+  h1: string;
+  lede: string;
+  what: string;
+  why: string;
+  fix: string;
+  /** The one link this page adds, as raw HTML. */
+  linkHtml: string;
+  robotsMeta?: string;
+}
+
+function linkPage(
+  path: string,
+  copy: LinkPageCopy,
+  rest: Pick<Fixture, "expectedIssues" | "linkedFromHub" | "inSitemap" | "name">,
+): Fixture {
+  return {
+    path,
+    category: "links",
+    ...rest,
+    exact: true,
+    handler: (req, res) =>
+      serve(req, res, () => ({
+        title: copy.title,
+        metaDescription: copy.description,
+        ...(copy.robotsMeta === undefined ? {} : { robotsMeta: copy.robotsMeta }),
+        bodyHtml:
+          article({
+            h1: copy.h1,
+            lede: copy.lede,
+            withImage: false,
+            sections: [
+              { h2: "What this page does", body: copy.what },
+              { h2: "Why it matters", body: copy.why },
+              { h2: "How it gets fixed", body: copy.fix },
+            ],
+          }) + `\n<p>${copy.linkHtml}</p>`,
+      })),
+  };
+}
+
+const internalNofollow = linkPage(
+  "/authored26/internal-nofollow",
+  {
+    title: "A page that marks a link to its own site nofollow",
+    description:
+      "This page links back to the home page of its own site with rel=nofollow, which asks search engines not to follow it or to count it as an endorsement.",
+    h1: "A link to the home page that search engines are told to ignore",
+    lede: "Everything on this page is in order except one internal link, which carries a rel attribute that tells crawlers to disregard it.",
+    what: "The link at the foot of the page points at the home page of the same site. Its rel attribute says nofollow, so a search engine may neither follow it nor credit the home page for it, although the page it names belongs to the same site as this one.",
+    why: "Internal links are how a site tells search engines which of its own pages matter and passes credit between them. A nofollow on one of them withholds that credit from a page the site itself has chosen to link, which is almost never what the people who run the site want, and it tends to be copied from a template meant for another kind of link.",
+    fix: "Remove nofollow from links between the pages of your own site, and keep it for links to addresses you do not want to vouch for, such as ones left in comments by visitors.",
+    linkHtml: '<a href="/" rel="nofollow">Back to the home page</a>',
+  },
+  { name: "Page with an internal nofollow link", expectedIssues: ["links.internal-nofollow"] },
+);
+
+const genericAnchor = linkPage(
+  "/authored26/generic-anchor",
+  {
+    title: "A page whose only link says click here",
+    description:
+      "This page links to its own home page with the words click here, an anchor that says nothing about the page it leads to or why a visitor would go there.",
+    h1: "A link that tells the reader nothing about where it goes",
+    lede: "The page is well formed, and its single internal link uses an anchor that would read the same on any page of any site.",
+    what: "The link at the foot of the page points at the home page and its whole anchor text is click here. A visitor skimming the links on the page, and a search engine reading the anchor for a clue to the target, learn nothing from it.",
+    why: "Anchor text is one of the few places where a link describes its own destination in words. A page full of links that say click here or read more gives a visitor using a screen reader a list of identical entries to choose between, and it gives a search engine no description of the pages those links lead to.",
+    fix: "Write the anchor so it describes the page it points at, for example the name of the site or the question the target answers, and keep generic phrases out of it.",
+    linkHtml: '<a href="/">click here</a>',
+  },
+  { name: "Page with a generic internal anchor", expectedIssues: ["links.non-descriptive-anchor"] },
+);
+
+const privateHostLink = linkPage(
+  "/authored26/private-host-link",
+  {
+    title: "A page that links to a private network address",
+    description:
+      "This page carries a link to an address on a private network, which opens nothing for any visitor outside the network of whoever wrote the link.",
+    h1: "A link that only works on the author's own network",
+    lede: "The page is complete and its only external link points at a private address left over from a staging or development setup.",
+    what: "The link at the foot of the page points at a ten dot address, which is reserved for private networks. It opens a page for the author and for no one else, and a crawler that follows it reaches nothing.",
+    why: "A link to a private address is a sign that a page was written or copied on a development setup and published without anyone clicking through it. Visitors get a dead end or a connection error, and some browsers and security tools treat a public page that reaches into a private network as a risk worth flagging.",
+    fix: "Replace the link with the public address of the page it was meant to reach, or remove it, and search the templates for other addresses of the same kind.",
+    linkHtml: '<a href="http://10.1.2.3/admin">Open the admin panel</a>',
+  },
+  { name: "Page linking a private network address", expectedIssues: ["links.localhost"] },
+);
+
+const NOINDEX_TARGET = "/authored26/only-from-noindex";
+
+const noindexHub = linkPage(
+  "/authored26/noindex-hub",
+  {
+    title: "A noindexed page that links to a page nothing else links to",
+    description:
+      "This page asks to stay out of the index and links to a second page that no indexable page links to, so the second page is reachable only through this one.",
+    h1: "A page out of the index that is another page's only link",
+    lede: "The robots meta of this page says noindex while still allowing its links to be followed, and one of those links is the only way in to another page.",
+    what: "The link at the foot of the page names a page that the site's other pages do not link to. Search engines may give links from a page they are asked not to index little or no weight, so the page it names is left with no usable internal link.",
+    why: "Internal links from a page that is kept out of the index may carry little or no weight, because the engine does not retain the page that holds them. A site that routes its only link to a page through a page of this kind has linked it in the markup and left it unlinked in the way that counts for search.",
+    fix: "Link the target page from at least one page that is indexed, such as a category or a related content list, and leave the noindexed page as it is.",
+    linkHtml: `<a href="${NOINDEX_TARGET}">Read the page that only this page links to</a>`,
+    robotsMeta: "noindex, follow",
+  },
+  {
+    name: "Noindexed page that is another page's only inlink",
+    expectedIssues: ["indexability.noindex"],
+    // Off the sitemap, for the reason every noindex fixture is: a listed
+    // noindexed page is `sitemap.non-indexable`, which `/index/noindex-meta`
+    // claims.
+    inSitemap: false,
+  },
+);
+
+const onlyFromNoindex = linkPage(
+  NOINDEX_TARGET,
+  {
+    title: "An indexable page linked only from a noindexed page",
+    description:
+      "This page may be indexed, and the one page on the site that links to it asks to stay out of the index, which leaves it without a usable internal link.",
+    h1: "A page whose only inlink comes from a page out of the index",
+    lede: "Nothing is wrong with this page itself. The fault is in where its links come from, and it shows only when the whole site is read together.",
+    what: "The sitemap lists this page and one other page links to it, and that page carries a noindex directive. Links from a page that is out of the index may be given little or no weight, so this page is close to having no internal links at all.",
+    why: "A page with a single inlink, and that inlink from a page kept out of the index, is the closest thing to an orphan that still shows up as linked in a crawl. It is found by the sitemap if the sitemap lists it and by nothing else, which is a weak footing for a page that is meant to rank.",
+    fix: "Add a link to this page from an indexable page that has a reason to mention it, such as the section it belongs to.",
+    linkHtml: '<a href="/authored26/noindex-hub">See the page that links here</a>',
+  },
+  {
+    name: "Indexable page linked only from a noindexed page",
+    expectedIssues: ["links.only-from-non-indexable"],
+    linkedFromHub: false,
+  },
+);
+
 export const authoredP26Fixtures: Fixture[] = [
   wrongContentType,
   nofollow,
@@ -957,4 +1110,9 @@ export const authoredP26Fixtures: Fixture[] = [
   nextGone,
   seqA,
   seqB,
+  internalNofollow,
+  genericAnchor,
+  privateHostLink,
+  noindexHub,
+  onlyFromNoindex,
 ];

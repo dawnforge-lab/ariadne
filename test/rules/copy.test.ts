@@ -17,7 +17,12 @@ import { SLOW_MS } from "../../src/rules/page/technical.js";
 // `click_depth` and therefore lives with the link-graph rules.
 import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
 import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
-import { PAGINATION_WALK_MAX } from "../../src/rules/thresholds.js";
+import {
+  HIGH_EXTERNAL_OUTLINKS,
+  HIGH_INTERNAL_OUTLINKS,
+  NON_DESCRIPTIVE_ANCHORS,
+  PAGINATION_WALK_MAX,
+} from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
 import {
   DUPLICATE_SAMPLE_URLS,
@@ -831,6 +836,40 @@ describe("copy: pagination (26a)", () => {
   it("quotes the walk limit the loop rule actually uses", () => {
     expect(PAGINATION_WALK_MAX).toBe(500);
     expect(copy("pagination.loop").explanation).toContain(`${PAGINATION_WALK_MAX} pages`);
+  });
+});
+
+describe("copy: link hygiene (26a)", () => {
+  it("quotes the outlink limits the rule actually uses, in the title and the explanation", () => {
+    expect(HIGH_INTERNAL_OUTLINKS).toBe(1000);
+    expect(HIGH_EXTERNAL_OUTLINKS).toBe(100);
+    const { title, explanation } = copy("links.high-outlinks");
+    const internal = HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US");
+    expect(title).toContain(`Over ${internal} internal`);
+    expect(title).toContain(`${HIGH_EXTERNAL_OUTLINKS} external`);
+    expect(explanation).toContain(`more than ${internal} different internal`);
+    expect(explanation).toContain(`more than ${HIGH_EXTERNAL_OUTLINKS} different external`);
+  });
+
+  it("quotes the sample sizes the evidence uses", () => {
+    expect(SAMPLE_SOURCES).toBe(10);
+    expect(copy("links.internal-nofollow").explanation).toContain(`up to ${SAMPLE_SOURCES} of their targets`);
+    expect(copy("links.only-from-non-indexable").explanation).toContain(`up to ${SAMPLE_SOURCES} of them`);
+    expect(copy("links.localhost").explanation).toContain(`up to ${SAMPLE_SOURCES} of the targets`);
+    expect(copy("links.non-descriptive-anchor").explanation).toContain(`up to ${SAMPLE_SOURCES} of the phrases`);
+  });
+
+  it("names three of the generic anchors the rule really judges, and says English only", () => {
+    for (const phrase of ["click here", "read more", "learn more"]) {
+      expect(NON_DESCRIPTIVE_ANCHORS).toContain(phrase);
+      expect(copy("links.non-descriptive-anchor").explanation).toContain(phrase);
+    }
+    expect(copy("links.non-descriptive-anchor").explanation).toMatch(/other languages are not judged/i);
+  });
+
+  it("says internal and external, so neither rule over-claims its cohort", () => {
+    expect(copy("links.localhost").explanation).toMatch(/Links to the site's own host are not judged/);
+    expect(copy("links.non-descriptive-anchor").title).toMatch(/Internal links/);
   });
 });
 
@@ -1761,6 +1800,9 @@ describe("copy rubric: a threshold belongs in the title", () => {
     // pinned in the explanation above.
     "content.soft-404": String(SOFT_404_WORDS),
     "redirect.chain": String(CHAIN_HOPS),
+    // The title carries the internal limit; the external one has its own
+    // assertion in "copy: link hygiene (26a)", since a map entry holds one number.
+    "links.high-outlinks": HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US"),
   };
 
   it("states the number in the title of every rule that fires on one", () => {
@@ -1784,7 +1826,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
   // the cheap signal, not the authority.
   it("leaves no threshold rule out of the map", () => {
     const promises =
-      /too-long|too-short|thin|slow|oversized|deep|level-skip|near-duplicate|soft-404|\.chain$/;
+      /too-long|too-short|thin|slow|oversized|deep|level-skip|near-duplicate|soft-404|\.chain$|outlinks/;
     const missing = RULES.filter(
       (r) =>
         r.marker === undefined &&

@@ -497,7 +497,7 @@ clamping it").
 **Closed vocabularies.** Every query parameter, body field and tool argument is
 on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
-(`test/api/query.test.ts:3993` "refuses a typo'd filter instead of answering the
+(`test/api/query.test.ts:3999` "refuses a typo'd filter instead of answering the
 question nobody asked"). MCP argument typos are refused by the SDK's schema
 validator before the handler runs (`test/api/mcp.test.ts:825` "refuses an
 argument nobody allowed, naming it").
@@ -1074,7 +1074,7 @@ not name", `test/api/query.test.ts:1445` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:694` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:714` "names a block a block,
 whatever status the challenge was served with",
-`test/fixtures/harness.test.ts:1166` "declares a column for every evidence key it
+`test/fixtures/harness.test.ts:1184` "declares a column for every evidence key it
 writes, and writes every column it declares",
 `test/rules/registry.test.ts:733` "finds one defining file per rule, and the key
 spelled inside it".
@@ -1224,7 +1224,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2082` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2101` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1406,7 +1406,7 @@ so a UI that draws both puts the same rule in the same place twice. The METRIC
 rules follow them as one contiguous block, by their declared `table.order` then
 by id (Phase 21); no other listing has an opinion about where a metric goes,
 because a metric writes no finding row and never appears in `issues_list`.
-Pinned: `test/api/query.test.ts:4194` "leads the metric section with the site
+Pinned: `test/api/query.test.ts:4200` "leads the metric section with the site
 census, then the declared sequence".
 
 A NOT MEASURED marker's row carries one field more — `marker`, the reason
@@ -1719,7 +1719,7 @@ is the one move that changes the status without closing the crawl — the fixtur
 holds the robots request so the row is read mid-run);
 `test/api/mcp.test.ts:3134` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
-`test/api/query.test.ts:4137` "tells a pre-0017 failed
+`test/api/query.test.ts:4143` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
 
 ---
@@ -1831,14 +1831,14 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 "partitions every fetched URL over the four columns",
 `test/rules/health-metrics.test.ts:564`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1385` "names every column and the population they
-are over", `test/rules/copy.test.ts:1410` "says the counts are the authority, not the
-ratio", `test/rules/copy.test.ts:1427` "grades nothing: no score, no label, no
+`test/rules/copy.test.ts:1424` "names every column and the population they
+are over", `test/rules/copy.test.ts:1449` "says the counts are the authority, not the
+ratio", `test/rules/copy.test.ts:1466` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:459` "site.health is filed under the
+`test/rules/coverage.test.ts:468` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2720` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2775` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -2066,8 +2066,8 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:3903` "carries no path, no document and no stack in any
-  answer this phase added" and `test/api/query.test.ts:3946` "holds for the CSV
+  `test/api/query.test.ts:3909` "carries no path, no document and no stack in any
+  answer this phase added" and `test/api/query.test.ts:3952` "holds for the CSV
   bytes, which are a response like any other".
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the

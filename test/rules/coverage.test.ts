@@ -381,11 +381,20 @@ describe("checklist coverage", () => {
   //
   //   query   79 + 3 = 82
   //   total   131 + 3 = 134
-  it("pins the ruleset split the gate doc reports: 134 rules = 38 page + 82 query + 14 metric", () => {
+  //
+  // Phase 26a Task 8 adds FIVE link-hygiene query rules: `links.internal-
+  // nofollow` and `links.high-outlinks` (CHECK-33), `links.only-from-non-
+  // indexable` (CHECK-32) and `links.localhost` and `links.non-descriptive-
+  // anchor` (CHECK-86, which Task 2 added). Both older checks are claimed
+  // already, so the claimed-check arithmetic does not move.
+  //
+  //   query   82 + 5 = 87
+  //   total   134 + 5 = 139
+  it("pins the ruleset split the gate doc reports: 139 rules = 38 page + 87 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(134);
+    expect(registry.all()).toHaveLength(139);
     expect(registry.byKind("page")).toHaveLength(38);
-    expect(registry.byKind("query")).toHaveLength(82);
+    expect(registry.byKind("query")).toHaveLength(87);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -469,6 +478,7 @@ describe("checklist coverage", () => {
       .map((r) => r.id)
       .sort();
     expect(orphanClaimants).toEqual([
+      "links.only-from-non-indexable",
       "links.orphan",
       "links.orphan-skipped",
       "structure.depth-distribution",

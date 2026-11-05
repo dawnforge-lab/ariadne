@@ -3896,7 +3896,13 @@ describe("nothing inside the process reaches a caller", () => {
       ["a database URL", /postgres(ql)?:\/\//],
       ["a private host", /\b(localhost|127\.0\.0\.1|::1)\b/],
     ];
-    for (const [what, pattern] of patterns) if (pattern.test(text)) found.push(what);
+    // `links.localhost` is a rule's public id (Phase 26a Task 8) and appears in
+    // the rules catalog and in every issue it files. It names the rule, not a
+    // host, so it is taken out before the private-host pattern reads the text;
+    // the copy beside it avoids the word, and a real `localhost` anywhere else
+    // still fails.
+    const scanned = text.replaceAll("links.localhost", "");
+    for (const [what, pattern] of patterns) if (pattern.test(scanned)) found.push(what);
     return found;
   }
 

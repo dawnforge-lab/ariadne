@@ -1731,7 +1731,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-32: Orphan pages (no internal links)
 - **Priority**: High | **Requires**: Engine + GSC
-- **Engine**: `issues_list` with `checkId: "CHECK-32"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-32"` — three rules:
   - `links.orphan` (warning) — a page the crawl fetched that no other crawled page
     links to. `issue_urls` gives the list, and each row's evidence says how the page
     was discovered and whether the sitemap lists it, which is the SITEMAP breakdown
@@ -1740,8 +1740,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     unfetched, or a page cap reached), so "nothing links to this page" cannot be
     distinguished from "the page that links to it was never crawled". When this
     fires, CHECK-32 is SKIP with the reason quoted, NOT a clean orphan count.
+  - `links.only-from-non-indexable` (warning) — an indexable page that other pages link
+    to, none of which is indexable itself (noindex, canonicalised elsewhere, or not a
+    200). It is the near-orphan: the page shows as linked in a crawl and the links
+    count for little. A page nothing else links to is `links.orphan`'s, not this
+    rule's; a page with even one indexable inlink fires neither.
 
-  And the site-wide evidence beside those two verdicts: `metrics_get` with
+  And the site-wide evidence beside those verdicts: `metrics_get` with
   `metricId: "structure.depth-distribution"` — DISCOVERY depth, how far into the
   crawl each page was first found. It passes no verdict; it is the shape the orphan
   findings make in aggregate. Every sitemap URL is enqueued as a starting point, so
@@ -1806,14 +1811,23 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     count if applicable, percentage of total known URLs
 
 ### CHECK-33: Unique inlinks distribution
-- **Priority**: Medium | **Requires**: Engine (metrics)
-- **Engine**: two metrics, and no findings — `issues_list` with `checkId: "CHECK-33"`
-  is refused with a pointer to `metrics_get`, because an inlink count is a
-  measurement rather than a fault:
+- **Priority**: Medium | **Requires**: Engine (metrics and rules)
+- **Engine**: two metrics, which measure, and two rules, which find. The inlink count
+  is a measurement rather than a fault, so the metrics carry the distribution:
   - `inlinks.distribution` — `{count, min, p25, median, p75, p95, max, mean}` unique
     inlinks per indexable page, for the site and per page type (`scope: "page_type"`)
   - `inlinks.extremes` — the two ends as URLs: the under-linked bottom and the
     top-linked pages, ready to quote
+
+  The two rules are per-page findings about the links a page carries, read with
+  `issues_list` and `checkId: "CHECK-33"`:
+  - `links.internal-nofollow` (warning) — a page with an internal link marked
+    `rel="nofollow"`; the evidence counts them and samples the targets. An external
+    nofollow is not judged.
+  - `links.high-outlinks` (info) — a page linking to more distinct internal URLs than
+    the internal limit, or more distinct external URLs than the external limit (the
+    limits are in the rule's copy and are not added together). An unusually long link
+    list dilutes what each link passes on.
 - **Analysis**: This check must present actual numbers, not just pass/fail. From the two
   metrics above, present:
   1. Distribution summary: min, median, mean, max unique inlinks (site row)
@@ -1921,8 +1935,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   here", "read more") and so tells neither a visitor nor a search engine what the
   target is. The evidence is the `links` table, answered in SQL for the whole crawl,
   with `issue_urls` naming the source page and the target. Only external links are
-  judged for private hosts: an internal link is the site itself. The rules that
-  answer this check are named here as they register.
+  judged for private hosts: an internal link is the site itself. Two rules answer it:
+  - `links.localhost` (warning) — a page with an external link whose host is
+    `localhost`, a private or reserved IP address, or an internal-only name (`.local`,
+    `.internal` and the like), decided by the same policy the crawler refuses to fetch
+    with. A dotless intranet name is not reported, because that policy does not call it
+    private.
+  - `links.non-descriptive-anchor` (info) — a page with an INTERNAL link whose whole
+    anchor is a generic English phrase ("click here", "read more", "learn more" and the
+    rest of the list in the rule's thresholds). The judgement covers internal anchors
+    only; anchors in other languages, and external anchors, are not judged.
 - **Evaluate**:
   - PASS if no link points at a private host and generic anchors are rare
   - WARN if any link points at `localhost` or a private address, or generic anchors

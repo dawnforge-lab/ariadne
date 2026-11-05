@@ -432,6 +432,18 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     table) and `pagination.sequence-error` (info, CHECK-22: the next page's
 //     `rel=prev` is absent or names another page). The first two read targets
 //     the earlier pagination rules already looked up; no column is new.
+//  7. (T8) Link hygiene, query rules over the `links` table (no column is new):
+//     `links.internal-nofollow` (warning, CHECK-33: an internal link with
+//     `is_nofollow`), `links.only-from-non-indexable` (warning, CHECK-32: a
+//     JUDGED page whose internal inlinks all come from pages that are
+//     definitely not JUDGED), `links.localhost` (warning, CHECK-86: an EXTERNAL
+//     link whose host `blockedHostReason` blocks, found through a SQL prefilter
+//     built from `BLOCKED_HOSTS` and `BLOCKED_HOST_SUFFIXES`, which url-policy
+//     now exports), `links.non-descriptive-anchor` (info, CHECK-86: an INTERNAL
+//     link whose whole normalised anchor is on `NON_DESCRIPTIVE_ANCHORS`) and
+//     `links.high-outlinks` (info, CHECK-33: distinct internal targets over
+//     `HIGH_INTERNAL_OUTLINKS` or distinct external targets over
+//     `HIGH_EXTERNAL_OUTLINKS`, starting values that T12 calibrates).
 export const RULESET_VERSION = "0.20.0";
 
 /**

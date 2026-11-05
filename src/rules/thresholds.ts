@@ -273,3 +273,44 @@ export const CANONICAL_MAX_HOPS = 10;
  * cost is at most pages times this limit.
  */
 export const PAGINATION_WALK_MAX = 500;
+
+// ---- from src/rules/query/link-hygiene.ts
+/**
+ * Anchor texts `links.non-descriptive-anchor` calls generic: English, lower
+ * case, compared after the anchor is trimmed, lower-cased and its runs of
+ * whitespace are collapsed to one space. The whole anchor must equal an entry,
+ * so "read more about pricing" is not generic and "Read  More" is. Other
+ * languages are not judged: a list of generic phrases in a language the rule
+ * has no entries for would be a claim the rule cannot back.
+ */
+export const NON_DESCRIPTIVE_ANCHORS = [
+  "click here",
+  "click",
+  "here",
+  "read more",
+  "more",
+  "learn more",
+  "find out more",
+  "continue reading",
+  "continue",
+  "see more",
+  "view more",
+  "more info",
+  "more information",
+  "details",
+  "this page",
+  "this",
+  "link",
+  "go",
+  "website",
+] as const;
+
+/**
+ * Distinct internal link targets on one page above which
+ * `links.high-outlinks` fires. A STARTING VALUE: Task 12 of Phase 26a replaces
+ * it with the value calibrated against the reference crawls.
+ */
+export const HIGH_INTERNAL_OUTLINKS = 1000;
+
+/** Distinct external link targets on one page above which `links.high-outlinks` fires. A starting value, replaced by Task 12's calibration like `HIGH_INTERNAL_OUTLINKS`. */
+export const HIGH_EXTERNAL_OUTLINKS = 100;

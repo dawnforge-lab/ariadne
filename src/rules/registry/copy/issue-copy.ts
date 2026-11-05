@@ -1004,4 +1004,39 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Strip tracking parameters from internal links and point them at the clean URL. Measure internal promotions with the analytics feature built for it.",
   },
+  "links.internal-nofollow": {
+    title: "Links: Internal links marked nofollow",
+    explanation:
+      "Pages with internal links that carry rel=nofollow. Search engines may not follow such a link or pass link value through it, so the page it points at is starved of the internal links it depends on. Each row gives the number of nofollow links on the page and up to 10 of their targets.",
+    howToFix:
+      "Remove rel=nofollow from internal links to pages that should rank. Keep it only on links you do not want to vouch for, such as links in user submitted content.",
+  },
+  "links.only-from-non-indexable": {
+    title: "Links: Indexable page linked only from non-indexable pages",
+    explanation:
+      "Indexable, self-canonical pages whose internal links all come from pages that are not indexable themselves (noindex, canonicalised to another URL, or not a 200). Search engines may give such links little or no weight, so the page is close to an orphan. Each row gives the number of pages linking to it and up to 10 of them.",
+    howToFix:
+      "Link to the page from at least one indexable page, such as a category, hub or related content block.",
+  },
+  "links.localhost": {
+    title: "Links: Links to a private or loopback address",
+    explanation:
+      "Pages with an external link whose host is the machine itself (a loopback name or address), a private or reserved IP address, or an internal-only name such as .local or .internal. These links work only on the author's own machine or network, so visitors and crawlers reach nothing; they are usually left over from development. Links to the site's own host are not judged, and each row lists up to 10 of the targets and why the first one is not public.",
+    howToFix:
+      "Replace each link with the live public URL of the page it should point at, or remove it.",
+  },
+  "links.non-descriptive-anchor": {
+    title: "Links: Internal links with generic anchor text",
+    explanation:
+      "Pages with internal links whose whole anchor text is a generic English phrase such as click here, read more or learn more. The anchor is what tells visitors and search engines what the target is about, and these phrases tell them nothing. Each row gives the number of such links and up to 10 of the phrases; anchors in other languages are not judged.",
+    howToFix:
+      "Replace each generic anchor with words that describe the page it points at, such as the name of the product or the question the page answers.",
+  },
+  "links.high-outlinks": {
+    title: "Links: Over 1,000 internal or 100 external links",
+    explanation:
+      "Pages that link to more than 1,000 different internal URLs or more than 100 different external URLs. Link value is shared between the links on a page, so every extra link dilutes the rest, and a crawler may stop reading a very long page. The row gives both counts and the limit that was crossed.",
+    howToFix:
+      "Cut the list down to the links a visitor needs, and move long lists into paginated or category pages that each carry a manageable number.",
+  },
 };
