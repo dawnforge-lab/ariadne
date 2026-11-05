@@ -140,6 +140,56 @@ describe("missingSecurityHeaders", () => {
     ).toEqual([]);
   });
 
+  it("reads every occurrence of a repeated Referrer-Policy and applies the last recognised token", () => {
+    // CDN safe, app unsafe: the combined header ends on unsafe-url.
+    expect(
+      missingSecurityHeaders(
+        headers({ "referrer-policy": ["strict-origin-when-cross-origin", "unsafe-url"] }),
+      ),
+    ).toEqual({ missing: ["referrer-policy"], referrerPolicy: "unsafe-url" });
+    // And the reverse is safe, not an accusation.
+    expect(
+      missingSecurityHeaders(
+        headers({ "referrer-policy": ["unsafe-url", "strict-origin-when-cross-origin"] }),
+      ),
+    ).toEqual({ missing: [], referrerPolicy: null });
+    // An unrecognised token does not displace the last recognised one.
+    expect(
+      missingSecurityHeaders(headers({ "referrer-policy": ["no-referrer, unsafe-url, bogus"] })),
+    ).toEqual({ missing: ["referrer-policy"], referrerPolicy: "unsafe-url" });
+    expect(
+      missingSecurityHeaders(headers({ "referrer-policy": ["no-referrer, bogus"] })),
+    ).toEqual({ missing: [], referrerPolicy: null });
+    // Nothing recognised is no policy at all.
+    expect(missingSecurityHeaders(headers({ "referrer-policy": ["bogus"] }))).toEqual({
+      missing: ["referrer-policy"],
+      referrerPolicy: null,
+    });
+  });
+
+  it("takes frame-ancestors from any CSP occurrence, not just the first", () => {
+    const h = headers({
+      "x-frame-options": null,
+      "content-security-policy": ["default-src 'self'", "frame-ancestors 'none'"],
+    });
+    expect(missingSecurityHeaders(h).missing).toEqual([]);
+  });
+
+  it("does not claim frame protection is missing from a CSP cut at the storage cap", () => {
+    const cut = headers({
+      "x-frame-options": null,
+      "content-security-policy": ["default-src 'self'; script-src a b c"],
+    });
+    cut.truncated = ["content-security-policy"];
+    expect(missingSecurityHeaders(cut).missing).toEqual([]);
+    // A whole policy with no frame-ancestors still reports it.
+    const whole = headers({
+      "x-frame-options": null,
+      "content-security-policy": ["default-src 'self'"],
+    });
+    expect(missingSecurityHeaders(whole).missing).toEqual(["frame-protection"]);
+  });
+
   it("judges Referrer-Policy on an unsafe last token as well as on absence", () => {
     expect(missingSecurityHeaders(headers({ "referrer-policy": ["unsafe-url"] }))).toEqual({
       missing: ["referrer-policy"],
@@ -290,6 +340,21 @@ describe("securityRules against the database", () => {
       await addPages(crawl, [{ url: `${HTTPS_SITE}/odd`, headers: null }]);
       await expect(run("security.hsts-missing", crawl)).rejects.toThrow(/no stored response headers/);
       await expect(run("security.headers-missing", crawl)).rejects.toThrow(
+        /no stored response headers/,
+      );
+    });
+
+    it("a null-headers HTTPS 200 throws even when it sits past the listing cap", async () => {
+      const crawl = await newCrawl(HTTPS_SITE);
+      await addPages(crawl, [
+        { url: `${HTTPS_SITE}/a`, headers: { values: {}, truncated: [] } },
+        { url: `${HTTPS_SITE}/b`, headers: { values: {}, truncated: [] } },
+        { url: `${HTTPS_SITE}/z`, headers: null },
+      ]);
+      await expect(run("security.hsts-missing", crawl, 1)).rejects.toThrow(
+        /no stored response headers/,
+      );
+      await expect(run("security.headers-missing", crawl, 1)).rejects.toThrow(
         /no stored response headers/,
       );
     });

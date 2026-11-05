@@ -503,6 +503,9 @@ describe("resourceRules against the database", () => {
             on: ["/a"],
           },
           { url: "/js/b.js", kind: "js", contentType: "text/javascript", on: ["/a"] },
+          // Legacy spellings the Fetch standard still treats as JavaScript.
+          { url: "/js/c.js", kind: "js", contentType: "text/x-javascript", on: ["/a"] },
+          { url: "/js/d.js", kind: "js", contentType: "application/x-ecmascript", on: ["/a"] },
           { url: "/img/a.png", kind: "image", contentType: "image/png", on: ["/a"] },
         ],
       );

@@ -67,53 +67,85 @@ const HEADERS_NOT_RECORDED: RuleIdentity = {
 const HTTP_URL: RuleIdentity = { id: "security.http-url", severity: "warning" };
 const MIXED_CONTENT: RuleIdentity = { id: "security.mixed-content", severity: "warning" };
 
-/** The first value of a header, or null when the page did not send it. */
-function firstValue(h: StoredResponseHeaders, name: string): string | null {
-  const values = h.values[name];
-  return values === undefined || values.length === 0 ? null : (values[0] ?? null);
+/** Every occurrence of a header, in arrival order; empty when the page did not send it. */
+function occurrences(h: StoredResponseHeaders, name: string): string[] {
+  return (h.values[name] ?? []).filter((v) => v.trim() !== "");
 }
+
+/** The comma-separated tokens of every occurrence, trimmed and lower-cased. */
+function tokens(h: StoredResponseHeaders, name: string): string[] {
+  return occurrences(h, name)
+    .flatMap((v) => v.split(","))
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t !== "");
+}
+
+/**
+ * The policy tokens the Referrer-Policy specification defines. A browser applies
+ * the last token of the combined header it RECOGNISES, so an unknown token after
+ * a known one does not replace it.
+ */
+const KNOWN_REFERRER_POLICIES: readonly string[] = [
+  "no-referrer",
+  "no-referrer-when-downgrade",
+  "same-origin",
+  "origin",
+  "strict-origin",
+  "origin-when-cross-origin",
+  "strict-origin-when-cross-origin",
+  "unsafe-url",
+];
 
 /**
  * Which of the four protective headers an HTTPS page lacks, in the order the
  * evidence lists them, plus the unsafe `Referrer-Policy` value when that is why
  * the policy counts as missing.
  *
- *  - `content-security-policy`: the enforcing header only. Report-Only observes
+ * EVERY OCCURRENCE IS READ: `StoredResponseHeaders` keeps each one, and a CDN
+ * and an application that both set a header is an ordinary stack. Browsers
+ * combine repeated headers, so the values are joined before they are parsed.
+ *
+ *  - `content-security-policy`: any enforcing occurrence. Report-Only observes
  *    and blocks nothing, so it does not count.
- *  - `x-content-type-options`: present only as `nosniff`, any case.
- *  - `frame-protection`: `X-Frame-Options` `DENY` or `SAMEORIGIN`, or a CSP with a
- *    `frame-ancestors` directive.
- *  - `referrer-policy`: absent, or its last token is in `UNSAFE_REFERRER_POLICIES`.
- *    The last token because the browser applies the last policy it understands.
+ *  - `x-content-type-options`: the first token of the combined value is
+ *    `nosniff`, any case.
+ *  - `frame-protection`: every `X-Frame-Options` token is `DENY` or `SAMEORIGIN`,
+ *    or ANY CSP occurrence has a `frame-ancestors` directive (every enforced
+ *    policy applies, so one occurrence is enough). A CSP cut at the storage cap
+ *    (`truncated`) may have had the directive past the cut, so when none was seen
+ *    in what survives, frame protection is not reported missing: absence cannot
+ *    be shown from a cut value.
+ *  - `referrer-policy`: no recognised policy token, or the last recognised token
+ *    is in `UNSAFE_REFERRER_POLICIES`.
  */
 export function missingSecurityHeaders(h: StoredResponseHeaders): {
   missing: string[];
   referrerPolicy: string | null;
 } {
   const missing: string[] = [];
-  const csp = firstValue(h, "content-security-policy");
-  if (csp === null || csp.trim() === "") missing.push("content-security-policy");
+  const csp = occurrences(h, "content-security-policy");
+  if (csp.length === 0) missing.push("content-security-policy");
 
-  const nosniff = firstValue(h, "x-content-type-options");
-  if (nosniff === null || nosniff.trim().toLowerCase() !== "nosniff") {
+  if (tokens(h, "x-content-type-options")[0] !== "nosniff") {
     missing.push("x-content-type-options");
   }
 
-  const xfo = firstValue(h, "x-frame-options");
-  const xfoOk = xfo !== null && ["deny", "sameorigin"].includes(xfo.trim().toLowerCase());
-  const cspFrames = csp !== null && /(?:^|[\s;])frame-ancestors(?:\s|;|$)/i.test(csp);
-  if (!xfoOk && !cspFrames) missing.push("frame-protection");
+  const xfo = tokens(h, "x-frame-options");
+  const xfoOk = xfo.length > 0 && xfo.every((t) => t === "deny" || t === "sameorigin");
+  const cspFrames = csp.some((v) => /(?:^|[\s;])frame-ancestors(?:\s|;|$)/i.test(v));
+  const cspCut = h.truncated.includes("content-security-policy");
+  if (!xfoOk && !cspFrames && !cspCut) missing.push("frame-protection");
 
-  const referrer = firstValue(h, "referrer-policy");
+  const recognised = tokens(h, "referrer-policy").filter((t) =>
+    KNOWN_REFERRER_POLICIES.includes(t),
+  );
+  const last = recognised[recognised.length - 1];
   let referrerPolicy: string | null = null;
-  if (referrer === null || referrer.trim() === "") {
+  if (last === undefined) {
     missing.push("referrer-policy");
-  } else {
-    const last = referrer.split(",").pop()!.trim().toLowerCase();
-    if ((UNSAFE_REFERRER_POLICIES as readonly string[]).includes(last)) {
-      missing.push("referrer-policy");
-      referrerPolicy = last;
-    }
+  } else if ((UNSAFE_REFERRER_POLICIES as readonly string[]).includes(last)) {
+    missing.push("referrer-policy");
+    referrerPolicy = last;
   }
   return { missing, referrerPolicy };
 }
@@ -139,46 +171,25 @@ function corruptHeaders(url: string): Error {
   );
 }
 
-async function hstsMissingFindings(
+/**
+ * Walk the HTTPS cohort in `url` order (Postgres's own order, so the listing is
+ * the one `order by p.url` gives its siblings), a batch at a time, and keep the
+ * findings `evidenceFor` produces up to the listing cap.
+ *
+ * The scan runs to the end either way, so the total behind `noteTruncation` is
+ * exact while memory stays O(batch + cap) (hard rule 6). A current-extraction
+ * HTTPS 200 with no stored headers throws wherever it is met, inside the cap or
+ * past it (hard rule 7).
+ */
+async function scanHttpsPages(
   self: RuleIdentity,
   db: Db,
   crawlId: string,
   caps: RuleCaps,
+  evidenceFor: (h: StoredResponseHeaders) => Record<string, unknown> | null,
 ): Promise<Finding[]> {
   if (!(await headersGate(db, crawlId)).recorded) return [];
-  const result = await db.execute<{
-    id: string;
-    url: string;
-    unrecorded: boolean;
-    total_matches: number;
-  }>(sql`
-    select p.id, p.url, (p.response_headers is null) as unrecorded,
-           count(*) over ()::int as total_matches
-    from pages p
-    where p.crawl_id = ${crawlId} and ${HTTPS_COHORT}
-      and not coalesce(p.response_headers->'values' ? 'strict-transport-security', false)
-    order by p.url
-    ${limitTo(caps.listing)}`);
-  const findings = result.rows.map((row) => {
-    if (row.unrecorded) throw corruptHeaders(row.url);
-    return queryFinding(self, {
-      pageId: row.id,
-      pageUrl: row.url,
-      evidence: {},
-      dedupeKey: row.url,
-    });
-  });
-  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
-}
-
-async function headersMissingFindings(
-  self: RuleIdentity,
-  db: Db,
-  crawlId: string,
-  caps: RuleCaps,
-): Promise<Finding[]> {
-  if (!(await headersGate(db, crawlId)).recorded) return [];
-  const found: Finding[] = [];
+  const findings: Finding[] = [];
   let total = 0;
   let cursor = "";
   for (;;) {
@@ -189,32 +200,52 @@ async function headersMissingFindings(
     }>(sql`
       select p.id, p.url, p.response_headers
       from pages p
-      where p.crawl_id = ${crawlId} and ${HTTPS_COHORT} and p.id > ${cursor}
-      order by p.id
+      where p.crawl_id = ${crawlId} and ${HTTPS_COHORT} and p.url > ${cursor}
+      order by p.url
       limit ${SECURITY_BATCH}`);
     if (batch.rows.length === 0) break;
-    cursor = batch.rows[batch.rows.length - 1]!.id;
+    cursor = batch.rows[batch.rows.length - 1]!.url;
     for (const row of batch.rows) {
       if (row.response_headers === null) throw corruptHeaders(row.url);
-      const { missing, referrerPolicy } = missingSecurityHeaders(row.response_headers);
-      if (missing.length === 0) continue;
+      const evidence = evidenceFor(row.response_headers);
+      if (evidence === null) continue;
       total += 1;
-      found.push(
+      if (caps.listing !== null && findings.length >= caps.listing) continue;
+      findings.push(
         queryFinding(self, {
           pageId: row.id,
           pageUrl: row.url,
-          evidence: referrerPolicy === null ? { missing } : { missing, referrerPolicy },
+          evidence,
           dedupeKey: row.url,
         }),
       );
     }
   }
-  // The scan walks in id order and the listing is URL order, like its siblings,
-  // so a capped run names the same pages every time. Only the findings of one
-  // crawl's hits are held at once, and they are cut to the cap straight away.
-  found.sort((a, b) => (a.pageUrl ?? "").localeCompare(b.pageUrl ?? ""));
-  const listed = caps.listing === null ? found : found.slice(0, caps.listing);
-  return noteTruncation(listed, total);
+  return noteTruncation(findings, total);
+}
+
+function hstsMissingFindings(
+  self: RuleIdentity,
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
+  return scanHttpsPages(self, db, crawlId, caps, (h) =>
+    occurrences(h, "strict-transport-security").length === 0 ? {} : null,
+  );
+}
+
+function headersMissingFindings(
+  self: RuleIdentity,
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
+  return scanHttpsPages(self, db, crawlId, caps, (h) => {
+    const { missing, referrerPolicy } = missingSecurityHeaders(h);
+    if (missing.length === 0) return null;
+    return referrerPolicy === null ? { missing } : { missing, referrerPolicy };
+  });
 }
 
 async function headersNotRecordedFindings(

@@ -760,7 +760,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "resources.bad-content-type": {
     title: "Resources: File served with the wrong content type",
     explanation:
-      "Stylesheets, scripts or images that answered 200 with a content type that contradicts what the page calls them, such as a stylesheet sent as text/html; the row shows the file, the type it was sent as and how many pages reference it. Browsers refuse a stylesheet or script sent with the wrong type, so the page can lose its styling or behaviour even though the request succeeded. Files that returned an error are reported as broken, not here.",
+      "Stylesheets, scripts or images that answered 200 with a content type that contradicts what the page calls them, such as a stylesheet sent as text/html; the row shows the file, the type it was sent as and how many pages reference it. Browsers ignore a stylesheet sent with the wrong type and, where the response also carries X-Content-Type-Options: nosniff, block a script sent with one, so the page can lose its styling or behaviour even though the request succeeded. Files that returned an error are reported as broken, not here.",
     howToFix:
       "Configure the server or CDN to send text/css for stylesheets, a JavaScript type such as text/javascript for scripts and an image/* type for images. Check that the URL does not return an error or login page that happens to answer 200.",
   },

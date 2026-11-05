@@ -292,17 +292,28 @@ async function brokenFindings(
 }
 
 /**
- * The content types a script may be served as. `module` is not a media type; it
- * is in the list because the rule's brief names it, and a server that sends it
- * is declaring a script, not contradicting one.
+ * The content types a script may be served as: the WHATWG Fetch standard's
+ * "JavaScript MIME type essence" list, legacy spellings included, because a
+ * server that sends `text/x-javascript` is declaring a script, not contradicting
+ * one.
  */
 const JS_CONTENT_TYPES = [
-  "text/javascript",
-  "application/javascript",
-  "application/x-javascript",
   "application/ecmascript",
+  "application/javascript",
+  "application/x-ecmascript",
+  "application/x-javascript",
   "text/ecmascript",
-  "module",
+  "text/javascript",
+  "text/javascript1.0",
+  "text/javascript1.1",
+  "text/javascript1.2",
+  "text/javascript1.3",
+  "text/javascript1.4",
+  "text/javascript1.5",
+  "text/jscript",
+  "text/livescript",
+  "text/x-ecmascript",
+  "text/x-javascript",
 ] as const;
 
 /**
