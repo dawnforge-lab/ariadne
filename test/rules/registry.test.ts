@@ -514,7 +514,7 @@ describe("check universe", () => {
     // (http.no-response pair, page.html-too-large, the crawl.unreadable-encoding
     // marker); the recheck pass also re-asks the no-response rows; registry.ts
     // carries the grounds.
-    expect(RULESET_VERSION).toBe("0.19.0");
+    expect(RULESET_VERSION).toBe("0.20.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);

@@ -1192,6 +1192,43 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - Record: canonical host, redirect behavior per variant, and whether any
     `legacyHosts` were supplied
 
+### CHECK-84: Security headers on HTTPS pages
+- **Priority**: Medium | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-84"`. The check asks whether HTTPS
+  pages carry the response headers a browser uses to protect the visitor:
+  `Strict-Transport-Security` (HSTS), `Content-Security-Policy`,
+  `X-Content-Type-Options: nosniff`, frame protection (`X-Frame-Options` or a CSP
+  `frame-ancestors`) and `Referrer-Policy`. The evidence is the response headers the
+  crawl stored for each page; the engine reads them from the database and fetches
+  nothing. Two limits to state whenever this is quoted: a plain-HTTP page is judged
+  by the host and protocol checks, not here, and a crawl written before the evidence
+  layer (Phase 25) stored no response headers at all, so for such a crawl the
+  silence of the finding rules is NOT a pass. The rules that answer this check are
+  named here as they register.
+- **Evaluate**:
+  - PASS if every HTTPS page sends HSTS and the other four headers
+  - WARN if HSTS is missing, or any of the other four is missing on most pages
+  - SKIP if the crawl stored no response headers; the remedy is a re-crawl
+  - Record: per-header count of pages that send it, and the URLs that do not
+
+### CHECK-85: Mixed content
+- **Priority**: High | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-85"`. The check asks whether an
+  HTTPS page references any resource over `http:` — an image, script, stylesheet or
+  other file a browser blocks or downgrades. The evidence is the table of files each
+  page points at (the page-resources table), read from the database; nothing is fetched. A
+  page's own HTTP links to other pages are not mixed content and belong to CHECK-14.
+  The crawl must have recorded the page's files for this to be answerable: when it
+  recorded none, `resources.not-recorded` (info) is the NOT MEASURED marker, and the
+  silence of the mixed-content finding says the crawl never recorded them rather
+  than that the site is clean. The remedy is a re-crawl. The finding rules that
+  answer this check are named here as they register.
+- **Evaluate**:
+  - PASS if no HTTPS page references an `http:` resource
+  - FAIL if any does
+  - NOT MEASURED if `resources.not-recorded` fired
+  - Record: the referencing pages, the `http:` URLs, and the resource type
+
 ---
 
 ## 5. Canonicals & Indexability
@@ -1812,6 +1849,23 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - PASS if main nav and footer links are in initial HTML
   - FAIL if key navigation is JS-only
   - Record: nav link count, footer link count, JS-dependency status
+
+### CHECK-86: Link hygiene (private hosts, generic anchors)
+- **Priority**: Low | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-86"`. The check asks whether the
+  links a page carries are ones a visitor and a crawler can use: links that point at
+  `localhost` or a private-network address (a staging or development leftover that
+  works only on the author's machine) and links whose anchor text is generic ("click
+  here", "read more") and so tells neither a visitor nor a search engine what the
+  target is. The evidence is the `links` table, answered in SQL for the whole crawl,
+  with `issue_urls` naming the source page and the target. Only external links are
+  judged for private hosts: an internal link is the site itself. The rules that
+  answer this check are named here as they register.
+- **Evaluate**:
+  - PASS if no link points at a private host and generic anchors are rare
+  - WARN if any link points at `localhost` or a private address, or generic anchors
+    are common
+  - Record: source page, target URL and anchor text for each finding
 
 ---
 

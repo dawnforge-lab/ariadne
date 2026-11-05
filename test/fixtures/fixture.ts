@@ -16,6 +16,7 @@ import { authoredP7Fixtures } from "./pages/authored-p7.js";
 import { authoredP11Fixtures } from "./pages/authored-p11.js";
 import { authoredP23Fixtures } from "./pages/authored-p23.js";
 import { authoredP25Fixtures } from "./pages/authored-p25.js";
+import { authoredP26Fixtures } from "./pages/authored-p26.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -142,6 +143,9 @@ export function allFixtures(): Fixture[] {
     // 2,048-character cap `pages.response_headers` keeps — the stored value is
     // cut, and the header is named in `truncated`.
     ...authoredP25Fixtures,
+    // P26: the 26a rules' fixture pages, added task by task. Plain HTTP on
+    // 127.0.0.1, so the HTTPS-only rules have none (SKIP_HARNESS_CLAIMS).
+    ...authoredP26Fixtures,
     controlFixture,
   ];
 }

@@ -1835,7 +1835,7 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 are over", `test/rules/copy.test.ts:1351` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1368` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:413` "site.health is filed under the
+`test/rules/coverage.test.ts:414` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
 `test/fixtures/harness.test.ts:2514` "the health rollup agrees with a

@@ -393,7 +393,16 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `failed` on a crawl whose last pass could not launch, and a pre-0025
 //     crawl, or one whose pass launched, reads exactly as before. The metric
 //     table gains a Render Launch Error column. No finding rule moves.
-export const RULESET_VERSION = "0.19.0";
+// 0.20.0: Phase 26a, rules over existing data (docs/superpowers/specs/2026-11-05-
+// phase-26-checks-wave-1-design.md). ONE BUMP FOR THE PHASE; later tasks append
+// here. The version moves for the new 26a rules, which read columns the crawl
+// already stores; the rules are listed by family as the tasks that register them
+// add them.
+//
+//  1. (T2) `resources.not-recorded` gains CHECK-85: mixed content reads
+//     `page_resources`, so a crawl that recorded none is silent on it, and the
+//     marker now says so. CHECK-84..86 are new checklist ids.
+export const RULESET_VERSION = "0.20.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):

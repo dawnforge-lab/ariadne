@@ -374,6 +374,7 @@ describe("checklist coverage", () => {
       "CHECK-49",
       "CHECK-50",
       "CHECK-51",
+      "CHECK-85",
     ]);
     // And its sibling claims the same four (P12-T2): the silence it explains is
     // the same silence, so a marker claiming fewer would leave a check whose

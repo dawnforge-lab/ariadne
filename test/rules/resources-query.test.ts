@@ -81,7 +81,7 @@ describe("resourceRules metadata", () => {
       "resources.uncached": [["CHECK-50"], "info", "technical"],
       // The marker claims every check whose silence it explains.
       "resources.not-recorded": [
-        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
         "info",
         "technical",
       ],

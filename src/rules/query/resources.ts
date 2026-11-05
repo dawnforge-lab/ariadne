@@ -1134,7 +1134,7 @@ export const resourceRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_RECORDED.id,
-    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
     category: CATEGORY,
     severity: NOT_RECORDED.severity,
     columns: [
