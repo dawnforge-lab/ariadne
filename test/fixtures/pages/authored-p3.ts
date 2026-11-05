@@ -498,7 +498,7 @@ const caseVariantUpper: Fixture = {
   path: "/authored3/Case",
   category: URLS,
   name: "Case variant (upper), served 200",
-  expectedIssues: [],
+  expectedIssues: ["url.uppercase"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

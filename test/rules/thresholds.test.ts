@@ -51,6 +51,8 @@ describe("thresholds", () => {
       ],
       HIGH_INTERNAL_OUTLINKS: 1000,
       HIGH_EXTERNAL_OUTLINKS: 100,
+      INTERNAL_SEARCH_PARAMS: ["s", "q", "query", "search", "keyword", "keywords"],
+      INTERNAL_SEARCH_PATH: /(?:^|\/)search(?:\/|$)/i,
     });
   });
 

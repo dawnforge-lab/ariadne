@@ -1111,7 +1111,166 @@ const onlyFromNoindex = linkPage(
   },
 );
 
+/**
+ * The seven URL-shape fixtures (Task 9). The page is the control recipe and the
+ * defect is its ADDRESS, so each one is `exact` with the one rule its path
+ * trips. Paths are written as the crawler stores them (`normalizeUrl` keeps
+ * case, underscores and `//`, and the encoded forms are already encoded).
+ */
+interface ShapePageCopy {
+  title: string;
+  description: string;
+  h1: string;
+  lede: string;
+  what: string;
+  why: string;
+  fix: string;
+}
+
+function shapePage(
+  path: string,
+  copy: ShapePageCopy,
+  rest: Pick<Fixture, "expectedIssues" | "name">,
+): Fixture {
+  return {
+    path,
+    category: "url",
+    ...rest,
+    exact: true,
+    handler: (req, res) =>
+      serve(req, res, () => ({
+        title: copy.title,
+        metaDescription: copy.description,
+        bodyHtml: article({
+          h1: copy.h1,
+          lede: copy.lede,
+          withImage: false,
+          sections: [
+            { h2: "What this page does", body: copy.what },
+            { h2: "Why it matters", body: copy.why },
+            { h2: "How it gets fixed", body: copy.fix },
+          ],
+        }),
+      })),
+  };
+}
+
+const upperCase = shapePage(
+  "/authored26/Upper-Case",
+  {
+    title: "A page served at an address with a capital letter",
+    description:
+      "This page is in order, and its address spells one folder with capital letters, which a server that reads paths exactly treats as another address.",
+    h1: "An address that is spelled with capitals",
+    lede: "Nothing on the page is wrong. The fault is in the path it is served at, where the last segment starts with capital letters.",
+    what: "The path ends in Upper-Case, with a capital U and a capital C. On most servers a path is read exactly as written, so the same page may also answer at the lower-case spelling, and each of the two is a separate address to a search engine.",
+    why: "People type, copy and link addresses in whatever case they remember. Where the server answers every case, each spelling is a copy of the page that splits the links and signals between them, and where it answers only one, the others are dead ends that a visitor reaches by a small slip.",
+    fix: "Serve the page at a lower-case path, redirect the capitalised spelling to it with a permanent redirect, and make every link and the sitemap use the lower-case form.",
+  },
+  { name: "Page whose path has capital letters", expectedIssues: ["url.uppercase"] },
+);
+
+const underScore = shapePage(
+  "/authored26/under_score",
+  {
+    title: "A page served at an address joined with an underscore",
+    description:
+      "This page is fine, and its address joins two words with an underscore, which search engines read as one longer word rather than as two separate ones.",
+    h1: "An address that joins its words with an underscore",
+    lede: "The page itself is correct, and the path it lives at runs two words together with an underscore instead of a hyphen.",
+    what: "The last segment of the path is under_score. A hyphen between words is read by search engines as a space, and an underscore is read as a character inside a word, so the two words are taken as a single term that nobody searches for.",
+    why: "The words in an address are a small hint about what the page covers, and an underscore hides that hint. It is also easy to lose in a link that is underlined, because the underscore disappears behind the line and a reader sees a space where there is none.",
+    fix: "Use hyphens between the words of the path, redirect the old address to the new one with a permanent redirect, and update the internal links and the sitemap to the new address.",
+  },
+  { name: "Page whose path has an underscore", expectedIssues: ["url.underscores"] },
+);
+
+const nonAscii = shapePage(
+  "/authored26/caf%C3%A9",
+  {
+    title: "A page served at an address with an accented letter",
+    description:
+      "This page is correct, and its address ends with an accented letter that is sent as percent-encoded bytes, a form that is hard to read, copy or type.",
+    h1: "An address that carries a letter outside plain ASCII",
+    lede: "The page has no fault of its own. Its path ends with an e with an acute accent, which travels in an address as three characters beginning with a percent sign.",
+    what: "The last segment of the path is caf followed by the encoded bytes of an accented e. A browser shows the accented letter, and anything that copies the address as text, such as an email or a spreadsheet, shows the encoded form.",
+    why: "Search engines understand these addresses, but people who share them often get the encoded form, and some systems that rewrite links decode or encode them twice and break them. A path in plain letters avoids that and is easier to type from memory.",
+    fix: "Use plain ASCII letters in the path, for example cafe, redirect the old address with a permanent redirect, and keep the accented spelling in the title and the text of the page.",
+  },
+  { name: "Page whose path has a non-ASCII character", expectedIssues: ["url.non-ascii"] },
+);
+
+const withSpace = shapePage(
+  "/authored26/with%20space",
+  {
+    title: "A page served at an address that contains a space",
+    description:
+      "The page is in order, and its address holds a space, written as a percent sign and two digits, which breaks when the link is copied or wrapped in text.",
+    h1: "An address with a space in the middle of it",
+    lede: "There is nothing wrong with the content. The path carries a space, which is written in an address as a percent sign followed by two digits.",
+    what: "The last segment of the path is the word with, a space and the word space. Anywhere an address is pasted into a line of text, the space can end the link early, so the visitor lands on a page that does not exist.",
+    why: "A space is the one character that email programs, chat tools and word processors treat as the end of a link. A visitor who is sent this address may reach only the first half of it, and search engines see a second address wherever the space is replaced by a plus sign.",
+    fix: "Replace the space with a hyphen, redirect the old address to the new one with a permanent redirect, and change the links and the sitemap to the hyphenated address.",
+  },
+  { name: "Page whose path has a space", expectedIssues: ["url.spaces"] },
+);
+
+const doubleSlash = shapePage(
+  "/authored26//double",
+  {
+    title: "A page served at an address with two slashes in a row",
+    description:
+      "This page is correct, and its address has two slashes in a row after the first folder, which usually means a link was built by joining two paths badly.",
+    h1: "An address with a doubled slash inside it",
+    lede: "The page is complete. The fault is in the address, where an empty folder sits between the first folder and the last segment.",
+    what: "The path runs from the first folder straight into a second slash before the word double. Many servers read the doubled slash as a single one and answer with the same page, so the page exists at two addresses that differ by one character.",
+    why: "The doubled slash nearly always comes from a template that adds a slash to a path that already ends with one. Search engines count the two addresses separately, and the mistake tends to repeat on every link the same template builds.",
+    fix: "Find the template or the rule that joins the two parts of the path and make it add one slash only, then redirect the doubled address to the single one with a permanent redirect.",
+  },
+  { name: "Page whose path has a double slash", expectedIssues: ["url.multiple-slashes"] },
+);
+
+const repetitivePath = shapePage(
+  "/authored26/shop/shop/x",
+  {
+    title: "A page served at an address that repeats a folder",
+    description:
+      "The page is in order, and its address names the same folder twice in a row, which is how a relative link that adds a folder begins to build endless paths.",
+    h1: "An address that says the same folder twice",
+    lede: "Nothing is wrong with the page. Its path repeats a folder straight after itself, and that is the signature of a link built from the wrong base.",
+    what: "The path has the folder shop twice before the last segment. When a relative link is written without its leading slash, each page that carries it adds one more copy of the folder, and a crawler follows the result without end.",
+    why: "A repeating folder is rarely a page somebody wanted. It is usually the first address of a run that a crawler can follow for as long as it is willing to, filling an index and a crawl budget with copies of one page under a path that grows by one folder at a time.",
+    fix: "Find the relative link or the rewrite rule that adds the folder and correct it so it builds the address from the root, then redirect the repeating address to the right one.",
+  },
+  { name: "Page whose path repeats a folder", expectedIssues: ["url.repetitive-path"] },
+);
+
+const searchResults = shapePage(
+  "/search?q=x",
+  {
+    title: "The results page of the site's own search box",
+    description:
+      "This page lists what the site search found for one phrase, and it is open to indexing, so every phrase a visitor types can become an indexed page.",
+    h1: "What the site search found for one phrase",
+    lede: "The page is complete and a search engine may index it. It is the output of the site's own search, requested here with the parameter q.",
+    what: "The address is the search path with q set to one letter. The site answers with a results page and puts no noindex on it, so a crawler that finds a link to it treats it as a page of the site like any other.",
+    why: "A site search can produce a different page for every phrase anyone has ever typed, and almost all of them are thin lists of links to pages the index already holds. Left open, they dilute the site's crawl and compete with the pages they list.",
+    fix: "Add noindex to the results pages or block the search path in robots.txt, keep them out of the sitemap and the internal links, and give any search page that is meant to rank an address and content of its own.",
+  },
+  {
+    name: "Indexable site search results page",
+    expectedIssues: ["url.internal-search", "url.parameter-pages-indexable"],
+  },
+);
+
 export const authoredP26Fixtures: Fixture[] = [
+  upperCase,
+  underScore,
+  nonAscii,
+  withSpace,
+  doubleSlash,
+  repetitivePath,
+  searchResults,
   wrongContentType,
   nofollow,
   nosnippet,

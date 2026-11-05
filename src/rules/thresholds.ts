@@ -314,3 +314,15 @@ export const HIGH_INTERNAL_OUTLINKS = 1000;
 
 /** Distinct external link targets on one page above which `links.high-outlinks` fires. A starting value, replaced by Task 12's calibration like `HIGH_INTERNAL_OUTLINKS`. */
 export const HIGH_EXTERNAL_OUTLINKS = 100;
+
+/**
+ * Query keys `url.internal-search` reads as a site search, compared whole and
+ * case-sensitively: `?S=` and `?search_tips=` are other parameters.
+ */
+export const INTERNAL_SEARCH_PARAMS = ["s", "q", "query", "search", "keyword", "keywords"] as const;
+
+/**
+ * A path segment that is exactly `search`, case-insensitively: `/search`,
+ * `/en/Search/shoes`, not `/search-tips` or `/researching`.
+ */
+export const INTERNAL_SEARCH_PATH = /(?:^|\/)search(?:\/|$)/i;

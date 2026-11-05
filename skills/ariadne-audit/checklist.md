@@ -1636,6 +1636,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `url.normalisation-variants` (critical): URLs the crawl reached in more than one
   spelling (case, trailing slash) where both answered 200 instead of one redirecting
   to the other. `issue_urls` gives the variant sets.
+  Six page rules read the SHAPE of an indexable page's URL path (never its query or
+  host): `url.uppercase` (info), `url.underscores` (info), `url.non-ascii` (info),
+  `url.spaces` (warning: `%20`, a literal space or a `+`), `url.multiple-slashes`
+  (warning) and `url.repetitive-path` (warning: a folder or run of folders repeated
+  straight after itself, which names the repeated part). A page whose path is
+  percent-encoded non-ASCII is not an upper-case page: the hex digits are not read.
 - **DevTools**: Test an uppercase URL — check if it 301s to lowercase. Test with/without trailing slash
 - **Evaluate**:
   - PASS if single canonical version, variants redirect 301
@@ -2904,7 +2910,11 @@ Skip this section if site is not on Shopify.
 - **Engine**: `pages_query` with `indexable: true` (or the pages export) filtered to
   /search and /tagged paths for the indexable ones, `indexable: false` for the
   excluded ones, and `issues_list` with `checkId: "CHECK-03"` for what robots.txt
-  blocks. Three lists, one question: are these pages in the index or out of it
+  blocks. Three lists, one question: are these pages in the index or out of it.
+  `issues_list` with `checkId: "CHECK-67"` carries `url.internal-search` (warning):
+  an indexable page whose path has a `search` segment or whose query has a key
+  `s`, `q`, `query`, `search`, `keyword` or `keywords` (whole key, case-sensitive).
+  It names the path and the parameter; a `/tagged` path is not read.
 - **Evaluate**:
   - PASS if /search and /tagged noindexed or blocked
   - FAIL if indexable (creates bloat)

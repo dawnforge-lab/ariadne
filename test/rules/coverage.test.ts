@@ -390,10 +390,18 @@ describe("checklist coverage", () => {
   //
   //   query   82 + 5 = 87
   //   total   134 + 5 = 139
-  it("pins the ruleset split the gate doc reports: 139 rules = 38 page + 87 query + 14 metric", () => {
+  //
+  // Phase 26a Task 9 adds SEVEN URL-shape PAGE rules in `src/rules/page/url-shape.ts`:
+  // six on CHECK-30 (`url.uppercase`, `url.underscores`, `url.non-ascii`,
+  // `url.spaces`, `url.multiple-slashes`, `url.repetitive-path`) and
+  // `url.internal-search` on CHECK-67.
+  //
+  //   page    38 + 7 = 45
+  //   total   139 + 7 = 146
+  it("pins the ruleset split the gate doc reports: 146 rules = 45 page + 87 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(139);
-    expect(registry.byKind("page")).toHaveLength(38);
+    expect(registry.all()).toHaveLength(146);
+    expect(registry.byKind("page")).toHaveLength(45);
     expect(registry.byKind("query")).toHaveLength(87);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

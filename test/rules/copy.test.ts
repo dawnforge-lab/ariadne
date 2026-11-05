@@ -21,6 +21,7 @@ import {
   HIGH_EXTERNAL_OUTLINKS,
   HIGH_INTERNAL_OUTLINKS,
   NON_DESCRIPTIVE_ANCHORS,
+  INTERNAL_SEARCH_PARAMS,
   PAGINATION_WALK_MAX,
 } from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
@@ -870,6 +871,13 @@ describe("copy: link hygiene (26a)", () => {
   it("says internal and external, so neither rule over-claims its cohort", () => {
     expect(copy("links.localhost").explanation).toMatch(/Links to the site's own host are not judged/);
     expect(copy("links.non-descriptive-anchor").title).toMatch(/Internal links/);
+  });
+});
+
+describe("copy: URL shape (26a)", () => {
+  it("quotes the search parameters the internal-search rule actually reads", () => {
+    const list = `${INTERNAL_SEARCH_PARAMS.slice(0, -1).join(", ")} or ${INTERNAL_SEARCH_PARAMS.at(-1)}`;
+    expect(copy("url.internal-search").explanation).toContain(`(${list})`);
   });
 });
 

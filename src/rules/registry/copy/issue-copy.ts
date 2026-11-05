@@ -997,6 +997,55 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Shorten the URL to the words that describe the page, drop needless folders and parameters, and 301 the old URL to the new one.",
   },
+  "url.uppercase": {
+    title: "URL: Upper-case letters in the path",
+    explanation:
+      "Indexable pages whose URL path contains a capital letter; the row gives the path. Paths are case-sensitive on most servers, so /About and /about can each answer and split the page's signals between them.",
+    howToFix:
+      "Use lower-case paths, 301 the capitalised spelling to the lower-case one and link only to the lower-case form.",
+  },
+  "url.underscores": {
+    title: "URL: Underscores in the path",
+    explanation:
+      "Indexable pages whose URL path contains an underscore; the row gives the path. Search engines read a hyphen as a word separator and an underscore as a joining character, so a path of underscores is read as one long word.",
+    howToFix:
+      "Separate the words of the path with hyphens, 301 the old URL to the new one and update the links that point at it.",
+  },
+  "url.non-ascii": {
+    title: "URL: Non-ASCII characters in the path",
+    explanation:
+      "Indexable pages whose URL path holds characters outside basic ASCII, shown encoded as in the crawl (%C3%A9 for an accented e). Search engines handle them, but they are copied and shared in a form people cannot read, and links often break in transit.",
+    howToFix:
+      "Prefer plain ASCII words in the path, such as cafe for an accented spelling, and 301 the old URL to the new one. Keep the characters only where the page's language needs them.",
+  },
+  "url.spaces": {
+    title: "URL: Spaces or plus signs in the path",
+    explanation:
+      "Indexable pages whose URL path holds a space (shown as %20) or a plus sign; the row gives the path. A space is unsafe in a link and is lost when the address is copied, and a plus is read as a space only in a query string.",
+    howToFix:
+      "Replace spaces and plus signs in the path with hyphens, 301 the old URL to the new one and update the links that point at it.",
+  },
+  "url.multiple-slashes": {
+    title: "URL: Double slash in the path",
+    explanation:
+      "Indexable pages whose URL path holds two slashes in a row; the row gives the path. Many servers answer /a//b and /a/b with the same page, so the page exists at two addresses and a link template is joining paths with a slash too many.",
+    howToFix:
+      "Fix the template that builds the link so it joins paths with a single slash, and 301 the double-slash address to the single-slash one.",
+  },
+  "url.repetitive-path": {
+    title: "URL: Repeated folders in the path",
+    explanation:
+      "Indexable pages whose URL path repeats a folder or a run of folders straight after itself, as in /shop/shop/ or /a/b/a/b/; the row quotes the repeated part. It usually means a relative link or a rewrite rule is stacking a folder onto the path, which can generate an endless run of addresses.",
+    howToFix:
+      "Find the relative link or rewrite rule that adds the folder and correct it, then 301 the repeating address to the clean one.",
+  },
+  "url.internal-search": {
+    title: "URL: Internal search results indexable",
+    explanation:
+      "Indexable pages that look like the site's own search results, because the path has a search folder or the query carries a search parameter (s, q, query, search, keyword or keywords); the row gives the path and the parameter. Search results are an unbounded set of thin pages, and one URL exists for every phrase anyone typed.",
+    howToFix:
+      "Add noindex to search results or block them in robots.txt, and keep them out of the sitemap and out of internal links. If one search page is meant to rank, give it a fixed address and its own content.",
+  },
   "url.tracking-params-internal": {
     title: "URL: Internal links with tracking parameters",
     explanation:
