@@ -107,10 +107,14 @@ describe("url.non-ascii", () => {
 });
 
 describe("url.spaces", () => {
-  it("fires on %20, on a literal space and on a plus in the path", () => {
+  it("fires on %20 and on a literal space in the path", () => {
     expect(firing("https://example.com/with%20space")).toContain("url.spaces");
     expect(firing("https://example.com/with space")).toContain("url.spaces");
-    expect(firing("https://example.com/with+plus")).toContain("url.spaces");
+  });
+
+  it("does not read a plus in the path as a space", () => {
+    expect(firing("https://example.com/c++-guide")).toEqual([]);
+    expect(firing("https://example.com/with+plus")).not.toContain("url.spaces");
   });
 
   it("does not read a plus or a space in the query", () => {
@@ -163,9 +167,11 @@ describe("url.internal-search", () => {
     }
   });
 
-  it("fires on a /search path, and the evidence has a null param", () => {
+  it("fires on a /search path, and the evidence omits param", () => {
     const out = rule("url.internal-search").run(at("https://example.com/search/shoes"));
-    expect(out[0]?.evidence).toEqual({ path: "/search/shoes", param: null });
+    expect(out[0]?.evidence).toEqual({ path: "/search/shoes" });
+    expect("param" in (out[0]?.evidence ?? {})).toBe(false);
+    expect(rule("url.internal-search").columns?.find((c) => c.key === "param")?.optional).toBe(true);
     expect(firing("https://example.com/en/Search")).toContain("url.internal-search");
   });
 

@@ -1019,11 +1019,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Prefer plain ASCII words in the path, such as cafe for an accented spelling, and 301 the old URL to the new one. Keep the characters only where the page's language needs them.",
   },
   "url.spaces": {
-    title: "URL: Spaces or plus signs in the path",
+    title: "URL: Spaces in the path",
     explanation:
-      "Indexable pages whose URL path holds a space (shown as %20) or a plus sign; the row gives the path. A space is unsafe in a link and is lost when the address is copied, and a plus is read as a space only in a query string.",
+      "Indexable pages whose URL path holds a space (shown as %20); the row gives the path. A space is unsafe in a link and is lost when the address is copied or wrapped in text.",
     howToFix:
-      "Replace spaces and plus signs in the path with hyphens, 301 the old URL to the new one and update the links that point at it.",
+      "Replace spaces in the path with hyphens, 301 the old URL to the new one and update the links that point at it.",
   },
   "url.multiple-slashes": {
     title: "URL: Double slash in the path",

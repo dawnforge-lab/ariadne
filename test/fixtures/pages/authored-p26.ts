@@ -1209,7 +1209,7 @@ const withSpace = shapePage(
     h1: "An address with a space in the middle of it",
     lede: "There is nothing wrong with the content. The path carries a space, which is written in an address as a percent sign followed by two digits.",
     what: "The last segment of the path is the word with, a space and the word space. Anywhere an address is pasted into a line of text, the space can end the link early, so the visitor lands on a page that does not exist.",
-    why: "A space is the one character that email programs, chat tools and word processors treat as the end of a link. A visitor who is sent this address may reach only the first half of it, and search engines see a second address wherever the space is replaced by a plus sign.",
+    why: "A space is the one character that email programs, chat tools and word processors treat as the end of a link. A visitor who is sent this address may reach only the first half of it, and search engines may see a second address wherever the space is spelled another way.",
     fix: "Replace the space with a hyphen, redirect the old address to the new one with a permanent redirect, and change the links and the sitemap to the hyphenated address.",
   },
   { name: "Page whose path has a space", expectedIssues: ["url.spaces"] },

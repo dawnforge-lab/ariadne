@@ -84,10 +84,9 @@ export const urlShapeRules: PageRule[] = [
   // bytes of any non-ASCII character), in either hex case.
   pathRule("url.non-ascii", "info", (path) => /[^\x00-\x7f]|%[89a-f][0-9a-f]/i.test(path)),
 
-  // `+` is a space only in a query, and in a path it is a literal plus that
-  // most servers do not treat as one; the rule reports it with `%20` because
-  // both are a word separator the URL should have spelled with a hyphen.
-  pathRule("url.spaces", "warning", (path) => /%20|\+| /.test(path)),
+  // A space only: `%20` or a literal one. A `+` in a PATH is a literal plus
+  // (`/c++-guide`); it means a space only in a form-encoded query string.
+  pathRule("url.spaces", "warning", (path) => /%20| /.test(path)),
 
   pathRule("url.multiple-slashes", "warning", (path) => path.includes("//")),
 
@@ -110,7 +109,8 @@ export const urlShapeRules: PageRule[] = [
 
   // The query is read by KEY, whole and case-sensitively, through
   // URLSearchParams so an escaped key is decoded first. `param` is the first
-  // matching key in the URL's order, and null when only the path matched.
+  // matching key in the URL's order, and the key is omitted (optional column)
+  // when only the path matched.
   pageRule(
     "url.internal-search",
     ["CHECK-67"],
@@ -118,7 +118,7 @@ export const urlShapeRules: PageRule[] = [
     "warning",
     [
       { key: "path", label: "URL Path" },
-      { key: "param", label: "Search Parameter" },
+      { key: "param", label: "Search Parameter", optional: true },
     ],
     (p, self) => {
       if (!isJudged(p)) return [];
@@ -132,7 +132,9 @@ export const urlShapeRules: PageRule[] = [
         }
       }
       if (param === null && !INTERNAL_SEARCH_PATH.test(url.pathname)) return [];
-      return [finding(self, p, { path: url.pathname, param })];
+      return [
+        finding(self, p, param === null ? { path: url.pathname } : { path: url.pathname, param }),
+      ];
     },
   ),
 ];

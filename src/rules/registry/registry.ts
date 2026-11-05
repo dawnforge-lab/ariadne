@@ -447,7 +447,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //  8. (T9) URL shape, seven page rules in `page/url-shape.ts`, all on the path of
 //     the stored URL and gated by `isJudged` like `url.too-long`: `url.uppercase`
 //     (info; the hex of a percent-escape is not a letter), `url.underscores`
-//     (info), `url.non-ascii` (info), `url.spaces` (warning; `%20`, `+` or a
+//     (info), `url.non-ascii` (info), `url.spaces` (warning; `%20` or a
 //     space), `url.multiple-slashes` (warning), `url.repetitive-path` (warning; a
 //     run of segments immediately repeated) — all CHECK-30 — and
 //     `url.internal-search` (warning, CHECK-67: a path segment `search`, or a

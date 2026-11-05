@@ -1638,7 +1638,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   to the other. `issue_urls` gives the variant sets.
   Six page rules read the SHAPE of an indexable page's URL path (never its query or
   host): `url.uppercase` (info), `url.underscores` (info), `url.non-ascii` (info),
-  `url.spaces` (warning: `%20`, a literal space or a `+`), `url.multiple-slashes`
+  `url.spaces` (warning: `%20` or a literal space; a `+` is not read), `url.multiple-slashes`
   (warning) and `url.repetitive-path` (warning: a folder or run of folders repeated
   straight after itself, which names the repeated part). A page whose path is
   percent-encoded non-ASCII is not an upper-case page: the hex digits are not read.
