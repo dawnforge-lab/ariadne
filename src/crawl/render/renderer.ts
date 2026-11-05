@@ -773,11 +773,13 @@ class RenderTraffic {
    */
   private readonly inFlight = new Map<string, { url: string; method: string }>();
   /**
-   * Network ids of this render's TOP-LEVEL document requests (the goto's, its
-   * redirect hops, a navigation the page made itself). Their status is the
-   * page's own — already on the row — so they are never failed requests.
+   * The network id of the document `render` navigated to — its HTTP redirect
+   * hops share it. That document's status is the page's own, already on the
+   * row, so it is never a failed request. A navigation the PAGE makes itself
+   * (a JS redirect) gets a new id and is NOT excluded: its 4xx/5xx is stored
+   * nowhere else, and it is the broken JS redirect CHECK-10 exists to find.
    */
-  private readonly documentIds = new Set<string>();
+  private gotoNetworkId: string | null = null;
   /** What the page reported going wrong — see console-capture.ts. Per render. */
   private readonly reported = new RenderConsoleCollector();
 
@@ -955,7 +957,9 @@ class RenderTraffic {
     // (the JS redirect CHECK-10 exists to find), and every iframe's.
     if (event.resourceType === "Document") {
       const topLevel = event.frameId === this.mainFrameId;
-      if (topLevel && event.networkId !== undefined) this.documentIds.add(event.networkId);
+      if (topLevel && this.gotoNetworkId === null && event.networkId !== undefined) {
+        this.gotoNetworkId = event.networkId;
+      }
       // The goto's own request is the URL `render` put through url-policy a
       // moment ago; asking again would only put a lookup between its slot and
       // its request.
@@ -1131,9 +1135,9 @@ class RenderTraffic {
       return;
     }
     // THE SITE FAILED A REQUEST WE SENT: a status of 400 or above on one this
-    // render released (a 404 never fires `loadingFailed`). Not the top-level
-    // document — its status is the page's own, on the row already.
-    if (sent !== undefined && response.status >= 400 && !this.documentIds.has(requestId)) {
+    // render released (a 404 never fires `loadingFailed`). Not the document
+    // `render` navigated to — its status is the page's own, on the row already.
+    if (sent !== undefined && response.status >= 400 && requestId !== this.gotoNetworkId) {
       this.reported.addFailedRequest(sent.url, response.status, `http ${response.status}`);
     }
     const fromCache =
@@ -1205,7 +1209,8 @@ class RenderTraffic {
    *
    * What IS reported is also the page's failed request (`render_console`), under
    * Chromium's net error name — a classification, never transport text — unless
-   * it is the top-level document, whose failure is the render's own error.
+   * it is the document `render` navigated to, whose failure is the render's
+   * own error.
    */
   private onFailed(
     requestId: string,
@@ -1218,7 +1223,7 @@ class RenderTraffic {
     this.predicted.delete(requestId);
     if (!this.open || sent === undefined || canceled || blockedReason !== undefined) return;
     if (errorText === "net::ERR_BLOCKED_BY_CLIENT" || errorText === "net::ERR_ABORTED") return;
-    if (!this.documentIds.has(requestId)) this.reported.addFailedRequest(sent.url, null, errorText);
+    if (requestId !== this.gotoNetworkId) this.reported.addFailedRequest(sent.url, null, errorText);
     this.gate.report(gateKey(sent.url), {
       fetchClass: "network_error",
       statusCode: null,

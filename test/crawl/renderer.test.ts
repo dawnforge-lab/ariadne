@@ -462,6 +462,9 @@ async function startSite(otherOrigin: () => string): Promise<Site> {
     if (path === "/malformed") return html(malformedHtml());
     if (path === "/js-redirect") return html(jsRedirectHtml(`${siteBase(server)}/csr`));
     if (path === "/offsite-redirect") return html(jsRedirectHtml(`${otherOrigin()}/elsewhere`));
+    if (path === "/js-redirect-missing") {
+      return html(jsRedirectHtml(`${siteBase(server)}/no-such-page`));
+    }
     if (path === "/third-party") return html(thirdPartyHtml(otherOrigin()));
     if (path === "/console-errors") return html(consoleErrorsHtml(otherOrigin()));
     if (path === "/console-clean") return html(consoleCleanHtml());
@@ -946,6 +949,18 @@ describe("PageRenderer", () => {
     // the document's own 404 is the row's status and is not listed beside it.
     expect(result.console!.failedRequests).toEqual([
       { url: `${site.base}/missing.js`, status: 404, reason: "http 404", cut: false },
+    ]);
+    expect(result.console!.failedRequestsTotal).toBe(1);
+  });
+
+  it("records a JS redirect the page made to a 404 as a failed request", async () => {
+    const result = await renderer.render(`${site.base}/js-redirect-missing`);
+
+    expect(result.redirectUrl).toBe(`${site.base}/no-such-page`);
+    // The navigated-to document answered 200 and is on the row; the page's
+    // own navigation answered 404 and is stored nowhere else.
+    expect(result.console!.failedRequests).toEqual([
+      { url: `${site.base}/no-such-page`, status: 404, reason: "http 404", cut: false },
     ]);
     expect(result.console!.failedRequestsTotal).toBe(1);
   });
