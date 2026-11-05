@@ -290,6 +290,43 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Re-run the crawl with host checks on. Meanwhile, request each host variant by hand and follow the redirects to confirm they end on the canonical HTTPS host.",
   },
 
+  // --------------------------------------------------------------- security
+  "security.headers-missing": {
+    title: "Security: Protective response headers missing or unsafe",
+    explanation:
+      "HTTPS pages that send no enforced Content-Security-Policy, no X-Content-Type-Options: nosniff, no frame protection (X-Frame-Options or a CSP frame-ancestors directive) or no safe Referrer-Policy; the Missing Headers column names which. A Referrer-Policy of unsafe-url or no-referrer-when-downgrade counts as unsafe because it sends the full address to other sites. These headers do not affect rankings directly; they limit what a hijacked script, a framing site or a link click can do to your visitors.",
+    howToFix:
+      "Add the missing headers at the server or CDN so every response carries them. Start with X-Content-Type-Options: nosniff and Referrer-Policy: strict-origin-when-cross-origin, add frame protection, then roll out a Content-Security-Policy in report-only mode before enforcing it.",
+  },
+  "security.headers-not-recorded": {
+    title: "Security: Security headers not checked on this crawl",
+    explanation:
+      "Some or all pages in this crawl were stored without their response headers, so no page could be judged on HSTS or the other protective headers; the check was left unrun rather than reported clean. The Pages Without Recorded Headers column counts the pages affected.",
+    howToFix:
+      "Re-crawl the site. Response headers are recorded for every page on crawls from this version onwards.",
+  },
+  "security.hsts-missing": {
+    title: "Security: HTTPS page without HSTS header",
+    explanation:
+      "HTTPS pages that send no Strict-Transport-Security header. Without it a browser still tries plain HTTP first on a visitor's first request, which leaves a window for a downgrade or interception on an untrusted network.",
+    howToFix:
+      "Send Strict-Transport-Security on every HTTPS response, for example max-age=31536000; includeSubDomains. Start with a short max-age, confirm nothing on the host still needs HTTP, then raise it.",
+  },
+  "security.http-url": {
+    title: "Security: Page served over HTTP on an HTTPS site",
+    explanation:
+      "Pages whose address starts with http:// on a site that was crawled over https://, and that answered 200. Visitors get a not-secure warning and search engines can index the HTTP address as a duplicate of the secure one.",
+    howToFix:
+      "301 each HTTP address to its HTTPS equivalent, and change the internal links, canonicals and sitemap entries that still point at the HTTP address.",
+  },
+  "security.mixed-content": {
+    title: "Security: HTTPS page loading HTTP resources",
+    explanation:
+      "HTTPS pages that reference images, scripts or stylesheets with an http:// address; the row shows how many and lists up to 10 of them. Browsers block or warn about these files, so a page can lose its scripts or styles or show a not-secure warning even though it was served securely. Only img src, stylesheet and script references in the HTML response are checked.",
+    howToFix:
+      "Change each listed address to https://, or to a path on your own host, and check that the file is served over HTTPS. Where a template or CMS field produces the address, fix it there.",
+  },
+
   // --------------------------------------------------------------- hreflang
   "hreflang.alternates-not-crawled": {
     title: "Hreflang: Alternate URLs not crawled",
@@ -719,6 +756,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "The crawl recorded every image, stylesheet and script the pages reference and requested none of them: the file check was turned off, the crawl was interrupted before it started, or the resource budget was used up first. Nothing is known about whether any file is broken, oversized, in a dated format or uncached.",
     howToFix:
       "Re-run the crawl with the file check on (the default), or resume the interrupted crawl.",
+  },
+  "resources.bad-content-type": {
+    title: "Resources: File served with the wrong content type",
+    explanation:
+      "Stylesheets, scripts or images that answered 200 with a content type that contradicts what the page calls them, such as a stylesheet sent as text/html; the row shows the file, the type it was sent as and how many pages reference it. Browsers refuse a stylesheet or script sent with the wrong type, so the page can lose its styling or behaviour even though the request succeeded. Files that returned an error are reported as broken, not here.",
+    howToFix:
+      "Configure the server or CDN to send text/css for stylesheets, a JavaScript type such as text/javascript for scripts and an image/* type for images. Check that the URL does not return an error or login page that happens to answer 200.",
   },
   "resources.not-recorded": {
     title: "Resources: File checks not run on this crawl",

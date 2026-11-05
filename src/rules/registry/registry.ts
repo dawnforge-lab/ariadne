@@ -402,6 +402,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //  1. (T2) `resources.not-recorded` gains CHECK-85: mixed content reads
 //     `page_resources`, so a crawl that recorded none is silent on it, and the
 //     marker now says so. CHECK-84..86 are new checklist ids.
+//  2. (T3) Security and served-type rules: `security.hsts-missing`,
+//     `security.headers-missing`, the marker `security.headers-not-recorded`
+//     (CHECK-84), `security.http-url` (CHECK-14), `security.mixed-content`
+//     (CHECK-85) and `resources.bad-content-type` (CHECK-51). The header rules
+//     read `pages.response_headers` and refuse a crawl any of whose pages
+//     predates Phase 25, so a pre-25 crawl gets the marker, never a clean list.
 export const RULESET_VERSION = "0.20.0";
 
 /**

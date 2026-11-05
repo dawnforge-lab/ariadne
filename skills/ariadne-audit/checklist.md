@@ -352,6 +352,7 @@ answered from, and its verdict is the confidence interval around all of them.
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
   `resources.all-unknown`, `resources.partial-unknown`,
   `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
+  `security.headers-not-recorded`,
   and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
   resource markers are siblings and never more than one appears: `resources.not-recorded` means
@@ -1148,6 +1149,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     read the absence of the first rule as a pass.
   The probe is the only part of a crawl that fetches before robots.txt is read, so
   it runs once per crawl and answers CHECK-14 and CHECK-15 together.
+  A third rule reads the crawl's own pages: `security.http-url` (warning) — a page the
+  crawl fetched at an `http:` address, 200, on a site whose crawl started at `https:`.
+  One finding per page; a site crawled over `http:` produces none.
 - **Evaluate**:
   - FAIL if internal HTTP URLs exist or http:// doesn't redirect to https://
   - Record: HTTP URL count, redirect behavior
@@ -1203,31 +1207,45 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   nothing. Two limits to state whenever this is quoted: a plain-HTTP page is judged
   by the host and protocol checks, not here, and a crawl written before the evidence
   layer (Phase 25) stored no response headers at all, so for such a crawl the
-  silence of the finding rules is NOT a pass. The rules that answer this check are
-  named here as they register.
+  silence of the finding rules is NOT a pass. Three rules answer it:
+  - `security.hsts-missing` (warning) — an HTTPS page that sent no
+    `Strict-Transport-Security`. One finding per page.
+  - `security.headers-missing` (info) — an HTTPS page missing an enforced
+    `Content-Security-Policy` (Report-Only does not count), `X-Content-Type-Options:
+    nosniff`, frame protection, or a safe `Referrer-Policy`. The evidence names which
+    are missing. `Referrer-Policy` is judged on an unsafe value (`unsafe-url`,
+    `no-referrer-when-downgrade`) as well as on absence, and the evidence carries the
+    unsafe value.
+  - `security.headers-not-recorded` (info) — the NOT MEASURED marker: at least one
+    page of the crawl was written without response headers (a crawl before Phase 25,
+    or a crawl mixing old and new pages), so neither rule above judged anything.
 - **Evaluate**:
   - PASS if every HTTPS page sends HSTS and the other four headers
-  - WARN if HSTS is missing, or any of the other four is missing on most pages
-  - SKIP if the crawl stored no response headers; the remedy is a re-crawl
+  - WARN if `security.hsts-missing` fired
+  - INFO if `security.headers-missing` fired: report which headers, and on how many pages
+  - SKIP if `security.headers-not-recorded` fired, which it does when response headers
+    are missing for ANY pages of the crawl, mixed crawls included; the remedy is a
+    re-crawl
   - Record: per-header count of pages that send it, and the URLs that do not
 
 ### CHECK-85: Mixed content
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-85"`. The check asks whether an
-  HTTPS page references any resource over `http:` — an image, script, stylesheet or
-  other file a browser blocks or downgrades. The evidence is the table of files each
+  HTTPS page references any image, script or stylesheet over `http:`, which a browser
+  blocks or downgrades (26b widens the check to iframes, media and forms). The evidence is the table of files each
   page points at (the page-resources table), read from the database; nothing is fetched. A
   page's own HTTP links to other pages are not mixed content and belong to CHECK-14.
   The crawl must have recorded the page's files for this to be answerable: when it
   recorded none, `resources.not-recorded` (info) is the NOT MEASURED marker, and the
   silence of the mixed-content finding says the crawl never recorded them rather
-  than that the site is clean. The remedy is a re-crawl. The finding rules that
-  answer this check are named here as they register.
+  than that the site is clean. The remedy is a re-crawl. One rule answers it:
+  `security.mixed-content` (warning) — an HTTPS page with at least one `http:`
+  resource. One finding per page, carrying the count and up to ten of the URLs.
 - **Evaluate**:
-  - PASS if no HTTPS page references an `http:` resource
-  - FAIL if any does
+  - PASS if no HTTPS page references an `http:` image, script or stylesheet
+  - FAIL if `security.mixed-content` fired
   - NOT MEASURED if `resources.not-recorded` fired
-  - Record: the referencing pages, the `http:` URLs, and the resource type
+  - Record: the referencing pages, the `http:` URLs and how many there are per page
 
 ---
 
@@ -2626,6 +2644,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
   holds: nothing in a crawl records a console, and requests a script makes at runtime
   are not in the resource table either — both stay browser work.
+  A second rule reads the same table: `resources.bad-content-type` (info) — a file the
+  server answered 200 for whose content type contradicts what the page called it (a
+  stylesheet not served as `text/css`, a script not served as JavaScript, an image
+  not served as `image/*`). One finding per file, with the type it was sent as and up
+  to ten referencing pages. Files that returned an error are `resources.broken`'s,
+  not this rule's, and a page whose own body is not HTML is not judged here.
   **The window that once had no marker, now closed** (P13-T2): on a crawl where every
   file landed in an unknown class — refused by our own policy, disallowed by a
   robots.txt, its host's robots.txt unreachable while we crawled, or a request that

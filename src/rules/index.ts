@@ -25,6 +25,7 @@ import { renderDiffRules } from "./query/render-diff.js";
 import { renderRedirectRules } from "./query/render-redirect.js";
 import { resourceRules } from "./query/resources.js";
 import { robotsRules } from "./query/robots.js";
+import { securityRules } from "./query/security.js";
 import { sitemapRules } from "./query/sitemap.js";
 import { structuredDataRules } from "./query/structured-data.js";
 import { urlHygieneRules } from "./query/url-hygiene.js";
@@ -74,6 +75,9 @@ export function buildRegistry(): Registry {
     // read `resources` and `page_resources` through SQL, and "is this file
     // broken" is a question about a table a page rule is never handed.
     ...resourceRules,
+    // The security rules (26a): response headers, HTTP URLs and mixed content,
+    // all read from what the crawl stored.
+    ...securityRules,
     // The metric kind. Registered in the same list because a rule is a rule to
     // the registry — the runner is what tells the kinds apart, driving these
     // last, after everything that writes evidence.

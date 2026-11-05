@@ -214,3 +214,16 @@ export const IMAGE_WEIGHT_WARN = 100_000;
  * of, which is why it is a column of this metric rather than a matter of taste.
  */
 export const SITEMAP_URL_CAP = 50_000;
+
+// ---- from src/rules/query/security.ts
+/**
+ * The `Referrer-Policy` values that send the full URL, query string included, to
+ * a destination that is not the site's own, or to a less secure one: `unsafe-url`
+ * always, `no-referrer-when-downgrade` to every https origin. A header that
+ * names one of these is judged the same as an absent header, since it leaks what
+ * the browser's own default (`strict-origin-when-cross-origin`) would not.
+ *
+ * When a header lists several policies the browser applies the LAST one it
+ * understands, so the rule compares the last token.
+ */
+export const UNSAFE_REFERRER_POLICIES = ["unsafe-url", "no-referrer-when-downgrade"] as const;

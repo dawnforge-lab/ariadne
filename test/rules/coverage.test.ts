@@ -339,11 +339,21 @@ describe("checklist coverage", () => {
   //
   //   query   62 + 5 = 67
   //   total   109 + 5 = 114
-  it("pins the ruleset split the gate doc reports: 114 rules = 33 page + 67 query + 14 metric", () => {
+  //
+  // Phase 26a Task 3 adds SIX query rules: `security.hsts-missing`,
+  // `security.headers-missing`, the marker `security.headers-not-recorded`
+  // (CHECK-84), `security.http-url` (CHECK-14), `security.mixed-content`
+  // (CHECK-85) and `resources.bad-content-type` (CHECK-51). CHECK-14 and
+  // CHECK-51 were claimed already, CHECK-84 and CHECK-85 are new checklist ids
+  // outside the build plan's 47, so the claimed-check arithmetic does not move.
+  //
+  //   query   67 + 6 = 73
+  //   total   114 + 6 = 120
+  it("pins the ruleset split the gate doc reports: 120 rules = 33 page + 73 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(114);
+    expect(registry.all()).toHaveLength(120);
     expect(registry.byKind("page")).toHaveLength(33);
-    expect(registry.byKind("query")).toHaveLength(67);
+    expect(registry.byKind("query")).toHaveLength(73);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -361,6 +371,9 @@ describe("checklist coverage", () => {
     // bundle-size one (CHECK-48), which is the split the plan proposed and the
     // checklist's text does not support.
     expect(byId.get("resources.broken")).toEqual(["CHECK-51"]);
+    // A file served under the wrong type is the same check: broken and
+    // wrong-typed resources are one network-request question (26a).
+    expect(byId.get("resources.bad-content-type")).toEqual(["CHECK-51"]);
     expect(byId.get("images.oversized")).toEqual(["CHECK-49"]);
     expect(byId.get("images.legacy-format")).toEqual(["CHECK-49"]);
     expect(byId.get("resources.uncached")).toEqual(["CHECK-50"]);

@@ -39,6 +39,7 @@ describe("thresholds", () => {
       NONE_PAGE_FLOOR: 1,
       IMAGE_WEIGHT_WARN: 100_000,
       SITEMAP_URL_CAP: 50_000,
+      UNSAFE_REFERRER_POLICIES: ["unsafe-url", "no-referrer-when-downgrade"],
     });
   });
 
