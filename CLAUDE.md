@@ -43,6 +43,9 @@ either direction; the seam is the network API only.
   suite and not just for the renderer's own tests. CI installs it with
   `npx playwright install --with-deps chromium`, cached on the locked
   Playwright version (`.github/workflows/ci.yml`).
+  `test/rules/serp-width.test.ts` also drives Chromium and needs the Liberation
+  Sans font (the metric-compatible Arial; `fonts-liberation`, installed by the
+  `--with-deps` form above). It fails loudly if Arial resolves to another font.
 - Tests: `npm test` (vitest). Typecheck: `npx tsc --noEmit`. Both must stay clean.
 - Migrations: drizzle-kit, applied with `npm run db:migrate`. Never hand-apply SQL.
 

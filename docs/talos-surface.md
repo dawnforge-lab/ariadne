@@ -59,7 +59,9 @@ produces them without a re-crawl (§11). By family:
   already in the future when the sitemap was read, and a value stamped while the
   crawl ran is not judged).
   CHECK-08 is no longer metric-only, so `issues_list` with `checkId: "CHECK-08"`
-  now answers rather than being refused.
+  now answers rather than being refused; CHECK-33 is no longer metric-only either
+  (`links.internal-nofollow` and `links.high-outlinks` claim it), so `checkId:
+  "CHECK-33"` answers too.
 - **Pixel width** (CHECK-35, CHECK-36), beside the character rules rather than
   replacing them: `title.pixel-too-long` (warning), `title.pixel-too-short`
   (info), `meta-description.pixel-too-long` (warning) and
@@ -2287,13 +2289,15 @@ the new ids, and changed exactly one metric row. That row is `site.health`:
 its partition counts findings, so pages moved between `urlsWithInfoOnly` and
 `urlsWithWarningOnly` as the new warnings landed. A health gauge compared across
 the boundary moves because there is more to see, not because the site changed,
-which is the reason `crawl_compare` raises `ruleset-mismatch` across it. Two
+which is the reason `crawl_compare` raises `ruleset-mismatch` across it. Three
 cases need a consumer's attention. First, the two security-header rules refuse a
 crawl with any page written before migration 0025 and fire
 `security.headers-not-recorded` instead, so an old crawl re-judged at 0.20.0
 gains a marker there, not a clean result. Second, `issues_list` with
 `checkId: "CHECK-08"` was refused as metric-only before 0.20.0 and answers
-now, because `sitemap.over-50k-urls` claims it.
+now, because `sitemap.over-50k-urls` claims it. Third, `checkId: "CHECK-33"`
+changed the same way, because `links.internal-nofollow` and
+`links.high-outlinks` claim it.
 
 **Phase 23 bumped to 0.18.0 because verdicts and thresholds MOVE.** Fourteen
 rules joined (see the top of this document), and existing ones changed what

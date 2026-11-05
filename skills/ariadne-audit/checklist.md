@@ -911,6 +911,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
 - **Evaluate**:
   - FAIL if non-indexable URLs > 0
+  - WARN if `sitemap.cross-host-loc` (warning) > 0: entries on a host the sitemap may
+    not speak for are ignored by search engines
+  - INFO if `sitemap.url-too-long` (info) or `sitemap.lastmod-invalid` (info) > 0:
+    the entry is malformed but the page is still listed. Do not PASS the check silently
+    with either on file; name the count
   - Severity = non-indexable count / total sitemap URLs
   - Record: count, breakdown by reason (noindex, 3xx, 4xx, canonicalised)
 
@@ -931,6 +936,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - PASS if sitemaps split logically by type (products, collections, blog, pages)
   - WARN if single flat sitemap on site >5k URLs
+  - WARN if `sitemap.over-50k-urls` (warning) > 0: a document over the 50,000-entry limit
+    is not read past it. Quote the count as a floor when `entryCapReached` is true
   - Record: sitemap structure description
 
 ### CHECK-09: URLs not found in sitemaps
@@ -1302,6 +1309,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - Review canonical targets — are they correct?
   - WARN if canonicalised count is high relative to total pages
+  - WARN if `canonical.chain` (warning) > 0: the signal does not land on the first
+    target named
+  - INFO if `canonical.unlinked` (info) > 0: a canonical target nothing links to;
+    weigh it with the target review above
   - FAIL if canonical targets are wrong
   - Record: canonicalised count, canonical target patterns, incorrect targets
 
@@ -1337,6 +1348,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   reading a clean answer as "every canonical target is healthy".
 - **Evaluate**:
   - FAIL if canonical points to non-200 or non-indexable target
+  - WARN if `canonical.chain` (warning) > 0 and no target is non-200 or non-indexable:
+    the target canonicalises onward, so the first page's signal is diluted
   - Record: count, affected URLs, target status codes
 
 ### CHECK-20: Cross-domain canonicals
@@ -1411,6 +1424,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - PASS if pagination links are HTML anchor tags and paginated pages are indexable
   - FAIL if JS-only (infinite scroll / "View More" button with no HTML link fallback)
   - FAIL if paginated pages are noindexed (this is incorrect — they should be indexed)
+  - WARN if `pagination.non-indexable-target` (warning) or `pagination.loop` (warning)
+    > 0: a series whose `rel` chain ends at an unusable page or never ends
+  - INFO if `pagination.sequence-error` (info) > 0: say whether it is one series
+    omitting `rel="prev"` everywhere or a genuine mismatch
   - **FAIL if no HTML numbered page links exist** — numbered pagination (1, 2, 3...)
     is far better for crawl efficiency than just next/previous sequential links.
     It allows crawlers to reach page 10 in one hop instead of 9 sequential hops.
@@ -1522,6 +1539,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - FAIL if pages missing their own self-reference > 0
   - FAIL if significant coverage gap (many pages that should have hreflang don't)
   - WARN if hreflang only in sitemap (not in HTML)
+  - WARN if `hreflang.inconsistent-return-code` (warning) or `hreflang.multiple-entries`
+    (warning) > 0: the cluster disagrees with itself and a search engine may discard it
+  - INFO if `hreflang.self-only` (info) or `hreflang.unlinked-target` (info) > 0:
+    a set naming no alternate, or alternates nothing links to. Record the count; do
+    not PASS the check clean with either on file
   - Record: total hreflang URLs, total indexable URLs, coverage %, missing return links, page types without hreflang that should have it, implementation method (HTML/sitemap/both)
 
 ### CHECK-25: Language-region codes and x-default
@@ -1660,6 +1682,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - PASS if single canonical version, variants redirect 301
   - FAIL if both versions resolve to 200 without canonical
+  - WARN if `url.spaces` (warning), `url.multiple-slashes` (warning) or
+    `url.repetitive-path` (warning) > 0: each makes a second spelling of a URL
+  - INFO if `url.uppercase` (info), `url.underscores` (info) or `url.non-ascii` (info)
+    > 0: style and consistency findings, not defects. Report the counts
   - Record: uppercase URL count, redirect behavior
 
 ---
@@ -1858,6 +1884,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - WARN if important pages have <3 unique inlinks
   - WARN if significant imbalance (some pages have 100+ inlinks, others have 1-2)
+  - WARN if `links.internal-nofollow` (warning) > 0: internal links that withhold what
+    they would pass on
+  - INFO if `links.high-outlinks` (info) > 0: the external limit is a review
+    threshold, so weigh the page before calling it a defect
   - Record: full inlinks distribution table, bottom 20 pages, top 20 pages, averages by page type
 
 ### CHECK-33b: Product discovery source analysis (e-commerce)
@@ -2060,6 +2090,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - WARN if duplicates > 5% or over-60-char > 50% of pages
   - WARN if product titles front-load internal style names instead of descriptive keywords
   - WARN if brand suffix > 15 chars (wasting SERP real estate)
+  - WARN if `title.pixel-too-long` (warning) > 0: the title is cut in the result;
+    quote the count beside the over-60 count, since the two rules overlap but differ
+  - INFO if `title.pixel-too-short` (info) > 0: report it with the too-short count
   - Record: **per-page-type breakdown** with template pattern, samples, and SERP truncation
     preview. Missing count, duplicate count, over-60 count, brand suffix analysis,
     whitespace issues, top duplicate title groups, SERP simulation for top 10 pages
@@ -2102,6 +2135,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - WARN if missing > 10% for any page type
   - WARN if duplicates > 5%
+  - WARN if `meta-description.pixel-too-long` (warning) > 0: Google cuts the snippet
+    in the result; quote the count beside the over-155 count
+  - INFO if `meta-description.pixel-too-short` (info) > 0: report it with the too-short count
   - **WARN if average length > 200 chars** (descriptions are being truncated — likely
     auto-generated from full product copy rather than crafted for SERPs)
   - FAIL if garbage content found in meta descriptions (data tables, code, foreign language dumps)

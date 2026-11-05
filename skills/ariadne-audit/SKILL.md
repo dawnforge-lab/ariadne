@@ -182,8 +182,9 @@ you named the pages, so you know exactly which rows to read.
 ## Phase 2 — the engine-answered checks
 
 The checklist's crawl-derived range is CHECK-01 to CHECK-46 (47 checks, counting
-CHECK-33b). **45 of them have a rule behind them** — 44 with finding rules, plus
-CHECK-38, whose two metric rules supply evidence and pass no verdict. Only CHECK-41
+CHECK-33b). **45 of them have a rule behind them** — 42 with finding rules, plus
+the three metric-only checks (CHECK-29, CHECK-33b and CHECK-38), whose metric rules
+supply evidence and pass no verdict. Only CHECK-41
 and CHECK-42 have no rule of any kind. Three of the 47 are judgement — CHECK-38,
 CHECK-41 and CHECK-42 — and belong to Phase 3 whatever evidence exists for them.
 
