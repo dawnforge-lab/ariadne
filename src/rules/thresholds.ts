@@ -326,3 +326,26 @@ export const INTERNAL_SEARCH_PARAMS = ["s", "q", "query", "search", "keyword", "
  * `/en/Search/shoes`, not `/search-tips` or `/researching`.
  */
 export const INTERNAL_SEARCH_PATH = /(?:^|\/)search(?:\/|$)/i;
+
+// ---- from src/rules/query/sitemap-entries.ts
+/**
+ * The longest `<loc>` Google accepts in a sitemap: 2,048 characters. The
+ * sitemaps protocol allows less than that nowhere, and a longer entry is one a
+ * search engine may drop or truncate. Compared in characters, strictly greater,
+ * so an entry of exactly this length is not reported.
+ */
+export const SITEMAP_LOC_MAX = 2048;
+
+/**
+ * The W3C date-time profile the sitemaps protocol names for `<lastmod>`: a
+ * year, a year and month, a date, or a date with a time that carries a zone
+ * designator (`Z` or `+hh:mm`), with optional seconds and fractional seconds.
+ * A date-time with no zone designator is not in the profile.
+ *
+ * One anchored pattern, tested in Postgres with `~` (a JS source string is a
+ * valid POSIX ARE for these constructs). It checks the SHAPE and the month,
+ * day, hour and minute ranges; whether the day exists in that month (30
+ * February) is the database's own `timestamptz` parse, in the rule.
+ */
+export const W3C_DATETIME =
+  /^\d{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01])(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?)?)?$/;

@@ -127,13 +127,29 @@ ${links}
  * this document readable. Nothing reads the order.
  */
 function sitemapXml(fixtures: readonly Fixture[], origin: string): string {
-  const paths = [
-    "/",
-    ...fixtures.filter((f) => f.inSitemap !== false).map((f) => f.sitemapLoc ?? f.path),
-    ROBOTS_BLOCKED_PATH,
-  ];
-  const entries = paths
-    .map((path) => `  <url><loc>${escapeHtml(`${origin}${path}`)}</loc></url>`)
+  const parsed = new URL(origin);
+  const legacyOrigin = `${parsed.protocol}//localhost:${parsed.port}`;
+  const entries = [
+    { loc: `${origin}/`, lastmod: undefined },
+    ...fixtures
+      .filter((f) => f.inSitemap !== false)
+      .map((f) => {
+        const target = f.sitemapLoc ?? f.path;
+        return {
+          loc: target.startsWith("{legacy}")
+            ? `${legacyOrigin}${target.slice("{legacy}".length)}`
+            : `${origin}${target}`,
+          lastmod: f.sitemapLastmod,
+        };
+      }),
+    { loc: `${origin}${ROBOTS_BLOCKED_PATH}`, lastmod: undefined },
+  ]
+    .map(
+      (e) =>
+        `  <url><loc>${escapeHtml(e.loc)}</loc>${
+          e.lastmod === undefined ? "" : `<lastmod>${escapeHtml(e.lastmod)}</lastmod>`
+        }</url>`,
+    )
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">

@@ -455,6 +455,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `normalizeUrl` keeps case, underscores and `//` and percent-encodes a space
 //     and non-ASCII, so every shape reaches the rules as stored. A URL that does
 //     not parse throws.
+//  9. (T10) Sitemap entries, four query rules in `query/sitemap-entries.ts`, SQL
+//     over `sitemap_urls`: `sitemap.over-50k-urls` (warning, CHECK-08: a document
+//     with more than `SITEMAP_URL_CAP` DEDUPLICATED entries, so the count is a
+//     lower bound until 26c), `sitemap.url-too-long` (info, CHECK-07: a `<loc>`
+//     over `SITEMAP_LOC_MAX` characters), `sitemap.cross-host-loc` (warning,
+//     CHECK-07: scheme or host differs from the document's) and
+//     `sitemap.lastmod-invalid` (info, CHECK-07: not `W3C_DATETIME`, or after
+//     `crawls.started_at`; zone-less forms are UTC at the period's start, so a
+//     date-only value on the crawl's own day is not future).
 export const RULESET_VERSION = "0.20.0";
 
 /**

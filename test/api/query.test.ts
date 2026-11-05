@@ -1130,13 +1130,13 @@ describe("GET /crawls/:id/issues", () => {
   });
 
   it("400s a check or rule that only the metric side claims, pointing at /metrics", async () => {
-    // CHECK-08 is claimed by exactly one rule in this ruleset, and it is a
-    // METRIC rule (`sitemap.structure`). Findings never carry a metric id, so
-    // this filter's answer is structurally empty — and an empty page would read
-    // as "the sitemap is fine", which is a verdict nobody reached.
-    const check = await call(`/crawls/${crawlA}/issues?checkId=CHECK-08`);
+    // CHECK-29 is claimed only by a METRIC rule (`url.param-volumes`; CHECK-08
+    // was the example until 26a Task 10 gave it `sitemap.over-50k-urls`), so
+    // findings never carry it and an empty page would read as "the URLs are
+    // fine", a verdict nobody reached.
+    const check = await call(`/crawls/${crawlA}/issues?checkId=CHECK-29`);
     expect(check.status).toBe(400);
-    expect(String(check.body["error"])).toContain("CHECK-08");
+    expect(String(check.body["error"])).toContain("CHECK-29");
     expect(String(check.body["error"])).toContain("/metrics");
 
     const rule = await call(`/crawls/${crawlA}/issues?ruleId=sitemap.structure`);

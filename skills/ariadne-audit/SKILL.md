@@ -219,7 +219,7 @@ of three ways:
   PASS only because the crawl was judged; cite `crawl_status`'s `rulesRunAt` (and the
   `crawl_rules` summary, if you ran it) in the evidence.
 - **No rows because the check is measured, not found** → the metrics sweep has it.
-  Four checks are metric-only — CHECK-08, CHECK-29, CHECK-33b and CHECK-38
+  Three checks are metric-only — CHECK-29, CHECK-33b and CHECK-38
   — and `issues_list` with their `checkId` is refused with a pointer to `metrics_get`
   rather than answered empty. That refusal is a useful thing to see once; it is not an
   error to work around. (CHECK-38's metrics are evidence for a judgement you still

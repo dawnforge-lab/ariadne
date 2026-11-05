@@ -5284,8 +5284,8 @@ export class ApiService {
           // test can reach it. It is kept because a future metric-only category
           // (a `performance` group, say) would otherwise be refused as "not a
           // category" — true of the finding rules, and misleading about the
-          // ruleset. The checkId arm above IS reachable (CHECK-08 is claimed
-          // only by `sitemap.structure`) and is tested.
+          // ruleset. The checkId arm above IS reachable (CHECK-29 is claimed
+          // only by `url.param-volumes`) and is tested.
           this.allCategories.has(opts.category)
             ? `category '${clip(opts.category)}' holds only metric rules in ruleset ` +
               `${RULESET_VERSION} — ask /crawls/:id/metrics`

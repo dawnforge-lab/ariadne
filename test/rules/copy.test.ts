@@ -22,6 +22,7 @@ import {
   HIGH_INTERNAL_OUTLINKS,
   NON_DESCRIPTIVE_ANCHORS,
   INTERNAL_SEARCH_PARAMS,
+  SITEMAP_LOC_MAX,
   PAGINATION_WALK_MAX,
 } from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
@@ -878,6 +879,23 @@ describe("copy: URL shape (26a)", () => {
   it("quotes the search parameters the internal-search rule actually reads", () => {
     const list = `${INTERNAL_SEARCH_PARAMS.slice(0, -1).join(", ")} or ${INTERNAL_SEARCH_PARAMS.at(-1)}`;
     expect(copy("url.internal-search").explanation).toContain(`(${list})`);
+  });
+});
+
+describe("copy: sitemap entries (26a)", () => {
+  it("quotes the entry cap and the loc length the rules actually use", () => {
+    expect(copy("sitemap.over-50k-urls").explanation).toContain(
+      `${SITEMAP_URL_CAP.toLocaleString("en-US")} URLs`,
+    );
+    expect(copy("sitemap.over-50k-urls").title).toContain(SITEMAP_URL_CAP.toLocaleString("en-US"));
+    expect(copy("sitemap.url-too-long").title).toContain(SITEMAP_LOC_MAX.toLocaleString("en-US"));
+    expect(copy("sitemap.url-too-long").explanation).toContain(
+      `${SITEMAP_LOC_MAX.toLocaleString("en-US")} characters`,
+    );
+  });
+
+  it("says the entry count is a lower bound", () => {
+    expect(copy("sitemap.over-50k-urls").explanation).toMatch(/lower bound/);
   });
 });
 
@@ -1811,6 +1829,8 @@ describe("copy rubric: a threshold belongs in the title", () => {
     // The title carries the internal limit; the external one has its own
     // assertion in "copy: link hygiene (26a)", since a map entry holds one number.
     "links.high-outlinks": HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US"),
+    "sitemap.url-too-long": SITEMAP_LOC_MAX.toLocaleString("en-US"),
+    "sitemap.over-50k-urls": SITEMAP_URL_CAP.toLocaleString("en-US"),
   };
 
   it("states the number in the title of every rule that fires on one", () => {

@@ -897,6 +897,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     robots or outside the crawl's budget, off this crawl's origin (another host,
     port, or scheme — never attempted by design; the evidence's `offOrigin` flag
     marks these), or attempted and no response came back. NOT MEASURED, not clean.
+  Three more rules read the entry itself, not the page it names:
+  - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters
+  - `sitemap.cross-host-loc` (warning) — a `<loc>` whose scheme or host (www and port
+    included) is not its sitemap document's
+  - `sitemap.lastmod-invalid` (info) — a `<lastmod>` that is not a W3C date or
+    date-time (`reason: "format"`), or is dated after the crawl began
+    (`reason: "future"`; a date-only value on the crawl's own UTC day is not future)
   `issue_urls` per rule for the URL lists; `metrics_get` with
   `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
 - **Evaluate**:
@@ -905,10 +912,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - Record: count, breakdown by reason (noindex, 3xx, 4xx, canonicalised)
 
 ### CHECK-08: Sitemap structure (large sites)
-- **Priority**: Medium | **Requires**: Engine (metric)
-- **Engine**: `metrics_get` with `metricId: "sitemap.structure"`. This check is
-  MEASURED, not found: no rule fires for it, so `issues_list` with
-  `checkId: "CHECK-08"` is refused with a pointer here rather than answered empty.
+- **Priority**: Medium | **Requires**: Engine (metric and rule)
+- **Engine**: `metrics_get` with `metricId: "sitemap.structure"` for the shape, and
+  `issues_list` with `checkId: "CHECK-08"` for one finding rule:
+  `sitemap.over-50k-urls` (warning), one site-scoped finding per sitemap document
+  with more than 50,000 entries. Its count is a LOWER BOUND: a URL listed in two
+  documents is stored, and counted, once. No finding is not proof of a clean
+  sitemap when `entryCapReached` is true. The metric's rows:
   - the `site` row: `{docs, totalUrls, urlCapBreaches, entryCapReached, oversizedDocsSkipped}`
   - one `sitemap_doc` row per document (`scopeValue` is the document's URL) with
     `{urls, breaches50k}` — the largest 50 are listed
@@ -3062,8 +3072,8 @@ the answer to "how many" — `issues_list`'s `count` is.
 define is refused BY NAME, so an empty page always means "nothing found" and never
 "you asked wrong". Two refusals are routine and both are informative:
 
-- `checkId 'CHECK-08' is claimed only by metric rules … it is measured, not found` —
-  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33b and CHECK-38 answer
+- `checkId 'CHECK-29' is claimed only by metric rules … it is measured, not found` —
+  go to `metrics_get`. CHECK-29, CHECK-33b and CHECK-38 answer
   this way, **for example**: the list is a sample of the shape, not the closed set.
 - `checkId 'CHECK-41' is claimed by no rule` — an agent check. There is no engine
   answer and there is not meant to be one. CHECK-41 is the standing example and

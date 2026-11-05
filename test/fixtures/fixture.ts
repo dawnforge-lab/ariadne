@@ -93,6 +93,17 @@ export interface Fixture {
    */
   sitemapLoc?: string;
   /**
+   * The `<lastmod>` `/sitemap.xml` publishes for this fixture, verbatim. Default:
+   * none. Verbatim so a fixture can publish a value no W3C parser accepts
+   * (`sitemap.lastmod-invalid`).
+   *
+   * `sitemapLoc` may begin with `{legacy}`, which the writer replaces with the
+   * site's second name (`FixtureApp.legacyBase`): the port is only known once
+   * the server listens, and an entry on that host is the cross-host `<loc>`
+   * (`sitemap.cross-host-loc`).
+   */
+  sitemapLastmod?: string;
+  /**
    * Whether the hub links this fixture. Default true.
    *
    * The hub is what makes one crawl from the seed reach the whole collection, so

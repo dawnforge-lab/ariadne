@@ -32,6 +32,7 @@ import { resourceRules } from "./query/resources.js";
 import { robotsRules } from "./query/robots.js";
 import { securityRules } from "./query/security.js";
 import { sitemapRules } from "./query/sitemap.js";
+import { sitemapEntryRules } from "./query/sitemap-entries.js";
 import { structuredDataRules } from "./query/structured-data.js";
 import { urlHygieneRules } from "./query/url-hygiene.js";
 
@@ -64,6 +65,8 @@ export function buildRegistry(): Registry {
     ...paginationRules,
     ...robotsRules,
     ...sitemapRules,
+    // The entry-level sitemap limits (26a): size, loc length, host, lastmod.
+    ...sitemapEntryRules,
     ...urlHygieneRules,
     ...hostRules,
     ...contentRules,

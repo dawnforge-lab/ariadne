@@ -53,6 +53,9 @@ describe("thresholds", () => {
       HIGH_EXTERNAL_OUTLINKS: 100,
       INTERNAL_SEARCH_PARAMS: ["s", "q", "query", "search", "keyword", "keywords"],
       INTERNAL_SEARCH_PATH: /(?:^|\/)search(?:\/|$)/i,
+      SITEMAP_LOC_MAX: 2048,
+      W3C_DATETIME:
+        /^\d{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01])(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?)?)?$/,
     });
   });
 

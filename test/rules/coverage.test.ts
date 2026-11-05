@@ -398,11 +398,19 @@ describe("checklist coverage", () => {
   //
   //   page    38 + 7 = 45
   //   total   139 + 7 = 146
-  it("pins the ruleset split the gate doc reports: 146 rules = 45 page + 87 query + 14 metric", () => {
+  //
+  // Phase 26a Task 10 adds FOUR sitemap-entry QUERY rules in
+  // `src/rules/query/sitemap-entries.ts`: `sitemap.over-50k-urls` on CHECK-08 and
+  // `sitemap.url-too-long`, `sitemap.cross-host-loc` and `sitemap.lastmod-invalid`
+  // on CHECK-07.
+  //
+  //   query   87 + 4 = 91
+  //   total   146 + 4 = 150
+  it("pins the ruleset split the gate doc reports: 150 rules = 45 page + 91 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(146);
+    expect(registry.all()).toHaveLength(150);
     expect(registry.byKind("page")).toHaveLength(45);
-    expect(registry.byKind("query")).toHaveLength(87);
+    expect(registry.byKind("query")).toHaveLength(91);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

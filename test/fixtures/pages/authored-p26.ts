@@ -1263,6 +1263,103 @@ const searchResults = shapePage(
   },
 );
 
+/**
+ * The three sitemap-entry fixtures (Task 10). Each page is the control recipe
+ * and the fault is in the line of `/sitemap.xml` that names it.
+ *
+ * `P26_LONG_LOC` is a fragment: it is stripped by `normalizeUrl`, so the
+ * published `<loc>` is over 2,048 characters and still names the page the crawl
+ * fetched, which keeps the entry joinable to its page.
+ */
+const P26_LONG_LOC = `/authored26/long-loc#${"segment-".repeat(270)}`;
+
+const badLastmod: Fixture = {
+  path: "/authored26/bad-lastmod",
+  sitemapLastmod: "2026-13-01",
+  category: "sitemap",
+  name: "Page whose sitemap entry carries an impossible lastmod",
+  expectedIssues: ["sitemap.lastmod-invalid"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "The page whose sitemap entry has a month thirteen",
+      metaDescription:
+        "The page itself is sound. The sitemap entry that lists it carries a last modified date with a month that does not exist, so a search engine cannot read it.",
+      bodyHtml: article({
+        h1: "A page listed with a date no calendar contains",
+        lede: "Nothing on this page is wrong. The file that lists it gives a modification date that no engine can parse.",
+        withImage: false,
+        sections: [
+          { h2: "What the sitemap does", body: "The sitemap entry for this page has a lastmod of 2026-13-01. The month is thirteen, so the value is not a date in the W3C format the protocol asks for, and a crawler reading the file has to discard it." },
+          { h2: "Why it matters", body: "A modification date is a promise about when to come back and look again. One that cannot be read is worse than none, because it teaches the engine that the site's dates are unreliable and it begins to ignore the good ones as well." },
+          { h2: "How it gets fixed", body: "Output the date in the W3C format, a year, a date or a date and time with a zone, from the real last change of the page content, and check the generator against a month and a day that exist." },
+          {
+            h2: "What a check of the file looks like",
+            body: "Open the sitemap, read the entry for this page and compare it with the address the page really answers on. Every entry is one line of text written by a generator, so a fault in one line is nearly always a fault in all the lines the same template writes, and one correction usually repairs the whole file at once.",
+          },
+        ],
+      }),
+    })),
+};
+
+const longLoc: Fixture = {
+  path: "/authored26/long-loc",
+  sitemapLoc: P26_LONG_LOC,
+  category: "sitemap",
+  name: "Page whose sitemap entry is longer than 2,048 characters",
+  expectedIssues: ["sitemap.url-too-long"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "The page whose sitemap entry is a very long address",
+      metaDescription:
+        "The page is ordinary. The sitemap lists it with an address more than two thousand characters long, which is past what a search engine accepts in an entry.",
+      bodyHtml: article({
+        h1: "A page listed under an address that never ends",
+        lede: "Nothing on this page is wrong. The entry that lists it is over the length a sitemap may carry.",
+        withImage: false,
+        sections: [
+          { h2: "What the sitemap does", body: "The sitemap writes this page's address with a very long tail after a fragment marker. The fragment is never sent to the server, so the address resolves to the same page, but the entry itself is far past 2,048 characters." },
+          { h2: "Why it matters", body: "Search engines may drop or truncate an entry that long, so the page can silently stay out of the file that exists to announce it. A tail like this usually comes from a session or filter value that should never have been written into a sitemap." },
+          { h2: "How it gets fixed", body: "Write the plain address of the page and leave any tail out. Check the generator for a value that is appended to every entry." },
+          {
+            h2: "What a check of the file looks like",
+            body: "Open the sitemap, read the entry for this page and compare it with the address the page really answers on. Every entry is one line of text written by a generator, so a fault in one line is nearly always a fault in all the lines the same template writes, and one correction usually repairs the whole file at once.",
+          },
+        ],
+      }),
+    })),
+};
+
+const crossHostLoc: Fixture = {
+  path: "/authored26/cross-host-loc",
+  sitemapLoc: "{legacy}/authored26/cross-host-loc",
+  category: "sitemap",
+  name: "Page whose sitemap entry names it on another host",
+  expectedIssues: ["pages.not-in-sitemap"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "The page the sitemap lists under the wrong host name",
+      metaDescription:
+        "The page answers on its own host. The sitemap lists it under another host name for the same server, outside the host of the file itself.",
+      bodyHtml: article({
+        h1: "A page listed on a host the sitemap does not belong to",
+        lede: "Nothing on this page is wrong. The sitemap lists it under the old host name of the site.",
+        withImage: false,
+        sections: [
+          { h2: "What the sitemap does", body: "The entry in the sitemap for this page names the old host of the site, which still answers. The sitemap protocol only allows a file to list addresses on its own host, so the entry is outside what the file may speak for, and the page counts as not listed." },
+          { h2: "Why it matters", body: "A search engine may ignore entries on another host. The page it was meant to announce is then discovered only through links, and the old host keeps being treated as part of the site." },
+          { h2: "How it gets fixed", body: "Rewrite the entry with the host and scheme of the sitemap, and fix the generator that still builds addresses from the old host name." },
+          {
+            h2: "What a check of the file looks like",
+            body: "Open the sitemap, read the entry for this page and compare it with the address the page really answers on. Every entry is one line of text written by a generator, so a fault in one line is nearly always a fault in all the lines the same template writes, and one correction usually repairs the whole file at once.",
+          },
+        ],
+      }),
+    })),
+};
+
 export const authoredP26Fixtures: Fixture[] = [
   upperCase,
   underScore,
@@ -1299,4 +1396,7 @@ export const authoredP26Fixtures: Fixture[] = [
   noindexHub,
   onlyFromNoindex,
   highOutlinks,
+  badLastmod,
+  longLoc,
+  crossHostLoc,
 ];

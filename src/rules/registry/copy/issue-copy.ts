@@ -674,12 +674,26 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add the pages to the sitemap, or fix the generator that should have included them. Confirm any deliberate exclusion is a decision rather than an oversight.",
   },
+  "sitemap.cross-host-loc": {
+    title: "Sitemaps: URL on another host or scheme than its sitemap",
+    explanation:
+      "Sitemap entries whose scheme or host (www and port included) differs from the sitemap document that lists them. The sitemaps protocol only lets a document list URLs on its own host, so search engines may ignore these entries; the row gives the document and the URL.",
+    howToFix:
+      "Move each entry into a sitemap on its own host, or correct the generator that is writing the wrong host or scheme (often http against https, or www against the bare domain).",
+  },
   "sitemap.invalid": {
     title: "Sitemaps: Sitemap could not be read",
     explanation:
       "Sitemap documents that could not be read: a 4xx or 5xx, no response, a document over the size limit, an unsupported encoding, a non-XML response such as an HTML page served with 200, or a root element that is neither urlset nor sitemapindex. Up to 50 failures are listed and the count is exact. Their URLs are invisible to search engines.",
     howToFix:
       "Request each listed sitemap URL and check the response. A sitemap must be well-formed XML with a urlset or sitemapindex root, served with 200 and an XML content type; remove index entries pointing at sitemaps that no longer exist.",
+  },
+  "sitemap.lastmod-invalid": {
+    title: "Sitemaps: Invalid lastmod date",
+    explanation:
+      "Sitemap entries whose lastmod is not a W3C date or date-time (YYYY, YYYY-MM, YYYY-MM-DD, or a date-time with a Z or hh:mm zone), or is dated after the crawl began. The row gives the value and which of the two it is: format or future. Search engines ignore a lastmod they cannot trust.",
+    howToFix:
+      "Output lastmod in W3C format with a zone, and set it to the date the page content last changed, never to the time the sitemap was generated.",
   },
   "sitemap.missing": {
     title: "Sitemaps: No sitemap declared in robots.txt",
@@ -702,6 +716,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Remove noindex if the page should rank, otherwise remove the URL from the sitemap. For a canonicalised URL, list the canonical target instead. Filtered, paginated and thank-you pages usually belong out of the sitemap.",
   },
+  "sitemap.over-50k-urls": {
+    title: "Sitemaps: Sitemap over 50,000 URLs",
+    explanation:
+      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document. Entries past the limit are not read. The row gives the document and its entry count, which is a lower bound because a URL listed in two documents is counted once.",
+    howToFix:
+      "Split the sitemap into several documents of 50,000 URLs or fewer and list them in a sitemap index.",
+  },
   "sitemap.redirected": {
     title: "Sitemaps: Sitemap URLs that redirect",
     explanation:
@@ -715,6 +736,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), and the largest 50 documents with their entry counts. An entry in several documents is counted once.",
     howToFix:
       "Split sitemaps by content type so stale sections can be seen and submitted separately. Split any document over 50,000 entries; entries past the limit are not read.",
+  },
+  "sitemap.url-too-long": {
+    title: "Sitemaps: URL over 2,048 characters",
+    explanation:
+      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length.",
+    howToFix:
+      "Shorten the URL or remove the entry. A very long address is usually a filter or session parameter that should not be in the sitemap.",
   },
   "sitemap.uncrawled": {
     title: "Sitemaps: URLs in sitemap not crawled",
