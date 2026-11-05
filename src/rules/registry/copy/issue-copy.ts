@@ -336,7 +336,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "security.hsts-missing": {
     title: "Security: HTTPS page without HSTS header",
     explanation:
-      "HTTPS pages that send no Strict-Transport-Security header. Without it a browser still tries plain HTTP first on a visitor's first request, which leaves a window for a downgrade or interception on an untrusted network.",
+      "HTTPS pages that send no Strict-Transport-Security header, or one that does not protect: max-age=0 tells browsers to drop HSTS, and a header with no valid max-age is ignored; the HSTS Problem column says which. Without working HSTS a browser still tries plain HTTP first on a visitor's first request, which leaves a window for a downgrade or interception on an untrusted network.",
     howToFix:
       "Send Strict-Transport-Security on every HTTPS response, for example max-age=31536000; includeSubDomains. Start with a short max-age, confirm nothing on the host still needs HTTP, then raise it.",
   },
@@ -1140,8 +1140,8 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "links.high-outlinks": {
     title: "Links: Over 1,000 internal or 10 external links",
     explanation:
-      "Pages that link to more than 1,000 different internal URLs or more than 10 different external URLs. Link value is shared between the links on a page, so every extra link dilutes the rest, and a crawler may stop reading a very long page. The row gives both counts and the limit that was crossed.",
+      "Pages that link to more than 1,000 different internal URLs or more than 10 different external URLs. Internally, link value is shared between the links on a page, so every extra link dilutes the rest, and a page this long is hard for a visitor to use; externally, 10 is a review threshold, not a defect, because that many outbound links send visitors and link value off the site and can read as a link list. The row gives both counts and the limit that was crossed.",
     howToFix:
-      "Cut the list down to the links a visitor needs, and move long lists into paginated or category pages that each carry a manageable number.",
+      "Internal: cut the list down to the links a visitor needs, and move long lists into paginated or category pages that each carry a manageable number. External: keep the links that earn their place, such as sources and references, and remove or mark with rel=\"nofollow\" or rel=\"sponsored\" any you would not vouch for.",
   },
 };

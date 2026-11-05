@@ -613,6 +613,32 @@ describe("hreflangIntegrityRules against the database", () => {
       expect(found[0]!.evidence.sourceCount).toBe(n);
     });
 
+    it("samples each target's own declarers when two targets share them", async () => {
+      const crawlId = await newCrawl();
+      const n = SAMPLE_SOURCES + 3;
+      const specs = ["/de", "/fr"];
+      for (let i = 0; i < n; i += 1) specs.push(`/s-${String(i).padStart(2, "0")}`);
+      const ids = await addPages(crawlId, specs);
+      const declarers = specs.slice(2);
+      // Every declarer names both targets.
+      for (const path of declarers) {
+        await declare(crawlId, ids, path, [
+          ["de", "/de"],
+          ["fr", "/fr"],
+        ]);
+      }
+      // /fr also declares /de: it is a source for /de but never for itself.
+      await declare(crawlId, ids, "/fr", [["de", "/de"]]);
+      const found = await findings("hreflang.unlinked-target", crawlId);
+      expect(found.map((f) => f.pageUrl)).toEqual([url("/de"), url("/fr")]);
+      const [de, fr] = found;
+      const sortedUrls = [...declarers.map(url), url("/fr")].sort();
+      expect(de!.evidence.sourceCount).toBe(n + 1);
+      expect(de!.evidence.sources).toEqual(sortedUrls.slice(0, SAMPLE_SOURCES));
+      expect(fr!.evidence.sourceCount).toBe(n);
+      expect(fr!.evidence.sources).toEqual(declarers.map(url).slice(0, SAMPLE_SOURCES));
+    });
+
     it("caps what it lists and reports the exact total of targets", async () => {
       const crawlId = await newCrawl();
       const total = URL_FINDING_CAP + 2;

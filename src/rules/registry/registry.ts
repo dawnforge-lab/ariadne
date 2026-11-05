@@ -475,8 +475,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `META_PX_MIN`). Width is `serpWidth` (measured Chromium advances at
 //     20px / 14px Arial); a value with a character outside the measured table
 //     is NOT pixel-judged (the character-count rules still apply), and the
-//     copy says so. The four bounds are starting values that T13's Screaming
-//     Frog calibration confirms or moves. This is the last rule task: 154 rules.
+//     copy says so. T13's Screaming Frog 25.1 calibration CONFIRMED all four
+//     bounds (561 / 200 / 985 / 400, strict) and moved one other threshold:
+//     `HIGH_EXTERNAL_OUTLINKS` 100 -> 10 (SF flags 11 distinct external
+//     targets and not 10); `HIGH_INTERNAL_OUTLINKS` 1000 was confirmed. See
+//     docs/gates/phase-26a-calibration.md. This is the last rule task: 154 rules.
 export const RULESET_VERSION = "0.20.0";
 
 /**

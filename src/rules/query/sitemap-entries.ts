@@ -168,9 +168,9 @@ async function assertLastmodReference(db: Db, crawlId: string): Promise<void> {
   if (row.unfinished && row.has_lastmod) {
     throw new Error(
       `${LASTMOD.id}: crawl '${crawlId}' has sitemap lastmod values but no finished_at, ` +
-        `the instant a lastmod is judged "future" against: every closed crawl records it, ` +
-        `so this row was not closed by the crawl loop — re-crawl the site, or close the ` +
-        `crawl, before judging its sitemap dates`,
+        `so "future" cannot be judged: it is measured against the instant the crawl finished. ` +
+        `A crawl that ran to a terminal state always records finished_at, so this is normally ` +
+        `a crawl row that never reached one (it is still running, or it was interrupted)`,
     );
   }
 }

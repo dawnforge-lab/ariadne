@@ -335,6 +335,28 @@ describe("securityRules against the database", () => {
       });
     });
 
+    it("hsts-missing treats max-age=0 and an absent or unparseable max-age as missing, and says why", async () => {
+      const crawl = await newCrawl(HTTPS_SITE);
+      const sts = (v: string) => headers({ "strict-transport-security": [v] });
+      await addPages(crawl, [
+        { url: `${HTTPS_SITE}/zero`, headers: sts("max-age=0") },
+        { url: `${HTTPS_SITE}/zero-quoted`, headers: sts('Max-Age="0"; includeSubDomains') },
+        { url: `${HTTPS_SITE}/no-age`, headers: sts("includeSubDomains") },
+        { url: `${HTTPS_SITE}/junk`, headers: sts("max-age=soon") },
+        { url: `${HTTPS_SITE}/good`, headers: sts("includeSubDomains; max-age=300") },
+      ]);
+      const found = await run("security.hsts-missing", crawl);
+      const byUrl = new Map(found.map((f) => [f.pageUrl, f.evidence]));
+      const zero = { hstsProblem: "max-age is 0, which tells browsers to drop HSTS" };
+      const noAge = { hstsProblem: "no valid max-age directive" };
+      expect(byUrl.get(`${HTTPS_SITE}/zero`)).toEqual(zero);
+      expect(byUrl.get(`${HTTPS_SITE}/zero-quoted`)).toEqual(zero);
+      expect(byUrl.get(`${HTTPS_SITE}/no-age`)).toEqual(noAge);
+      expect(byUrl.get(`${HTTPS_SITE}/junk`)).toEqual(noAge);
+      expect(byUrl.has(`${HTTPS_SITE}/good`)).toBe(false);
+      expect(found).toHaveLength(4);
+    });
+
     it("hsts-missing refuses an HTTPS 200 with no stored headers rather than reading it as missing", async () => {
       const crawl = await newCrawl(HTTPS_SITE);
       await addPages(crawl, [{ url: `${HTTPS_SITE}/odd`, headers: null }]);

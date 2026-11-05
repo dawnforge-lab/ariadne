@@ -275,20 +275,23 @@ async function unlinkedTargetFindings(
       group by t.id, t.url
       order by t.url
       ${limitTo(caps.listing)}
+    ),
+    declarers as (
+      select distinct d.target_key, d.page_id, d.page_url from decl d
+    ),
+    ranked as (
+      select t.target_id, dr.page_url,
+             row_number() over (partition by t.target_id order by dr.page_url) as rn
+      from targets t
+      join declarers dr on dr.target_key = t.target_key and dr.page_id <> t.target_id
     )
-    select t.target_id, t.target_url, t.source_count, t.total_matches, s.sample_sources
-    from targets t
-    cross join lateral (
-      select coalesce(array_agg(sample.page_url order by sample.page_url), array[]::text[])
+    select t.target_id, t.target_url, t.source_count, t.total_matches,
+           coalesce(array_agg(r.page_url order by r.page_url)
+                      filter (where r.page_url is not null), array[]::text[])
              as sample_sources
-      from (
-        select distinct d2.page_url
-        from decl d2
-        where d2.target_key = t.target_key and d2.page_id <> t.target_id
-        order by d2.page_url
-        limit ${SAMPLE_SOURCES}
-      ) sample
-    ) s
+    from targets t
+    left join ranked r on r.target_id = t.target_id and r.rn <= ${SAMPLE_SOURCES}
+    group by t.target_id, t.target_url, t.source_count, t.total_matches
     order by t.target_url`);
 
   const findings = result.rows.map((row) =>

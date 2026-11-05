@@ -231,8 +231,27 @@ function hstsMissingFindings(
   caps: RuleCaps,
 ): Promise<Finding[]> {
   return scanHttpsPages(self, db, crawlId, caps, (h) =>
-    occurrences(h, "strict-transport-security").length === 0 ? {} : null,
+    hstsProblem(h),
   );
+}
+
+/**
+ * Why a page's HSTS header does not protect, or null when it does. A missing
+ * header, `max-age=0` (which tells browsers to DROP HSTS) and a header with no
+ * parseable max-age all leave the page unprotected. A browser reads the first
+ * Strict-Transport-Security header (RFC 6797 8.1), so that one decides.
+ */
+function hstsProblem(h: StoredResponseHeaders): Record<string, unknown> | null {
+  const first = occurrences(h, "strict-transport-security")[0];
+  if (first === undefined) return {};
+  for (const directive of first.split(";")) {
+    const m = /^\s*max-age\s*=\s*"?(\d+)"?\s*$/i.exec(directive);
+    if (m === null) continue;
+    return Number(m[1]) === 0
+      ? { hstsProblem: "max-age is 0, which tells browsers to drop HSTS" }
+      : null;
+  }
+  return { hstsProblem: "no valid max-age directive" };
 }
 
 function headersMissingFindings(
@@ -340,7 +359,7 @@ export const securityRules: QueryRule[] = [
     checkIds: ["CHECK-84"],
     category: CATEGORY,
     severity: HSTS_MISSING.severity,
-    columns: [],
+    columns: [{ key: "hstsProblem", label: "HSTS Problem", optional: true }],
     ...copyFor(HSTS_MISSING.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => hstsMissingFindings(HSTS_MISSING, db, crawlId, capsOr(caps)),

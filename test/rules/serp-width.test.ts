@@ -51,6 +51,28 @@ describe("serpWidth", () => {
     expect(Math.abs(d - t * 0.7)).toBeLessThan(0.5);
   });
 
+  it("collapses newline, tab and repeated spaces to one space, as a results page does", () => {
+    const plain = serpWidth("Foo Bar | Shop", "title");
+    expect(plain).not.toBeNull();
+    expect(serpWidth("Foo\n  Bar | Shop", "title")).toBe(plain);
+    expect(serpWidth("Foo\tBar | Shop", "title")).toBe(plain);
+    expect(serpWidth("Foo   Bar | Shop", "title")).toBe(plain);
+    expect(serpWidth("Foo\r\n\r\nBar | Shop", "description")).toBe(
+      serpWidth("Foo Bar | Shop", "description"),
+    );
+  });
+
+  it("ignores leading and trailing whitespace", () => {
+    expect(serpWidth("  \n Foo Bar\t ", "title")).toBe(serpWidth("Foo Bar", "title"));
+    expect(serpWidth(" \n\t ", "title")).toBe(0);
+  });
+
+  it("keeps a non-breaking space as its own measured glyph (HTML does not collapse it)", () => {
+    expect(serpWidth("Foo\u00a0\u00a0Bar", "title")!).toBeGreaterThan(
+      serpWidth("Foo Bar", "title")!,
+    );
+  });
+
   it("returns null for a code point outside the table", () => {
     expect(serpWidth("日本", "title")).toBeNull();
     expect(serpWidth("abc 日", "description")).toBeNull();
