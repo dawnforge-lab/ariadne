@@ -588,17 +588,17 @@ describe("check annotations", () => {
  * `render.meta-description-changed` and `render.h1-changed`. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
- * the fourteen markers (26a added `security.headers-not-recorded`), which report a hole in OUR evidence and never a fault of
+ * the fifteen markers (26a added `security.headers-not-recorded`, 26b `extraction.not-recorded`), which report a hole in OUR evidence and never a fault of
  * the site.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 54 warning and 67 info rules", () => {
+  it("holds 33 critical, 54 warning and 68 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 54, info: 67 });
-    expect(all).toHaveLength(154);
+    expect(counts).toEqual({ critical: 33, warning: 54, info: 68 });
+    expect(all).toHaveLength(155);
   });
 
   it("names exactly the rules that are critical", () => {

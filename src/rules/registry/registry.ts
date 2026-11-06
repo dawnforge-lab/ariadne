@@ -542,6 +542,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     twitter and an og tag counts as both. Migration 0027 (Ruling R7) widens
 //     `title_count`, `meta_description_count`, `rel_next_count` and
 //     `rel_prev_count` from smallint to integer, unclamped.
+//  4. (T5) The v2 gate and its marker, `src/rules/query/page-facts.ts`:
+//     `v2Gate` (a thin wrapper over `extractionCoverage(db, crawlId, 2)`) opens
+//     every later query rule on a v2 fact, and `extraction.not-recorded` (info,
+//     `marker`, category `crawl`) is the one NOT MEASURED marker for them all. It
+//     fires once (`dedupeKey` "site") when any page is below version 2 and the
+//     crawl has a FETCHED_OK page, and claims CHECK-04, 10, 18, 22, 24, 25, 34,
+//     35, 36, 37, 49, 85, 86, 87 and 88. 155 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**

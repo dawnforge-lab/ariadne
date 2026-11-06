@@ -218,6 +218,15 @@ function databaseUrl(): string {
  * `test/rules/security-query.test.ts`.
  */
 const SKIP_HARNESS_CLAIMS: string[] = [
+  // Phase 26b Task 5. `extraction.not-recorded` is the NOT MEASURED marker for a
+  // crawl with pages below extraction version 2. The fixture crawl is always
+  // current: this harness runs the current crawler, which stamps every row with
+  // `EXTRACTION_VERSION`, so the marker's condition is false BY CONSTRUCTION.
+  // Producing the crawl it reports would mean hand-writing `pages` rows, the one
+  // thing this file exists not to do. Its firing on a pre-bump, null-stamped and
+  // mixed crawl, and its silence on a current, an empty and a nothing-fetched
+  // crawl, are covered in `test/rules/page-facts-query.test.ts`.
+  "extraction.not-recorded",
   "content.thin-skipped",
   // P19-T2's NOT MEASURED marker, unprovokable here for the same reason as the
   // thin skip above it: its condition is a property of a PRE-0018 CRAWL, not of

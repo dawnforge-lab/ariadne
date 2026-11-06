@@ -318,6 +318,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Re-run the crawl with host checks on. Meanwhile, request each host variant by hand and follow the redirects to confirm they end on the canonical HTTPS host.",
   },
 
+  // ------------------------------------------------------------- extraction
+  "extraction.not-recorded": {
+    title: "Crawl: Page facts not recorded on this crawl",
+    explanation:
+      "Some or all pages in this crawl were extracted before the page facts the social, structure, link-hygiene and image checks read were recorded, so those checks were left unrun rather than reported clean. The Pages Without Version 2 Facts column counts the pages affected.",
+    howToFix:
+      "Re-crawl the site. These page facts are recorded for every page on crawls from this version onwards.",
+  },
   // --------------------------------------------------------------- security
   "security.headers-missing": {
     title: "Security: Protective response headers missing or unsafe",

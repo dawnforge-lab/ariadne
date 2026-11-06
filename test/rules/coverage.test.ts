@@ -414,11 +414,18 @@ describe("checklist coverage", () => {
   //
   //   page    45 + 4 = 49
   //   total   150 + 4 = 154
-  it("pins the ruleset split the gate doc reports: 154 rules = 49 page + 91 query + 14 metric", () => {
+  //
+  // Phase 26b Task 5 adds ONE query rule, the `extraction.not-recorded` marker in
+  // `src/rules/query/page-facts.ts`, claiming the fifteen checks a v2-gated rule
+  // reads.
+  //
+  //   query   91 + 1 = 92
+  //   total   154 + 1 = 155
+  it("pins the ruleset split the gate doc reports: 155 rules = 49 page + 92 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(154);
+    expect(registry.all()).toHaveLength(155);
     expect(registry.byKind("page")).toHaveLength(49);
-    expect(registry.byKind("query")).toHaveLength(91);
+    expect(registry.byKind("query")).toHaveLength(92);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

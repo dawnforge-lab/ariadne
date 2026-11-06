@@ -352,7 +352,7 @@ answered from, and its verdict is the confidence interval around all of them.
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
   `resources.all-unknown`, `resources.partial-unknown`,
   `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
-  `security.headers-not-recorded`,
+  `security.headers-not-recorded`, `extraction.not-recorded`,
   and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
   resource markers are siblings and never more than one appears: `resources.not-recorded` means
@@ -809,6 +809,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - Paginated blog pages noindexed — prevents discovery of older articles
   - Collection pages with filters noindexed (may be intentional, but verify)
   - Policy pages noindexed (shipping, returns — these have organic value)
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if noindex/nofollow only on truly intended pages (account, cart, checkout, search internal)
   - **FAIL if blog index or blog paginated pages are noindexed** — this blocks article discovery
@@ -1018,6 +1019,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      URLs crawled is `ratioPct`. The inlink-weighted one — `redirectInlinks` ÷
      `totalPages` — is the one the Evaluate line's 10% threshold grades, and it
      is the one that moves when a template link is repointed.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if redirect chains > 0
   - CRITICAL if redirect loops found
@@ -1283,6 +1285,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   than that the site is clean. The remedy is a re-crawl. One rule answers it:
   `security.mixed-content` (warning) — an HTTPS page with at least one `http:`
   resource. One finding per page, carrying the count and up to ten of the URLs.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if no HTTPS page references an `http:` image, script or stylesheet
   - FAIL if `security.mixed-content` fired
@@ -1344,6 +1347,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     JavaScript added, removed or pointed elsewhere (rendered pages only; see CHECK-01
     step 6).
   `issue_urls` per rule; the evidence carries the competing targets.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if multiple conflicting canonicals > 0
   - Record: count, affected URLs, conflicting targets
@@ -1434,6 +1438,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   recommend noindexing paginated content. The correct approach is indexed pages with
   self-referencing canonicals. Noindexing pagination removes those pages and their
   linked content from the index.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if pagination links are HTML anchor tags and paginated pages are indexable
   - FAIL if JS-only (infinite scroll / "View More" button with no HTML link fallback)
@@ -1548,6 +1553,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   real one, and search engines read hreflang on the canonical, so an inherited
   alternates block on a tracking-parameter variant is not judged at all. Its
   canonical is reported by CHECK-17 where it belongs.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing return links > 0
   - FAIL if pages missing their own self-reference > 0
@@ -1567,6 +1573,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     language, or language-region, value
   - `hreflang.missing-x-default` (info) — a cluster with no `x-default` member
   `issue_urls` per rule for the affected URLs and the codes they declared.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if incorrect codes > 0
   - WARN if x-default or self-reference missing
@@ -1985,6 +1992,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   It needs `renderPassCount` ≥ 1; without a render pass this is SKIP, not PASS.
   Whether the nav contains the RIGHT links (key categories) is judgement — read the
   nav on one page in a browser for that, and say that is what you did.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if main nav and footer links are in initial HTML
   - FAIL if key navigation is JS-only
@@ -2009,6 +2017,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     anchor is a generic English phrase ("click here", "read more", "learn more" and the
     rest of the list in the rule's thresholds). The judgement covers internal anchors
     only; anchors in other languages, and external anchors, are not judged.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if no link points at a private host and generic anchors are rare
   - WARN if any link points at `localhost` or a private address, or generic anchors
@@ -2023,7 +2032,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   contradict each other, tags placed in the head, and a share image that loads. The
   evidence is the social tag set the crawler stored on each page; the image check
   reads the recorded fetch of the image. These facts exist only for crawls written by
-  extraction version 2 or later: on an older crawl the crawl-level "not recorded" marker is the
+  extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
   NOT MEASURED marker, and silence says the crawl never measured them, not that the
   site is clean. The remedy is a re-crawl. The rules that answer the check are named
   in the engine's issue listing.
@@ -2031,7 +2040,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - PASS if every judged page carries a complete, consistent, head-placed social set
     and its share image loads
   - FAIL if any rule listed under this check fired
-  - NOT MEASURED if the crawl-level "not recorded" marker fired
+  - NOT MEASURED if `extraction.not-recorded` (info) fired
   - Record: the pages with each gap and the tags that are missing or conflicting
 
 ### CHECK-88: HTML document structure
@@ -2042,13 +2051,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   not belong in it (which pushes the tags after it, including the title, canonical and
   robots tags, out of the head). The evidence is the document structure the crawler
   recorded while parsing each page. These facts exist only for crawls written by
-  extraction version 2 or later: on an older crawl the crawl-level "not recorded" marker is the
+  extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
   NOT MEASURED marker. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if every judged page has a single, correctly ordered html, head and body and
     its head is not closed early
   - FAIL if any rule listed under this check fired
-  - NOT MEASURED if the crawl-level "not recorded" marker fired
+  - NOT MEASURED if `extraction.not-recorded` (info) fired
   - Record: the pages, the structural fault and, for an early close, the tag that
     ended the head
 
@@ -2135,6 +2144,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      show what Google actually displays at 60 chars. Flag if important keywords are
      being cut off.
 
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing titles > 0
   - FAIL if collection titles lack category keywords (just marketing names + brand)
@@ -2183,6 +2193,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - Garbage content? (e.g., data tables, code, repeated text scraped from page body)
   4. **Duplicate analysis**: Group duplicates by page type. Template-generated duplicates
      (all products share the same description) are worse than coincidental duplicates.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - WARN if missing > 10% for any page type
   - WARN if duplicates > 5%
@@ -2266,6 +2277,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      - Is there a clean H1 → H2 → H3 hierarchy?
      - Are headings used for non-heading elements (nav items as H3, promo text as H4)?
      - Are semantic sections properly headed?
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if missing H1 > 0
   - **FAIL if a template element is incorrectly coded as H1 across all pages** — this is
@@ -2752,6 +2764,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   the remedy is a re-crawl or a resume.
 - **DevTools**: Check the network panel for image formats (WebP/AVIF vs PNG/JPG) and file
   sizes. Check srcset/sizes on product images
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - WARN if >100KB images on key pages, no modern formats, or missing dimensions
   - Record: oversized image count, format breakdown, missing dimensions count
