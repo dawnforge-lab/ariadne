@@ -598,6 +598,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     0.20.0 one, and a v2 page's gains the optional `byKind` evidence), and
 //     `images.missing-alt` gains an optional `sample` of image addresses on a
 //     v2 row. 178 rules.
+// 10. (T11) Two page rules in the new `src/rules/page/html-structure.ts`, both
+//     `isAuditable` and silent on a v1 row: `html.head-closed-early` (warning,
+//     CHECK-18 / CHECK-04 / CHECK-24: the analyzer's `closedEarly`, which needs a
+//     later head-only element or `</head>` as evidence the head was meant to
+//     continue) and `html.structure-invalid` (info, CHECK-88: not exactly one
+//     head or one body, or a head after the body). `head.directives-outside-head`
+//     and `head.tags-outside-head` gain the optional `headClosedEarly` evidence
+//     naming the closing element on a v2 row. 180 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**

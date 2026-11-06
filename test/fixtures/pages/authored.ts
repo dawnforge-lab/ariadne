@@ -395,6 +395,9 @@ const noViewport: Fixture = {
   expectedIssues: [
     "head.directives-outside-head",
     "head.tags-outside-head",
+    // Phase 26b: the banner div is a real early close, confirmed by the title
+    // that follows it.
+    "html.head-closed-early",
     "mobile.viewport-missing",
   ],
   exact: true,

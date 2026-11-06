@@ -2078,7 +2078,8 @@ describe("the fixture site end to end", () => {
     // 116; in Task 9 the seven URL-shape pages: 123; in Task 10 the three
     // sitemap-entry pages: 126; in Task 12 the four pixel-width pages: 130;
     // Phase 26b Task 6's seven social pages: 137; Task 7's seven headings pages: 144;
-    // Task 9's four link pages and Task 8's pages: 152; Task 10's four: 156.)
+    // Task 9's four link pages and Task 8's pages: 152; Task 10's four: 156;
+    // Task 11's four structure pages: 160.)
     //
     // ratioPct = 100 × 4 / 156 = 2.564… -> 2.6 at one decimal place.
     //
@@ -2098,10 +2099,10 @@ describe("the fixture site end to end", () => {
     expect(siteMetric("redirect.volume")).toEqual({
       redirectPages: 4,
       redirectInlinks: 4,
-      // 4 / 156: Phase 26b Task 10's four pages (insecure form, empty alt, long
-      // alt, repeated rel=next) join the crawl (152 before).
-      totalPages: 156,
-      ratioPct: 2.6,
+      // 4 / 160: Phase 26b Task 11's four structure pages join the crawl (156
+      // before, 2.6; 100 x 4 / 160 = 2.5 exactly).
+      totalPages: 160,
+      ratioPct: 2.5,
       chains: 1,
       loops: 1,
     });
@@ -2448,9 +2449,15 @@ describe("the fixture site end to end", () => {
       // `pagination-multiple`: each has two hyphenated words, so all four stay
       // literal and typesBefore 107 -> 111, typesAfter stays 26 and pagesRetyped
       // 86 -> 90.
-      typesBefore: 111,
+      //
+      // Phase 26b Task 11 adds four more: `two-bodies` has two hyphenated words
+      // and stays literal, the other three (`head-closed-div`, `no-head-tag` and
+      // `head-closed-noscript-iframe`) have three or more and fold into
+      // `/p26b/:slug`, so typesBefore 111 -> 112, typesAfter stays 26 and
+      // pagesRetyped 90 -> 91.
+      typesBefore: 112,
       typesAfter: 26,
-      pagesRetyped: 90,
+      pagesRetyped: 91,
     });
   });
 
@@ -2515,7 +2522,9 @@ describe("the fixture site end to end", () => {
     // 128 with Phase 26b Task 9's four link pages (124 before): all four are
     // hub-linked indexable 200s. 132 with Task 10's four (insecure form, empty
     // alt, long alt, repeated rel=next), which are the same.
-    const COHORT = 132;
+    // 136 with Task 11's four structure pages: each is a hub-linked, listed,
+    // indexable 200 whose canonical is itself.
+    const COHORT = 136;
 
     // THE LINK GRAPH. Every anchor the site renders, and there are only five
     // kinds: the hub at `/` links the 121 fixtures whose `linkedFromHub` is not
@@ -2591,7 +2600,9 @@ describe("the fixture site end to end", () => {
       // mean = (121 + 4 + 3) / 128 = 1.00 and max = 3 (0.98 and 2 over 124).
       // Task 10's four pages are hub-linked too and link nothing the table
       // stores (the form action is no anchor): 4 zeros, 125 ones, 2, 2, 3 over
-      // 132 pages, so mean = (125 + 4 + 3) / 132 = 1.00 and max = 3.
+      // 132 pages, so mean = (125 + 4 + 3) / 132 = 1.00 and max = 3. Task 11's
+      // four pages are hub-linked and link nothing else: 4 zeros, 129 ones, 2,
+      // 2, 3 over 136 pages, mean = (129 + 4 + 3) / 136 = 1.00, max = 3.
       max: 3,
       mean: 1,
     });
@@ -2623,7 +2634,8 @@ describe("the fixture site end to end", () => {
       // 10.8 with 13 over 120 before them, 11.5 over 113 before Task 7's seven
       // headings pages.
       // 100 × 15 / 132 = 11.36 -> 11.4 with Task 10's four pages (none declares).
-      coveragePct: 11.4,
+      // 100 x 15 / 136 = 11.03 -> 11.0 with Task 11's four pages (none declares).
+      coveragePct: 11.0,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
@@ -2645,7 +2657,7 @@ describe("the fixture site end to end", () => {
     // `/sitemap.xml` publishes the hub, every fixture whose `inSitemap` is not
     // false, and the one URL robots.txt blocks:
     //   1 (the hub, `/`)
-    // + 133 (fixtures listed, of the 156 — 23 opt out: the sixteen of the early
+    // + 137 (fixtures listed, of the 160 — 23 opt out: the sixteen of the early
     //   phases, Phase 23's three fetch outcomes and the robots-blocked
     //   `/private/linked`, Phase 25's plain-text document, and Phase 26a's
     //   `/authored26/chain-a`, a canonicalised page the sitemap must not carry,
@@ -2657,27 +2669,27 @@ describe("the fixture site end to end", () => {
     //   12's four pixel-width pages among
     //   them, which is how the crawl reaches the first two; the cross-host
     //   page's entry is on the legacy host, a distinct URL, so it counts; and
-    //   Phase 26b's twenty-six listed `/p26b/` pages: Task 6's seven social
+    //   Phase 26b's thirty listed `/p26b/` pages: Task 6's seven social
     //   pages, Task 7's seven headings pages, Task 8's four, Task 9's four link
-    //   pages and Task 10's four)
+    //   pages Task 10's four and Task 11's four structure pages)
     // + 1 (/private/hidden)
-    // = 135 entries (1 + 133 + 1), all distinct, so the walk's first-source-wins
-    // dedupe drops none of them. (Counted from the fixture collection: 156
-    // fixtures, 23 of them opted out, 133 listed.)
+    // = 139 entries (1 + 137 + 1), all distinct, so the walk's first-source-wins
+    // dedupe drops none of them. (Counted from the fixture collection: 160
+    // fixtures, 23 of them opted out, 137 listed.)
     //
-    // 135 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
+    // 139 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
     // it; no document was dropped for exceeding the read cap; and the walk
     // stopped at no entry cap — which is what makes every count above exact
     // rather than a floor.
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 1,
-      totalUrls: 135,
+      totalUrls: 139,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
     });
     // The per-document row beneath it, which is where `docs: 1` is spent: the
-    // one document, with the same 135 entries under its own URL. Asserted as the
+    // one document, with the same 139 entries under its own URL. Asserted as the
     // exact key set, so the broken document appearing here — or the good one
     // vanishing — is a failure rather than a number nobody reads.
     expect([...(metricsById.get("sitemap.structure") ?? new Map()).keys()].sort()).toEqual([
@@ -2685,7 +2697,7 @@ describe("the fixture site end to end", () => {
       "site|",
     ]);
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
-      { urls: 135, breaches50k: false },
+      { urls: 139, breaches50k: false },
     );
   });
 
@@ -2738,7 +2750,7 @@ describe("the fixture site end to end", () => {
     // Task 12's four pixel-width pages and Phase 26b Task 6's seven social pages
     // are hub-linked cohort pages: depth 1.)
     expect(siteMetric("structure.click-depth-distribution")).toEqual({
-      count: 132,
+      count: 136,
       nullCount: 4,
       min: 0,
       p25: 1,
@@ -2749,8 +2761,11 @@ describe("the fixture site end to end", () => {
       // Task 10's four pages are at depth 1 as well: 128 pages with a depth,
       // v0 = 0, v1…v120 = 1, then 2,2,3,4,5,6,7. mean = 149/128 = 1.16;
       // p95 at pos 120.65 interpolates v120 = 1 and v121 = 2 -> 1.65.
+      // Task 11's four pages are at depth 1: 132 pages with a depth, v0 = 0,
+      // v1…v124 = 1, then 2,2,3,4,5,6,7. mean = 153/132 = 1.16; p95 at pos
+      // 124.45 interpolates v124 = 1 and v125 = 2 -> 1.45.
       p75: 1,
-      p95: 1.65,
+      p95: 1.45,
       max: 7,
       mean: 1.16,
     });
@@ -2765,8 +2780,8 @@ describe("the fixture site end to end", () => {
     // from nowhere too, and the metric leaves it out only because the judged
     // cohort sets a canonicalised page aside. 121 = the 113 judged pages plus the
     // 8 indexable pages canonicalised elsewhere.
-    // (136 before Task 10's four pages, which are indexable 200s like the rest.)
-    expect(cohort).toHaveLength(140);
+    // (136 before Task 10's four pages, which are indexable 200s like the rest; 140 before Task 11's four.)
+    expect(cohort).toHaveLength(144);
     expect(
       cohort.filter(([, p]) => p.clickDepth === null).map(([path]) => path).sort(),
     ).toEqual([
@@ -2793,7 +2808,7 @@ describe("the fixture site end to end", () => {
     // the sitemap must not carry, and Task 10's `/authored26/cross-host-loc`,
     // whose entry is on another host), and those 10 carry the depth the frontier
     // reached them at. (104 before Phase 26b Task 6's seven listed social pages.)
-    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(130);
+    expect(cohort.filter(([, p]) => p.depth === 0)).toHaveLength(134);
     expect(cohort.filter(([, p]) => p.clickDepth === 0).map(([path]) => path)).toEqual(["/"]);
   });
 
@@ -2902,6 +2917,11 @@ describe("the fixture site end to end", () => {
     // suspects (+4, 121 -> 125). Pages crawled 152 -> 156, selected 127 -> 131,
     // rendered 126 -> 130.
     //
+    // Phase 26b Task 11's four structure pages (`head-closed-noscript-iframe`,
+    // `head-closed-div`, `no-head-tag`, `two-bodies`) render an article with no
+    // anchor at all, so all four are suspects (+4, 125 -> 129). Pages crawled
+    // 156 -> 160, selected 131 -> 135, rendered 130 -> 134.
+    //
     // selectionSampled = 6, and it MOVED FROM 9 IN P8-T5 — the one number in
     // this file that the template inference changes, and the change is the
     // point of it. The sample takes `renderSamplePerType` (3) pages of every
@@ -2937,7 +2957,7 @@ describe("the fixture site end to end", () => {
     // satisfy, because it was selected once. The one failure is
     // `/render/js-redirect-offsite`, whose row shape the next test pins.
     expect(siteMetric("render.coverage")).toEqual({
-      pagesCrawled: 156,
+      pagesCrawled: 160,
       // P12-T4. The end-to-end crawl really did render, so this is the `ran`
       // side of the field — the whole-site case the unit tests bound from the
       // other end. `pagesRendered: 120` below is evidence enough on its own
@@ -2948,12 +2968,12 @@ describe("the fixture site end to end", () => {
       // and this is the field that says so. The five numbers under it describe
       // that decision and are present only because it was taken.
       selectionMode: "auto",
-      selectionBudget: 156,
-      selectionSuspects: 125,
+      selectionBudget: 160,
+      selectionSuspects: 129,
       selectionSampled: 6,
-      selectionSelected: 131,
+      selectionSelected: 135,
       selectionTruncated: false,
-      pagesRendered: 130,
+      pagesRendered: 134,
       renderFailures: 1,
     });
 
@@ -2961,12 +2981,12 @@ describe("the fixture site end to end", () => {
     // the statement that actually promoted the frontier rows. Asserting both
     // is what proves `renderSelectionStats` describes the selection that
     // happened rather than one it would make today.
-    expect(render.selection.budget).toBe(156);
-    expect(render.selection.suspects).toBe(125);
+    expect(render.selection.budget).toBe(160);
+    expect(render.selection.suspects).toBe(129);
     expect(render.selection.sampled).toBe(6);
     expect(render.selection.truncated).toBe(false);
-    expect(render.selection.selected).toHaveLength(131);
-    expect(render.rendered).toBe(130);
+    expect(render.selection.selected).toHaveLength(135);
+    expect(render.rendered).toBe(134);
     expect(render.failures).toBe(1);
     // No URL left behind: the pass was not aborted, so every leased render was
     // recorded and completed.
@@ -2994,7 +3014,7 @@ describe("the fixture site end to end", () => {
       .select({ count: crawls.renderPassCount })
       .from(crawls)
       .where(eq(crawls.id, summary.crawlId));
-    expect(crawlRow?.count).toBe(130);
+    expect(crawlRow?.count).toBe(134);
   });
 
   it("the health rollup agrees with a page-by-page recount (P10-T2)", () => {
@@ -3077,8 +3097,8 @@ describe("the fixture site end to end", () => {
       // robots-blocked row (counted here DELIBERATELY: "URLs Not Judged" is over
       // every URL on record), plus the two set-aside columns beside them.
       // (153 with Phase 26b Task 9's four link pages, all judged; 157 with
-      // Task 10's four pages, also judged.)
-      pagesNotAuditable: 157 - judged - canonicalised - noindex,
+      // Task 10's four pages, also judged; 161 with Task 11's four.)
+      pagesNotAuditable: 161 - judged - canonicalised - noindex,
       urlsCanonicalised: canonicalised,
       urlsNoindex: noindex,
       // Inside `urlsTotal`, not a partition member: judged pages declaring
@@ -3096,8 +3116,8 @@ describe("the fixture site end to end", () => {
         health["urlsCanonicalised"]! +
         health["urlsNoindex"]! +
         health["pagesNotAuditable"]!,
-    ).toBe(157);
-    expect(pageByPath.size).toBe(157);
+    ).toBe(161);
+    expect(pageByPath.size).toBe(161);
   });
 
   it("the resource findings carry what the asset server actually answered (P11-T3)", () => {
@@ -3194,7 +3214,7 @@ describe("the fixture site end to end", () => {
     expect(weight.atLeast).toBe(true);
     // And the distribution is over the same cohort every other metric uses, so
     // its count is the constant the three quotable metrics are pinned against.
-    expect(weight.pageWeight.count).toBe(132);
+    expect(weight.pageWeight.count).toBe(136);
     // The heavy page is the heaviest thing on this site by a wide margin, so
     // the maximum is at least the image the assertion above pinned. Stated as a
     // floor rather than a sum: the page's own HTML is in there too.

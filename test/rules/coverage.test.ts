@@ -466,10 +466,18 @@ describe("checklist coverage", () => {
   //   page    63 + 4 = 67
   //   query   97
   //   total   174 + 4 = 178
-  it("pins the ruleset split the gate doc reports: 178 rules = 67 page + 97 query + 14 metric", () => {
+  //
+  // Phase 26b Task 11 adds TWO page rules in `src/rules/page/html-structure.ts`:
+  // `html.head-closed-early` (CHECK-18 / CHECK-04 / CHECK-24) and
+  // `html.structure-invalid` (CHECK-88). Both claim checks already claimed.
+  //
+  //   page    67 + 2 = 69
+  //   query   97
+  //   total   178 + 2 = 180
+  it("pins the ruleset split the gate doc reports: 180 rules = 69 page + 97 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(178);
-    expect(registry.byKind("page")).toHaveLength(67);
+    expect(registry.all()).toHaveLength(180);
+    expect(registry.byKind("page")).toHaveLength(69);
     expect(registry.byKind("query")).toHaveLength(97);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

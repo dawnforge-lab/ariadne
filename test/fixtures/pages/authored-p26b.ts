@@ -6,7 +6,8 @@
  */
 import type { Fixture } from "../fixture.js";
 import { SHARED_IMAGE_PATH } from "../assets.js";
-import { article, serve } from "../render.js";
+import { article, renderDocument, selfUrl, serve } from "../render.js";
+import type { PageSpec } from "../render.js";
 
 /**
  * Task 6: the social rules. Each page breaks one tag of the default set and
@@ -875,6 +876,123 @@ const paginationMultiple = linkPage(
   },
 );
 
+/**
+ * Task 11: document structure. `renderDocument` cannot emit malformed HTML, so
+ * each page is rendered from the control recipe and then edited as a string
+ * before it is sent raw (`res.end`). A page keeps its title, description,
+ * canonical and social set INSIDE the head, before any defect, so the one
+ * structure rule it is for is the only finding (a closer placed before them
+ * would also fire the outside-head pair).
+ */
+function structurePage(
+  path: string,
+  name: string,
+  expectedIssues: string[],
+  copy: { title: string; description: string; h1: string; lede: string; topic: string },
+  edit: (html: string) => string,
+): Fixture {
+  const build = (self: string): PageSpec => ({
+    title: copy.title,
+    metaDescription: copy.description,
+    canonical: self,
+    bodyHtml: article({
+      h1: copy.h1,
+      lede: copy.lede,
+      withImage: false,
+      sections: [
+        {
+          h2: `How the ${copy.topic} shows up in the source`,
+          body: "The visible page reads like any other article on the site, and every difference lives in the markup a browser has to repair before it can build the page from it.",
+        },
+        {
+          h2: `What the ${copy.topic} costs a crawler`,
+          body: "A parser that follows the HTML specification recovers from the fault and carries on, but it recovers by guessing, and the guess is not always the structure the author meant when the template was written.",
+        },
+        {
+          h2: `Fixing the ${copy.topic} in the template`,
+          body: "Correct the layout that writes the document skeleton rather than the individual page, so every page built from it is repaired together and the fault does not return with the next release.",
+        },
+      ],
+    }),
+  });
+  return {
+    path,
+    category: "html structure",
+    name,
+    expectedIssues,
+    exact: true,
+    handler: (req, res) => {
+      const html = edit(renderDocument(build(selfUrl(req)), selfUrl(req)));
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(html);
+    },
+  };
+}
+
+/** Insert `fragment` immediately before the first `</head>`. */
+const beforeHeadEnd = (fragment: string) => (html: string) =>
+  html.replace("</head>", `${fragment}\n</head>`);
+
+const headClosedNoscriptIframe = structurePage(
+  "/p26b/head-closed-noscript-iframe",
+  "A tag-manager noscript iframe left in the head",
+  ["html.head-closed-early"],
+  {
+    title: "A head that ends where the tag manager noscript begins",
+    description:
+      "A tag manager snippet puts its noscript iframe inside the head, where an iframe is not allowed, and the head is read as ended at that point.",
+    h1: "The tag manager snippet in the wrong place",
+    lede: "The noscript fallback that tag managers ask for belongs at the top of the body, and this page has pasted it into the head instead.",
+    topic: "noscript iframe",
+  },
+  beforeHeadEnd('<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-FIXTURE" height="0" width="0"></iframe></noscript>'),
+);
+
+const headClosedDiv = structurePage(
+  "/p26b/head-closed-div",
+  "A banner div left in the head",
+  ["html.head-closed-early"],
+  {
+    title: "A head that ends at an injected banner element",
+    description:
+      "A plugin writes an empty banner div after the last head tag and before the closing head, so a parser ends the head at the div.",
+    h1: "A div where only metadata should be",
+    lede: "A banner plugin injects its container at the end of the head. The title and other tags above it are safe, but the head closes there.",
+    topic: "head div",
+  },
+  beforeHeadEnd('<div class="promo-banner"></div>'),
+);
+
+const noHeadTag = structurePage(
+  "/p26b/no-head-tag",
+  "A document with no head element",
+  ["html.structure-invalid"],
+  {
+    title: "A document that never opens a head element",
+    description:
+      "The title, description and other metadata of this page sit directly under the html element, with no head element to hold them.",
+    h1: "Metadata with no head around it",
+    lede: "A hand-written layout leaves out the head start and end tags, and the parser has to invent a head to hold the tags it finds.",
+    topic: "missing head",
+  },
+  (html) => html.replace("<head>\n", "").replace("\n</head>", ""),
+);
+
+const twoBodies = structurePage(
+  "/p26b/two-bodies",
+  "A document with two body elements",
+  ["html.structure-invalid"],
+  {
+    title: "A document that opens a second body element",
+    description:
+      "A template includes a partial that opens its own body element after the main content, so the document carries two body start tags.",
+    h1: "Two bodies in one document",
+    lede: "A layout and an included partial each write a body start tag, and a parser keeps the first and merges the attributes of the second.",
+    topic: "second body",
+  },
+  (html) => html.replace("</main>", "</main>\n<body>"),
+);
+
 export const authoredP26bFixtures: Fixture[] = [
   botConflict,
   metaRefresh,
@@ -902,4 +1020,8 @@ export const authoredP26bFixtures: Fixture[] = [
   emptyAlt,
   longAlt,
   paginationMultiple,
+  headClosedNoscriptIframe,
+  headClosedDiv,
+  noHeadTag,
+  twoBodies,
 ];

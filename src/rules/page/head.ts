@@ -69,7 +69,18 @@ function tagsOutside(p: PageRecord): string[] {
 const COLUMNS = [
   { key: "elements", label: "Elements Outside Head" },
   { key: "headClosedBy", label: "Closed By" },
+  // Phase 26b: the element the analyzer recorded as ending the head early, on a
+  // v2 row that has one. Absent on a v1 row and where nothing closed it early.
+  { key: "headClosedEarly", label: "Head Closed By (element)", optional: true },
 ] as const;
+
+/** The optional `headClosedEarly` evidence: present only when the analyzer named a closer. */
+function closedEarlyEvidence(p: PageRecord): { headClosedEarly?: { tag: string; snippet: string } } {
+  const closed = p.htmlStructure?.closedEarly;
+  return closed === null || closed === undefined
+    ? {}
+    : { headClosedEarly: { tag: closed.tag, snippet: closed.snippet } };
+}
 
 export const headRules: PageRule[] = [
   // THE FETCHED-OK COHORT (`isAuditable`), like `canonical.*` and
@@ -87,7 +98,7 @@ export const headRules: PageRule[] = [
       if (!isAuditable(p)) return [];
       const elements = directivesOutside(p);
       return elements.length > 0
-        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p) })]
+        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p), ...closedEarlyEvidence(p) })]
         : [];
     },
   ),
@@ -106,7 +117,7 @@ export const headRules: PageRule[] = [
       if (!isJudged(p)) return [];
       const elements = tagsOutside(p);
       return elements.length > 0
-        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p) })]
+        ? [finding(self, p, { elements: elements.join(", "), headClosedBy: closedBy(p), ...closedEarlyEvidence(p) })]
         : [];
     },
   ),

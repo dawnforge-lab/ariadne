@@ -14,6 +14,7 @@ import { urlShapeRules } from "./page/url-shape.js";
 import { pixelWidthRules } from "./page/pixel-width.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
+import { htmlStructureRules } from "./page/html-structure.js";
 import { anchorRules } from "./page/anchors.js";
 import { paginationPageRules } from "./page/pagination.js";
 import { refreshRules } from "./page/refresh.js";
@@ -62,6 +63,8 @@ export function buildRegistry(): Registry {
     ...pixelWidthRules,
     // Where the head ended, and which head elements came after it (P23-T5).
     ...headRules,
+    // An early head close and an invalid html/head/body structure (26b, CHECK-88).
+    ...htmlStructureRules,
     // The meta refresh and Refresh header redirect (26b, CHECK-10).
     ...refreshRules,
     // Uncrawlable, empty and unsafe anchors (26b, CHECK-34 / CHECK-86).

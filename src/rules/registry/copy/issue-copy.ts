@@ -623,6 +623,20 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Move the title, meta description and social tags into the <head> above any other markup, and remove or move the element named in Closed By out of the head.",
   },
+  "html.head-closed-early": {
+    title: "HTML: Head closed early",
+    explanation:
+      "Pages where the browser ends the <head> at an element it does not allow there (an iframe, an image, a div or visible text), while the document goes on to write head tags such as the title, meta tags or links after it. The row names the closing element, quotes it and says whether it sat inside a noscript. Everything after that point is read as body content, so the canonical, robots, hreflang, title and description may be ignored.",
+    howToFix:
+      "Remove or move the element named in the row out of the <head>; a tracking noscript iframe belongs at the top of the <body>. Keep only title, meta, link, base, style, script and noscript with those elements in the head.",
+  },
+  "html.structure-invalid": {
+    title: "HTML: Invalid document structure",
+    explanation:
+      "Pages that do not have exactly one <head> and one <body>, or whose <head> starts after the <body>; the Problems column lists which of head-missing, head-repeated, body-missing, body-repeated and head-after-body apply. A parser repairs such a document by guessing, so head tags can end up in the body and the page may be read differently from how it was written.",
+    howToFix:
+      "Fix the template so the document has one <html>, then one <head>, then one <body>, in that order. Check for a layout or plugin that writes a second <head> or <body>, or that drops the <head> element.",
+  },
   "h2.missing": {
     title: "Headings: No H2",
     explanation:

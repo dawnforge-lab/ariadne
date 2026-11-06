@@ -40,6 +40,7 @@ describe("head rule metadata", () => {
       expect(r.columns).toEqual([
         { key: "elements", label: "Elements Outside Head" },
         { key: "headClosedBy", label: "Closed By" },
+        { key: "headClosedEarly", label: "Head Closed By (element)", optional: true },
       ]);
     }
   });
@@ -175,5 +176,39 @@ describe("head.tags-outside-head", () => {
   it("is judged-only: silent on non-200s and on noindexed or canonicalised 200s", () => {
     expectSilentOnNonOkFetches([tags], [{ metaDescriptionOutsideHead: true }]);
     expectSilentOnNotJudged([tags], [{ titleOutsideHead: true }]);
+  });
+});
+
+describe("the head rules name the closing element (26b)", () => {
+  const closedEarly = { tag: "div", snippet: '<div class="promo">', inNoscript: false };
+  const structure = {
+    htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true as boolean | null, closedEarly,
+  };
+
+  it("carries headClosedEarly {tag, snippet} on a v2 row that has one, on both rules", () => {
+    const row = {
+      htmlStructure: structure,
+      headClosedBy: "div",
+      canonicalOutsideHead: true,
+      titleOutsideHead: true,
+    };
+    expect(directives.run(mkPage(row))[0]?.evidence).toEqual({
+      elements: "canonical",
+      headClosedBy: "<div>",
+      headClosedEarly: { tag: "div", snippet: '<div class="promo">' },
+    });
+    expect(tags.run(mkPage(row))[0]?.evidence).toEqual({
+      elements: "title",
+      headClosedBy: "<div>",
+      headClosedEarly: { tag: "div", snippet: '<div class="promo">' },
+    });
+  });
+
+  it("omits the key on a v1 row and on a v2 row with no early close", () => {
+    const v1 = mkV1Page({ headClosedBy: "div", canonicalOutsideHead: true, titleOutsideHead: true });
+    expect(directives.run(v1)[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    expect(tags.run(v1)[0]?.evidence).not.toHaveProperty("headClosedEarly");
+    const v2 = mkPage({ canonicalOutsideHead: true, headClosedBy: null });
+    expect(directives.run(v2)[0]?.evidence).not.toHaveProperty("headClosedEarly");
   });
 });

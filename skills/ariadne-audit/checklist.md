@@ -37,7 +37,7 @@ WHAT CHANGED AFTER IMPORT (the living authority's own change log):
   - CHECK-35 / 36 / 37: title floor 30, meta description ceiling 155,
     `headings.h1-too-long`, rel=prev pages left out of the three duplicate rules.
   - CHECK-04 / 18 / 24 / 35 / 36: `head.directives-outside-head` and
-    `head.tags-outside-head`.
+    `head.tags-outside-head`. CHECK-04 / 18 / 24 also gain `html.head-closed-early`.
   - CHECK-01: the five `render.*-changed` rules, each also claiming its element's
     check.
 
@@ -788,6 +788,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        the outcome of, and it is a finding on its own.
      - `head.directives-outside-head` (critical) — a robots meta (or canonical, or
        hreflang) after the `<head>` ended, where search engines may not read it.
+     - `html.head-closed-early` (warning) — names the element or text that ended the
+       head early, so the robots meta after it is read as body content.
      - `directives.bot-conflict` (warning) — a bot-specific robots meta (`googlebot`,
        `bingbot`, ...) whose noindex or nofollow state differs from the generic
        `robots` meta (absent means index, follow), so engines treat the page
@@ -1357,6 +1359,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     link after the point the `<head>` ended (at `</head>`, or implicitly at an element
     a head does not allow); Closed By names the element. Shared with CHECK-04 and
     CHECK-24.
+  - `html.head-closed-early` (warning) — the same early close seen from the document:
+    the element or text that ended the head (Closing Element, Element Snippet, Inside
+    noscript), reported when head tags followed it. Shared with CHECK-04 and CHECK-24.
   - `render.canonical-changed` (critical) — a rendered page whose canonical the
     JavaScript added, removed or pointed elsewhere (rendered pages only; see CHECK-01
     step 6).
@@ -1539,6 +1544,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      engine stores no language for a page and naming one would be a guess.
      `head.directives-outside-head` (critical) also claims this check: hreflang links
      after the `<head>` ended, with their count.
+     `html.head-closed-early` (warning) also claims it: the element that ended the head
+     before those links.
   4. `issues_list` with `checkId: "CHECK-24"` — `hreflang.alternates-not-crawled`
      (info) is a NOT MEASURED marker, not a finding about the site: it fires once
      when declared alternates have no page in this crawl, with the count of
@@ -2117,7 +2124,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-88: HTML document structure
 - **Priority**: Medium | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-88"`. The check asks whether the
+- **Engine**: `issues_list` with `checkId: "CHECK-88"` — two rules:
+  `html.structure-invalid` (info: not exactly one `<head>` or one `<body>`, or a
+  `<head>` after the `<body>`; Problems lists which) and `html.head-closed-early`
+  (warning: an element or text the head does not allow ended it while head tags
+  followed; Closing Element names it). The check asks whether the
   HTML document is shaped so a parser reads it as written: one `<html>`, one `<head>`
   before one `<body>`, and a `<head>` that is not closed early by an element that does
   not belong in it (which pushes the tags after it, including the title, canonical and
