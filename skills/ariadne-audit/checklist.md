@@ -2082,7 +2082,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     empty; evidence `{missing, none}`, `none` true when the page has no Open Graph
     tag at all.
   - `social.og-multiple` (info): an `og:` tag repeated with different values;
-    evidence `{tags}`.
+    evidence `{tags}`. `og:image` is never listed: Open Graph makes it an array (a
+    gallery's images, first preferred), so several values are not a conflict.
   - `social.og-url-mismatch` (info): og:url resolves to another address than the
     page's canonical (its own URL when it declares none); evidence `{ogUrl,
     canonical}`. A trailing slash on a path is a different address.

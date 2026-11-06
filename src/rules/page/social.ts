@@ -22,7 +22,7 @@
  * THE JUDGED COHORT (`isJudged`): a share preview matters on a page meant to be
  * in the index as itself, as a title does.
  */
-import type { SocialFacts } from "../../crawl/parse/page-facts.js";
+import type { SocialFacts, SocialTag } from "../../crawl/parse/page-facts.js";
 import { normalizeUrl } from "../../crawl/parse/url-utils.js";
 import { finding, isJudged, pageRule, resolveEffectiveCanonical } from "../helpers.js";
 import type { PageRecord, PageRule } from "../registry/types.js";
@@ -30,6 +30,14 @@ import { OG_REQUIRED } from "../thresholds.js";
 
 const CHECKS = ["CHECK-87"];
 const CATEGORY = "on-page" as const;
+
+/**
+ * The recorded `og:` tags the Open Graph protocol defines as arrays, which
+ * `social.og-multiple` never reports (ruling R15). Of the tags `SocialFacts`
+ * records only `og:image` is one; its structured `og:image:*` properties are
+ * not recorded.
+ */
+const OG_ARRAY_TAGS: ReadonlySet<SocialTag> = new Set<SocialTag>(["og:image"]);
 
 /** The extraction that measured `social`; below it a null means "not measured". */
 const SOCIAL_EXTRACTION = 2;
@@ -73,7 +81,10 @@ export const socialRules: PageRule[] = [
   ),
 
   // A tag seen twice with two different values: a platform takes one, and
-  // which one is theirs to decide. Only the `og:` tags are this rule's.
+  // which one is theirs to decide. Only the `og:` tags are this rule's, and
+  // not `og:image` (ruling R15): the Open Graph protocol makes it an array
+  // (a gallery's images, first preferred), so several values are not a
+  // conflict. The fact still records it; the rule exempts it.
   pageRule(
     "social.og-multiple",
     CHECKS,
@@ -82,7 +93,9 @@ export const socialRules: PageRule[] = [
     [{ key: "tags", label: "Conflicting Tags" }],
     (p, self) => {
       if (!isJudged(p) || p.social === null) return [];
-      const tags = p.social.conflicting.filter((tag) => tag.startsWith("og:"));
+      const tags = p.social.conflicting.filter(
+        (tag) => tag.startsWith("og:") && !OG_ARRAY_TAGS.has(tag),
+      );
       return tags.length > 0 ? [finding(self, p, { tags })] : [];
     },
   ),

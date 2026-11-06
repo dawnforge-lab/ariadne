@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 import type { SocialFacts } from "../../src/crawl/parse/page-facts.js";
 import { socialRules } from "../../src/rules/page/social.js";
 import type { PageRecord } from "../../src/rules/registry/types.js";
@@ -145,12 +146,31 @@ describe("social.og-incomplete", () => {
 });
 
 describe("social.og-multiple", () => {
-  it("fires on a conflicting og: tag, naming the og: ones only", () => {
+  it("fires on a conflicting og: tag, naming the og: ones only, og:image never (R15)", () => {
     const f = ogMultiple.run(
       mkPage(social((s) => (s.conflicting = ["og:image", "og:title", "twitter:title"]))),
     );
     expect(f).toHaveLength(1);
-    expect(f[0]?.evidence).toEqual({ tags: ["og:image", "og:title"] });
+    expect(f[0]?.evidence).toEqual({ tags: ["og:title"] });
+  });
+
+  it("is silent on an og:image array, and fires on two og:title values (R15)", () => {
+    // The Open Graph protocol makes og:image an array (first wins): a gallery
+    // page's several images are not a conflict. og:title is single-valued.
+    const page = (head: string) => {
+      const url = "https://example.com/gallery";
+      const a = analyzePage(`<html><head>${head}</head><body><p>x</p></body></html>`, url);
+      return mkPage({ url, social: a.social });
+    };
+    const gallery = page(
+      `<meta property="og:image" content="/1.png"><meta property="og:image" content="/2.png">`,
+    );
+    expect(gallery.social?.conflicting).toEqual(["og:image"]);
+    expect(ogMultiple.run(gallery)).toEqual([]);
+    const titles = page(
+      `<meta property="og:title" content="One"><meta property="og:title" content="Two">`,
+    );
+    expect(ogMultiple.run(titles).map((f) => f.evidence)).toEqual([{ tags: ["og:title"] }]);
   });
 
   it("is silent when only X tags conflict", () => {

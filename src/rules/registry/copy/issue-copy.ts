@@ -337,7 +337,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "social.og-multiple": {
     title: "Social: Open Graph tag repeated with different values",
     explanation:
-      "Indexable, self-canonical pages that carry the same Open Graph tag more than once with different content; the Conflicting Tags column names them. Each platform picks one of the values by its own rule, so the preview a link gets can differ from one platform to the next.",
+      "Indexable, self-canonical pages that carry the same Open Graph tag more than once with different content; the Conflicting Tags column names them. Each platform picks one of the values by its own rule, so the preview a link gets can differ from one platform to the next. og:image is not counted: Open Graph allows several images on a page, and platforms prefer the first.",
     howToFix:
       "Remove the duplicate tags so each Open Graph tag appears once. This usually means a theme and a plugin both write them: turn one off.",
   },
