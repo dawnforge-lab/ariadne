@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseRefresh, REFRESH_RAW_MAX } from "../../src/crawl/parse/page-facts.js";
+import {
+  parseRefresh,
+  REFRESH_RAW_MAX,
+  REFRESH_TARGET_MAX,
+} from "../../src/crawl/parse/page-facts.js";
 
 const BASE = "https://base.test/dir/page";
 
@@ -41,5 +45,13 @@ describe("parseRefresh", () => {
   it("caps raw", () => {
     expect(parseRefresh("0;url=/" + "a".repeat(2000), BASE).raw.length).toBe(REFRESH_RAW_MAX);
     expect(REFRESH_RAW_MAX).toBe(512);
+  });
+  it("caps target at REFRESH_TARGET_MAX (ruling R16)", () => {
+    const target = "https://base.test/" + "a".repeat(3_000);
+    const r = parseRefresh("0;url=" + target, BASE);
+    expect(REFRESH_TARGET_MAX).toBe(1024);
+    expect(r.target).toBe(target.slice(0, REFRESH_TARGET_MAX));
+    // A target under the cap is untouched.
+    expect(parseRefresh("0;url=/short", BASE).target).toBe("https://base.test/short");
   });
 });

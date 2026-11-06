@@ -70,6 +70,8 @@ export const SOCIAL_URL_MAX = 1024;
 export const ROBOTS_METAS_MAX = 10;
 export const ROBOTS_META_CONTENT_MAX = 512;
 export const REFRESH_RAW_MAX = 512;
+/** `metaRefresh.target` (resolved absolute) is cut here (ruling R16). */
+export const REFRESH_TARGET_MAX = 1024;
 export const INSECURE_SAMPLE_MAX = 10;
 /** Each `insecureRefs.sample[].url` is cut here; the counters use the whole URL. */
 export const INSECURE_SAMPLE_URL_MAX = 1024;
@@ -120,7 +122,7 @@ export function parseRefresh(value: string, baseUrl: string): RefreshFact {
   rest = rest.trim();
   if (rest === "") return { raw, delaySeconds, target: null };
   try {
-    return { raw, delaySeconds, target: storableCap(new URL(rest, base).href) };
+    return { raw, delaySeconds, target: storableCap(new URL(rest, base).href, REFRESH_TARGET_MAX) };
   } catch {
     return { raw, delaySeconds, target: null };
   }
