@@ -566,6 +566,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `resources.not-recorded` and `resources.not-fetched` claim CHECK-87, and
 //     `resources.not-fetched` also fires on a crawl whose only rows are
 //     unasked share images and whose pages count no image (R13). 161 rules.
+//  6. (T8) `directives.bot-conflict` (page, warning, CHECK-04: a bot-specific
+//     robots meta whose noindex/nofollow state differs from the combined
+//     `robots` meta; `none` counts as both), `redirect.meta-refresh` (page,
+//     warning, CHECK-10: a meta refresh or `Refresh` header naming a URL, in
+//     `src/rules/page/refresh.ts`) and `hreflang.html-lang-mismatch` (query,
+//     info, CHECK-25: `v2Gate`, primary language subtag of `html_lang` against
+//     the page's self hreflang codes). `parseRefresh` follows the HTML refresh
+//     algorithm strictly (ruling R5). 170 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**

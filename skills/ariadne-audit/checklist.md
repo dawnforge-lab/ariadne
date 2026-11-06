@@ -768,7 +768,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-04: Meta robots & X-Robots-Tag directives
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-04"`. Seven rules:
+  1. `issues_list` with `checkId: "CHECK-04"`. Eight rules:
      - `indexability.noindex` (info) — every page the crawl found excluded from the
        index, whether by meta tag or by header.
      - `indexability.nofollow` (warning) — a page whose meta tag or header says
@@ -788,6 +788,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        the outcome of, and it is a finding on its own.
      - `head.directives-outside-head` (critical) — a robots meta (or canonical, or
        hreflang) after the `<head>` ended, where search engines may not read it.
+     - `directives.bot-conflict` (warning) — a bot-specific robots meta (`googlebot`,
+       `bingbot`, ...) whose noindex or nofollow state differs from the generic
+       `robots` meta (absent means index, follow), so engines treat the page
+       differently. Needs extraction version 2; `extraction.not-recorded` marks it
+       NOT MEASURED.
      - `render.noindex-changed` (critical) — a rendered page whose noindex the
        JavaScript added or removed (rendered pages only; see CHECK-01 step 6).
   2. `issue_urls` with `ruleId: "indexability.noindex"` for the FULL list — this is
@@ -966,11 +971,15 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-10: Redirect chains, loops, JS redirects, and redirect volume
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-10"` — three finding rules:
+  1. `issues_list` with `checkId: "CHECK-10"` — four finding rules:
      - `redirect.chain` (warning) — a redirect that lands on another redirect
      - `redirect.loop` (critical) — a redirect that returns to a URL already in its chain
      - `redirect.js` (critical) — a redirect performed by JavaScript rather than by a
        3xx, found by the render pass (so it needs `renderPassCount` ≥ 1 to be measured)
+     - `redirect.meta-refresh` (warning) — a `<meta http-equiv=refresh>` or `Refresh`
+       header that names a URL (a refresh with no URL is not reported); the evidence
+       says whether the page refreshes to itself. Needs extraction version 2;
+       `extraction.not-recorded` marks it NOT MEASURED.
      `issue_urls` per rule for the hops and the URLs.
   2. `metrics_get` with `metricId: "redirect.volume"` — the site row carries
      `{redirectPages, redirectInlinks, totalPages, ratioPct, chains, loops}`: how
@@ -1568,10 +1577,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-25: Language-region codes and x-default
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-25"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-25"` — three rules:
   - `hreflang.invalid-code` (critical) — a declared code that is not a valid
     language, or language-region, value
   - `hreflang.missing-x-default` (info) — a cluster with no `x-default` member
+  - `hreflang.html-lang-mismatch` (info) — a page whose `<html lang>` primary language
+    differs from its own self-referencing hreflang codes (region is not compared)
   `issue_urls` per rule for the affected URLs and the codes they declared.
 - **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:

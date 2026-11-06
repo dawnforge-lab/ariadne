@@ -380,6 +380,8 @@ const hreflangB: Fixture = {
       title: "Opening hours on the fixture site",
       metaDescription:
         "The French half of the pair, carrying the same three annotations as its English counterpart so the cluster is complete from both sides.",
+      // The page names itself `fr`, so its `<html lang>` says so (26b).
+      htmlLang: "fr",
       headExtra: [
         alternate("en", HREFLANG_A, self),
         alternate("fr", HREFLANG_B, self),

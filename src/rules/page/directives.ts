@@ -33,7 +33,57 @@ function tokensOf(p: PageRecord): { meta: string[]; header: string[] } {
 const says = (tokens: string[], ...wanted: string[]): boolean =>
   tokens.some((t) => wanted.includes(t));
 
+/** Index and follow state of a token list; `none` is both noindex and nofollow. */
+function stateOf(tokens: string[]): { noindex: boolean; nofollow: boolean } {
+  return {
+    noindex: says(tokens, "noindex", "none"),
+    nofollow: says(tokens, "nofollow", "none"),
+  };
+}
+
 export const directiveRules: PageRule[] = [
+  // A bot-specific robots meta (`googlebot`, `bingbot`, ...) whose index or
+  // follow state differs from the combined generic `robots` meta. Engines obey
+  // the most specific meta for themselves, so the page behaves differently per
+  // engine. An absent generic meta means index, follow. Entries naming one bot
+  // are combined (engines combine repeated metas). Only the meta channel is
+  // compared; the header is `indexability.meta-header-conflict`'s. A null
+  // `robotsMetas` is a row extraction 2 never wrote: silent, the marker speaks.
+  pageRule(
+    "directives.bot-conflict",
+    ["CHECK-04"],
+    CATEGORY,
+    "warning",
+    [{ key: "conflicts", label: "Bot Conflicts" }],
+    (p, self) => {
+      if (!isAuditable(p) || p.robotsMetas === null) return [];
+      const generic = stateOf(robotsTokens(p.robotsMeta));
+      const byBot = new Map<string, string[]>();
+      for (const entry of p.robotsMetas) {
+        const list = byBot.get(entry.name);
+        if (list === undefined) byBot.set(entry.name, [entry.content]);
+        else list.push(entry.content);
+      }
+      const conflicts: {
+        bot: string;
+        differs: ("noindex" | "nofollow")[];
+        botDirectives: string;
+        robotsDirectives: string | null;
+      }[] = [];
+      for (const [bot, contents] of byBot) {
+        const botDirectives = contents.join(", ");
+        const state = stateOf(robotsTokens(botDirectives));
+        const differs: ("noindex" | "nofollow")[] = [];
+        if (state.noindex !== generic.noindex) differs.push("noindex");
+        if (state.nofollow !== generic.nofollow) differs.push("nofollow");
+        if (differs.length > 0) {
+          conflicts.push({ bot, differs, botDirectives, robotsDirectives: p.robotsMeta });
+        }
+      }
+      return conflicts.length > 0 ? [finding(self, p, { conflicts })] : [];
+    },
+  ),
+
   // `nofollow` (or `none`, which is noindex plus nofollow) tells engines to
   // ignore every outgoing link of the page. Often deliberate on user-generated
   // or login pages; a warning because on an ordinary page it starves the pages

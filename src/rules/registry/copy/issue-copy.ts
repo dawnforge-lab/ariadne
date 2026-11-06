@@ -456,6 +456,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Keep one URL per code and remove the stale or duplicate entry. Generate the block from one mapping so a code cannot be added twice.",
   },
+  "hreflang.html-lang-mismatch": {
+    title: "Hreflang: HTML lang differs from own hreflang",
+    explanation:
+      "Pages whose html lang attribute names a different language from the hreflang code the page gives itself; only the language part is compared, so en-US against en-gb agrees, and the columns show both. Browsers and assistive technology read the lang attribute while search engines read hreflang, so one of them is wrong. Pages with no lang attribute are not reported.",
+    howToFix:
+      "Set the html lang attribute to the language of the page content and make the page's own hreflang code match it. Check that the template does not hard-code one language for every locale.",
+  },
   "hreflang.self-only": {
     title: "Hreflang: Block names only the page itself",
     explanation:
@@ -506,6 +513,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Pages with nofollow (or none) in the robots meta tag or the X-Robots-Tag header; the Directive Source column says which. Search engines are told to ignore every link on the page, so the pages it links to get no internal equity from it and may not be discovered through it.",
     howToFix:
       "Remove nofollow from the robots meta tag and the header so the page's links are followed. Leave it only if the page is deliberately closed off, such as a login or user-generated page.",
+  },
+  "directives.bot-conflict": {
+    title: "Directives: Bot meta differs from robots meta",
+    explanation:
+      "Pages with a bot-specific robots meta tag (googlebot, bingbot and so on) whose noindex or nofollow state differs from the generic robots meta tag; the Bot Conflicts column names the bot and what differs. A search engine follows the tag that names it, so the page is indexed or followed by some engines and not by others. A page with no generic robots tag counts as index, follow.",
+    howToFix:
+      "Decide the intended behaviour per engine and make the tags agree, usually by removing the bot-specific tag. Keep a bot-specific tag only where the difference is deliberate.",
   },
   "directives.restrictive": {
     title: "Directives: Snippet or image preview restricted",
@@ -778,6 +792,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "URLs whose redirects return to a URL already visited, so they never resolve. Browsers stop with an error and search engines drop the URLs. Usually two rules fighting, such as a trailing-slash rule against an HTTPS or locale rule.",
     howToFix:
       "Trace the rules behind each hop, decide the destination URL, and make every other URL redirect to it directly. Test the entry URL with redirects followed until it ends on a 200.",
+  },
+  "redirect.meta-refresh": {
+    title: "Redirects: Meta refresh redirect",
+    explanation:
+      "Pages that send the browser to another URL with a meta refresh tag or a Refresh response header; the row shows the source, the target, the delay and whether the target is the page itself. A refresh is not a redirect status, so it passes link signals unreliably and delays visitors. A refresh with no URL, which only reloads the page, is not reported.",
+    howToFix:
+      "Replace the refresh with a server-side 301 (permanent) or 302 (temporary) redirect to the target. Remove a refresh that points at the page itself.",
   },
   "redirect.volume": {
     title: "Redirects: Redirect volume",

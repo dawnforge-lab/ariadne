@@ -431,6 +431,10 @@ function hreflangPage(
       serve(req, res, (self) => ({
         title: copy.title,
         metaDescription: copy.description,
+        // The page's `<html lang>` is the code it gives itself, so
+        // `hreflang.html-lang-mismatch` stays quiet (26b); `en` when the block
+        // names no self code.
+        htmlLang: block.find(([code, target]) => target === path && code !== "x-default")?.[0],
         headExtra: block.map(([code, target]) => alternate(code, target, self)).join("\n"),
         bodyHtml: article({
           h1: copy.h1,

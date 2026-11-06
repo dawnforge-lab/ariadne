@@ -510,7 +510,178 @@ const titleSameAsH1: Fixture = {
     })),
 };
 
+/**
+ * Task 8: a bot meta that disagrees with the generic robots meta, a meta
+ * refresh, and an hreflang pair whose French page keeps `lang="en"`.
+ */
+const botConflict: Fixture = {
+  path: "/p26b/bot-conflict",
+  category: "indexability",
+  name: "Googlebot meta says noindex while the robots meta says index",
+  expectedIssues: ["directives.bot-conflict"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "Choosing a spirit level for hanging shelves straight",
+      metaDescription:
+        "How long a spirit level should be for shelving, which vial type reads easiest, and how to check the level itself is true before you rely on it.",
+      robotsMeta: "index, follow",
+      headExtra: '<meta name="googlebot" content="noindex">',
+      bodyHtml: article({
+        h1: "Choosing a spirit level",
+        lede: "A shelf that looks level to the eye usually is not. A decent spirit level settles the argument in a second, if the level itself is true.",
+        withImage: false,
+        sections: [
+          {
+            h2: "How long a level to buy",
+            body: "A level about as long as the shelf is the most useful size. A short one has to be moved along the board, and every move adds a little error.",
+          },
+          {
+            h2: "Reading the vial",
+            body: "Look for a vial with clear marks and a bubble that settles quickly. Cloudy or scratched vials make a half-bubble error easy to miss.",
+          },
+          {
+            h2: "Checking the level itself",
+            body: "Lay it on a flat surface, note where the bubble sits, then turn it end for end. If the bubble sits in a different place, the level is out and should be replaced.",
+          },
+          {
+            h2: "Looking after it",
+            body: "Keep the level in a case or hang it flat, never leaning in a corner where the frame can bow. Wipe plaster and paint off the edges after each job, because a build-up on one face tilts the whole reading and makes a good tool look faulty.",
+          },
+        ],
+      }),
+    })),
+};
+
+const metaRefresh: Fixture = {
+  path: "/p26b/meta-refresh",
+  category: "redirects",
+  name: "A page that refreshes to another URL after a delay",
+  expectedIssues: ["redirect.meta-refresh"],
+  exact: true,
+  handler: (req, res) =>
+    serve(req, res, () => ({
+      title: "Moving a shed base to firmer ground in the autumn",
+      metaDescription:
+        "How to lift and relay a shed base that has started to sink, what to put under it, and how to check it stays level through a wet winter.",
+      headExtra: '<meta http-equiv="refresh" content="5; url=/p26b/title-same-as-h1">',
+      bodyHtml: article({
+        h1: "Relaying a shed base",
+        lede: "A shed that leans is usually a base that moved. Lifting it and relaying the ground is a day's work and saves the frame.",
+        withImage: false,
+        sections: [
+          {
+            h2: "Why bases sink",
+            body: "Soft ground under one corner takes the weight first, and rain softens it further. The frame twists a little each season until the door will not close.",
+          },
+          {
+            h2: "What to lay instead",
+            body: "Compact a layer of hardcore, add a bed of sharp sand, and set paving slabs or a timber frame on top. Check each corner with a level before the shed goes back.",
+          },
+          {
+            h2: "Keeping it level",
+            body: "Look at the door gap after heavy rain. A gap that changes width is the first sign the ground is moving again, and early shimming costs nothing.",
+          },
+          {
+            h2: "When to call someone in",
+            body: "If a corner has dropped more than a few centimetres, or the floor has cracked, the ground needs more than shims. A groundworker can dig out the soft patch, lay a proper footing and save you doing the job twice in one year.",
+          },
+        ],
+      }),
+    })),
+};
+
+const LANG_EN = "/p26b/lang-pair-en";
+const LANG_FR = "/p26b/lang-pair-fr";
+
+function langPair(
+  path: string,
+  htmlLang: string | undefined,
+  copy: { title: string; description: string; h1: string; lede: string },
+  expectedIssues: string[],
+  name: string,
+): Fixture {
+  return {
+    path,
+    category: "hreflang",
+    name,
+    expectedIssues,
+    exact: true,
+    handler: (req, res) =>
+      serve(req, res, (self) => ({
+        title: copy.title,
+        metaDescription: copy.description,
+        ...(htmlLang === undefined ? {} : { htmlLang }),
+        headExtra: [
+          ["en", LANG_EN],
+          ["fr", LANG_FR],
+          ["x-default", LANG_EN],
+        ]
+          .map(
+            ([code, target]) =>
+              `<link rel="alternate" hreflang="${code}" href="${new URL(target!, self).href}">`,
+          )
+          .join("\n"),
+        bodyHtml: article({
+          h1: copy.h1,
+          lede: copy.lede,
+          withImage: false,
+          sections: [
+            {
+              h2: "Annotations in the head",
+              body: "The head names this page and its twin under their language codes, and an x-default pointing at the English page.",
+            },
+            {
+              h2: "The lang attribute",
+              body: "The lang attribute on the html element tells browsers and screen readers which language the text is in, and it should agree with the code the page gives itself.",
+            },
+            {
+              h2: "How the two drift apart",
+              body: "A translated template copied from the English one often keeps lang set to en, because the attribute is written in a layout file nobody opened.",
+            },
+            {
+              h2: "Why it is worth correcting",
+              body: "Screen readers pick a pronunciation voice from the attribute, browsers choose hyphenation and quotation marks from it, and translation prompts appear when it disagrees with the text. A wrong value makes the page worse for exactly the readers the translation was written for.",
+            },
+          ],
+        }),
+      })),
+  };
+}
+
+const langPairEn = langPair(
+  LANG_EN,
+  undefined,
+  {
+    title: "Storing garden tools through the winter months",
+    description:
+      "The English page of a pair whose root element agrees with its own hreflang code, so the lang comparison has a control to be measured against.",
+    h1: "Storing garden tools over winter",
+    lede: "Clean, oil and hang your tools before the first frost, and they will be ready when the ground thaws.",
+  },
+  [],
+  "Hreflang pair, English page with lang matching its code",
+);
+
+const langPairFr = langPair(
+  LANG_FR,
+  "en",
+  {
+    title: "Ranger les outils de jardin pendant les mois d'hiver",
+    description:
+      "The French page of the pair. It names itself fr in its hreflang block while its root element still says en, copied from the English layout.",
+    h1: "Ranger les outils de jardin en hiver",
+    lede: "Nettoyez, huilez et suspendez vos outils avant les premières gelées, et ils seront prêts au dégel.",
+  },
+  ["hreflang.html-lang-mismatch"],
+  "Hreflang pair, French page whose lang attribute still says en",
+);
+
 export const authoredP26bFixtures: Fixture[] = [
+  botConflict,
+  metaRefresh,
+  langPairEn,
+  langPairFr,
   ogIncomplete,
   ogMultiple,
   ogUrlMismatch,

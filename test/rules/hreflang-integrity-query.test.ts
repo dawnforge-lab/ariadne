@@ -37,8 +37,9 @@ function rule(id: string): QueryRule {
 }
 
 describe("hreflangIntegrityRules metadata", () => {
-  it("defines exactly the four integrity rules", () => {
+  it("defines exactly the five integrity rules", () => {
     expect(hreflangIntegrityRules.map((r) => r.id).sort()).toEqual([
+      "hreflang.html-lang-mismatch",
       "hreflang.inconsistent-return-code",
       "hreflang.multiple-entries",
       "hreflang.self-only",
@@ -52,6 +53,7 @@ describe("hreflangIntegrityRules metadata", () => {
         hreflangIntegrityRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]]),
       ),
     ).toEqual({
+      "hreflang.html-lang-mismatch": [["CHECK-25"], "info", "hreflang"],
       "hreflang.inconsistent-return-code": [["CHECK-24"], "warning", "hreflang"],
       "hreflang.multiple-entries": [["CHECK-24"], "warning", "hreflang"],
       "hreflang.self-only": [["CHECK-24"], "info", "hreflang"],
@@ -76,6 +78,8 @@ describe("hreflangIntegrityRules against the database", () => {
   interface PageSpec extends IndexabilitySpec {
     path: string;
     canonicalHtml?: string;
+    htmlLang?: string | null;
+    extractionVersion?: number | null;
   }
 
   async function newCrawl(): Promise<string> {
@@ -101,6 +105,8 @@ describe("hreflangIntegrityRules against the database", () => {
       canonicalHtml: s.canonicalHtml ?? null,
       robotsMeta: s.robotsMeta ?? null,
       xRobotsTag: s.xRobotsTag ?? null,
+      htmlLang: s.htmlLang === undefined ? null : s.htmlLang,
+      extractionVersion: s.extractionVersion === undefined ? null : s.extractionVersion,
       depth: 1,
       discoveredVia: "link",
     }));
@@ -675,6 +681,69 @@ describe("hreflangIntegrityRules against the database", () => {
       } as Parameters<QueryRule["run"]>[2]);
       expect(found).toHaveLength(total);
       expect(found.some((f) => "truncated" in f.evidence)).toBe(false);
+    });
+  });
+
+  describe("hreflang.html-lang-mismatch", () => {
+    const run = (crawlId: string) => findings("hreflang.html-lang-mismatch", crawlId);
+    const V2 = { extractionVersion: 2 };
+
+    it("fires when lang=de and the self hreflang is en, with both in the evidence", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a", htmlLang: "de", ...V2 }]);
+      await declare(crawlId, ids, "/a", [["en", "/a"], ["x-default", "/a"]]);
+      const found = await run(crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ htmlLang: "de", hreflangCodes: ["en"] });
+    });
+
+    it("is silent when only the region differs (en-US against en-gb)", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a", htmlLang: "en-US", ...V2 }]);
+      await declare(crawlId, ids, "/a", [["en-gb", "/a"]]);
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("is silent when any self code shares the language", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a", htmlLang: "fr", ...V2 }]);
+      await declare(crawlId, ids, "/a", [["en", "/a"], ["fr-CA", "/a"]]);
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("never compares x-default, and a page naming only x-default has no code", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a", htmlLang: "de", ...V2 }]);
+      await declare(crawlId, ids, "/a", [["x-default", "/a"]]);
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a page with no lang", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/a", htmlLang: null, ...V2 }]);
+      await declare(crawlId, ids, "/a", [["en", "/a"]]);
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("ignores another page's code and sitemap-source declarations", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/a", htmlLang: "de", ...V2 },
+        { path: "/b", htmlLang: "de", ...V2 },
+      ]);
+      await declare(crawlId, ids, "/a", [["de", "/a"], ["en", "/b"]]);
+      await declare(crawlId, ids, "/b", [["en", "/b"]], "sitemap");
+      expect(await run(crawlId)).toHaveLength(0);
+    });
+
+    it("is silent on a crawl with any page below extraction 2 (the marker speaks)", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/a", htmlLang: "de", ...V2 },
+        { path: "/old", extractionVersion: 1 },
+      ]);
+      await declare(crawlId, ids, "/a", [["en", "/a"]]);
+      expect(await run(crawlId)).toHaveLength(0);
     });
   });
 

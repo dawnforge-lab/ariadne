@@ -439,11 +439,20 @@ describe("checklist coverage", () => {
   //   page    53 + 5 = 58
   //   query   94 + 1 = 95
   //   total   161 + 6 = 167
-  it("pins the ruleset split the gate doc reports: 167 rules = 58 page + 95 query + 14 metric", () => {
+  //
+  // Phase 26b Task 8 adds TWO page rules, `directives.bot-conflict` (CHECK-04)
+  // and `redirect.meta-refresh` (CHECK-10), and ONE query rule,
+  // `hreflang.html-lang-mismatch` (CHECK-25); all three claim checks already
+  // claimed.
+  //
+  //   page    58 + 2 = 60
+  //   query   95 + 1 = 96
+  //   total   167 + 3 = 170
+  it("pins the ruleset split the gate doc reports: 170 rules = 60 page + 96 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(167);
-    expect(registry.byKind("page")).toHaveLength(58);
-    expect(registry.byKind("query")).toHaveLength(95);
+    expect(registry.all()).toHaveLength(170);
+    expect(registry.byKind("page")).toHaveLength(60);
+    expect(registry.byKind("query")).toHaveLength(96);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

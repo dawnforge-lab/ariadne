@@ -88,21 +88,39 @@ export const ROBOTS_META_BOTS = [
 
 /**
  * Parse a `<meta http-equiv=refresh content=…>` value per the HTML refresh
- * algorithm: leading digits (optional fraction) are the delay, then an optional
- * `;` or `,` and whitespace, an optional `url=` (any case) with optional quotes,
- * and the rest, trimmed, is the URL resolved against `baseUrl`.
+ * algorithm: leading digits (optional fraction) are the delay. A separator
+ * (`;`, `,` or whitespace) is REQUIRED before a URL part (`5abc` has no URL).
+ * The URL part is `url`, optional whitespace and `=` (any case), then an
+ * optional quote; a part that starts `url` without `=` has no URL (`urlfoo`),
+ * while a part that does not start with `url` is a bare URL (`0; /next`). A
+ * quoted URL ends at its closing quote, an unquoted one at the end, trimmed.
+ * The target is resolved against `baseUrl`; an invalid `baseUrl` throws, and
+ * only the target's own failure to resolve gives `target: null`.
  */
 export function parseRefresh(value: string, baseUrl: string): RefreshFact {
   const raw = storableCap(value, REFRESH_RAW_MAX);
+  const base = new URL(baseUrl);
   const m = /^\s*(\d+(?:\.\d*)?|\.\d+)/.exec(value);
   if (!m) return { raw, delaySeconds: null, target: null };
   const delaySeconds = Number(m[1]);
-  let rest = value.slice(m[0].length).replace(/^[\s;,]+/, "");
-  rest = rest.replace(/^url\s*=\s*/i, "");
-  rest = rest.trim().replace(/^(["'])(.*?)\1?$/s, "$2").trim();
+  const after = value.slice(m[0].length);
+  const sep = /^(?:\s*[;,]\s*|\s+)/.exec(after);
+  if (!sep) return { raw, delaySeconds, target: null };
+  let rest = after.slice(sep[0].length);
+  if (/^url/i.test(rest)) {
+    const eq = /^url\s*=\s*/i.exec(rest);
+    if (!eq) return { raw, delaySeconds, target: null };
+    rest = rest.slice(eq[0].length);
+  }
+  const quote = rest[0];
+  if (quote === '"' || quote === "'") {
+    const close = rest.indexOf(quote, 1);
+    rest = close === -1 ? rest.slice(1) : rest.slice(1, close);
+  }
+  rest = rest.trim();
   if (rest === "") return { raw, delaySeconds, target: null };
   try {
-    return { raw, delaySeconds, target: storableCap(new URL(rest, baseUrl).href) };
+    return { raw, delaySeconds, target: storableCap(new URL(rest, base).href) };
   } catch {
     return { raw, delaySeconds, target: null };
   }

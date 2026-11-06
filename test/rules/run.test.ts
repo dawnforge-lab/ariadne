@@ -135,7 +135,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("render.title-changed");
     expect(ids).toContain("render.meta-description-changed");
     expect(ids).toContain("render.h1-changed");
-    expect(ids.length).toBe(167);
+    expect(ids.length).toBe(170);
   });
 
   it("registers every kind the runner drives", () => {

@@ -14,6 +14,7 @@ import { urlShapeRules } from "./page/url-shape.js";
 import { pixelWidthRules } from "./page/pixel-width.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
+import { refreshRules } from "./page/refresh.js";
 import { socialRules } from "./page/social.js";
 import { technicalRules } from "./page/technical.js";
 import { resourceMetrics } from "./metric/resource-metrics.js";
@@ -59,6 +60,8 @@ export function buildRegistry(): Registry {
     ...pixelWidthRules,
     // Where the head ended, and which head elements came after it (P23-T5).
     ...headRules,
+    // The meta refresh and Refresh header redirect (26b, CHECK-10).
+    ...refreshRules,
     // The Open Graph and X tags (26b, CHECK-87).
     ...socialRules,
     ...technicalRules,

@@ -21,6 +21,23 @@ describe("parseRefresh", () => {
   it("an unresolvable url gives a null target", () => {
     expect(parseRefresh("0;url=http://[bad", BASE).target).toBeNull();
   });
+  it("requires a separator before the url part", () => {
+    expect(parseRefresh("5abc", BASE)).toMatchObject({ delaySeconds: 5, target: null });
+    expect(parseRefresh("5 /x", BASE).target).toBe("https://base.test/x");
+  });
+  it("a url part needs url then = ; a bare url is accepted", () => {
+    expect(parseRefresh("0;urlfoo", BASE).target).toBeNull();
+    expect(parseRefresh("0;url /x", BASE).target).toBeNull();
+    expect(parseRefresh("0; URL = /x", BASE).target).toBe("https://base.test/x");
+    expect(parseRefresh("0; /next", BASE).target).toBe("https://base.test/next");
+  });
+  it("a quoted url ends at the matching quote", () => {
+    expect(parseRefresh("0;url='a'b", BASE).target).toBe("https://base.test/dir/a");
+    expect(parseRefresh('0;url="a', BASE).target).toBe("https://base.test/dir/a");
+  });
+  it("an invalid base url throws", () => {
+    expect(() => parseRefresh("0;url=/x", "not a url")).toThrow();
+  });
   it("caps raw", () => {
     expect(parseRefresh("0;url=/" + "a".repeat(2000), BASE).raw.length).toBe(REFRESH_RAW_MAX);
     expect(REFRESH_RAW_MAX).toBe(512);

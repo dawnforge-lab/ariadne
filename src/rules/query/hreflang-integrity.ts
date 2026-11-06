@@ -19,12 +19,14 @@ import {
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { SAMPLE_SOURCES } from "./link-targets.js";
+import { v2Gate } from "./page-facts.js";
 
 const CATEGORY = "hreflang";
 
 const RETURN_CODE: RuleIdentity = { id: "hreflang.inconsistent-return-code", severity: "warning" };
 const MULTIPLE: RuleIdentity = { id: "hreflang.multiple-entries", severity: "warning" };
 const SELF_ONLY: RuleIdentity = { id: "hreflang.self-only", severity: "info" };
+const LANG_MISMATCH: RuleIdentity = { id: "hreflang.html-lang-mismatch", severity: "info" };
 const UNLINKED: RuleIdentity = { id: "hreflang.unlinked-target", severity: "info" };
 
 // --------------------------------------------------------------------------
@@ -305,7 +307,79 @@ async function unlinkedTargetFindings(
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
+/**
+ * A page whose `<html lang>` names a different language from the one its own
+ * hreflang block gives it (Phase 26b, CHECK-25).
+ *
+ * Opens with `v2Gate`: `html_lang` exists only on extraction 2 rows, so a crawl
+ * not wholly recorded returns `[]` and `extraction.not-recorded` speaks.
+ *
+ * The page's SELF codes are its html-source hreflang codes whose target is the
+ * page itself (the cohort above), `x-default` excluded. Only the PRIMARY
+ * language subtag is compared (before `-`, lower-cased): `en-US` against `en-gb`
+ * agree, `de` against `en` do not. The page fires when it has at least one self
+ * code and none of their primary subtags equals `html_lang`'s. A page with no
+ * `lang`, or no self code, has nothing to compare and is not this rule's.
+ */
+async function htmlLangMismatchFindings(
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
+  const gate = await v2Gate(db, crawlId);
+  if (!gate.recorded) return [];
+  const result = await db.execute<{
+    page_id: string;
+    page_url: string;
+    html_lang: string;
+    codes: string[];
+    total_matches: number;
+  }>(sql`
+    with ${DECLARATIONS(crawlId)},
+    self_codes as (
+      select page_id, array_agg(distinct code order by code) as codes
+      from decl
+      where target_key = page_key and code <> ${X_DEFAULT}
+      group by page_id
+    ),
+    hits as (
+      select p.id as page_id, p.url as page_url, p.html_lang, s.codes,
+             count(*) over ()::int as total_matches
+      from self_codes s
+      join pages p on p.id = s.page_id and p.crawl_id = ${crawlId}
+      where nullif(btrim(p.html_lang), '') is not null
+        and not (lower(split_part(btrim(p.html_lang), '-', 1)) = any (
+          select lower(split_part(c, '-', 1)) from unnest(s.codes) as c))
+    )
+    select * from hits order by page_url ${limitTo(caps.listing)}`);
+
+  const findings = result.rows.map((row) =>
+    queryFinding(LANG_MISMATCH, {
+      pageId: row.page_id,
+      pageUrl: row.page_url,
+      evidence: { htmlLang: row.html_lang, hreflangCodes: row.codes },
+      dedupeKey: row.page_url,
+    }),
+  );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
 export const hreflangIntegrityRules: QueryRule[] = [
+  defineRule<QueryRule>({
+    kind: "query",
+    id: LANG_MISMATCH.id,
+    checkIds: ["CHECK-25"],
+    category: CATEGORY,
+    severity: LANG_MISMATCH.severity,
+    columns: [
+      { key: "htmlLang", label: "HTML Lang" },
+      { key: "hreflangCodes", label: "Self Hreflang" },
+    ],
+    ...copyFor(LANG_MISMATCH.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => htmlLangMismatchFindings(db, crawlId, capsOr(caps)),
+  }),
+
   defineRule<QueryRule>({
     kind: "query",
     id: RETURN_CODE.id,
