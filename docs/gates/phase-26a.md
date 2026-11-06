@@ -3,13 +3,14 @@
 Date: 2026-11-05. Spec: `docs/superpowers/specs/2026-11-05-phase-26-checks-wave-1-design.md`
 (the "Gate 26a" section). Plan: `docs/superpowers/plans/2026-11-05-phase-26a-rules-over-existing-data.md`.
 Branch `worktree-phase-26a`, built on `47c26b5`. The first re-judge ran on `2c78017`'s code,
-and the second (the numbers below) on `40dab51`, the `sitemap.lastmod-invalid` fix. The
+the second on `40dab51`, the `sitemap.lastmod-invalid` fix, and the third (the numbers
+below) on `70daa5d`, after the PR #22 review fixes. The
 suite and `tsc` ran on the commit that merges. Apart from `40dab51`, the Task 14 commits
 are docs and one test comment.
 
 **Verdict: clauses 1–4 pass.** The 40 new rules bring the ruleset to 0.20.0 with 154 rules
 (49 page / 91 query / 14 metric). The stored lavishalice crawl was re-judged with no
-re-crawl. Nine new rules fire there, with 635 findings, and the 1,270 findings of the
+re-crawl. Ten new rules fire there, with 637 findings, and the 1,270 findings of the
 older rules came out byte-identical. The hand-check found **one false positive, and it is
 fixed**: `sitemap.lastmod-invalid` judged "future" against the crawl's start, so on Shopify
 all 205 product entries, stamped with the moment the sitemap was served, read as future.
@@ -17,7 +18,7 @@ The rule now judges against the end of the crawl, which every sitemap read prece
 (`40dab51`, §5.2), and fires on none of them. The
 four HTTPS-only rules got their manual check on this HTTPS site (§5.3), and
 `security.headers-not-recorded` stayed silent, as it must on a Phase 25 crawl. Live
-traffic for the hand-check was 8 URLs, under the cap of 40.
+traffic for the hand-check was 11 URLs, under the cap of 40.
 
 ## Gate clauses (spec "Gate 26a")
 
@@ -26,7 +27,7 @@ traffic for the hand-check was 8 URLs, under the cap of 40.
 | 1 | full suite green, 0 skipped; `tsc` clean | **pass**: 104 files / 2,816 tests, 0 failed, 0 skipped; `tsc` clean | §1 |
 | 2 | positive and negative tests per rule; a fixture page per rule, or a `SKIP_HARNESS_CLAIMS` entry with its reason | **pass**: 40 of 40 have DB or unit tests both ways; 34 fire on the fixture crawl; 6 joined `SKIP_HARNESS_CLAIMS` (16 → 22), each argued | §2 |
 | 3 | calibration report against Screaming Frog | **pass**: `docs/gates/phase-26a-calibration.md`, 0 UNEXPLAINED / 0 MISMATCH, run with the SEO Spider's post-crawl analysis on; one threshold moved (`HIGH_EXTERNAL_OUTLINKS` 100 → 10, owner confirmed); `DEEP_DEPTH` kept at 5 against SF's 3 (owner decision, recorded as an owner-decided threshold divergence); every mapped filter calibrated except the HTTPS-only four | §3 |
-| 4 | rules re-run over the stored lavishalice crawl (no re-crawl); each new rule's count reviewed against the site for false positives; the four HTTPS rules checked by hand | **pass**: 9 rules fire, 31 silent, every silence explained; samples hand-checked; 1 false positive found and fixed (`sitemap.lastmod-invalid`, 205 → 0); `security.headers-not-recorded` silent | §4, §5 |
+| 4 | rules re-run over the stored lavishalice crawl (no re-crawl); each new rule's count reviewed against the site for false positives; the four HTTPS rules checked by hand | **pass**: 10 rules fire, 30 silent, every silence explained; samples hand-checked; 1 false positive found and fixed (`sitemap.lastmod-invalid`, 205 → 0); `security.headers-not-recorded` silent | §4, §5 |
 
 ## 1. Clause 1: suite and types
 
@@ -164,10 +165,27 @@ twice. The first run was at 2026-11-05 19:39:27 UTC on `2c78017`. It found the
 `sitemap.lastmod-invalid` false positive of §5.2 and answered
 `{pagesScanned: 602, findings: 2105, metrics: 92}`. The second run was at
 2026-11-05 20:02:59 UTC on `40dab51`, after the fix, and answered
-`{pagesScanned: 602, findings: 1905, metrics: 92}` in 5.2 s. No page was fetched for
-either run. The crawl's issues and metrics were snapshotted before each run and compared
-after it. Both runs use the default listing cap of 200 per rule. The tables below are the
-second run.
+`{pagesScanned: 602, findings: 1905, metrics: 92}` in 5.2 s. The third run was at
+2026-11-06 16:07:45 UTC on `70daa5d`, after the PR #22 review fixes (`security.http-url`
+redefined over `links`, `robotsTokens` splitting on whitespace, `unavailable_after` read by
+an explicit parser, pagination targets dropping every `disallowed` row, a cheaper
+`pagination.loop` walk), and answered `{pagesScanned: 602, findings: 1907, metrics: 92}`
+in 5.4 s. No page was fetched for any run. The crawl's issues and metrics were snapshotted
+before each run and compared after it. All runs use the default listing cap of 200 per
+rule. The tables below are the third run.
+
+**Third run against the second, row by row** (rule, dedupe key, page, severity and
+evidence): 1,905 rows byte-identical, 2 added, 0 removed, and all 92 metric rows
+byte-identical. The rules the review changed, against their second-run figures:
+
+| rule | second run (`40dab51`) | third run (`70daa5d`) | delta | why |
+|---|---:|---:|---:|---|
+| `security.http-url` | 0 | 2 | +2 | redefined: it read `http:` rows of `pages`, which an `https:` crawl never writes; it now reads internal links to `http:` URLs (§5.3) |
+| `indexability.nofollow` | 4 | 4 | 0 | same 4 rows; the only robots value on the crawl is `X-Robots-Tag: noindex, nofollow`, comma-separated, so the whitespace split changes nothing here |
+| `directives.restrictive` | 0 | 0 | 0 | no snippet or image directive in any robots value, with either delimiter |
+| `directives.unavailable-after` | 0 | 0 | 0 | no `unavailable_after` anywhere |
+| `pagination.non-indexable-target`, `pagination.loop` | 0, 0 | 0, 0 | 0 | no `rel=next` target was crawled, so neither change has anything to act on |
+| `security.headers-not-recorded` | 0 | 0 | 0 | the throw on an empty count is not reachable: the count answered |
 
 ### 4.1 The new rules: findings per rule
 
@@ -181,16 +199,16 @@ says it was capped.
 | `title.pixel-too-short` | info | 114 | 114 | true (§5.1) |
 | `title.pixel-too-long` | warning | 17 | 17 | true (§5.1) |
 | `links.non-descriptive-anchor` | info | 5 | 5 | true (§5.1) |
-| `indexability.nofollow` | warning | 4 | 4 | true, and deliberate on the site (§5.1) |
+| `indexability.nofollow` | warning | 4 | 4 | true, and deliberate on the site (§5.1); unchanged by the whitespace split |
 | `links.high-outlinks` | info | 2 | 2 | true at the calibrated limit (§5.1) |
 | `url.internal-search` | warning | 2 | 2 | true (§5.1) |
 | `meta-description.pixel-too-short` | info | 2 | 2 | true (§5.1) |
+| `security.http-url` | warning | 2 | 2 | true: both policy pages link to `http://www.lavishalice.com`, which answers 301 (§5.3) |
 | `security.hsts-missing` | warning | 0 | | silent, correctly: HSTS on 504 of 504 (§5.3) |
 | `security.headers-not-recorded` | info | 0 | | silent, correctly: 602 of 602 rows at `extraction_version` 1 |
-| `security.http-url` | warning | 0 | | not re-judged in this run: the rule was redefined after it (PR #22 review); measured alone it files 2 (§5.3) |
 | `security.mixed-content` | warning | 0 | | silent, correctly: 0 `http:` references among 52,998 `page_resources` rows (§5.3) |
 | `resources.bad-content-type` | info | 0 | | not measured: all 3,837 resource rows are unfetched, and `resources.not-fetched` fired (1) and says so |
-| `directives.restrictive` | warning | 0 | | silent: no snippet or image directive in any robots meta or `X-Robots-Tag` |
+| `directives.restrictive` | warning | 0 | | silent: no snippet or image directive in any robots meta or `X-Robots-Tag`, split on commas or whitespace |
 | `directives.unavailable-after` | warning | 0 | | silent: no `unavailable_after` anywhere |
 | `canonical.relative` | info | 0 | | silent: 504 canonicals, all absolute |
 | `canonical.fragment` | warning | 0 | | silent: no canonical contains `#` |
@@ -217,7 +235,7 @@ says it was capped.
 | `sitemap.cross-host-loc` | warning | 0 | | silent: every `<loc>` is on `https://lavishalice.com/` |
 | `sitemap.lastmod-invalid` | info | 0 | | silent after the fix: 440 entries carry a lastmod, all well-formed, none after the crawl ended. The first run reported 205 (200 listed), all false positives (§5.2) |
 
-**Nine fire, thirty-one are silent**, and every silence has a reason drawn from the stored
+**Ten fire, thirty are silent**, and every silence has a reason drawn from the stored
 evidence. The one rule this crawl cannot answer, `resources.bad-content-type`, is covered
 by the marker that already claims CHECK-51 (`resources.not-fetched`). That is the
 arrangement the plan made for it.
@@ -226,12 +244,14 @@ arrangement the plan made for it.
 
 All 27 rules that fired at 0.19.0 fired again at 0.20.0 with the **same 1,270 findings,
 byte-identical** (rule, dedupe key, page, severity and evidence compared row by row). Only
-the `ruleset_version` stamp moved. Total findings went from 1,270 to 1,905 (+635, all from
-the nine rules above). Between the first and second runs, only the 200
+the `ruleset_version` stamp moved. Total findings went from 1,270 to 1,907 (+637, all from
+the ten rules above). Between the first and second runs, only the 200
 `sitemap.lastmod-invalid` rows changed, and they were removed. The other 1,905 rows are
 byte-identical across both runs, and so are all 92 metric rows. The lastmod findings were
 info-level and sat on pages that already had other findings, so `site.health` did not
-move.
+move. Between the second and third runs only the 2 `security.http-url` rows were added;
+both pages already carried warnings (`headings.h1-missing`, `meta-description.missing`), so
+`site.health` and the other 91 metric rows did not move either.
 
 Of the 92 metric rows, 91 are byte-identical. The one that moved is `site.health`, whose
 partition counts findings by severity:
@@ -257,7 +277,8 @@ each gained exactly one new warning rule:
 | both | 0 |
 | **total** | **99** (= 103 − 4 = 438 − 339) |
 
-The other two 26a warning rules moved no page. `indexability.nofollow`'s 4 pages are the
+The other three 26a warning rules moved no page. `security.http-url`'s 2 pages already had
+a warning. `indexability.nofollow`'s 4 pages are the
 noindexed `/search?q=` results. They sit outside the partition, in `urlsNoindex`, and
 already carried a critical finding (`hreflang.non-indexable-target`). Both of
 `url.internal-search`'s pages already had a warning (`content.thin`). Across the whole
@@ -277,7 +298,11 @@ A live fetch was used only where the evidence could not settle a question. Live 
 followed the controller's politeness ruling (hard rule 9): **8 distinct URLs**, GET only,
 one at a time, at least 2.5 s apart, `redirect: manual`, with the crawler's own
 User-Agent from `src/crawl/loop.ts` (`AriadneBot/0.1 (+https://github.com/dawnforge-lab/ariadne)`).
-The requests ran 19:48:07–19:48:27 UTC. Every one answered without a 429.
+The requests ran 19:48:07–19:48:27 UTC. Every one answered without a 429. Three more
+were made on 2026-11-06 for the third run's new `security.http-url` findings (rows 9–11):
+GET only, one at a time, no redirect followed, but not spaced 2.5 s apart and sent with the
+User-Agent `AriadneBot/0.1 (gate hand-check)` rather than the crawler's own. None answered
+429.
 
 | # | URL | answer | used for |
 |---|---|---|---|
@@ -289,6 +314,9 @@ The requests ran 19:48:07–19:48:27 UTC. Every one answered without a 429.
 | 6 | `http://lavishalice.com/` | 301 → `https://lavishalice.com/` | `security.http-url` as first defined (see §5.3) |
 | 7 | `/search?q=blazers` | 200, `X-Robots-Tag: noindex, nofollow` | `indexability.nofollow` |
 | 8 | `/sitemap_products_1.xml?from=8318238458166&to=16162418524542` | 200 | `sitemap.lastmod-invalid` (§5.2) |
+| 9 | `/pages/privacy-policy` | 200 | `security.http-url` (§5.3) |
+| 10 | `/pages/data-protection-policy-by-lavish-alice` | 200 | `security.http-url` (§5.3) |
+| 11 | `http://www.lavishalice.com/` | 301 → `https://www.lavishalice.com/` | `security.http-url` (§5.3) |
 
 ### 5.1 Rules that fired and were confirmed
 
@@ -404,18 +432,20 @@ The fixture site cannot exercise these rules and Screaming Frog cannot calibrate
   the fix recommends. The finding is therefore hardening rather than an exposure. That
   is the spec's definition ("no or unsafe `referrer-policy`") and Screaming Frog's
   ("Missing Secure Referrer-Policy Header"), and it is info severity. No change.
-- **`security.http-url`: redefined after the re-judge, measured alone.** In the run above
-  it was silent, and that silence was the rule's defect, not the site's health: it read
-  `http:` rows in `pages`, and an `https:` crawl never fetches an `http:` URL (`enqueue`
-  keeps only `isSameOrigin` URLs), so it could not fire on any real crawl. PR #22's
-  review redefined it over `links`: an HTTPS page fetched OK that links to an `http:` URL
-  on the site's own host. Run alone against this crawl (2026-11-06, not through
-  `runRulesForCrawl`, so the §4 totals are unchanged) it files 2 findings:
-  `/pages/privacy-policy` and `/pages/data-protection-policy-by-lavish-alice`, each with
-  `httpTargetCount` 1 and sample `http://www.lavishalice.com/`. True by the stored links;
-  the crawl holds 3 `http:` link rows and the third targets `http://www.ico.org.uk/`,
-  another host, which the rule rightly ignores. The pages were not re-fetched to
-  hand-check the markup. Separately, live `http://lavishalice.com/` answers 301 to
+- **`security.http-url`: 2 findings, both true.** In the second run it was silent, and that
+  silence was the rule's defect, not the site's health: it read `http:` rows in `pages`, and
+  an `https:` crawl never fetches an `http:` URL (`enqueue` keeps only `isSameOrigin` URLs),
+  so it could not fire on any real crawl. PR #22's review redefined it over `links`: an
+  HTTPS page fetched OK that links to an `http:` URL on the site's own host. The third run
+  files 2: `/pages/privacy-policy` and `/pages/data-protection-policy-by-lavish-alice`, each
+  `httpTargetCount` 1, sample `http://www.lavishalice.com/`. Stored: the crawl holds 3
+  `http:` link rows, all `is_internal` false (as the writer records an `http:` target on an
+  `https:` page), anchor text `www.lavishalice.com` at position 68 on both pages; the third
+  row targets `http://www.ico.org.uk/`, another host, which the rule rightly ignores. Live
+  (rows 9–11 of the table above): both pages carry `<a href="http://www.lavishalice.com">`
+  in the body copy, and `http://www.lavishalice.com/` answers 301 to
+  `https://www.lavishalice.com/`, so each click starts on plain HTTP and costs a redirect.
+  No false positive. Separately, live `http://lavishalice.com/` answers 301 to
   `https://lavishalice.com/`, which is the host probe's question.
 - **`security.mixed-content`: silent, correct.** 0 of 52,998 `page_resources` rows are
   `http:`. Live, on the 5 HTML pages, no `<img>`, `<script>` or `<link>` has an `http:`
@@ -431,7 +461,7 @@ The fixture site cannot exercise these rules and Screaming Frog cannot calibrate
 the first re-judge, 0 after.** The cause was a reference instant earlier than the sitemap
 read (§5.2). The fix is `40dab51`, with tests in the owning rule's test file.
 
-The other nine rules that fire showed no false positive in the samples. Two carry a caveat,
+The other ten rules that fire showed no false positive in the samples. Two carry a caveat,
 and neither is a false positive:
 
 1. `links.high-outlinks`: correct at 10, but the limit is busy on real pages (§3). This is
