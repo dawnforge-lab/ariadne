@@ -64,6 +64,12 @@ describe("indexability.nofollow", () => {
     ).toMatchObject({ source: "both" });
   });
 
+  it("reads a nofollow written after an unavailable_after date (PR #22 re-review M1)", () => {
+    expect(
+      r.run(mkPage({ robotsMeta: "unavailable_after: 25 Jun 2010 15:00:00 PST nofollow" })),
+    ).toHaveLength(1);
+  });
+
   it("reads whitespace-delimited directives as saysNoindex does (PR #22 review)", () => {
     expect(r.run(mkPage({ robotsMeta: "noindex nofollow", isIndexable: false }))).toHaveLength(1);
     expect(r.run(mkPage({ xRobotsTag: "noarchive none", isIndexable: false }))).toHaveLength(1);
@@ -170,6 +176,19 @@ describe("directives.unavailable-after", () => {
     expect(out.map((f) => f.evidence)).toEqual([
       { unavailableAfter: "June 25", dateParsed: false },
     ]);
+  });
+
+  it("reads the date, not the directive after it (PR #22 re-review M1)", () => {
+    const out = r.run(
+      mkPage({
+        fetchedAt: FETCHED,
+        robotsMeta: "unavailable_after: 25 Jun 2010 15:00:00 PST nofollow",
+      }),
+    );
+    expect(out[0]!.evidence).toMatchObject({
+      unavailableAfter: "25 Jun 2010 15:00:00 PST",
+      dateParsed: true,
+    });
   });
 
   it("keeps an RFC 1123 date whole across its comma", () => {

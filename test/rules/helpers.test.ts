@@ -994,3 +994,44 @@ describe("parseRobotsDate (PR #22 review)", () => {
     }
   });
 });
+
+describe("unavailable_after ends where its date ends (PR #22 re-review M1)", () => {
+  it("tokenises a directive written after the date with only a space between", () => {
+    expect(robotsTokens("unavailable_after: 25 Jun 2010 15:00:00 PST nofollow")).toEqual([
+      "unavailable_after: 25 jun 2010 15:00:00 pst",
+      "nofollow",
+    ]);
+    expect(unavailableAfterOf("unavailable_after: 25 Jun 2010 15:00:00 PST nofollow")).toBe(
+      "25 Jun 2010 15:00:00 PST",
+    );
+  });
+
+  it("ends a date-only value at the date", () => {
+    expect(robotsTokens("unavailable_after: 2025-01-01 noindex")).toEqual([
+      "unavailable_after: 2025-01-01",
+      "noindex",
+    ]);
+    expect(unavailableAfterOf("unavailable_after: 2025-01-01 noindex")).toBe("2025-01-01");
+  });
+
+  it("keeps the longest prefix that is a date, so a whole date is never cut short", () => {
+    // "2025-01-01" alone parses too; the date-time is the longer one.
+    expect(unavailableAfterOf("unavailable_after: 2025-01-01T10:00:00Z")).toBe(
+      "2025-01-01T10:00:00Z",
+    );
+    expect(robotsTokens("noindex, unavailable_after: Fri, 25 Jun 2010 15:00:00 GMT")).toEqual([
+      "noindex",
+      "unavailable_after: fri, 25 jun 2010 15:00:00 gmt",
+    ]);
+  });
+
+  it("keeps the whole value when no prefix of it is a date", () => {
+    expect(robotsTokens("unavailable_after: next tuesday nofollow, noarchive")).toEqual([
+      "unavailable_after: next tuesday nofollow",
+      "noarchive",
+    ]);
+    expect(unavailableAfterOf("unavailable_after: next tuesday nofollow")).toBe(
+      "next tuesday nofollow",
+    );
+  });
+});

@@ -487,11 +487,38 @@ export function hasNoindex(page: RobotsDeclaration): boolean {
 const UNAVAILABLE_AFTER =
   /unavailable_after:\s*((?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,\s*)?[^,]+)/i;
 
+/**
+ * Where the `unavailable_after` directive of a robots value starts and ends,
+ * and its date as written, or null when the value has none.
+ *
+ * `UNAVAILABLE_AFTER` runs the value to the next comma, because a date may hold
+ * spaces. A directive written after the date with only a space between
+ * (`unavailable_after: 25 Jun 2010 15:00:00 PST nofollow`) would be swallowed
+ * into it, so the date ENDS at the longest whitespace-delimited prefix that
+ * `parseRobotsDate` accepts, and what follows is the next directive. Longest,
+ * so `2025-01-01T10:00:00Z` is not cut to `2025-01-01`. When no prefix is a
+ * date the whole value is kept, and the rule reports it as unparsed: nothing is
+ * guessed either way.
+ */
+function unavailableAfterSpan(value: string): { start: number; end: number; date: string } | null {
+  const match = UNAVAILABLE_AFTER.exec(value);
+  if (match === null) return null;
+  const captured = match[1]!;
+  const capturedAt = match.index + match[0].length - captured.length;
+  const wordEnds = [...captured.matchAll(/\S+/g)].map((w) => w.index + w[0].length);
+  for (let k = wordEnds.length - 1; k >= 0; k--) {
+    const candidate = captured.slice(0, wordEnds[k]);
+    if (parseRobotsDate(candidate) !== null) {
+      return { start: match.index, end: capturedAt + wordEnds[k]!, date: candidate.trim() };
+    }
+  }
+  return { start: match.index, end: match.index + match[0].length, date: captured.trim() };
+}
+
 /** The raw `unavailable_after` date of a robots directive string, or null. */
 export function unavailableAfterOf(value: string | null): string | null {
   if (!present(value)) return null;
-  const match = UNAVAILABLE_AFTER.exec(value);
-  return match ? match[1]!.trim() : null;
+  return unavailableAfterSpan(value)?.date ?? null;
 }
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -628,8 +655,9 @@ const VALUE_DIRECTIVES = new Set(["max-snippet", "max-image-preview", "max-video
  * their colon, and whitespace around any colon is closed up BEFORE the
  * whitespace split, so `max-snippet: 50` stays the one token `max-snippet:50`.
  * `unavailable_after: <date>` is one token whose date may hold spaces, commas
- * and colons; it runs to the next comma that does not follow a weekday name,
- * and is taken out first so neither split cuts it.
+ * and colons; it runs to the next comma that does not follow a weekday name, or
+ * to the end of the longest prefix that is a date (`unavailableAfterSpan`), and
+ * is taken out first so neither split cuts it.
  *
  * Rules compare whole tokens, which is the point: `nofollowing` is not
  * `nofollow`, and `max-snippet:-1` is not `max-snippet:0`.
@@ -650,14 +678,14 @@ export function robotsTokens(value: string | null): string[] {
       }
     }
   };
-  const match = UNAVAILABLE_AFTER.exec(value);
-  if (match === null) {
+  const span = unavailableAfterSpan(value);
+  if (span === null) {
     plain(value);
     return tokens;
   }
-  plain(value.slice(0, match.index));
-  tokens.push(`unavailable_after: ${match[1]!.trim().toLowerCase()}`);
-  plain(value.slice(match.index + match[0].length));
+  plain(value.slice(0, span.start));
+  tokens.push(`unavailable_after: ${span.date.toLowerCase()}`);
+  plain(value.slice(span.end));
   return tokens;
 }
 
