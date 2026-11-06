@@ -97,6 +97,18 @@
  *    never could. The oracle's copy is written from the field's contract, not
  *    from the port's code.
  *
+ * Phase 26b (P26b-T2) put its head facts ON the parity surface, each computed
+ * here by the selector that defines it: `htmlLang` (`html[lang]`),
+ * `titleCount` (`title` not under `svg`), `metaDescriptionCount`,
+ * `robotsMetas`, `metaRefresh` (through the shared `parseRefresh`, on the
+ * `simhash64` precedent: arithmetic over an attribute, not a tree read),
+ * `h2Text` (`$("h2").first()`, as `h1s` is read) and the whole `social` set,
+ * which rides the outside-head walk because tree order is document order and
+ * that walk already knows which side of the head each element is on. The
+ * oracle moved once more: `robotsMeta` is now every `meta[name=robots]`
+ * content joined with ", " (deviation 4), as the port now reads it.
+ * `socialImageRefs` is stripped, on `resourceRefs`' reasoning.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -111,6 +123,17 @@ import {
 } from "./page-analyzer.js";
 import { simhash64 } from "./simhash.js";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
+import {
+  H2_TEXT_MAX,
+  HTML_LANG_MAX,
+  parseRefresh,
+  ROBOTS_META_BOTS,
+  ROBOTS_META_CONTENT_MAX,
+  ROBOTS_METAS_MAX,
+  SOCIAL_TEXT_MAX,
+  SOCIAL_URL_MAX,
+  type SocialTag,
+} from "./page-facts.js";
 
 /** The Task 6 additions, which the oracle does not model. */
 const EXTENSION_FIELDS = [
@@ -151,7 +174,19 @@ const EXTENSION_FIELDS = [
   // modelled below; the closer is held to the oracle where the oracle can see
   // it (the first node of the body) in test/crawl/page-analyzer.test.ts.
   "headClosedBy",
+  // Phase 26b's social image refs, stripped on `resourceRefs`' reasoning: the
+  // field's specification is the port's own (resolution by `normalizeUrl`, the
+  // resource skip rules, the port's cap of four), not a DOM read. The SOCIAL
+  // SET they come from is on the parity surface below. Covered in
+  // test/crawl/analyzer-extensions.test.ts.
+  "socialImageRefs",
 ] as const;
+
+/** The ten social tags `PageAnalysis.social` reads, as the oracle lists them. */
+const SOCIAL_TAG_NAMES: readonly string[] = [
+  "og:title", "og:description", "og:image", "og:url", "og:type", "og:site_name",
+  "twitter:card", "twitter:title", "twitter:description", "twitter:image",
+] satisfies SocialTag[];
 
 type UpstreamShape = Omit<RawPageAnalysis, (typeof EXTENSION_FIELDS)[number]>;
 
@@ -344,8 +379,16 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     ? (canonicalEls.first().attr("href") ?? null)
     : null;
 
-  const robotsMeta =
-    byAttr("meta", "name", "robots").first().attr("content") ?? null;
+  // Phase 26b, deviation 4: EVERY robots meta's content, joined — Google
+  // combines them. An element with no `content` contributes nothing, so a
+  // page whose only robots meta has none still reads null, as before.
+  const robotsContents = byAttr("meta", "name", "robots")
+    .toArray()
+    .flatMap((el) => {
+      const content = $(el).attr("content");
+      return content === undefined ? [] : [content];
+    });
+  const robotsMeta = robotsContents.length === 0 ? null : robotsContents.join(", ");
   const ogTitle =
     byAttr("meta", "property", "og:title").first().attr("content") ?? null;
   const ogDescription =
@@ -358,6 +401,35 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   $("h1").each((_, el) => {
     h1s.push($(el).text().trim());
   });
+
+  // ---- Phase 26b head facts, each the selector its field is defined by ----
+  const langAttr = $("html").attr("lang")?.trim();
+  const htmlLang =
+    langAttr === undefined || langAttr === "" ? null : langAttr.slice(0, HTML_LANG_MAX);
+  // A `<title>` under an `<svg>` is the svg's, never the document's.
+  const titleCount = $("title").filter((_, el) => $(el).parents("svg").length === 0).length;
+  const metaDescriptionCount = byAttr("meta", "name", "description").length;
+  const botNames: readonly string[] = ROBOTS_META_BOTS;
+  const robotsMetas = $("meta[name]")
+    .toArray()
+    .flatMap((el) => {
+      const name = fold($(el).attr("name"));
+      if (name === undefined || !botNames.includes(name)) return [];
+      return [{ name, content: ($(el).attr("content") ?? "").slice(0, ROBOTS_META_CONTENT_MAX) }];
+    })
+    .slice(0, ROBOTS_METAS_MAX);
+  const refreshEl = $("meta[http-equiv][content]")
+    .filter((_, el) => fold($(el).attr("http-equiv")) === "refresh")
+    .first();
+  const refreshContent = refreshEl.attr("content");
+  // `parseRefresh` is shared rather than re-derived, on the `simhash64`
+  // precedent: it is arithmetic over the attribute, not a reading of the tree.
+  const metaRefresh =
+    refreshContent === undefined ? null : parseRefresh(refreshContent, pageUrl);
+  const h2El = $("h2").first();
+  const h2Text = h2El.length
+    ? h2El.text().replace(/\s+/g, " ").trim().slice(0, H2_TEXT_MAX)
+    : null;
 
   const headingOrder: number[] = [];
   $("h1, h2, h3, h4, h5, h6").each((_, el) => {
@@ -474,6 +546,17 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   let robotsOutsideHead: boolean | undefined;
   let canonicalOutsideHead: boolean | undefined;
   let hreflangOutsideHeadCount = 0;
+  // Phase 26b: the social set rides the same walk, because tree order is
+  // document order and the walk already knows which side of the head each
+  // element is on. Written from `PageAnalysis.social`'s contract: Open Graph
+  // from `property=` then `name=`, X from `name=` then `property=` (the latter
+  // flagged), first trimmed value per tag, every element counted, a tag with
+  // two distinct trimmed values conflicting.
+  const socialValues = new Map<string, string[]>();
+  let socialOutsideHead = false;
+  let xViaProperty = false;
+  const isSocial = (value: string | undefined): value is string =>
+    value !== undefined && SOCIAL_TAG_NAMES.includes(value);
   const walkOutsideHead = (node: DomNode, inHead: boolean, inSvg: boolean) => {
     const isElement =
       node.type === "tag" || node.type === "script" || node.type === "style";
@@ -482,6 +565,25 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       const attribs = node.attribs ?? {};
       const rel = relTokens(attribs["rel"]);
       const outside = !inHead;
+      if (name === "meta") {
+        const metaName = fold(attribs["name"]);
+        const property = fold(attribs["property"]);
+        const tag =
+          isSocial(property) && property.startsWith("og:")
+            ? property
+            : isSocial(metaName)
+              ? metaName
+              : isSocial(property)
+                ? property
+                : undefined;
+        if (tag !== undefined) {
+          if (tag !== metaName && tag.startsWith("twitter:")) xViaProperty = true;
+          if (outside) socialOutsideHead = true;
+          const values = socialValues.get(tag) ?? [];
+          values.push(attribs["content"]?.trim() ?? "");
+          socialValues.set(tag, values);
+        }
+      }
       if (name === "title" && !inSvg) titleOutsideHead ??= outside;
       if (name === "meta" && fold(attribs["name"]) === "description") {
         metaDescriptionOutsideHead ??= outside;
@@ -497,6 +599,30 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     }
   };
   walkOutsideHead($.root()[0] as unknown as DomNode, false, false);
+
+  let social: RawPageAnalysis["social"] = null;
+  if (socialValues.size > 0) {
+    const og: Record<string, string> = {};
+    const x: Record<string, string> = {};
+    const counts: Record<string, number> = {};
+    const conflicting: string[] = [];
+    for (const [tag, values] of socialValues) {
+      const [group, key] = tag.split(":") as [string, string];
+      const isUrl = tag === "og:url" || tag === "og:image" || tag === "twitter:image";
+      const first = values[0]!.slice(0, isUrl ? SOCIAL_URL_MAX : SOCIAL_TEXT_MAX);
+      (group === "og" ? og : x)[key] = first;
+      counts[tag] = values.length;
+      if (new Set(values).size > 1) conflicting.push(tag);
+    }
+    social = {
+      og,
+      x,
+      counts,
+      conflicting: conflicting.sort(),
+      outsideHead: socialOutsideHead,
+      xViaProperty,
+    } as RawPageAnalysis["social"];
+  }
 
   const hasAmp =
     byRel("link", "amphtml").length > 0 ||
@@ -535,6 +661,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     robotsOutsideHead: robotsOutsideHead ?? false,
     canonicalOutsideHead: canonicalOutsideHead ?? false,
     hreflangOutsideHeadCount,
+    htmlLang,
+    social,
+    h2Text,
+    titleCount,
+    metaDescriptionCount,
+    robotsMetas,
+    metaRefresh,
     links: Array.from(linksByTarget.values()),
     bodyText,
     h1s,
@@ -562,6 +695,7 @@ function expectParity(html: string) {
     resourceRefs: _resourceRefs,
     resourceRefsCapped: _resourceRefsCapped,
     headClosedBy: _headClosedBy,
+    socialImageRefs: _socialImageRefs,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
@@ -1107,5 +1241,66 @@ describe("the main-content stream, against the DOM", () => {
 
   it("agrees on a short page whose whole text is the quotation", () => {
     expectParity(`<html><body><p>Lorem ipsum dolor.</p></body></html>`);
+  });
+});
+
+/**
+ * Phase 26b's head facts and social set against the selectors they are
+ * defined by. `socialImageRefs` is stripped (see EXTENSION_FIELDS); the social
+ * set it comes from is compared whole.
+ */
+describe("the Phase 26b head facts and social set, against the DOM", () => {
+  it("agrees on a complete, consistent social set", () => {
+    expectParity(`<!doctype html><html lang="en"><head><title>T</title>
+      <meta property="og:title" content="T"><meta property="og:type" content="website">
+      <meta property="og:url" content="https://example.com/blog/post">
+      <meta property="og:image" content="https://example.com/i.png">
+      <meta property="og:site_name" content="Site"><meta property="og:description" content="D">
+      <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="T">
+      <meta name="twitter:description" content="D"><meta name="twitter:image" content="/x.png">
+      </head><body><h2>Sub</h2><p>x</p></body></html>`);
+  });
+
+  it("agrees on repeated, conflicting, name= and property= social tags", () => {
+    expectParity(`<html><head>
+      <meta property="og:title" content=" a "><meta name="og:title" content="a">
+      <meta property="og:title" content="b"><meta property="twitter:card" content="summary">
+      <meta name="twitter:title" property="og:title" content="c">
+      <meta property="og:image"><meta property="OG:IMAGE" content="/i.png">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on social tags after the head ends, in a template and in a noscript", () => {
+    expectParity(`<html><head><meta property="og:title" content="t">
+      <template><meta property="og:type" content="article"></template>
+      <noscript><meta property="og:url" content="/ns"></noscript>
+      </head><body><div>x</div><meta name="twitter:card" content="summary"></body></html>`);
+    expectParity(`<html><head><img src="/pixel.gif"><meta property="og:title" content="t"></head><body></body></html>`);
+  });
+
+  it("agrees on a page with no social tag at all", () => {
+    expectParity(`<html><head><title>t</title></head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on robots metas: every robots content joined, the bot-specific ones listed", () => {
+    expectParity(`<html><head>
+      <meta name="robots" content="index"><meta name="Robots" content="noarchive">
+      <meta name="robots"><meta name="GoogleBot" content="noindex">
+      <meta name="bingbot"><meta name="robotsx" content="noindex">
+      </head><body><p>x</p><meta name="robots" content="nofollow"></body></html>`);
+  });
+
+  it("agrees on the meta refresh, the first one only", () => {
+    expectParity(`<html><head><meta http-equiv="REFRESH">
+      <meta http-equiv="Refresh" content="3; URL='/next'"><meta http-equiv="refresh" content="0">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on lang, counts and the first h2", () => {
+    expectParity(`<html lang=" de-AT "><head><title>a</title><title>b</title>
+      <meta name="description" content="1"><meta name="DESCRIPTION" content="2">
+      </head><body><svg><title>icon</title></svg><h2>  First  <em>sub</em> </h2><h2>second</h2></body></html>`);
+    expectParity(`<html lang=""><body><h2></h2></body></html>`);
+    expectParity(`<p>a fragment with no html tag</p>`);
   });
 });

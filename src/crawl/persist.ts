@@ -351,6 +351,22 @@ export class PageWriter {
         })),
         () => this.flushPageResources(),
       );
+
+      // DEVIATION 3 (Phase 26b): og:image / twitter:image URLs become
+      // `resources` rows — kind `image`, so the fetch pass asks for their
+      // status and bytes — and NEVER `page_resources` edges. A browser does not
+      // load a share image, so it is no part of page weight, mixed content or
+      // `resources.broken`; every rule in that family judges only URLs with an
+      // edge. A URL the page also loads through a resource ref already has its
+      // row from the push above (with that ref's kind) and is not repeated.
+      const pageRefs = new Set(analysis.resourceRefs.map((ref) => ref.url));
+      await this.push(
+        this.resourceBuffer,
+        analysis.socialImageRefs
+          .filter((url) => !pageRefs.has(url))
+          .map((url) => ({ crawlId: this.crawlId, url, kind: "image" as const })),
+        () => this.flushResources(),
+      );
     }
 
     return pageId;
@@ -754,14 +770,18 @@ export class PageWriter {
       responseHeaders: fetch.responseHeaders,
       // Stamped on every row the writer shapes, robots-blocked rows included.
       extractionVersion: EXTRACTION_VERSION,
-      // Phase 26b facts (migration 0026): null until the analyzer fills them.
-      htmlLang: null,
-      social: null,
-      h2Text: null,
-      titleCount: null,
-      metaDescriptionCount: null,
-      robotsMetas: null,
-      metaRefresh: null,
+      // Phase 26b facts (migration 0026). Null exactly when no analysis ran
+      // (no HTML: nothing measured). With one, `social` is null only for a
+      // page with no social tag and `meta_refresh` only for a page with no
+      // refresh; the two counts are never null.
+      htmlLang: analysis === null ? null : analysis.htmlLang,
+      social: analysis === null ? null : analysis.social,
+      h2Text: analysis === null ? null : analysis.h2Text,
+      titleCount: analysis === null ? null : analysis.titleCount,
+      metaDescriptionCount: analysis === null ? null : analysis.metaDescriptionCount,
+      robotsMetas: analysis === null ? null : analysis.robotsMetas,
+      metaRefresh: analysis === null ? null : analysis.metaRefresh,
+      // Later Phase 26b tasks fill these.
       anchorCounts: null,
       insecureRefs: null,
       imagesEmptyAlt: null,

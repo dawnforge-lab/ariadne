@@ -522,6 +522,18 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     the allowlist. CHECK-87 (social sharing tags) and CHECK-88 (HTML document
 //     structure) are new checklist ids; CHECK-85 widens to "Mixed content and
 //     insecure forms". No rule is registered yet.
+//  2. (T2) The analyzer fills `html_lang`, `social`, `h2_text`, `title_count`,
+//     `meta_description_count`, `robots_metas` and `meta_refresh`. Two existing
+//     behaviours move. `robots_meta` now holds EVERY `<meta name=robots>`
+//     content joined with ", " (deviation 4), so `is_indexable` and every rule
+//     reading the column see a `noindex` in a second robots meta.
+//     `og:image` / `twitter:image` URLs become `resources` rows (kind `image`)
+//     with no `page_resources` edge (deviation 3). Every resource rule and
+//     marker that read `resources` without the edge table
+//     (`resources.bad-content-type`, `images.oversized`,
+//     `images.legacy-format`, `resources.uncached` and the four census markers)
+//     now counts only rows a page loads; `resources.broken`, `page.weight` and
+//     `security.mixed-content` already joined through `page_resources`.
 export const RULESET_VERSION = "0.21.0";
 
 /**

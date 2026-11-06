@@ -189,6 +189,26 @@ const LEGACY_IMAGE_TYPES = ["image/png", "image/jpeg", "image/jpg"] as const;
 const bareContentType = sql`btrim(lower(split_part(r.content_type, ';', 1)))`;
 
 /**
+ * THE FAMILY'S POPULATION: files a page LOADS, which is a `resources` row with
+ * at least one `page_resources` edge (Phase 26b, deviation 3).
+ *
+ * Since extraction 2 an `og:image` / `twitter:image` URL is a `resources` row
+ * too — so the fetch pass learns its status and size for `social.image-broken`
+ * — with NO edge, because a browser never loads a share image. Every statement
+ * here that reads `resources` WITHOUT going through `page_resources` therefore
+ * carries this condition: the file rules (a social image is not a page's file
+ * to judge for type, weight, format or caching) and the four markers (they
+ * explain the file rules' silence, so they count the same population — an
+ * og-only `ok` row must not read as "partial coverage the judging rules carry"
+ * when the judging rules cannot see it). `resources.broken` joins through the
+ * edges already and needs nothing. Served by `page_resources_crawl_resource`.
+ */
+const LOADED_BY_A_PAGE = sql`exists (
+  select 1 from page_resources pr_loaded
+  where pr_loaded.crawl_id = r.crawl_id and pr_loaded.resource_url = r.url
+)`;
+
+/**
  * Pages referencing at least one resource a server answered 4xx or 5xx for.
  *
  * PAGE-CENTRIC, unlike `links.broken-internal` next door, and the difference is
@@ -358,6 +378,8 @@ async function badContentTypeFindings(
       where r.crawl_id = ${crawlId}
         and r.status_code = 200
         and r.fetch_class = ${RESOURCE_OK_CLASS}
+        -- Deviation 3: a social-only image is no page's file (LOADED_BY_A_PAGE).
+        and ${LOADED_BY_A_PAGE}
         and (
           (r.kind = 'css' and ${bareContentType} <> 'text/css')
           or (r.kind = 'js' and ${bareContentType} <> all(${sql.param([...JS_CONTENT_TYPES])}::text[]))
@@ -459,6 +481,8 @@ async function heavyImageFindings(
         and r.fetch_class = ${RESOURCE_OK_CLASS}
         and r.bytes is not null
         and r.bytes > ${IMAGE_WEIGHT_WARN}
+        -- Deviation 3: a share image is heavy by design and no page loads it.
+        and ${LOADED_BY_A_PAGE}
         and ${extra}
       order by r.bytes desc, r.url
       ${limitTo(caps.listing)}
@@ -547,7 +571,8 @@ async function uncachedFindings(self: RuleIdentity, db: Db, crawlId: string): Pr
         array[]::text[]
       ) as sample
     from resources r
-    where r.crawl_id = ${crawlId}`);
+    -- Deviation 3: only files a page loads (LOADED_BY_A_PAGE).
+    where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}`);
 
   const row = result.rows[0];
   if (row === undefined) {
@@ -616,7 +641,9 @@ async function notRecordedFindings(
     pages_crawled: number;
   }>(sql`
     select
-      (select count(*)::int from resources r where r.crawl_id = ${crawlId}) as resources_seen,
+      -- Deviation 3: a social-only row is not a recorded page resource.
+      (select count(*)::int from resources r
+        where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}) as resources_seen,
       count(*) filter (where p.images_total > 0)::int as pages_with_images,
       count(*)::int as pages_crawled
     from pages p
@@ -808,7 +835,8 @@ async function notFetchedFindings(
       )::int as cap_rows,
       (select count(*)::int from pages p where p.crawl_id = ${crawlId}) as pages_crawled
     from resources r
-    where r.crawl_id = ${crawlId}`);
+    -- Deviation 3: the census of files a page loads (LOADED_BY_A_PAGE).
+    where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}`);
 
   const row = result.rows[0];
   if (row === undefined) {
@@ -941,7 +969,8 @@ async function allUnknownFindings(
     with census as (
       select r.fetch_class as fetch_class, count(*)::int as n
       from resources r
-      where r.crawl_id = ${crawlId}
+      -- Deviation 3: the census of files a page loads (LOADED_BY_A_PAGE).
+      where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}
       group by r.fetch_class
     )
     select
@@ -1071,7 +1100,8 @@ async function partialUnknownFindings(
     with census as (
       select r.fetch_class as fetch_class, count(*)::int as n
       from resources r
-      where r.crawl_id = ${crawlId}
+      -- Deviation 3: the census of files a page loads (LOADED_BY_A_PAGE).
+      where r.crawl_id = ${crawlId} and ${LOADED_BY_A_PAGE}
       group by r.fetch_class
     )
     select

@@ -17,12 +17,19 @@
  *    was also a missing-canonical page. Defaulting to self keeps each absorbed
  *    page carrying the one defect it names, and leaves `canonical.missing` for
  *    a fixture that means it (`canonical: null` opts out).
+ *  - A complete, consistent Open Graph / X set is the default too (Phase 26b),
+ *    for the same reason: the social rules would otherwise fire on every page.
+ *    `social: false` opts out, an object overrides (`PageSpec.social`), and
+ *    `htmlLang` makes the root's `lang` a knob, default `"en"`.
  *  - Responses are `node:http` writes rather than Workers `Response` objects,
  *    so upstream's `htmlResponse` / `redirect` become `serve` / `redirect`
  *    over a `ServerResponse`, and `delayMs` is a `setTimeout` before the write
  *    rather than an awaited sleep.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+
+import type { SocialFacts } from "../../src/crawl/parse/page-facts.js";
+import { SHARED_IMAGE_PATH } from "./assets.js";
 
 export function escapeHtml(input: string): string {
   return input
@@ -69,7 +76,7 @@ export function article(opts: {
   parts.push(`<p class="lede">${escapeHtml(opts.lede)}</p>`);
   if (opts.withImage !== false) {
     parts.push(
-      `<img src="/img/placeholder.svg" alt="${escapeHtml(
+      `<img src="${SHARED_IMAGE_PATH}" alt="${escapeHtml(
         opts.h1,
       )}, an illustrative diagram" width="720" height="360">`,
     );
@@ -107,7 +114,46 @@ export interface PageSpec {
    * the head early, so the tags after it land in the body (P23-T5).
    */
   headPrefix?: string;
+  /** `<html lang>`. Default `"en"`; `""` renders the attribute empty. */
+  htmlLang?: string;
+  /**
+   * The Open Graph / X set (Phase 26b). By default a complete, consistent one:
+   * `og:title` and `twitter:title` = the page title (both omitted when the page
+   * has no `<title>`), `og:type` `website`, `og:url` = this page's own URL,
+   * `og:image` = the site's shared image (`SHARED_IMAGE_PATH`, absolute) and
+   * `twitter:card` `summary_large_image`. An object overrides those values and
+   * may add `description` / `site_name`; a key given as `undefined` omits that
+   * tag. `false` renders no social tag at all.
+   */
+  social?: false | Partial<SocialFacts["og"] & { xCard: string }>;
   bodyHtml: string;
+}
+
+/** The social tags `renderDocument` writes for `spec` (see `PageSpec.social`). */
+function socialTags(spec: PageSpec, self: string): string[] {
+  if (spec.social === false) return [];
+  const override = spec.social ?? {};
+  const pick = <K extends keyof typeof override>(key: K, value: string | undefined) =>
+    key in override ? override[key] : value;
+  const og: Array<[string, string | undefined]> = [
+    ["og:title", pick("title", spec.title)],
+    ["og:type", pick("type", "website")],
+    ["og:url", pick("url", self)],
+    ["og:image", pick("image", `${new URL(self).origin}${SHARED_IMAGE_PATH}`)],
+    ["og:description", pick("description", undefined)],
+    ["og:site_name", pick("site_name", undefined)],
+  ];
+  const tags = og.flatMap(([property, value]) =>
+    value === undefined
+      ? []
+      : [`<meta property="${property}" content="${escapeHtml(value)}">`],
+  );
+  const card = pick("xCard", "summary_large_image");
+  if (card !== undefined) tags.push(`<meta name="twitter:card" content="${escapeHtml(card)}">`);
+  if (spec.title !== undefined) {
+    tags.push(`<meta name="twitter:title" content="${escapeHtml(spec.title)}">`);
+  }
+  return tags;
 }
 
 export interface ResponseSpec {
@@ -117,8 +163,11 @@ export interface ResponseSpec {
   delayMs?: number;
 }
 
-/** Build a complete HTML document with exact `<head>` control. */
-export function renderDocument(spec: PageSpec): string {
+/**
+ * Build a complete HTML document with exact `<head>` control. `self` is this
+ * page's own absolute URL, which the default `og:url` and `og:image` name.
+ */
+export function renderDocument(spec: PageSpec, self: string): string {
   const head: string[] = ['<meta charset="utf-8">'];
   if (spec.viewport !== false) {
     head.push('<meta name="viewport" content="width=device-width, initial-scale=1">');
@@ -134,13 +183,13 @@ export function renderDocument(spec: PageSpec): string {
   if (spec.robotsMeta !== undefined) {
     head.push(`<meta name="robots" content="${escapeHtml(spec.robotsMeta)}">`);
   }
+  head.push(...socialTags(spec, self));
   if (spec.headExtra !== undefined) head.push(spec.headExtra);
 
-  // `lang` is fixed rather than a knob: every fixture page is in English, and
-  // no rule reads the attribute. A per-page override would be a seam nothing
-  // uses, and an unused seam is a claim the fixture set does not back up.
+  // `lang` defaults to "en" (every fixture page is in English); Phase 26b's
+  // `hreflang.html-lang-mismatch` reads it, so a fixture can now set it.
   return `<!doctype html>
-<html lang="en">
+<html lang="${escapeHtml(spec.htmlLang ?? "en")}">
 <head>
 ${head.join("\n")}
 </head>
@@ -179,10 +228,13 @@ export function serve(
 ): void {
   const self = selfUrl(req);
   const spec = build(self);
-  const html = renderDocument({
-    ...spec,
-    canonical: spec.canonical === undefined ? self : spec.canonical,
-  });
+  const html = renderDocument(
+    {
+      ...spec,
+      canonical: spec.canonical === undefined ? self : spec.canonical,
+    },
+    self,
+  );
   const send = (): void => {
     res.writeHead(opts.status ?? 200, {
       "content-type": "text/html; charset=utf-8",

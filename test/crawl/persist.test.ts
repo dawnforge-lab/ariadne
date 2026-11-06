@@ -21,7 +21,7 @@ import {
   leaseBatch,
 } from "../../src/crawl/frontier.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
-import type { PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
+import { analyzePage, type PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -109,6 +109,17 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     robotsOutsideHead: false,
     canonicalOutsideHead: false,
     hreflangOutsideHeadCount: 0,
+    // Phase 26b (extraction 2). No social tags and so no social image refs by
+    // default: the resource cases below count rows and edges exactly, and an
+    // og:image would add a row with no edge (deviation 3).
+    htmlLang: "en",
+    social: null,
+    socialImageRefs: [],
+    h2Text: "A subheading",
+    titleCount: 1,
+    metaDescriptionCount: 1,
+    robotsMetas: [],
+    metaRefresh: null,
     ...overrides,
   };
 }
@@ -728,6 +739,14 @@ describe("PageWriter", () => {
     expect(row?.robotsOutsideHead).toBeNull();
     expect(row?.canonicalOutsideHead).toBeNull();
     expect(row?.hreflangOutsideHeadCount).toBeNull();
+    // The Phase 26b facts (0026): no HTML, nothing measured.
+    expect(row?.htmlLang).toBeNull();
+    expect(row?.social).toBeNull();
+    expect(row?.h2Text).toBeNull();
+    expect(row?.titleCount).toBeNull();
+    expect(row?.metaDescriptionCount).toBeNull();
+    expect(row?.robotsMetas).toBeNull();
+    expect(row?.metaRefresh).toBeNull();
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);
@@ -759,6 +778,63 @@ describe("PageWriter", () => {
     expect(row?.robotsOutsideHead).toBe(true);
     expect(row?.canonicalOutsideHead).toBe(true);
     expect(row?.hreflangOutsideHeadCount).toBe(4);
+  });
+
+  it("writes the Phase 26b head facts and social set (migration 0026)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/head-facts`;
+    const social = {
+      og: { title: "Share title", image: "/og.png" },
+      x: { card: "summary" },
+      counts: { "og:title": 2, "og:image": 1, "twitter:card": 1 } as const,
+      conflicting: ["og:title" as const],
+      outsideHead: true,
+      xViaProperty: true,
+    };
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        htmlLang: "en-GB",
+        social,
+        h2Text: "Second heading",
+        titleCount: 2,
+        metaDescriptionCount: 0,
+        robotsMeta: "index, noarchive",
+        robotsMetas: [{ name: "googlebot", content: "noindex" }],
+        metaRefresh: { raw: "0;url=/x", delaySeconds: 0, target: `${SITE}/x` },
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.htmlLang).toBe("en-GB");
+    expect(row?.social).toEqual(social);
+    expect(row?.h2Text).toBe("Second heading");
+    expect(row?.titleCount).toBe(2);
+    expect(row?.metaDescriptionCount).toBe(0);
+    expect(row?.robotsMeta).toBe("index, noarchive");
+    expect(row?.robotsMetas).toEqual([{ name: "googlebot", content: "noindex" }]);
+    expect(row?.metaRefresh).toEqual({ raw: "0;url=/x", delaySeconds: 0, target: `${SITE}/x` });
+  });
+
+  it("reads a later robots noindex into is_indexable through the joined robots_meta (deviation 4)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/second-robots-noindex`;
+    // Google combines repeated robots metas; the first one alone said index.
+    const analysis = analyzePage(
+      `<html><head><meta name="robots" content="index, follow">` +
+        `<meta name="robots" content="noindex"></head><body><p>x</p></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.robotsMeta).toBe("index, follow, noindex");
+    expect(row?.isIndexable).toBe(false);
   });
 
   it("ignores a second row for the same (crawl, url)", async () => {
@@ -1248,6 +1324,45 @@ describe("PageWriter", () => {
       await writer.flush();
       expect(await countOf(resources, crawlId)).toBe(0);
       expect(await countOf(pageResources, crawlId)).toBe(0);
+    });
+
+    /**
+     * Deviation 3 (Phase 26b): a browser does not load an og:image, so it is a
+     * `resources` row (the pass fetches its status and bytes) with NO
+     * `page_resources` edge — never page weight, mixed content or
+     * `resources.broken`.
+     */
+    it("writes an og:image as a resources row with no page_resources edge", async () => {
+      const crawlId = await newCrawl();
+      const writer = new PageWriter(db, crawlId);
+      const url = `${SITE}/shared`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="/og/share.png">` +
+          `<meta name="twitter:image" content="/img/logo.png"></head>` +
+          `<body><img src="/img/logo.png" alt="logo"></body></html>`,
+        url,
+      );
+      expect(analysis.socialImageRefs).toEqual([`${SITE}/og/share.png`, `${SITE}/img/logo.png`]);
+      await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+      await writer.flush();
+
+      const rows = await db
+        .select({ url: resources.url, kind: resources.kind, fetchClass: resources.fetchClass })
+        .from(resources)
+        .where(eq(resources.crawlId, crawlId))
+        .orderBy(resources.url);
+      expect(rows).toEqual([
+        // Referenced by the <img> too: one row, and that page edge below.
+        { url: `${SITE}/img/logo.png`, kind: "image", fetchClass: null },
+        { url: `${SITE}/og/share.png`, kind: "image", fetchClass: null },
+      ]);
+      const edges = await db
+        .select({ url: pageResources.resourceUrl })
+        .from(pageResources)
+        .where(eq(pageResources.crawlId, crawlId));
+      expect(edges).toEqual([{ url: `${SITE}/img/logo.png` }]);
+      expect(writer.stats().resources).toBe(2);
+      expect(writer.stats().pageResources).toBe(1);
     });
 
     /**

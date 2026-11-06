@@ -350,11 +350,56 @@
  * rendered one by 1 per unclosed `<a>` crossing a container boundary, and
  * never over. CHECK-34's threshold must tolerate ±1 for that reason (Task 5 —
  * the same note is on `pages.nav_link_count` in src/db/schema.ts).
+ *
+ * Phase 26b (P26b-T2, extraction version 2) added head facts and the social
+ * set, all as tokenizer state in the same pass and all capped (shapes and caps
+ * in page-facts.ts). Metas inside `<noscript>` stay ignored, as every meta is.
+ *  - `htmlLang`: the FIRST `<html>` start tag's `lang`, trimmed and capped.
+ *  - `social`: the Open Graph and X tags, read in `handleMetaTag` beside the
+ *    existing chain rather than inside it (one element may carry a `name` the
+ *    chain matches and a social `property`). Open Graph is read from
+ *    `property=` or `name=`; `twitter:*` from `name=`, or from `property=`,
+ *    which X ignores and so raises `xViaProperty`. The first value of each tag
+ *    is trimmed and capped; every element is counted; a tag seen with two
+ *    distinct trimmed values is `conflicting` (compared uncapped, capped once
+ *    at the end); `outsideHead` is any social tag met in body mode. Null only
+ *    when the page has no social tag. `ogTitle` / `ogDescription` / `ogImage`
+ *    are untouched: first `property=` value, raw, for their existing readers.
+ *  - `socialImageRefs`: `og:image` / `twitter:image` values resolved by
+ *    `normalizeUrl` under `addResource`'s skip rules, deduped, at most four —
+ *    and deliberately NOT through `addResource`. A browser never loads a share
+ *    image, so these become `resources` rows with no `page_resources` edge
+ *    (deviation 3): no page weight, no mixed content, no `resources.broken`.
+ *  - `h2Text`: the first `<h2>`, collected exactly as `h1Text` is.
+ *  - `titleCount` (non-svg `<title>` elements) and `metaDescriptionCount`.
+ *  - `robotsMetas`: the bot-specific robots metas (`ROBOTS_META_BOTS`), in
+ *    document order, capped.
+ *  - `metaRefresh`: the first `<meta http-equiv=refresh content>`, through
+ *    `parseRefresh`.
+ * ONE EXISTING FIELD CHANGES MEANING (deviation 4): `robotsMeta` is now every
+ * `<meta name=robots>` content joined with ", ", not the first one's. Google
+ * combines repeated robots metas, and reading only the first missed a later
+ * `noindex` — `isIndexable` (persist.ts) reads this field and now sees it.
+ * `robotsOutsideHead` stays a first-element flag.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 import { simhash64 } from "./simhash.js";
+import {
+  H2_TEXT_MAX,
+  HTML_LANG_MAX,
+  parseRefresh,
+  ROBOTS_META_BOTS,
+  ROBOTS_META_CONTENT_MAX,
+  ROBOTS_METAS_MAX,
+  SOCIAL_TEXT_MAX,
+  SOCIAL_URL_MAX,
+  type RefreshFact,
+  type RobotsMetaEntry,
+  type SocialFacts,
+  type SocialTag,
+} from "./page-facts.js";
 
 /** A link as the `links` table wants it. */
 export interface PageLink {
@@ -607,6 +652,41 @@ export interface PageAnalysis {
    * `href` — the `hreflangTags` condition) after the head ended. Uncapped.
    */
   hreflangOutsideHeadCount: number;
+  // ---- Phase 26b (extraction version 2); shapes and caps in page-facts.ts ----
+  /**
+   * The FIRST `<html>` start tag's `lang`, trimmed and capped at
+   * `HTML_LANG_MAX`. Null when that tag has no `lang`, a blank one, or the
+   * document has no `<html>` tag at all.
+   */
+  htmlLang: string | null;
+  /**
+   * The Open Graph and X (`twitter:`) tags. Null ONLY when the page carries no
+   * social tag at all; see the module header's Phase 26b block for how each
+   * part is read.
+   */
+  social: SocialFacts | null;
+  /**
+   * The `og:image` and `twitter:image` values, resolved (`normalizeUrl`) and
+   * deduped, at most `MAX_SOCIAL_IMAGE_REFS`. NOT resource refs: a browser
+   * never loads them, so they become `resources` rows with no `page_resources`
+   * edge (deviation 3). A value that names no fetchable file is skipped here
+   * and stays, raw, in `social`.
+   */
+  socialImageRefs: string[];
+  /** The first `<h2>`'s text, collected exactly as `h1Text` is; capped at `H2_TEXT_MAX`. */
+  h2Text: string | null;
+  /** `<title>` elements outside `<svg>`. A count, never null. */
+  titleCount: number;
+  /** `<meta name=description>` elements. A count, never null. */
+  metaDescriptionCount: number;
+  /**
+   * The bot-specific robots metas (`ROBOTS_META_BOTS`, `name` lower-cased), in
+   * document order, at most `ROBOTS_METAS_MAX`, content capped at
+   * `ROBOTS_META_CONTENT_MAX`. Plain `robots` is `robotsMeta`'s.
+   */
+  robotsMetas: RobotsMetaEntry[];
+  /** The first `<meta http-equiv=refresh content>`, through `parseRefresh`. */
+  metaRefresh: RefreshFact | null;
 }
 
 /**
@@ -800,6 +880,39 @@ const MAX_EXTRACTED_LINKS = 2_000;
  * (the SOFT_404_PHRASES precedent).
  */
 export const MAX_RESOURCE_REFS = 2_000;
+/**
+ * Social image refs kept per page (Phase 26b). Open Graph allows `og:image` to
+ * repeat and real pages do; four covers the `og:image` / `twitter:image` pair
+ * and a couple of alternates. Each one is a request the resource pass will
+ * spend against somebody's server for a file no page load fetches, so the cap
+ * is a politeness bound as much as a memory one. Exported so the suite pins the
+ * constant rather than a copy of its value.
+ */
+export const MAX_SOCIAL_IMAGE_REFS = 4;
+/** Where each social tag's first value lands in `SocialFacts`, and its cap. */
+type SocialSlot =
+  | { group: "og"; key: keyof SocialFacts["og"]; cap: number }
+  | { group: "x"; key: keyof SocialFacts["x"]; cap: number };
+/**
+ * The closed list of social tags, keyed by the lower-cased tag name. A
+ * `Record` over `SocialTag`, so a tag added to the union without a slot here
+ * fails to compile rather than going silently unread.
+ */
+const SOCIAL_SLOTS: Record<SocialTag, SocialSlot> = {
+  "og:title": { group: "og", key: "title", cap: SOCIAL_TEXT_MAX },
+  "og:description": { group: "og", key: "description", cap: SOCIAL_TEXT_MAX },
+  "og:image": { group: "og", key: "image", cap: SOCIAL_URL_MAX },
+  "og:url": { group: "og", key: "url", cap: SOCIAL_URL_MAX },
+  "og:type": { group: "og", key: "type", cap: SOCIAL_TEXT_MAX },
+  "og:site_name": { group: "og", key: "site_name", cap: SOCIAL_TEXT_MAX },
+  "twitter:card": { group: "x", key: "card", cap: SOCIAL_TEXT_MAX },
+  "twitter:title": { group: "x", key: "title", cap: SOCIAL_TEXT_MAX },
+  "twitter:description": { group: "x", key: "description", cap: SOCIAL_TEXT_MAX },
+  "twitter:image": { group: "x", key: "image", cap: SOCIAL_URL_MAX },
+};
+const isSocialTag = (value: string | undefined): value is SocialTag =>
+  value !== undefined && Object.hasOwn(SOCIAL_SLOTS, value);
+const ROBOTS_META_BOT_NAMES: ReadonlySet<string> = new Set(ROBOTS_META_BOTS);
 const MAX_HEADING_ORDER = 500;
 const MAX_HREFLANG_PAIRS = 200;
 const MAX_STRUCTURED_DATA_BLOCKS = 50;
@@ -1006,7 +1119,6 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // wins; `null` = seen without a usable attribute.
   let metaDescription: string | null | undefined;
   let canonical: string | null | undefined;
-  let robotsMeta: string | null | undefined;
   let ogTitle: string | null | undefined;
   let ogDescription: string | null | undefined;
   let ogImage: string | null | undefined;
@@ -1019,6 +1131,32 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let relPrev: string | null | undefined;
   const hreflang: HreflangPair[] = [];
   let domSize = 0;
+
+  // PHASE 26b HEAD FACTS (module header). Every one is O(1) in page size: a
+  // fixed number of capped strings, or a counter.
+  // `undefined` = no `<html>` start tag seen yet, the first-element sentinel.
+  let htmlLang: string | null | undefined;
+  let titleCount = 0;
+  let metaDescriptionCount = 0;
+  // Every `<meta name=robots>` content, joined at the end (deviation 4). The
+  // list is O(page) in principle, as the hreflang codes are; robots metas are
+  // a handful on any real page.
+  const robotsContents: string[] = [];
+  let sawRobotsMeta = false;
+  const robotsMetas: RobotsMetaEntry[] = [];
+  let metaRefresh: RefreshFact | null | undefined;
+  // The social set. `socialFirst` holds each tag's first TRIMMED value
+  // UNCAPPED while the parse runs — at most ten strings the tokenizer already
+  // allocated — so a later value that differs only past the cap is still
+  // seen to conflict; the caps are applied once, at the end.
+  const socialFirst = new Map<SocialTag, string>();
+  const socialCounts = new Map<SocialTag, number>();
+  const socialConflicting = new Set<SocialTag>();
+  let socialOutsideHead = false;
+  let xViaProperty = false;
+  // Insertion-ordered and capped at MAX_SOCIAL_IMAGE_REFS: document order,
+  // first occurrence wins, like every other ref list here.
+  const socialImageRefs = new Set<string>();
 
   // JSON-LD is buffered one block at a time: the tokenizer hands its text over
   // in pieces, and only the closing </script> says the block is complete.
@@ -1033,6 +1171,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const headingOrder: number[] = [];
   const headingCounts = [0, 0, 0, 0, 0, 0];
   let openH1: string[] | null = null;
+  // The first `<h2>` only (Phase 26b), on `openH1`'s footing: opened by the
+  // heading block below, fed by `ontext` under the same gates, closed on
+  // `</h2>`. `h2Done` retires it so a second h2 is never captured.
+  let openH2: string[] | null = null;
+  let h2Done = false;
+  let h2Text: string | null = null;
 
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
@@ -1287,11 +1431,63 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     headMode = "body";
   };
 
+  /**
+   * One social tag (Phase 26b). Open Graph is read from `property=` first and
+   * `name=` second (both are in the wild); X from `name=` first and
+   * `property=` second, which X does not read and so is recorded as
+   * `xViaProperty`. One element is one tag, so `<meta name=og:title
+   * property=og:title>` counts once.
+   */
+  const handleSocialTag = (
+    name: string | undefined,
+    property: string | undefined,
+    content: string | undefined,
+  ) => {
+    let tag: SocialTag;
+    let viaProperty = false;
+    if (isSocialTag(property) && property.startsWith("og:")) tag = property;
+    else if (isSocialTag(name)) tag = name;
+    else if (isSocialTag(property)) {
+      tag = property;
+      viaProperty = true;
+    } else return;
+    if (viaProperty) xViaProperty = true;
+    if (headMode === "body") socialOutsideHead = true;
+    socialCounts.set(tag, (socialCounts.get(tag) ?? 0) + 1);
+    // A tag with no `content` is present and empty, as a `<meta
+    // name=description>` without one is.
+    const value = content?.trim() ?? "";
+    const first = socialFirst.get(tag);
+    if (first === undefined) socialFirst.set(tag, value);
+    else if (first !== value) socialConflicting.add(tag);
+    if (tag === "og:image" || tag === "twitter:image") {
+      // `addResource`'s skip rules, in its order, but into a list of its own:
+      // a social image is NOT a resource ref (deviation 3, and the header).
+      if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return;
+      if (socialImageRefs.size >= MAX_SOCIAL_IMAGE_REFS) return;
+      const resolved = normalizeUrl(value, pageUrl);
+      if (resolved !== null) socialImageRefs.add(resolved);
+    }
+  };
+
   const handleMetaTag = (attribs: Record<string, string>) => {
     const content = attribs["content"];
     const name = attribs["name"]?.trim().toLowerCase();
     const property = attribs["property"]?.trim().toLowerCase();
+    // Phase 26b: the social set and the refresh are read beside the chain
+    // below, never inside it — an element carrying `name=description` and
+    // `property=og:description` is both, and the chain's first match must not
+    // hide the second.
+    handleSocialTag(name, property, content);
+    if (
+      metaRefresh === undefined &&
+      content !== undefined &&
+      attribs["http-equiv"]?.trim().toLowerCase() === "refresh"
+    ) {
+      metaRefresh = parseRefresh(content, pageUrl);
+    }
     if (name === "description") {
+      metaDescriptionCount += 1;
       // FIRST OCCURRENCE: the flag says the description the value is read
       // from sits outside the head; a body duplicate of an in-head one is not.
       if (metaDescription === undefined) {
@@ -1299,9 +1495,22 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         metaDescriptionOutsideHead = headMode === "body";
       }
     } else if (name === "robots") {
-      if (robotsMeta === undefined) {
-        robotsMeta = content ?? null;
+      // EVERY robots meta's content, joined at the end (deviation 4): Google
+      // combines repeated robots metas, so a `noindex` in the second one is a
+      // `noindex`. The outside-head flag stays about the FIRST element.
+      if (!sawRobotsMeta) {
+        sawRobotsMeta = true;
         robotsOutsideHead = headMode === "body";
+      }
+      if (content !== undefined) robotsContents.push(content);
+    } else if (name !== undefined && ROBOTS_META_BOT_NAMES.has(name)) {
+      if (robotsMetas.length < ROBOTS_METAS_MAX) {
+        // No `content` is present and empty, as for the description: the
+        // element is a fact even when it directs nothing.
+        robotsMetas.push({
+          name,
+          content: (content ?? "").slice(0, ROBOTS_META_CONTENT_MAX),
+        });
       }
     } else if (name === "viewport") {
       // Presence is the whole signal; the content string is the agent's
@@ -1490,6 +1699,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             // The outside-head flag is about the FIRST document title, the one
             // `title` is read from, under the same svg guard.
             if (!sawTitle && suppressDepth === 0) titleOutsideHead = headMode === "body";
+            // Every document title, under the same svg guard (Phase 26b).
+            if (suppressDepth === 0) titleCount += 1;
             if (!titleDone && suppressDepth === 0) {
               titleDepth += 1;
               sawTitle = true;
@@ -1507,6 +1718,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             // that merely *has* an AMP twin links to it with rel=amphtml.
             // Either is enough for pages.has_amp.
             if ("amp" in attribs || "⚡" in attribs) hasAmp = true;
+            // The FIRST `<html>` start tag decides `htmlLang`, lang or not.
+            if (htmlLang === undefined) {
+              const lang = attribs["lang"]?.trim();
+              htmlLang =
+                lang === undefined || lang === "" ? null : lang.slice(0, HTML_LANG_MAX);
+            }
             break;
           case "meta":
             handleMetaTag(attribs);
@@ -1630,6 +1847,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             headingOrder.push(headingLevel);
           }
           if (headingLevel === 1 && openH1 === null) openH1 = [];
+          if (headingLevel === 2 && openH2 === null && !h2Done) openH2 = [];
         }
         if (isTextBoundary(name)) emitTextBoundary();
       },
@@ -1654,6 +1872,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           return;
         }
         if (openH1) openH1.push(text);
+        if (openH2) openH2.push(text);
         if (openAnchor) openAnchor.text.push(text);
         // THE TEMPLATE GATE, and its position is the point: every capture
         // above it sees template text (the DOM oracle's selectors do too, so
@@ -1736,6 +1955,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           h1s.push(openH1.join("").trim());
           openH1 = null;
         }
+        if (name === "h2" && openH2) {
+          h2Text = openH2.join("").replace(/\s+/g, " ").trim().slice(0, H2_TEXT_MAX);
+          openH2 = null;
+          h2Done = true;
+        }
       },
     },
     // Defaults (non-XML mode): lowercased tag/attribute names, decoded
@@ -1789,12 +2013,36 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const textRatio =
     htmlBytes === 0 ? 0 : Math.min(1, Buffer.byteLength(bodyText) / htmlBytes);
 
+  // The social set, capped here and only here (see `socialFirst`). Null only
+  // when the page carried no social tag at all.
+  let social: SocialFacts | null = null;
+  if (socialCounts.size > 0) {
+    const og: SocialFacts["og"] = {};
+    const x: SocialFacts["x"] = {};
+    for (const [tag, value] of socialFirst) {
+      const slot = SOCIAL_SLOTS[tag];
+      const capped = value.slice(0, slot.cap);
+      if (slot.group === "og") og[slot.key] = capped;
+      else x[slot.key] = capped;
+    }
+    social = {
+      og,
+      x,
+      counts: Object.fromEntries(socialCounts),
+      conflicting: [...socialConflicting].sort(),
+      outsideHead: socialOutsideHead,
+      xViaProperty,
+    };
+  }
+
   return {
     title,
     metaDescription: metaDescription ?? null,
     canonicalHtml: canonical ?? null,
     canonicalCount,
-    robotsMeta: robotsMeta ?? null,
+    // Deviation 4: every robots meta, joined. Null when there was none — or
+    // when none carried a `content`, which is what the first-only read said.
+    robotsMeta: robotsContents.length === 0 ? null : robotsContents.join(", "),
     ogTitle: ogTitle ?? null,
     ogDescription: ogDescription ?? null,
     ogImage: ogImage ?? null,
@@ -1843,6 +2091,14 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     robotsOutsideHead,
     canonicalOutsideHead,
     hreflangOutsideHeadCount,
+    htmlLang: htmlLang ?? null,
+    social,
+    socialImageRefs: [...socialImageRefs],
+    h2Text,
+    titleCount,
+    metaDescriptionCount,
+    robotsMetas,
+    metaRefresh: metaRefresh ?? null,
     bodyText,
     h1s,
     hasStructuredData,
@@ -1910,5 +2166,13 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     robotsOutsideHead: raw.robotsOutsideHead,
     canonicalOutsideHead: raw.canonicalOutsideHead,
     hreflangOutsideHeadCount: raw.hreflangOutsideHeadCount,
+    htmlLang: raw.htmlLang,
+    social: raw.social,
+    socialImageRefs: [...raw.socialImageRefs],
+    h2Text: raw.h2Text,
+    titleCount: raw.titleCount,
+    metaDescriptionCount: raw.metaDescriptionCount,
+    robotsMetas: raw.robotsMetas,
+    metaRefresh: raw.metaRefresh,
   };
 }

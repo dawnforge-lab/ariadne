@@ -387,6 +387,9 @@ export const pages = pgTable("pages", {
   // keeps the first; this counts them all, because "more than one canonical"
   // (CHECK-18) is a finding a single-value column cannot express.
   canonicalCount: integer("canonical_count").notNull().default(0),
+  // Extraction 2 (Phase 26b, deviation 4): EVERY `<meta name=robots>` content,
+  // joined with ", " — Google combines them. Extraction 1 rows hold the first
+  // one's only. Bot-specific metas are `robots_metas`.
   robotsMeta: text("robots_meta"),
   xRobotsTag: text("x_robots_tag"),
   isIndexable: boolean("is_indexable"),

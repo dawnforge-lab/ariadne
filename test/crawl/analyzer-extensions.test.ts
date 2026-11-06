@@ -1,14 +1,25 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzePage,
+  MAX_SOCIAL_IMAGE_REFS,
   SOFT_404_PHRASES,
 } from "../../src/crawl/parse/page-analyzer.js";
 import { simhash64, hammingDistance } from "../../src/crawl/parse/simhash.js";
+import {
+  H2_TEXT_MAX,
+  HTML_LANG_MAX,
+  ROBOTS_META_CONTENT_MAX,
+  ROBOTS_METAS_MAX,
+  SOCIAL_TEXT_MAX,
+  SOCIAL_URL_MAX,
+} from "../../src/crawl/parse/page-facts.js";
 import {
   P7_HIDDEN_CHROME_BODY,
   P7_RENDERABLE_WORD_COUNT,
   P7_WORD_COUNT,
 } from "../fixtures/pages/authored-p7.js";
+import { SHARED_IMAGE_PATH } from "../fixtures/assets.js";
+import { renderDocument } from "../fixtures/render.js";
 
 const HTML = `<!doctype html><html><head>
 <title>P2</title>
@@ -1000,5 +1011,332 @@ describe("placeholderSnippet: the evidence for hasLoremIpsum", () => {
       const a = page(html);
       expect(a.placeholderSnippet === null, html).toBe(!a.hasLoremIpsum);
     }
+  });
+});
+
+/**
+ * Phase 26b (extraction version 2): the head facts and the social set. Each
+ * `describe` is one fact; the shapes and caps are src/crawl/parse/page-facts.ts.
+ */
+const P26B_URL = "https://ex.com/blog/post";
+function headPage(head: string, bodyHtml = "<p>body text</p>", htmlTag = "<html>") {
+  return analyzePage(
+    `<!doctype html>${htmlTag}<head>${head}</head><body>${bodyHtml}</body></html>`,
+    P26B_URL,
+  );
+}
+
+describe("htmlLang: the first <html> start tag's lang", () => {
+  it("is trimmed", () => {
+    expect(headPage("<title>t</title>", "<p>x</p>", `<html lang=" en-GB ">`).htmlLang).toBe("en-GB");
+  });
+
+  it("is null when the attribute is absent or blank", () => {
+    expect(headPage("<title>t</title>").htmlLang).toBeNull();
+    expect(headPage("<title>t</title>", "<p>x</p>", `<html lang="  ">`).htmlLang).toBeNull();
+  });
+
+  it("reads the first <html> tag only", () => {
+    const a = analyzePage(`<html lang="de"><html lang="fr"><body>x</body></html>`, P26B_URL);
+    expect(a.htmlLang).toBe("de");
+  });
+
+  it("is capped at HTML_LANG_MAX", () => {
+    const a = headPage("", "<p>x</p>", `<html lang="${"x".repeat(HTML_LANG_MAX + 40)}">`);
+    expect(a.htmlLang).toHaveLength(HTML_LANG_MAX);
+  });
+});
+
+describe("social: the Open Graph and X set", () => {
+  it("records first values, per-tag counts and a conflicting tag", () => {
+    const a = headPage(
+      `<meta property="og:title" content=" First ">` +
+        `<meta property="og:title" content="Second">` +
+        `<meta property="og:title" content="First">` +
+        `<meta property="og:type" content="website">` +
+        `<meta name="twitter:card" content="summary">`,
+    );
+    expect(a.social).toEqual({
+      og: { title: "First", type: "website" },
+      x: { card: "summary" },
+      counts: { "og:title": 3, "og:type": 1, "twitter:card": 1 },
+      conflicting: ["og:title"],
+      outsideHead: false,
+      xViaProperty: false,
+    });
+  });
+
+  it("does not call a repeated tag with one trimmed value conflicting", () => {
+    const a = headPage(
+      `<meta property="og:url" content="https://ex.com/a">` +
+        `<meta property="og:url" content=" https://ex.com/a ">`,
+    );
+    expect(a.social?.counts["og:url"]).toBe(2);
+    expect(a.social?.conflicting).toEqual([]);
+  });
+
+  it("sorts the conflicting list", () => {
+    const a = headPage(
+      `<meta name="twitter:title" content="a"><meta name="twitter:title" content="b">` +
+        `<meta property="og:description" content="a"><meta property="og:description" content="b">`,
+    );
+    expect(a.social?.conflicting).toEqual(["og:description", "twitter:title"]);
+  });
+
+  it("reads twitter:* given as property=, and says so", () => {
+    const a = headPage(`<meta property="twitter:card" content="summary_large_image">`);
+    expect(a.social?.x.card).toBe("summary_large_image");
+    expect(a.social?.xViaProperty).toBe(true);
+  });
+
+  it("does not raise xViaProperty for twitter:* given as name=", () => {
+    expect(headPage(`<meta name="twitter:card" content="summary">`).social?.xViaProperty).toBe(false);
+  });
+
+  it("reads og:* given as name=", () => {
+    const a = headPage(`<meta name="og:title" content="By name">`);
+    expect(a.social?.og.title).toBe("By name");
+    expect(a.social?.counts["og:title"]).toBe(1);
+  });
+
+  it("folds the case of the tag name", () => {
+    const a = headPage(`<meta property="OG:Title" content="Folded">`);
+    expect(a.social?.og.title).toBe("Folded");
+  });
+
+  it("records a tag with no content attribute as present and empty", () => {
+    const a = headPage(`<meta property="og:title"><meta property="og:title" content="Later">`);
+    expect(a.social?.og.title).toBe("");
+    expect(a.social?.counts["og:title"]).toBe(2);
+    expect(a.social?.conflicting).toEqual(["og:title"]);
+  });
+
+  it("raises outsideHead for a social tag in the body", () => {
+    const a = headPage(
+      `<meta property="og:title" content="In head">`,
+      `<div>x</div><meta property="og:image" content="https://ex.com/i.png">`,
+    );
+    expect(a.social?.outsideHead).toBe(true);
+    expect(a.social?.og.image).toBe("https://ex.com/i.png");
+  });
+
+  it("keeps outsideHead false when every tag is in the head", () => {
+    expect(headPage(`<meta property="og:title" content="t">`).social?.outsideHead).toBe(false);
+  });
+
+  it("resolves a relative og:image into socialImageRefs and keeps the raw value in social", () => {
+    const a = headPage(`<meta property="og:image" content="/img/share.png">`);
+    expect(a.social?.og.image).toBe("/img/share.png");
+    expect(a.socialImageRefs).toEqual(["https://ex.com/img/share.png"]);
+  });
+
+  it("collects og:image and twitter:image refs, deduped, at most four, never into resourceRefs", () => {
+    const a = headPage(
+      `<meta property="og:image" content="/1.png">` +
+        `<meta property="og:image" content="https://ex.com/1.png">` +
+        `<meta name="twitter:image" content="/2.png">` +
+        `<meta property="og:image" content="/3.png">` +
+        `<meta property="og:image" content="/4.png">` +
+        `<meta property="og:image" content="/5.png">`,
+    );
+    expect(a.socialImageRefs).toEqual([
+      "https://ex.com/1.png",
+      "https://ex.com/2.png",
+      "https://ex.com/3.png",
+      "https://ex.com/4.png",
+    ]);
+    expect(MAX_SOCIAL_IMAGE_REFS).toBe(4);
+    expect(a.resourceRefs).toEqual([]);
+  });
+
+  it("skips an image value that names no fetchable file, keeping it in social", () => {
+    const a = headPage(
+      `<meta property="og:image" content="data:image/png;base64,AAAA">` +
+        `<meta name="twitter:image" content="  ">` +
+        `<meta name="twitter:image" content="#top">`,
+    );
+    expect(a.socialImageRefs).toEqual([]);
+    expect(a.social?.og.image).toBe("data:image/png;base64,AAAA");
+    expect(a.social?.x.image).toBe("");
+  });
+
+  it("caps text values at SOCIAL_TEXT_MAX and URL values at SOCIAL_URL_MAX", () => {
+    const longText = "t".repeat(SOCIAL_TEXT_MAX + 50);
+    const longUrl = `https://ex.com/${"u".repeat(SOCIAL_URL_MAX + 50)}`;
+    const a = headPage(
+      `<meta property="og:title" content="${longText}">` +
+        `<meta property="og:url" content="${longUrl}">`,
+    );
+    expect(a.social?.og.title).toHaveLength(SOCIAL_TEXT_MAX);
+    expect(a.social?.og.url).toHaveLength(SOCIAL_URL_MAX);
+  });
+
+  it("is null when the page carries no social tag", () => {
+    expect(headPage(`<title>t</title><meta name="description" content="d">`).social).toBeNull();
+    expect(headPage(`<title>t</title>`).socialImageRefs).toEqual([]);
+  });
+
+  it("ignores social tags inside <noscript>, as every meta is", () => {
+    expect(headPage(`<noscript><meta property="og:title" content="x"></noscript>`).social).toBeNull();
+  });
+
+  it("leaves ogTitle / ogDescription / ogImage exactly as before: first property= value, raw", () => {
+    const a = headPage(
+      `<meta name="og:title" content="by name">` +
+        `<meta property="og:title" content=" raw ">` +
+        `<meta property="og:image" content="/i.png">`,
+    );
+    expect(a.ogTitle).toBe(" raw ");
+    expect(a.ogImage).toBe("/i.png");
+    expect(a.ogDescription).toBeNull();
+  });
+});
+
+describe("h2Text: the first <h2>'s words", () => {
+  it("collapses whitespace and reads through inline markup", () => {
+    expect(headPage("", `<h2> A <b>b</b> </h2><h2>second</h2>`).h2Text).toBe("A b");
+  });
+
+  it("is null without an h2 and empty for an empty one", () => {
+    expect(headPage("", `<p>x</p>`).h2Text).toBeNull();
+    expect(headPage("", `<h2></h2>`).h2Text).toBe("");
+  });
+
+  it("caps at H2_TEXT_MAX", () => {
+    expect(headPage("", `<h2>${"w".repeat(H2_TEXT_MAX + 100)}</h2>`).h2Text).toHaveLength(H2_TEXT_MAX);
+  });
+
+  it("does not disturb h1Text", () => {
+    const a = headPage("", `<h1>One</h1><h2>Two</h2>`);
+    expect(a.h1Text).toBe("One");
+    expect(a.h2Text).toBe("Two");
+  });
+});
+
+describe("titleCount / metaDescriptionCount", () => {
+  it("counts every element", () => {
+    const a = headPage(
+      `<title>a</title><title>b</title>` +
+        `<meta name="description" content="a"><meta name="Description" content="b">`,
+    );
+    expect(a.titleCount).toBe(2);
+    expect(a.metaDescriptionCount).toBe(2);
+  });
+
+  it("is zero, not null, when there are none", () => {
+    const a = headPage("");
+    expect(a.titleCount).toBe(0);
+    expect(a.metaDescriptionCount).toBe(0);
+  });
+
+  it("does not count an <svg> title", () => {
+    const a = headPage(`<title>a</title>`, `<svg><title>icon</title></svg>`);
+    expect(a.titleCount).toBe(1);
+  });
+});
+
+describe("robots metas", () => {
+  it("joins every robots meta and records the bot-specific ones apart", () => {
+    const a = headPage(
+      `<meta name="robots" content="index">` +
+        `<meta name="robots" content="noarchive">` +
+        `<meta name="googlebot" content="noindex">`,
+    );
+    expect(a.robotsMeta).toBe("index, noarchive");
+    expect(a.robotsMetas).toEqual([{ name: "googlebot", content: "noindex" }]);
+  });
+
+  it("keeps robotsMeta null with no robots meta, and robotsMetas empty", () => {
+    const a = headPage(`<title>t</title>`);
+    expect(a.robotsMeta).toBeNull();
+    expect(a.robotsMetas).toEqual([]);
+  });
+
+  it("keeps robotsOutsideHead about the FIRST robots meta", () => {
+    const a = headPage(
+      `<meta name="robots" content="index">`,
+      `<div>x</div><meta name="robots" content="noindex">`,
+    );
+    expect(a.robotsMeta).toBe("index, noindex");
+    expect(a.robotsOutsideHead).toBe(false);
+  });
+
+  it("lower-cases the bot name, keeps document order and caps count and content", () => {
+    const metas = Array.from(
+      { length: ROBOTS_METAS_MAX + 3 },
+      (_, i) => `<meta name="${i % 2 === 0 ? "Bingbot" : "googlebot-news"}" content="c${i}">`,
+    ).join("");
+    const a = headPage(metas);
+    expect(a.robotsMetas).toHaveLength(ROBOTS_METAS_MAX);
+    expect(a.robotsMetas[0]).toEqual({ name: "bingbot", content: "c0" });
+    expect(a.robotsMetas[1]).toEqual({ name: "googlebot-news", content: "c1" });
+    const long = headPage(
+      `<meta name="googlebot" content="${"n".repeat(ROBOTS_META_CONTENT_MAX + 9)}">`,
+    );
+    expect(long.robotsMetas[0]?.content).toHaveLength(ROBOTS_META_CONTENT_MAX);
+  });
+
+  it("ignores names that are not robots-class", () => {
+    expect(headPage(`<meta name="robotsx" content="noindex">`).robotsMetas).toEqual([]);
+  });
+
+  it("ignores robots metas inside <noscript>", () => {
+    const a = headPage(
+      `<noscript><meta name="robots" content="noindex"><meta name="googlebot" content="noindex"></noscript>`,
+    );
+    expect(a.robotsMeta).toBeNull();
+    expect(a.robotsMetas).toEqual([]);
+  });
+});
+
+describe("the fixture site's default social set reads as complete and consistent", () => {
+  it("carries every tag the social rules ask for, once, in the head", () => {
+    const self = "http://127.0.0.1:4000/authored/control";
+    const a = analyzePage(
+      renderDocument({ title: "Control page", canonical: self, bodyHtml: "<p>x</p>" }, self),
+      self,
+    );
+    expect(a.htmlLang).toBe("en");
+    expect(a.social).toEqual({
+      og: {
+        title: "Control page",
+        type: "website",
+        url: self,
+        image: `http://127.0.0.1:4000${SHARED_IMAGE_PATH}`,
+      },
+      x: { card: "summary_large_image", title: "Control page" },
+      counts: {
+        "og:title": 1, "og:type": 1, "og:url": 1, "og:image": 1,
+        "twitter:card": 1, "twitter:title": 1,
+      },
+      conflicting: [],
+      outsideHead: false,
+      xViaProperty: false,
+    });
+    expect(a.socialImageRefs).toEqual([`http://127.0.0.1:4000${SHARED_IMAGE_PATH}`]);
+  });
+
+  it("renders none with social: false", () => {
+    const self = "http://127.0.0.1:4000/x";
+    const a = analyzePage(renderDocument({ title: "t", social: false, bodyHtml: "" }, self), self);
+    expect(a.social).toBeNull();
+  });
+});
+
+describe("metaRefresh: the first <meta http-equiv=refresh>", () => {
+  it("parses the delay and resolves the target", () => {
+    const a = headPage(`<meta http-equiv="Refresh" content="0;url=/x">`);
+    expect(a.metaRefresh).toEqual({ raw: "0;url=/x", delaySeconds: 0, target: "https://ex.com/x" });
+  });
+
+  it("takes the first of two", () => {
+    const a = headPage(
+      `<meta http-equiv="refresh" content="5"><meta http-equiv="refresh" content="0;url=/y">`,
+    );
+    expect(a.metaRefresh).toEqual({ raw: "5", delaySeconds: 5, target: null });
+  });
+
+  it("is null when there is none", () => {
+    expect(headPage(`<meta http-equiv="content-type" content="text/html">`).metaRefresh).toBeNull();
   });
 });
