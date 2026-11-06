@@ -841,19 +841,57 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
     expect(s.closedEarly).toMatchObject({ tag: "img", inNoscript: false });
   });
 
-  it("each head-only element after the candidate confirms it", () => {
+  it("each head-only element after the candidate confirms it (ruling R8)", () => {
     const tails = [
       `<title>t</title>`,
       `<meta name="a" content="b">`,
       `<link rel="icon" href="/i">`,
+      `<link rel="canonical" href="/c">`,
+      `<link rel="stylesheet icon" href="/i">`,
       `<base href="/">`,
-      `<style>p{}</style>`,
     ];
     for (const tail of tails) {
       expect(structureOf(`<head><img src="/p.gif"><p>x</p>${tail}`).closedEarly, tail).toMatchObject({
         tag: "img",
       });
     }
+  });
+
+  it("what a body may hold is not evidence (ruling R8)", () => {
+    const tails = [
+      `<style>p{}</style>`,
+      `<meta itemprop="name" content="a">`,
+      `<link rel="stylesheet" href="/a.css">`,
+      `<link rel="stylesheet preload" href="/a.css">`,
+      `<link rel="MODULEPRELOAD" href="/m.js">`,
+      `<link href="/no-rel">`,
+      `<link rel="  " href="/blank-rel">`,
+      `<svg><title>i</title></svg>`,
+    ];
+    for (const tail of tails) {
+      expect(structureOf(`<head><img src="/p.gif"><p>x</p>${tail}`).closedEarly, tail).toBeNull();
+    }
+  });
+
+  it("a minified page: body-ok elements leave it unflagged, a head-only one confirms (R8)", () => {
+    const page =
+      `<title>t</title><div>x</div><meta itemprop="name" content="a">` +
+      `<link rel="stylesheet" href="/a.css"><style>p{}</style><svg><title>i</title></svg>`;
+    expect(structureOf(page).closedEarly).toBeNull();
+    expect(structureOf(`${page}<meta name="description" content="d">`).closedEarly).toEqual({
+      tag: "div",
+      inNoscript: false,
+      snippet: "<div>",
+    });
+    expect(structureOf(`${page}<link rel="canonical" href="/c">`).closedEarly).toMatchObject({
+      tag: "div",
+    });
+  });
+
+  it("a title after a closed svg is evidence again", () => {
+    expect(
+      structureOf(`<title>t</title><div>x</div><svg><title>i</title></svg><title>u</title>`).closedEarly,
+    ).toMatchObject({ tag: "div" });
   });
 
   it("nothing after the candidate but body content: not confirmed", () => {

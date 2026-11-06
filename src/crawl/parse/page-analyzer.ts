@@ -429,11 +429,16 @@
  *    trimmed of HTML whitespace). A start tag's snippet is its source,
  *    `html.slice(startIndex, endIndex + 1)`, cut at `HEAD_SNIPPET_MAX` before it
  *    is copied. `<body>` is NEVER a candidate: it is where a head is meant to
- *    end. The candidate is reported only if a later token is evidence the head
- *    was meant to go on — an explicit `</head>`, an explicit `<body>`, or a
- *    `title`/`meta`/`link`/`base`/`style` start tag anywhere after it — and is
- *    null otherwise, so a valid document that omits `</head>` and starts its
- *    body is not flagged. The head-noscript read is BESIDE the Phase 23 machine,
+ *    end (ruling R8 (a)). The candidate is reported only if a later token is
+ *    evidence the head was meant to go on, and is null otherwise, so a valid
+ *    document that omits `</head>` and starts its body is not flagged. Ruling
+ *    R8 (b) narrowed deviation 6's evidence list to elements that only belong
+ *    in a head, because a body may legitimately hold the others: an explicit
+ *    `</head>`; an explicit `<body>`; `<base>`; a `<title>` outside `<svg>`; a
+ *    `<meta>` without `itemprop` (microdata metas are body content); a `<link>`
+ *    with at least one `rel` token that is not body-ok (`BODY_OK_LINK_RELS`; a
+ *    link with no or blank `rel` is body-ok). `<style>` is not evidence: it is
+ *    allowed in a body. The head-noscript read is BESIDE the Phase 23 machine,
  *    not in it: a head noscript's children stay invisible to `headClosedBy`,
  *    `headMode` and every outside-head flag, exactly as before.
  */
@@ -870,11 +875,21 @@ const AFTER_HEAD_REOPENS = new Set([
  */
 const HEAD_NOSCRIPT_CHILDREN = new Set(["link", "meta", "style"]);
 /**
- * Head-only start tags whose appearance AFTER a closed-early candidate is
- * evidence the head was meant to continue (deviation 6), beside an explicit
- * `</head>` and an explicit `<body>`.
+ * The HTML "body-ok" link types: a `<link>` whose `rel` tokens are all among
+ * these may sit in a body, so it is no evidence the head was meant to continue
+ * (ruling R8 (b), narrowing deviation 6). Any other token makes the link
+ * head-only evidence.
  */
-const HEAD_CONTINUES = new Set(["title", "meta", "link", "base", "style"]);
+const BODY_OK_LINK_RELS = new Set([
+  "stylesheet",
+  "preload",
+  "prefetch",
+  "modulepreload",
+  "pingback",
+  "dns-prefetch",
+  "preconnect",
+  "prerender",
+]);
 /** Text that is not ASCII whitespace as HTML defines it (tab, LF, FF, CR, space). */
 const NON_HTML_WHITESPACE = /[^\t\n\f\r ]/;
 /** Leading and trailing ASCII whitespace as HTML defines it. */
@@ -1549,9 +1564,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let bodyTags = 0;
   let firstOfHeadBody: "head" | "body" | null = null;
   // The first closed-early candidate (deviation 6), and whether a later token
-  // confirmed the head was meant to go on. Read together at the end.
+  // confirmed the head was meant to go on (narrowed by ruling R8). Read
+  // together at the end.
   let earlyCandidate: HtmlStructure["closedEarly"] = null;
   let earlyConfirmed = false;
+  // Open `<svg>` elements, so an svg `<title>` is not read as head evidence
+  // (R8). Its own counter: `suppressDepth` also counts script/style/noscript.
+  let structureSvgDepth = 0;
   // A `<noscript>` opened in head mode with no other container around it is
   // open. Its children are invisible to the head machine (they ride
   // `headContainerDepth`) and STAY invisible to it; this flag only lets the
@@ -1649,17 +1668,52 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
    * from every explicit start tag BEFORE the head machine sees it, so the
    * token that becomes the candidate can never confirm itself.
    */
-  const structureOnOpenTag = (name: string, isImplied: boolean) => {
+  const structureOnOpenTag = (
+    name: string,
+    attribs: Record<string, string>,
+    isImplied: boolean,
+  ) => {
     if (isImplied) return;
     if (name === "html") htmlTags += 1;
     else if (name === "head") headTags += 1;
     else if (name === "body") bodyTags += 1;
     if ((name === "head" || name === "body") && firstOfHeadBody === null) firstOfHeadBody = name;
-    if (earlyCandidate !== null && (name === "body" || HEAD_CONTINUES.has(name))) {
+    if (earlyCandidate !== null && !earlyConfirmed && isHeadEvidence(name, attribs)) {
       earlyConfirmed = true;
+    }
+    if (name === "svg") structureSvgDepth += 1;
+  };
+  /**
+   * Ruling R8 (b): the start tags that only belong in a head, and so show a
+   * head that was meant to go on. Everything a body may legitimately hold
+   * (a microdata `<meta itemprop>`, a stylesheet or preload `<link>`, a
+   * `<style>`, an svg `<title>`) is not evidence.
+   */
+  const isHeadEvidence = (name: string, attribs: Record<string, string>): boolean => {
+    switch (name) {
+      case "body":
+      case "base":
+        return true;
+      case "title":
+        return structureSvgDepth === 0;
+      case "meta":
+        return !("itemprop" in attribs);
+      case "link": {
+        // No `rel`, or a blank one, is body-ok.
+        const rel = attribs["rel"];
+        if (rel === undefined) return false;
+        return rel
+          .toLowerCase()
+          .split(/[\t\n\f\r ]+/)
+          .some((token) => token !== "" && !BODY_OK_LINK_RELS.has(token));
+      }
+      default:
+        return false;
     }
   };
   const structureOnCloseTag = (name: string, isImplied: boolean) => {
+    // Implied or not: an svg htmlparser2 closes at its parent's end is closed.
+    if (name === "svg" && structureSvgDepth > 0) structureSvgDepth -= 1;
     if (!isImplied && name === "head" && earlyCandidate !== null) earlyConfirmed = true;
   };
 
@@ -1910,7 +1964,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // a `<noscript>` in the head is a container it has to see open. The
         // structure facts read it first (see `structureOnOpenTag`), and the
         // machine gets the token's source span for a candidate's snippet.
-        structureOnOpenTag(name, isImplied);
+        structureOnOpenTag(name, attribs, isImplied);
         headOnOpenTag(name, isImplied, parser.startIndex, parser.endIndex);
         // Hidden-surface bookkeeping first, and unconditionally: the
         // `noscript` early return below skips the rest of this handler, and
@@ -2404,7 +2458,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       bodyTags,
       headBeforeBody: headTags > 0 && bodyTags > 0 ? firstOfHeadBody === "head" : null,
       // A candidate nothing confirmed is a document that simply started its
-      // body without `</head>` (deviation 6): not an early close.
+      // body without `</head>` (deviation 6, evidence narrowed by ruling R8):
+      // not an early close.
       closedEarly: earlyConfirmed ? earlyCandidate : null,
     },
     bodyText,
