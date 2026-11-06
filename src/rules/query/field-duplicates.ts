@@ -130,9 +130,13 @@ function valueKey(value: string): string {
 }
 
 /** One field's spelling: the column to group by, and the evidence key it fills. */
-interface DuplicateField {
-  /** The `pages` column, as SQL. */
-  column: string;
+export interface DuplicateField {
+  /**
+   * The `pages` column, as SQL. A closed union because it reaches the query
+   * through `sql.raw`: only these literals can, whoever imports the function.
+   * Each has a partial `pages_dupe_*` index on the JUDGED predicate.
+   */
+  column: "title" | "meta_description" | "h1_text" | "og_title" | "og_description";
   /** The evidence key the duplicated value is written under. */
   evidenceKey: string;
 }
@@ -219,13 +223,32 @@ type GroupRow = {
  * instead of 28.9s. `content.exact-duplicate` was restructured the same way in
  * the same commit; it is the shape's origin and had the same cost curve.
  */
-async function groupFindings(
+export async function groupFindings(
   db: Db,
   crawlId: string,
   self: RuleIdentity,
   field: DuplicateField,
   caps: RuleCaps,
 ): Promise<Finding[]> {
+  const { findings, total } = await duplicateGroups(db, crawlId, self, field, caps);
+  return noteTruncation(findings, total);
+}
+
+/**
+ * `groupFindings` before its truncation note: the capped listing of groups and
+ * the exact number of groups behind it. Exported for a rule that lists SEVERAL
+ * fields under one id (`social.og-duplicate`, src/rules/query/social.ts): it
+ * cuts the concatenation to one cap and writes ONE note with the summed total.
+ * Two noted listings concatenated could not say that: a rule's note rides on
+ * its last finding, and the API reads one note per rule.
+ */
+export async function duplicateGroups(
+  db: Db,
+  crawlId: string,
+  self: RuleIdentity,
+  field: DuplicateField,
+  caps: RuleCaps,
+): Promise<{ findings: Finding[]; total: number }> {
   // A crawl id nothing knows groups nothing and would report a clean bill of
   // health for a crawl that does not exist (hard rule 7, `links.orphan`'s
   // precedent). These rules read no evidence blob, so this is the existence
@@ -233,9 +256,9 @@ async function groupFindings(
   await assertCrawl(db, crawlId, self.id);
 
   // `sql.raw` because a column name is not a parameter — Postgres has no
-  // placeholder for one. The three values it can ever take are the literals in
-  // the rule definitions at the bottom of this file, so nothing outside this
-  // module chooses them and no crawl datum reaches here.
+  // placeholder for one. The values it can ever take are the literals of
+  // `DuplicateField.column`'s union (used by the rules at the bottom of this
+  // file and by `social.og-duplicate`), so no crawl datum reaches here.
   const column = sql.raw(`p.${field.column}`);
 
   const result = await db.execute<GroupRow>(sql`
@@ -317,7 +340,8 @@ async function groupFindings(
       dedupeKey: valueKey(row.value),
     }),
   );
-  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+  // An empty listing has no window row: zero groups, which is what it means.
+  return { findings, total: result.rows[0]?.total_matches ?? 0 };
 }
 
 type H1Coverage = {

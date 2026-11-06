@@ -421,11 +421,20 @@ describe("checklist coverage", () => {
   //
   //   query   91 + 1 = 92
   //   total   154 + 1 = 155
-  it("pins the ruleset split the gate doc reports: 155 rules = 49 page + 92 query + 14 metric", () => {
+  //
+  // Phase 26b Task 6 adds the six social rules on CHECK-87: FOUR page rules in
+  // `src/rules/page/social.ts` (`social.og-incomplete`, `social.og-multiple`,
+  // `social.og-url-mismatch`, `social.x-incomplete`) and TWO query rules in
+  // `src/rules/query/social.ts` (`social.og-duplicate`, `social.image-broken`).
+  //
+  //   page    49 + 4 = 53
+  //   query   92 + 2 = 94
+  //   total   155 + 6 = 161
+  it("pins the ruleset split the gate doc reports: 161 rules = 53 page + 94 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(155);
-    expect(registry.byKind("page")).toHaveLength(49);
-    expect(registry.byKind("query")).toHaveLength(92);
+    expect(registry.all()).toHaveLength(161);
+    expect(registry.byKind("page")).toHaveLength(53);
+    expect(registry.byKind("query")).toHaveLength(94);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -453,22 +462,25 @@ describe("checklist coverage", () => {
     // CHECK-49's; a metric evidences both and judges neither.
     expect(byId.get("page.weight")).toEqual(["CHECK-48", "CHECK-49"]);
     // The marker claims every check whose silence it explains, `page.weight`'s
-    // included — the `content.thin-skipped` contract.
+    // included — the `content.thin-skipped` contract. CHECK-87 (26b): a share
+    // image's status and size come from the same file check.
     expect(byId.get("resources.not-recorded")).toEqual([
       "CHECK-48",
       "CHECK-49",
       "CHECK-50",
       "CHECK-51",
       "CHECK-85",
+      "CHECK-87",
     ]);
     // And its sibling claims the same four (P12-T2): the silence it explains is
     // the same silence, so a marker claiming fewer would leave a check whose
-    // reader never meets it.
+    // reader never meets it. CHECK-87 too, for the share image (26b).
     expect(byId.get("resources.not-fetched")).toEqual([
       "CHECK-48",
       "CHECK-49",
       "CHECK-50",
       "CHECK-51",
+      "CHECK-87",
     ]);
     // The third marker (P13-T2) claims the same four again, for the same reason:
     // on a crawl whose every row is a decided unknown class the same four

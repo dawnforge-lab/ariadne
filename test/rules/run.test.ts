@@ -10,6 +10,7 @@ import {
   issues,
   metrics,
   pages,
+  resources,
   structuredData,
   urlParams,
 } from "../../src/db/schema.js";
@@ -135,7 +136,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("render.title-changed");
     expect(ids).toContain("render.meta-description-changed");
     expect(ids).toContain("render.h1-changed");
-    expect(ids.length).toBe(155);
+    expect(ids.length).toBe(161);
   });
 
   it("registers every kind the runner drives", () => {
@@ -238,6 +239,29 @@ describe("runRules against the database", () => {
     });
   }
 
+  /**
+   * The fetched share image a clean page's og:image names (Phase 26b). A crawl
+   * writes it as a `resources` row with no `page_resources` edge, and the file
+   * check answers it; without the row `social.image-broken` reports the image
+   * as not fetched, which is an unknown on the page, not a clean page. No edge,
+   * so it is no page resource and `resources.not-recorded` still speaks for the
+   * crawl's missing page files below.
+   */
+  async function insertShareImage(page: PageRecord): Promise<void> {
+    const image = page.social?.og.image;
+    if (image === undefined) throw new Error(`${page.url}: clean page has no og:image`);
+    await db.insert(resources).values({
+      crawlId: page.crawlId,
+      url: image,
+      kind: "image",
+      fetchClass: "ok",
+      statusCode: 200,
+      contentType: "image/png",
+      bytes: 40_000,
+      bytesSource: "header",
+    });
+  }
+
   beforeAll(async () => {
     db = createDb(databaseUrl());
     await runMigrations(db);
@@ -259,6 +283,7 @@ describe("runRules against the database", () => {
     const untitled = mkRow(crawlId, "/untitled", { title: null });
     const broken = mkRow(crawlId, "/broken", { fetchClass: "server_error", statusCode: 503 });
     await db.insert(pages).values([clean, untitled, broken]);
+    await insertShareImage(clean);
     await db.insert(hreflang).values([
       {
         crawlId,
@@ -398,7 +423,9 @@ describe("runRules against the database", () => {
     // The seed, for the reason given above: an indexable page nothing links to
     // is an orphan, and "a clean crawl produces nothing" has to mean the rules
     // read the right crawl, not that this page is unreachable.
-    await db.insert(pages).values([mkRow(mine, "/clean", { depth: 0, discoveredVia: "seed" })]);
+    const clean = mkRow(mine, "/clean", { depth: 0, discoveredVia: "seed" });
+    await db.insert(pages).values([clean]);
+    await insertShareImage(clean);
 
     const summary = await runRules(db, mine, buildRegistry());
     expect(summary.pagesScanned).toBe(1);

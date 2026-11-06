@@ -60,6 +60,9 @@ function tagsOutside(p: PageRecord): string[] {
   const out: string[] = [];
   if (p.titleOutsideHead === true) out.push("title");
   if (p.metaDescriptionOutsideHead === true) out.push("meta description");
+  // Phase 26b: ANY Open Graph or X tag met after the head ended. Null `social`
+  // (a v1 row, or a v2 page with no social tag) adds nothing.
+  if (p.social?.outsideHead === true) out.push("social");
   return out;
 }
 
@@ -91,9 +94,11 @@ export const headRules: PageRule[] = [
 
   // THE JUDGED COHORT (`isJudged`), with the other title and description rules:
   // where a title sits matters on a page that is meant to be in the index.
+  // CHECK-87 since Phase 26b: social tags outside the head are this rule's
+  // finding, and "tags placed in the head" is part of that check.
   pageRule(
     "head.tags-outside-head",
-    ["CHECK-35", "CHECK-36"],
+    ["CHECK-35", "CHECK-36", "CHECK-87"],
     "on-page",
     "warning",
     COLUMNS,

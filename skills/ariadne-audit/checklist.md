@@ -2034,13 +2034,46 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   reads the recorded fetch of the image. These facts exist only for crawls written by
   extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
   NOT MEASURED marker, and silence says the crawl never measured them, not that the
-  site is clean. The remedy is a re-crawl. The rules that answer the check are named
-  in the engine's issue listing.
+  site is clean. The remedy is a re-crawl. Seven rules answer it, all on judged pages
+  (indexable, self-canonical):
+  - `social.og-incomplete` (info): og:title, og:type, og:image or og:url missing or
+    empty; evidence `{missing, none}`, `none` true when the page has no Open Graph
+    tag at all.
+  - `social.og-multiple` (info): an `og:` tag repeated with different values;
+    evidence `{tags}`.
+  - `social.og-url-mismatch` (info): og:url resolves to another address than the
+    page's canonical (its own URL when it declares none); evidence `{ogUrl,
+    canonical}`. A trailing slash on a path is a different address.
+  - `social.x-incomplete` (info): no `twitter:card`, a card with no title
+    (`twitter:title`, or the `og:title` X falls back to), or X tags written as
+    `property=`; evidence `{missing, viaProperty}`.
+  - `social.og-duplicate` (info): one og:title or og:description on several pages,
+    grouped exactly as CHECK-35's `title.duplicate` (hreflang alternates one page,
+    rel=prev pages set aside); evidence `{field, value, count, pages,
+    alternatesCollapsed, paginationExcluded}`. It reads columns older crawls have
+    too, so it judges every crawl.
+  - `social.image-broken` (warning): per page, each og:image / twitter:image that is
+    relative or malformed, answered non-200, or is over 5 MB; evidence `{images:
+    [{tag, url, problem, statusCode?, bytes?, fetchClass?}]}`. A `problem` of
+    `not-fetched` means the image was never requested on this crawl or its request
+    got no answer: report it as NOT CHECKED for that image, never as broken and
+    never as a pass.
+  - `head.tags-outside-head` (warning): `social` in its `elements` when any Open
+    Graph or X tag came after the head ended.
+- **Crawl-level markers**: `extraction.not-recorded` (info) as above, and for the
+  image's status and size the file-check markers `resources.not-recorded` (info, no
+  file recorded) and `resources.not-fetched` (info, files recorded and none
+  requested). Share images are not files a page loads, so those markers count only
+  page files; `social.image-broken`'s `not-fetched` entries name the share images
+  themselves.
 - **Evaluate**:
   - PASS if every judged page carries a complete, consistent, head-placed social set
     and its share image loads
-  - FAIL if any rule listed under this check fired
-  - NOT MEASURED if `extraction.not-recorded` (info) fired
+  - FAIL if any rule listed under this check fired (a `social.image-broken` finding
+    whose every image is `not-fetched` is NOT MEASURED for those images, not FAIL)
+  - NOT MEASURED if `extraction.not-recorded` (info) fired; the image half is NOT
+    MEASURED if `resources.not-recorded` (info) or `resources.not-fetched` (info)
+    fired
   - Record: the pages with each gap and the tags that are missing or conflicting
 
 ### CHECK-88: HTML document structure
@@ -2075,7 +2108,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   title in the search result's font and do not judge a title with a character
   outside the Latin, Greek and Cyrillic scripts (the character rules still apply
   to it), plus `head.tags-outside-head` (warning, a title or meta
-  description after the `<head>` ended) and `render.title-changed` (warning, a
+  description after the `<head>` ended; since 26b its `elements` also names
+  `social` for Open Graph or X tags there, which is CHECK-87's half of the same
+  finding, so a row naming only `social` is not a title fault) and `render.title-changed` (warning, a
   rendered page whose title JavaScript changed; see CHECK-01 step 6). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
   `issue_urls` gives the titles themselves in the evidence, which is where the
@@ -2167,7 +2202,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   narrower than 400 pixels), which measure the description in the search result's
   font and do not judge one with a character outside the Latin, Greek and Cyrillic
   scripts, plus `head.tags-outside-head` (warning,
-  a meta description or title after the `<head>` ended) and
+  a meta description or title after the `<head>` ended; `social` in its `elements`
+  is CHECK-87's half, see CHECK-35) and
   `render.meta-description-changed` (warning, a rendered page whose description
   JavaScript changed; see CHECK-01 step 6). Filter by `pageType` for the per-type
   breakdown; `issue_urls` carries each description and its length, which is what the

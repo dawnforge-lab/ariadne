@@ -1,0 +1,465 @@
+/**
+ * The two social query rules (Phase 26b, Task 6), against a real database:
+ * `social.og-duplicate` (one og:title or og:description shared by pages) and
+ * `social.image-broken` (an og/X share image that is relative, malformed,
+ * answered non-200, over `SOCIAL_IMAGE_MAX_BYTES`, or never fetched).
+ *
+ * Rows are inserted directly: what is under test is what the rules make of the
+ * `pages`, `resources` and `page_resources` rows a crawl writes.
+ */
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
+
+import type { SocialFacts } from "../../src/crawl/parse/page-facts.js";
+import { closeDb, createDb, type Db } from "../../src/db/client.js";
+import { runMigrations } from "../../src/db/migrate.js";
+import { crawls, pageResources, pages, resources } from "../../src/db/schema.js";
+import { buildRegistry } from "../../src/rules/index.js";
+import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
+import { socialQueryRules } from "../../src/rules/query/social.js";
+import type { MetricRule, QueryRule, RuleCaps } from "../../src/rules/registry/types.js";
+import { SOCIAL_IMAGE_MAX_BYTES } from "../../src/rules/thresholds.js";
+
+function databaseUrl(): string {
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL must be set for db tests (no fallback)");
+  return url;
+}
+
+const SITE = "https://social.example";
+
+function rule(id: string): QueryRule {
+  const r = socialQueryRules.find((x) => x.id === id);
+  if (!r) throw new Error(`no rule '${id}' in socialQueryRules`);
+  return r;
+}
+const duplicate = rule("social.og-duplicate");
+const imageBroken = rule("social.image-broken");
+
+/** Any registered rule, for the Review Focus 2 cross-checks. */
+const registry = buildRegistry();
+function registered(id: string): QueryRule {
+  const r = registry.all().find((x) => x.id === id);
+  if (!r || r.kind !== "query") throw new Error(`no query rule '${id}'`);
+  return r;
+}
+function metric(id: string): MetricRule {
+  const r = registry.all().find((x) => x.id === id);
+  if (!r || r.kind !== "metric") throw new Error(`no metric rule '${id}'`);
+  return r;
+}
+
+function caps(listing: number | null): RuleCaps {
+  return { ...DEFAULT_RULE_CAPS, listing };
+}
+
+/** A social set holding only the images a case is about. */
+function images(og: string | undefined, x?: string): SocialFacts {
+  return {
+    og: { title: "A share title", type: "website", url: SITE, ...(og === undefined ? {} : { image: og }) },
+    x: { card: "summary_large_image", ...(x === undefined ? {} : { image: x }) },
+    counts: {},
+    conflicting: [],
+    outsideHead: false,
+    xViaProperty: false,
+  };
+}
+
+interface PageSpec {
+  path: string;
+  title?: string;
+  ogTitle?: string | null;
+  ogDescription?: string | null;
+  social?: SocialFacts | null;
+  extractionVersion?: number | null;
+  isIndexable?: boolean;
+  robotsMeta?: string | null;
+}
+
+interface ResourceSpec {
+  url: string;
+  fetchClass?: string | null;
+  statusCode?: number | null;
+  contentType?: string | null;
+  bytes?: number | null;
+  /** Paths of the pages that LOAD it (a `page_resources` edge). */
+  on?: string[];
+}
+
+describe("socialQueryRules metadata", () => {
+  it("defines the two query rules", () => {
+    expect(socialQueryRules.map((r) => r.id)).toEqual([
+      "social.og-duplicate",
+      "social.image-broken",
+    ]);
+    expect([duplicate.severity, duplicate.category, duplicate.checkIds]).toEqual([
+      "info",
+      "on-page",
+      ["CHECK-87"],
+    ]);
+    expect([imageBroken.severity, imageBroken.category, imageBroken.checkIds]).toEqual([
+      "warning",
+      "on-page",
+      ["CHECK-87"],
+    ]);
+    expect(duplicate.marker).toBeUndefined();
+    expect(imageBroken.marker).toBeUndefined();
+  });
+
+  it("declares groupFindings' columns plus the field, and the image list", () => {
+    expect(duplicate.columns).toEqual([
+      { key: "field", label: "Tag" },
+      { key: "value", label: "Shared Value" },
+      { key: "count", label: "Occurrences" },
+      { key: "pages", label: "Addresses" },
+      { key: "alternatesCollapsed", label: "Alternates Collapsed" },
+      { key: "paginationExcluded", label: "Paginated Pages Set Aside (Site-Wide)" },
+    ]);
+    expect(imageBroken.columns).toEqual([{ key: "images", label: "Image Problems" }]);
+  });
+
+  it("the size limit is 5 MB", () => {
+    expect(SOCIAL_IMAGE_MAX_BYTES).toBe(5 * 1024 * 1024);
+  });
+});
+
+describe("social query rules against the database", () => {
+  let db: Db;
+  const created: string[] = [];
+
+  async function seed(
+    pageSpecs: PageSpec[],
+    resourceSpecs: ResourceSpec[] = [],
+  ): Promise<{ crawlId: string; ids: Map<string, string> }> {
+    const crawlId = `crawl_${randomUUID()}`;
+    await db.insert(crawls).values({ id: crawlId, siteUrl: SITE, config: {}, rulesetVersion: "test" });
+    created.push(crawlId);
+    const rows = pageSpecs.map((s) => ({
+      id: `page_${randomUUID()}`,
+      crawlId,
+      url: `${SITE}${s.path}`,
+      urlNormalised: `${SITE}${s.path}`,
+      pageType: "content",
+      fetchClass: "ok",
+      statusCode: 200,
+      isIndexable: s.isIndexable ?? true,
+      robotsMeta: s.robotsMeta ?? null,
+      depth: 1,
+      discoveredVia: "link",
+      htmlBytes: 20_000,
+      title: s.title ?? `Title of ${s.path}`,
+      ogTitle: s.ogTitle ?? null,
+      ogDescription: s.ogDescription ?? null,
+      social: s.social === undefined ? null : s.social,
+      extractionVersion: s.extractionVersion === undefined ? 2 : s.extractionVersion,
+    }));
+    if (rows.length > 0) await db.insert(pages).values(rows);
+    const ids = new Map(pageSpecs.map((s, i) => [s.path, rows[i]!.id]));
+    if (resourceSpecs.length > 0) {
+      await db.insert(resources).values(
+        resourceSpecs.map((r) => ({
+          crawlId,
+          url: r.url,
+          kind: "image",
+          fetchClass: r.fetchClass === undefined ? "ok" : r.fetchClass,
+          statusCode: r.statusCode === undefined ? 200 : r.statusCode,
+          contentType: r.contentType === undefined ? "image/png" : r.contentType,
+          bytes: r.bytes === undefined ? 40_000 : r.bytes,
+          bytesSource: r.bytes === null ? null : "header",
+          cacheControl: "public, max-age=3600",
+        })),
+      );
+      const edges = resourceSpecs.flatMap((r) =>
+        (r.on ?? []).map((path) => {
+          const pageId = ids.get(path);
+          if (pageId === undefined) throw new Error(`no page ${path}`);
+          return { crawlId, pageId, resourceUrl: r.url };
+        }),
+      );
+      if (edges.length > 0) await db.insert(pageResources).values(edges);
+    }
+    return { crawlId, ids };
+  }
+
+  beforeAll(async () => {
+    db = createDb(databaseUrl());
+    await runMigrations(db);
+  });
+
+  afterAll(async () => {
+    for (const id of created) await db.delete(crawls).where(eq(crawls.id, id));
+    await closeDb(db);
+  });
+
+  describe("social.og-duplicate", () => {
+    it("groups two pages sharing one og:title under different titles", async () => {
+      const { crawlId, ids } = await seed([
+        { path: "/a", title: "Alpha", ogTitle: "Shared share title" },
+        { path: "/b", title: "Beta", ogTitle: "  Shared share title " },
+        { path: "/c", title: "Gamma", ogTitle: "Another share title" },
+      ]);
+      const f = await duplicate.run(db, crawlId);
+      expect(f).toHaveLength(1);
+      expect(f[0]).toMatchObject({
+        ruleId: "social.og-duplicate",
+        severity: "info",
+        pageId: ids.get("/a"),
+        pageUrl: `${SITE}/a`,
+      });
+      expect(f[0]?.evidence).toEqual({
+        field: "og:title",
+        value: "Shared share title",
+        count: 2,
+        pages: [`${SITE}/a`, `${SITE}/b`],
+        alternatesCollapsed: 0,
+        paginationExcluded: 0,
+      });
+      expect(f[0]?.dedupeKey).toMatch(/^og:title:[0-9a-f]{64}$/);
+    });
+
+    it("reports title groups, then description groups; one text in both is two findings", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", ogTitle: "Same words", ogDescription: "Same words" },
+        { path: "/b", ogTitle: "Same words", ogDescription: "Same words" },
+      ]);
+      const f = await duplicate.run(db, crawlId);
+      expect(f.map((x) => x.evidence.field)).toEqual(["og:title", "og:description"]);
+      // The prefix is what keeps the two keys apart: the value hashes alike.
+      expect(f[0]?.dedupeKey).not.toBe(f[1]?.dedupeKey);
+      expect(f[0]?.dedupeKey.slice("og:title:".length)).toBe(
+        f[1]?.dedupeKey.slice("og:description:".length),
+      );
+    });
+
+    it("an og:title equal to another page's og:description is not a group", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", ogTitle: "Crossed value" },
+        { path: "/b", ogDescription: "Crossed value" },
+      ]);
+      expect(await duplicate.run(db, crawlId)).toEqual([]);
+    });
+
+    it("judges only judged pages, and never groups blanks", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", ogTitle: "Kept out" },
+        { path: "/b", ogTitle: "Kept out", robotsMeta: "noindex", isIndexable: false },
+        { path: "/c", ogTitle: "" },
+        { path: "/d", ogTitle: "   " },
+      ]);
+      expect(await duplicate.run(db, crawlId)).toEqual([]);
+    });
+
+    it("judges a v1 crawl too: the og columns predate the bump (deviation 1)", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", ogTitle: "Old crawl title", extractionVersion: 1 },
+        { path: "/b", ogTitle: "Old crawl title", extractionVersion: 1 },
+      ]);
+      expect(await duplicate.run(db, crawlId)).toHaveLength(1);
+    });
+
+    it("one cap and one exact note across both fields", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", ogTitle: "T1", ogDescription: "D1" },
+        { path: "/b", ogTitle: "T1", ogDescription: "D1" },
+        { path: "/c", ogTitle: "T2", ogDescription: "D2" },
+        { path: "/d", ogTitle: "T2", ogDescription: "D2" },
+      ]);
+      const capped = await duplicate.run(db, crawlId, caps(3));
+      expect(capped.map((x) => [x.evidence.field, x.evidence.value])).toEqual([
+        ["og:title", "T1"],
+        ["og:title", "T2"],
+        ["og:description", "D1"],
+      ]);
+      // One note, on the last finding, with the exact total of both fields.
+      expect(capped.filter((x) => "truncated" in x.evidence)).toHaveLength(1);
+      expect(capped[2]?.evidence.truncated).toEqual({ reported: 3, total: 4 });
+
+      const one = await duplicate.run(db, crawlId, caps(1));
+      expect(one).toHaveLength(1);
+      expect(one[0]?.evidence.truncated).toEqual({ reported: 1, total: 4 });
+
+      const all = await duplicate.run(db, crawlId, caps(null));
+      expect(all).toHaveLength(4);
+      expect(all.some((x) => "truncated" in x.evidence)).toBe(false);
+    });
+
+    it("throws on a crawl that does not exist", async () => {
+      await expect(duplicate.run(db, "crawl_nope")).rejects.toThrow(/no such crawl/);
+    });
+  });
+
+  describe("social.image-broken", () => {
+    const OK = `${SITE}/og/fine.png`;
+
+    it("fires on a relative og:image, before any fetch", async () => {
+      const { crawlId, ids } = await seed([{ path: "/a", social: images("/og/share.png") }]);
+      const f = await imageBroken.run(db, crawlId);
+      expect(f).toHaveLength(1);
+      expect(f[0]).toMatchObject({
+        ruleId: "social.image-broken",
+        severity: "warning",
+        pageId: ids.get("/a"),
+        pageUrl: `${SITE}/a`,
+        dedupeKey: `${SITE}/a`,
+      });
+      expect(f[0]?.evidence).toEqual({
+        images: [{ tag: "og:image", url: "/og/share.png", problem: "relative" }],
+      });
+    });
+
+    it("a protocol-relative image is relative; a non-http scheme or a broken host is invalid", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", social: images("//cdn.example/x.png") },
+        { path: "/b", social: images("data:image/png;base64,AAAA") },
+        { path: "/c", social: images("https://exa mple.com/x.png") },
+      ]);
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => x.evidence.images)).toEqual([
+        [{ tag: "og:image", url: "//cdn.example/x.png", problem: "relative" }],
+        [{ tag: "og:image", url: "data:image/png;base64,AAAA", problem: "invalid" }],
+        [{ tag: "og:image", url: "https://exa mple.com/x.png", problem: "invalid" }],
+      ]);
+    });
+
+    it("fires on a non-200 status and on an image over 5 MB; one finding names both tags", async () => {
+      const BIG = `${SITE}/og/big.png`;
+      const GONE = `${SITE}/og/gone.png`;
+      const { crawlId } = await seed(
+        [{ path: "/a", social: images(BIG, GONE) }],
+        [
+          { url: BIG, bytes: 6 * 1024 * 1024 },
+          { url: GONE, fetchClass: "client_error", statusCode: 404, bytes: null },
+        ],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f).toHaveLength(1);
+      expect(f[0]?.evidence).toEqual({
+        images: [
+          { tag: "og:image", url: BIG, problem: "too-large", bytes: 6 * 1024 * 1024 },
+          { tag: "twitter:image", url: GONE, problem: "status", statusCode: 404 },
+        ],
+      });
+    });
+
+    it("is silent on a fetched 200 at exactly the limit, and on a page with no image", async () => {
+      const EDGE = `${SITE}/og/edge.png`;
+      const { crawlId } = await seed(
+        [
+          { path: "/a", social: images(EDGE) },
+          { path: "/b", social: images(undefined) },
+          { path: "/c", social: null },
+        ],
+        [{ url: EDGE, bytes: SOCIAL_IMAGE_MAX_BYTES }],
+      );
+      expect(await imageBroken.run(db, crawlId)).toEqual([]);
+    });
+
+    it("matches the resource row by the resolved URL (fragment and host case ignored)", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", social: images("https://SOCIAL.example/og/fine.png#x") }],
+        [{ url: OK }],
+      );
+      expect(await imageBroken.run(db, crawlId)).toEqual([]);
+    });
+
+    it("an image never fetched is reported as not fetched, never read as fine (hard rule 7)", async () => {
+      const UNASKED = `${SITE}/og/unasked.png`;
+      const FAILED = `${SITE}/og/failed.png`;
+      const { crawlId } = await seed(
+        [
+          { path: "/a", social: images(UNASKED) },
+          { path: "/b", social: images(FAILED) },
+          // No `resources` row at all (past the analyzer's four-ref cap).
+          { path: "/c", social: images(`${SITE}/og/norow.png`) },
+        ],
+        [
+          { url: UNASKED, fetchClass: null, statusCode: null, contentType: null, bytes: null },
+          { url: FAILED, fetchClass: "fetch_error", statusCode: null, contentType: null, bytes: null },
+        ],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => x.evidence.images)).toEqual([
+        [{ tag: "og:image", url: UNASKED, problem: "not-fetched", fetchClass: null }],
+        [{ tag: "og:image", url: FAILED, problem: "not-fetched", fetchClass: "fetch_error" }],
+        [{ tag: "og:image", url: `${SITE}/og/norow.png`, problem: "not-fetched", fetchClass: null }],
+      ]);
+    });
+
+    it("judges only judged pages", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", social: images("/rel.png"), robotsMeta: "noindex", isIndexable: false },
+      ]);
+      expect(await imageBroken.run(db, crawlId)).toEqual([]);
+    });
+
+    it("is silent on a v1 or a mixed crawl: extraction.not-recorded speaks", async () => {
+      const v1 = await seed([{ path: "/a", extractionVersion: 1 }]);
+      expect(await imageBroken.run(db, v1.crawlId)).toEqual([]);
+      const mixed = await seed([
+        { path: "/a", social: images("/rel.png") },
+        { path: "/b", extractionVersion: 1 },
+      ]);
+      expect(await imageBroken.run(db, mixed.crawlId)).toEqual([]);
+    });
+
+    it("caps the listing with an exact note", async () => {
+      const { crawlId } = await seed([
+        { path: "/a", social: images("/1.png") },
+        { path: "/b", social: images("/2.png") },
+        { path: "/c", social: images("/3.png") },
+      ]);
+      const f = await imageBroken.run(db, crawlId, caps(2));
+      expect(f.map((x) => x.pageUrl)).toEqual([`${SITE}/a`, `${SITE}/b`]);
+      expect(f[1]?.evidence.truncated).toEqual({ reported: 2, total: 3 });
+      expect(await imageBroken.run(db, crawlId, caps(null))).toHaveLength(3);
+    });
+
+    it("throws on a crawl that does not exist", async () => {
+      await expect(imageBroken.run(db, "crawl_nope")).rejects.toThrow(/no such crawl/);
+    });
+
+    /**
+     * Review Focus 2: an og-only image URL that 404s is a `resources` row with
+     * no `page_resources` edge. `social.image-broken` reports it; the file rules,
+     * mixed content and page weight do not see it. A page-loaded resource on the
+     * same page keeps each of those rules speaking, so the silence is about the
+     * og row and not an empty crawl.
+     */
+    it("an og-only 404 fires social.image-broken and nothing in the resource family", async () => {
+      const OG_ONLY = "http://cdn.social.example/og-only.png";
+      const X_ONLY = "http://cdn.social.example/x-only.png";
+      const LOADED = "http://cdn.social.example/loaded.png";
+      const { crawlId } = await seed(
+        [{ path: "/a", social: images(OG_ONLY, X_ONLY) }],
+        [
+          { url: OG_ONLY, fetchClass: "client_error", statusCode: 404, contentType: "text/html", bytes: null },
+          // Answered 200 as text/html: a bad content type if a page loaded it.
+          { url: X_ONLY, contentType: "text/html", bytes: 2_000 },
+          { url: LOADED, fetchClass: "client_error", statusCode: 404, contentType: "text/html", bytes: null, on: ["/a"] },
+        ],
+      );
+      const social = await imageBroken.run(db, crawlId);
+      expect(social.map((x) => x.evidence.images)).toEqual([
+        [{ tag: "og:image", url: OG_ONLY, problem: "status", statusCode: 404 }],
+      ]);
+
+      const broken = await registered("resources.broken").run(db, crawlId);
+      expect(broken).toHaveLength(1);
+      expect(JSON.stringify(broken)).toContain(LOADED);
+      expect(JSON.stringify(broken)).not.toContain(OG_ONLY);
+      expect(await registered("resources.bad-content-type").run(db, crawlId)).toEqual([]);
+      const mixed = await registered("security.mixed-content").run(db, crawlId);
+      expect(mixed.map((x) => x.evidence.sample)).toEqual([[LOADED]]);
+
+      // Page weight with and without the two og/X rows: the same table.
+      const weight = await metric("page.weight").run(db, crawlId);
+      for (const url of [OG_ONLY, X_ONLY]) {
+        await db
+          .delete(resources)
+          .where(and(eq(resources.crawlId, crawlId), eq(resources.url, url)));
+      }
+      expect(await metric("page.weight").run(db, crawlId)).toEqual(weight);
+    });
+  });
+});

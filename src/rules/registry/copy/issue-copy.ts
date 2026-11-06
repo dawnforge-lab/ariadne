@@ -326,6 +326,49 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Re-crawl the site. These page facts are recorded for every page on crawls from this version onwards.",
   },
+  // ----------------------------------------------------------------- social
+  "social.og-incomplete": {
+    title: "Social: Open Graph tags missing",
+    explanation:
+      "Indexable, self-canonical pages missing one or more of og:title, og:type, og:image and og:url, or carrying one with empty content; the Missing OG Tags column names them and No OG Tags marks pages with no Open Graph tag at all. Without them a link shared on Facebook, LinkedIn and messaging apps is shown with whatever title and image the platform guesses, or none.",
+    howToFix:
+      "Add og:title, og:type, og:image and og:url to the page template's <head>, filled per page from the page's own title, URL and lead image.",
+  },
+  "social.og-multiple": {
+    title: "Social: Open Graph tag repeated with different values",
+    explanation:
+      "Indexable, self-canonical pages that carry the same Open Graph tag more than once with different content; the Conflicting Tags column names them. Each platform picks one of the values by its own rule, so the preview a link gets can differ from one platform to the next.",
+    howToFix:
+      "Remove the duplicate tags so each Open Graph tag appears once. This usually means a theme and a plugin both write them: turn one off.",
+  },
+  "social.og-url-mismatch": {
+    title: "Social: og:url is not the canonical URL",
+    explanation:
+      "Indexable, self-canonical pages whose og:url names a different address from the page's canonical (or, with no canonical, the page's own URL); the row shows both. Shares and likes are counted against the og:url, so they are credited to another address than the one you want indexed.",
+    howToFix:
+      "Set og:url to the page's canonical URL, written exactly as the canonical tag writes it.",
+  },
+  "social.x-incomplete": {
+    title: "Social: X card tags missing or written as property",
+    explanation:
+      "Indexable, self-canonical pages with no twitter:card, with a card but no title (neither twitter:title nor og:title), or with X tags written as property= instead of name=; the Missing X Tags column names what is missing and Given as property= marks the last. X reads its tags from name=, so a link shared there falls back to a plain or missing preview.",
+    howToFix:
+      "Add <meta name=\"twitter:card\" content=\"summary_large_image\"> and a title to the template, and write every twitter: tag with name= rather than property=.",
+  },
+  "social.og-duplicate": {
+    title: "Social: Open Graph title or description duplicate",
+    explanation:
+      "Groups of indexable, self-canonical pages with an identical og:title or og:description, counted like duplicate titles: hreflang alternates are one page and pages 2 onwards of a paginated series are left out. Each row names the tag, the shared value, the number of distinct pages and up to 20 of their URLs; shared links from those pages all look the same.",
+    howToFix:
+      "Fill og:title and og:description in the template from fields that differ per page, such as the page title and meta description.",
+  },
+  "social.image-broken": {
+    title: "Social: Share image relative, broken, over 5 MB or not checked",
+    explanation:
+      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was not requested on this crawl (or its request got no answer): whether it loads is unknown, which is not the same as broken.",
+    howToFix:
+      "Use an absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run the crawl with the file check on to check an image listed as not fetched.",
+  },
   // --------------------------------------------------------------- security
   "security.headers-missing": {
     title: "Security: Protective response headers missing or unsafe",
@@ -553,11 +596,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Move the tags into the <head> above any other markup, and remove or move the element named in Closed By out of the head; it is usually a tracking pixel, an injected banner or a stray text node from a plugin.",
   },
   "head.tags-outside-head": {
-    title: "Page titles: Title or meta description outside <head>",
+    title: "Page titles: Title, meta description or social tags outside <head>",
     explanation:
-      "Indexable, self-canonical pages whose title or meta description appears after the <head> has ended, either at </head> or where an element that is not allowed in the head closed it early; the Closed By column names that element. Search engines may ignore a title or description outside the head and write their own.",
+      "Indexable, self-canonical pages whose title, meta description or Open Graph and X tags appear after the <head> has ended, either at </head> or where an element that is not allowed in the head closed it early; the Elements Outside Head column names which and Closed By names that element. Search engines may ignore a title or description outside the head and write their own, and social platforms may not read share tags there.",
     howToFix:
-      "Move the title and meta description into the <head> above any other markup, and remove or move the element named in Closed By out of the head.",
+      "Move the title, meta description and social tags into the <head> above any other markup, and remove or move the element named in Closed By out of the head.",
   },
   "headings.h1-missing": {
     title: "H1: Missing",

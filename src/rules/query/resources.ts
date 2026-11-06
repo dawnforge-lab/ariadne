@@ -1300,11 +1300,12 @@ export const resourceRules: QueryRule[] = [
   // The marker claims every check whose silence it explains — the
   // `content.thin-skipped` contract, which claims the checks of the rule it
   // stands in for. CHECK-48 is on the list because `page.weight` is as blind on
-  // such a crawl as the four rules above are.
+  // such a crawl as the four rules above are. CHECK-87 since Phase 26b: a share
+  // image's status and size come from the same file check.
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_RECORDED.id,
-    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85", "CHECK-87"],
     category: CATEGORY,
     severity: NOT_RECORDED.severity,
     columns: [
@@ -1323,10 +1324,12 @@ export const resourceRules: QueryRule[] = [
   // beside it and for the same reason: the silence it explains is the same
   // silence — the four judging rules quiet and `page.weight` counting HTML
   // alone. Which of the two speaks is decided by whether the crawl has rows.
+  // CHECK-87 since Phase 26b, as its sibling: a share image is fetched by the
+  // same file check (and `social.image-broken` lists each one it never got).
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_FETCHED.id,
-    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-87"],
     category: CATEGORY,
     severity: NOT_FETCHED.severity,
     columns: [

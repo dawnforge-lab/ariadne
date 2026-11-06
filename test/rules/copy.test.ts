@@ -65,6 +65,7 @@ import {
 import {
   CANONICAL_MAX_HOPS,
   RESTRICTIVE_DIRECTIVES,
+  SOCIAL_IMAGE_MAX_BYTES,
   UNAVAILABLE_AFTER_WARN_DAYS,
 } from "../../src/rules/thresholds.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
@@ -1879,6 +1880,9 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "title.pixel-too-short": String(TITLE_PX_MIN),
     "meta-description.pixel-too-long": String(META_PX_MAX),
     "meta-description.pixel-too-short": String(META_PX_MIN),
+    // The id names no threshold; the size half of its predicate is one, quoted
+    // in megabytes as the title writes it ("over 5 MB").
+    "social.image-broken": String(SOCIAL_IMAGE_MAX_BYTES / (1024 * 1024)),
   };
 
   it("states the number in the title of every rule that fires on one", () => {

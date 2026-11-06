@@ -14,6 +14,7 @@ import { urlShapeRules } from "./page/url-shape.js";
 import { pixelWidthRules } from "./page/pixel-width.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
+import { socialRules } from "./page/social.js";
 import { technicalRules } from "./page/technical.js";
 import { resourceMetrics } from "./metric/resource-metrics.js";
 import { canonicalGraphRules } from "./query/canonical-graph.js";
@@ -35,6 +36,7 @@ import { robotsRules } from "./query/robots.js";
 import { securityRules } from "./query/security.js";
 import { sitemapRules } from "./query/sitemap.js";
 import { sitemapEntryRules } from "./query/sitemap-entries.js";
+import { socialQueryRules } from "./query/social.js";
 import { structuredDataRules } from "./query/structured-data.js";
 import { urlHygieneRules } from "./query/url-hygiene.js";
 
@@ -57,6 +59,8 @@ export function buildRegistry(): Registry {
     ...pixelWidthRules,
     // Where the head ended, and which head elements came after it (P23-T5).
     ...headRules,
+    // The Open Graph and X tags (26b, CHECK-87).
+    ...socialRules,
     ...technicalRules,
     ...hreflangRules,
     ...hreflangIntegrityRules,
@@ -78,6 +82,9 @@ export function buildRegistry(): Registry {
     // and for the same reason — "is this value unique on this site" is a
     // question about the crawl, which no page rule is handed.
     ...fieldDuplicateRules,
+    // The social duplicates and share images (26b): one og title or description
+    // across pages, and an og/X image a platform cannot use.
+    ...socialQueryRules,
     ...structuredDataRules,
     // The render pass's query rules: the three diffs between the raw HTML and
     // the rendered DOM, and the JavaScript redirect. Registered here with the

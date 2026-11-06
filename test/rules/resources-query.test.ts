@@ -84,14 +84,15 @@ describe("resourceRules metadata", () => {
       "resources.uncached": [["CHECK-50"], "info", "technical"],
       // The marker claims every check whose silence it explains.
       "resources.not-recorded": [
-        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85", "CHECK-87"],
         "info",
         "technical",
       ],
       // Its sibling claims the same four, for the same reason: the silence it
-      // explains is the same silence.
+      // explains is the same silence. Both claim CHECK-87 (26b): a share
+      // image's status and size come from the same file check.
       "resources.not-fetched": [
-        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-87"],
         "info",
         "technical",
       ],

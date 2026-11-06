@@ -5,6 +5,7 @@ import {
   expectSilentOnNonOkFetches,
   expectSilentOnNotJudged,
   mkPage,
+  mkV1Page,
   NOT_JUDGED_200S,
   ruleLookup,
 } from "./mk-page.js";
@@ -34,7 +35,7 @@ describe("head rule metadata", () => {
     expect(directives.checkIds).toEqual(["CHECK-18", "CHECK-04", "CHECK-24"]);
     expect(tags.severity).toBe("warning");
     expect(tags.category).toBe("on-page");
-    expect(tags.checkIds).toEqual(["CHECK-35", "CHECK-36"]);
+    expect(tags.checkIds).toEqual(["CHECK-35", "CHECK-36", "CHECK-87"]);
     for (const r of headRules) {
       expect(r.columns).toEqual([
         { key: "elements", label: "Elements Outside Head" },
@@ -138,6 +139,25 @@ describe("head.tags-outside-head", () => {
       elements: "title, meta description",
       headClosedBy: "</head>",
     });
+  });
+
+  it("names social tags outside the head (26b), after the title and description", () => {
+    const social = mkPage().social;
+    if (social === null) throw new Error("mkPage's clean page lost its social set");
+    const outside = { social: { ...social, outsideHead: true } };
+    expect(tags.run(mkPage({ ...outside, headClosedBy: "div" }))[0]?.evidence).toEqual({
+      elements: "social",
+      headClosedBy: "<div>",
+    });
+    expect(
+      tags.run(mkPage({ ...outside, titleOutsideHead: true, metaDescriptionOutsideHead: true }))[0]
+        ?.evidence,
+    ).toEqual({ elements: "title, meta description, social", headClosedBy: "</head>" });
+  });
+
+  it("is silent on social tags inside the head, and on a v1 row's null social", () => {
+    expect(tags.run(mkPage())).toHaveLength(0);
+    expect(tags.run(mkV1Page())).toHaveLength(0);
   });
 
   it("does not fire on directives outside the head", () => {

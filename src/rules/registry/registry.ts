@@ -549,6 +549,20 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     fires once (`dedupeKey` "site") when any page is below version 2 and the
 //     crawl has a FETCHED_OK page, and claims CHECK-04, 10, 18, 22, 24, 25, 34,
 //     35, 36, 37, 49, 85, 86, 87 and 88. 155 rules.
+//  5. (T6) The six social rules, all CHECK-87, category `on-page`, judged
+//     pages only. Page rules (`src/rules/page/social.ts`, info):
+//     `social.og-incomplete` and `social.x-incomplete` fire on a v2 row whose
+//     `social` is null or incomplete (ruling R2); `social.og-multiple` and
+//     `social.og-url-mismatch` need a non-null `social`. Query rules
+//     (`src/rules/query/social.ts`): `social.og-duplicate` (info) groups
+//     `og_title` then `og_description` through field-duplicates.ts'
+//     `duplicateGroups` under one cap and one note, judging every crawl
+//     (deviation 1); `social.image-broken` (warning) opens with `v2Gate` and
+//     reports each og/X image that is relative, invalid, non-200, over
+//     `SOCIAL_IMAGE_MAX_BYTES`, or `not-fetched` (no status recorded: an
+//     unknown, listed so it is never read as a pass). `head.tags-outside-head`
+//     names `social` and claims CHECK-87; `resources.not-recorded` and
+//     `resources.not-fetched` claim CHECK-87. 161 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**
