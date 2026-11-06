@@ -424,9 +424,8 @@
  *  - `closedEarly` (deviation 6): the first CANDIDATE met while the head
  *    machine is in head mode — a start tag outside `HEAD_ALLOWED` (the token
  *    `headClosedBy` names; a stray `</br>` included, a stray `</p>` not), a
- *    start tag inside a head `<noscript>` other than `link`/`meta`/`style`
- *    and, per ruling R12, `script`/`noframes`/`basefont`/`bgsound`
- *    (`inNoscript: true`), or non-whitespace text (`#text`, snippet the text
+ *    start tag inside a head `<noscript>` that is ALSO outside `HEAD_ALLOWED`
+ *    (ruling R12b: the same test as outside it; `inNoscript: true`), or non-whitespace text (`#text`, snippet the text
  *    trimmed of HTML whitespace). A start tag's snippet is its source,
  *    `html.slice(startIndex, endIndex + 1)`, cut at `HEAD_SNIPPET_MAX` before it
  *    is copied. `<body>` is NEVER a candidate: it is where a head is meant to
@@ -884,23 +883,6 @@ const AFTER_HEAD_REOPENS = new Set([
   "style",
   "template",
   "title",
-]);
-/**
- * The children a head `<noscript>` may hold without ending the head when
- * scripting is off: anything else inside one is a closed-early candidate
- * (deviation 6). The brief's list was `link`, `meta`, `style`. Ruling R12 adds
- * `script`, `noframes`, `basefont` and `bgsound`: the "in head noscript"
- * insertion mode processes those in the head (`script` by popping the noscript
- * and reprocessing it there), so none of them closes the head.
- */
-const HEAD_NOSCRIPT_CHILDREN = new Set([
-  "link",
-  "meta",
-  "style",
-  "script",
-  "noframes",
-  "basefont",
-  "bgsound",
 ]);
 /**
  * The HTML "body-ok" link types: a `<link>` whose `rel` tokens are all among
@@ -1656,9 +1638,23 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (headMode === "body") return;
     if (headContainerDepth > 0) {
       // A non-head child of a head `<noscript>` is a candidate (deviation 6),
-      // read here without touching the machine: it stays suspended.
-      // (The stray-`</p>` exemption below applies here too.)
-      if (inHeadNoscript && !(isImplied && name === "p") && !HEAD_NOSCRIPT_CHILDREN.has(name)) {
+      // read here without touching the machine: it stays suspended. RULING
+      // R12b: the test is `HEAD_ALLOWED`, the same as outside the noscript.
+      // With scripting off, the "in head noscript" insertion mode keeps
+      // `link`/`meta`/`style`/`noframes`/`basefont`/`bgsound` in the head. It
+      // pops the noscript for any other head tag (`title`, `base`, `script`,
+      // `template`) and reprocesses that tag in the head, and it ignores
+      // `head`/`noscript`. None of these closes the head, so only a tag the
+      // head cannot hold is a candidate. Only the noscript's OWN content is
+      // read (`headContainerDepth === 1`). Inside a nested container, a
+      // `<template>`'s fragment or a `<noframes>`' raw text, nothing is in the
+      // head at all. The stray-`</p>` exemption below applies here too.
+      if (
+        inHeadNoscript &&
+        headContainerDepth === 1 &&
+        !(isImplied && name === "p") &&
+        !HEAD_ALLOWED.has(name)
+      ) {
         takeCandidate(name, tagSnippet(start, end), true);
       }
       if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;

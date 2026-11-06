@@ -936,15 +936,36 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
     expect(s.closedEarly).toBeNull();
   });
 
-  it("script, noframes, basefont and bgsound inside a head <noscript> are not candidates (R12)", () => {
+  it("a head tag inside a head <noscript> is never a candidate (R12, R12b)", () => {
     for (const child of [
       `<script>1</script>`,
       `<noframes>n</noframes>`,
       `<basefont size="3">`,
       `<bgsound src="/s.wav">`,
+      `<title>nt</title>`,
+      `<base href="/">`,
+      `<template><p>t</p></template>`,
+      `<link rel="stylesheet" href="/a.css">`,
+      `<meta name="x" content="y">`,
+      `<style>p{}</style>`,
     ]) {
-      const s = structureOf(`<html><head><noscript>${child}</noscript><title>t</title></head><body></body></html>`);
+      const s = structureOf(
+        `<html><head><noscript>${child}</noscript><title>t</title></head><body></body></html>`,
+      );
       expect(s.closedEarly, child).toBeNull();
+    }
+  });
+
+  it("a tag the head cannot hold inside a head <noscript> is a candidate (R12b)", () => {
+    for (const [child, tag] of [
+      [`<iframe src="/f"></iframe>`, "iframe"],
+      [`<div>x</div>`, "div"],
+      [`<img src="/p.gif">`, "img"],
+    ] as const) {
+      const s = structureOf(
+        `<html><head><noscript>${child}</noscript><title>t</title></head><body></body></html>`,
+      );
+      expect(s.closedEarly, child).toMatchObject({ tag, inNoscript: true });
     }
   });
 
