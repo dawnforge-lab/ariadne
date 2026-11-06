@@ -626,6 +626,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     now says those tags are optional in HTML, that without them nothing marks
 //     where the head ends, and to write them explicitly. Title: "HTML: Head or
 //     body tag missing, repeated or out of order". No verdict moved.
+// 13. Final review, before release (no bump; 0.21.0 never shipped without it):
+//     the analyzer resolves only the two judged share images (first og:image,
+//     first twitter:image; `MAX_SOCIAL_IMAGE_REFS` 2) and stores each WHOLE
+//     resolved URL as `social.imageRefs`, which `social.image-broken` reads
+//     instead of re-resolving the 1024-capped value (I1); an image alt in anchor
+//     text is spaced off as a word ("Home Logo", I2); `social.og-multiple`
+//     never lists `og:image`, an Open Graph array (R15); `metaRefresh.target`
+//     is cut at `REFRESH_TARGET_MAX` (R16); CHECK-87's Evaluate keeps relative
+//     and invalid share images FAIL when the file-check markers fire (I3).
 export const RULESET_VERSION = "0.21.0";
 
 /**

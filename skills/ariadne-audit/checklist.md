@@ -2118,9 +2118,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     and its share image loads
   - FAIL if any rule listed under this check fired (a `social.image-broken` finding
     whose every image is `not-fetched` is NOT MEASURED for those images, not FAIL)
-  - NOT MEASURED if `extraction.not-recorded` (info) fired; the image half is NOT
-    MEASURED if `resources.not-recorded` (info) or `resources.not-fetched` (info)
-    fired
+  - NOT MEASURED if `extraction.not-recorded` (info) fired; if
+    `resources.not-recorded` (info) or `resources.not-fetched` (info) fired, only
+    the share image's status, size and `not-fetched` part is NOT MEASURED: a
+    `relative` or `invalid` image in `social.image-broken` is judged without a
+    fetch and stays FAIL
   - Record: the pages with each gap and the tags that are missing or conflicting
 
 ### CHECK-88: HTML document structure
