@@ -19,9 +19,11 @@ import {
   present,
   queryFinding,
   resolveEffectiveCanonical,
+  DATE_MAX_WORDS,
   parseRobotsDate,
   robotsTokens,
   unavailableAfterOf,
+  unavailableAfterSpan,
   type MetricIdentity,
 } from "../../src/rules/helpers.js";
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
@@ -1114,5 +1116,50 @@ describe("parseRobotsDate: the other widely used forms (PR #22 re-review M2)", (
       "unavailable_after: 2025-01-01 10:00:00 pst",
       "noindex",
     ]);
+  });
+});
+
+describe("unavailable_after on a hostile value (PR #22 security review)", () => {
+  // The value is the site's own markup, so it can be as long as a meta tag can.
+  const counting = () => {
+    let calls = 0;
+    let longest = 0;
+    const parse = (raw: string) => {
+      calls += 1;
+      longest = Math.max(longest, raw.length);
+      return parseRobotsDate(raw);
+    };
+    return { parse, stats: () => ({ calls, longest }) };
+  };
+
+  it("DATE_MAX_WORDS covers the longest form the parser accepts", () => {
+    // RFC 1123 with every part written out: weekday, day, month, year, time, zone.
+    const longest = "Wednesday, 29 September 2010 15:00:00 EEST";
+    expect(longest.split(/\s+/)).toHaveLength(DATE_MAX_WORDS);
+    expect(parseRobotsDate(longest)).not.toBeNull();
+  });
+
+  it("tries at most DATE_MAX_WORDS prefixes of a 200k-character value, with the short answer", () => {
+    const tail = " nofollow".repeat(25_000); // 225,000 characters
+    const short = "unavailable_after: 25 Jun 2010 15:00:00 PST nofollow";
+    const long = `unavailable_after: 25 Jun 2010 15:00:00 PST${tail}`;
+    const c = counting();
+    const span = unavailableAfterSpan(long, c.parse);
+    expect(span?.date).toBe(unavailableAfterSpan(short)?.date);
+    expect(span?.date).toBe("25 Jun 2010 15:00:00 PST");
+    expect(c.stats().calls).toBeLessThanOrEqual(DATE_MAX_WORDS);
+    // No attempt reads past the first DATE_MAX_WORDS words.
+    expect(c.stats().longest).toBeLessThan(80);
+    const tokens = robotsTokens(long);
+    expect(tokens[0]).toBe("unavailable_after: 25 jun 2010 15:00:00 pst");
+    expect(tokens).toHaveLength(25_001);
+  });
+
+  it("keeps a 200k-character value whole when no prefix is a date, after the same capped attempts", () => {
+    const words = " word".repeat(40_000);
+    const c = counting();
+    const span = unavailableAfterSpan(`unavailable_after:${words}`, c.parse);
+    expect(span?.date).toBe(words.trim());
+    expect(c.stats().calls).toBeLessThanOrEqual(DATE_MAX_WORDS);
   });
 });

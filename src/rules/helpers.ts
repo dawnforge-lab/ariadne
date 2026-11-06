@@ -499,16 +499,29 @@ const UNAVAILABLE_AFTER =
  * so `2025-01-01T10:00:00Z` is not cut to `2025-01-01`. When no prefix is a
  * date the whole value is kept, and the rule reports it as unparsed: nothing is
  * guessed either way.
+ *
+ * BOUNDED, because the value is the site's markup and a meta `content` can be
+ * any length: only the first `DATE_MAX_WORDS` words are ever found, so at most
+ * that many prefixes are tried, each no longer than those words. The work is
+ * linear in the value, never words times length. `parse` is a parameter only so
+ * a test can count the attempts.
  */
-function unavailableAfterSpan(value: string): { start: number; end: number; date: string } | null {
+export function unavailableAfterSpan(
+  value: string,
+  parse: (raw: string) => unknown = parseRobotsDate,
+): { start: number; end: number; date: string } | null {
   const match = UNAVAILABLE_AFTER.exec(value);
   if (match === null) return null;
   const captured = match[1]!;
   const capturedAt = match.index + match[0].length - captured.length;
-  const wordEnds = [...captured.matchAll(/\S+/g)].map((w) => w.index + w[0].length);
+  const wordEnds: number[] = [];
+  const word = /\S+/g;
+  for (let w = word.exec(captured); w !== null && wordEnds.length < DATE_MAX_WORDS; w = word.exec(captured)) {
+    wordEnds.push(w.index + w[0].length);
+  }
   for (let k = wordEnds.length - 1; k >= 0; k--) {
     const candidate = captured.slice(0, wordEnds[k]);
-    if (parseRobotsDate(candidate) !== null) {
+    if (parse(candidate) !== null) {
       return { start: match.index, end: capturedAt + wordEnds[k]!, date: candidate.trim() };
     }
   }
@@ -574,6 +587,17 @@ const RFC_DATE = new RegExp(
     "(\\d{2}):(\\d{2})(?::(\\d{2}))?\\s+" + // 15:00[:00]
     "([a-z]+|[+-]\\d{4})$", // zone
 );
+
+/**
+ * The most whitespace-separated words any form `parseRobotsDate` accepts can
+ * have: RFC 822 / 1123 written out in full, `Wednesday, 29 September 2010
+ * 15:00:00 EEST` (weekday with its comma, day, month, year, time, zone). asctime
+ * has 5 (`Fri Jun 25 15:00:00 2010`), RFC 850 4, ISO at most 3
+ * (`2025-01-01 10:00:00 PST`). `unavailableAfterSpan` looks no further, so a
+ * new form with more words must raise this, and the test that parses the
+ * longest form pins it.
+ */
+export const DATE_MAX_WORDS = 6;
 
 /** C `asctime()`: `Fri Jun 25 15:00:00 2010`, the day space-padded. No zone. */
 const ASCTIME_DATE = /^([a-z]+)\s+([a-z]+)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/;
