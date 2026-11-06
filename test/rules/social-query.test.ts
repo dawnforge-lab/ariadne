@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 import type { SocialFacts } from "../../src/crawl/parse/page-facts.js";
+import { RESOURCE_OFF_REASON } from "../../src/crawl/resources/fetch-resources.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, pageResources, pages, resources } from "../../src/db/schema.js";
@@ -80,6 +81,7 @@ interface PageSpec {
 interface ResourceSpec {
   url: string;
   fetchClass?: string | null;
+  fetchReason?: string | null;
   statusCode?: number | null;
   contentType?: string | null;
   bytes?: number | null;
@@ -163,6 +165,7 @@ describe("social query rules against the database", () => {
           url: r.url,
           kind: "image",
           fetchClass: r.fetchClass === undefined ? "ok" : r.fetchClass,
+          fetchReason: r.fetchReason ?? null,
           statusCode: r.statusCode === undefined ? 200 : r.statusCode,
           contentType: r.contentType === undefined ? "image/png" : r.contentType,
           bytes: r.bytes === undefined ? 40_000 : r.bytes,
@@ -363,7 +366,7 @@ describe("social query rules against the database", () => {
       expect(await imageBroken.run(db, crawlId)).toEqual([]);
     });
 
-    it("an image never fetched is reported as not fetched, never read as fine (hard rule 7)", async () => {
+    it("on a crawl whose file check ran, an unfetched image is listed as not fetched (R13)", async () => {
       const UNASKED = `${SITE}/og/unasked.png`;
       const FAILED = `${SITE}/og/failed.png`;
       const { crawlId } = await seed(
@@ -372,8 +375,12 @@ describe("social query rules against the database", () => {
           { path: "/b", social: images(FAILED) },
           // No `resources` row at all (past the analyzer's four-ref cap).
           { path: "/c", social: images(`${SITE}/og/norow.png`) },
+          // The check ran: this page's image was asked about and answered.
+          { path: "/d", social: images(OK) },
         ],
         [
+          { url: OK },
+          // The check stopped short of this one.
           { url: UNASKED, fetchClass: null, statusCode: null, contentType: null, bytes: null },
           { url: FAILED, fetchClass: "fetch_error", statusCode: null, contentType: null, bytes: null },
         ],
@@ -383,6 +390,80 @@ describe("social query rules against the database", () => {
         [{ tag: "og:image", url: UNASKED, problem: "not-fetched", fetchClass: null }],
         [{ tag: "og:image", url: FAILED, problem: "not-fetched", fetchClass: "fetch_error" }],
         [{ tag: "og:image", url: `${SITE}/og/norow.png`, problem: "not-fetched", fetchClass: null }],
+      ]);
+    });
+
+    it("one unfetched image on a crawl whose check ran is a per-page entry (R13)", async () => {
+      const SKIPPED = `${SITE}/og/skipped.png`;
+      const { crawlId, ids } = await seed(
+        [
+          { path: "/a", social: images(OK) },
+          { path: "/b", social: images(SKIPPED) },
+        ],
+        [
+          { url: OK },
+          { url: SKIPPED, fetchClass: null, statusCode: null, contentType: null, bytes: null },
+        ],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f).toHaveLength(1);
+      expect(f[0]?.pageId).toBe(ids.get("/b"));
+      expect(f[0]?.evidence).toEqual({
+        images: [{ tag: "og:image", url: SKIPPED, problem: "not-fetched", fetchClass: null }],
+      });
+    });
+
+    it("on a crawl whose file check asked nothing, the marker speaks once instead (R13)", async () => {
+      const A = `${SITE}/og/a.png`;
+      const B = `${SITE}/og/b.png`;
+      const { crawlId } = await seed(
+        [
+          { path: "/a", social: images(A) },
+          { path: "/b", social: images(B) },
+          // No row at all: nothing to list either when the check asked nothing.
+          { path: "/c", social: images(`${SITE}/og/norow.png`) },
+        ],
+        [A, B].map((url) => ({
+          url,
+          fetchClass: null,
+          fetchReason: RESOURCE_OFF_REASON,
+          statusCode: null,
+          contentType: null,
+          bytes: null,
+        })),
+      );
+      expect(await imageBroken.run(db, crawlId)).toEqual([]);
+      // The crawl's only rows are og-only ones and no page counts an <img>, so
+      // `resources.not-recorded` is silent and `resources.not-fetched` speaks for
+      // the share images (both claim CHECK-87).
+      expect(await registered("resources.not-recorded").run(db, crawlId)).toEqual([]);
+      const marker = await registered("resources.not-fetched").run(db, crawlId);
+      expect(marker.map((x) => x.evidence)).toEqual([
+        expect.objectContaining({ reason: "fetch-off", resourcesSeen: 2, resourcesSkipped: 2 }),
+      ]);
+    });
+
+    it("a relative image still fires on a crawl whose file check asked nothing", async () => {
+      const OFF = `${SITE}/og/off.png`;
+      const { crawlId } = await seed(
+        [
+          { path: "/a", social: images("/og/share.png") },
+          { path: "/b", social: images(OFF) },
+        ],
+        [
+          {
+            url: OFF,
+            fetchClass: null,
+            fetchReason: RESOURCE_OFF_REASON,
+            statusCode: null,
+            contentType: null,
+            bytes: null,
+          },
+        ],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => [x.pageUrl, x.evidence.images])).toEqual([
+        [`${SITE}/a`, [{ tag: "og:image", url: "/og/share.png", problem: "relative" }]],
       ]);
     });
 

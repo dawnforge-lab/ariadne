@@ -1558,5 +1558,82 @@ describe("resourceRules against the database", () => {
       const [marker] = await run("resources.not-recorded", crawlId);
       expect(marker?.evidence.resourcesSeen).toBe(0);
     });
+
+    /** An og-only row the file check never asked about, for the R13 cases. */
+    const unasked = (fetchReason: string | null) => ({
+      url: OG_ONLY,
+      on: [],
+      fetchClass: null,
+      fetchReason,
+      statusCode: null,
+      contentType: null,
+      bytes: null,
+      bytesSource: null,
+      cacheControl: null,
+    });
+
+    it("R13: a crawl whose ONLY rows are unasked share images gets resources.not-fetched", async () => {
+      // No page file recorded and no page counts an <img>, so not-recorded is
+      // silent; `social.image-broken` lists nothing when the check asked
+      // nothing, so this marker is what says the share images went unchecked.
+      for (const [fetchReason, reason] of [
+        [RESOURCE_OFF_REASON, NOT_FETCHED_REASON.off],
+        [null, NOT_FETCHED_REASON.notRun],
+      ] as const) {
+        const { crawlId } = await seed([{ path: "/a" }], [unasked(fetchReason)]);
+        expect(await run("resources.not-recorded", crawlId)).toEqual([]);
+        const findings = await run("resources.not-fetched", crawlId);
+        expect(findings.map((f) => f.evidence)).toEqual([
+          expect.objectContaining({ reason, resourcesSeen: 1, resourcesSkipped: 1 }),
+        ]);
+      }
+    });
+
+    it("R13: not-recorded keeps the og-only crawl whose pages count images, and the two never both fire", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a", imagesTotal: 2 }],
+        [unasked(RESOURCE_OFF_REASON)],
+      );
+      expect(await run("resources.not-recorded", crawlId)).toHaveLength(1);
+      expect(await run("resources.not-fetched", crawlId)).toEqual([]);
+    });
+
+    it("R13: a decided og-only row is a check that ran; no marker, and it quiets no unknown marker", async () => {
+      const { crawlId } = await seed([{ path: "/a" }], [{ url: OG_ONLY, on: [] }]);
+      for (const id of [
+        "resources.not-recorded",
+        "resources.not-fetched",
+        "resources.all-unknown",
+        "resources.partial-unknown",
+      ]) {
+        expect(await run(id, crawlId), id).toEqual([]);
+      }
+    });
+
+    it("R13: page files decide the marker even when share images were asked about", async () => {
+      // Every page file unasked (fetch-off) beside an og-only row that is: the
+      // census is the page files', exactly as before.
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          {
+            url: "/img/a.png",
+            on: ["/a"],
+            fetchClass: null,
+            fetchReason: RESOURCE_OFF_REASON,
+            statusCode: null,
+            contentType: null,
+            bytes: null,
+            bytesSource: null,
+            cacheControl: null,
+          },
+          { url: OG_ONLY, on: [] },
+        ],
+      );
+      const findings = await run("resources.not-fetched", crawlId);
+      expect(findings.map((f) => f.evidence)).toEqual([
+        expect.objectContaining({ reason: NOT_FETCHED_REASON.off, resourcesSeen: 1 }),
+      ]);
+    });
   });
 });

@@ -33,6 +33,7 @@ import { SOCIAL_IMAGE_MAX_BYTES } from "../thresholds.js";
 import { assertCrawl, cappedListing, capsOr, noteTruncation } from "./crawl-evidence.js";
 import { duplicateGroups, type DuplicateField } from "./field-duplicates.js";
 import { v2Gate } from "./page-facts.js";
+import { resourceCheckAskedNothing } from "./resources.js";
 
 const CATEGORY = "on-page" as const;
 const CHECKS = ["CHECK-87"];
@@ -92,12 +93,14 @@ type ImageProblem =
   | { problem: "status"; statusCode: number }
   | { problem: "too-large"; bytes: number }
   /**
-   * The image's status is unknown: no request was made (the file check was
-   * off, a budget stopped short of it, or no row was written for it), or one
-   * was made and got no answer (`fetch_error`, a refusal, a robots block).
-   * `fetchClass` says which; null is "never asked". NOT a verdict of broken
-   * (hard rule 7): the four resource markers count only files a page loads, so
-   * without this entry nothing would speak for an unfetched share image.
+   * The image's status is unknown on a crawl whose file check DID run: no
+   * request was made for it (a budget stopped short of it, or no row was
+   * written for it), or one was made and got no answer (`fetch_error`, a
+   * refusal, a robots block). `fetchClass` says which; null is "never asked".
+   * NOT a verdict of broken (hard rule 7): the resource markers count only
+   * files a page loads, so without this entry nothing would speak for it. On
+   * a crawl whose check asked about nothing it is never listed (see
+   * `fetchedVerdict`).
    */
   | { problem: "not-fetched"; fetchClass: string | null };
 
@@ -135,10 +138,27 @@ type ResourceRow = {
   bytes: number | null;
 };
 
-/** The verdict on a resolved image from its `resources` row, or null when it is fine. */
-function fetchedVerdict(row: ResourceRow | undefined): ImageProblem | null {
-  if (row === undefined) return { problem: "not-fetched", fetchClass: null };
-  if (row.statusCode === null) return { problem: "not-fetched", fetchClass: row.fetchClass };
+/**
+ * The verdict on a resolved image from its `resources` row, or null when there
+ * is nothing to list.
+ *
+ * An image with no status (no row, or a row the file check never decided) is
+ * listed as `not-fetched` only when the check DID ask about something on this
+ * crawl (ruling R13): then the unfetched image is a specific gap, skipped,
+ * capped or failed. When the check asked about nothing (`fetchResources: false`,
+ * never run, budget spent first), every image is unfetched for one crawl-wide
+ * reason, and `resources.not-fetched` / `resources.not-recorded` (both claim
+ * CHECK-87) say so once; a per-page warning saying only "we did not look" would
+ * be that one fact filed N times.
+ */
+function fetchedVerdict(
+  row: ResourceRow | undefined,
+  checkAskedNothing: boolean,
+): ImageProblem | null {
+  if (row === undefined || row.statusCode === null) {
+    if (checkAskedNothing) return null;
+    return { problem: "not-fetched", fetchClass: row === undefined ? null : row.fetchClass };
+  }
   if (row.statusCode !== 200) return { problem: "status", statusCode: row.statusCode };
   if (row.bytes !== null && row.bytes > SOCIAL_IMAGE_MAX_BYTES) {
     return { problem: "too-large", bytes: row.bytes };
@@ -162,6 +182,7 @@ async function imageBrokenFindings(
   const gate = await v2Gate(db, crawlId);
   if (!gate.recorded) return [];
   await assertCrawl(db, crawlId, self.id);
+  const checkAskedNothing = await resourceCheckAskedNothing(db, crawlId, self.id);
 
   const out = cappedListing(self, caps);
   let cursor = "";
@@ -215,7 +236,8 @@ async function imageBrokenFindings(
 
     for (const { page, found } of perPage) {
       const problems = found.flatMap((c) => {
-        const verdict = "verdict" in c ? c.verdict : fetchedVerdict(rows.get(c.resolved));
+        const verdict =
+          "verdict" in c ? c.verdict : fetchedVerdict(rows.get(c.resolved), checkAskedNothing);
         return verdict === null ? [] : [{ tag: c.tag, url: c.url, ...verdict }];
       });
       if (problems.length === 0) continue;

@@ -559,10 +559,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `duplicateGroups` under one cap and one note, judging every crawl
 //     (deviation 1); `social.image-broken` (warning) opens with `v2Gate` and
 //     reports each og/X image that is relative, invalid, non-200, over
-//     `SOCIAL_IMAGE_MAX_BYTES`, or `not-fetched` (no status recorded: an
-//     unknown, listed so it is never read as a pass). `head.tags-outside-head`
-//     names `social` and claims CHECK-87; `resources.not-recorded` and
-//     `resources.not-fetched` claim CHECK-87. 161 rules.
+//     `SOCIAL_IMAGE_MAX_BYTES`, or `not-fetched` (no status recorded on a
+//     crawl whose file check ran; ruling R13: when the check asked about
+//     nothing, no image is listed for that and the marker speaks once).
+//     `head.tags-outside-head` names `social` and claims CHECK-87;
+//     `resources.not-recorded` and `resources.not-fetched` claim CHECK-87, and
+//     `resources.not-fetched` also fires on a crawl whose only rows are
+//     unasked share images and whose pages count no image (R13). 161 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**

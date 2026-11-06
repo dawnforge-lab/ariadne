@@ -2055,17 +2055,21 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `social.image-broken` (warning): per page, each og:image / twitter:image that is
     relative or malformed, answered non-200, or is over 5 MB; evidence `{images:
     [{tag, url, problem, statusCode?, bytes?, fetchClass?}]}`. A `problem` of
-    `not-fetched` means the image was never requested on this crawl or its request
-    got no answer: report it as NOT CHECKED for that image, never as broken and
-    never as a pass.
+    `not-fetched` appears only on a crawl whose file check ran, and means this
+    image was skipped by it (a budget, no record) or its request got no answer
+    (`fetchClass` says which): report it as NOT CHECKED for that image, never as
+    broken and never as a pass. When the file check asked about nothing on the
+    whole crawl, no image is listed for that reason; the marker below says it once.
   - `head.tags-outside-head` (warning): `social` in its `elements` when any Open
     Graph or X tag came after the head ended.
 - **Crawl-level markers**: `extraction.not-recorded` (info) as above, and for the
   image's status and size the file-check markers `resources.not-recorded` (info, no
   file recorded) and `resources.not-fetched` (info, files recorded and none
-  requested). Share images are not files a page loads, so those markers count only
-  page files; `social.image-broken`'s `not-fetched` entries name the share images
-  themselves.
+  requested). Share images are not files a page loads, so those markers count page
+  files; on a crawl that recorded no page file and whose pages count no image,
+  `resources.not-fetched` counts the unrequested share images instead, so a crawl
+  with the file check off that recorded any file meets one of the two. On a crawl whose check ran,
+  `social.image-broken`'s `not-fetched` entries name each share image it missed.
 - **Evaluate**:
   - PASS if every judged page carries a complete, consistent, head-placed social set
     and its share image loads

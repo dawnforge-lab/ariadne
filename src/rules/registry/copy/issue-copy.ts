@@ -365,9 +365,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "social.image-broken": {
     title: "Social: Share image relative, broken, over 5 MB or not checked",
     explanation:
-      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was not requested on this crawl (or its request got no answer): whether it loads is unknown, which is not the same as broken.",
+      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was skipped by the file check or got no answer: whether it loads is unknown, which is not the same as broken (when the file check was off for the whole crawl, no image is listed for that and the crawl-level notice says so once).",
     howToFix:
-      "Use an absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run the crawl with the file check on to check an image listed as not fetched.",
+      "Use an absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run or resume the crawl to check an image listed as not fetched.",
   },
   // --------------------------------------------------------------- security
   "security.headers-missing": {
