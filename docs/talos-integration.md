@@ -102,6 +102,14 @@ crawler inside Talos. The intended shape:
   and credential management (admin-managed, like model keys).
 - Update `docs/talos/api-contract.md` if any tenant-visible surface changes.
 
+## Runtime requirements
+
+- **Postgres 16 or newer.** `sitemap.lastmod-invalid` (ruleset 0.20.0) calls
+  `pg_input_is_valid`, which Postgres added in 16. On an older server that rule
+  errors loudly rather than reporting nothing, so a deployment, a sidecar or a
+  shared instance must run 16+. The dev container and CI already do.
+- **Node 22**, and **Chromium** wherever a crawl's render pass runs.
+
 ## Cross-references
 
 - The surface contract: `docs/talos-surface.md` (Phase 10). Its §9 records the

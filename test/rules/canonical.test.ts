@@ -17,10 +17,12 @@ const BROKEN_CANONICALS = [
     canonicalCount: 2,
     robotsMeta: "noindex",
   },
+  // Phase 26a: a relative canonical and one carrying a fragment.
+  { canonicalHtml: "/relative#frag", canonicalHeader: null },
 ];
 
 describe("canonicalRules metadata", () => {
-  it("defines exactly the six canonical rules of the Phase 2 table", () => {
+  it("defines exactly the eight canonical rules: Phase 2's six and 26a's relative and fragment", () => {
     expect(canonicalRules.map((r) => r.id).sort()).toEqual(
       [
         "canonical.missing",
@@ -29,6 +31,8 @@ describe("canonicalRules metadata", () => {
         "canonical.html-header-conflict",
         "canonical.cross-domain",
         "directive.canonical-noindex-conflict",
+        "canonical.relative",
+        "canonical.fragment",
       ].sort(),
     );
   });
@@ -41,6 +45,8 @@ describe("canonicalRules metadata", () => {
       "canonical.html-header-conflict": ["CHECK-18"],
       "canonical.cross-domain": ["CHECK-20"],
       "directive.canonical-noindex-conflict": ["CHECK-21"],
+      "canonical.relative": ["CHECK-16"],
+      "canonical.fragment": ["CHECK-16"],
     });
   });
 
@@ -52,6 +58,8 @@ describe("canonicalRules metadata", () => {
       "canonical.html-header-conflict": "critical",
       "canonical.cross-domain": "warning",
       "directive.canonical-noindex-conflict": "critical",
+      "canonical.relative": "info",
+      "canonical.fragment": "warning",
     });
   });
 
@@ -455,6 +463,81 @@ describe("directive.canonical-noindex-conflict", () => {
       rule("directive.canonical-noindex-conflict").run(
         mkPage({ canonicalHtml: "javascript:void(0)", robotsMeta: "noindex" }),
       ),
+    ).toHaveLength(0);
+  });
+});
+
+describe("canonical.relative", () => {
+  it("fires on a path-relative canonical, and carries it verbatim", () => {
+    const f = rule("canonical.relative").run(mkPage({ canonicalHtml: "/x" }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.evidence).toEqual({ canonical: "/x" });
+    expect(f[0]!.dedupeKey).toBe("https://example.com/page");
+  });
+
+  it("fires on every spelling that has no scheme", () => {
+    for (const value of ["x/y", "../x", "//example.com/x", "?page=2", "  /x  "]) {
+      expect(
+        rule("canonical.relative").run(mkPage({ canonicalHtml: value })),
+        JSON.stringify(value),
+      ).toHaveLength(1);
+    }
+  });
+
+  it("is silent on an absolute canonical, whatever its scheme case", () => {
+    for (const value of ["https://example.com/x", "HTTP://example.com/x", "  https://example.com/x"]) {
+      expect(
+        rule("canonical.relative").run(mkPage({ canonicalHtml: value })),
+        JSON.stringify(value),
+      ).toHaveLength(0);
+    }
+  });
+
+  it("is silent when there is no HTML canonical, or only a header one", () => {
+    expect(rule("canonical.relative").run(mkPage({ canonicalHtml: null }))).toHaveLength(0);
+    expect(rule("canonical.relative").run(mkPage({ canonicalHtml: "" }))).toHaveLength(0);
+    expect(
+      rule("canonical.relative").run(
+        mkPage({ canonicalHtml: null, canonicalHeader: "/relative-header" }),
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+describe("canonical.fragment", () => {
+  it("fires on a canonical carrying a fragment", () => {
+    const f = rule("canonical.fragment").run(
+      mkPage({ canonicalHtml: "https://example.com/page#top" }),
+    );
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.evidence).toEqual({ canonical: "https://example.com/page#top" });
+  });
+
+  it("reads the effective canonical: the header one when the HTML declares none", () => {
+    expect(
+      rule("canonical.fragment").run(
+        mkPage({ canonicalHtml: null, canonicalHeader: "https://example.com/page#h" }),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("judges the HTML canonical, the one that wins, and not the header it overrides", () => {
+    expect(
+      rule("canonical.fragment").run(
+        mkPage({
+          canonicalHtml: "https://example.com/page",
+          canonicalHeader: "https://example.com/page#h",
+        }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("is silent on a clean canonical, and on a page with none", () => {
+    expect(rule("canonical.fragment").run(mkPage())).toHaveLength(0);
+    expect(
+      rule("canonical.fragment").run(mkPage({ canonicalHtml: null, canonicalHeader: null })),
     ).toHaveLength(0);
   });
 });

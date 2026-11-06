@@ -73,6 +73,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Point the canonical at the URL that serves the content with a 200. If the target redirects, canonicalise to its destination; if it is gone, canonicalise to the page itself or to the closest live replacement.",
   },
+  "canonical.relative": {
+    title: "Canonicals: Canonical is a relative URL",
+    explanation:
+      "Pages whose canonical link element gives a path such as /page instead of a full address with scheme and host. Search engines resolve it against whatever address served the page, so a copy on a staging host, a mirror or a cache names itself as the original.",
+    howToFix:
+      "Write the canonical as an absolute URL with the preferred scheme and host, generated in the template so every page carries one.",
+  },
+  "canonical.fragment": {
+    title: "Canonicals: Canonical contains a fragment",
+    explanation:
+      "Pages whose canonical URL ends in a # fragment. Search engines index addresses without the fragment, so the canonical names a URL that does not exist as written and may be ignored.",
+    howToFix:
+      "Remove the fragment from the canonical and point it at the clean address of the page.",
+  },
+  "canonical.chain": {
+    title: "Canonicals: Canonical chain or loop (followed up to 10 hops)",
+    explanation:
+      "Pages whose canonical target is itself canonicalised to another URL, so the signals have to pass through more than one page. The Canonical Chain column lists the URLs from the one this page's canonical names onward, in order; Loop is true when the chain comes back to a page already on it, Hop Limit Reached when it was still going after 10 hops and the walk stopped, and Next URL Not Crawled As 200 names where it was heading when it reached a page the crawl has no 200 for. Search engines may stop following a chain, and a loop gives them no final page at all.",
+    howToFix:
+      "Point the canonical straight at the last URL of the chain, the one that canonicalises to itself (or, if the chain ends at an address that does not answer 200, at the live page that should hold the content). For a loop, decide which page should be the original and make it canonical to itself.",
+  },
+  "canonical.unlinked": {
+    title: "Canonicals: Canonical target has no internal links",
+    explanation:
+      "Pages whose canonical points at a crawled page that no other page on the site links to; a link from the page to itself does not count. Search engines treat a canonical as a hint, and a target with no links in is easy to overrule or to never find.",
+    howToFix:
+      "Link to the canonical target from the site's navigation or content, or choose a canonical that is part of the site's link structure.",
+  },
   "canonical.non-indexable-target": {
     title: "Canonicals: Canonical points to a noindex page",
     explanation:
@@ -290,6 +318,43 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Re-run the crawl with host checks on. Meanwhile, request each host variant by hand and follow the redirects to confirm they end on the canonical HTTPS host.",
   },
 
+  // --------------------------------------------------------------- security
+  "security.headers-missing": {
+    title: "Security: Protective response headers missing or unsafe",
+    explanation:
+      "HTTPS pages that send no enforced Content-Security-Policy, no X-Content-Type-Options: nosniff, no frame protection (X-Frame-Options or a CSP frame-ancestors directive) or no safe Referrer-Policy; the Missing Headers column names which. A Referrer-Policy of unsafe-url or no-referrer-when-downgrade counts as unsafe because it sends the full address to other sites. These headers do not affect rankings directly; they limit what a hijacked script, a framing site or a link click can do to your visitors.",
+    howToFix:
+      "Add the missing headers at the server or CDN so every response carries them. Start with X-Content-Type-Options: nosniff and Referrer-Policy: strict-origin-when-cross-origin, add frame protection, then roll out a Content-Security-Policy in report-only mode before enforcing it.",
+  },
+  "security.headers-not-recorded": {
+    title: "Security: Security headers not checked on this crawl",
+    explanation:
+      "Some or all pages in this crawl were stored without their response headers, so no page could be judged on HSTS or the other protective headers; the check was left unrun rather than reported clean. The Pages Without Recorded Headers column counts the pages affected.",
+    howToFix:
+      "Re-crawl the site. Response headers are recorded for every page on crawls from this version onwards.",
+  },
+  "security.hsts-missing": {
+    title: "Security: HTTPS page without HSTS header",
+    explanation:
+      "HTTPS pages that send no Strict-Transport-Security header, or one that does not protect: max-age=0 tells browsers to drop HSTS, and a header with no valid max-age is ignored; the HSTS Problem column says which. Without working HSTS a browser still tries plain HTTP first on a visitor's first request, which leaves a window for a downgrade or interception on an untrusted network.",
+    howToFix:
+      "Send Strict-Transport-Security on every HTTPS response, for example max-age=31536000; includeSubDomains. Start with a short max-age, confirm nothing on the host still needs HTTP, then raise it.",
+  },
+  "security.http-url": {
+    title: "Security: Internal links to HTTP URLs",
+    explanation:
+      "HTTPS pages that link to an http:// address on the site's own host (with or without www) on a site that was crawled over https://; the row shows how many distinct HTTP addresses the page links to and lists up to 10 of them. Each click costs the visitor a redirect at best, and at worst lands on a page served without encryption that search engines can index as a duplicate of the secure one.",
+    howToFix:
+      "Change each listed link to its https:// address, or to a root-relative path. Where a template, menu or CMS field produces the link, fix it there. Check that each HTTP address 301-redirects to its HTTPS equivalent for visitors arriving from old links.",
+  },
+  "security.mixed-content": {
+    title: "Security: HTTPS page loading HTTP resources",
+    explanation:
+      "HTTPS pages that reference images, scripts or stylesheets with an http:// address; the row shows how many and lists up to 10 of them. Browsers block or warn about these files, so a page can lose its scripts or styles or show a not-secure warning even though it was served securely. Only img src, stylesheet and script references in the HTML response are checked.",
+    howToFix:
+      "Change each listed address to https://, or to a path on your own host, and check that the file is served over HTTPS. Where a template or CMS field produces the address, fix it there.",
+  },
+
   // --------------------------------------------------------------- hreflang
   "hreflang.alternates-not-crawled": {
     title: "Hreflang: Alternate URLs not crawled",
@@ -326,6 +391,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add an alternate for the page's own URL with its language and region code. Generate the whole set from one mapping and render the identical block on every version.",
   },
+  "hreflang.inconsistent-return-code": {
+    title: "Hreflang: Return link uses a different code than the page itself",
+    explanation:
+      "Pages that list a crawled alternate which links back to them under a different language code than the page uses for itself, such as en-gb in the return link and en in the page's own entry. Pages with no entry for their own URL, alternates that do not link back and alternates that were not crawled are not judged here, and x-default is ignored on both sides. Search engines may discard a set whose pages disagree about which language a page is.",
+    howToFix:
+      "Give each page one code and write it the same way in every version's block. Generate the whole set from one mapping and render the identical block on every version.",
+  },
+  "hreflang.multiple-entries": {
+    title: "Hreflang: Same code listed for different URLs",
+    explanation:
+      "Pages whose hreflang block gives one language code to two or more different URLs; spellings of one URL that differ only by fragment, host case or query order count as one. Search engines cannot tell which URL the code stands for and may ignore both. Only the block on the page is read, and the alternates are not fetched.",
+    howToFix:
+      "Keep one URL per code and remove the stale or duplicate entry. Generate the block from one mapping so a code cannot be added twice.",
+  },
+  "hreflang.self-only": {
+    title: "Hreflang: Block names only the page itself",
+    explanation:
+      "Pages whose hreflang block lists only the page's own URL, so no other version is named; pages canonicalised to another URL are ignored. The block is valid but connects nothing, which usually means the other versions were left out of the template.",
+    howToFix:
+      "Add the other language versions to the block, or remove the block if the page has no alternate versions.",
+  },
+  "hreflang.unlinked-target": {
+    title: "Hreflang: Alternate has no internal links",
+    explanation:
+      "Crawled pages that other pages name as hreflang alternates but that no other page on the site links to; a link from the page to itself does not count. Search engines treat hreflang as a hint and not as a link, so an alternate that is only annotated is hard to discover. The Declaring Pages column lists up to 10 of the pages that name it and the count is exact; alternates the crawl did not fetch are not judged.",
+    howToFix:
+      "Link each alternate from its own section's navigation, a language switcher or a related-pages list.",
+  },
   "hreflang.missing-x-default": {
     title: "Hreflang: Missing x-default",
     explanation:
@@ -355,6 +448,27 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Pages with noindex (or none) in the robots meta tag or the X-Robots-Tag header; the Directive Source column says which. Often intentional for admin, thank-you and filtered pages; listed for review, not as an error.",
     howToFix:
       "No action if the exclusion is deliberate. If the page should rank, remove the noindex and request re-indexing.",
+  },
+  "indexability.nofollow": {
+    title: "Directives: Nofollow",
+    explanation:
+      "Pages with nofollow (or none) in the robots meta tag or the X-Robots-Tag header; the Directive Source column says which. Search engines are told to ignore every link on the page, so the pages it links to get no internal equity from it and may not be discovered through it.",
+    howToFix:
+      "Remove nofollow from the robots meta tag and the header so the page's links are followed. Leave it only if the page is deliberately closed off, such as a login or user-generated page.",
+  },
+  "directives.restrictive": {
+    title: "Directives: Snippet or image preview restricted",
+    explanation:
+      "Pages carrying nosnippet, max-snippet:0, max-image-preview:none or noimageindex in the robots meta tag or the X-Robots-Tag header; the Restrictive Directives column lists which. The page stays indexed but results show no text excerpt, no large image preview or no images from it, which usually costs clicks. These are often left over from a template copied from another site.",
+    howToFix:
+      "Remove the directive if the restriction is not intended. To limit rather than forbid a preview, use a value such as max-snippet:160 or max-image-preview:large.",
+  },
+  "directives.unavailable-after": {
+    title: "Directives: unavailable_after date within 30 days",
+    explanation:
+      "Pages whose unavailable_after directive names a date that had passed or fell within 30 days of the crawl, or a date in no standard format (ISO 8601, RFC 822, 850 or 1123, or asctime) that search engines cannot read. A page leaves the index once the date passes, and an unreadable date is ignored, so the page stays indexed when its author expected it to leave. The Days From Fetch column counts the days from the crawl to the date (negative means already past), and Assumed UTC marks a date and time written without a time zone, which is read as UTC.",
+    howToFix:
+      "Remove the directive if the page should stay indexed, or move the date well beyond 30 days. If the date cannot be read, rewrite it in a standard format such as 2027-01-31T00:00:00Z.",
   },
 
   // ------------------------------------------------------------------ links
@@ -486,6 +600,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Trim the description to 155 characters or fewer, keeping the core message and the reason to click in the first sentence.",
   },
+  "title.pixel-too-long": {
+    title: "Page titles: Wider than 561 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose title is wider than 561 pixels in the font search results use, so the end is likely to be cut off. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Shorten the title or swap wide letters for narrower words so it fits in 561 pixels, keeping the important words at the front.",
+  },
+  "title.pixel-too-short": {
+    title: "Page titles: Narrower than 200 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose title is narrower than 200 pixels in the font search results use, so it leaves most of the line unused. Width is measured, not counted in characters, and a title with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Add the words people search for to the title, such as the product, the place or the benefit, until it fills more of the line.",
+  },
+  "meta-description.pixel-too-long": {
+    title: "Meta description: Wider than 985 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose meta description is wider than 985 pixels in the font search results use, so its ending is likely to be cut off. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Trim the description so it fits in 985 pixels, keeping the core message and the reason to click in the first sentence.",
+  },
+  "meta-description.pixel-too-short": {
+    title: "Meta description: Narrower than 400 pixels",
+    explanation:
+      "Indexable, self-canonical pages whose meta description is narrower than 400 pixels in the font search results use, so it fills little of the space a result offers. Width is measured, not counted in characters, and a description with characters outside the Latin, Greek and Cyrillic scripts is not judged here.",
+    howToFix:
+      "Expand the description with what the page offers and a reason to click, until it fills more of the result.",
+  },
   "meta-description.too-short": {
     title: "Meta description: Below 70 characters",
     explanation:
@@ -560,12 +702,26 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Add the pages to the sitemap, or fix the generator that should have included them. Confirm any deliberate exclusion is a decision rather than an oversight.",
   },
+  "sitemap.cross-host-loc": {
+    title: "Sitemaps: URL on another host or scheme than its sitemap",
+    explanation:
+      "Sitemap entries whose scheme or host (www and port included) differs from both the sitemap document that lists them and the crawled site. The sitemaps protocol only lets a document list URLs on its own host unless the other host's robots.txt declares it, so search engines may ignore these; a document elsewhere listing the crawled site's own URLs is that allowed exception and is not reported. The row gives the document and the URL.",
+    howToFix:
+      "Move each entry into a sitemap on its own host, or correct the generator that is writing the wrong host or scheme (often http against https, or www against the bare domain).",
+  },
   "sitemap.invalid": {
     title: "Sitemaps: Sitemap could not be read",
     explanation:
       "Sitemap documents that could not be read: a 4xx or 5xx, no response, a document over the size limit, an unsupported encoding, a non-XML response such as an HTML page served with 200, or a root element that is neither urlset nor sitemapindex. Up to 50 failures are listed and the count is exact. Their URLs are invisible to search engines.",
     howToFix:
       "Request each listed sitemap URL and check the response. A sitemap must be well-formed XML with a urlset or sitemapindex root, served with 200 and an XML content type; remove index entries pointing at sitemaps that no longer exist.",
+  },
+  "sitemap.lastmod-invalid": {
+    title: "Sitemaps: Invalid lastmod date",
+    explanation:
+      "Sitemap entries whose lastmod is not a W3C date or date-time (YYYY, YYYY-MM, YYYY-MM-DD, or a date-time with a Z or hh:mm zone), or is dated after the crawl ended, so it was already in the future when the sitemap was read. The row gives the value and which of the two it is: format or future. Search engines ignore a lastmod they cannot trust.",
+    howToFix:
+      "Output lastmod in W3C format with a zone, and set it to the date the page content last changed, never to the time the sitemap was generated.",
   },
   "sitemap.missing": {
     title: "Sitemaps: No sitemap declared in robots.txt",
@@ -588,6 +744,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Remove noindex if the page should rank, otherwise remove the URL from the sitemap. For a canonicalised URL, list the canonical target instead. Filtered, paginated and thank-you pages usually belong out of the sitemap.",
   },
+  "sitemap.over-50k-urls": {
+    title: "Sitemaps: Sitemap over 50,000 URLs",
+    explanation:
+      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, a lower bound because a URL listed in two documents is counted once and the crawl stops reading at its entry cap, which can fall before a document's end. No finding is therefore not proof that every document is under the limit.",
+    howToFix:
+      "Split the sitemap into several documents of 50,000 URLs or fewer and list them in a sitemap index.",
+  },
   "sitemap.redirected": {
     title: "Sitemaps: Sitemap URLs that redirect",
     explanation:
@@ -601,6 +764,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), and the largest 50 documents with their entry counts. An entry in several documents is counted once.",
     howToFix:
       "Split sitemaps by content type so stale sections can be seen and submitted separately. Split any document over 50,000 entries; entries past the limit are not read.",
+  },
+  "sitemap.url-too-long": {
+    title: "Sitemaps: URL over 2,048 characters",
+    explanation:
+      "Sitemap entries whose URL is longer than 2,048 characters. Search engines may drop or truncate entries that long. The row gives the start of the URL and its length.",
+    howToFix:
+      "Shorten the URL or remove the entry. A very long address is usually a filter or session parameter that should not be in the sitemap.",
   },
   "sitemap.uncrawled": {
     title: "Sitemaps: URLs in sitemap not crawled",
@@ -720,6 +890,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Re-run the crawl with the file check on (the default), or resume the interrupted crawl.",
   },
+  "resources.bad-content-type": {
+    title: "Resources: File served with the wrong content type",
+    explanation:
+      "Stylesheets, scripts or images that answered 200 with a content type that contradicts what the page calls them, such as a stylesheet sent as text/html; the row shows the file, the type it was sent as and how many pages reference it. Browsers ignore a stylesheet sent with the wrong type and, where the response also carries X-Content-Type-Options: nosniff, block a script sent with one, so the page can lose its styling or behaviour even though the request succeeded. Files that returned an error are reported as broken, not here.",
+    howToFix:
+      "Configure the server or CDN to send text/css for stylesheets, a JavaScript type such as text/javascript for scripts and an image/* type for images. Check that the URL does not return an error or login page that happens to answer 200.",
+  },
   "resources.not-recorded": {
     title: "Resources: File checks not run on this crawl",
     explanation:
@@ -827,6 +1004,27 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Nothing if the crawl was bounded and the series continues. If the URL is wrong or gone, correct the rel=next in the template that generates the series.",
   },
+  "pagination.non-indexable-target": {
+    title: "Pagination: Next or previous page not indexable",
+    explanation:
+      "Pages whose rel=next or rel=prev names a crawled page that does not return 200, is a bot-protection block or carries noindex; the Link Type column says which end of the series, and Target Fetch Result says why a target without a status failed. A series that points at an error page or a noindexed page is broken for search engines at that step. Targets the crawl never fetched are reported under Next page not crawled instead.",
+    howToFix:
+      "Point rel=next and rel=prev at working, indexable pages. If the target was removed, end the series at the last live page; if the noindex is wrong, remove it.",
+  },
+  "pagination.loop": {
+    title: "Pagination: Next pages form a loop",
+    explanation:
+      "Pages that are part of a cycle of rel=next links, so that following next from the page leads back to it; the Pagination Loop column lists the URLs in order and Pages In Loop gives the full count. A series that loops has no last page. Loops longer than 500 pages are not detected.",
+    howToFix:
+      "Fix the template that writes rel=next so the last page of the series declares none, and no page names itself or an earlier page.",
+  },
+  "pagination.sequence-error": {
+    title: "Pagination: Next page does not point back",
+    explanation:
+      "Pages whose rel=next names a crawled page that has no rel=prev, or one that names a different page; the row quotes that rel=prev as written. Each page of a series should name its neighbours both ways, and a pair that disagrees usually means one template generates the two links differently. Next pages that were not crawled or did not return 200 are left to the other pagination checks.",
+    howToFix:
+      "Make rel=prev on each page name the page whose rel=next names it, or drop rel=prev everywhere if the site does not use it.",
+  },
   "url.normalisation-variants": {
     title: "URL: Same page served at several URLs (case or trailing slash)",
     explanation:
@@ -855,11 +1053,95 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Shorten the URL to the words that describe the page, drop needless folders and parameters, and 301 the old URL to the new one.",
   },
+  "url.uppercase": {
+    title: "URL: Upper-case letters in the path",
+    explanation:
+      "Indexable pages whose URL path contains a capital letter; the row gives the path. Paths are case-sensitive on most servers, so /About and /about can each answer and split the page's signals between them.",
+    howToFix:
+      "Use lower-case paths, 301 the capitalised spelling to the lower-case one and link only to the lower-case form.",
+  },
+  "url.underscores": {
+    title: "URL: Underscores in the path",
+    explanation:
+      "Indexable pages whose URL path contains an underscore; the row gives the path. Search engines read a hyphen as a word separator and an underscore as a joining character, so a path of underscores is read as one long word.",
+    howToFix:
+      "Separate the words of the path with hyphens, 301 the old URL to the new one and update the links that point at it.",
+  },
+  "url.non-ascii": {
+    title: "URL: Non-ASCII characters in the path",
+    explanation:
+      "Indexable pages whose URL path holds characters outside basic ASCII, shown encoded as in the crawl (%C3%A9 for an accented e). Search engines handle them, but they are copied and shared in a form people cannot read, and links often break in transit.",
+    howToFix:
+      "Prefer plain ASCII words in the path, such as cafe for an accented spelling, and 301 the old URL to the new one. Keep the characters only where the page's language needs them.",
+  },
+  "url.spaces": {
+    title: "URL: Spaces in the path",
+    explanation:
+      "Indexable pages whose URL path holds a space (shown as %20); the row gives the path. A space is unsafe in a link and is lost when the address is copied or wrapped in text.",
+    howToFix:
+      "Replace spaces in the path with hyphens, 301 the old URL to the new one and update the links that point at it.",
+  },
+  "url.multiple-slashes": {
+    title: "URL: Double slash in the path",
+    explanation:
+      "Indexable pages whose URL path holds two slashes in a row; the row gives the path. Many servers answer /a//b and /a/b with the same page, so the page exists at two addresses and a link template is joining paths with a slash too many.",
+    howToFix:
+      "Fix the template that builds the link so it joins paths with a single slash, and 301 the double-slash address to the single-slash one.",
+  },
+  "url.repetitive-path": {
+    title: "URL: Repeated folders in the path",
+    explanation:
+      "Indexable pages whose URL path repeats a folder or a run of folders straight after itself, as in /shop/shop/ or /a/b/a/b/; the row quotes the repeated part. It usually means a relative link or a rewrite rule is stacking a folder onto the path, which can generate an endless run of addresses.",
+    howToFix:
+      "Find the relative link or rewrite rule that adds the folder and correct it, then 301 the repeating address to the clean one.",
+  },
+  "url.internal-search": {
+    title: "URL: Internal search results indexable",
+    explanation:
+      "Indexable pages that look like the site's own search results, because the path has a search folder or the query carries a search parameter (s, q, query, search, keyword or keywords); the row gives the path and the parameter. Search results are an unbounded set of thin pages, and one URL exists for every phrase anyone typed.",
+    howToFix:
+      "Add noindex to search results or block them in robots.txt, and keep them out of the sitemap and out of internal links. If one search page is meant to rank, give it a fixed address and its own content.",
+  },
   "url.tracking-params-internal": {
     title: "URL: Internal links with tracking parameters",
     explanation:
       "Internal links pointing at URLs tagged with campaign or ad-click parameters (utm_source, gclid and similar). They create a second crawlable URL per page and overwrite the visit's real traffic source in analytics.",
     howToFix:
       "Strip tracking parameters from internal links and point them at the clean URL. Measure internal promotions with the analytics feature built for it.",
+  },
+  "links.internal-nofollow": {
+    title: "Links: Internal links marked nofollow",
+    explanation:
+      "Pages with internal links that carry rel=nofollow. Search engines may not follow such a link or pass link value through it, so the page it points at is starved of the internal links it depends on. Each row gives the number of nofollow links on the page and up to 10 of their targets.",
+    howToFix:
+      "Remove rel=nofollow from internal links to pages that should rank. Keep it only on links you do not want to vouch for, such as links in user submitted content.",
+  },
+  "links.only-from-non-indexable": {
+    title: "Links: Indexable page linked only from non-indexable pages",
+    explanation:
+      "Indexable, self-canonical pages whose internal links all come from pages that are not indexable themselves (noindex, canonicalised to another URL, or not a 200). Search engines may give such links little or no weight, so the page is close to an orphan. Each row gives the number of pages linking to it and up to 10 of them.",
+    howToFix:
+      "Link to the page from at least one indexable page, such as a category, hub or related content block.",
+  },
+  "links.localhost": {
+    title: "Links: Links to a private or loopback address",
+    explanation:
+      "Pages with an external link whose host is the machine itself (a loopback name or address), a private or reserved IP address, or an internal-only name such as .local or .internal. These links work only on the author's own machine or network, so visitors and crawlers reach nothing; they are usually left over from development. Links to the site's own host are not judged, and each row lists up to 10 of the targets and why the first one is not public.",
+    howToFix:
+      "Replace each link with the live public URL of the page it should point at, or remove it.",
+  },
+  "links.non-descriptive-anchor": {
+    title: "Links: Internal links with generic anchor text",
+    explanation:
+      "Pages with internal links whose whole anchor text is a generic English phrase such as click here, read more or learn more. The anchor is what tells visitors and search engines what the target is about, and these phrases tell them nothing. Each row gives the number of such links and up to 10 of the phrases; anchors in other languages are not judged.",
+    howToFix:
+      "Replace each generic anchor with words that describe the page it points at, such as the name of the product or the question the page answers.",
+  },
+  "links.high-outlinks": {
+    title: "Links: Over 1,000 internal or 10 external links",
+    explanation:
+      "Pages that link to more than 1,000 different internal URLs or more than 10 different external URLs. Internally, link value is shared between the links on a page, so every extra link dilutes the rest, and a page this long is hard for a visitor to use; externally, 10 is a review threshold, not a defect, because that many outbound links send visitors and link value off the site and can read as a link list. The row gives both counts and the limit that was crossed.",
+    howToFix:
+      "Internal: cut the list down to the links a visitor needs, and move long lists into paginated or category pages that each carry a manageable number. External: keep the links that earn their place, such as sources and references, and remove or mark with rel=\"nofollow\" or rel=\"sponsored\" any you would not vouch for.",
   },
 };

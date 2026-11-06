@@ -106,21 +106,10 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { IMAGE_WEIGHT_WARN } from "../thresholds.js";
 
-/**
- * The weight at which an image is worth reporting: 100,000 bytes.
- *
- * The checklist's own line — CHECK-49 evaluates `WARN if >100KB images on key
- * pages` — so the constant is the check's number rather than one we chose, and
- * the copy quotes it (the `DEEP_DEPTH` contract: change one, change both, and
- * `test/rules/copy.test.ts` fails until you do).
- *
- * Decimal 100,000 rather than 102,400: the checklist says 100KB in the sense a
- * client and a CDN dashboard mean it, and transferred bytes are what the pass
- * measured. The comparison is STRICTLY greater, so a file of exactly this size
- * is not reported — a threshold a rule fires ON is a threshold nobody can meet.
- */
-export const IMAGE_WEIGHT_WARN = 100_000;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export { IMAGE_WEIGHT_WARN } from "../thresholds.js";
 
 /** Broken resources listed on one page's finding. The count is never sampled. */
 export const BROKEN_SAMPLE_RESOURCES = 10;
@@ -297,6 +286,122 @@ async function brokenFindings(
         resources: row.sample,
       },
       dedupeKey: row.page_url,
+    }),
+  );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
+/**
+ * The content types a script may be served as: the WHATWG Fetch standard's
+ * "JavaScript MIME type essence" list, legacy spellings included, because a
+ * server that sends `text/x-javascript` is declaring a script, not contradicting
+ * one.
+ */
+const JS_CONTENT_TYPES = [
+  "application/ecmascript",
+  "application/javascript",
+  "application/x-ecmascript",
+  "application/x-javascript",
+  "text/ecmascript",
+  "text/javascript",
+  "text/javascript1.0",
+  "text/javascript1.1",
+  "text/javascript1.2",
+  "text/javascript1.3",
+  "text/javascript1.4",
+  "text/javascript1.5",
+  "text/jscript",
+  "text/livescript",
+  "text/x-ecmascript",
+  "text/x-javascript",
+] as const;
+
+/**
+ * One finding per file whose served type contradicts what the markup said it
+ * was: a stylesheet not served as `text/css`, a script not served as JavaScript,
+ * an image not served as `image/*`.
+ *
+ * THE FILE IS THE SUBJECT, as in `heavyImageFindings`, and it is filed the same
+ * way: the first referencing page in URL order carries the finding, `dedupeKey`
+ * is the file, and the evidence names how many pages reference it and up to
+ * `BROKEN_SAMPLE_RESOURCES` of them.
+ *
+ * ONLY A FILE THE SERVER ANSWERED 200 FOR, and only one the pass classed `ok`.
+ * A 404 is `resources.broken`'s finding, and a bot challenge that answers 200
+ * with an HTML body lands `client_error` (P11-T2): it is broken, not mistyped,
+ * and reporting it here would file one fault twice. A row with no content type
+ * has nothing to contradict and is not judged.
+ *
+ * The type is compared bare, lower-cased and before the first `;`, so
+ * `text/css; charset=utf-8` is `text/css`.
+ */
+async function badContentTypeFindings(
+  self: RuleIdentity,
+  db: Db,
+  crawlId: string,
+  caps: RuleCaps,
+): Promise<Finding[]> {
+  const result = await db.execute<{
+    url: string;
+    kind: string;
+    content_type: string | null;
+    total_matches: number;
+    page_count: number;
+    sample_pages: string[];
+    first_page_id: string | null;
+    first_page_url: string | null;
+  }>(sql`
+    with bad as (
+      select r.url, r.kind, r.content_type,
+             count(*) over ()::int as total_matches
+      from resources r
+      where r.crawl_id = ${crawlId}
+        and r.status_code = 200
+        and r.fetch_class = ${RESOURCE_OK_CLASS}
+        and (
+          (r.kind = 'css' and ${bareContentType} <> 'text/css')
+          or (r.kind = 'js' and ${bareContentType} <> all(${sql.param([...JS_CONTENT_TYPES])}::text[]))
+          or (r.kind = 'image' and ${bareContentType} not like 'image/%')
+        )
+      order by r.url
+      ${limitTo(caps.listing)}
+    )
+    select b.url, b.kind, b.content_type, b.total_matches,
+           refs.page_count, refs.sample_pages,
+           first_page.page_id as first_page_id, first_page.page_url as first_page_url
+    from bad b
+    cross join lateral (
+      select count(*)::int as page_count,
+             coalesce(
+               (array_agg(p.url order by p.url))[1:${BROKEN_SAMPLE_RESOURCES}],
+               array[]::text[]
+             ) as sample_pages
+      from page_resources pr
+      join pages p on p.crawl_id = pr.crawl_id and p.id = pr.page_id
+      where pr.crawl_id = ${crawlId} and pr.resource_url = b.url
+    ) refs
+    left join lateral (
+      select p.id as page_id, p.url as page_url
+      from page_resources pr
+      join pages p on p.crawl_id = pr.crawl_id and p.id = pr.page_id
+      where pr.crawl_id = ${crawlId} and pr.resource_url = b.url
+      order by p.url
+      limit 1
+    ) first_page on true
+    order by b.url`);
+
+  const findings = result.rows.map((row) =>
+    queryFinding(self, {
+      pageId: row.first_page_id,
+      pageUrl: row.first_page_url,
+      evidence: {
+        resourceUrl: row.url,
+        kind: row.kind,
+        contentType: row.content_type,
+        pageCount: row.page_count,
+        samplePages: row.sample_pages,
+      },
+      dedupeKey: row.url,
     }),
   );
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
@@ -1035,6 +1140,7 @@ const CATEGORY = "technical" as const;
 const BROKEN: RuleIdentity = { id: "resources.broken", severity: "warning" };
 const OVERSIZED: RuleIdentity = { id: "images.oversized", severity: "warning" };
 const LEGACY: RuleIdentity = { id: "images.legacy-format", severity: "info" };
+const BAD_CONTENT_TYPE: RuleIdentity = { id: "resources.bad-content-type", severity: "info" };
 const UNCACHED: RuleIdentity = { id: "resources.uncached", severity: "info" };
 const NOT_RECORDED: RuleIdentity = { id: "resources.not-recorded", severity: "info" };
 const NOT_FETCHED: RuleIdentity = { id: "resources.not-fetched", severity: "info" };
@@ -1058,6 +1164,29 @@ export const resourceRules: QueryRule[] = [
     ...copyFor(BROKEN.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => brokenFindings(BROKEN, db, crawlId, capsOr(caps)),
+  }),
+
+  // The file answered 200 and said it was something other than what the markup
+  // called it. Info: a browser ignores a mistyped stylesheet, but an image often
+  // still renders, so it is a fault to fix rather than an outage. CHECK-51 is
+  // where broken files already live.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: BAD_CONTENT_TYPE.id,
+    checkIds: ["CHECK-51"],
+    category: CATEGORY,
+    severity: BAD_CONTENT_TYPE.severity,
+    columns: [
+      { key: "resourceUrl", label: "Resource URL" },
+      { key: "kind", label: "Type" },
+      { key: "contentType", label: "Content Type" },
+      { key: "pageCount", label: "Inlinks" },
+      { key: "samplePages", label: "Source" },
+    ],
+    ...copyFor(BAD_CONTENT_TYPE.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) =>
+      badContentTypeFindings(BAD_CONTENT_TYPE, db, crawlId, capsOr(caps)),
   }),
 
   // CHECK-49's own Evaluate line: `WARN if >100KB images on key pages`. Over
@@ -1145,7 +1274,7 @@ export const resourceRules: QueryRule[] = [
   defineRule<QueryRule>({
     kind: "query",
     id: NOT_RECORDED.id,
-    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+    checkIds: ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
     category: CATEGORY,
     severity: NOT_RECORDED.severity,
     columns: [

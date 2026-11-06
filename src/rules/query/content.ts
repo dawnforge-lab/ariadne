@@ -86,6 +86,13 @@ import {
   type NotFoundProbeReading,
 } from "./crawl-evidence.js";
 import { CLUSTER_KEY, HREFLANG_CLUSTER_CTES } from "./hreflang-cluster.js";
+import {
+  SOFT_404_WORDS,
+  TEMPLATE_HAMMING,
+  NEAR_DUPLICATE_HAMMING,
+  NEAR_DUPLICATE_MIN_MAIN_WORDS,
+  THIN_WORDS,
+} from "../thresholds.js";
 
 const CATEGORY = "content" as const;
 
@@ -99,72 +106,18 @@ const NEAR_SKIPPED: RuleIdentity = {
 const THIN: RuleIdentity = { id: "content.thin", severity: "warning" };
 const THIN_SKIPPED: RuleIdentity = { id: "content.thin-skipped", severity: "info" };
 
-/**
- * Below this, a page carrying "page not found" wording is reported as one.
- *
- * Deliberately generous — well above `THIN_WORDS` — because the phrase alone is
- * not the finding. An article ABOUT broken links contains the same words and
- * runs to a thousand of them; a 404 rendered into the site's shell rarely
- * clears three hundred. Exported because the client-facing copy quotes it.
- */
-export const SOFT_404_WORDS = 300;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export {
+  SOFT_404_WORDS,
+  TEMPLATE_HAMMING,
+  NEAR_DUPLICATE_HAMMING,
+  NEAR_DUPLICATE_MIN_MAIN_WORDS,
+  THIN_WORDS,
+} from "../thresholds.js";
 
-/**
- * How close to the site's own 404 template a page may sit before it is one.
- *
- * Four bits out of sixty-four. A template rendered around different breadcrumbs
- * or a different `<title>` moves a handful of bits; genuinely different pages
- * sit thirty-odd apart (see the corpus assertions in the test), so the band
- * between the two is wide and nothing lives in it.
- */
-export const TEMPLATE_HAMMING = 4;
 
-/** How close two pages may sit before they are near-duplicates of each other. */
-export const NEAR_DUPLICATE_HAMMING = 3;
 
-/**
- * How much MAIN content a page must have of its own before it can be one half of
- * a near-duplicate pair. Both sides must clear it.
- *
- * Fifty words is the floor under which the question stops being answerable
- * rather than a judgement about quality. A simhash over a couple of dozen words
- * is dominated by a handful of tokens, so two pages carrying nothing but a
- * heading and a sentence land inside three bits of each other whenever the
- * heading pattern repeats — and on a templated site that is every empty
- * category, every out-of-stock product and every tag archive. Those pages are a
- * real problem and they have a rule: `content.thin`, below in this file, reports
- * them at a floor of `THIN_WORDS` words of their own. Reporting them a second
- * time as duplicates of one another says nothing new and buries the pages that
- * genuinely have near-identical content.
- *
- * It sits BELOW `THIN_WORDS` on purpose, and the gap is the point: a page
- * between 50 and 150 main words is thin AND can still be shown to be a copy of
- * another page, which is a sharper finding than either alone. Only below fifty
- * does the fingerprint stop carrying enough of the page to compare.
- */
-export const NEAR_DUPLICATE_MIN_MAIN_WORDS = 50;
 
-/**
- * The thin-content floor: below this many words of its OWN content, an
- * indexable page is reported (CHECK-40, CHECK-13).
- *
- * MOVED HERE FROM src/rules/page/on-page.ts with the rule (Phase 19 §11), so
- * the floor and the floor beneath it — `NEAR_DUPLICATE_MIN_MAIN_WORDS`, whose
- * docblock argues the gap between them — are one file apart no longer.
- * Exported because the client-facing copy quotes the number and
- * test/rules/copy.test.ts asserts the sentence against this constant.
- *
- * The number did not move in Phase 19; the QUANTITY it is applied to did. It
- * used to be `renderable_word_count` (the words the page's markup does not
- * hide) and is now `main_word_count` (the words that are not header,
- * navigation, sidebar or footer). On the crawl that provoked the amendment,
- * 35 pages have fewer than 150 words of their own and NOT ONE has fewer than
- * 150 renderable words — every page carries ~900 words of chrome — so the rule
- * fired on nothing at all while a third of the site's `/pages/*` URLs were
- * empty templates. That is the always-passes shape hard rule 1 forbids, and
- * the column is what was wrong with it.
- */
-export const THIN_WORDS = 150;
 
 /**
  * How many of a page's near-duplicates one finding names.

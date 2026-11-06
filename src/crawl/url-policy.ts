@@ -26,8 +26,12 @@
  *    cloud metadata hosts and 169.254.0.0/16 stay refused.
  */
 
-/** Hosts that are never crawlable, whatever they resolve to. */
-const BLOCKED_HOSTS = new Set([
+/**
+ * Hosts that are never crawlable, whatever they resolve to. Exported so the
+ * `links.localhost` rule builds its SQL prefilter from this list rather than a
+ * copy of it; `blockedHostReason` stays the authority on what is blocked.
+ */
+export const BLOCKED_HOSTS: ReadonlySet<string> = new Set([
   "localhost",
   "metadata.google.internal",
   "metadata",
@@ -35,7 +39,8 @@ const BLOCKED_HOSTS = new Set([
   "100.100.100.200",
 ]);
 
-const BLOCKED_HOST_SUFFIXES = [
+/** Exported for the same reason as `BLOCKED_HOSTS`. */
+export const BLOCKED_HOST_SUFFIXES: readonly string[] = [
   ".localhost",
   ".local",
   ".localdomain",

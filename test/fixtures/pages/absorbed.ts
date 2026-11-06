@@ -42,6 +42,7 @@
  */
 import type { Fixture } from "../fixture.js";
 import { article, lorem, redirect, serve } from "../render.js";
+import { DEEP_DEPTH } from "../../../src/rules/thresholds.js";
 
 // ---------------------------------------------------------------------------
 // Head tags & headings — badseo/src/fixtures/head-tags.ts
@@ -1033,8 +1034,8 @@ const noOutgoingLinks: Fixture = {
 /**
  * The click-chain. `/deep/1` is the only rung the hub links; every other rung is
  * reachable only from the one above it, so a page's depth is its number. With
- * the hub at depth 0 and `structure.deep-page` firing above depth 5, `/deep/6`
- * and `/deep/7` are the buried pages.
+ * the hub at depth 0 and `structure.deep-page` firing above `DEEP_DEPTH` (5),
+ * `/deep/6` and `/deep/7` are the buried pages.
  *
  * NO RUNG IS IN THE SITEMAP, and that is load-bearing rather than tidy: the
  * crawl loop enqueues every sitemap entry at depth 0 before the first fetch, so
@@ -1045,7 +1046,8 @@ const noOutgoingLinks: Fixture = {
  * which is true of them, and is stated in the exact set on the last rung.
  */
 const DEEP_CHAIN_LENGTH = 7;
-const DEEP_DEPTH_THRESHOLD = 5;
+/** The threshold itself, read from the rule's constant so the chain follows it. */
+const DEEP_DEPTH_THRESHOLD = DEEP_DEPTH;
 
 function deepRung(level: number): Fixture {
   const next = level < DEEP_CHAIN_LENGTH ? `/deep/${level + 1}` : null;

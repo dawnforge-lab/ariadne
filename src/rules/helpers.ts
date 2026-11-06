@@ -477,6 +477,284 @@ export function hasNoindex(page: RobotsDeclaration): boolean {
 }
 
 /**
+ * `unavailable_after: <date>`. The date holds colons (the time) and may hold a
+ * comma (an RFC 850 / RFC 1123 weekday), and the directive list is itself comma
+ * separated, so a plain split would cut the date in two. A comma belongs to the
+ * date only when it follows a weekday name; anything else after a comma is the
+ * next directive. (The first draft of this pattern, in the 26a plan, accepted any
+ * `,[^,:]+` and so truncated "Fri, 25 Jun 2010 15:00:00" at the first colon.)
+ */
+const UNAVAILABLE_AFTER =
+  /unavailable_after:\s*((?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*,\s*)?[^,]+)/i;
+
+/**
+ * Where the `unavailable_after` directive of a robots value starts and ends,
+ * and its date as written, or null when the value has none.
+ *
+ * `UNAVAILABLE_AFTER` runs the value to the next comma, because a date may hold
+ * spaces. A directive written after the date with only a space between
+ * (`unavailable_after: 25 Jun 2010 15:00:00 PST nofollow`) would be swallowed
+ * into it, so the date ENDS at the longest whitespace-delimited prefix that
+ * `parseRobotsDate` accepts, and what follows is the next directive. Longest,
+ * so `2025-01-01T10:00:00Z` is not cut to `2025-01-01`. When no prefix is a
+ * date the whole value is kept, and the rule reports it as unparsed: nothing is
+ * guessed either way.
+ *
+ * BOUNDED, because the value is the site's markup and a meta `content` can be
+ * any length: only the first `DATE_MAX_WORDS` words are ever found, so at most
+ * that many prefixes are tried, each no longer than those words. The work is
+ * linear in the value, never words times length. `parse` is a parameter only so
+ * a test can count the attempts.
+ */
+export function unavailableAfterSpan(
+  value: string,
+  parse: (raw: string) => unknown = parseRobotsDate,
+): { start: number; end: number; date: string } | null {
+  const match = UNAVAILABLE_AFTER.exec(value);
+  if (match === null) return null;
+  const captured = match[1]!;
+  const capturedAt = match.index + match[0].length - captured.length;
+  const wordEnds: number[] = [];
+  const word = /\S+/g;
+  for (let w = word.exec(captured); w !== null && wordEnds.length < DATE_MAX_WORDS; w = word.exec(captured)) {
+    wordEnds.push(w.index + w[0].length);
+  }
+  for (let k = wordEnds.length - 1; k >= 0; k--) {
+    const candidate = captured.slice(0, wordEnds[k]);
+    if (parse(candidate) !== null) {
+      return { start: match.index, end: capturedAt + wordEnds[k]!, date: candidate.trim() };
+    }
+  }
+  return { start: match.index, end: match.index + match[0].length, date: captured.trim() };
+}
+
+/** The raw `unavailable_after` date of a robots directive string, or null. */
+export function unavailableAfterOf(value: string | null): string | null {
+  if (!present(value)) return null;
+  return unavailableAfterSpan(value)?.date ?? null;
+}
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const MONTH_NAMES = [
+  "january", "february", "march", "april", "may", "june",
+  "july", "august", "september", "october", "november", "december",
+];
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+/** A month by its three-letter or full English name, 0-based, or -1. */
+function monthIndex(name: string): number {
+  const short = MONTHS.indexOf(name);
+  return short >= 0 ? short : MONTH_NAMES.indexOf(name);
+}
+
+/** Whether `name` is a weekday by its three-letter or full English name. */
+function isWeekday(name: string): boolean {
+  return WEEKDAYS.includes(name) || WEEKDAY_NAMES.includes(name);
+}
+
+/**
+ * Zone names, as minutes east of UTC: RFC 822's (section 5.1) plus `UTC`, and
+ * the central / eastern European and British names sites commonly write. A
+ * name not listed is not guessed at.
+ */
+const RFC822_ZONES: ReadonlyMap<string, number> = new Map([
+  ["ut", 0],
+  ["utc", 0],
+  ["gmt", 0],
+  ["z", 0],
+  ["est", -300],
+  ["edt", -240],
+  ["cst", -360],
+  ["cdt", -300],
+  ["mst", -420],
+  ["mdt", -360],
+  ["pst", -480],
+  ["pdt", -420],
+  ["bst", 60],
+  ["cet", 60],
+  ["cest", 120],
+  ["eet", 120],
+  ["eest", 180],
+]);
+
+const ISO_DATE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(z|[+-]\d{2}(?::?\d{2})?|\s+[a-z]+)?)?$/;
+
+const RFC_DATE = new RegExp(
+  "^(?:([a-z]+),\\s*)?" + // weekday, optional
+    "(\\d{1,2})([ -])([a-z]+)\\3(\\d{2}|\\d{4})\\s+" + // 25 Jun 2010 | 25-June-10
+    "(\\d{2}):(\\d{2})(?::(\\d{2}))?\\s+" + // 15:00[:00]
+    "([a-z]+|[+-]\\d{4})$", // zone
+);
+
+/**
+ * The most whitespace-separated words any form `parseRobotsDate` accepts can
+ * have: RFC 822 / 1123 written out in full, `Wednesday, 29 September 2010
+ * 15:00:00 EEST` (weekday with its comma, day, month, year, time, zone). asctime
+ * has 5 (`Fri Jun 25 15:00:00 2010`), RFC 850 4, ISO at most 3
+ * (`2025-01-01 10:00:00 PST`). `unavailableAfterSpan` looks no further, so a
+ * new form with more words must raise this, and the test that parses the
+ * longest form pins it.
+ */
+export const DATE_MAX_WORDS = 6;
+
+/** C `asctime()`: `Fri Jun 25 15:00:00 2010`, the day space-padded. No zone. */
+const ASCTIME_DATE = /^([a-z]+)\s+([a-z]+)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/;
+
+/**
+ * Epoch ms for the given UTC fields, or null when they name no real instant
+ * (`2010-02-30`, hour 24): `Date.UTC` rolls those over silently, so the fields
+ * are read back and must survive the round trip.
+ */
+function utcFields(y: number, mo: number, d: number, h: number, mi: number, s: number): number | null {
+  if (h > 23 || mi > 59 || s > 59) return null;
+  const at = Date.UTC(y, mo, d, h, mi, s);
+  const back = new Date(at);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo || back.getUTCDate() !== d) {
+    return null;
+  }
+  return at;
+}
+
+/** Minutes east of UTC for `+HHMM`, `+HH:MM` or `+HH`, or null when out of range. */
+function offsetMinutes(zone: string): number | null {
+  const m = /^([+-])(\d{2})(?::?(\d{2}))?$/.exec(zone);
+  if (m === null) return null;
+  const hours = Number(m[2]);
+  const minutes = Number(m[3] ?? 0);
+  if (hours > 23 || minutes > 59) return null;
+  return (m[1] === "-" ? -1 : 1) * (hours * 60 + minutes);
+}
+
+/**
+ * The instant an `unavailable_after` date names, or null when it is not one of
+ * the forms below. NEVER A GUESS: `Date.parse` used to read this, and it reads a
+ * zone-less date-time in the HOST's zone (so the answer moved with the machine)
+ * and accepts loose text ("June 25" became 25 June 2001).
+ *
+ * Accepted, case-insensitively:
+ *  - ISO 8601 / RFC 3339: `YYYY-MM-DD`, or that plus `T` (or a space) and
+ *    `HH:MM[:SS[.fff]]`, with an optional `Z`, `±HH:MM` / `±HHMM` / `±HH`
+ *    offset, or a space and a zone name from the list below. A form with no
+ *    zone is read as UTC and `assumedUtc` says so.
+ *  - RFC 822 / RFC 1123: `[Wkd, ]DD Mon YY[YY] HH:MM[:SS] ZONE`.
+ *  - RFC 850: `Weekday, DD-Mon-YY HH:MM:SS ZONE`.
+ *    ZONE is `UT`, `UTC`, `GMT`, `Z`, the US zones `EST`..`PDT`, `BST`, `CET`,
+ *    `CEST`, `EET`, `EEST`, or `±HHMM`; these forms require one. A two-digit
+ *    year is 20YY below 70 and 19YY from 70 (RFC 6265's fixed pivot, so the
+ *    answer does not depend on today's date).
+ *  - asctime: `Wkd Mon D HH:MM:SS YYYY`. It carries no zone, so it is read as
+ *    UTC and `assumedUtc` says so.
+ *    Month and weekday names may be written short (`Jun`, `Fri`) or in full
+ *    (`June`, `Friday`). A weekday must be a weekday name; whether it agrees
+ *    with the date is not checked, since the numeric date is what every reader
+ *    uses.
+ *
+ * Fields must name a real instant: `2010-02-30` and `24:00` are refused.
+ */
+export function parseRobotsDate(raw: string): { at: number; assumedUtc: boolean } | null {
+  const text = raw.trim().toLowerCase();
+
+  const iso = ISO_DATE.exec(text);
+  if (iso !== null) {
+    const [, y, mo, d, h, mi, s, frac, zone] = iso;
+    const base = utcFields(
+      Number(y),
+      Number(mo) - 1,
+      Number(d),
+      Number(h ?? 0),
+      Number(mi ?? 0),
+      Number(s ?? 0),
+    );
+    if (base === null) return null;
+    const ms = frac === undefined ? 0 : Math.floor(Number(`0.${frac}`) * 1000);
+    if (zone === undefined) return { at: base + ms, assumedUtc: true };
+    const named = zone.trim();
+    const offset = named === "z" ? 0 : (RFC822_ZONES.get(named) ?? offsetMinutes(named));
+    if (offset === null) return null;
+    return { at: base + ms - offset * 60_000, assumedUtc: false };
+  }
+
+  const asc = ASCTIME_DATE.exec(text);
+  if (asc !== null) {
+    const [, weekday, mon, d, h, mi, s, y] = asc;
+    const month = monthIndex(mon!);
+    if (!isWeekday(weekday!) || month < 0) return null;
+    const base = utcFields(Number(y), month, Number(d), Number(h), Number(mi), Number(s));
+    return base === null ? null : { at: base, assumedUtc: true };
+  }
+
+  const rfc = RFC_DATE.exec(text);
+  if (rfc === null) return null;
+  const [, weekday, d, , mon, y, h, mi, s, zone] = rfc;
+  if (weekday !== undefined && !isWeekday(weekday)) return null;
+  const month = monthIndex(mon!);
+  if (month < 0) return null;
+  let year = Number(y);
+  if (y!.length === 2) year += year < 70 ? 2000 : 1900;
+  const base = utcFields(year, month, Number(d), Number(h), Number(mi), Number(s ?? 0));
+  if (base === null) return null;
+  const offset = RFC822_ZONES.get(zone!) ?? offsetMinutes(zone!);
+  if (offset === null) return null;
+  return { at: base - offset * 60_000, assumedUtc: false };
+}
+
+/**
+ * Robots directives that carry a value after a colon. Their colon is part of
+ * the token, where any other `name:` prefix names a bot.
+ */
+const VALUE_DIRECTIVES = new Set(["max-snippet", "max-image-preview", "max-video-preview"]);
+
+/**
+ * The directive tokens of a robots meta or `X-Robots-Tag` value: split on
+ * commas AND on whitespace, lower-cased, with a leading `<bot>:` prefix dropped.
+ *
+ * Whitespace delimits as a comma does: `content="noindex nofollow"` is two
+ * directives to a search engine, and `saysNoindex` / `NONE_DIRECTIVE` already
+ * read it that way, so a rule over these tokens must too.
+ *
+ * The prefix is ignored, as `saysNoindex` ignores it: a directive for one bot is
+ * read as a directive for the page, and bot-specific judgement is 26b's job.
+ * `max-snippet:0` is one token and not a prefix, so the value directives keep
+ * their colon, and whitespace around any colon is closed up BEFORE the
+ * whitespace split, so `max-snippet: 50` stays the one token `max-snippet:50`.
+ * `unavailable_after: <date>` is one token whose date may hold spaces, commas
+ * and colons; it runs to the next comma that does not follow a weekday name, or
+ * to the end of the longest prefix that is a date (`unavailableAfterSpan`), and
+ * is taken out first so neither split cuts it.
+ *
+ * Rules compare whole tokens, which is the point: `nofollowing` is not
+ * `nofollow`, and `max-snippet:-1` is not `max-snippet:0`.
+ */
+export function robotsTokens(value: string | null): string[] {
+  if (!present(value)) return [];
+  const tokens: string[] = [];
+  const plain = (part: string): void => {
+    for (const segment of part.split(",")) {
+      const words = segment.toLowerCase().replace(/\s*:\s*/g, ":").split(/\s+/);
+      for (const word of words) {
+        let token = word;
+        const colon = token.indexOf(":");
+        if (colon > 0 && !VALUE_DIRECTIVES.has(token.slice(0, colon))) {
+          token = token.slice(colon + 1);
+        }
+        if (token !== "") tokens.push(token);
+      }
+    }
+  };
+  const span = unavailableAfterSpan(value);
+  if (span === null) {
+    plain(value);
+    return tokens;
+  }
+  plain(value.slice(0, span.start));
+  tokens.push(`unavailable_after: ${span.date.toLowerCase()}`);
+  plain(value.slice(span.end));
+  return tokens;
+}
+
+/**
  * The columns `indexabilityOf` reads. A `Pick` rather than a whole `PageRecord`
  * for `isAuditable`'s reason: the API's listing query holds a narrow projection
  * of `pages` (`ISSUE_PAGE_COLUMNS`, src/api/service.ts) and must ask this

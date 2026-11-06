@@ -82,6 +82,14 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps, RuleCategory } from "../registry/types.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import {
+  CSR_WORD_MULTIPLE,
+  CSR_MIN_ADDED_WORDS,
+  NAV_RAW_MAX,
+  NAV_RENDERED_MIN,
+  NAV_RENDERED_MULTIPLE,
+  FILTER_RENDERED_MIN,
+} from "../thresholds.js";
 
 const CSR: RuleIdentity = { id: "content.csr-dependent", severity: "critical" };
 const NAV: RuleIdentity = { id: "nav.js-only", severity: "critical" };
@@ -102,48 +110,20 @@ const H1_CHANGED: RuleIdentity = { id: "render.h1-changed", severity: "warning" 
  */
 export const DIVERGENCE_BATCH = 500;
 
-/**
- * How many times the raw word count the rendered one must reach before the page
- * counts as client-side rendered.
- *
- * Doubling, rather than "more words after rendering": every page gains a few
- * words in a browser — a cookie banner, a live search box, a lazily inserted
- * breadcrumb — and a rule that fired on those would fire on every page of every
- * modern site. Twice the text is a different claim: most of what the page says
- * was not in the HTML.
- */
-export const CSR_WORD_MULTIPLE = 2;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export {
+  CSR_WORD_MULTIPLE,
+  CSR_MIN_ADDED_WORDS,
+  NAV_RAW_MAX,
+  NAV_RENDERED_MIN,
+  NAV_RENDERED_MULTIPLE,
+  FILTER_RENDERED_MIN,
+} from "../thresholds.js";
 
-/**
- * …and the absolute floor beneath the ratio, in words.
- *
- * The ratio alone is unusable at the small end: an eight-word shell that
- * renders sixteen words has doubled and is still a page with nothing on it,
- * while `2 × 0` is satisfied by any page at all. 150 words is roughly a short
- * paragraph of real body copy — enough that "the content arrives with the
- * JavaScript" is a statement about the page's substance rather than about its
- * furniture. Both conditions must hold.
- */
-export const CSR_MIN_ADDED_WORDS = 150;
 
-/**
- * Raw nav + footer links BELOW this and the page's navigation is, as far as the
- * HTML says, not there. Exclusive: a page with exactly five is not reported.
- */
-export const NAV_RAW_MAX = 5;
 
-/** …and rendered nav + footer links AT OR ABOVE this is a real navigation. */
-export const NAV_RENDERED_MIN = 10;
 
-/** …and the ratio between the two sides. See `navJsOnlyFindings` for the margin. */
-export const NAV_RENDERED_MULTIPLE = 2;
 
-/**
- * Filter-looking links a rendered page must expose before a raw side of zero is
- * worth reporting. Five is a facet block; one or two is a sort control, which is
- * not the crawl-budget story CHECK-02 asks about.
- */
-export const FILTER_RENDERED_MIN = 5;
 
 /**
  * Refuse a crawl holding a page that says `rendered = true` and stores no count.

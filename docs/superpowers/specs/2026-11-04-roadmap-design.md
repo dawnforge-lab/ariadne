@@ -108,11 +108,11 @@ Absorbs the old Phase 25's priority axis.
 - Health and Prometheus metrics; the 50k memory gate as a scheduled CI job.
 - Scheduler (schedules table, advisory-lock leader, the existing queue) and crawl
   history events.
-- **Storage — open question, to be rediscussed (owner, 2026-11-04).** Whether Ariadne
-  stores raw or rendered HTML at all, and on-demand screenshots of named key pages, is
-  undecided. If it is wanted, it is designed here, with tenancy, quotas, cost and
-  retention, not before. Long-term crawl comparison does not depend on it: it runs on
-  the extracted facts, which are kept with the crawl.
+- **Storage — no HTML store (owner, 2026-11-05).** Ariadne does not store raw or
+  rendered HTML. Rendering is validated per template where it matters, through the
+  render pass's facts, and the agent validates a live page itself when it needs the
+  markup. Long-term crawl comparison runs on the extracted facts, which are kept with
+  the crawl. On-demand screenshots of named key pages stay undecided.
 
 ### Phase 29 — Integrations
 

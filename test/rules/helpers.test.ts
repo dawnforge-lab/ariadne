@@ -19,6 +19,11 @@ import {
   present,
   queryFinding,
   resolveEffectiveCanonical,
+  DATE_MAX_WORDS,
+  parseRobotsDate,
+  robotsTokens,
+  unavailableAfterOf,
+  unavailableAfterSpan,
   type MetricIdentity,
 } from "../../src/rules/helpers.js";
 import { FETCH_CLASSES } from "../../src/crawl/fetch-page.js";
@@ -805,5 +810,356 @@ describe("indexabilityOf", () => {
 
   it("refuses a fetch class it has never met rather than labelling it", () => {
     expect(() => indexabilityOf(mkPage({ fetchClass: "teapot" }))).toThrow(/unknown fetch_class/);
+  });
+});
+
+describe("robotsTokens (26a)", () => {
+  it("splits on commas, lower-cases and trims", () => {
+    expect(robotsTokens(" NoIndex ,NoFollow,  max-snippet:-1 ")).toEqual([
+      "noindex",
+      "nofollow",
+      "max-snippet:-1",
+    ]);
+  });
+
+  it("is empty for null and for an empty or blank value", () => {
+    expect(robotsTokens(null)).toEqual([]);
+    expect(robotsTokens("")).toEqual([]);
+    expect(robotsTokens(" , ")).toEqual([]);
+  });
+
+  it("drops a leading bot prefix and ignores which bot it named", () => {
+    expect(robotsTokens("googlebot: nofollow, bingbot:noindex")).toEqual(["nofollow", "noindex"]);
+  });
+
+  it("keeps a value directive whole: its colon is not a bot prefix", () => {
+    expect(robotsTokens("max-snippet:0, max-image-preview: none")).toEqual([
+      "max-snippet:0",
+      "max-image-preview:none",
+    ]);
+    expect(robotsTokens("googlebot: max-snippet:0")).toEqual(["max-snippet:0"]);
+  });
+
+  it("keeps unavailable_after as one token whose date holds colons and commas", () => {
+    expect(
+      robotsTokens("nofollow, unavailable_after: 25 Jun 2010 15:00:00 PST, noarchive"),
+    ).toEqual(["nofollow", "unavailable_after: 25 jun 2010 15:00:00 pst", "noarchive"]);
+    expect(robotsTokens("unavailable_after: Fri, 25 Jun 2010 15:00:00 GMT, nosnippet")).toEqual([
+      "unavailable_after: fri, 25 jun 2010 15:00:00 gmt",
+      "nosnippet",
+    ]);
+    // An unparseable date must not swallow the next directive.
+    expect(robotsTokens("unavailable_after: soon, nofollow")).toEqual([
+      "unavailable_after: soon",
+      "nofollow",
+    ]);
+  });
+});
+
+describe("robotsTokens: whitespace delimiters (PR #22 review)", () => {
+  it("splits whitespace-delimited directives, as saysNoindex reads them", () => {
+    expect(robotsTokens("noindex nofollow")).toEqual(["noindex", "nofollow"]);
+    expect(robotsTokens("noarchive none")).toEqual(["noarchive", "none"]);
+  });
+
+  it("splits commas and whitespace together, with extra whitespace and mixed case", () => {
+    expect(robotsTokens("  NoIndex \t NOFOLLOW ,  noArchive   nosnippet ")).toEqual([
+      "noindex",
+      "nofollow",
+      "noarchive",
+      "nosnippet",
+    ]);
+  });
+
+  it("keeps a value directive with a space after its colon as one token", () => {
+    expect(robotsTokens("nosnippet, max-snippet: 50")).toEqual(["nosnippet", "max-snippet:50"]);
+    expect(robotsTokens("noindex max-image-preview : LARGE max-video-preview: -1")).toEqual([
+      "noindex",
+      "max-image-preview:large",
+      "max-video-preview:-1",
+    ]);
+    expect(robotsTokens("googlebot: noindex nofollow")).toEqual(["noindex", "nofollow"]);
+  });
+
+  it("keeps an unavailable_after date whole after a whitespace-delimited directive", () => {
+    expect(robotsTokens("noindex unavailable_after: 25 Jun 2010 15:00:00 PST")).toEqual([
+      "noindex",
+      "unavailable_after: 25 jun 2010 15:00:00 pst",
+    ]);
+    expect(
+      robotsTokens("NOINDEX  unavailable_after: Fri, 25 Jun 2010 15:00:00 GMT, nofollow"),
+    ).toEqual(["noindex", "unavailable_after: fri, 25 jun 2010 15:00:00 gmt", "nofollow"]);
+  });
+});
+
+describe("unavailableAfterOf (26a)", () => {
+  it("returns the raw date, case and all, or null", () => {
+    expect(unavailableAfterOf("noarchive, unavailable_after: 25 Jun 2010 15:00:00 PST")).toBe(
+      "25 Jun 2010 15:00:00 PST",
+    );
+    expect(unavailableAfterOf("noarchive")).toBeNull();
+    expect(unavailableAfterOf(null)).toBeNull();
+  });
+});
+
+describe("parseRobotsDate (PR #22 review)", () => {
+  const utc = (iso: string) => Date.parse(iso); // only ever called with an explicit Z
+
+  /** Run `fn` with the process time zone set to `tz`, restoring it after. */
+  function inZone<T>(tz: string, fn: () => T): T {
+    const before = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      return fn();
+    } finally {
+      if (before === undefined) delete process.env.TZ;
+      else process.env.TZ = before;
+    }
+  }
+
+  it("reads ISO 8601 with a zone exactly", () => {
+    expect(parseRobotsDate("2010-06-25T15:00:00Z")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25T15:00:00+02:00")).toEqual({
+      at: utc("2010-06-25T13:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25t15:00:00.250-0130")).toEqual({
+      at: utc("2010-06-25T16:30:00.250Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25T15:00z")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: false,
+    });
+  });
+
+  it("reads a zone-less ISO date or date-time as UTC whatever the host zone, and says so", () => {
+    // The host zone really moves: Date.parse of the same zone-less text differs.
+    const local = ["America/Los_Angeles", "Asia/Tokyo"].map((tz) =>
+      inZone(tz, () => Date.parse("2010-06-25T15:00:00")),
+    );
+    expect(local[0]).not.toBe(local[1]);
+    for (const tz of ["America/Los_Angeles", "Asia/Tokyo"]) {
+      inZone(tz, () => {
+        expect(parseRobotsDate("2010-06-25T15:00:00"), tz).toEqual({
+          at: utc("2010-06-25T15:00:00Z"),
+          assumedUtc: true,
+        });
+        expect(parseRobotsDate("2010-06-25 15:00"), tz).toEqual({
+          at: utc("2010-06-25T15:00:00Z"),
+          assumedUtc: true,
+        });
+        expect(parseRobotsDate("2010-06-25"), tz).toEqual({
+          at: utc("2010-06-25T00:00:00Z"),
+          assumedUtc: true,
+        });
+      });
+    }
+  });
+
+  it("reads RFC 1123, RFC 850 and RFC 822 forms with their zone names", () => {
+    const at = utc("2010-06-25T15:00:00Z");
+    expect(parseRobotsDate("Fri, 25 Jun 2010 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("fri, 25 jun 2010 15:00:00 utc")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("Friday, 25-Jun-10 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 08:00:00 PDT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 07:00:00 PST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 10:00 EST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 10 16:00:00 +0100")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("Fri, 25 Jun 2010 15:00:00 UT")).toEqual({ at, assumedUtc: false });
+    // Two-digit years pivot at 70 (RFC 6265's rule): 69 is 2069, 70 is 1970.
+    expect(parseRobotsDate("Thursday, 01-Jan-70 00:00:00 GMT")!.at).toBe(0);
+    expect(parseRobotsDate("01 Jan 69 00:00:00 GMT")!.at).toBe(utc("2069-01-01T00:00:00Z"));
+  });
+
+  it("refuses anything else rather than guess", () => {
+    for (const raw of [
+      "June 25, 2010",
+      "June 25",
+      "25 Jun 2010",
+      "25 Jun 2010 15:00:00",
+      "25 Jun 2010 15:00:00 QQT",
+      "2010-02-30",
+      "2010-06-25T24:00:00Z",
+      "2010-06-25T15:00:00+2",
+      "2010/06/25",
+      "Fri, 31 Jun 2010 15:00:00 GMT",
+      "Fry, 25 Jun 2010 15:00:00 GMT",
+      "1277478000",
+      "soon",
+      "",
+    ]) {
+      expect(parseRobotsDate(raw), raw).toBeNull();
+    }
+  });
+});
+
+describe("unavailable_after ends where its date ends (PR #22 re-review M1)", () => {
+  it("tokenises a directive written after the date with only a space between", () => {
+    expect(robotsTokens("unavailable_after: 25 Jun 2010 15:00:00 PST nofollow")).toEqual([
+      "unavailable_after: 25 jun 2010 15:00:00 pst",
+      "nofollow",
+    ]);
+    expect(unavailableAfterOf("unavailable_after: 25 Jun 2010 15:00:00 PST nofollow")).toBe(
+      "25 Jun 2010 15:00:00 PST",
+    );
+  });
+
+  it("ends a date-only value at the date", () => {
+    expect(robotsTokens("unavailable_after: 2025-01-01 noindex")).toEqual([
+      "unavailable_after: 2025-01-01",
+      "noindex",
+    ]);
+    expect(unavailableAfterOf("unavailable_after: 2025-01-01 noindex")).toBe("2025-01-01");
+  });
+
+  it("keeps the longest prefix that is a date, so a whole date is never cut short", () => {
+    // "2025-01-01" alone parses too; the date-time is the longer one.
+    expect(unavailableAfterOf("unavailable_after: 2025-01-01T10:00:00Z")).toBe(
+      "2025-01-01T10:00:00Z",
+    );
+    expect(robotsTokens("noindex, unavailable_after: Fri, 25 Jun 2010 15:00:00 GMT")).toEqual([
+      "noindex",
+      "unavailable_after: fri, 25 jun 2010 15:00:00 gmt",
+    ]);
+  });
+
+  it("keeps the whole value when no prefix of it is a date", () => {
+    expect(robotsTokens("unavailable_after: next tuesday nofollow, noarchive")).toEqual([
+      "unavailable_after: next tuesday nofollow",
+      "noarchive",
+    ]);
+    expect(unavailableAfterOf("unavailable_after: next tuesday nofollow")).toBe(
+      "next tuesday nofollow",
+    );
+  });
+});
+
+describe("parseRobotsDate: the other widely used forms (PR #22 re-review M2)", () => {
+  const utc = (iso: string) => Date.parse(iso); // only ever called with an explicit Z
+
+  it("reads an ISO date-time followed by a zone name", () => {
+    expect(parseRobotsDate("2025-01-01 10:00:00 PST")).toEqual({
+      at: utc("2025-01-01T18:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2025-01-01T10:00 CET")).toEqual({
+      at: utc("2025-01-01T09:00:00Z"),
+      assumedUtc: false,
+    });
+  });
+
+  it("reads an ISO offset given in hours only", () => {
+    expect(parseRobotsDate("2010-06-25T15:00:00+05")).toEqual({
+      at: utc("2010-06-25T10:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25T15:00:00-03")).toEqual({
+      at: utc("2010-06-25T18:00:00Z"),
+      assumedUtc: false,
+    });
+  });
+
+  it("reads asctime as UTC and says the zone was assumed", () => {
+    expect(parseRobotsDate("Fri Jun 25 15:00:00 2010")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: true,
+    });
+    expect(parseRobotsDate("Fri Jun  5 15:00:00 2010")).toEqual({
+      at: utc("2010-06-05T15:00:00Z"),
+      assumedUtc: true,
+    });
+    expect(parseRobotsDate("Friday June 25 15:00:00 2010")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: true,
+    });
+  });
+
+  it("reads full day and month names", () => {
+    const at = utc("2010-06-25T15:00:00Z");
+    expect(parseRobotsDate("Friday, 25 June 2010 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 June 2010 15:00 UTC")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("Friday, 25-June-10 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+  });
+
+  it("knows the central and eastern European and British zones", () => {
+    const at = utc("2010-06-25T12:00:00Z");
+    expect(parseRobotsDate("25 Jun 2010 13:00:00 CET")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 14:00:00 CEST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 13:00:00 BST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 14:00:00 EET")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 15:00:00 EEST")).toEqual({ at, assumedUtc: false });
+  });
+
+  it("still refuses everything else", () => {
+    for (const raw of [
+      "2010-06-25T15:00:00 QQT",
+      "2010-06-25 PST",
+      "2010-06-25T15:00:00+5",
+      "Fri Jun 25 15:00:00",
+      "Fri Jun 25 2010",
+      "Fri Jun 31 15:00:00 2010",
+      "Fry Jun 25 15:00:00 2010",
+      "25 Juno 2010 15:00 GMT",
+      "25 Ju 2010 15:00 GMT",
+      "constructor",
+    ]) {
+      expect(parseRobotsDate(raw), raw).toBeNull();
+    }
+  });
+
+  it("ends an unavailable_after date with a zone name before the next directive", () => {
+    expect(robotsTokens("unavailable_after: 2025-01-01 10:00:00 PST noindex")).toEqual([
+      "unavailable_after: 2025-01-01 10:00:00 pst",
+      "noindex",
+    ]);
+  });
+});
+
+describe("unavailable_after on a hostile value (PR #22 security review)", () => {
+  // The value is the site's own markup, so it can be as long as a meta tag can.
+  const counting = () => {
+    let calls = 0;
+    let longest = 0;
+    const parse = (raw: string) => {
+      calls += 1;
+      longest = Math.max(longest, raw.length);
+      return parseRobotsDate(raw);
+    };
+    return { parse, stats: () => ({ calls, longest }) };
+  };
+
+  it("DATE_MAX_WORDS covers the longest form the parser accepts", () => {
+    // RFC 1123 with every part written out: weekday, day, month, year, time, zone.
+    const longest = "Wednesday, 29 September 2010 15:00:00 EEST";
+    expect(longest.split(/\s+/)).toHaveLength(DATE_MAX_WORDS);
+    expect(parseRobotsDate(longest)).not.toBeNull();
+  });
+
+  it("tries at most DATE_MAX_WORDS prefixes of a 200k-character value, with the short answer", () => {
+    const tail = " nofollow".repeat(25_000); // 225,000 characters
+    const short = "unavailable_after: 25 Jun 2010 15:00:00 PST nofollow";
+    const long = `unavailable_after: 25 Jun 2010 15:00:00 PST${tail}`;
+    const c = counting();
+    const span = unavailableAfterSpan(long, c.parse);
+    expect(span?.date).toBe(unavailableAfterSpan(short)?.date);
+    expect(span?.date).toBe("25 Jun 2010 15:00:00 PST");
+    expect(c.stats().calls).toBeLessThanOrEqual(DATE_MAX_WORDS);
+    // No attempt reads past the first DATE_MAX_WORDS words.
+    expect(c.stats().longest).toBeLessThan(80);
+    const tokens = robotsTokens(long);
+    expect(tokens[0]).toBe("unavailable_after: 25 jun 2010 15:00:00 pst");
+    expect(tokens).toHaveLength(25_001);
+  });
+
+  it("keeps a 200k-character value whole when no prefix is a date, after the same capped attempts", () => {
+    const words = " word".repeat(40_000);
+    const c = counting();
+    const span = unavailableAfterSpan(`unavailable_after:${words}`, c.parse);
+    expect(span?.date).toBe(words.trim());
+    expect(c.stats().calls).toBeLessThanOrEqual(DATE_MAX_WORDS);
   });
 });

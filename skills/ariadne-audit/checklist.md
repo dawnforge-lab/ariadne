@@ -352,6 +352,7 @@ answered from, and its verdict is the confidence interval around all of them.
   `host.probe-skipped`, `resources.not-recorded`, `resources.not-fetched`,
   `resources.all-unknown`, `resources.partial-unknown`,
   `hreflang.alternates-not-crawled`, `content.near-duplicate-skipped`,
+  `security.headers-not-recorded`,
   and the per-page `crawl.blocked` and `crawl.unreadable-encoding`. Each one
   is the engine saying a check below could not be answered on this crawl. The four
   resource markers are siblings and never more than one appears: `resources.not-recorded` means
@@ -767,9 +768,21 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-04: Meta robots & X-Robots-Tag directives
 - **Priority**: Critical | **Requires**: Engine
 - **Engine**:
-  1. `issues_list` with `checkId: "CHECK-04"`. Four rules:
+  1. `issues_list` with `checkId: "CHECK-04"`. Seven rules:
      - `indexability.noindex` (info) — every page the crawl found excluded from the
        index, whether by meta tag or by header.
+     - `indexability.nofollow` (warning) — a page whose meta tag or header says
+       `nofollow` or `none`, so engines ignore every link on it.
+     - `directives.restrictive` (warning) — `nosnippet`, `max-snippet:0`,
+       `max-image-preview:none` or `noimageindex`: the page is indexed but its
+       result is stripped of text or images.
+     - `directives.unavailable-after` (warning) — an unavailable_after date that
+       had passed, falls within 30 days of the crawl, or cannot be parsed. Only
+       ISO 8601, the RFC 822 / 850 / 1123 forms and asctime parse, with short or
+       full month and day names and the US, UTC/GMT, BST, CET/CEST and EET/EEST zone
+       names (`dateParsed: false` otherwise, never a guess); a zone-less ISO
+       date-time and an asctime date are read as UTC and the evidence carries
+       `assumedUtc: true`, so say the zone was assumed.
      - `indexability.meta-header-conflict` (critical) — a page whose robots meta and
        `X-Robots-Tag` header disagree. That is a directive the site cannot predict
        the outcome of, and it is a finding on its own.
@@ -889,18 +902,37 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     robots or outside the crawl's budget, off this crawl's origin (another host,
     port, or scheme — never attempted by design; the evidence's `offOrigin` flag
     marks these), or attempted and no response came back. NOT MEASURED, not clean.
+  Three more rules read the entry itself, not the page it names:
+  - `sitemap.url-too-long` (info) — a `<loc>` over 2,048 characters
+  - `sitemap.cross-host-loc` (warning) — a `<loc>` whose scheme or host (www and port
+    included) is neither its sitemap document's nor the crawled site's. A document on
+    another host (a CDN) that lists the crawled site's own URLs is an allowed
+    cross-submission and is not reported
+  - `sitemap.lastmod-invalid` (info) — a `<lastmod>` that is not a W3C date or
+    date-time (`reason: "format"`), or is dated after the crawl ended, so it was already
+    in the future when the sitemap was read (`reason: "future"`; a date-only value on
+    the crawl's own UTC day is not future)
   `issue_urls` per rule for the URL lists; `metrics_get` with
   `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
 - **Evaluate**:
   - FAIL if non-indexable URLs > 0
+  - WARN if `sitemap.cross-host-loc` (warning) > 0: entries on a host the sitemap may
+    not speak for are ignored by search engines
+  - INFO if `sitemap.url-too-long` (info) or `sitemap.lastmod-invalid` (info) > 0:
+    the entry is malformed but the page is still listed. Do not PASS the check silently
+    with either on file; name the count
   - Severity = non-indexable count / total sitemap URLs
   - Record: count, breakdown by reason (noindex, 3xx, 4xx, canonicalised)
 
 ### CHECK-08: Sitemap structure (large sites)
-- **Priority**: Medium | **Requires**: Engine (metric)
-- **Engine**: `metrics_get` with `metricId: "sitemap.structure"`. This check is
-  MEASURED, not found: no rule fires for it, so `issues_list` with
-  `checkId: "CHECK-08"` is refused with a pointer here rather than answered empty.
+- **Priority**: Medium | **Requires**: Engine (metric and rule)
+- **Engine**: `metrics_get` with `metricId: "sitemap.structure"` for the shape, and
+  `issues_list` with `checkId: "CHECK-08"` for one finding rule:
+  `sitemap.over-50k-urls` (warning), one site-scoped finding per sitemap document
+  with more than 50,000 entries. Its count is a LOWER BOUND: a URL listed in two
+  documents is stored, and counted, once, and the crawl's entry cap can stop reading
+  before a document's end. No finding is not proof of a clean sitemap when
+  `entryCapReached` is true. The metric's rows:
   - the `site` row: `{docs, totalUrls, urlCapBreaches, entryCapReached, oversizedDocsSkipped}`
   - one `sitemap_doc` row per document (`scopeValue` is the document's URL) with
     `{urls, breaches50k}` — the largest 50 are listed
@@ -909,6 +941,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - PASS if sitemaps split logically by type (products, collections, blog, pages)
   - WARN if single flat sitemap on site >5k URLs
+  - WARN if `sitemap.over-50k-urls` (warning) > 0: a document over the 50,000-entry limit
+    is not read past it. Quote the count as a floor when `entryCapReached` is true
   - Record: sitemap structure description
 
 ### CHECK-09: URLs not found in sitemaps
@@ -1148,9 +1182,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     read the absence of the first rule as a pass.
   The probe is the only part of a crawl that fetches before robots.txt is read, so
   it runs once per crawl and answers CHECK-14 and CHECK-15 together.
+  A third rule reads the crawl's own links: `security.http-url` (warning) — an HTTPS
+  page the crawl fetched OK (200) that links to an `http:` URL on the site's own host
+  (with or without `www.`), on a site whose crawl started at `https:`. One finding per
+  linking page; its HTTP URLs Linked column is the exact number of distinct `http:`
+  targets and its sample lists up to 10, sorted. The crawl never fetches those `http:`
+  URLs (they are outside an `https:` crawl's boundary), so whether each one redirects
+  is the host probe's answer, not this rule's. A site crawled over `http:` produces none.
 - **Evaluate**:
-  - FAIL if internal HTTP URLs exist or http:// doesn't redirect to https://
-  - Record: HTTP URL count, redirect behavior
+  - FAIL if `security.http-url` fires (internal links to HTTP URLs) or
+    `host.http-serves-200` fires (http:// does not redirect to https://)
+  - Record: number of linking pages and distinct HTTP URLs linked, redirect behavior
 
 ### CHECK-15: Primary host choice (www vs apex, legacy, staging)
 - **Priority**: Medium | **Requires**: Engine (host probe)
@@ -1192,30 +1234,99 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - Record: canonical host, redirect behavior per variant, and whether any
     `legacyHosts` were supplied
 
+### CHECK-84: Security headers on HTTPS pages
+- **Priority**: Medium | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-84"`. The check asks whether HTTPS
+  pages carry the response headers a browser uses to protect the visitor:
+  `Strict-Transport-Security` (HSTS), `Content-Security-Policy`,
+  `X-Content-Type-Options: nosniff`, frame protection (`X-Frame-Options` or a CSP
+  `frame-ancestors`) and `Referrer-Policy`. The evidence is the response headers the
+  crawl stored for each page; the engine reads them from the database and fetches
+  nothing. Two limits to state whenever this is quoted: a plain-HTTP page is judged
+  by the host and protocol checks, not here, and a crawl written before the evidence
+  layer (Phase 25) stored no response headers at all, so for such a crawl the
+  silence of the finding rules is NOT a pass. Three rules answer it:
+  - `security.hsts-missing` (warning) — an HTTPS page whose
+    `Strict-Transport-Security` does not protect it: the header is absent, its
+    `max-age` is 0 (which tells browsers to drop HSTS), or it has no parseable
+    `max-age`. A browser reads the first such header, so that one decides. One
+    finding per page; the evidence key `hstsProblem` (HSTS Problem column) says which
+    of the last two it was, and is absent when the header was simply not sent.
+  - `security.headers-missing` (info) — an HTTPS page missing an enforced
+    `Content-Security-Policy` (Report-Only does not count), `X-Content-Type-Options:
+    nosniff`, frame protection, or a safe `Referrer-Policy`. The evidence names which
+    are missing. `Referrer-Policy` is judged on an unsafe value (`unsafe-url`,
+    `no-referrer-when-downgrade`) as well as on absence, and the evidence carries the
+    unsafe value.
+  - `security.headers-not-recorded` (info) — the NOT MEASURED marker: at least one
+    page of the crawl was written without response headers (a crawl before Phase 25,
+    or a crawl mixing old and new pages), so neither rule above judged anything.
+- **Evaluate**:
+  - PASS if every HTTPS page sends a protecting HSTS (max-age above 0) and the other four headers
+  - WARN if `security.hsts-missing` fired
+  - INFO if `security.headers-missing` fired: report which headers, and on how many pages
+  - SKIP if `security.headers-not-recorded` fired, which it does when response headers
+    are missing for ANY pages of the crawl, mixed crawls included; the remedy is a
+    re-crawl
+  - Record: per-header count of pages that send it, and the URLs that do not
+
+### CHECK-85: Mixed content
+- **Priority**: High | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-85"`. The check asks whether an
+  HTTPS page references any image, script or stylesheet over `http:`, which a browser
+  blocks or downgrades (26b widens the check to iframes, media and forms). The evidence is the table of files each
+  page points at (the page-resources table), read from the database; nothing is fetched. A
+  page's own HTTP links to other pages are not mixed content and belong to CHECK-14.
+  The crawl must have recorded the page's files for this to be answerable: when it
+  recorded none, `resources.not-recorded` (info) is the NOT MEASURED marker, and the
+  silence of the mixed-content finding says the crawl never recorded them rather
+  than that the site is clean. The remedy is a re-crawl. One rule answers it:
+  `security.mixed-content` (warning) — an HTTPS page with at least one `http:`
+  resource. One finding per page, carrying the count and up to ten of the URLs.
+- **Evaluate**:
+  - PASS if no HTTPS page references an `http:` image, script or stylesheet
+  - FAIL if `security.mixed-content` fired
+  - NOT MEASURED if `resources.not-recorded` fired
+  - Record: the referencing pages, the `http:` URLs and how many there are per page
+
 ---
 
 ## 5. Canonicals & Indexability
 
 ### CHECK-16: Self-referential canonicals on indexable pages
 - **Priority**: Critical | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-16"` — `canonical.missing`
-  (warning): an indexable page with no canonical at all. `issue_urls` for the list,
-  and group it by `pageType` (via `pages_query`) to say whether one template is
-  responsible. Pages that self-canonicalise produce no finding — that is the pass.
+- **Engine**: `issues_list` with `checkId: "CHECK-16"` — three rules:
+  - `canonical.missing` (warning) — an indexable page with no canonical at all.
+    `issue_urls` for the list, and group it by `pageType` (via `pages_query`) to say
+    whether one template is responsible. Pages that self-canonicalise produce no
+    finding — that is the pass.
+  - `canonical.relative` (info) — the HTML canonical is a path with no scheme and
+    host, so it resolves against whatever address served the page.
+  - `canonical.fragment` (warning) — the canonical carries a `#fragment`, which
+    search engines do not index as part of an address.
 - **Evaluate**:
   - FAIL if indexable pages missing canonical > 0
   - Record: self-referencing count, missing count, missing URLs by page type
 
 ### CHECK-17: Canonicalised URLs audit
 - **Priority**: Critical | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-17"` — `canonical.points-elsewhere`
-  (info): every page whose canonical names a different URL. The engine reports the
-  fact; whether each target is the RIGHT one is the judgement this check asks for,
-  so read the list from `issue_urls` (source and target per row) and assess the
-  patterns — do not report the count alone.
+- **Engine**: `issues_list` with `checkId: "CHECK-17"` — three rules:
+  - `canonical.points-elsewhere` (info) — every page whose canonical names a
+    different URL. The engine reports the fact; whether each target is the RIGHT one
+    is the judgement this check asks for, so read the list from `issue_urls` (source
+    and target per row) and assess the patterns — do not report the count alone.
+  - `canonical.chain` (warning) — the target is itself canonicalised to another URL;
+    the evidence lists the hops, and says when the chain loops or was cut at the hop
+    limit. Shared with CHECK-19.
+  - `canonical.unlinked` (info) — the canonical target is a crawled page that no
+    other page links to, filed on the page that names it.
 - **Evaluate**:
   - Review canonical targets — are they correct?
   - WARN if canonicalised count is high relative to total pages
+  - WARN if `canonical.chain` (warning) > 0: the signal does not land on the first
+    target named
+  - INFO if `canonical.unlinked` (info) > 0: a canonical target nothing links to;
+    weigh it with the target review above
   - FAIL if canonical targets are wrong
   - Record: canonicalised count, canonical target patterns, incorrect targets
 
@@ -1239,16 +1350,20 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-19: Canonical to non-200 / non-indexable target
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-19"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-19"` — three rules:
   - `canonical.non-200-target` (critical) — the canonical points at a URL that did
     not answer 200
   - `canonical.non-indexable-target` (critical) — it points at a page the crawl
     judged non-indexable
-  Both join the canonical to the target's own crawled row, so a target the crawl
+  - `canonical.chain` (warning) — the target canonicalises to yet another URL, so
+    the signals do not land on the first page named (also under CHECK-17)
+  All three join the canonical to the target's own crawled row, so a target the crawl
   never fetched produces no finding: check `pages_query` for the target URLs before
   reading a clean answer as "every canonical target is healthy".
 - **Evaluate**:
   - FAIL if canonical points to non-200 or non-indexable target
+  - WARN if `canonical.chain` (warning) > 0 and no target is non-200 or non-indexable:
+    the target canonicalises onward, so the first page's signal is diluted
   - Record: count, affected URLs, target status codes
 
 ### CHECK-20: Cross-domain canonicals
@@ -1277,7 +1392,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-22: Pagination is HTML-based and crawlable
 - **Priority**: High | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-22"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-22"` — five rules:
   - `pagination.next-not-linked` (warning) — the page declares `rel="next"`, the
     target was crawled, and NO page on the site links to it. `rel="next"` has not
     been a discovery signal since 2019, so a series wired this way is one whose
@@ -1285,7 +1400,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `pagination.next-target-uncrawled` (info) — the declared `rel="next"` target was
     never fetched by this crawl (or would not resolve). NOT MEASURED beyond that
     point, not "the sequence ends here".
-  A JS-only "Load more" with no `rel="next"` at all leaves BOTH rules silent — the
+  - `pagination.non-indexable-target` (warning) — a `rel="next"` or `rel="prev"` whose
+    target the crawl fetched and which is not a 200 or says noindex. It reads
+    `rel="prev"` too, so it also answers CHECK-23; an uncrawled target stays with
+    `pagination.next-target-uncrawled`.
+  - `pagination.loop` (warning) — the page is in a `rel="next"` cycle (following next
+    comes back to it), reported once per member page with the URLs in walk order. A loop
+    longer than 500 pages is not detected.
+  - `pagination.sequence-error` (info) — the page's `rel="next"` names a crawled 200 page
+    whose `rel="prev"` is absent or names a different page. A series that omits
+    `rel="prev"` everywhere fires on every page of it; say so rather than listing it.
+  A JS-only "Load more" with no `rel="next"` at all leaves ALL FIVE rules silent — the
   engine cannot report a declaration nobody made. That is what the DevTools steps
   below are for, and it is why this check keeps them.
 - **DevTools** — Check BOTH collection and blog pagination separately:
@@ -1313,6 +1438,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - PASS if pagination links are HTML anchor tags and paginated pages are indexable
   - FAIL if JS-only (infinite scroll / "View More" button with no HTML link fallback)
   - FAIL if paginated pages are noindexed (this is incorrect — they should be indexed)
+  - WARN if `pagination.non-indexable-target` (warning) or `pagination.loop` (warning)
+    > 0: a series whose `rel` chain ends at an unusable page or never ends
+  - INFO if `pagination.sequence-error` (info) > 0: say whether it is one series
+    omitting `rel="prev"` everywhere or a genuine mismatch
   - **FAIL if no HTML numbered page links exist** — numbered pagination (1, 2, 3...)
     is far better for crawl efficiency than just next/previous sequential links.
     It allows crawlers to reach page 10 in one hop instead of 9 sequential hops.
@@ -1327,6 +1456,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   canonical points somewhere else, normally back to page 1. The engine states which
   strategy the site chose and leaves the verdict to you, which is exactly what this
   check asks for: a self-canonicalising paginated page fires nothing.
+  `pagination.non-indexable-target` (warning) also claims this check: a series step
+  whose target is a non-200 or a noindexed page (see CHECK-22).
   Cross-read `issues_list` with `checkId: "CHECK-04"` for whether those same pages
   are noindexed — the two together are the "pagination is being hidden" finding.
 - **DevTools** (rel=next/prev presence on a page the crawl typed, and the visible controls):
@@ -1394,6 +1525,19 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
      of them. **When it is present, the return-link answer above covers only the
      alternates that were fetched** — mark this check SKIP for the rest rather than
      reading the silence as reciprocal.
+  5. `issues_list` with `checkId: "CHECK-24"` — four integrity rules over the
+     declarations in the page's HTML, each filed with the evidence that names the
+     fix:
+     - `hreflang.inconsistent-return-code` (warning) — page A lists B, B links back to
+       A, and the code B uses for A differs from the code A uses for itself.
+       `x-default` is not read as a language; a page with no self-reference is
+       left to `hreflang.missing-self-reference`.
+     - `hreflang.multiple-entries` (warning) — one page gives one code to two or
+       more different URLs (spellings of one URL are not different).
+     - `hreflang.self-only` (info) — every declaration names the page itself, so no
+       alternate is named.
+     - `hreflang.unlinked-target` (info) — a crawled alternate no other page links
+       to, filed on the alternate with up to 10 declaring pages and the exact count.
 - **Important**: Don't just check for hreflang errors — also assess **coverage**:
   1. How many internal indexable URLs have hreflang tags vs how many should?
   2. If the site has multiple language/market versions, ALL equivalent pages should have hreflang
@@ -1409,6 +1553,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - FAIL if pages missing their own self-reference > 0
   - FAIL if significant coverage gap (many pages that should have hreflang don't)
   - WARN if hreflang only in sitemap (not in HTML)
+  - WARN if `hreflang.inconsistent-return-code` (warning) or `hreflang.multiple-entries`
+    (warning) > 0: the cluster disagrees with itself and a search engine may discard it
+  - INFO if `hreflang.self-only` (info) or `hreflang.unlinked-target` (info) > 0:
+    a set naming no alternate, or alternates nothing links to. Record the count; do
+    not PASS the check clean with either on file
   - Record: total hreflang URLs, total indexable URLs, coverage %, missing return links, page types without hreflang that should have it, implementation method (HTML/sitemap/both)
 
 ### CHECK-25: Language-region codes and x-default
@@ -1537,10 +1686,20 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   `url.normalisation-variants` (critical): URLs the crawl reached in more than one
   spelling (case, trailing slash) where both answered 200 instead of one redirecting
   to the other. `issue_urls` gives the variant sets.
+  Six page rules read the SHAPE of an indexable page's URL path (never its query or
+  host): `url.uppercase` (info), `url.underscores` (info), `url.non-ascii` (info),
+  `url.spaces` (warning: `%20` or a literal space; a `+` is not read), `url.multiple-slashes`
+  (warning) and `url.repetitive-path` (warning: a folder or run of folders repeated
+  straight after itself, which names the repeated part). A page whose path is
+  percent-encoded non-ASCII is not an upper-case page: the hex digits are not read.
 - **DevTools**: Test an uppercase URL — check if it 301s to lowercase. Test with/without trailing slash
 - **Evaluate**:
   - PASS if single canonical version, variants redirect 301
   - FAIL if both versions resolve to 200 without canonical
+  - WARN if `url.spaces` (warning), `url.multiple-slashes` (warning) or
+    `url.repetitive-path` (warning) > 0: each makes a second spelling of a URL
+  - INFO if `url.uppercase` (info), `url.underscores` (info) or `url.non-ascii` (info)
+    > 0: style and consistency findings, not defects. Report the counts
   - Record: uppercase URL count, redirect behavior
 
 ---
@@ -1632,7 +1791,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-32: Orphan pages (no internal links)
 - **Priority**: High | **Requires**: Engine + GSC
-- **Engine**: `issues_list` with `checkId: "CHECK-32"` — two rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-32"` — three rules:
   - `links.orphan` (warning) — a page the crawl fetched that no other crawled page
     links to. `issue_urls` gives the list, and each row's evidence says how the page
     was discovered and whether the sitemap lists it, which is the SITEMAP breakdown
@@ -1641,8 +1800,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     unfetched, or a page cap reached), so "nothing links to this page" cannot be
     distinguished from "the page that links to it was never crawled". When this
     fires, CHECK-32 is SKIP with the reason quoted, NOT a clean orphan count.
+  - `links.only-from-non-indexable` (warning) — an indexable page that other pages link
+    to, none of which is indexable itself (noindex, canonicalised elsewhere, or not a
+    200). It is the near-orphan: the page shows as linked in a crawl and the links
+    count for little. A page nothing else links to is `links.orphan`'s, not this
+    rule's; a page with even one indexable inlink fires neither.
 
-  And the site-wide evidence beside those two verdicts: `metrics_get` with
+  And the site-wide evidence beside those verdicts: `metrics_get` with
   `metricId: "structure.depth-distribution"` — DISCOVERY depth, how far into the
   crawl each page was first found. It passes no verdict; it is the shape the orphan
   findings make in aggregate. Every sitemap URL is enqueued as a starting point, so
@@ -1707,14 +1871,23 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     count if applicable, percentage of total known URLs
 
 ### CHECK-33: Unique inlinks distribution
-- **Priority**: Medium | **Requires**: Engine (metrics)
-- **Engine**: two metrics, and no findings — `issues_list` with `checkId: "CHECK-33"`
-  is refused with a pointer to `metrics_get`, because an inlink count is a
-  measurement rather than a fault:
+- **Priority**: Medium | **Requires**: Engine (metrics and rules)
+- **Engine**: two metrics, which measure, and two rules, which find. The inlink count
+  is a measurement rather than a fault, so the metrics carry the distribution:
   - `inlinks.distribution` — `{count, min, p25, median, p75, p95, max, mean}` unique
     inlinks per indexable page, for the site and per page type (`scope: "page_type"`)
   - `inlinks.extremes` — the two ends as URLs: the under-linked bottom and the
     top-linked pages, ready to quote
+
+  The two rules are per-page findings about the links a page carries, read with
+  `issues_list` and `checkId: "CHECK-33"`:
+  - `links.internal-nofollow` (warning) — a page with an internal link marked
+    `rel="nofollow"`; the evidence counts them and samples the targets. An external
+    nofollow is not judged.
+  - `links.high-outlinks` (info) — a page linking to more distinct internal URLs than
+    the internal limit, or more distinct external URLs than the external limit (the
+    limits are in the rule's copy and are not added together). An unusually long link
+    list dilutes what each link passes on.
 - **Analysis**: This check must present actual numbers, not just pass/fail. From the two
   metrics above, present:
   1. Distribution summary: min, median, mean, max unique inlinks (site row)
@@ -1725,6 +1898,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - WARN if important pages have <3 unique inlinks
   - WARN if significant imbalance (some pages have 100+ inlinks, others have 1-2)
+  - WARN if `links.internal-nofollow` (warning) > 0: internal links that withhold what
+    they would pass on
+  - INFO if `links.high-outlinks` (info) > 0: the external limit is a review
+    threshold, so weigh the page before calling it a defect
   - Record: full inlinks distribution table, bottom 20 pages, top 20 pages, averages by page type
 
 ### CHECK-33b: Product discovery source analysis (e-commerce)
@@ -1813,15 +1990,45 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - FAIL if key navigation is JS-only
   - Record: nav link count, footer link count, JS-dependency status
 
+### CHECK-86: Link hygiene (private hosts, generic anchors)
+- **Priority**: Low | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-86"`. The check asks whether the
+  links a page carries are ones a visitor and a crawler can use: links that point at
+  `localhost` or a private-network address (a staging or development leftover that
+  works only on the author's machine) and links whose anchor text is generic ("click
+  here", "read more") and so tells neither a visitor nor a search engine what the
+  target is. The evidence is the `links` table, answered in SQL for the whole crawl,
+  with `issue_urls` naming the source page and the target. Only external links are
+  judged for private hosts: an internal link is the site itself. Two rules answer it:
+  - `links.localhost` (warning) — a page with an external link whose host is
+    `localhost`, a private or reserved IP address, or an internal-only name (`.local`,
+    `.internal` and the like), decided by the same policy the crawler refuses to fetch
+    with. A dotless intranet name is not reported, because that policy does not call it
+    private.
+  - `links.non-descriptive-anchor` (info) — a page with an INTERNAL link whose whole
+    anchor is a generic English phrase ("click here", "read more", "learn more" and the
+    rest of the list in the rule's thresholds). The judgement covers internal anchors
+    only; anchors in other languages, and external anchors, are not judged.
+- **Evaluate**:
+  - PASS if no link points at a private host and generic anchors are rare
+  - WARN if any link points at `localhost` or a private address, or generic anchors
+    are common
+  - Record: source page, target URL and anchor text for each finding
+
 ---
 
 ## 10. On-Page SEO
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — six rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — eight rules:
   `title.missing` (critical), `title.too-short` (info, under 30 characters),
-  `title.too-long` (info, over 60) and `title.duplicate` (warning), plus `head.tags-outside-head` (warning, a title or meta
+  `title.too-long` (info, over 60) and `title.duplicate` (warning), plus
+  `title.pixel-too-long` (warning, wider than 561 pixels) and
+  `title.pixel-too-short` (info, narrower than 200 pixels), which measure the
+  title in the search result's font and do not judge a title with a character
+  outside the Latin, Greek and Cyrillic scripts (the character rules still apply
+  to it), plus `head.tags-outside-head` (warning, a title or meta
   description after the `<head>` ended) and `render.title-changed` (warning, a
   rendered page whose title JavaScript changed; see CHECK-01 step 6). Use `pageType` on `issues_list` to get each count per
   template cohort directly, which is what the per-page-type breakdown below needs;
@@ -1897,6 +2104,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - WARN if duplicates > 5% or over-60-char > 50% of pages
   - WARN if product titles front-load internal style names instead of descriptive keywords
   - WARN if brand suffix > 15 chars (wasting SERP real estate)
+  - WARN if `title.pixel-too-long` (warning) > 0: the title is cut in the result;
+    quote the count beside the over-60 count, since the two rules overlap but differ
+  - INFO if `title.pixel-too-short` (info) > 0: report it with the too-short count
   - Record: **per-page-type breakdown** with template pattern, samples, and SERP truncation
     preview. Missing count, duplicate count, over-60 count, brand suffix analysis,
     whitespace issues, top duplicate title groups, SERP simulation for top 10 pages
@@ -1905,7 +2115,11 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
   (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
-  and `meta-description.duplicate` (warning), plus `head.tags-outside-head` (warning,
+  and `meta-description.duplicate` (warning), plus `meta-description.pixel-too-long`
+  (warning, wider than 985 pixels) and `meta-description.pixel-too-short` (info,
+  narrower than 400 pixels), which measure the description in the search result's
+  font and do not judge one with a character outside the Latin, Greek and Cyrillic
+  scripts, plus `head.tags-outside-head` (warning,
   a meta description or title after the `<head>` ended) and
   `render.meta-description-changed` (warning, a rendered page whose description
   JavaScript changed; see CHECK-01 step 6). Filter by `pageType` for the per-type
@@ -1935,6 +2149,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Evaluate**:
   - WARN if missing > 10% for any page type
   - WARN if duplicates > 5%
+  - WARN if `meta-description.pixel-too-long` (warning) > 0: Google cuts the snippet
+    in the result; quote the count beside the over-155 count
+  - INFO if `meta-description.pixel-too-short` (info) > 0: report it with the too-short count
   - **WARN if average length > 200 chars** (descriptions are being truncated — likely
     auto-generated from full product copy rather than crafted for SERPs)
   - FAIL if garbage content found in meta descriptions (data tables, code, foreign language dumps)
@@ -2572,6 +2789,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   re-crawl to answer it. JAVASCRIPT ERRORS are NOT MEASURED whatever the crawl
   holds: nothing in a crawl records a console, and requests a script makes at runtime
   are not in the resource table either — both stay browser work.
+  A second rule reads the same table: `resources.bad-content-type` (info) — a file the
+  server answered 200 for whose content type contradicts what the page called it (a
+  stylesheet not served as `text/css`, a script not served as JavaScript, an image
+  not served as `image/*`). One finding per file, with the type it was sent as and up
+  to ten referencing pages. Files that returned an error are `resources.broken`'s,
+  not this rule's, and a page whose own body is not HTML is not judged here.
   **The window that once had no marker, now closed** (P13-T2): on a crawl where every
   file landed in an unknown class — refused by our own policy, disallowed by a
   robots.txt, its host's robots.txt unreachable while we crawled, or a request that
@@ -2760,7 +2983,11 @@ Skip this section if site is not on Shopify.
 - **Engine**: `pages_query` with `indexable: true` (or the pages export) filtered to
   /search and /tagged paths for the indexable ones, `indexable: false` for the
   excluded ones, and `issues_list` with `checkId: "CHECK-03"` for what robots.txt
-  blocks. Three lists, one question: are these pages in the index or out of it
+  blocks. Three lists, one question: are these pages in the index or out of it.
+  `issues_list` with `checkId: "CHECK-67"` carries `url.internal-search` (warning):
+  an indexable page whose path has a `search` segment or whose query has a key
+  `s`, `q`, `query`, `search`, `keyword` or `keywords` (whole key, case-sensitive).
+  It names the path and the parameter; a `/tagged` path is not read.
 - **Evaluate**:
   - PASS if /search and /tagged noindexed or blocked
   - FAIL if indexable (creates bloat)
@@ -2908,8 +3135,8 @@ the answer to "how many" — `issues_list`'s `count` is.
 define is refused BY NAME, so an empty page always means "nothing found" and never
 "you asked wrong". Two refusals are routine and both are informative:
 
-- `checkId 'CHECK-08' is claimed only by metric rules … it is measured, not found` —
-  go to `metrics_get`. CHECK-08, CHECK-29, CHECK-33, CHECK-33b and CHECK-38 answer
+- `checkId 'CHECK-29' is claimed only by metric rules … it is measured, not found` —
+  go to `metrics_get`. CHECK-29, CHECK-33b and CHECK-38 answer
   this way, **for example**: the list is a sample of the shape, not the closed set.
 - `checkId 'CHECK-41' is claimed by no rule` — an agent check. There is no engine
   answer and there is not meant to be one. CHECK-41 is the standing example and

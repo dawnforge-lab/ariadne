@@ -94,6 +94,17 @@ const ASSETS = new Map<string, Asset>([
     "/img/authored-no-dimensions.svg",
     { contentType: "image/svg+xml", body: svg("No dimensions"), cacheControl: "public, max-age=3600" },
   ],
+  // A stylesheet the server mislabels (26a): a 200 whose `content-type` is
+  // `text/html`, which is what `resources.bad-content-type` reports. Cached
+  // properly so it says nothing about `resources.uncached`.
+  [
+    "/css/p26-wrong-type.css",
+    {
+      contentType: "text/html; charset=utf-8",
+      body: "body { color: #222; }",
+      cacheControl: "public, max-age=3600",
+    },
+  ],
   // The heavy one (P11-T3): past the 100,000-byte line AND served as a PNG, so
   // the one file provokes both `images.oversized` and `images.legacy-format` on
   // the single page that references it. Cached properly, so it says nothing

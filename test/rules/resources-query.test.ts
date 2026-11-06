@@ -60,6 +60,7 @@ describe("resourceRules metadata", () => {
       "images.legacy-format",
       "images.oversized",
       "resources.all-unknown",
+      "resources.bad-content-type",
       "resources.broken",
       "resources.not-fetched",
       "resources.not-recorded",
@@ -76,12 +77,14 @@ describe("resourceRules metadata", () => {
       // is what CHECK-51 asks for by name. See the module header for why the
       // plan's proposed CHECK-48/CHECK-49 split was not the honest filing.
       "resources.broken": [["CHECK-51"], "warning", "technical"],
+      // Broken and wrong-typed files are one check (26a).
+      "resources.bad-content-type": [["CHECK-51"], "info", "technical"],
       "images.oversized": [["CHECK-49"], "warning", "technical"],
       "images.legacy-format": [["CHECK-49"], "info", "technical"],
       "resources.uncached": [["CHECK-50"], "info", "technical"],
       // The marker claims every check whose silence it explains.
       "resources.not-recorded": [
-        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51"],
+        ["CHECK-48", "CHECK-49", "CHECK-50", "CHECK-51", "CHECK-85"],
         "info",
         "technical",
       ],
@@ -454,6 +457,135 @@ describe("resourceRules against the database", () => {
       const [f] = await run("resources.broken", crawlId);
       expect(f!.evidence.brokenCount).toBe(n);
       expect(f!.evidence.resources).toHaveLength(BROKEN_SAMPLE_RESOURCES);
+    });
+  });
+
+  describe("resources.bad-content-type", () => {
+    it("fires on a stylesheet served as text/html, with the pages that carry it", async () => {
+      const { crawlId, pageIds } = await seed(
+        [{ path: "/a" }, { path: "/b" }],
+        [
+          {
+            url: "/css/site.css",
+            kind: "css",
+            contentType: "text/html; charset=utf-8",
+            on: ["/b", "/a"],
+          },
+        ],
+      );
+      const found = await run("resources.bad-content-type", crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({
+        ruleId: "resources.bad-content-type",
+        severity: "info",
+        pageId: pageIds.get("/a"),
+        pageUrl: `${SITE}/a`,
+        dedupeKey: `${SITE}/css/site.css`,
+        evidence: {
+          resourceUrl: `${SITE}/css/site.css`,
+          kind: "css",
+          contentType: "text/html; charset=utf-8",
+          pageCount: 2,
+          samplePages: [`${SITE}/a`, `${SITE}/b`],
+        },
+      });
+    });
+
+    it("does not fire on correctly typed files, whatever the parameters or case", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          { url: "/css/a.css", kind: "css", contentType: "Text/CSS; charset=utf-8", on: ["/a"] },
+          {
+            url: "/js/a.js",
+            kind: "js",
+            contentType: "application/javascript; charset=utf-8",
+            on: ["/a"],
+          },
+          { url: "/js/b.js", kind: "js", contentType: "text/javascript", on: ["/a"] },
+          // Legacy spellings the Fetch standard still treats as JavaScript.
+          { url: "/js/c.js", kind: "js", contentType: "text/x-javascript", on: ["/a"] },
+          { url: "/js/d.js", kind: "js", contentType: "application/x-ecmascript", on: ["/a"] },
+          { url: "/img/a.png", kind: "image", contentType: "image/png", on: ["/a"] },
+        ],
+      );
+      expect(await run("resources.bad-content-type", crawlId)).toEqual([]);
+    });
+
+    it("fires on a script that is not JavaScript and an image that is not an image", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          { url: "/js/a.js", kind: "js", contentType: "text/plain", on: ["/a"] },
+          { url: "/img/a.png", kind: "image", contentType: "text/html", on: ["/a"] },
+        ],
+      );
+      const found = await run("resources.bad-content-type", crawlId);
+      expect(found.map((f) => f.evidence.kind)).toEqual(["image", "js"]);
+    });
+
+    it("never fires on a 404 stylesheet: that is resources.broken's job", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          {
+            url: "/css/gone.css",
+            kind: "css",
+            fetchClass: "client_error",
+            statusCode: 404,
+            contentType: "text/html",
+            on: ["/a"],
+          },
+        ],
+      );
+      expect(await run("resources.bad-content-type", crawlId)).toEqual([]);
+      expect(await run("resources.broken", crawlId)).toHaveLength(1);
+    });
+
+    it("does not judge a file with no recorded type, or one never asked about", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        [
+          { url: "/css/none.css", kind: "css", contentType: null, on: ["/a"] },
+          {
+            url: "/css/unasked.css",
+            kind: "css",
+            fetchClass: null,
+            statusCode: null,
+            contentType: null,
+            on: ["/a"],
+          },
+        ],
+      );
+      expect(await run("resources.bad-content-type", crawlId)).toEqual([]);
+    });
+
+    it("samples at most the broken-resource limit of referencing pages, and counts them all", async () => {
+      const paths = Array.from({ length: BROKEN_SAMPLE_RESOURCES + 2 }, (_, i) => `/p${String(i).padStart(2, "0")}`);
+      const { crawlId } = await seed(
+        paths.map((path) => ({ path })),
+        [{ url: "/css/x.css", kind: "css", contentType: "text/html", on: paths }],
+      );
+      const [only] = await run("resources.bad-content-type", crawlId);
+      expect(only!.evidence.pageCount).toBe(paths.length);
+      expect(only!.evidence.samplePages).toEqual(
+        paths.slice(0, BROKEN_SAMPLE_RESOURCES).map((p) => `${SITE}${p}`),
+      );
+    });
+
+    it("reports the count past the listing cap", async () => {
+      const { crawlId } = await seed(
+        [{ path: "/a" }],
+        ["/css/1.css", "/css/2.css", "/css/3.css"].map((url) => ({
+          url,
+          kind: "css",
+          contentType: "text/html",
+          on: ["/a"],
+        })),
+      );
+      const found = await run("resources.bad-content-type", crawlId, caps(2));
+      expect(found).toHaveLength(2);
+      expect(found[1]!.evidence).toMatchObject({ truncated: { reported: 2, total: 3 } });
     });
   });
 

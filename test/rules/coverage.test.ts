@@ -339,11 +339,86 @@ describe("checklist coverage", () => {
   //
   //   query   62 + 5 = 67
   //   total   109 + 5 = 114
-  it("pins the ruleset split the gate doc reports: 114 rules = 33 page + 67 query + 14 metric", () => {
+  //
+  // Phase 26a Task 3 adds SIX query rules: `security.hsts-missing`,
+  // `security.headers-missing`, the marker `security.headers-not-recorded`
+  // (CHECK-84), `security.http-url` (CHECK-14), `security.mixed-content`
+  // (CHECK-85) and `resources.bad-content-type` (CHECK-51). CHECK-14 and
+  // CHECK-51 were claimed already, CHECK-84 and CHECK-85 are new checklist ids
+  // outside the build plan's 47, so the claimed-check arithmetic does not move.
+  //
+  //   query   67 + 6 = 73
+  //   total   114 + 6 = 120
+  //
+  // Phase 26a Task 4 adds THREE page rules over robots directives:
+  // `indexability.nofollow`, `directives.restrictive` and
+  // `directives.unavailable-after`, all warning and all CHECK-04, which the
+  // noindex rules claim already, so the claimed-check arithmetic does not move.
+  //
+  //   page    33 + 3 = 36
+  //   total   120 + 3 = 123
+  //
+  // Phase 26a Task 5 adds FOUR canonical rules: the page rules
+  // `canonical.relative` and `canonical.fragment` (CHECK-16) and the query rules
+  // `canonical.chain` (CHECK-17, CHECK-19) and `canonical.unlinked` (CHECK-17).
+  // All three checks are claimed already, so the claimed-check arithmetic does
+  // not move.
+  //
+  //   page    36 + 2 = 38
+  //   query   73 + 2 = 75
+  //   total   123 + 4 = 127
+  //
+  // Phase 26a Task 6 adds FOUR hreflang query rules, all on CHECK-24, which is
+  // claimed already: `hreflang.inconsistent-return-code`, `hreflang.multiple-
+  // entries`, `hreflang.self-only` and `hreflang.unlinked-target`.
+  //
+  //   query   75 + 4 = 79
+  //   total   127 + 4 = 131
+  //
+  // Phase 26a Task 7 adds THREE pagination query rules on CHECK-22 and CHECK-23,
+  // both claimed already: `pagination.non-indexable-target`, `pagination.loop`
+  // and `pagination.sequence-error`.
+  //
+  //   query   79 + 3 = 82
+  //   total   131 + 3 = 134
+  //
+  // Phase 26a Task 8 adds FIVE link-hygiene query rules: `links.internal-
+  // nofollow` and `links.high-outlinks` (CHECK-33), `links.only-from-non-
+  // indexable` (CHECK-32) and `links.localhost` and `links.non-descriptive-
+  // anchor` (CHECK-86, which Task 2 added). Both older checks are claimed
+  // already, so the claimed-check arithmetic does not move.
+  //
+  //   query   82 + 5 = 87
+  //   total   134 + 5 = 139
+  //
+  // Phase 26a Task 9 adds SEVEN URL-shape PAGE rules in `src/rules/page/url-shape.ts`:
+  // six on CHECK-30 (`url.uppercase`, `url.underscores`, `url.non-ascii`,
+  // `url.spaces`, `url.multiple-slashes`, `url.repetitive-path`) and
+  // `url.internal-search` on CHECK-67.
+  //
+  //   page    38 + 7 = 45
+  //   total   139 + 7 = 146
+  //
+  // Phase 26a Task 10 adds FOUR sitemap-entry QUERY rules in
+  // `src/rules/query/sitemap-entries.ts`: `sitemap.over-50k-urls` on CHECK-08 and
+  // `sitemap.url-too-long`, `sitemap.cross-host-loc` and `sitemap.lastmod-invalid`
+  // on CHECK-07.
+  //
+  //   query   87 + 4 = 91
+  //   total   146 + 4 = 150
+  //
+  // Phase 26a Task 12 adds FOUR pixel-width PAGE rules in
+  // `src/rules/page/pixel-width.ts`: `title.pixel-too-long` and
+  // `title.pixel-too-short` on CHECK-35, `meta-description.pixel-too-long` and
+  // `meta-description.pixel-too-short` on CHECK-36. The last rule task.
+  //
+  //   page    45 + 4 = 49
+  //   total   150 + 4 = 154
+  it("pins the ruleset split the gate doc reports: 154 rules = 49 page + 91 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(114);
-    expect(registry.byKind("page")).toHaveLength(33);
-    expect(registry.byKind("query")).toHaveLength(67);
+    expect(registry.all()).toHaveLength(154);
+    expect(registry.byKind("page")).toHaveLength(49);
+    expect(registry.byKind("query")).toHaveLength(91);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.
@@ -361,6 +436,9 @@ describe("checklist coverage", () => {
     // bundle-size one (CHECK-48), which is the split the plan proposed and the
     // checklist's text does not support.
     expect(byId.get("resources.broken")).toEqual(["CHECK-51"]);
+    // A file served under the wrong type is the same check: broken and
+    // wrong-typed resources are one network-request question (26a).
+    expect(byId.get("resources.bad-content-type")).toEqual(["CHECK-51"]);
     expect(byId.get("images.oversized")).toEqual(["CHECK-49"]);
     expect(byId.get("images.legacy-format")).toEqual(["CHECK-49"]);
     expect(byId.get("resources.uncached")).toEqual(["CHECK-50"]);
@@ -374,6 +452,7 @@ describe("checklist coverage", () => {
       "CHECK-49",
       "CHECK-50",
       "CHECK-51",
+      "CHECK-85",
     ]);
     // And its sibling claims the same four (P12-T2): the silence it explains is
     // the same silence, so a marker claiming fewer would leave a check whose
@@ -423,6 +502,7 @@ describe("checklist coverage", () => {
       .map((r) => r.id)
       .sort();
     expect(orphanClaimants).toEqual([
+      "links.only-from-non-indexable",
       "links.orphan",
       "links.orphan-skipped",
       "structure.depth-distribution",

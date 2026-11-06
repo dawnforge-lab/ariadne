@@ -122,7 +122,7 @@ async function linkTargetClassFindings(
 }
 
 /** A page's canonical, the URL it resolves to, and the page row for that URL. */
-interface ResolvedTarget {
+export interface ResolvedTarget {
   page: PageRecord;
   canonical: string;
   resolvedTo: string;
@@ -153,10 +153,10 @@ interface ResolvedTarget {
  *    200 OK page is not read at all — its canonical is not what is wrong with
  *    it, and every canonical page rule is gated the same way.
  */
-async function eachCanonicalTarget(
+export async function eachCanonicalTargetBatch(
   db: Db,
   crawlId: string,
-  visit: (t: ResolvedTarget) => void,
+  visitBatch: (batch: ResolvedTarget[]) => Promise<void>,
 ): Promise<void> {
   let cursor = "";
   for (;;) {
@@ -219,8 +219,22 @@ async function eachCanonicalTarget(
     // defined order buys today is a rule that answers the same question the
     // same way twice.) O(batch), like everything else in this loop.
     visits.sort((a, b) => a.page.url.localeCompare(b.page.url));
-    for (const t of visits) visit(t);
+    await visitBatch(visits);
   }
+}
+
+/**
+ * `eachCanonicalTargetBatch` for the rule whose verdict needs nothing but the
+ * pair in front of it: a synchronous visit per resolved canonical.
+ */
+async function eachCanonicalTarget(
+  db: Db,
+  crawlId: string,
+  visit: (t: ResolvedTarget) => void,
+): Promise<void> {
+  await eachCanonicalTargetBatch(db, crawlId, async (batch) => {
+    for (const t of batch) visit(t);
+  });
 }
 
 /**

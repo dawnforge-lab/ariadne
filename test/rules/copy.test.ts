@@ -16,6 +16,19 @@ import { SLOW_MS } from "../../src/rules/page/technical.js";
 // `DEEP_DEPTH` moved with `structure.deep-page` in Phase 9: the rule reads
 // `click_depth` and therefore lives with the link-graph rules.
 import { DEEP_DEPTH } from "../../src/rules/query/link-graph.js";
+import { SAMPLE_SOURCES } from "../../src/rules/query/link-targets.js";
+import {
+  HIGH_EXTERNAL_OUTLINKS,
+  HIGH_INTERNAL_OUTLINKS,
+  NON_DESCRIPTIVE_ANCHORS,
+  INTERNAL_SEARCH_PARAMS,
+  SITEMAP_LOC_MAX,
+  PAGINATION_WALK_MAX,
+  TITLE_PX_MAX,
+  TITLE_PX_MIN,
+  META_PX_MAX,
+  META_PX_MIN,
+} from "../../src/rules/thresholds.js";
 import { CHAIN_HOPS } from "../../src/rules/query/redirects.js";
 import {
   DUPLICATE_SAMPLE_URLS,
@@ -49,6 +62,11 @@ import {
   SITEMAP_DOC_ROWS_CAP,
   SITEMAP_URL_CAP,
 } from "../../src/rules/metric/crawl-metrics.js";
+import {
+  CANONICAL_MAX_HOPS,
+  RESTRICTIVE_DIRECTIVES,
+  UNAVAILABLE_AFTER_WARN_DAYS,
+} from "../../src/rules/thresholds.js";
 import { TOP_PARAMS_CAP } from "../../src/rules/metric/url-metrics.js";
 import {
   BROKEN_SAMPLE_RESOURCES,
@@ -782,6 +800,154 @@ describe("copy: structured data", () => {
 // ==========================================================================
 // IMAGES AND RESOURCES
 // ==========================================================================
+
+describe("copy: directives (26a)", () => {
+  it("quotes the unavailable_after window the rule actually uses", () => {
+    const days = `${UNAVAILABLE_AFTER_WARN_DAYS} days`;
+    expect(UNAVAILABLE_AFTER_WARN_DAYS).toBe(30);
+    expect(copy("directives.unavailable-after").title).toContain(days);
+    expect(copy("directives.unavailable-after").explanation).toContain(days);
+    expect(copy("directives.unavailable-after").howToFix).toContain(days);
+  });
+
+  it("names every restrictive directive the rule matches", () => {
+    const text = copy("directives.restrictive").explanation;
+    for (const d of RESTRICTIVE_DIRECTIVES) expect(text, d).toContain(d);
+  });
+});
+
+describe("copy: hreflang integrity (26a)", () => {
+  it("quotes the sample size the unlinked-target evidence uses", () => {
+    expect(SAMPLE_SOURCES).toBe(10);
+    expect(copy("hreflang.unlinked-target").explanation).toContain(`up to ${SAMPLE_SOURCES} of`);
+  });
+
+  // The standard of "the hreflang copy states which alternates were judged and
+  // which were not": every rule here says what it did not judge.
+  it("each rule says what it left unjudged", () => {
+    expect(copy("hreflang.inconsistent-return-code").explanation).toMatch(
+      /not judged here/i,
+    );
+    expect(copy("hreflang.inconsistent-return-code").explanation).toMatch(
+      /were not crawled|alternates that were not crawled/i,
+    );
+    expect(copy("hreflang.inconsistent-return-code").explanation).toMatch(/x-default is ignored/i);
+    expect(copy("hreflang.multiple-entries").explanation).toMatch(/not fetched/i);
+    expect(copy("hreflang.self-only").explanation).toMatch(/canonicalised to another URL are ignored/i);
+    expect(copy("hreflang.unlinked-target").explanation).toMatch(/did not fetch are not judged/i);
+  });
+});
+
+describe("copy: pagination (26a)", () => {
+  it("quotes the walk limit the loop rule actually uses", () => {
+    expect(PAGINATION_WALK_MAX).toBe(500);
+    expect(copy("pagination.loop").explanation).toContain(`${PAGINATION_WALK_MAX} pages`);
+  });
+});
+
+describe("copy: link hygiene (26a)", () => {
+  it("quotes the outlink limits the rule actually uses, in the title and the explanation", () => {
+    expect(HIGH_INTERNAL_OUTLINKS).toBe(1000);
+    expect(HIGH_EXTERNAL_OUTLINKS).toBe(10);
+    const { title, explanation } = copy("links.high-outlinks");
+    const internal = HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US");
+    expect(title).toContain(`Over ${internal} internal`);
+    expect(title).toContain(`${HIGH_EXTERNAL_OUTLINKS} external`);
+    expect(explanation).toContain(`more than ${internal} different internal`);
+    expect(explanation).toContain(`more than ${HIGH_EXTERNAL_OUTLINKS} different external`);
+  });
+
+  it("quotes the sample sizes the evidence uses", () => {
+    expect(SAMPLE_SOURCES).toBe(10);
+    expect(copy("links.internal-nofollow").explanation).toContain(`up to ${SAMPLE_SOURCES} of their targets`);
+    expect(copy("links.only-from-non-indexable").explanation).toContain(`up to ${SAMPLE_SOURCES} of them`);
+    expect(copy("links.localhost").explanation).toContain(`up to ${SAMPLE_SOURCES} of the targets`);
+    expect(copy("links.non-descriptive-anchor").explanation).toContain(`up to ${SAMPLE_SOURCES} of the phrases`);
+  });
+
+  it("names three of the generic anchors the rule really judges, and says English only", () => {
+    for (const phrase of ["click here", "read more", "learn more"]) {
+      expect(NON_DESCRIPTIVE_ANCHORS).toContain(phrase);
+      expect(copy("links.non-descriptive-anchor").explanation).toContain(phrase);
+    }
+    expect(copy("links.non-descriptive-anchor").explanation).toMatch(/other languages are not judged/i);
+  });
+
+  it("says internal and external, so neither rule over-claims its cohort", () => {
+    expect(copy("links.localhost").explanation).toMatch(/Links to the site's own host are not judged/);
+    expect(copy("links.non-descriptive-anchor").title).toMatch(/Internal links/);
+  });
+});
+
+describe("copy: pixel width (26a)", () => {
+  it("quotes the pixel bounds the rules actually use, in the title and the fix", () => {
+    const bounds: Array<[string, number]> = [
+      ["title.pixel-too-long", TITLE_PX_MAX],
+      ["title.pixel-too-short", TITLE_PX_MIN],
+      ["meta-description.pixel-too-long", META_PX_MAX],
+      ["meta-description.pixel-too-short", META_PX_MIN],
+    ];
+    for (const [id, px] of bounds) {
+      expect(copy(id).title, id).toMatch(new RegExp(`(?<![0-9,])${px} pixels$`));
+    }
+    expect(copy("title.pixel-too-long").howToFix).toContain(`${TITLE_PX_MAX} pixels`);
+    expect(copy("meta-description.pixel-too-long").howToFix).toContain(`${META_PX_MAX} pixels`);
+  });
+
+  it("says in plain words that the width is the search result's font and that other scripts are not judged", () => {
+    for (const id of [
+      "title.pixel-too-long",
+      "title.pixel-too-short",
+      "meta-description.pixel-too-long",
+      "meta-description.pixel-too-short",
+    ]) {
+      const text = copy(id).explanation;
+      expect(text, id).toMatch(/font search results use/);
+      expect(text, id).toMatch(/outside the Latin, Greek and Cyrillic scripts is not judged/);
+      expect(text, id).not.toMatch(/glyph|table|serpWidth/i);
+    }
+  });
+});
+
+describe("copy: URL shape (26a)", () => {
+  it("quotes the search parameters the internal-search rule actually reads", () => {
+    const list = `${INTERNAL_SEARCH_PARAMS.slice(0, -1).join(", ")} or ${INTERNAL_SEARCH_PARAMS.at(-1)}`;
+    expect(copy("url.internal-search").explanation).toContain(`(${list})`);
+  });
+});
+
+describe("copy: sitemap entries (26a)", () => {
+  it("quotes the entry cap and the loc length the rules actually use", () => {
+    expect(copy("sitemap.over-50k-urls").explanation).toContain(
+      `${SITEMAP_URL_CAP.toLocaleString("en-US")} URLs`,
+    );
+    expect(copy("sitemap.over-50k-urls").title).toContain(SITEMAP_URL_CAP.toLocaleString("en-US"));
+    expect(copy("sitemap.url-too-long").title).toContain(SITEMAP_LOC_MAX.toLocaleString("en-US"));
+    expect(copy("sitemap.url-too-long").explanation).toContain(
+      `${SITEMAP_LOC_MAX.toLocaleString("en-US")} characters`,
+    );
+  });
+
+  it("says the entry count is a lower bound", () => {
+    const text = copy("sitemap.over-50k-urls").explanation;
+    expect(text).toMatch(/lower bound/);
+    expect(text).toMatch(/counted once/);
+    expect(text).toMatch(/entry cap/);
+  });
+
+  it("names the cross-submission exception the cross-host rule honours", () => {
+    expect(copy("sitemap.cross-host-loc").explanation).toMatch(/robots\.txt declares it/);
+    expect(copy("sitemap.cross-host-loc").explanation).toMatch(/crawled site/);
+  });
+});
+
+describe("copy: canonicals (26a)", () => {
+  it("quotes the hop limit the chain walk actually uses", () => {
+    expect(CANONICAL_MAX_HOPS).toBe(10);
+    expect(copy("canonical.chain").title).toContain(`${CANONICAL_MAX_HOPS} hops`);
+    expect(copy("canonical.chain").explanation).toContain(`${CANONICAL_MAX_HOPS} hops`);
+  });
+});
 
 describe("copy: images and resources", () => {
   // The resource threshold, pinned against the rule's own constant the way the
@@ -1692,12 +1858,25 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "content.near-duplicate": String(NEAR_DUPLICATE_HAMMING),
     "images.oversized": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
     "images.legacy-format": IMAGE_WEIGHT_WARN.toLocaleString("en-US"),
+    "directives.unavailable-after": String(UNAVAILABLE_AFTER_WARN_DAYS),
+    // Not a firing line (a chain fires at two hops) but the limit the walk
+    // stops at, which the evidence's `hopLimitReached` refers to.
+    "canonical.chain": String(CANONICAL_MAX_HOPS),
     // Two rules whose ids do not advertise a threshold but whose predicates are
     // one. `content.soft-404` fires on `SOFT_404_WORDS` OR `TEMPLATE_HAMMING`;
     // the word count is the half a title can carry, and the four bits are
     // pinned in the explanation above.
     "content.soft-404": String(SOFT_404_WORDS),
     "redirect.chain": String(CHAIN_HOPS),
+    // The title carries the internal limit; the external one has its own
+    // assertion in "copy: link hygiene (26a)", since a map entry holds one number.
+    "links.high-outlinks": HIGH_INTERNAL_OUTLINKS.toLocaleString("en-US"),
+    "sitemap.url-too-long": SITEMAP_LOC_MAX.toLocaleString("en-US"),
+    "sitemap.over-50k-urls": SITEMAP_URL_CAP.toLocaleString("en-US"),
+    "title.pixel-too-long": String(TITLE_PX_MAX),
+    "title.pixel-too-short": String(TITLE_PX_MIN),
+    "meta-description.pixel-too-long": String(META_PX_MAX),
+    "meta-description.pixel-too-short": String(META_PX_MIN),
   };
 
   it("states the number in the title of every rule that fires on one", () => {
@@ -1721,7 +1900,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
   // the cheap signal, not the authority.
   it("leaves no threshold rule out of the map", () => {
     const promises =
-      /too-long|too-short|thin|slow|oversized|deep|level-skip|near-duplicate|soft-404|\.chain$/;
+      /too-long|too-short|thin|slow|oversized|deep|level-skip|near-duplicate|soft-404|\.chain$|outlinks/;
     const missing = RULES.filter(
       (r) =>
         r.marker === undefined &&

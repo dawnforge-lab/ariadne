@@ -28,23 +28,19 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { capsOr, noteTruncation } from "./crawl-evidence.js";
+import {
+  MAX_REDIRECT_HOPS,
+  CHAIN_HOPS,
+} from "../thresholds.js";
 
 const CATEGORY = "redirects";
 
-/**
- * How many pages one walk may visit. A redirect graph is a functional graph —
- * one target per page — so the only way to walk forever is a cycle, and the
- * cycle test below already stops those. The cap is here for the other case: a
- * chain long enough that reporting every hop helps nobody, and that would make
- * the recursive CTE's intermediate rows grow with the site.
- *
- * A chain cut short by the cap is reported with `chainTruncated: true`
- * rather than silently presented as if it ended there.
- */
-export const MAX_REDIRECT_HOPS = 10;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export {
+  MAX_REDIRECT_HOPS,
+  CHAIN_HOPS,
+} from "../thresholds.js";
 
-/** A chain is worth reporting from this many redirect hops up. */
-export const CHAIN_HOPS = 2;
 
 /**
  * One terminal row of a walk: the last page reached from a given seed, with the

@@ -514,7 +514,7 @@ describe("check universe", () => {
     // (http.no-response pair, page.html-too-large, the crawl.unreadable-encoding
     // marker); the recheck pass also re-asks the no-response rows; registry.ts
     // carries the grounds.
-    expect(RULESET_VERSION).toBe("0.19.0");
+    expect(RULESET_VERSION).toBe("0.20.0");
   });
   it("every listed check id is a well-formed CHECK-NN and unique", () => {
     expect(new Set(CRAWL_CHECK_IDS).size).toBe(CRAWL_CHECK_IDS.length);
@@ -588,17 +588,17 @@ describe("check annotations", () => {
  * `render.meta-description-changed` and `render.h1-changed`. Two classes are fixed by
  * construction rather than by judgement and can never appear in the critical
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
- * the thirteen markers, which report a hole in OUR evidence and never a fault of
+ * the fourteen markers (26a added `security.headers-not-recorded`), which report a hole in OUR evidence and never a fault of
  * the site.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 31 warning and 50 info rules", () => {
+  it("holds 33 critical, 54 warning and 67 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 31, info: 50 });
-    expect(all).toHaveLength(114);
+    expect(counts).toEqual({ critical: 33, warning: 54, info: 67 });
+    expect(all).toHaveLength(154);
   });
 
   it("names exactly the rules that are critical", () => {

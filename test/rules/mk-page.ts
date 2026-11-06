@@ -150,9 +150,19 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
     recheckStatusCode: null,
     recheckReason: null,
     recheckAt: null,
-    // The clean page was written by the current extraction, with headers that
-    // arrived and none worth a finding; never rendered, so no render stamp or console.
-    responseHeaders: { values: {}, truncated: [] },
+    // The clean page was written by the current extraction, with the five
+    // security headers a clean HTTPS page sends (`security.*`, 26a), so none of
+    // them is worth a finding; never rendered, so no render stamp or console.
+    responseHeaders: {
+      values: {
+        "strict-transport-security": ["max-age=31536000"],
+        "content-security-policy": ["default-src 'self'"],
+        "x-content-type-options": ["nosniff"],
+        "x-frame-options": ["DENY"],
+        "referrer-policy": ["strict-origin-when-cross-origin"],
+      },
+      truncated: [],
+    },
     extractionVersion: 1,
     renderVersion: null,
     renderConsole: null,

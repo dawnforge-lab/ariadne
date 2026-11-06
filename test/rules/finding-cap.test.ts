@@ -20,6 +20,7 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, issues, pages } from "../../src/db/schema.js";
 import { contentRules, NEAR_DUPLICATE_COUNT_CAP } from "../../src/rules/query/content.js";
 import {
+  cappedListing,
   DEFAULT_RULE_CAPS,
   resolveRuleCaps,
   storedFindingCap,
@@ -69,6 +70,41 @@ describe("resolveRuleCaps", () => {
     // And the discontinuity the pair budget created is gone with it: naming the
     // default is now the same thing as omitting the field.
     expect(resolveRuleCaps(URL_FINDING_CAP)).toEqual(resolveRuleCaps(undefined));
+  });
+});
+
+describe("cappedListing (PR #22 review)", () => {
+  const self = { id: "test.rule", severity: "info" as const };
+  const hit = (n: number) => ({
+    pageId: `page_${n}`,
+    pageUrl: `https://x.example/${n}`,
+    evidence: { n },
+    dedupeKey: `https://x.example/${n}`,
+  });
+
+  it("keeps the first caps.listing findings, counts the rest and notes the exact total", () => {
+    const out = cappedListing(self, { ...DEFAULT_RULE_CAPS, listing: 2 });
+    for (const n of [1, 2, 3, 4]) out.add(hit(n));
+    const found = out.done();
+    expect(found.map((f) => f.pageId)).toEqual(["page_1", "page_2"]);
+    expect(found[0]).toEqual({
+      ruleId: "test.rule",
+      severity: "info",
+      pageId: "page_1",
+      pageUrl: "https://x.example/1",
+      evidence: { n: 1 },
+      dedupeKey: "https://x.example/1",
+    });
+    expect(found[1]!.evidence).toEqual({ n: 2, truncated: { reported: 2, total: 4 } });
+  });
+
+  it("lists everything, with no note, when uncapped or under the cap", () => {
+    const uncapped = cappedListing(self, { ...DEFAULT_RULE_CAPS, listing: null });
+    for (const n of [1, 2, 3]) uncapped.add(hit(n));
+    expect(uncapped.done().map((f) => f.evidence)).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
+    const under = cappedListing(self, { ...DEFAULT_RULE_CAPS, listing: 5 });
+    under.add(hit(1));
+    expect(under.done().map((f) => f.evidence)).toEqual([{ n: 1 }]);
   });
 });
 

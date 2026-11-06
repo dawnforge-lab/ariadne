@@ -1,13 +1,9 @@
 import { finding, isJudged, pageRule } from "../helpers.js";
 import type { PageRule } from "../registry/types.js";
+import { SLOW_MS } from "../thresholds.js";
 
-/**
- * Thresholds. Exported because the client-facing copy quotes them and a test
- * asserts the prose against these constants: change one here and the copy test
- * fails until the sentence is changed with it.
- */
-/** Time to first byte, in ms, above which the response is reported as slow. */
-export const SLOW_MS = 1500;
+/** Verdict thresholds live in `../thresholds.js`; re-exported so every existing import still resolves. */
+export { SLOW_MS } from "../thresholds.js";
 
 /**
  * All four report under one heading. `RuleCategory` is the report's grouping,

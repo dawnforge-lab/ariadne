@@ -16,6 +16,7 @@ import { authoredP7Fixtures } from "./pages/authored-p7.js";
 import { authoredP11Fixtures } from "./pages/authored-p11.js";
 import { authoredP23Fixtures } from "./pages/authored-p23.js";
 import { authoredP25Fixtures } from "./pages/authored-p25.js";
+import { authoredP26Fixtures } from "./pages/authored-p26.js";
 import { controlFixture } from "./pages/control.js";
 import { renderFixtures } from "./pages/render-p5.js";
 
@@ -89,8 +90,19 @@ export interface Fixture {
    * of one URL. The rules join `sitemap_urls.url_normalised`, so they match;
    * this field is what puts a divergent spelling in front of them end to end
    * (see `/authored3/loc-variant`).
+   *
+   * It may begin with `{legacy}`, which the writer replaces with the site's
+   * second name (`FixtureApp.legacyBase`): the port is only known once the
+   * server listens, and an entry on that host is the cross-host `<loc>`
+   * (`sitemap.cross-host-loc`).
    */
   sitemapLoc?: string;
+  /**
+   * The `<lastmod>` `/sitemap.xml` publishes for this fixture, verbatim. Default:
+   * none. Verbatim so a fixture can publish a value no W3C parser accepts
+   * (`sitemap.lastmod-invalid`).
+   */
+  sitemapLastmod?: string;
   /**
    * Whether the hub links this fixture. Default true.
    *
@@ -142,6 +154,9 @@ export function allFixtures(): Fixture[] {
     // 2,048-character cap `pages.response_headers` keeps — the stored value is
     // cut, and the header is named in `truncated`.
     ...authoredP25Fixtures,
+    // P26: the 26a rules' fixture pages, added task by task. Plain HTTP on
+    // 127.0.0.1, so the HTTPS-only rules have none (SKIP_HARNESS_CLAIMS).
+    ...authoredP26Fixtures,
     controlFixture,
   ];
 }

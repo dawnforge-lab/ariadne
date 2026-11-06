@@ -9,15 +9,21 @@ import { urlMetrics } from "./metric/url-metrics.js";
 import { onPageRules } from "./page/on-page.js";
 import { statusRules } from "./page/status.js";
 import { canonicalRules } from "./page/canonical.js";
+import { directiveRules } from "./page/directives.js";
+import { urlShapeRules } from "./page/url-shape.js";
+import { pixelWidthRules } from "./page/pixel-width.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
 import { technicalRules } from "./page/technical.js";
 import { resourceMetrics } from "./metric/resource-metrics.js";
+import { canonicalGraphRules } from "./query/canonical-graph.js";
 import { contentRules } from "./query/content.js";
 import { fieldDuplicateRules } from "./query/field-duplicates.js";
 import { hostRules } from "./query/host.js";
 import { hreflangRules } from "./query/hreflang.js";
+import { hreflangIntegrityRules } from "./query/hreflang-integrity.js";
 import { linkGraphRules } from "./query/link-graph.js";
+import { linkHygieneRules } from "./query/link-hygiene.js";
 import { linkTargetRules } from "./query/link-targets.js";
 import { paginationRules } from "./query/pagination.js";
 import { redirectRules } from "./query/redirects.js";
@@ -25,7 +31,9 @@ import { renderDiffRules } from "./query/render-diff.js";
 import { renderRedirectRules } from "./query/render-redirect.js";
 import { resourceRules } from "./query/resources.js";
 import { robotsRules } from "./query/robots.js";
+import { securityRules } from "./query/security.js";
 import { sitemapRules } from "./query/sitemap.js";
+import { sitemapEntryRules } from "./query/sitemap-entries.js";
 import { structuredDataRules } from "./query/structured-data.js";
 import { urlHygieneRules } from "./query/url-hygiene.js";
 
@@ -43,16 +51,24 @@ export function buildRegistry(): Registry {
     ...statusRules,
     ...canonicalRules,
     ...indexabilityRules,
+    ...directiveRules,
+    ...urlShapeRules,
+    ...pixelWidthRules,
     // Where the head ended, and which head elements came after it (P23-T5).
     ...headRules,
     ...technicalRules,
     ...hreflangRules,
+    ...hreflangIntegrityRules,
     ...redirectRules,
     ...linkTargetRules,
+    ...canonicalGraphRules,
     ...linkGraphRules,
+    ...linkHygieneRules,
     ...paginationRules,
     ...robotsRules,
     ...sitemapRules,
+    // The entry-level sitemap limits (26a): size, loc length, host, lastmod.
+    ...sitemapEntryRules,
     ...urlHygieneRules,
     ...hostRules,
     ...contentRules,
@@ -74,6 +90,9 @@ export function buildRegistry(): Registry {
     // read `resources` and `page_resources` through SQL, and "is this file
     // broken" is a question about a table a page rule is never handed.
     ...resourceRules,
+    // The security rules (26a): response headers, HTTP URLs and mixed content,
+    // all read from what the crawl stored.
+    ...securityRules,
     // The metric kind. Registered in the same list because a rule is a rule to
     // the registry — the runner is what tells the kinds apart, driving these
     // last, after everything that writes evidence.

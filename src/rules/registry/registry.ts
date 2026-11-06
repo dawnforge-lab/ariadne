@@ -393,7 +393,121 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `failed` on a crawl whose last pass could not launch, and a pre-0025
 //     crawl, or one whose pass launched, reads exactly as before. The metric
 //     table gains a Render Launch Error column. No finding rule moves.
-export const RULESET_VERSION = "0.19.0";
+// 0.20.0: Phase 26a, rules over existing data (docs/superpowers/specs/2026-11-05-
+// phase-26-checks-wave-1-design.md). ONE BUMP FOR THE PHASE; later tasks append
+// here. The version moves for the new 26a rules, which read columns the crawl
+// already stores; the rules are listed by family as the tasks that register them
+// add them.
+//
+//  1. (T2) `resources.not-recorded` gains CHECK-85: mixed content reads
+//     `page_resources`, so a crawl that recorded none is silent on it, and the
+//     marker now says so. CHECK-84..86 are new checklist ids.
+//  2. (T3) Security and served-type rules: `security.hsts-missing`,
+//     `security.headers-missing`, the marker `security.headers-not-recorded`
+//     (CHECK-84), `security.http-url` (CHECK-14), `security.mixed-content`
+//     (CHECK-85) and `resources.bad-content-type` (CHECK-51). The header rules
+//     read `pages.response_headers` and refuse a crawl any of whose pages
+//     predates Phase 25, so a pre-25 crawl gets the marker, never a clean list.
+//  3. (T4) Robots directives, page rules, all warning on CHECK-04:
+//     `indexability.nofollow`, `directives.restrictive` and
+//     `directives.unavailable-after`. They compare whole tokens
+//     (`robotsTokens`), and judge a date against the page's own `fetched_at`.
+//  4. (T5) Canonical rules: `canonical.relative` (info, CHECK-16) and
+//     `canonical.fragment` (warning, CHECK-16) are page rules;
+//     `canonical.chain` (warning, CHECK-17/19) and `canonical.unlinked` (info,
+//     CHECK-17) are query rules over the resolved canonical pairs. The chain walk
+//     stops at `CANONICAL_MAX_HOPS` and reports a revisit as `loop`; both
+//     are filed on the page that declares the canonical.
+//  5. (T6) Hreflang integrity, query rules on CHECK-24 over HTML declarations of
+//     fetched, non-canonicalised pages: `hreflang.inconsistent-return-code`
+//     (warning) and `hreflang.multiple-entries` (warning), `hreflang.self-only`
+//     (info) and `hreflang.unlinked-target` (info). Codes compare as
+//     `lower(btrim(code))` and targets on `URL_MATCH_KEY`; `x-default` is not
+//     read as a language by the return-code rule.
+//  6. (T7) Pagination, query rules: `pagination.non-indexable-target` (warning,
+//     CHECK-22/23: a `rel=next` or `rel=prev` target the crawl fetched that is not
+//     a 200 or says noindex), `pagination.loop` (warning, CHECK-22: a `rel=next`
+//     cycle, reported once per member, found by a walk of at most
+//     `PAGINATION_WALK_MAX` steps over the crawl's edges held in a temporary
+//     table) and `pagination.sequence-error` (info, CHECK-22: the next page's
+//     `rel=prev` is absent or names another page). The first two read targets
+//     the earlier pagination rules already looked up; no column is new.
+//  7. (T8) Link hygiene, query rules over the `links` table (no column is new):
+//     `links.internal-nofollow` (warning, CHECK-33: an internal link with
+//     `is_nofollow`), `links.only-from-non-indexable` (warning, CHECK-32: a
+//     JUDGED page whose internal inlinks all come from pages that are
+//     definitely not JUDGED), `links.localhost` (warning, CHECK-86: an EXTERNAL
+//     link whose host `blockedHostReason` blocks, found through a SQL prefilter
+//     built from `BLOCKED_HOSTS` and `BLOCKED_HOST_SUFFIXES`, which url-policy
+//     now exports), `links.non-descriptive-anchor` (info, CHECK-86: an INTERNAL
+//     link whose whole normalised anchor is on `NON_DESCRIPTIVE_ANCHORS`) and
+//     `links.high-outlinks` (info, CHECK-33: distinct internal targets over
+//     `HIGH_INTERNAL_OUTLINKS` or distinct external targets over
+//     `HIGH_EXTERNAL_OUTLINKS`, calibrated against Screaming Frog in T13).
+//  8. (T9) URL shape, seven page rules in `page/url-shape.ts`, all on the path of
+//     the stored URL and gated by `isJudged` like `url.too-long`: `url.uppercase`
+//     (info; the hex of a percent-escape is not a letter), `url.underscores`
+//     (info), `url.non-ascii` (info), `url.spaces` (warning; `%20` or a
+//     space), `url.multiple-slashes` (warning), `url.repetitive-path` (warning; a
+//     run of segments immediately repeated) — all CHECK-30 — and
+//     `url.internal-search` (warning, CHECK-67: a path segment `search`, or a
+//     query key in `INTERNAL_SEARCH_PARAMS`, compared whole and case-sensitively).
+//     `normalizeUrl` keeps case, underscores and `//` and percent-encodes a space
+//     and non-ASCII, so every shape reaches the rules as stored. A URL that does
+//     not parse throws.
+//  9. (T10) Sitemap entries, four query rules in `query/sitemap-entries.ts`, SQL
+//     over `sitemap_urls`: `sitemap.over-50k-urls` (warning, CHECK-08: a document
+//     with more than `SITEMAP_URL_CAP` DEDUPLICATED entries, so the count is a
+//     lower bound until 26c), `sitemap.url-too-long` (info, CHECK-07: a `<loc>`
+//     over `SITEMAP_LOC_MAX` characters), `sitemap.cross-host-loc` (warning,
+//     CHECK-07: scheme or host differs from the document's) and
+//     `sitemap.lastmod-invalid` (info, CHECK-07: not `W3C_DATETIME`, or after
+//     `crawls.finished_at`, which every sitemap read precedes; zone-less forms
+//     are UTC at the period's start, so a date-only value on the crawl's own day
+//     is not future). T14's re-judge moved the reference off `started_at`: a
+//     sitemap stamped "now" when served read as future there.
+// 10. (T12) Pixel width, four page rules in `page/pixel-width.ts`, gated by
+//     `isJudged`, a present value and a measurable one: `title.pixel-too-long`
+//     (warning, CHECK-35, wider than `TITLE_PX_MAX`), `title.pixel-too-short`
+//     (info, CHECK-35, narrower than `TITLE_PX_MIN`),
+//     `meta-description.pixel-too-long` (warning, CHECK-36, over `META_PX_MAX`)
+//     and `meta-description.pixel-too-short` (info, CHECK-36, under
+//     `META_PX_MIN`). Width is `serpWidth` (measured Chromium advances at
+//     20px / 14px Arial); a value with a character outside the measured table
+//     is NOT pixel-judged (the character-count rules still apply), and the
+//     copy says so. T13's Screaming Frog 25.1 calibration CONFIRMED all four
+//     bounds (561 / 200 / 985 / 400, strict) and moved one other threshold:
+//     `HIGH_EXTERNAL_OUTLINKS` 100 -> 10 (SF flags 11 distinct external
+//     targets and not 10); `HIGH_INTERNAL_OUTLINKS` 1000 was confirmed. See
+//     docs/gates/phase-26a-calibration.md. This is the last rule task: 154 rules.
+// 11. (T13 follow-up) `DEEP_DEPTH` stays 5. Screaming Frog, run with its
+//     post-crawl analysis on, flags the click-depth ladder from depth 4 (its
+//     depths equal ours); the owner kept 5 as a product choice (2026-11-06).
+//     Same calibration doc, where the difference is recorded as owner-decided.
+// 12. (PR #22 review) `security.http-url` reads `links`, not `pages`: an
+//     `https:` crawl never fetches an `http:` URL, so the page-row rule could
+//     not fire. It now files an HTTPS page fetched OK that links to an `http:`
+//     URL on the site's own host (modulo `www.`; `is_internal` is false for
+//     such a link and is not read), with `httpTargetCount` and a sorted
+//     `sample` of `BROKEN_SAMPLE_RESOURCES`. `robotsTokens` splits on
+//     whitespace as well as commas (closing up `name: value` first), so
+//     `noindex nofollow` is two tokens for `indexability.nofollow` and
+//     `directives.restrictive`, as it already was for `saysNoindex`.
+//     `directives.unavailable-after` reads its date with `parseRobotsDate`
+//     (ISO 8601, RFC 822 / 850 / 1123), not `Date.parse`: a zone-less form is
+//     UTC with `assumedUtc: true`, and loose text is `dateParsed: false`.
+//     The date ends at its longest prefix `parseRobotsDate` accepts, so a
+//     directive after it with only a space between is still a token. The
+//     parser also reads asctime (UTC, `assumedUtc`), full month and day names,
+//     an ISO zone name or hours-only offset, and BST, CET, CEST, EET, EEST.
+//     The pagination target lookup drops every `disallowed` row (url-policy
+//     as well as robots.txt): never requested, so
+//     `pagination.non-indexable-target` no longer reports a url-policy
+//     refusal as a fetched non-200; `next-target-uncrawled` reports it.
+//     `pagination.loop` gives the same findings for less work: series that
+//     end are peeled off first, and each loop is walked once, from its
+//     member with the smallest `md5(url)`, then fanned out to its members.
+export const RULESET_VERSION = "0.20.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
