@@ -82,7 +82,7 @@ from Task 3 and one from Task 10, and each has its paragraph in
 |---|---|---|
 | `security.hsts-missing` | needs an HTTPS page fetched OK, and the fixture site is plain HTTP on 127.0.0.1 (deviation 1) | `security-query.test.ts`, and §5.3 on lavishalice |
 | `security.headers-missing` | same | same |
-| `security.http-url` | needs a crawl whose site URL is `https:` | same |
+| `security.http-url` | needs a crawl whose site URL is `https:` and an HTTPS page linking to an `http:` URL on that host | `security-query.test.ts` (pages and links written by the analyzer and `PageWriter`), and §5.3 on lavishalice |
 | `security.mixed-content` | needs an HTTPS page | same |
 | `security.headers-not-recorded` | the marker for a crawl with pre-Phase-25 rows; the fixture crawl is current, so its condition is false by construction, and it also needs an HTTPS page | `security-query.test.ts`, which pins the marker, its silence on a current crawl and its silence on a crawl with no HTTPS page |
 | `sitemap.over-50k-urls` | a 50,001-entry fixture sitemap would put 50,000 URLs into the fixture crawl's frontier; the threshold is the protocol's own limit, so nothing smaller fires it | `sitemap-entries-query.test.ts` (50,001 rows from `generate_series`, and silence at exactly the cap) |
@@ -187,7 +187,7 @@ says it was capped.
 | `meta-description.pixel-too-short` | info | 2 | 2 | true (§5.1) |
 | `security.hsts-missing` | warning | 0 | | silent, correctly: HSTS on 504 of 504 (§5.3) |
 | `security.headers-not-recorded` | info | 0 | | silent, correctly: 602 of 602 rows at `extraction_version` 1 |
-| `security.http-url` | warning | 0 | | silent, correctly: no `http:` page row; `http://` answers 301 (§5.3) |
+| `security.http-url` | warning | 0 | | not re-judged in this run: the rule was redefined after it (PR #22 review); measured alone it files 2 (§5.3) |
 | `security.mixed-content` | warning | 0 | | silent, correctly: 0 `http:` references among 52,998 `page_resources` rows (§5.3) |
 | `resources.bad-content-type` | info | 0 | | not measured: all 3,837 resource rows are unfetched, and `resources.not-fetched` fired (1) and says so |
 | `directives.restrictive` | warning | 0 | | silent: no snippet or image directive in any robots meta or `X-Robots-Tag` |
@@ -286,7 +286,7 @@ The requests ran 19:48:07–19:48:27 UTC. Every one answered without a 429.
 | 3 | `/products/maxine-tailored-fit-flare-trousers-in-black` | 200 | same |
 | 4 | `/pages/faqs` | 200 | same, plus the "here" anchors |
 | 5 | `/blogs/news` | 200 | same |
-| 6 | `http://lavishalice.com/` | 301 → `https://lavishalice.com/` | `security.http-url` |
+| 6 | `http://lavishalice.com/` | 301 → `https://lavishalice.com/` | `security.http-url` as first defined (see §5.3) |
 | 7 | `/search?q=blazers` | 200, `X-Robots-Tag: noindex, nofollow` | `indexability.nofollow` |
 | 8 | `/sitemap_products_1.xml?from=8318238458166&to=16162418524542` | 200 | `sitemap.lastmod-invalid` (§5.2) |
 
@@ -404,8 +404,19 @@ The fixture site cannot exercise these rules and Screaming Frog cannot calibrate
   the fix recommends. The finding is therefore hardening rather than an exposure. That
   is the spec's definition ("no or unsafe `referrer-policy`") and Screaming Frog's
   ("Missing Secure Referrer-Policy Header"), and it is info severity. No change.
-- **`security.http-url`: silent, correct.** The crawl has no `http:` page row, and live
-  `http://lavishalice.com/` answers 301 to `https://lavishalice.com/`.
+- **`security.http-url`: redefined after the re-judge, measured alone.** In the run above
+  it was silent, and that silence was the rule's defect, not the site's health: it read
+  `http:` rows in `pages`, and an `https:` crawl never fetches an `http:` URL (`enqueue`
+  keeps only `isSameOrigin` URLs), so it could not fire on any real crawl. PR #22's
+  review redefined it over `links`: an HTTPS page fetched OK that links to an `http:` URL
+  on the site's own host. Run alone against this crawl (2026-11-06, not through
+  `runRulesForCrawl`, so the §4 totals are unchanged) it files 2 findings:
+  `/pages/privacy-policy` and `/pages/data-protection-policy-by-lavish-alice`, each with
+  `httpTargetCount` 1 and sample `http://www.lavishalice.com/`. True by the stored links;
+  the crawl holds 3 `http:` link rows and the third targets `http://www.ico.org.uk/`,
+  another host, which the rule rightly ignores. The pages were not re-fetched to
+  hand-check the markup. Separately, live `http://lavishalice.com/` answers 301 to
+  `https://lavishalice.com/`, which is the host probe's question.
 - **`security.mixed-content`: silent, correct.** 0 of 52,998 `page_resources` rows are
   `http:`. Live, on the 5 HTML pages, no `<img>`, `<script>` or `<link>` has an `http:`
   `src` or `href`. The site also sends `block-all-mixed-content` and

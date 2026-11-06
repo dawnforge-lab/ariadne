@@ -12,7 +12,10 @@ import { eq } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { crawls, pageResources, pages } from "../../src/db/schema.js";
+import { crawls, links, pageResources, pages } from "../../src/db/schema.js";
+import type { FetchResult } from "../../src/crawl/fetch-page.js";
+import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
+import { PageWriter } from "../../src/crawl/persist.js";
 import type { StoredResponseHeaders } from "../../src/crawl/response-headers.js";
 import { DEFAULT_RULE_CAPS } from "../../src/rules/query/crawl-evidence.js";
 import { BROKEN_SAMPLE_RESOURCES } from "../../src/rules/query/resources.js";
@@ -444,27 +447,147 @@ describe("securityRules against the database", () => {
       for (const r of securityRules) expect(await run(r.id, crawl), r.id).toEqual([]);
     });
 
-    it("an http page on an https site files security.http-url", async () => {
-      const crawl = await newCrawl(HTTPS_SITE);
-      const ids = await addPages(crawl, [
-        { url: `${HTTPS_SITE}/a` },
-        { url: "http://secure.example/legacy" },
-        // An HTTP URL that never answered 200 is not judged.
-        { url: "http://secure.example/missing", statusCode: 404 },
-      ]);
-      const found = await run("security.http-url", crawl);
-      expect(found).toHaveLength(1);
-      expect(found[0]).toMatchObject({
-        ruleId: "security.http-url",
-        severity: "warning",
-        pageId: ids.get("http://secure.example/legacy"),
-        pageUrl: "http://secure.example/legacy",
-        evidence: {},
-      });
-    });
+    describe("security.http-url (internal links to http: on an https: site)", () => {
+      /**
+       * Write one crawled page the way the crawl loop does: the analyzer reads
+       * the HTML (it resolves and normalises every `<a href>` and drops
+       * duplicates) and `PageWriter` stores the page row and its `links` rows,
+       * computing `is_internal` itself. Nothing about a link row is hand-made.
+       */
+      async function crawlPage(
+        crawlId: string,
+        url: string,
+        hrefs: string[],
+        fetch: Partial<FetchResult> = {},
+      ): Promise<string> {
+        const html = `<html><head><title>t</title></head><body>${hrefs
+          .map((h) => `<a href="${h}">x</a>`)
+          .join("")}</body></html>`;
+        const writer = new PageWriter(db, crawlId);
+        const result: FetchResult = {
+          url,
+          statusCode: 200,
+          fetchClass: "ok",
+          contentType: "text/html; charset=utf-8",
+          redirectUrl: null,
+          body: html,
+          htmlBytes: html.length,
+          responseTimeMs: 10,
+          retryAfterMs: null,
+          canonicalHeader: null,
+          xRobotsTag: null,
+          platformHint: null,
+          responseHeaders: null,
+          disallowedReason: null,
+          ...fetch,
+        };
+        const pageId = await writer.addPage(
+          { url, depth: 1, discoveredVia: "link" },
+          result,
+          analyzePage(html, url),
+          { complete: false },
+        );
+        await writer.flush();
+        return pageId;
+      }
 
-    it("http-url throws for a crawl that does not exist", async () => {
-      await expect(run("security.http-url", `crawl_${randomUUID()}`)).rejects.toThrow(/no crawl/);
+      it("files the linking page with the exact count and a sorted sample of its http: targets", async () => {
+        const crawl = await newCrawl(HTTPS_SITE);
+        const linking = await crawlPage(crawl, `${HTTPS_SITE}/a`, [
+          "http://secure.example/legacy",
+          "http://www.secure.example/b",
+          "http://SECURE.example/a?z=1&y=2",
+          // Duplicate of the first: the analyzer keeps one row per target.
+          "http://secure.example/legacy#frag",
+          // Not the site's host, not http, not a downgrade: none counts.
+          "http://other.example/x",
+          "http://secure.example.evil.example/x",
+          "https://secure.example/fine",
+          "/relative",
+        ]);
+        await crawlPage(crawl, `${HTTPS_SITE}/clean`, ["https://secure.example/a"]);
+        const found = await run("security.http-url", crawl);
+        expect(found).toHaveLength(1);
+        expect(found[0]).toMatchObject({
+          ruleId: "security.http-url",
+          severity: "warning",
+          pageId: linking,
+          pageUrl: `${HTTPS_SITE}/a`,
+          dedupeKey: `${HTTPS_SITE}/a`,
+          evidence: {
+            httpTargetCount: 3,
+            sample: [
+              "http://secure.example/a?y=2&z=1",
+              "http://secure.example/legacy",
+              "http://www.secure.example/b",
+            ],
+          },
+        });
+      });
+
+      it("does not rely on links.is_internal, which the crawler writes false for an http: target", async () => {
+        const crawl = await newCrawl(HTTPS_SITE);
+        await crawlPage(crawl, `${HTTPS_SITE}/a`, ["http://secure.example/legacy"]);
+        const stored = await db
+          .select({ isInternal: links.isInternal })
+          .from(links)
+          .where(eq(links.crawlId, crawl));
+        expect(stored).toEqual([{ isInternal: false }]);
+        expect(await run("security.http-url", crawl)).toHaveLength(1);
+      });
+
+      it("samples at most the sample limit, sorted, with the exact count", async () => {
+        const crawl = await newCrawl(HTTPS_SITE);
+        const total = BROKEN_SAMPLE_RESOURCES + 3;
+        const urls = Array.from(
+          { length: total },
+          (_, i) => `http://secure.example/${String(i).padStart(2, "0")}`,
+        );
+        await crawlPage(crawl, `${HTTPS_SITE}/many`, [...urls].reverse());
+        const found = await run("security.http-url", crawl);
+        expect(found.map((f) => f.evidence)).toEqual([
+          { httpTargetCount: total, sample: urls.slice(0, BROKEN_SAMPLE_RESOURCES) },
+        ]);
+      });
+
+      it("judges only pages fetched OK with a 200", async () => {
+        const crawl = await newCrawl(HTTPS_SITE);
+        await crawlPage(crawl, `${HTTPS_SITE}/gone`, ["http://secure.example/x"], {
+          statusCode: 404,
+          fetchClass: "client_error",
+        });
+        expect(await run("security.http-url", crawl)).toEqual([]);
+      });
+
+      it("caps the listing at caps.listing and reports the exact total", async () => {
+        const crawl = await newCrawl(HTTPS_SITE);
+        for (const n of [3, 1, 2]) {
+          await crawlPage(crawl, `${HTTPS_SITE}/p${n}`, ["http://secure.example/old"]);
+        }
+        const found = await run("security.http-url", crawl, 2);
+        expect(found.map((f) => f.pageUrl)).toEqual([`${HTTPS_SITE}/p1`, `${HTTPS_SITE}/p2`]);
+        expect(found[found.length - 1]!.evidence).toMatchObject({
+          truncated: { reported: 2, total: 3 },
+        });
+      });
+
+      it("does not key on an http: page row: an http: page with no http: link files nothing", async () => {
+        const crawl = await newCrawl(HTTPS_SITE);
+        await addPages(crawl, [{ url: `${HTTPS_SITE}/a` }, { url: "http://secure.example/legacy" }]);
+        expect(await run("security.http-url", crawl)).toEqual([]);
+      });
+
+      it("files nothing on an http: site, where http: links are the site itself", async () => {
+        const crawl = await newCrawl(HTTP_SITE);
+        await crawlPage(crawl, `${HTTP_SITE}/a`, ["http://plain.example/b"]);
+        expect(await run("security.http-url", crawl)).toEqual([]);
+      });
+
+      it("throws for a crawl that does not exist", async () => {
+        await expect(run("security.http-url", `crawl_${randomUUID()}`)).rejects.toThrow(
+          /no crawl/,
+        );
+      });
     });
 
     it("mixed-content counts the http resources of an https page, one finding per page", async () => {

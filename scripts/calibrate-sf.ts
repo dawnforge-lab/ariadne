@@ -413,7 +413,7 @@ const META_ROUNDING =
   "Measurement at the bound (checked per URL): both tools measured this description, each tool's verdict is the one its own width gives against the same bound (985 / 400), the bound lies between the two widths, and they differ by no more than 2 px. Screaming Frog reports description widths in whole pixels; ours is to one decimal (985.1 > 985, 399.1 < 400 on the ladder).";
 
 const HTTPS_DESIGN =
-  "Screaming Frog reports this on every page of a plain-HTTP site. Ariadne judges security headers only on pages fetched over https: (a plain-HTTP page cannot send HSTS, and on an http: site the missing HTTPS is the finding), and `security.http-url` only on an https: site that still serves pages over http:. HTTPS-only by design (plan deviation 1).";
+  "Screaming Frog reports this on every page of a plain-HTTP site. Ariadne judges security headers only on pages fetched over https: (a plain-HTTP page cannot send HSTS, and on an http: site the missing HTTPS is the finding), and `security.http-url` only on an https: site, where an HTTPS page's link to an http: URL on the site's own host is the downgrade (on an http: site every internal link is http:). HTTPS-only by design (plan deviation 1).";
 
 export const REASONS: Record<string, readonly Reason[]> = {
   "Security:Missing Content-Security-Policy Header": [{ side: "sf-only", match: httpSite, reason: HTTPS_DESIGN }],

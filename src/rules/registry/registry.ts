@@ -484,6 +484,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     post-crawl analysis on, flags the click-depth ladder from depth 4 (its
 //     depths equal ours); the owner kept 5 as a product choice (2026-11-06).
 //     Same calibration doc, where the difference is recorded as owner-decided.
+// 12. (PR #22 review) `security.http-url` reads `links`, not `pages`: an
+//     `https:` crawl never fetches an `http:` URL, so the page-row rule could
+//     not fire. It now files an HTTPS page fetched OK that links to an `http:`
+//     URL on the site's own host (modulo `www.`; `is_internal` is false for
+//     such a link and is not read), with `httpTargetCount` and a sorted
+//     `sample` of `BROKEN_SAMPLE_RESOURCES`.
 export const RULESET_VERSION = "0.20.0";
 
 /**

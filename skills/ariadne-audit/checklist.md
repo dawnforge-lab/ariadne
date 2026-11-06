@@ -1177,12 +1177,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     read the absence of the first rule as a pass.
   The probe is the only part of a crawl that fetches before robots.txt is read, so
   it runs once per crawl and answers CHECK-14 and CHECK-15 together.
-  A third rule reads the crawl's own pages: `security.http-url` (warning) — a page the
-  crawl fetched at an `http:` address, 200, on a site whose crawl started at `https:`.
-  One finding per page; a site crawled over `http:` produces none.
+  A third rule reads the crawl's own links: `security.http-url` (warning) — an HTTPS
+  page the crawl fetched OK (200) that links to an `http:` URL on the site's own host
+  (with or without `www.`), on a site whose crawl started at `https:`. One finding per
+  linking page; its HTTP URLs Linked column is the exact number of distinct `http:`
+  targets and its sample lists up to 10, sorted. The crawl never fetches those `http:`
+  URLs (they are outside an `https:` crawl's boundary), so whether each one redirects
+  is the host probe's answer, not this rule's. A site crawled over `http:` produces none.
 - **Evaluate**:
-  - FAIL if internal HTTP URLs exist or http:// doesn't redirect to https://
-  - Record: HTTP URL count, redirect behavior
+  - FAIL if `security.http-url` fires (internal links to HTTP URLs) or
+    `host.http-serves-200` fires (http:// does not redirect to https://)
+  - Record: number of linking pages and distinct HTTP URLs linked, redirect behavior
 
 ### CHECK-15: Primary host choice (www vs apex, legacy, staging)
 - **Priority**: Medium | **Requires**: Engine (host probe)

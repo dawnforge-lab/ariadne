@@ -341,11 +341,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Send Strict-Transport-Security on every HTTPS response, for example max-age=31536000; includeSubDomains. Start with a short max-age, confirm nothing on the host still needs HTTP, then raise it.",
   },
   "security.http-url": {
-    title: "Security: Page served over HTTP on an HTTPS site",
+    title: "Security: Internal links to HTTP URLs",
     explanation:
-      "Pages whose address starts with http:// on a site that was crawled over https://, and that answered 200. Visitors get a not-secure warning and search engines can index the HTTP address as a duplicate of the secure one.",
+      "HTTPS pages that link to an http:// address on the site's own host (with or without www) on a site that was crawled over https://; the row shows how many distinct HTTP addresses the page links to and lists up to 10 of them. Each click costs the visitor a redirect at best, and at worst lands on a page served without encryption that search engines can index as a duplicate of the secure one.",
     howToFix:
-      "301 each HTTP address to its HTTPS equivalent, and change the internal links, canonicals and sitemap entries that still point at the HTTP address.",
+      "Change each listed link to its https:// address, or to a root-relative path. Where a template, menu or CMS field produces the link, fix it there. Check that each HTTP address 301-redirects to its HTTPS equivalent for visitors arriving from old links.",
   },
   "security.mixed-content": {
     title: "Security: HTTPS page loading HTTP resources",

@@ -11,14 +11,15 @@
  *                                 or a safe `Referrer-Policy`
  *  - `security.headers-not-recorded`  the NOT MEASURED marker for the crawl that stored no
  *                                 headers (see below)
- *  - `security.http-url`          an `http:` page on a site crawled over `https:`
+ *  - `security.http-url`          an HTTPS page linking to an `http:` URL on the site's own
+ *                                 host, on a site crawled over `https:`
  *  - `security.mixed-content`     an HTTPS page referencing an image, script or stylesheet
  *                                 over `http:`
  *
  * **THE COHORT** for the header rules and mixed content is the HTTPS pages the
  * crawl fetched OK with a 200 (`FETCHED_OK`, URL starting `https:`). A plain-HTTP
- * page cannot send HSTS and is judged by `security.http-url` and the host rules
- * instead; a page that never answered has no headers to read.
+ * page cannot send HSTS and is judged by the host rules instead; a page that
+ * never answered has no headers to read.
  *
  * **WHY THE HEADER RULES ARE QUERY RULES, AND WHY THEY HAVE A MARKER.** A crawl
  * written before Phase 25 stores no response headers: `response_headers` is null on
@@ -288,6 +289,33 @@ async function headersNotRecordedFindings(
   ];
 }
 
+/**
+ * The host part of an `http:` link target as the analyzer stores it: the
+ * `normalizeUrl` spelling (lower-cased host, default port dropped), optionally
+ * with userinfo, and an IPv6 literal kept in its brackets. A port is not part of
+ * the host, so `http://site:8080/` is still the site's host.
+ */
+const HTTP_TARGET_HOST = String.raw`^http://(?:[^/?#@]*@)?(\[[^\]]*\]|[^/?#:]*)`;
+
+/**
+ * `security.http-url`: on a site crawled over `https:`, an HTTPS page fetched
+ * OK with a 200 that links (`<a href>`) to an `http:` URL on the site's own host.
+ *
+ * WHY LINKS AND NOT PAGES. The crawl never fetches such a URL: `enqueue` admits
+ * a URL only when `isSameOrigin(url, siteUrl)` holds, which on an `https:` site
+ * refuses every `http:` spelling, so there is never an `http:` row in `pages` to
+ * report. What the crawl does keep is the link that points there, and that link
+ * is the defect the site owner can fix.
+ *
+ * NOT `links.is_internal`: the writer sets it with the same `isSameOrigin`, so
+ * an `http:` target on an `https:` page is stored as external. The host is
+ * matched here instead, with `isSameOrigin`'s host equivalence (equal, modulo
+ * one leading `www.`), in SQL (hard rule 3).
+ *
+ * Evidence: the exact number of distinct `http:` targets on the page and a
+ * sorted sample of them. An `http:` site is the host rules' job, so it files
+ * nothing; a crawl that does not exist throws.
+ */
 async function httpUrlFindings(
   self: RuleIdentity,
   db: Db,
@@ -299,17 +327,36 @@ async function httpUrlFindings(
   const siteUrl = crawl.rows[0]?.site_url;
   // The crawl must exist before anything is concluded from an empty scan.
   if (siteUrl === undefined) throw new Error(`security.http-url: no crawl '${crawlId}'`);
-  // A site crawled over http is judged by the host rules; an http page on it is
+  // A site crawled over http is judged by the host rules; an http link on it is
   // the site, not a downgrade.
   if (!siteUrl.startsWith("https:")) return [];
-  const result = await db.execute<{ id: string; url: string; total_matches: number }>(sql`
-    select p.id, p.url, count(*) over ()::int as total_matches
+  const apex = new URL(siteUrl).hostname.toLowerCase().replace(/^www\./, "");
+  const result = await db.execute<{
+    id: string;
+    url: string;
+    http_target_count: number;
+    sample: string[];
+    total_matches: number;
+  }>(sql`
+    select p.id, p.url,
+           count(distinct l.target_url)::int as http_target_count,
+           (array_agg(distinct l.target_url order by l.target_url))[1:${BROKEN_SAMPLE_RESOURCES}] as sample,
+           count(*) over ()::int as total_matches
     from pages p
-    where p.crawl_id = ${crawlId} and ${FETCHED_OK("p")} and starts_with(p.url, 'http:')
+    join links l on l.crawl_id = p.crawl_id and l.source_page_id = p.id
+    where p.crawl_id = ${crawlId} and ${HTTPS_COHORT}
+      and starts_with(l.target_url, 'http:')
+      and lower(substring(l.target_url from ${HTTP_TARGET_HOST})) in (${apex}, ${"www." + apex})
+    group by p.id, p.url
     order by p.url
     ${limitTo(caps.listing)}`);
   const findings = result.rows.map((row) =>
-    queryFinding(self, { pageId: row.id, pageUrl: row.url, evidence: {}, dedupeKey: row.url }),
+    queryFinding(self, {
+      pageId: row.id,
+      pageUrl: row.url,
+      evidence: { httpTargetCount: row.http_target_count, sample: row.sample },
+      dedupeKey: row.url,
+    }),
   );
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
@@ -404,7 +451,10 @@ export const securityRules: QueryRule[] = [
     checkIds: ["CHECK-14"],
     category: "host",
     severity: HTTP_URL.severity,
-    columns: [],
+    columns: [
+      { key: "httpTargetCount", label: "HTTP URLs Linked" },
+      { key: "sample", label: "HTTP URL Sample" },
+    ],
     ...copyFor(HTTP_URL.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => httpUrlFindings(HTTP_URL, db, crawlId, capsOr(caps)),

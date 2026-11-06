@@ -20,8 +20,9 @@ produces them without a re-crawl (§11). By family:
   (warning), `security.headers-missing` (info; the Missing Headers column names
   which), `security.http-url` (warning, `category` `host`) and
   `security.mixed-content` (warning). All four need a site crawled over HTTPS:
-  `security.http-url` reports its pages that still answer over `http:`, and the
-  other three judge its HTTPS pages. The two header
+  `security.http-url` reports its HTTPS pages that link to an `http:` URL on the
+  site's own host, and the other three judge its HTTPS pages' headers and
+  resources. The two header
   rules read the response headers Phase 25 stores, so on a crawl any of whose
   pages predates migration 0025 they write nothing and the NOT MEASURED marker
   `security.headers-not-recorded` (info) fires instead — the fourteenth marker
