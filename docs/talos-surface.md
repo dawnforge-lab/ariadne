@@ -1139,8 +1139,8 @@ replace a column derived from the page row.
 Pinned: `test/api/query.test.ts:1256` "returns the URL slice with the evidence as
 stored", `test/api/query.test.ts:1437` "never leaks a column the projection did
 not name", `test/api/query.test.ts:1445` "carries a finding with no page as a
-null url", `test/rules/helpers.test.ts:695` "maps each fetch class to the status
-a reader acts on", `test/rules/helpers.test.ts:715` "names a block a block,
+null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
+a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1225` "declares a column for every evidence key it
 writes, and writes every column it declares",

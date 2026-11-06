@@ -24,7 +24,7 @@ traffic for the hand-check was 11 URLs, under the cap of 40.
 
 | # | clause | result | where |
 |---|---|---|---|
-| 1 | full suite green, 0 skipped; `tsc` clean | **pass**: 104 files / 2,816 tests, 0 failed, 0 skipped; `tsc` clean | §1 |
+| 1 | full suite green, 0 skipped; `tsc` clean | **pass**: 104 files / 2,859 tests, 0 failed, 0 skipped; `tsc` clean | §1 |
 | 2 | positive and negative tests per rule; a fixture page per rule, or a `SKIP_HARNESS_CLAIMS` entry with its reason | **pass**: 40 of 40 have DB or unit tests both ways; 34 fire on the fixture crawl; 6 joined `SKIP_HARNESS_CLAIMS` (16 → 22), each argued | §2 |
 | 3 | calibration report against Screaming Frog | **pass**: `docs/gates/phase-26a-calibration.md`, 0 UNEXPLAINED / 0 MISMATCH, run with the SEO Spider's post-crawl analysis on; one threshold moved (`HIGH_EXTERNAL_OUTLINKS` 100 → 10, owner confirmed); `DEEP_DEPTH` kept at 5 against SF's 3 (owner decision, recorded as an owner-decided threshold divergence); every mapped filter calibrated except the HTTPS-only four | §3 |
 | 4 | rules re-run over the stored lavishalice crawl (no re-crawl); each new rule's count reviewed against the site for false positives; the four HTTPS rules checked by hand | **pass**: 10 rules fire, 30 silent, every silence explained; samples hand-checked; 1 false positive found and fixed (`sitemap.lastmod-invalid`, 205 → 0); `security.headers-not-recorded` silent | §4, §5 |
@@ -33,10 +33,10 @@ traffic for the hand-check was 11 URLs, under the cap of 40.
 
 | | |
 |---|---|
-| `npm test` (`DATABASE_URL` set) | **104 files / 2,816 tests, 0 failed, 0 skipped** (158 s, 2026-11-06 15:27 UTC), the run after the last edit: the post-crawl calibration (§3), the owner's `DEEP_DEPTH` = 5 decision and the corrected hreflang crawl-scope reason. The analysis-on calibration commit itself ran 104 files / 2,815 tests green (12:47 UTC). Before it: **104 files / 2,806 tests, 0 failed, 0 skipped** (160 s, 2026-11-05 20:06 UTC). That was the run after the last edit of Task 14's fix round, on the tree of `40dab51` plus the docs and test-comment changes of the closing commit. Before the fix round, 104 files / 2,803 tests were green on `7ddab87`, and one earlier run on that commit had 1 failure, the pacing flake in §7. The fix round added 3 tests |
+| `npm test` (`DATABASE_URL` set) | **104 files / 2,859 tests, 0 failed, 0 skipped** (2026-11-06), the run after the last edit of the PR #22 review and re-review fixes (`d086062..` this commit; the fix report is `.superpowers/sdd/…/pr22-review-fix-report.md`). Those fixes added 43 tests. Before them: **104 files / 2,816 tests, 0 failed, 0 skipped** (158 s, 2026-11-06 15:27 UTC), the run after the post-crawl calibration (§3), the owner's `DEEP_DEPTH` = 5 decision and the corrected hreflang crawl-scope reason. The analysis-on calibration commit itself ran 104 files / 2,815 tests green (12:47 UTC). Before it: **104 files / 2,806 tests, 0 failed, 0 skipped** (160 s, 2026-11-05 20:06 UTC). That was the run after the last edit of Task 14's fix round, on the tree of `40dab51` plus the docs and test-comment changes of the closing commit. Before the fix round, 104 files / 2,803 tests were green on `7ddab87`, and one earlier run on that commit had 1 failure, the pacing flake in §7. The fix round added 3 tests |
 | `npx tsc --noEmit` | clean |
 | baseline at the branch point (`47c26b5`) | 92 files / 2,502 tests (`.superpowers/sdd/…/baseline-test.log`) |
-| phase delta | +12 files, +314 tests |
+| phase delta | +12 files, +357 tests |
 | ruleset | **0.20.0** (from 0.19.0; one bump for the phase, note in `src/rules/registry/registry.ts`) |
 | rules | **154**: 49 page / 91 query / 14 metric (114 + 40). Finding rules split 33 critical / 54 warning / 53 info; the 40 new ones are 23 warning / 17 info |
 | migrations | none in this phase (0000–0025 as Phase 25 left them); `EXTRACTION_VERSION` unchanged |
