@@ -1285,7 +1285,7 @@ const badLastmod: Fixture = {
   sitemapLastmod: "2026-13-01",
   category: "sitemap",
   name: "Page whose sitemap entry carries an impossible lastmod",
-  expectedIssues: ["sitemap.lastmod-invalid"],
+  expectedIssues: ["h2.duplicate", "sitemap.lastmod-invalid"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

@@ -160,7 +160,7 @@ const soft404: Fixture = {
   path: "/authored3/soft-404",
   category: CONTENT,
   name: "Soft 404 (200 OK, page cannot be found)",
-  expectedIssues: ["content.soft-404"],
+  expectedIssues: ["content.soft-404", "title.same-as-h1"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

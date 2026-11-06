@@ -2104,14 +2104,17 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-35: Title tags — unique, intent-led, not truncated
 - **Priority**: High | **Requires**: Engine
-- **Engine**: `issues_list` with `checkId: "CHECK-35"` — eight rules:
+- **Engine**: `issues_list` with `checkId: "CHECK-35"` — ten rules:
   `title.missing` (critical), `title.too-short` (info, under 30 characters),
   `title.too-long` (info, over 60) and `title.duplicate` (warning), plus
   `title.pixel-too-long` (warning, wider than 561 pixels) and
   `title.pixel-too-short` (info, narrower than 200 pixels), which measure the
   title in the search result's font and do not judge a title with a character
   outside the Latin, Greek and Cyrillic scripts (the character rules still apply
-  to it), plus `head.tags-outside-head` (warning, a title or meta
+  to it), plus `title.multiple` (warning, more than one `<title>` element; judged
+  only on a crawl extracted at version 2, `extraction.not-recorded` speaks for an older
+  one) and `title.same-as-h1` (info, the title and the first H1 equal after collapsing
+  whitespace and ignoring case; judges every crawl), plus `head.tags-outside-head` (warning, a title or meta
   description after the `<head>` ended; since 26b its `elements` also names
   `social` for Open Graph or X tags there, which is CHECK-87's half of the same
   finding, so a row naming only `social` is not a title fault) and `render.title-changed` (warning, a
@@ -2201,7 +2204,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-36"` — `meta-description.missing`
   (warning), `meta-description.too-short` (info), `meta-description.too-long` (info)
-  and `meta-description.duplicate` (warning), plus `meta-description.pixel-too-long`
+  and `meta-description.duplicate` (warning), plus `meta-description.multiple`
+  (warning, more than one meta description element; judged only on a crawl extracted
+  at version 2) and `meta-description.pixel-too-long`
   (warning, wider than 985 pixels) and `meta-description.pixel-too-short` (info,
   narrower than 400 pixels), which measure the description in the search result's
   font and do not judge one with a character outside the Latin, Greek and Cyrillic
@@ -2251,6 +2256,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 - **Engine**: `issues_list` with `checkId: "CHECK-37"` — `headings.h1-missing`
   (warning), `headings.h1-multiple` (info), `headings.h1-too-long` (info, first H1
   over 70 characters), `headings.level-skip` (info),
+  `h2.missing` (info, no H2 on the page; judges every crawl), `h2.too-long` (info, first
+  H2 over 70 characters) and `h2.duplicate` (info, the first H2 shared across pages,
+  grouped as `h1.duplicate-text` is; the last two need a crawl extracted at version 2),
   `h1.duplicate-text` (warning; rel=prev pages left out, see CHECK-35),
   `h1.duplicate-skipped` (info) and
   `render.h1-changed` (warning, a rendered page whose first H1 JavaScript changed;

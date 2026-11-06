@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   H1_MAX,
+  H2_MAX,
   META_MAX,
   META_MIN,
   onPageRules,
@@ -18,6 +19,7 @@ import {
   expectSilentOnNonOkFetches,
   expectSilentOnNotJudged,
   mkPage,
+  mkV1Page,
   ruleLookup,
 } from "./mk-page.js";
 
@@ -38,13 +40,18 @@ const BROKEN_ON_PAGE = [
     wordCount: 3,
     renderableWordCount: 3,
     hasLoremIpsum: true,
+    h2Count: 0,
+    titleCount: 2,
+    metaDescriptionCount: 2,
   },
   { title: "x".repeat(TITLE_MIN - 1), metaDescription: "x".repeat(META_MIN - 1) },
+  { title: "Shoes ", h1Text: "shoes" },
   {
     title: "x".repeat(TITLE_MAX + 1),
     metaDescription: "x".repeat(META_MAX + 1),
     h1Count: 3,
     h1Text: "x".repeat(H1_MAX + 1),
+    h2Text: "x".repeat(H2_MAX + 1),
     url: "https://example.com/" + "a".repeat(URL_MAX),
   },
 ];
@@ -58,10 +65,15 @@ describe("onPageRules metadata", () => {
         "headings.h1-multiple",
         "headings.h1-too-long",
         "headings.level-skip",
+        "h2.missing",
+        "h2.too-long",
         "meta-description.missing",
+        "meta-description.multiple",
         "meta-description.too-long",
         "meta-description.too-short",
         "title.missing",
+        "title.multiple",
+        "title.same-as-h1",
         "title.too-long",
         "title.too-short",
         "url.too-long",
@@ -91,6 +103,11 @@ describe("onPageRules metadata", () => {
     expect(rule("headings.h1-missing").checkIds).toEqual(["CHECK-37"]);
     expect(rule("headings.h1-too-long").checkIds).toEqual(["CHECK-37"]);
     expect(rule("url.too-long").checkIds).toEqual(["CHECK-28"]);
+    expect(rule("h2.missing").checkIds).toEqual(["CHECK-37"]);
+    expect(rule("h2.too-long").checkIds).toEqual(["CHECK-37"]);
+    expect(rule("title.multiple").checkIds).toEqual(["CHECK-35"]);
+    expect(rule("title.same-as-h1").checkIds).toEqual(["CHECK-35"]);
+    expect(rule("meta-description.multiple").checkIds).toEqual(["CHECK-36"]);
     expect(rule("content.placeholder").checkIds).toEqual(["CHECK-40"]);
   });
 
@@ -268,6 +285,57 @@ describe("heading rules", () => {
   it("headings.h1-too-long reports the analyzer's 300-character cap as 300", () => {
     const f = rule("headings.h1-too-long").run(mkPage({ h1Text: "x".repeat(300) }));
     expect(f[0]!.evidence).toMatchObject({ length: 300 });
+  });
+
+  it("h2.missing fires on h2Count 0, judges a v1 row too, and is silent on one H2", () => {
+    const f = rule("h2.missing").run(mkPage({ h2Count: 0 }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.evidence).toMatchObject({ h2Count: 0 });
+    expect(rule("h2.missing").run(mkV1Page({ h2Count: 0 }))).toHaveLength(1);
+    expect(rule("h2.missing").run(mkPage({ h2Count: 1 }))).toHaveLength(0);
+  });
+
+  it("h2.too-long boundary: 71 fires, 70 does not, null (no H2 or a v1 row) is silent", () => {
+    const f = rule("h2.too-long").run(mkPage({ h2Text: "x".repeat(71) }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.evidence).toMatchObject({ h2Text: "x".repeat(71), length: 71, max: 70 });
+    expect(rule("h2.too-long").run(mkPage({ h2Text: "x".repeat(70) }))).toHaveLength(0);
+    expect(rule("h2.too-long").run(mkPage({ h2Text: null }))).toHaveLength(0);
+    expect(rule("h2.too-long").run(mkV1Page())).toHaveLength(0);
+  });
+
+  it("title.multiple fires above one element, silent on one and on a v1 row", () => {
+    const f = rule("title.multiple").run(mkPage({ titleCount: 2 }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.evidence).toMatchObject({ titleCount: 2 });
+    expect(rule("title.multiple").run(mkPage({ titleCount: 1 }))).toHaveLength(0);
+    expect(rule("title.multiple").run(mkPage({ titleCount: 0 }))).toHaveLength(0);
+    expect(rule("title.multiple").run(mkV1Page())).toHaveLength(0);
+  });
+
+  it("meta-description.multiple fires above one element, silent on one and on a v1 row", () => {
+    const f = rule("meta-description.multiple").run(mkPage({ metaDescriptionCount: 3 }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.evidence).toMatchObject({ metaDescriptionCount: 3 });
+    expect(rule("meta-description.multiple").run(mkPage({ metaDescriptionCount: 1 }))).toHaveLength(0);
+    expect(rule("meta-description.multiple").run(mkV1Page())).toHaveLength(0);
+  });
+
+  it("title.same-as-h1 compares after whitespace collapse, trim and case, on every crawl", () => {
+    const rid = rule("title.same-as-h1");
+    const f = rid.run(mkPage({ title: "Shoes ", h1Text: "shoes" }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("info");
+    expect(f[0]!.evidence).toMatchObject({ title: "Shoes ", h1Text: "shoes" });
+    expect(rid.run(mkPage({ title: "Red   Running  Shoes", h1Text: " red running shoes" }))).toHaveLength(1);
+    expect(rid.run(mkV1Page({ title: "Shoes", h1Text: "SHOES" }))).toHaveLength(1);
+    expect(rid.run(mkPage({ title: "Shoes", h1Text: "Shoe" }))).toHaveLength(0);
+    expect(rid.run(mkPage({ title: null, h1Text: null }))).toHaveLength(0);
+    expect(rid.run(mkPage({ title: "", h1Text: "" }))).toHaveLength(0);
   });
 
   it("url.too-long boundary: 116 fires, 115 does not, measured on the stored string", () => {

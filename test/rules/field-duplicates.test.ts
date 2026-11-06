@@ -40,10 +40,11 @@ const TITLE = "title.duplicate";
 const META = "meta-description.duplicate";
 const H1 = "h1.duplicate-text";
 const H1_SKIPPED = "h1.duplicate-skipped";
+const H2 = "h2.duplicate";
 
 describe("fieldDuplicateRules metadata", () => {
   it("defines the three duplicate rules and the heading skip", () => {
-    expect(fieldDuplicateRules.map((r) => r.id)).toEqual([TITLE, META, H1, H1_SKIPPED]);
+    expect(fieldDuplicateRules.map((r) => r.id)).toEqual([TITLE, META, H1, H2, H1_SKIPPED]);
   });
 
   it("claims the checklist ids, severities and categories the task assigns", () => {
@@ -57,6 +58,7 @@ describe("fieldDuplicateRules metadata", () => {
       [H1]: [["CHECK-37"], "warning", "on-page", "query"],
       // The skip is a statement about the CRAWL, not a fault on the site, so it
       // is info — and it claims the same check as the rule it stands in for.
+      [H2]: [["CHECK-37"], "info", "on-page", "query"],
       [H1_SKIPPED]: [["CHECK-37"], "info", "on-page", "query"],
     });
   });
@@ -85,6 +87,10 @@ describe("the field duplicate rules against the database", () => {
     title?: string | null;
     metaDescription?: string | null;
     h1Text?: string | null;
+    /** The first H2, as extraction 2 writes it. */
+    h2Text?: string | null;
+    /** Defaults to 2: the crawl was written by the current extraction. */
+    extractionVersion?: number | null;
     /** How many `<h1>` elements the page carried. Defaults to 1 where there is text. */
     h1Count?: number;
     /**
@@ -150,6 +156,8 @@ describe("the field duplicate rules against the database", () => {
         title: s.title === undefined ? null : s.title,
         metaDescription: s.metaDescription === undefined ? null : s.metaDescription,
         h1Text,
+        h2Text: s.h2Text === undefined ? null : s.h2Text,
+        extractionVersion: s.extractionVersion === undefined ? 2 : s.extractionVersion,
         // The writer stores a count and the text off the same parse, so a row
         // with text has an h1. A spec that says otherwise is describing the
         // pre-Phase-7 row, which is what the skip rule is about.
@@ -505,6 +513,51 @@ describe("the field duplicate rules against the database", () => {
       // And no skip either: these rows have heading text stored, it is just
       // blank, so the column was written and the check DID run.
       expect(await run(H1_SKIPPED, crawlId)).toEqual([]);
+    });
+  });
+
+  describe("h2.duplicate", () => {
+    it("groups pages sharing a first H2, trimmed, and leaves a different one out", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", h2Text: "Our Story" },
+        { path: "/b", h2Text: "Our Story " },
+        { path: "/c", h2Text: "Our story" },
+        { path: "/d", h2Text: "Unique" },
+        { path: "/e", h2Text: null },
+      ]);
+      const found = await run(H2, crawlId);
+      expect(found).toHaveLength(1);
+      const f = found[0]!;
+      expect(f.ruleId).toBe(H2);
+      expect(f.severity).toBe("info");
+      expect(f.evidence).toMatchObject({ h2Text: "Our Story", count: 2 });
+      expect(f.evidence.pages).toEqual([url("/a"), url("/b")]);
+    });
+
+    it("finds nothing when every first H2 is distinct", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [
+        { path: "/a", h2Text: "One" },
+        { path: "/b", h2Text: "Two" },
+      ]);
+      expect(await run(H2, crawlId)).toEqual([]);
+    });
+
+    it("refuses a v1 crawl and a mixed crawl: extraction.not-recorded speaks", async () => {
+      const v1 = await newCrawl();
+      await addPages(v1, [
+        { path: "/a", h2Text: "Same", extractionVersion: 1 },
+        { path: "/b", h2Text: "Same", extractionVersion: 1 },
+      ]);
+      expect(await run(H2, v1)).toEqual([]);
+      const mixed = await newCrawl();
+      await addPages(mixed, [
+        { path: "/a", h2Text: "Same" },
+        { path: "/b", h2Text: "Same" },
+        { path: "/c", h2Text: "Same", extractionVersion: 1 },
+      ]);
+      expect(await run(H2, mixed)).toEqual([]);
     });
   });
 

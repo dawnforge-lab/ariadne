@@ -430,11 +430,20 @@ describe("checklist coverage", () => {
   //   page    49 + 4 = 53
   //   query   92 + 2 = 94
   //   total   155 + 6 = 161
-  it("pins the ruleset split the gate doc reports: 161 rules = 53 page + 94 query + 14 metric", () => {
+  //
+  // Phase 26b Task 7 adds six more: FIVE page rules in
+  // `src/rules/page/on-page.ts` (`h2.missing`, `h2.too-long`, `title.multiple`,
+  // `meta-description.multiple`, `title.same-as-h1`) and ONE query rule,
+  // `h2.duplicate`, in `src/rules/query/field-duplicates.ts`.
+  //
+  //   page    53 + 5 = 58
+  //   query   94 + 1 = 95
+  //   total   161 + 6 = 167
+  it("pins the ruleset split the gate doc reports: 167 rules = 58 page + 95 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(161);
-    expect(registry.byKind("page")).toHaveLength(53);
-    expect(registry.byKind("query")).toHaveLength(94);
+    expect(registry.all()).toHaveLength(167);
+    expect(registry.byKind("page")).toHaveLength(58);
+    expect(registry.byKind("query")).toHaveLength(95);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

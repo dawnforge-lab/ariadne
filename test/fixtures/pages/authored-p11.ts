@@ -65,7 +65,7 @@ const brokenResource: Fixture = {
   path: P11_BROKEN_PATH,
   category: RESOURCES,
   name: "Page referencing an image the site does not serve",
-  expectedIssues: ["resources.broken"],
+  expectedIssues: ["h2.duplicate", "resources.broken"],
   exact: true,
   handler: (req, res) =>
     serve(req, res, () => ({

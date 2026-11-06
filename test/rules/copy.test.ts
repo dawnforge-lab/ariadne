@@ -6,6 +6,7 @@ import { buildRegistry } from "../../src/rules/index.js";
 import {
   HEADING_MAX_STEP,
   H1_MAX,
+  H2_MAX,
   META_MAX,
   META_MIN,
   TITLE_MAX,
@@ -1853,6 +1854,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
     "meta-description.too-short": String(META_MIN),
     "meta-description.too-long": String(META_MAX),
     "headings.h1-too-long": String(H1_MAX),
+    "h2.too-long": String(H2_MAX),
     "url.too-long": String(URL_MAX),
     "content.thin": String(THIN_WORDS),
     "performance.slow-response": String(SLOW_MS),

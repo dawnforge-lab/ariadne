@@ -100,6 +100,7 @@ import {
 import type { RuleCaps } from "../registry/types.js";
 import { DUPLICATE_SAMPLE_URLS } from "./content.js";
 import { assertCrawl, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { v2Gate } from "./page-facts.js";
 import { CLUSTER_KEY, HREFLANG_CLUSTER_CTES } from "./hreflang-cluster.js";
 
 /**
@@ -117,6 +118,7 @@ const CATEGORY = "on-page" as const;
 const TITLE: RuleIdentity = { id: "title.duplicate", severity: "warning" };
 const META: RuleIdentity = { id: "meta-description.duplicate", severity: "warning" };
 const H1: RuleIdentity = { id: "h1.duplicate-text", severity: "warning" };
+const H2: RuleIdentity = { id: "h2.duplicate", severity: "info" };
 const H1_SKIPPED: RuleIdentity = { id: "h1.duplicate-skipped", severity: "info" };
 
 /** The stable identity of one duplicated value. */
@@ -136,7 +138,7 @@ export interface DuplicateField {
    * through `sql.raw`: only these literals can, whoever imports the function.
    * Each has a partial `pages_dupe_*` index on the JUDGED predicate.
    */
-  column: "title" | "meta_description" | "h1_text" | "og_title" | "og_description";
+  column: "title" | "meta_description" | "h1_text" | "h2_text" | "og_title" | "og_description";
   /** The evidence key the duplicated value is written under. */
   evidenceKey: string;
 }
@@ -510,6 +512,37 @@ export const fieldDuplicateRules: QueryRule[] = [
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) =>
       groupFindings(db, crawlId, H1, { column: "h1_text", evidenceKey: "h1Text" }, capsOr(caps)),
+  }),
+
+  // The first H2 of each page (`pages.h2_text`, written by extraction 2): the
+  // H1 rule's shape and the H1 rule's limits. A crawl not wholly recorded at
+  // version 2 is refused, and `extraction.not-recorded` speaks for it.
+  defineRule<QueryRule>({
+    kind: "query",
+    id: H2.id,
+    checkIds: ["CHECK-37"],
+    category: CATEGORY,
+    severity: H2.severity,
+    columns: [
+      { key: "h2Text", label: "H2-1" },
+      { key: "count", label: "Occurrences" },
+      { key: "pages", label: "Addresses" },
+      { key: "alternatesCollapsed", label: "Alternates Collapsed" },
+      { key: "paginationExcluded", label: "Paginated Pages Set Aside (Site-Wide)" },
+    ],
+    ...copyFor(H2.id),
+    rulesetVersion: RULESET_VERSION,
+    run: async (db, crawlId, caps) => {
+      const gate = await v2Gate(db, crawlId);
+      if (!gate.recorded) return [];
+      return groupFindings(
+        db,
+        crawlId,
+        H2,
+        { column: "h2_text", evidenceKey: "h2Text" },
+        capsOr(caps),
+      );
+    },
   }),
 
   // A check we could not run is visible, never silent (hard rule 7). One

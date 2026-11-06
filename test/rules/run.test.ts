@@ -135,7 +135,7 @@ describe("buildRegistry", () => {
     expect(ids).toContain("render.title-changed");
     expect(ids).toContain("render.meta-description-changed");
     expect(ids).toContain("render.h1-changed");
-    expect(ids.length).toBe(161);
+    expect(ids.length).toBe(167);
   });
 
   it("registers every kind the runner drives", () => {
@@ -234,6 +234,8 @@ describe("runRules against the database", () => {
       // characters, inside META_MIN..META_MAX.
       metaDescription: `${CLEAN_META} About ${tag}.`,
       h1Text: `A heading about ${tag}`,
+      // Per-URL like the head fields above: `h2.duplicate` groups the first H2.
+      h2Text: `A section about ${tag}`,
       ...overrides,
     });
   }

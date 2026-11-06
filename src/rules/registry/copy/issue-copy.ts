@@ -602,6 +602,48 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Move the title, meta description and social tags into the <head> above any other markup, and remove or move the element named in Closed By out of the head.",
   },
+  "h2.missing": {
+    title: "Headings: No H2",
+    explanation:
+      "Indexable, self-canonical pages with no H2. Without subheadings a page has no outline for readers, assistive technology or search engines to scan.",
+    howToFix:
+      "Add a descriptive H2 for each section of the content, under the page's H1.",
+  },
+  "h2.too-long": {
+    title: "Headings: H2 over 70 characters",
+    explanation:
+      "Indexable, self-canonical pages whose first H2 is longer than 70 characters. A long H2 is usually body copy marked up as a heading, which weakens the section outline.",
+    howToFix:
+      "Shorten the H2 to the section's subject in 70 characters or fewer and move the rest into the paragraph below it.",
+  },
+  "h2.duplicate": {
+    title: "Headings: Duplicate H2",
+    explanation:
+      "Groups of indexable, self-canonical pages whose first H2 is identical. Pages that declare each other as hreflang alternates count as one page, and pages 2 onwards of a paginated series are left out; each row names the H2, the number of distinct pages, up to 20 of their URLs, how many alternates were folded in and how many paginated pages were set aside. A shared first H2 is usually a template heading rather than a section about the page's own subject.",
+    howToFix:
+      "Make the first H2 describe what is specific to the page, and keep template headings such as related links further down the page.",
+  },
+  "title.multiple": {
+    title: "Page titles: Multiple title elements",
+    explanation:
+      "Indexable, self-canonical pages with more than one title element in the HTML. Browsers and search engines pick one, and which one wins is not under your control.",
+    howToFix:
+      "Remove the extra title elements so the page has exactly one, usually a plugin or a template adding its own.",
+  },
+  "meta-description.multiple": {
+    title: "Meta description: Multiple meta description elements",
+    explanation:
+      "Indexable, self-canonical pages with more than one meta description element in the HTML. Search engines use one of them, and the page may show one you did not choose.",
+    howToFix:
+      "Remove the extra meta description elements so the page has exactly one, usually a plugin or a template adding its own.",
+  },
+  "title.same-as-h1": {
+    title: "Page titles: Same as H1",
+    explanation:
+      "Indexable, self-canonical pages whose title and first H1 are identical after ignoring case and spacing. It is not an error, but it wastes the chance to give search results and the page two different phrasings of the topic.",
+    howToFix:
+      "Rewrite the title for the search result, with the topic first and the site name last, and keep the H1 for the reader on the page.",
+  },
   "headings.h1-missing": {
     title: "H1: Missing",
     explanation:

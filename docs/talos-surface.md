@@ -1899,14 +1899,14 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 "partitions every fetched URL over the four columns",
 `test/rules/health-metrics.test.ts:564`
 "buckets the findings the capped run wrote, and no others"; the copy contracts —
-`test/rules/copy.test.ts:1493` "names every column and the population they
-are over", `test/rules/copy.test.ts:1518` "says the counts are the authority, not the
-ratio", `test/rules/copy.test.ts:1535` "grades nothing: no score, no label, no
+`test/rules/copy.test.ts:1494` "names every column and the population they
+are over", `test/rules/copy.test.ts:1519` "says the counts are the authority, not the
+ratio", `test/rules/copy.test.ts:1536` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:511` "site.health is filed under the
+`test/rules/coverage.test.ts:520` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:2936` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:2948` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
