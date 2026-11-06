@@ -466,7 +466,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "directives.unavailable-after": {
     title: "Directives: unavailable_after date within 30 days",
     explanation:
-      "Pages whose unavailable_after directive names a date that had passed or fell within 30 days of the crawl, or a date search engines cannot read. A page leaves the index once the date passes, and a date that cannot be parsed is ignored, so the page stays indexed when its author expected it to leave. The Days From Fetch column counts the days from the crawl to the date; negative means already past.",
+      "Pages whose unavailable_after directive names a date that had passed or fell within 30 days of the crawl, or a date in no standard format (ISO 8601, or RFC 822, 850 or 1123) that search engines cannot read. A page leaves the index once the date passes, and an unreadable date is ignored, so the page stays indexed when its author expected it to leave. The Days From Fetch column counts the days from the crawl to the date (negative means already past), and Assumed UTC marks a date and time written without a time zone, which is read as UTC.",
     howToFix:
       "Remove the directive if the page should stay indexed, or move the date well beyond 30 days. If the date cannot be read, rewrite it in a standard format such as 2027-01-31T00:00:00Z.",
   },

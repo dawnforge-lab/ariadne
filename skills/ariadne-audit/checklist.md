@@ -777,7 +777,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
        `max-image-preview:none` or `noimageindex`: the page is indexed but its
        result is stripped of text or images.
      - `directives.unavailable-after` (warning) — an unavailable_after date that
-       had passed, falls within 30 days of the crawl, or cannot be parsed.
+       had passed, falls within 30 days of the crawl, or cannot be parsed. Only
+       ISO 8601 and the RFC 822 / 850 / 1123 forms parse (`dateParsed: false`
+       otherwise, never a guess); a zone-less ISO date-time is read as UTC and the
+       evidence carries `assumedUtc: true`, so say the zone was assumed.
      - `indexability.meta-header-conflict` (critical) — a page whose robots meta and
        `X-Robots-Tag` header disagree. That is a directive the site cannot predict
        the outcome of, and it is a finding on its own.

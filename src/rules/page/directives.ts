@@ -2,6 +2,7 @@ import {
   finding,
   isAuditable,
   pageRule,
+  parseRobotsDate,
   robotsTokens,
   unavailableAfterOf,
 } from "../helpers.js";
@@ -78,7 +79,10 @@ export const directiveRules: PageRule[] = [
   // The page leaves the index on a date. Judged against the page's own
   // `fetched_at`, so re-judging an old crawl gives the same answer. A date that
   // does not parse fires too: Google ignores a directive it cannot parse, so
-  // the page is not leaving the index when its author thinks it is.
+  // the page is not leaving the index when its author thinks it is. The date is
+  // read by `parseRobotsDate` (ISO 8601 and the RFC 822 / 850 / 1123 forms,
+  // nothing else), never by `Date.parse`; a zone-less ISO form is read as UTC
+  // and the evidence carries `assumedUtc: true`.
   pageRule(
     "directives.unavailable-after",
     ["CHECK-04"],
@@ -88,6 +92,7 @@ export const directiveRules: PageRule[] = [
       { key: "unavailableAfter", label: "Unavailable After" },
       { key: "dateParsed", label: "Date Parsed" },
       { key: "daysFromFetch", label: "Days From Fetch" },
+      { key: "assumedUtc", label: "Assumed UTC", optional: true },
     ],
     (p, self) => {
       // A fetched-OK page always has a `fetched_at`; null is a row from before
@@ -95,22 +100,24 @@ export const directiveRules: PageRule[] = [
       if (!isAuditable(p) || p.fetchedAt === null) return [];
       const dates = [unavailableAfterOf(p.robotsMeta), unavailableAfterOf(p.xRobotsTag)]
         .filter((d): d is string => d !== null)
-        .map((raw) => ({ raw, at: Date.parse(raw) }));
+        .map((raw) => ({ raw, parsed: parseRobotsDate(raw) }));
       if (dates.length === 0) return [];
 
-      const unparsed = dates.find((d) => Number.isNaN(d.at));
+      const unparsed = dates.find((d) => d.parsed === null);
       if (unparsed) {
         return [finding(self, p, { unavailableAfter: unparsed.raw, dateParsed: false })];
       }
+      const parsed = dates.map((d) => ({ raw: d.raw, ...d.parsed! }));
       // The earliest date wins: the page is gone from the moment either source
       // says so.
-      const earliest = dates.reduce((a, b) => (b.at < a.at ? b : a));
+      const earliest = parsed.reduce((a, b) => (b.at < a.at ? b : a));
       const fetched = p.fetchedAt.getTime();
       if (earliest.at >= fetched + UNAVAILABLE_AFTER_WARN_DAYS * DAY_MS) return [];
       return [
         finding(self, p, {
           unavailableAfter: earliest.raw,
           dateParsed: true,
+          ...(earliest.assumedUtc ? { assumedUtc: true } : {}),
           daysFromFetch: Math.floor((earliest.at - fetched) / DAY_MS),
         }),
       ];

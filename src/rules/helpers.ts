@@ -494,6 +494,120 @@ export function unavailableAfterOf(value: string | null): string | null {
   return match ? match[1]!.trim() : null;
 }
 
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+/** RFC 822 zone names (section 5.1), plus `UTC`, as minutes east of UTC. */
+const RFC822_ZONES: ReadonlyMap<string, number> = new Map([
+  ["ut", 0],
+  ["utc", 0],
+  ["gmt", 0],
+  ["z", 0],
+  ["est", -300],
+  ["edt", -240],
+  ["cst", -360],
+  ["cdt", -300],
+  ["mst", -420],
+  ["mdt", -360],
+  ["pst", -480],
+  ["pdt", -420],
+]);
+
+const ISO_DATE =
+  /^(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(z|[+-]\d{2}:?\d{2})?)?$/;
+
+const RFC_DATE = new RegExp(
+  "^(?:([a-z]+),\\s*)?" + // weekday, optional
+    "(\\d{1,2})([ -])([a-z]{3})\\3(\\d{2}|\\d{4})\\s+" + // 25 Jun 2010 | 25-Jun-10
+    "(\\d{2}):(\\d{2})(?::(\\d{2}))?\\s+" + // 15:00[:00]
+    "([a-z]+|[+-]\\d{4})$", // zone
+);
+
+/**
+ * Epoch ms for the given UTC fields, or null when they name no real instant
+ * (`2010-02-30`, hour 24): `Date.UTC` rolls those over silently, so the fields
+ * are read back and must survive the round trip.
+ */
+function utcFields(y: number, mo: number, d: number, h: number, mi: number, s: number): number | null {
+  if (h > 23 || mi > 59 || s > 59) return null;
+  const at = Date.UTC(y, mo, d, h, mi, s);
+  const back = new Date(at);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo || back.getUTCDate() !== d) {
+    return null;
+  }
+  return at;
+}
+
+/** Minutes east of UTC for `+HHMM` / `+HH:MM`, or null when out of range. */
+function offsetMinutes(zone: string): number | null {
+  const m = /^([+-])(\d{2}):?(\d{2})$/.exec(zone);
+  if (m === null) return null;
+  const hours = Number(m[2]);
+  const minutes = Number(m[3]);
+  if (hours > 23 || minutes > 59) return null;
+  return (m[1] === "-" ? -1 : 1) * (hours * 60 + minutes);
+}
+
+/**
+ * The instant an `unavailable_after` date names, or null when it is not one of
+ * the forms below. NEVER A GUESS: `Date.parse` used to read this, and it reads a
+ * zone-less date-time in the HOST's zone (so the answer moved with the machine)
+ * and accepts loose text ("June 25" became 25 June 2001).
+ *
+ * Accepted, case-insensitively:
+ *  - ISO 8601 / RFC 3339: `YYYY-MM-DD`, or that plus `T` (or a space) and
+ *    `HH:MM[:SS[.fff]]`, with an optional `Z` or `±HH:MM` / `±HHMM` offset. A
+ *    form with no zone is read as UTC and `assumedUtc` says so.
+ *  - RFC 822 / RFC 1123: `[Wkd, ]DD Mon YY[YY] HH:MM[:SS] ZONE`.
+ *  - RFC 850: `Weekday, DD-Mon-YY HH:MM:SS ZONE`.
+ *    ZONE is `UT`, `UTC`, `GMT`, `Z`, the US zones `EST`..`PDT`, or `±HHMM`;
+ *    these forms require one. A two-digit year is 20YY below 70 and 19YY from 70
+ *    (RFC 6265's fixed pivot, so the answer does not depend on today's date). A
+ *    weekday must be a weekday name; whether it agrees with the date is not
+ *    checked, since the numeric date is what every reader uses.
+ *
+ * Fields must name a real instant: `2010-02-30` and `24:00` are refused.
+ */
+export function parseRobotsDate(raw: string): { at: number; assumedUtc: boolean } | null {
+  const text = raw.trim().toLowerCase();
+
+  const iso = ISO_DATE.exec(text);
+  if (iso !== null) {
+    const [, y, mo, d, h, mi, s, frac, zone] = iso;
+    const base = utcFields(
+      Number(y),
+      Number(mo) - 1,
+      Number(d),
+      Number(h ?? 0),
+      Number(mi ?? 0),
+      Number(s ?? 0),
+    );
+    if (base === null) return null;
+    const ms = frac === undefined ? 0 : Math.floor(Number(`0.${frac}`) * 1000);
+    if (zone === undefined) return { at: base + ms, assumedUtc: true };
+    const offset = zone === "z" ? 0 : offsetMinutes(zone);
+    if (offset === null) return null;
+    return { at: base + ms - offset * 60_000, assumedUtc: false };
+  }
+
+  const rfc = RFC_DATE.exec(text);
+  if (rfc === null) return null;
+  const [, weekday, d, , mon, y, h, mi, s, zone] = rfc;
+  if (weekday !== undefined && !WEEKDAYS.includes(weekday) && !WEEKDAY_NAMES.includes(weekday)) {
+    return null;
+  }
+  const month = MONTHS.indexOf(mon!);
+  if (month < 0) return null;
+  let year = Number(y);
+  if (y!.length === 2) year += year < 70 ? 2000 : 1900;
+  const base = utcFields(year, month, Number(d), Number(h), Number(mi), Number(s ?? 0));
+  if (base === null) return null;
+  const offset = RFC822_ZONES.get(zone!) ?? offsetMinutes(zone!);
+  if (offset === null) return null;
+  return { at: base - offset * 60_000, assumedUtc: false };
+}
+
 /**
  * Robots directives that carry a value after a colon. Their colon is part of
  * the token, where any other `name:` prefix names a bot.

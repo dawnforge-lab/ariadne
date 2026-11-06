@@ -19,6 +19,7 @@ import {
   present,
   queryFinding,
   resolveEffectiveCanonical,
+  parseRobotsDate,
   robotsTokens,
   unavailableAfterOf,
   type MetricIdentity,
@@ -896,5 +897,100 @@ describe("unavailableAfterOf (26a)", () => {
     );
     expect(unavailableAfterOf("noarchive")).toBeNull();
     expect(unavailableAfterOf(null)).toBeNull();
+  });
+});
+
+describe("parseRobotsDate (PR #22 review)", () => {
+  const utc = (iso: string) => Date.parse(iso); // only ever called with an explicit Z
+
+  /** Run `fn` with the process time zone set to `tz`, restoring it after. */
+  function inZone<T>(tz: string, fn: () => T): T {
+    const before = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      return fn();
+    } finally {
+      if (before === undefined) delete process.env.TZ;
+      else process.env.TZ = before;
+    }
+  }
+
+  it("reads ISO 8601 with a zone exactly", () => {
+    expect(parseRobotsDate("2010-06-25T15:00:00Z")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25T15:00:00+02:00")).toEqual({
+      at: utc("2010-06-25T13:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25t15:00:00.250-0130")).toEqual({
+      at: utc("2010-06-25T16:30:00.250Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25T15:00z")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: false,
+    });
+  });
+
+  it("reads a zone-less ISO date or date-time as UTC whatever the host zone, and says so", () => {
+    // The host zone really moves: Date.parse of the same zone-less text differs.
+    const local = ["America/Los_Angeles", "Asia/Tokyo"].map((tz) =>
+      inZone(tz, () => Date.parse("2010-06-25T15:00:00")),
+    );
+    expect(local[0]).not.toBe(local[1]);
+    for (const tz of ["America/Los_Angeles", "Asia/Tokyo"]) {
+      inZone(tz, () => {
+        expect(parseRobotsDate("2010-06-25T15:00:00"), tz).toEqual({
+          at: utc("2010-06-25T15:00:00Z"),
+          assumedUtc: true,
+        });
+        expect(parseRobotsDate("2010-06-25 15:00"), tz).toEqual({
+          at: utc("2010-06-25T15:00:00Z"),
+          assumedUtc: true,
+        });
+        expect(parseRobotsDate("2010-06-25"), tz).toEqual({
+          at: utc("2010-06-25T00:00:00Z"),
+          assumedUtc: true,
+        });
+      });
+    }
+  });
+
+  it("reads RFC 1123, RFC 850 and RFC 822 forms with their zone names", () => {
+    const at = utc("2010-06-25T15:00:00Z");
+    expect(parseRobotsDate("Fri, 25 Jun 2010 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("fri, 25 jun 2010 15:00:00 utc")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("Friday, 25-Jun-10 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 08:00:00 PDT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 07:00:00 PST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 10:00 EST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 10 16:00:00 +0100")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("Fri, 25 Jun 2010 15:00:00 UT")).toEqual({ at, assumedUtc: false });
+    // Two-digit years pivot at 70 (RFC 6265's rule): 69 is 2069, 70 is 1970.
+    expect(parseRobotsDate("Thursday, 01-Jan-70 00:00:00 GMT")!.at).toBe(0);
+    expect(parseRobotsDate("01 Jan 69 00:00:00 GMT")!.at).toBe(utc("2069-01-01T00:00:00Z"));
+  });
+
+  it("refuses anything else rather than guess", () => {
+    for (const raw of [
+      "June 25, 2010",
+      "June 25",
+      "25 Jun 2010",
+      "25 Jun 2010 15:00:00",
+      "25 Jun 2010 15:00:00 CEST",
+      "2010-02-30",
+      "2010-06-25T24:00:00Z",
+      "2010-06-25T15:00:00+2",
+      "2010/06/25",
+      "Fri, 31 Jun 2010 15:00:00 GMT",
+      "Fry, 25 Jun 2010 15:00:00 GMT",
+      "1277478000",
+      "soon",
+      "",
+    ]) {
+      expect(parseRobotsDate(raw), raw).toBeNull();
+    }
   });
 });

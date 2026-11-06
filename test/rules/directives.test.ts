@@ -162,6 +162,41 @@ describe("directives.unavailable-after", () => {
     expect(out[0]!.evidence).toEqual({ unavailableAfter: "soon", dateParsed: false });
   });
 
+  it("does not guess at loose text a general date parser would accept (PR #22 review)", () => {
+    // Date.parse read "June 25" (cut at the comma) as 25 June 2001.
+    const out = r.run(
+      mkPage({ fetchedAt: FETCHED, robotsMeta: "unavailable_after: June 25, 2010" }),
+    );
+    expect(out.map((f) => f.evidence)).toEqual([
+      { unavailableAfter: "June 25", dateParsed: false },
+    ]);
+  });
+
+  it("keeps an RFC 1123 date whole across its comma", () => {
+    const out = r.run(
+      mkPage({
+        fetchedAt: FETCHED,
+        robotsMeta: "noindex, unavailable_after: Fri, 25 Jun 2010 15:00:00 GMT, nofollow",
+      }),
+    );
+    expect(out[0]!.evidence).toEqual({
+      unavailableAfter: "Fri, 25 Jun 2010 15:00:00 GMT",
+      dateParsed: true,
+      daysFromFetch: Math.floor((Date.UTC(2010, 5, 25, 15) - FETCHED.getTime()) / DAY_MS),
+    });
+  });
+
+  it("reads a zone-less date-time as UTC and says so in the evidence", () => {
+    const at = new Date(FETCHED.getTime() + 10 * DAY_MS).toISOString().slice(0, 19);
+    const out = r.run(mkPage({ fetchedAt: FETCHED, robotsMeta: `unavailable_after: ${at}` }));
+    expect(out[0]!.evidence).toEqual({
+      unavailableAfter: at,
+      dateParsed: true,
+      assumedUtc: true,
+      daysFromFetch: 10,
+    });
+  });
+
   it("reads the header, and takes the earliest date when both carry one", () => {
     const out = r.run(
       mkPage({

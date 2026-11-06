@@ -493,6 +493,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     whitespace as well as commas (closing up `name: value` first), so
 //     `noindex nofollow` is two tokens for `indexability.nofollow` and
 //     `directives.restrictive`, as it already was for `saysNoindex`.
+//     `directives.unavailable-after` reads its date with `parseRobotsDate`
+//     (ISO 8601, RFC 822 / 850 / 1123), not `Date.parse`: a zone-less form is
+//     UTC with `assumedUtc: true`, and loose text is `dateParsed: false`.
 export const RULESET_VERSION = "0.20.0";
 
 /**
