@@ -127,6 +127,12 @@
  * their order and the early-close candidate are token-stream facts that parse5's
  * normalised tree cannot show. The oracle did not move.
  *
+ * The Phase 26b string facts are made storable (`storableCap`: U+0000 to U+2400,
+ * lone surrogates to U+FFFD, caps cut on a code-point boundary) on both sides,
+ * with the one shared helper: storability is a property of the write, not of
+ * the tree, so it is shared rather than re-derived, on `parseRefresh`'s
+ * precedent.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -140,6 +146,7 @@ import {
   type RawPageAnalysis,
 } from "./page-analyzer.js";
 import { simhash64 } from "./simhash.js";
+import { storableCap } from "../storable-text.js";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 import {
   ALT_TEXT_LONG_CHARS,
@@ -423,7 +430,8 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       return content === undefined ? [] : [content];
     })
     .filter((content, i, all) => all.findIndex((c) => c.trim() === content.trim()) === i);
-  const robotsMeta = robotsContents.length === 0 ? null : robotsContents.join(", ");
+  const robotsMeta =
+    robotsContents.length === 0 ? null : storableCap(robotsContents.join(", "));
   const ogTitle =
     byAttr("meta", "property", "og:title").first().attr("content") ?? null;
   const ogDescription =
@@ -440,7 +448,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   // ---- Phase 26b head facts, each the selector its field is defined by ----
   const langAttr = $("html").attr("lang")?.trim();
   const htmlLang =
-    langAttr === undefined || langAttr === "" ? null : langAttr.slice(0, HTML_LANG_MAX);
+    langAttr === undefined || langAttr === "" ? null : storableCap(langAttr, HTML_LANG_MAX);
   // A `<title>` under an `<svg>` is the svg's, never the document's.
   const titleCount = $("title").filter((_, el) => $(el).parents("svg").length === 0).length;
   const metaDescriptionCount = byAttr("meta", "name", "description").length;
@@ -450,7 +458,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     .flatMap((el) => {
       const name = fold($(el).attr("name"));
       if (name === undefined || !botNames.includes(name)) return [];
-      return [{ name, content: ($(el).attr("content") ?? "").slice(0, ROBOTS_META_CONTENT_MAX) }];
+      return [{ name, content: storableCap($(el).attr("content") ?? "", ROBOTS_META_CONTENT_MAX) }];
     })
     .slice(0, ROBOTS_METAS_MAX);
   const refreshEl = $("meta[http-equiv][content]")
@@ -463,7 +471,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     refreshContent === undefined ? null : parseRefresh(refreshContent, pageUrl);
   const h2El = $("h2").first();
   const h2Text = h2El.length
-    ? h2El.text().replace(/\s+/g, " ").trim().slice(0, H2_TEXT_MAX)
+    ? storableCap(h2El.text().replace(/\s+/g, " ").trim(), H2_TEXT_MAX)
     : null;
 
   const headingOrder: number[] = [];
@@ -519,7 +527,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     const alt = $(el).attr("alt");
     if (alt === undefined) {
       imagesMissingAlt += 1;
-      imagesMissingAltSample.push(($(el).attr("src") ?? "").slice(0, IMAGE_SAMPLE_SRC_MAX));
+      imagesMissingAltSample.push(storableCap($(el).attr("src") ?? "", IMAGE_SAMPLE_SRC_MAX));
     } else if (alt.trim() === "") {
       imagesEmptyAlt += 1;
     } else if (alt.trim().length > ALT_TEXT_LONG_CHARS) {
@@ -568,7 +576,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     if (kind === "iframe") insecureRefs.iframe += 1;
     else if (kind === "media") insecureRefs.media += 1;
     else insecureRefs.formAction += 1;
-    insecureRefs.sample.push({ kind, url: resolved.slice(0, INSECURE_SAMPLE_URL_MAX) });
+    insecureRefs.sample.push({ kind, url: storableCap(resolved, INSECURE_SAMPLE_URL_MAX) });
   };
   const walkInsecure = (node: DomNode, inMedia: boolean) => {
     const name = node.type === "tag" ? node.name?.toLowerCase() : undefined;
@@ -727,7 +735,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     for (const [tag, values] of socialValues) {
       const [group, key] = tag.split(":") as [string, string];
       const isUrl = tag === "og:url" || tag === "og:image" || tag === "twitter:image";
-      const first = values[0]!.slice(0, isUrl ? SOCIAL_URL_MAX : SOCIAL_TEXT_MAX);
+      const first = storableCap(values[0]!, isUrl ? SOCIAL_URL_MAX : SOCIAL_TEXT_MAX);
       (group === "og" ? og : x)[key] = first;
       counts[tag] = values.length;
       if (new Set(values).size > 1) conflicting.push(tag);

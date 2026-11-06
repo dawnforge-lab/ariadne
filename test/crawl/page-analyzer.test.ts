@@ -953,3 +953,68 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
     expect(JSON.stringify(s).length).toBeLessThan(400);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 26b: every new page-derived string is storable (storable-text.ts):
+// U+0000 to U+2400, a lone surrogate to U+FFFD, caps cut on a code point.
+// ---------------------------------------------------------------------------
+
+describe("Phase 26b strings are storable in Postgres", () => {
+  const NUL = "\u0000";
+  const MARK = "␀";
+
+  it("a NUL in any 26b string fact is stored as U+2400", () => {
+    const a = analyzePage(
+      `<html lang="e${NUL}n"><head><meta property="og:title" content="T${NUL}">` +
+        `<meta name="robots" content="index${NUL}"><meta name="googlebot" content="noindex${NUL}">` +
+        `<meta http-equiv="refresh" content="5;url=/x${NUL}y"></head>` +
+        `<body><h2>H${NUL}</h2><img src="/i${NUL}.png"><iframe src="http://x.test/f${NUL}g"></iframe></body></html>`,
+      "https://x.test/",
+    );
+    expect(a.htmlLang).toBe(`e${MARK}n`);
+    expect(a.social?.og.title).toBe(`T${MARK}`);
+    expect(a.robotsMeta).toBe(`index${MARK}`);
+    expect(a.robotsMetas).toEqual([{ name: "googlebot", content: `noindex${MARK}` }]);
+    expect(a.metaRefresh?.raw).toBe(`5;url=/x${MARK}y`);
+    // The URL parser percent-encodes an inner NUL; the helper leaves that alone.
+    expect(a.metaRefresh?.target).toBe("https://x.test/x%00y");
+    expect(a.h2Text).toBe(`H${MARK}`);
+    expect(a.imagesMissingAltSample).toEqual([`/i${MARK}.png`]);
+    expect(a.insecureRefs.sample[0]?.url).toBe("http://x.test/f%00g");
+  });
+
+  it("a NUL in head text and in a candidate tag reaches the snippet as U+2400", () => {
+    expect(structureOf(`<head>a${NUL}b</head>`).closedEarly?.snippet).toBe(`a${MARK}b`);
+    expect(structureOf(`<head><img alt="${NUL}"><title>t</title></head>`).closedEarly?.snippet).toBe(
+      `<img alt="${MARK}">`,
+    );
+  });
+
+  it("a snippet cut in the middle of an emoji drops the whole pair", () => {
+    // `<img data-x="` is 13 units; 186 more put the emoji's high surrogate at
+    // index 199, the last unit under the cap.
+    const prefix = `<img data-x="${"x".repeat(186)}`;
+    expect(prefix).toHaveLength(HEAD_SNIPPET_MAX - 1);
+    expect(structureOf(`<head>${prefix}😀"><title>t</title></head>`).closedEarly?.snippet).toBe(prefix);
+    const text = "t".repeat(HEAD_SNIPPET_MAX - 1);
+    expect(structureOf(`<head>${text}😀</head>`).closedEarly?.snippet).toBe(text);
+  });
+
+  it("a social value cut in the middle of an emoji drops the whole pair", () => {
+    const a = analyzePage(
+      `<head><meta property="og:title" content="${"x".repeat(299)}😀"></head>`,
+      "https://x.test/",
+    );
+    expect(a.social?.og.title).toBe("x".repeat(299));
+  });
+
+  it("a lone surrogate (a direct string: entities already decode to U+FFFD) becomes U+FFFD", () => {
+    const a = analyzePage(
+      `<head><meta property="og:title" content="a\uD800b"></head><body><h2>c\uDC00</h2></body>`,
+      "https://x.test/",
+    );
+    expect(a.social?.og.title).toBe("a�b");
+    expect(a.h2Text).toBe("c�");
+    expect(structureOf(`<head>x\uD800</head>`).closedEarly?.snippet).toBe("x�");
+  });
+});

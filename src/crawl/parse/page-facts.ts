@@ -6,7 +6,13 @@
  * every one is capped (hard rule 6), so per-page memory stays O(1) in page size
  * beyond the caps below. The `pages` columns that store them are migration 0026;
  * null in a column means "not measured" (a row written before extraction 2).
+ *
+ * Every page-derived string among them goes through `storableCap`
+ * (src/crawl/storable-text.ts) on its way in: no U+0000, no lone surrogate, and
+ * every cap cut on a code-point boundary, so a hostile page cannot make the
+ * page-row insert throw.
  */
+import { storableCap } from "../storable-text.js";
 
 export type SocialTag =
   | "og:title" | "og:description" | "og:image" | "og:url" | "og:type" | "og:site_name"
@@ -87,7 +93,7 @@ export const ROBOTS_META_BOTS = [
  * and the rest, trimmed, is the URL resolved against `baseUrl`.
  */
 export function parseRefresh(value: string, baseUrl: string): RefreshFact {
-  const raw = value.slice(0, REFRESH_RAW_MAX);
+  const raw = storableCap(value, REFRESH_RAW_MAX);
   const m = /^\s*(\d+(?:\.\d*)?|\.\d+)/.exec(value);
   if (!m) return { raw, delaySeconds: null, target: null };
   const delaySeconds = Number(m[1]);
@@ -96,7 +102,7 @@ export function parseRefresh(value: string, baseUrl: string): RefreshFact {
   rest = rest.trim().replace(/^(["'])(.*?)\1?$/s, "$2").trim();
   if (rest === "") return { raw, delaySeconds, target: null };
   try {
-    return { raw, delaySeconds, target: new URL(rest, baseUrl).href };
+    return { raw, delaySeconds, target: storableCap(new URL(rest, baseUrl).href) };
   } catch {
     return { raw, delaySeconds, target: null };
   }

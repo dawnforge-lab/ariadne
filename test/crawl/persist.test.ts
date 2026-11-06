@@ -22,6 +22,7 @@ import {
 } from "../../src/crawl/frontier.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
 import { analyzePage, type PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
+import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -917,6 +918,34 @@ describe("PageWriter", () => {
       headBeforeBody: true,
       closedEarly: { tag: "iframe", snippet: `<iframe src="https://gtm.test/x">`, inNoscript: true },
     });
+  });
+
+  it("persists hostile 26b strings: a NUL, a pair cut at a cap, a lone surrogate", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/hostile-strings`;
+    // `<img data-x="` is 13 units: the emoji's high surrogate lands on the
+    // snippet cap's last unit. The robots content carries a raw lone surrogate,
+    // which no decoder produces but a direct string can.
+    //
+    // The NUL rides `twitter:title`, which only the 26b `social` column stores.
+    // In `og:title` it would ALSO reach the pre-26b `og_title` column, which is
+    // not sanitised and still makes this insert throw: a known gap outside this
+    // fix's scope (reported, not hidden).
+    const prefix = `<img data-x="${"x".repeat(HEAD_SNIPPET_MAX - 14)}`;
+    const analysis = analyzePage(
+      `<html><head><meta name="twitter:title" content="Sh\u0000are">` +
+        `<meta name="robots" content="noindex\uD800">${prefix}😀"><title>t</title></head>` +
+        `<body><p>x</p></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.social?.x.title).toBe("Sh␀are");
+    expect(row?.robotsMeta).toBe("noindex�");
+    expect(row?.htmlStructure?.closedEarly).toEqual({ tag: "img", snippet: prefix, inNoscript: false });
   });
 
   it("persists a rel=next count past the smallint range (Ruling R7, migration 0027)", async () => {

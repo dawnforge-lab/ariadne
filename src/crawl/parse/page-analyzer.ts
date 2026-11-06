@@ -441,11 +441,23 @@
  *    allowed in a body. The head-noscript read is BESIDE the Phase 23 machine,
  *    not in it: a head noscript's children stay invisible to `headClosedBy`,
  *    `headMode` and every outside-head flag, exactly as before.
+ *
+ * EVERY PHASE 26b STRING IS MADE STORABLE where it is capped, by the one shared
+ * `storableCap` (src/crawl/storable-text.ts, also the render console's):
+ * U+0000 becomes U+2400, a lone surrogate U+FFFD, and the cap cuts on a
+ * code-point boundary, so a hostile page cannot make the page-row insert throw.
+ * That covers the html-structure snippet (tag and text), every `social` value,
+ * `robotsMetas` contents, the joined `robotsMeta`, `metaRefresh` (in
+ * `parseRefresh`), `htmlLang`, `h2Text`, the insecure sample URLs and the
+ * missing-alt sample. The pre-26b strings (`title`, `metaDescription`,
+ * `h1Text`, the og trio, link anchors, …) are NOT yet covered: a known gap,
+ * outside this phase's scope.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 import { simhash64 } from "./simhash.js";
+import { storableCap } from "../storable-text.js";
 import {
   ALT_TEXT_LONG_CHARS,
   H2_TEXT_MAX,
@@ -1340,7 +1352,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     else if (kind === "media") insecureRefs.media += 1;
     else insecureRefs.formAction += 1;
     if (insecureRefs.sample.length < INSECURE_SAMPLE_MAX) {
-      insecureRefs.sample.push({ kind, url: resolved.slice(0, INSECURE_SAMPLE_URL_MAX) });
+      insecureRefs.sample.push({ kind, url: storableCap(resolved, INSECURE_SAMPLE_URL_MAX) });
     }
   };
   /** One `<a>` start tag into `anchorCounts` (definitions in the module header). */
@@ -1580,9 +1592,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (earlyCandidate !== null) return;
     earlyCandidate = { tag, snippet, inNoscript };
   };
-  /** The current start tag's source, cut at the cap before it is copied. */
+  /**
+   * The current start tag's source, made storable and cut at the cap. The
+   * slice takes one unit past the cap so a cut through a surrogate pair is
+   * seen and the whole pair dropped; the copy stays O(cap).
+   */
   const tagSnippet = (start: number, end: number) =>
-    html.slice(start, Math.min(end + 1, start + HEAD_SNIPPET_MAX));
+    storableCap(html.slice(start, Math.min(end + 1, start + HEAD_SNIPPET_MAX + 1)), HEAD_SNIPPET_MAX);
 
   const headOnOpenTag = (name: string, isImplied: boolean, start: number, end: number) => {
     if (headMode === "body") return;
@@ -1657,7 +1673,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       // (a non-breaking space included) is what the snippet shows.
       takeCandidate(
         "#text",
-        probe.replace(HTML_WHITESPACE_EDGES, "").slice(0, HEAD_SNIPPET_MAX),
+        storableCap(probe.replace(HTML_WHITESPACE_EDGES, ""), HEAD_SNIPPET_MAX),
         false,
       );
     }
@@ -1803,7 +1819,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         // element is a fact even when it directs nothing.
         robotsMetas.push({
           name,
-          content: (content ?? "").slice(0, ROBOTS_META_CONTENT_MAX),
+          content: storableCap(content ?? "", ROBOTS_META_CONTENT_MAX),
         });
       }
     } else if (name === "viewport") {
@@ -2022,7 +2038,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             if (htmlLang === undefined) {
               const lang = attribs["lang"]?.trim();
               htmlLang =
-                lang === undefined || lang === "" ? null : lang.slice(0, HTML_LANG_MAX);
+                lang === undefined || lang === "" ? null : storableCap(lang, HTML_LANG_MAX);
             }
             break;
           case "meta":
@@ -2038,7 +2054,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               imagesMissingAlt += 1;
               // Phase 26b: which images, raw, so the finding can name them.
               if (imagesMissingAltSample.length < IMAGE_SAMPLE_MAX) {
-                imagesMissingAltSample.push((attribs["src"] ?? "").slice(0, IMAGE_SAMPLE_SRC_MAX));
+                imagesMissingAltSample.push(storableCap(attribs["src"] ?? "", IMAGE_SAMPLE_SRC_MAX));
               }
             } else {
               const trimmedAlt = alt.trim();
@@ -2302,7 +2318,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           openH1 = null;
         }
         if (name === "h2" && openH2) {
-          h2Text = openH2.join("").replace(/\s+/g, " ").trim().slice(0, H2_TEXT_MAX);
+          h2Text = storableCap(openH2.join("").replace(/\s+/g, " ").trim(), H2_TEXT_MAX);
           openH2 = null;
           h2Done = true;
         }
@@ -2367,7 +2383,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     const x: SocialFacts["x"] = {};
     for (const [tag, value] of socialFirst) {
       const slot = SOCIAL_SLOTS[tag];
-      const capped = value.slice(0, slot.cap);
+      const capped = storableCap(value, slot.cap);
       if (slot.group === "og") og[slot.key] = capped;
       else x[slot.key] = capped;
     }
@@ -2388,7 +2404,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     canonicalCount,
     // Deviation 4: every robots meta, joined. Null when there was none — or
     // when none carried a `content`, which is what the first-only read said.
-    robotsMeta: robotsContents.length === 0 ? null : robotsContents.join(", "),
+    // Made storable (no cap): the joined value is a 26b reading of the column.
+    robotsMeta: robotsContents.length === 0 ? null : storableCap(robotsContents.join(", ")),
     ogTitle: ogTitle ?? null,
     ogDescription: ogDescription ?? null,
     ogImage: ogImage ?? null,
