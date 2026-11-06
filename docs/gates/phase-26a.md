@@ -23,19 +23,19 @@ traffic for the hand-check was 8 URLs, under the cap of 40.
 
 | # | clause | result | where |
 |---|---|---|---|
-| 1 | full suite green, 0 skipped; `tsc` clean | **pass**: 104 files / 2,815 tests, 0 failed, 0 skipped; `tsc` clean | §1 |
+| 1 | full suite green, 0 skipped; `tsc` clean | **pass**: 104 files / 2,816 tests, 0 failed, 0 skipped; `tsc` clean | §1 |
 | 2 | positive and negative tests per rule; a fixture page per rule, or a `SKIP_HARNESS_CLAIMS` entry with its reason | **pass**: 40 of 40 have DB or unit tests both ways; 34 fire on the fixture crawl; 6 joined `SKIP_HARNESS_CLAIMS` (16 → 22), each argued | §2 |
-| 3 | calibration report against Screaming Frog | **pass**: `docs/gates/phase-26a-calibration.md`, 0 UNEXPLAINED / 0 MISMATCH, run with the SEO Spider's post-crawl analysis on; two thresholds moved (`HIGH_EXTERNAL_OUTLINKS` 100 → 10, owner confirmed; `DEEP_DEPTH` 5 → 3); every mapped filter calibrated except the HTTPS-only four | §3 |
+| 3 | calibration report against Screaming Frog | **pass**: `docs/gates/phase-26a-calibration.md`, 0 UNEXPLAINED / 0 MISMATCH, run with the SEO Spider's post-crawl analysis on; one threshold moved (`HIGH_EXTERNAL_OUTLINKS` 100 → 10, owner confirmed); `DEEP_DEPTH` kept at 5 against SF's 3 (owner decision, recorded as an owner-decided threshold divergence); every mapped filter calibrated except the HTTPS-only four | §3 |
 | 4 | rules re-run over the stored lavishalice crawl (no re-crawl); each new rule's count reviewed against the site for false positives; the four HTTPS rules checked by hand | **pass**: 9 rules fire, 31 silent, every silence explained; samples hand-checked; 1 false positive found and fixed (`sitemap.lastmod-invalid`, 205 → 0); `security.headers-not-recorded` silent | §4, §5 |
 
 ## 1. Clause 1: suite and types
 
 | | |
 |---|---|
-| `npm test` (`DATABASE_URL` set) | **104 files / 2,815 tests, 0 failed, 0 skipped** (158 s, 2026-11-06 12:47 UTC), the run after the last edit of the post-crawl calibration (§3: `DEEP_DEPTH`, the hreflang probe, the script's analysis-aware reasons). Before it: **104 files / 2,806 tests, 0 failed, 0 skipped** (160 s, 2026-11-05 20:06 UTC). That was the run after the last edit of Task 14's fix round, on the tree of `40dab51` plus the docs and test-comment changes of the closing commit. Before the fix round, 104 files / 2,803 tests were green on `7ddab87`, and one earlier run on that commit had 1 failure, the pacing flake in §7. The fix round added 3 tests |
+| `npm test` (`DATABASE_URL` set) | **104 files / 2,816 tests, 0 failed, 0 skipped** (158 s, 2026-11-06 15:27 UTC), the run after the last edit: the post-crawl calibration (§3), the owner's `DEEP_DEPTH` = 5 decision and the corrected hreflang crawl-scope reason. The analysis-on calibration commit itself ran 104 files / 2,815 tests green (12:47 UTC). Before it: **104 files / 2,806 tests, 0 failed, 0 skipped** (160 s, 2026-11-05 20:06 UTC). That was the run after the last edit of Task 14's fix round, on the tree of `40dab51` plus the docs and test-comment changes of the closing commit. Before the fix round, 104 files / 2,803 tests were green on `7ddab87`, and one earlier run on that commit had 1 failure, the pacing flake in §7. The fix round added 3 tests |
 | `npx tsc --noEmit` | clean |
 | baseline at the branch point (`47c26b5`) | 92 files / 2,502 tests (`.superpowers/sdd/…/baseline-test.log`) |
-| phase delta | +12 files, +313 tests |
+| phase delta | +12 files, +314 tests |
 | ruleset | **0.20.0** (from 0.19.0; one bump for the phase, note in `src/rules/registry/registry.ts`) |
 | rules | **154**: 49 page / 91 query / 14 metric (114 + 40). Finding rules split 33 critical / 54 warning / 53 info; the 40 new ones are 23 warning / 17 info |
 | migrations | none in this phase (0000–0025 as Phase 25 left them); `EXTRACTION_VERSION` unchanged |
@@ -114,13 +114,16 @@ match or an explained divergence: 0 UNEXPLAINED and 0 MISMATCH.
   985 / 400) are confirmed by Screaming Frog's own boundaries. `SLOW_MS` is kept, because
   Screaming Frog has no response-time issue to read a boundary from. `THIN_WORDS` 150 is
   kept per the spec, because ours counts main-content words.
-- **`DEEP_DEPTH` moved from 5 to 3.** With the analysis on, Screaming Frog flags the
-  click-depth ladder from depth 4 and not at 3, and its crawl depths equal ours.
-  `structure.deep-page` is an existing rule, so older crawls gain findings: on the
-  lavishalice crawl, 18 pages are deeper than 3 links where 6 were deeper than 5
-  (read-only count, before the rule's indexability filter; not re-judged). CHECK-31
-  already fails key pages more than 3 clicks deep, so rule and checklist now agree. The
-  absorbed `/deep/N` chain now reads the constant, so `/deep/4` … `/deep/7` fire.
+- **`DEEP_DEPTH` stays 5: owner decision (2026-11-06).** With the analysis on,
+  Screaming Frog flags the click-depth ladder from depth 4 and not at 3, and its crawl
+  depths equal ours, so the tools differ only by threshold (SF more than 3, ours more
+  than 5). The owner keeps 5 as a product choice. The calibration records the
+  difference as an owner-decided threshold divergence, and the script checks it on
+  every run (`OWNER_THRESHOLDS`): if Screaming Frog's boundary or the constant moves,
+  the run reports a MISMATCH. For scale: on the lavishalice crawl, 18 pages are deeper
+  than 3 links and 6 deeper than 5 (read-only count, before the rule's indexability
+  filter). The absorbed `/deep/N` chain reads the constant, so `/deep/6` and `/deep/7`
+  fire, as before.
 - **`HIGH_EXTERNAL_OUTLINKS` moved from 100 to 10. This is a product call, flagged to
   the owner.** Screaming Frog flags a page with more than 10 distinct external targets.
   The brief said to take its boundary, but at 10 the finding is busy: on lavishalice it
@@ -129,11 +132,14 @@ match or an explained divergence: 0 UNEXPLAINED and 0 MISMATCH.
 - **The six post-crawl filters, now calibrated.** Pagination Loop (3/3) and
   Non-Indexable Page Inlinks Only (1/1) match exactly. Canonicals:Unlinked matches on the
   canonical targets both tools judge (2 both; the 2,212 SF-only are the canonical trap,
-  which Ariadne never fetches). Pages With High Crawl Depth matches after the move to 3
-  (11 both; 2 SF-only trap URLs). Hreflang:Unlinked hreflang URLs: the one target is
-  Ariadne-only because the SEO Spider does not crawl hreflang targets at this
-  configuration (`crawlHreflang` false), so it never fetched the page. Crawl scope, not
-  the rule.
+  which Ariadne never fetches). Pages With High Crawl Depth: 7 both from depth 6; the 4
+  pages at depths 4 and 5 are SF-only by the owner-decided threshold above, and 2 are
+  trap URLs. Hreflang:Unlinked hreflang URLs: the one target is Ariadne-only because
+  Screaming Frog had no path to it. No `<a>` links the page; Ariadne reached it through
+  the sitemap (`discovered_via` = `sitemap`; Ariadne enqueues links, redirects, the seed
+  and sitemap entries, never hreflang targets), and the configuration the SEO Spider ran
+  with has `crawlHreflang` and `crawlSitemaps` both `false`. The script checks all three
+  facts before it gives that reason. Crawl scope, not the rule.
 - **`hreflang.self-only` and a self `x-default`: a definition difference for the
   controller.** A probe page whose one alternate (`en`) is itself is listed by both
   tools. The harness fixture, whose alternates `en` and `x-default` both name itself, is
@@ -452,8 +458,8 @@ The binding ones:
   own URLs (a cross-submission).
 - CHECK-08 left the metric-only list, and CHECK-84..86 stay outside `CRAWL_CHECK_IDS`.
 - `HIGH_EXTERNAL_OUTLINKS` = 10 from the Screaming Frog run (owner confirmed).
-  `DEEP_DEPTH` = 3 from the analysis-on run; the six post-crawl filters are calibrated
-  (§3).
+  `DEEP_DEPTH` = 5 by owner decision against SF's 3; the six post-crawl filters are
+  calibrated (§3).
 - Task 14 fix round: `sitemap.lastmod-invalid`'s `future` on lavishalice is a false
   positive. It is judged against the sitemap read time (the crawl's `finished_at`, since no
   per-document time is recorded), with a named error and no fallback when that time is
@@ -483,7 +489,7 @@ Evidence that 26a did not cause them:
   existing constants (`BLOCKED_HOSTS`, `BLOCKED_HOST_SUFFIXES`) with no behaviour change.
 - `loop.test.ts` imports two rule modules, and the only 26a change in either
   (`link-graph.ts`) moved `DEEP_DEPTH` into `thresholds.ts` and re-exports it. The value
-  later moved from 5 to 3 (§3), and pacing does not read it.
+  is unchanged (5, kept by the owner, §3) and pacing does not read it.
 - Both are the load-sensitive tests the Phase 25 gate already listed on `main`: the
   renderer test by name ("about 2 of 36 loaded runs"), and "the platform-profile pacing
   cases in `loop.test.ts`".
@@ -505,8 +511,8 @@ ticket Phase 25 asked for, and it is still open.
   to delete them. They are the owner's to remove (`--delete-crawl <id>`).
 - **Decision: `hreflang.self-only` with a self `x-default`** (§3). Screaming Frog does not
   list such a page; ours does. Recommendation: keep ours.
-- **Decision: `DEEP_DEPTH` = 3** (§3). It follows Screaming Frog's boundary, widens an
-  existing rule's findings on older crawls, and agrees with CHECK-31.
+- **Decided: `DEEP_DEPTH` = 5** (owner, 2026-11-06; §3). Screaming Frog's boundary is 3;
+  the difference is recorded as owner-decided in the calibration.
 - **Dev database residue.** 113 crawl rows started 2026-11-05 17:20:34–17:21:29 UTC,
   7 of them still `running`, were left by an interrupted suite run during the phase.
   The whole dev database holds 8 `running` and 2 `queued` rows. It is the test

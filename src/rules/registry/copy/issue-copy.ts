@@ -926,9 +926,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Start with the unreachable pages and give each a home in a category, hub or related block, or remove it from the sitemap. Shorten the path to templates whose median depth is high with a hub or navigation entry.",
   },
   "structure.deep-page": {
-    title: "Links: Crawl depth over 3",
+    title: "Links: Crawl depth over 5",
     explanation:
-      "Indexable, self-canonical pages whose shortest internal link path from the home page is more than 3 links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
+      "Indexable, self-canonical pages whose shortest internal link path from the home page is more than 5 links. Deep pages are crawled less often, receive less internal link value and are harder to reach. Pages with no link path from the home page have no depth and are not in this report.",
     howToFix:
       "Link to the page from a category, landing page or navigation entry closer to the home page. If it is not worth linking from higher up, consolidate or remove it.",
   },

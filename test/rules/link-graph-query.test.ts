@@ -590,7 +590,7 @@ describe("the link-graph rules against the database", () => {
       // tests: every other expectation in this suite is written relative to
       // `DEEP_DEPTH`, so without this line a change to the constant would move
       // them all with it and silently redefine what "buried" means.
-      expect(DEEP_DEPTH).toBe(3);
+      expect(DEEP_DEPTH).toBe(5);
       const crawlId = await newCrawl();
       const paths = await addChain(crawlId, "c", DEEP_DEPTH + 1);
       const derived = await deriveClickDepth(db, crawlId);

@@ -58,13 +58,16 @@ export const SLOW_MS = 1500;
  *
  * Strictly greater: a page exactly this many links deep is not reported.
  *
- * Moved from 5. With its post-crawl analysis on (the one setting changed from
- * the configuration it starts with), Screaming Frog flags the click-depth
- * ladder from depth 4 and not at depth 3; its crawl depths on the 1 … 10 chain
- * match ours exactly, so the boundary is the same number in both measures.
+ * Calibrated, and deliberately NOT moved to Screaming Frog's boundary. With its
+ * post-crawl analysis on (the one setting changed from the configuration it
+ * starts with), Screaming Frog 25.1 flags the click-depth ladder from depth 4
+ * and not at depth 3; its crawl depths on the 1 … 10 chain match ours exactly.
+ * The owner keeps 5 as a product choice (2026-11-06): pages 4 and 5 links
+ * deep are a difference of threshold, recorded as owner-decided in the
+ * calibration (`OWNER_THRESHOLDS` in scripts/calibrate-sf.ts), not a defect.
  * calibrated against Screaming Frog 25.1 defaults, 2026-11-06 (docs/gates/phase-26a-calibration.md)
  */
-export const DEEP_DEPTH = 3;
+export const DEEP_DEPTH = 5;
 
 // ---- from src/rules/query/redirects.ts
 /**

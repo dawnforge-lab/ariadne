@@ -1034,8 +1034,8 @@ const noOutgoingLinks: Fixture = {
 /**
  * The click-chain. `/deep/1` is the only rung the hub links; every other rung is
  * reachable only from the one above it, so a page's depth is its number. With
- * the hub at depth 0 and `structure.deep-page` firing above `DEEP_DEPTH` (3
- * since the Phase 26a calibration), `/deep/4` … `/deep/7` are the buried pages.
+ * the hub at depth 0 and `structure.deep-page` firing above `DEEP_DEPTH` (5),
+ * `/deep/6` and `/deep/7` are the buried pages.
  *
  * NO RUNG IS IN THE SITEMAP, and that is load-bearing rather than tidy: the
  * crawl loop enqueues every sitemap entry at depth 0 before the first fetch, so

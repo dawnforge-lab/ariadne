@@ -21,7 +21,7 @@ describe("thresholds", () => {
       URL_MAX: 115,
       HEADING_MAX_STEP: 1,
       SLOW_MS: 1500,
-      DEEP_DEPTH: 3,
+      DEEP_DEPTH: 5,
       CHAIN_HOPS: 2,
       MAX_REDIRECT_HOPS: 10,
       SOFT_404_WORDS: 300,

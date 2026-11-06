@@ -67,7 +67,7 @@ URLs are compared by key: path plus sorted query string on the fixture origin, t
 | Page Titles:Below X Pixels (SF: 200) | `title.pixel-too-short` | pixel | 5 | 1 | 2 | divergence, explained |
 | Meta Description:Over X Pixels (SF: 985) | `meta-description.pixel-too-long` | pixel | 5 | 0 | 1 | divergence, explained |
 | Meta Description:Below X Pixels (SF: 400) | `meta-description.pixel-too-short` | pixel | 5 | 0 | 1 | divergence, explained |
-| Links:Pages With High Crawl Depth | `structure.deep-page` | threshold | 11 | 2 | 0 | divergence, explained |
+| Links:Pages With High Crawl Depth | `structure.deep-page` | threshold | 7 | 6 | 0 | threshold divergence, owner-decided |
 | Content:Low Content Pages | `content.thin` | threshold | 1021 | 124 | 0 | divergence, explained |
 
 ### 26a rules with no Screaming Frog counterpart
@@ -194,31 +194,31 @@ First rung SF flags: 11; first rung Ariadne flags: 11 (current threshold: more t
 
 | Server delay (ms) | SF `Response Time` (s) | Ariadne `response_time_ms` | `performance.slow-response` |
 |---:|---:|---:|:-:|
-| 250 | 0.252 | 263 | no |
-| 500 | 0.502 | 512 | no |
-| 1000 | 1.001 | 1004 | no |
+| 250 | 0.252 | 253 | no |
+| 500 | 0.502 | 503 | no |
+| 1000 | 1.001 | 1002 | no |
 | 1500 | 1.501 | 1503 | **yes** |
 | 2000 | 2.004 | 2002 | **yes** |
-| 3000 | 3.003 | 3004 | **yes** |
+| 3000 | 3.003 | 3003 | **yes** |
 
 Screaming Frog issues whose name mentions response time, slowness, TTFB or latency in its Issues Overview (all issues, flagged or not): "PageSpeed: Document Request Latency". No tab filter for response time exists in `--help export-tabs` either. First rung Ariadne flags: 1500 ms.
 
-### Click depth (`DEEP_DEPTH` 3)
+### Click depth (`DEEP_DEPTH` 5)
 
 | Level | SF `Crawl Depth` | SF `Pages With High Crawl Depth` | Ariadne `click_depth` | `structure.deep-page` |
 |---:|---:|:-:|---:|:-:|
 | 1 | 1 | no | 1 | no |
 | 2 | 2 | no | 2 | no |
 | 3 | 3 | no | 3 | no |
-| 4 | 4 | **yes** | 4 | **yes** |
-| 5 | 5 | **yes** | 5 | **yes** |
+| 4 | 4 | **yes** | 4 | no |
+| 5 | 5 | **yes** | 5 | no |
 | 6 | 6 | **yes** | 6 | **yes** |
 | 7 | 7 | **yes** | 7 | **yes** |
 | 8 | 8 | **yes** | 8 | **yes** |
 | 9 | 9 | **yes** | 9 | **yes** |
 | 10 | 10 | **yes** | 10 | **yes** |
 
-First level SF flags: 4 (SF depth 4); first level Ariadne flags: 4 (click depth 4).
+First level SF flags: 4 (SF depth 4); first level Ariadne flags: 6 (click depth 6).
 
 ### Thin content (`THIN_WORDS` 150, kept)
 
@@ -237,16 +237,16 @@ Set from the ladders only where the spec calls the value unknown (high outlinks,
 | `META_PX_MAX` | 985 | SF's filter is "Meta Description:Over 985 Pixels"; in its own widths 985 px not flagged, 986 px flagged | 985 | confirmed |
 | `META_PX_MIN` | 400 | SF's filter is "Meta Description:Below 400 Pixels"; in its own widths 397 px flagged, 400 px not flagged | 400 | confirmed |
 | `SLOW_MS` | 1500 | no response-time issue at its default configuration (Issues Overview, tab filters); its measured times match ours | 1500 | kept: no SF boundary to read |
-| `DEEP_DEPTH` | 5 | clear at 3, flagged at 4 | 3 | **moved** |
+| `DEEP_DEPTH` | 5 | clear at 3, flagged at 4 | 5 | threshold divergence, owner-decided (2026-11-06): SF's boundary is more than 3, ours more than 5 |
 | `THIN_WORDS` | 150 | low content below 200 words of the whole page (observed: 199 listed, 200 not) | 150 | kept (spec): ours counts main-content words, template-aware |
 
 ## Findings that need a decision
 
-1. **The post-crawl filters, calibrated with Screaming Frog's analysis on.** This run passed `--sf-config` (see The run): the SEO Spider's own configuration with its post-crawl analysis switched on and nothing else changed, and its log confirms `mAutoAnalyse=true`. The six filters that came back empty with the analysis off now read: Pagination Loop and Non-Indexable Page Inlinks Only match exactly; Canonicals:Unlinked matches on the canonical targets both tools judge (the rest is the canonical trap); Pages With High Crawl Depth sets `DEEP_DEPTH` (5 -> 3, item 5); Hreflang Unlinked differs only because the SEO Spider does not crawl hreflang targets at this configuration (crawl scope); Hreflang Self Reference Only differs by definition, item 6.
+1. **The post-crawl filters, calibrated with Screaming Frog's analysis on.** This run passed `--sf-config` (see The run): the SEO Spider's own configuration with its post-crawl analysis switched on and nothing else changed, and its log confirms `mAutoAnalyse=true`. The six filters that came back empty with the analysis off now read: Pagination Loop and Non-Indexable Page Inlinks Only match exactly; Canonicals:Unlinked matches on the canonical targets both tools judge (the rest is the canonical trap); Pages With High Crawl Depth matches from depth 6 and differs at depths 4 and 5 by an owner-decided threshold (item 5); Hreflang Unlinked differs only because the SEO Spider had no path to the page (crawl scope: it follows neither hreflang annotations nor sitemaps at this configuration, and Ariadne found the page in the sitemap); Hreflang Self Reference Only differs by definition, item 6.
 2. **`pagination.sequence-error` and a missing rel=prev (carried ruling).** Screaming Frog flags the page whose rel=next target declares NO rel=prev at all (`/calib26/pagination/no-prev-a` is in both lists), so our rule's behaviour on a missing prev matches it; nothing to change. Screaming Frog ALSO checks the reverse direction (B's prev is X, and X's next is not B: `/authored26/sequence-b`, SF only). Ours checks one direction, as the spec defines it (A's next is B, and B's prev is not A), and reports on A. On this fixture the reverse finding is the same defect (B's prev is wrong) seen from B, and ours already reports it on A. The reverse check would additionally catch a page whose rel=prev names a page that does not name it back when NO page names it as next; ours is silent there. Recommendation: leave the rule as the spec defines it; the controller decides whether the reverse direction is worth a second finding.
 3. **Title width measure.** Screaming Frog's title widths run 0–12 px wider than `serpWidth` on the ladder's strings (descriptions agree within 2 px). The bounds are the same numbers, so titles within about 12 px of a bound can be flagged by one tool only. Keeping our own measured table is the spec's requirement; no change proposed.
 4. **`HIGH_EXTERNAL_OUTLINKS` moved from 100 to 10** (owner confirmed). Screaming Frog's default flags a page with more than 10 unique external outlinks. That is a much busier finding than the starting value (any page with a footer of social links and a few citations); it is info severity.
-5. **`DEEP_DEPTH` moved from 5 to 3.** Screaming Frog flags the click-depth ladder from depth 4 and not at depth 3, and its crawl depths on the chain equal ours. `structure.deep-page` is an existing rule, so this widens a finding older crawls already had: on the Phase 25 lavishalice crawl a read-only count gives 18 pages deeper than 3 links where 6 were deeper than 5 (before the rule's indexability filter). The audit checklist already fails key pages more than 3 clicks deep (CHECK-31), so the rule and the checklist now agree.
+5. **`DEEP_DEPTH` stays 5: owner decision (2026-11-06).** Screaming Frog flags the click-depth ladder from depth 4 and not at depth 3, and its crawl depths on the chain equal ours, so the two tools differ only by threshold: pages 4 and 5 links deep are SF only. The owner kept 5 as a product choice. The script records it in `OWNER_THRESHOLDS` and checks it against every run: if Screaming Frog's boundary or the constant moves, the row turns into a MISMATCH and the pages into unexplained divergences.
 6. **`hreflang.self-only` and a self `x-default`.** A probe page whose one alternate (`en`) is itself IS listed by Screaming Frog; the harness fixture, whose alternates `en` and `x-default` are both itself, is not. Ours reports both, because neither page names any other version of itself. Recommendation: keep ours (an `x-default` to self adds no alternate); the controller decides.
 
 ## Notes on the run
@@ -482,7 +482,7 @@ Export `hreflang_unlinked_hreflang_urls.csv`.
 - SF only: —
 - Ariadne only (1):
   - `/authored26/hreflang-link-b`
-    - Reason: Screaming Frog never fetched this URL (it has no row in its Internal export): the page is reachable only through an hreflang annotation, and the configuration the SEO Spider ran with does not crawl hreflang targets (`crawlConfig.crawlHreflang` is `false` in the configuration it returned). It cannot list an unlinked hreflang URL it did not crawl. Ariadne enqueues hreflang targets, crawled it, and found no `<a>` inlink. Crawl scope, not the rule.
+    - Reason: Screaming Frog never fetched this URL (it has no row in its Internal export). No `<a>` on the site links it; it is named by an hreflang annotation and listed in the sitemap. Ariadne's crawl reached it through the sitemap (`discovered_via` = `sitemap`): Ariadne does not enqueue hreflang targets, only links, redirects, the seed and sitemap entries. The configuration the SEO Spider ran with has `crawlConfig.crawlHreflang` = `false` and `crawlConfig.crawlSitemaps` = `false`, so it had no path to the page and cannot list an unlinked hreflang URL it never crawled. Crawl scope, not the rule.
 
 ### Pagination:Non-200 Pagination URLs → `pagination.non-indexable-target`
 
@@ -684,8 +684,10 @@ Export `meta_description_below_400_pixels.csv`; SF's configured value: 400.
 
 Export `links_pages_with_high_crawl_depth.csv`.
 
-- Both (11): `/calib26/depth/10`, `/calib26/depth/4`, `/calib26/depth/5`, `/calib26/depth/6`, `/calib26/depth/7`, `/calib26/depth/8`, `/calib26/depth/9`, `/deep/4`, `/deep/5`, `/deep/6`, `/deep/7`
-- SF only (2):
+- Both (7): `/calib26/depth/10`, `/calib26/depth/6`, `/calib26/depth/7`, `/calib26/depth/8`, `/calib26/depth/9`, `/deep/6`, `/deep/7`
+- SF only (6):
+  - `/calib26/depth/4`, `/calib26/depth/5`, `/deep/4`, `/deep/5`
+    - Reason: Threshold difference, owner-decided (2026-11-06): Screaming Frog flags a page more than 3 links deep, ours more than 5 (`DEEP_DEPTH`). This page is 4 or 5 links deep by Screaming Frog's own crawl depth, which equals our click depth on the ladder, so only the threshold separates the two tools. The owner kept 5 as a product choice.
   - `/index/canonical-conflict?via=…` ×2
     - Reason: A URL of the canonical trap: `/index/canonical-conflict` declares its canonical as its own URL plus `?via=html`, so each canonical target names a deeper one. Screaming Frog fetches canonical targets and walked the trap over a thousand deep; Ariadne discovers URLs from links and sitemaps, not from canonical targets, so it never fetched one. A fixture artefact (absorbed.ts, `canonicalConflict`), not a rule difference.
 - Ariadne only: —

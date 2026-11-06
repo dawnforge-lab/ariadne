@@ -281,6 +281,11 @@ const NO_COUNTERPART: Record<string, string> = {
  */
 interface Reason {
   side: "sf-only" | "ariadne-only";
+  /**
+   * Set on a reason that records an OWNER DECISION rather than a measurement or
+   * design difference; the summary row then says so instead of "explained".
+   */
+  status?: "owner-decided";
   /** A key pattern, every key (`"*"`), or a test on the key and both tools' data. */
   match: RegExp | "*" | ((key: string, ctx: ReasonContext) => boolean);
   reason: string;
@@ -310,6 +315,8 @@ export interface ReasonContext {
   fired(ruleId: string, key: string): boolean;
   /** The evidence of Ariadne's finding of this rule on the key, or undefined. */
   details(ruleId: string, key: string): Record<string, unknown> | undefined;
+  /** How Ariadne's crawl found the key (`pages.discovered_via`: seed, link, sitemap, redirect), or undefined. */
+  ourDiscoveredVia(key: string): string | undefined;
 }
 
 /** The largest |SF width − serpWidth| a title divergence may show and still be "the measure" (ladder: 0–12 px). */
@@ -369,6 +376,17 @@ const httpSite = (_key: string, ctx: ReasonContext): boolean => ctx.siteScheme =
  * that analysis looks like from outside. Black box: that is an inference from
  * the output, not a reading of how the SEO Spider works.
  */
+/**
+ * Thresholds where the owner chose a value other than Screaming Frog's
+ * boundary. Each entry records the boundary the ladder showed and the value
+ * kept, so the verdict and the reason are CHECKED against the run: if Screaming
+ * Frog's boundary moves, or the constant moves, the run reports a MISMATCH or an
+ * unexplained divergence rather than reusing this entry.
+ */
+export const OWNER_THRESHOLDS: Record<string, { sfLastClear: number; kept: number; decided: string }> = {
+  DEEP_DEPTH: { sfLastClear: 3, kept: 5, decided: "2026-11-06" },
+};
+
 /** The fixture page with the site's one EXTERNAL private-address link (authored-p26.ts). */
 const PRIVATE_HOST_LINK_PATH = "/authored26/private-host-link";
 
@@ -473,10 +491,17 @@ export const REASONS: Record<string, readonly Reason[]> = {
     { side: "ariadne-only", match: analysisOffAndEmpty, reason: ANALYSIS_OFF },
     {
       side: "ariadne-only",
+      // Checked: SF has no Internal row for the URL; Ariadne's crawl reached it
+      // through the sitemap (`pages.discovered_via`); and the configuration SF
+      // ran with follows neither of the other two paths to it.
       match: (k, ctx) =>
-        ctx.autoAnalyse && sfNeverFetched(k, ctx) && ctx.sfConfig?.["crawlConfig"]?.["crawlHreflang"] === false,
+        ctx.autoAnalyse &&
+        sfNeverFetched(k, ctx) &&
+        ctx.ourDiscoveredVia(k) === "sitemap" &&
+        ctx.sfConfig?.["crawlConfig"]?.["crawlHreflang"] === false &&
+        ctx.sfConfig?.["crawlConfig"]?.["crawlSitemaps"] === false,
       reason:
-        "Screaming Frog never fetched this URL (it has no row in its Internal export): the page is reachable only through an hreflang annotation, and the configuration the SEO Spider ran with does not crawl hreflang targets (`crawlConfig.crawlHreflang` is `false` in the configuration it returned). It cannot list an unlinked hreflang URL it did not crawl. Ariadne enqueues hreflang targets, crawled it, and found no `<a>` inlink. Crawl scope, not the rule.",
+        "Screaming Frog never fetched this URL (it has no row in its Internal export). No `<a>` on the site links it; it is named by an hreflang annotation and listed in the sitemap. Ariadne's crawl reached it through the sitemap (`discovered_via` = `sitemap`): Ariadne does not enqueue hreflang targets, only links, redirects, the seed and sitemap entries. The configuration the SEO Spider ran with has `crawlConfig.crawlHreflang` = `false` and `crawlConfig.crawlSitemaps` = `false`, so it had no path to the page and cannot list an unlinked hreflang URL it never crawled. Crawl scope, not the rule.",
     },
   ],
   "Pagination:Non-Indexable": [
@@ -545,6 +570,27 @@ export const REASONS: Record<string, readonly Reason[]> = {
   ],
   "Links:Pages With High Crawl Depth": [
     { side: "ariadne-only", match: analysisOffAndEmpty, reason: ANALYSIS_OFF },
+    {
+      side: "sf-only",
+      status: "owner-decided",
+      // Checked: SF's own crawl depth for the URL lies between the boundary it
+      // showed and the value the owner kept, the constant IS the kept value, and
+      // Ariadne did not report the page.
+      match: (k, ctx) => {
+        const owner = OWNER_THRESHOLDS["DEEP_DEPTH"]!;
+        const depth = Number(ctx.sf(k)?.["Crawl Depth"]);
+        return (
+          ctx.autoAnalyse &&
+          T.DEEP_DEPTH === owner.kept &&
+          Number.isInteger(depth) &&
+          depth > owner.sfLastClear &&
+          depth <= owner.kept &&
+          !ctx.fired("structure.deep-page", k)
+        );
+      },
+      reason:
+        "Threshold difference, owner-decided (2026-11-06): Screaming Frog flags a page more than 3 links deep, ours more than 5 (`DEEP_DEPTH`). This page is 4 or 5 links deep by Screaming Frog's own crawl depth, which equals our click depth on the ladder, so only the threshold separates the two tools. The owner kept 5 as a product choice.",
+    },
     { side: "sf-only", match: CANONICAL_TRAP_KEY, reason: TRAP },
   ],
   "Content:Low Content Pages": [
@@ -592,14 +638,14 @@ function runNotes(meta: RunMeta): string[] {
   "## Findings that need a decision",
   "",
   meta.autoAnalyse
-    ? "1. **The post-crawl filters, calibrated with Screaming Frog's analysis on.** This run passed `--sf-config` (see The run): the SEO Spider's own configuration with its post-crawl analysis switched on and nothing else changed, and its log confirms `mAutoAnalyse=true`. The six filters that came back empty with the analysis off now read: Pagination Loop and Non-Indexable Page Inlinks Only match exactly; Canonicals:Unlinked matches on the canonical targets both tools judge (the rest is the canonical trap); Pages With High Crawl Depth sets `DEEP_DEPTH` (5 -> 3, item 5); Hreflang Unlinked differs only because the SEO Spider does not crawl hreflang targets at this configuration (crawl scope); Hreflang Self Reference Only differs by definition, item 6."
+    ? "1. **The post-crawl filters, calibrated with Screaming Frog's analysis on.** This run passed `--sf-config` (see The run): the SEO Spider's own configuration with its post-crawl analysis switched on and nothing else changed, and its log confirms `mAutoAnalyse=true`. The six filters that came back empty with the analysis off now read: Pagination Loop and Non-Indexable Page Inlinks Only match exactly; Canonicals:Unlinked matches on the canonical targets both tools judge (the rest is the canonical trap); Pages With High Crawl Depth matches from depth 6 and differs at depths 4 and 5 by an owner-decided threshold (item 5); Hreflang Unlinked differs only because the SEO Spider had no path to the page (crawl scope: it follows neither hreflang annotations nor sitemaps at this configuration, and Ariadne found the page in the sitemap); Hreflang Self Reference Only differs by definition, item 6."
     : "1. **Screaming Frog's post-crawl analysis did not run.** Its startup log reports `mAutoAnalyse=false` at the configuration it starts with, the CLI has no option to run the analysis, and the brief forbids a custom `--config` (and changing the owner's SEO Spider settings). Six mapped filters came back empty although the fixture has the condition: Canonicals:Unlinked, Hreflang:Unlinked hreflang URLs, Pagination:Pagination Loop, Links:Non-Indexable Page Inlinks Only, Links:Pages With High Crawl Depth (empty even at depth 1,000+), and Hreflang:Self Reference Only (which may also be a definition difference). Those five rules and `DEEP_DEPTH` are therefore NOT calibrated by this run. To calibrate them the owner would supply a configuration with crawl analysis on (a saved `.seospiderconfig`, passed as `--config`); the script needs no other change.",
   "2. **`pagination.sequence-error` and a missing rel=prev (carried ruling).** Screaming Frog flags the page whose rel=next target declares NO rel=prev at all (`/calib26/pagination/no-prev-a` is in both lists), so our rule's behaviour on a missing prev matches it; nothing to change. Screaming Frog ALSO checks the reverse direction (B's prev is X, and X's next is not B: `/authored26/sequence-b`, SF only). Ours checks one direction, as the spec defines it (A's next is B, and B's prev is not A), and reports on A. On this fixture the reverse finding is the same defect (B's prev is wrong) seen from B, and ours already reports it on A. The reverse check would additionally catch a page whose rel=prev names a page that does not name it back when NO page names it as next; ours is silent there. Recommendation: leave the rule as the spec defines it; the controller decides whether the reverse direction is worth a second finding.",
   "3. **Title width measure.** Screaming Frog's title widths run 0–12 px wider than `serpWidth` on the ladder's strings (descriptions agree within 2 px). The bounds are the same numbers, so titles within about 12 px of a bound can be flagged by one tool only. Keeping our own measured table is the spec's requirement; no change proposed.",
   "4. **`HIGH_EXTERNAL_OUTLINKS` moved from 100 to 10** (owner confirmed). Screaming Frog's default flags a page with more than 10 unique external outlinks. That is a much busier finding than the starting value (any page with a footer of social links and a few citations); it is info severity.",
   ...(meta.autoAnalyse
     ? [
-        "5. **`DEEP_DEPTH` moved from 5 to 3.** Screaming Frog flags the click-depth ladder from depth 4 and not at depth 3, and its crawl depths on the chain equal ours. `structure.deep-page` is an existing rule, so this widens a finding older crawls already had: on the Phase 25 lavishalice crawl a read-only count gives 18 pages deeper than 3 links where 6 were deeper than 5 (before the rule's indexability filter). The audit checklist already fails key pages more than 3 clicks deep (CHECK-31), so the rule and the checklist now agree.",
+        "5. **`DEEP_DEPTH` stays 5: owner decision (2026-11-06).** Screaming Frog flags the click-depth ladder from depth 4 and not at depth 3, and its crawl depths on the chain equal ours, so the two tools differ only by threshold: pages 4 and 5 links deep are SF only. The owner kept 5 as a product choice. The script records it in `OWNER_THRESHOLDS` and checks it against every run: if Screaming Frog's boundary or the constant moves, the row turns into a MISMATCH and the pages into unexplained divergences.",
         "6. **`hreflang.self-only` and a self `x-default`.** A probe page whose one alternate (`en`) is itself IS listed by Screaming Frog; the harness fixture, whose alternates `en` and `x-default` are both itself, is not. Ours reports both, because neither page names any other version of itself. Recommendation: keep ours (an `x-default` to self adds no alternate); the controller decides.",
       ]
     : []),
@@ -758,6 +804,8 @@ interface AriadnePage {
   metaDescription: string | null;
   responseTimeMs: number | null;
   clickDepth: number | null;
+  /** `pages.discovered_via`: how the crawl found the URL (seed, link, sitemap, redirect). */
+  discoveredVia: string;
 }
 interface AriadneIssue {
   ruleId: string;
@@ -904,6 +952,7 @@ async function runAriadne(base: string, legacyBase: string): Promise<AriadneResu
           metaDescription: p.metaDescription,
           responseTimeMs: p.responseTimeMs,
           clickDepth: p.clickDepth,
+          discoveredVia: p.discoveredVia,
         };
       });
       const issueRows = await db.select().from(issues).where(eq(issues.crawlId, summary.crawlId));
@@ -1008,13 +1057,18 @@ function listKeys(keys: readonly string[]): string {
   return parts.join(", ");
 }
 
-export function reasonFor(filter: string, side: Reason["side"], key: string, ctx: ReasonContext): string | null {
+/** The first reason that holds for this divergent key, or null. */
+export function reasonEntry(filter: string, side: Reason["side"], key: string, ctx: ReasonContext): Reason | null {
   for (const r of REASONS[filter] ?? []) {
     if (r.side !== side) continue;
     const hit = r.match === "*" ? true : r.match instanceof RegExp ? r.match.test(key) : r.match(key, ctx);
-    if (hit) return r.reason;
+    if (hit) return r;
   }
   return null;
+}
+
+export function reasonFor(filter: string, side: Reason["side"], key: string, ctx: ReasonContext): string | null {
+  return reasonEntry(filter, side, key, ctx)?.reason ?? null;
 }
 
 /** Screaming Frog's ladder boundary for one pixel ladder, in its own widths. */
@@ -1036,6 +1090,8 @@ interface Comparison {
   sfOnly: string[];
   ariadneOnly: string[];
   unexplained: number;
+  /** Whether any divergence on this filter is explained by an owner decision. */
+  ownerDecided: boolean;
   /** The context this filter's reasons were judged in (its own row count). */
   ctx: ReasonContext;
 }
@@ -1134,6 +1190,7 @@ function writeReport(runDir: string): number {
       return text === undefined || text === null ? null : serpWidth(text, kind);
     },
     fired,
+    ourDiscoveredVia: (key) => ourPage.get(key)?.discoveredVia,
     details: (ruleId, key) =>
       ariadne.issues.find((i) => i.ruleId === ruleId && i.key === key)?.details as Record<string, unknown> | undefined,
   };
@@ -1161,7 +1218,11 @@ function writeReport(runDir: string): number {
     for (const k of sfOnly) if (reasonFor(f.name, "sf-only", k, ctx) === null) unexplained++;
     for (const k of ariadneOnly) if (reasonFor(f.name, "ariadne-only", k, ctx) === null) unexplained++;
     unexplainedTotal += unexplained;
-    comparisons.push({ filter: f, exp, both, sfOnly, ariadneOnly, unexplained, ctx });
+    const ownerDecided = [
+      ...sfOnly.map((k) => reasonEntry(f.name, "sf-only", k, ctx)),
+      ...ariadneOnly.map((k) => reasonEntry(f.name, "ariadne-only", k, ctx)),
+    ].some((r) => r?.status === "owner-decided");
+    comparisons.push({ filter: f, exp, both, sfOnly, ariadneOnly, unexplained, ownerDecided, ctx });
   }
 
   // ---- ladders
@@ -1231,7 +1292,9 @@ function writeReport(runDir: string): number {
         ? c.both.length === 0 ? "match (both silent)" : "match"
         : c.unexplained > 0
           ? `**${c.unexplained} UNEXPLAINED**`
-          : "divergence, explained";
+          : c.ownerDecided
+            ? "threshold divergence, owner-decided"
+            : "divergence, explained";
     const configuredNote = c.exp.configured === null ? "" : ` (SF: ${c.exp.configured})`;
     w(
       `| ${c.filter.name}${configuredNote} | ${c.filter.ruleIds.map((id) => `\`${id}\``).join(", ")} | ${c.filter.family} | ${c.both.length} | ${c.sfOnly.length} | ${c.ariadneOnly.length} | ${status} |`,
@@ -1502,7 +1565,17 @@ function writeReport(runDir: string): number {
     `| \`SLOW_MS\` | 1500 | no response-time issue at its default configuration (Issues Overview, tab filters); its measured times match ours | ${T.SLOW_MS} | kept: no SF boundary to read |`,
   );
   if (meta.autoAnalyse) {
-    w(ladderVerdict("DEEP_DEPTH", 5, T.DEEP_DEPTH, depthBoundary));
+    const owner = OWNER_THRESHOLDS["DEEP_DEPTH"]!;
+    const adjacent =
+      depthBoundary.sfLastClear !== null && depthBoundary.sfFirstFlagged === depthBoundary.sfLastClear + 1;
+    if (adjacent && depthBoundary.sfLastClear === owner.sfLastClear && T.DEEP_DEPTH === owner.kept) {
+      w(
+        `| \`DEEP_DEPTH\` | 5 | clear at ${depthBoundary.sfLastClear}, flagged at ${depthBoundary.sfFirstFlagged} | ${T.DEEP_DEPTH} | threshold divergence, owner-decided (${owner.decided}): SF's boundary is more than ${owner.sfLastClear}, ours more than ${owner.kept} |`,
+      );
+    } else {
+      // The owner's record no longer describes this run: judge it as any ladder.
+      w(ladderVerdict("DEEP_DEPTH", 5, T.DEEP_DEPTH, depthBoundary));
+    }
   } else {
     w(
       `| \`DEEP_DEPTH\` | 5 | "Pages With High Crawl Depth" empty at every depth, 1 to over 1,000 (post-crawl analysis off); its depths match ours | ${T.DEEP_DEPTH} | kept: no SF boundary to read |`,

@@ -13,9 +13,11 @@ import {
   META_WIDTH_GAP_PX,
   TITLE_WIDTH_GAP_PX,
   assertUnderSfRun,
+  OWNER_THRESHOLDS,
   analysisOffAndEmpty,
   autoAnalyseFromLog,
   measureExplains,
+  reasonEntry,
   reasonFor,
   sfExportEmpty,
 } from "../../scripts/calibrate-sf.js";
@@ -31,6 +33,7 @@ function ctx(over: Partial<ReasonContext> = {}): ReasonContext {
     ourWidth: () => null,
     fired: () => false,
     details: () => undefined,
+    ourDiscoveredVia: () => undefined,
     ...over,
   };
 }
@@ -66,17 +69,44 @@ describe("the calibration reasons", () => {
     expect(analysisOffAndEmpty("/x", ctx({ autoAnalyse: true }))).toBe(false);
   });
 
-  it("explains an unlinked hreflang target only when SF never fetched it AND its config does not crawl hreflang", () => {
+  it("explains an unlinked hreflang target only when we found it in the sitemap, SF never fetched it, and SF follows neither hreflang nor sitemaps", () => {
     const filter = "Hreflang:Unlinked hreflang URLs";
-    const off = { crawlConfig: { crawlHreflang: false } };
-    const on = ctx({ autoAnalyse: true, sfRowCount: 0, sfConfig: off });
+    const neither = { crawlConfig: { crawlHreflang: false, crawlSitemaps: false } };
+    const on = ctx({
+      autoAnalyse: true,
+      sfRowCount: 0,
+      sfConfig: neither,
+      ourDiscoveredVia: () => "sitemap",
+    });
     expect(reasonFor(filter, "ariadne-only", "/t", on)).toMatch(/never fetched/);
     // SF crawled the page: then its silence is a real divergence.
     expect(reasonFor(filter, "ariadne-only", "/t", { ...on, sf: () => ({ Address: "/t" }) })).toBeNull();
-    // SF crawls hreflang targets: no reason.
-    expect(
-      reasonFor(filter, "ariadne-only", "/t", { ...on, sfConfig: { crawlConfig: { crawlHreflang: true } } }),
-    ).toBeNull();
+    // We reached it by a link: SF could have too, so the reason does not hold.
+    expect(reasonFor(filter, "ariadne-only", "/t", { ...on, ourDiscoveredVia: () => "link" })).toBeNull();
+    // SF follows hreflang, or reads sitemaps: it had a path, no reason.
+    for (const crawlConfig of [
+      { crawlHreflang: true, crawlSitemaps: false },
+      { crawlHreflang: false, crawlSitemaps: true },
+    ]) {
+      expect(reasonFor(filter, "ariadne-only", "/t", { ...on, sfConfig: { crawlConfig } })).toBeNull();
+    }
+  });
+
+  it("records a crawl depth of 4 or 5 as the owner-decided threshold difference, and nothing else", () => {
+    const filter = "Links:Pages With High Crawl Depth";
+    const at = (depth: string, fired = false): ReasonContext =>
+      ctx({ autoAnalyse: true, sfRowCount: 5, sf: () => ({ "Crawl Depth": depth }), fired: () => fired });
+    expect(OWNER_THRESHOLDS["DEEP_DEPTH"]).toEqual({ sfLastClear: 3, kept: 5, decided: "2026-11-06" });
+    for (const d of ["4", "5"]) {
+      const r = reasonEntry(filter, "sf-only", "/d", at(d));
+      expect(r?.status, d).toBe("owner-decided");
+    }
+    // Deeper than the kept value: we should have reported it, so it is a real miss.
+    expect(reasonEntry(filter, "sf-only", "/d", at("6"))).toBeNull();
+    // At or under SF's boundary: SF should not have listed it; not this reason.
+    expect(reasonEntry(filter, "sf-only", "/d", at("3"))).toBeNull();
+    // We did report it after all: not an SF-only divergence of threshold.
+    expect(reasonEntry(filter, "sf-only", "/d", at("4", true))).toBeNull();
   });
 
   it("explains a title divergence as the measurement only when the bound lies between the widths and the gap is small", () => {
