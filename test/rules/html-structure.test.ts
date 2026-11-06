@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 import { htmlStructureRules } from "../../src/rules/page/html-structure.js";
 import type { HtmlStructure } from "../../src/crawl/parse/page-facts.js";
+import { ISSUE_COPY } from "../../src/rules/registry/copy/index.js";
 import { expectSilentOnNonOkFetches, mkPage, mkV1Page, ruleLookup } from "./mk-page.js";
 
 const rule = ruleLookup(htmlStructureRules, "htmlStructureRules");
@@ -158,5 +159,26 @@ describe("html.structure-invalid", () => {
     expect(run(`<html><title>t</title><body>x</body></html>`)).toHaveLength(1);
     expect(run(`<html><head></head><body>a</body><body>b</body></html>`)).toHaveLength(1);
     expect(run(`<html><head></head><body>a</body></html>`)).toHaveLength(0);
+  });
+
+  // Ruling R14: a document that leaves out the optional <head> and <body> start
+  // tags is valid HTML, and the rule still reports it (info), because nothing in
+  // the markup then marks where the head ends. The copy must say exactly that
+  // and not call the page broken or invalid.
+  it("reports a valid tagless document as head-missing and body-missing, without calling it invalid", () => {
+    const out = invalid.run(
+      mkPage({ htmlStructure: structureOf(`<!doctype html><title>x</title><p>hi`) }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.severity).toBe("info");
+    expect(out[0]!.evidence).toEqual({
+      problems: ["head-missing", "body-missing"], headTags: 0, bodyTags: 0,
+    });
+    const copy = ISSUE_COPY["html.structure-invalid"]!;
+    for (const text of [copy.title, copy.explanation, copy.howToFix]) {
+      expect(text).not.toMatch(/\b(invalid|broken)\b/i);
+    }
+    expect(copy.explanation).toMatch(/optional|valid HTML/);
+    expect(copy.howToFix).toMatch(/explicit <head> and <body>/);
   });
 });

@@ -631,11 +631,11 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Remove or move the element named in the row out of the <head>; a tracking noscript iframe belongs at the top of the <body>. Keep only title, meta, link, base, style, script and noscript with those elements in the head.",
   },
   "html.structure-invalid": {
-    title: "HTML: Invalid document structure",
+    title: "HTML: Head or body tag missing, repeated or out of order",
     explanation:
-      "Pages that do not have exactly one <head> and one <body>, or whose <head> starts after the <body>; the Problems column lists which of head-missing, head-repeated, body-missing, body-repeated and head-after-body apply. A parser repairs such a document by guessing, so head tags can end up in the body and the page may be read differently from how it was written.",
+      "Pages that do not have exactly one <head> and one <body> tag, or whose <head> tag comes after the <body>; the Problems column lists which of head-missing, head-repeated, body-missing, body-repeated and head-after-body apply. The <head> and <body> tags are optional in HTML, because browsers infer both, but without them nothing in the markup marks where the head ends, so one stray element before the title or meta tags moves them into the body. A repeated or misplaced tag is ignored, so head tags written after it may not be read as intended.",
     howToFix:
-      "Fix the template so the document has one <html>, then one <head>, then one <body>, in that order. Check for a layout or plugin that writes a second <head> or <body>, or that drops the <head> element.",
+      "Write explicit <head> and <body> tags, once each and in that order, even though HTML lets them be left out. Check for a layout or plugin that writes a second <head> or <body>, or that drops the <head> tag.",
   },
   "h2.missing": {
     title: "Headings: No H2",

@@ -2125,21 +2125,28 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 ### CHECK-88: HTML document structure
 - **Priority**: Medium | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-88"` — two rules:
-  `html.structure-invalid` (info: not exactly one `<head>` or one `<body>`, or a
-  `<head>` after the `<body>`; Problems lists which) and `html.head-closed-early`
+  `html.structure-invalid` (info: not exactly one `<head>` or one `<body>` tag, or a
+  `<head>` tag after the `<body>`; Problems lists which) and `html.head-closed-early`
   (warning: an element or text the head does not allow ended it while head tags
   followed; Closing Element names it). The check asks whether the
   HTML document is shaped so a parser reads it as written: one `<html>`, one `<head>`
   before one `<body>`, and a `<head>` that is not closed early by an element that does
   not belong in it (which pushes the tags after it, including the title, canonical and
-  robots tags, out of the head). The evidence is the document structure the crawler
+  robots tags, out of the head). The `<head>` and `<body>` start tags are optional in
+  HTML, so a page that leaves them out is valid and is not broken; it is still reported
+  (head-missing / body-missing, info) because without them nothing marks where the head
+  ends and one stray element moves the head tags into the body. Recommend explicit
+  tags; do not describe such a page as invalid. The evidence is the document structure the crawler
   recorded while parsing each page. These facts exist only for crawls written by
   extraction version 2 or later: on an older crawl `extraction.not-recorded` (info) is the
   NOT MEASURED marker. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if every judged page has a single, correctly ordered html, head and body and
-    its head is not closed early
-  - FAIL if any rule listed under this check fired
+    its head is not closed early. A page whose only problems are head-missing /
+    body-missing (tags left out, which HTML allows) passes; record the explicit-tag
+    recommendation beside it
+  - FAIL if `html.head-closed-early` fired, or `html.structure-invalid` fired with a
+    repeated or misplaced tag (head-repeated, body-repeated, head-after-body)
   - NOT MEASURED if `extraction.not-recorded` (info) fired
   - Record: the pages, the structural fault and, for an early close, the tag that
     ended the head
