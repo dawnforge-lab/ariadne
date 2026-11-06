@@ -542,14 +542,29 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     twitter and an og tag counts as both. Migration 0027 (Ruling R7) widens
 //     `title_count`, `meta_description_count`, `rel_next_count` and
 //     `rel_prev_count` from smallint to integer, unclamped.
-//  4. (T5) The v2 gate and its marker, `src/rules/query/page-facts.ts`:
+//  4. (T4) The analyzer fills `html_structure` (`htmlTags`, `headTags`,
+//     `bodyTags`, `headBeforeBody`, `closedEarly`) in the streaming tokenizer.
+//     `closedEarly` is the first element or text that ends the head while the
+//     parser is still in it, kept only when the document later shows the head
+//     was meant to continue (deviation 6, narrowed by ruling R8): an explicit
+//     `</head>` or `<body>`, a `<base>`, a `<title>` outside `<svg>`, a `<meta>`
+//     without `itemprop`, or a `<link>` with a rel that is not body-ok. An
+//     explicit `<body>` is never a candidate, and inside a head `<noscript>`
+//     only a start tag outside `HEAD_ALLOWED` is one (R12, R12b). Every
+//     page-derived string is made storable at the writer boundary
+//     (`src/crawl/storable-text.ts`: no U+0000 or lone surrogate reaches
+//     Postgres, caps cut on code points; rulings R9, R10), and so is crawl-level
+//     site text such as robots.txt in `crawls.discovery` (R11). A JSON-LD block
+//     nested deeper than `MAX_LD_JSON_NESTING` (64) is a parse error, not a
+//     stored block, and `storableDeep` throws past `STORABLE_MAX_DEPTH` (R11).
+//  5. (T5) The v2 gate and its marker, `src/rules/query/page-facts.ts`:
 //     `v2Gate` (a thin wrapper over `extractionCoverage(db, crawlId, 2)`) opens
 //     every later query rule on a v2 fact, and `extraction.not-recorded` (info,
 //     `marker`, category `crawl`) is the one NOT MEASURED marker for them all. It
 //     fires once (`dedupeKey` "site") when any page is below version 2 and the
 //     crawl has a FETCHED_OK page, and claims CHECK-04, 10, 18, 22, 24, 25, 34,
 //     35, 36, 37, 49, 85, 86, 87 and 88. 155 rules.
-//  5. (T6) The six social rules, all CHECK-87, category `on-page`, judged
+//  6. (T6) The six social rules, all CHECK-87, category `on-page`, judged
 //     pages only. Page rules (`src/rules/page/social.ts`, info):
 //     `social.og-incomplete` and `social.x-incomplete` fire on a v2 row whose
 //     `social` is null or incomplete (ruling R2); `social.og-multiple` and
@@ -566,12 +581,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `resources.not-recorded` and `resources.not-fetched` claim CHECK-87, and
 //     `resources.not-fetched` also fires on a crawl whose only rows are
 //     unasked share images and whose pages count no image (R13). 161 rules.
-//  6. (T7) Heading and title rules, category `on-page`: `h2.missing`,
+//  7. (T7) Heading and title rules, category `on-page`: `h2.missing`,
 //     `h2.too-long`, `h2.duplicate`, `title.multiple`,
 //     `meta-description.multiple` and `title.same-as-h1` (commit 06cf98e).
 //     `title.same-as-h1`, `h2.missing` and `social.og-duplicate` judge every
 //     crawl (deviation 1).
-//  7. (T8) `directives.bot-conflict` (page, warning, CHECK-04: a bot-specific
+//  8. (T8) `directives.bot-conflict` (page, warning, CHECK-04: a bot-specific
 //     robots meta whose noindex/nofollow state differs from the combined
 //     `robots` meta; `none` counts as both), `redirect.meta-refresh` (page,
 //     warning, CHECK-10: a meta refresh or `Refresh` header naming a URL, in
@@ -579,14 +594,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     info, CHECK-25: `v2Gate`, primary language subtag of `html_lang` against
 //     the page's self hreflang codes). `parseRefresh` follows the HTML refresh
 //     algorithm strictly (ruling R5). 170 rules.
-//  8. (T9) Link rules. Page rules in `src/rules/page/anchors.ts` over
+//  9. (T9) Link rules. Page rules in `src/rules/page/anchors.ts` over
 //     `pages.anchorCounts` (null on a v1 row, so silent): `links.uncrawlable`
 //     (warning, CHECK-34: `<a>` with no href but onclick/role, a `javascript:`
 //     href, or a `#` / `#!` href), `links.empty-href` and
 //     `links.unsafe-target-blank` (info, CHECK-86). Query rule
 //     `links.no-anchor-text` (info, CHECK-86) opens with `v2Gate` and counts
 //     internal links whose stored anchor, image alt included, is empty. 174 rules.
-//  9. (T10) Four page rules: `security.form-insecure` (warning, CHECK-85,
+// 10. (T10) Four page rules: `security.form-insecure` (warning, CHECK-85,
 //     `isAuditable`: an `http:` page with a form, or an `https:` page with a form
 //     whose action is `http:`), `images.empty-alt` and `images.alt-too-long`
 //     (info, CHECK-49, `isJudged`; the 100-character limit is `IMAGE_ALT_MAX`,
@@ -598,7 +613,7 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     0.20.0 one, and a v2 page's gains the optional `byKind` evidence), and
 //     `images.missing-alt` gains an optional `sample` of image addresses on a
 //     v2 row. 178 rules.
-// 10. (T11) Two page rules in the new `src/rules/page/html-structure.ts`, both
+// 11. (T11) Two page rules in the new `src/rules/page/html-structure.ts`, both
 //     `isAuditable` and silent on a v1 row: `html.head-closed-early` (warning,
 //     CHECK-18 / CHECK-04 / CHECK-24: the analyzer's `closedEarly`, which needs a
 //     later head-only element or `</head>` as evidence the head was meant to
@@ -606,6 +621,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     head or one body, or a head after the body). `head.directives-outside-head`
 //     and `head.tags-outside-head` gain the optional `headClosedEarly` evidence
 //     naming the closing element on a v2 row. 180 rules.
+// 12. (T12) Ruling R14: `html.structure-invalid` still reports a page that
+//     leaves out the optional `<head>` / `<body>` start tags (info), and its copy
+//     now says those tags are optional in HTML, that without them nothing marks
+//     where the head ends, and to write them explicitly. Title: "HTML: Head or
+//     body tag missing, repeated or out of order". No verdict moved.
 export const RULESET_VERSION = "0.21.0";
 
 /**

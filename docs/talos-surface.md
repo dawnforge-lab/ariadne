@@ -1,11 +1,66 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 26a (ruleset 0.20.0, migrations 0000–0025,
+**Status:** the contract as of Phase 26b (ruleset 0.21.0, migrations 0000–0027,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
+
+**What Phase 26b changed here: twenty-six rule ids, which need a re-crawl.**
+Ruleset 0.21.0, migrations 0026 and 0027 (fifteen nullable `pages` columns, four of
+them widened to integer by 0027), and no tool, route or field added. The ids arrive
+through the listings that already exist, as Phase 26a's did, each with its own copy
+and `columns`. `rules_catalog` now answers 180 rows (69 page, 97 query, 14 metric; 15
+of them markers), and the finding rules split 33 critical / 62 warning / 71 info (85
+info counting the fourteen metric rules). Unlike 26a's rules, these read page facts
+the crawler records only from this phase on (extraction version 2), so `crawl_rules`
+over an older crawl does NOT produce them. On any crawl with a page written before the
+change, the NOT MEASURED marker `extraction.not-recorded` (info, the fifteenth marker)
+fires once with `pagesNotRecorded` and `pagesRecorded`, and the 22 rules it covers are
+silent; a re-crawl is the remedy (§11). Three rules read columns every crawl has
+(`title.same-as-h1`, `h2.missing`, `social.og-duplicate`) and judge old crawls too.
+By family:
+- **Social sharing tags** (CHECK-87, new): `social.og-incomplete`,
+  `social.x-incomplete`, `social.og-multiple`, `social.og-url-mismatch` and
+  `social.og-duplicate` (info), and `social.image-broken` (warning). A share image
+  is stored as a `resources` row with no page reference, because no page loads it: it
+  is counted in `crawl_status.resources` and listed on the `resources` CSV view with
+  `referencingPages` 0, and it never counts toward page weight, mixed content or
+  `resources.broken`. On a `fetchResources: false` crawl `social.image-broken` judges
+  only relative or malformed addresses and `resources.not-fetched` speaks for the rest.
+- **Headings and titles** (CHECK-35, CHECK-36, CHECK-37): `title.multiple` and
+  `meta-description.multiple` (warning), `title.same-as-h1`, `h2.missing`,
+  `h2.too-long` and `h2.duplicate` (info).
+- **Directives, refresh and language** (CHECK-04, CHECK-10, CHECK-25):
+  `directives.bot-conflict` and `redirect.meta-refresh` (warning),
+  `hreflang.html-lang-mismatch` (info; primary language subtag only, `x-default`
+  never compared). On a re-crawled page the stored robots value joins EVERY
+  `<meta name="robots">`, so a `noindex` in a second robots meta now makes the page
+  non-indexable for every rule and for `pages_query`'s `indexable`.
+- **Links** (CHECK-34, CHECK-86): `links.uncrawlable` (warning),
+  `links.empty-href`, `links.unsafe-target-blank` and `links.no-anchor-text` (info).
+  A stored anchor now includes the alt of an image inside the link.
+- **Forms, images and pagination** (CHECK-85, CHECK-49, CHECK-22):
+  `security.form-insecure` (warning; CHECK-85's title widens to "Mixed content and
+  insecure forms"), `images.empty-alt`, `images.alt-too-long` (over 100 characters)
+  and `pagination.multiple` (info). `security.mixed-content` also counts `http:`
+  iframes and media on a re-crawled page and gains optional `byKind` evidence;
+  `images.missing-alt` gains an optional `sample`.
+- **Document structure** (CHECK-18, CHECK-04, CHECK-24, and CHECK-88, new):
+  `html.head-closed-early` (warning; the element or text that ended the head while
+  head tags followed) and `html.structure-invalid` (info; not exactly one `<head>`
+  and one `<body>` tag, or the head after the body). A page that leaves out the
+  optional `<head>`/`<body>` tags is valid HTML and is still listed, and the copy
+  says so rather than calling it broken. `head.directives-outside-head` and
+  `head.tags-outside-head` gain optional `headClosedEarly` evidence.
+
+Two engine changes ride with it and are visible in served values. Every string the
+crawler stores from a page, and the site text a crawl row keeps (robots.txt), is made
+storable first (`src/crawl/storable-text.ts`): a U+0000 is served as U+2400 (`␀`) and
+a lone surrogate as U+FFFD, where before the page's insert failed and the crawl with
+it. A JSON-LD block nested deeper than 64 levels is counted as a parse error rather
+than stored.
 
 **What Phase 26a changed here: forty rule ids, and nothing else.** Ruleset
 0.20.0, no migration, no tool, route or field added. The new ids arrive through
@@ -566,12 +621,14 @@ validator before the handler runs (`test/api/mcp.test.ts:825` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (154 rows at 0.20.0) rather than by the crawl. The
-catalog is ~151 KB (**154,237 bytes**, re-measured 2026-11-05 at the end of
-Phase 26a over all 154 rows of ruleset 0.20.0 by serialising what
-`rulesCatalog` answers with no crawl id — 14 markers at 2,157 bytes, the
+bounded by the **ruleset** (180 rows at 0.21.0) rather than by the crawl. The
+catalog is ~176 KB (**180,444 bytes**, re-measured 2026-11-06 at the end of
+Phase 26b over all 180 rows of ruleset 0.21.0 by serialising what
+`rulesCatalog` answers with no crawl id — 15 markers at 2,274 bytes, the
 `marker` values JSON-serialised as one array, and the fourteen tables at 5,239
-the same way; the
+the same way, unchanged; the 154,237 before it was measured 2026-11-05 at the end of
+Phase 26a over all 154 rows of ruleset 0.20.0 the same way — 14 markers at 2,157
+bytes and the fourteen tables at 5,239; the
 115,443 before it was measured 2026-10-22 at the end of
 Phase 23 over all 114 rows of ruleset 0.18.0 — 13 markers at 2,020 bytes
 JSON-serialised and the fourteen tables at 5,166, measured one way for this
@@ -892,8 +949,10 @@ zeroes here are not "this site references no files."** The finding that says
 which it is, is `resources.not-recorded` (§5.3).
 
 - `seen` — distinct files the SERVED HTML points at, images, stylesheets and
-  scripts. Recorded even when `fetchResources` is false; a file a script injects
-  at runtime is not in it at all.
+  scripts, and since Phase 26b the share images its `og:image` / `twitter:image`
+  tags name (no page loads those; `referencingPages` 0 on the CSV view). Recorded
+  even when `fetchResources` is false; a file a script injects at runtime is not in
+  it at all.
 - `fetched` — a server answered about the file.
 - `failed` — a server could not: a 4xx or 5xx, a request that failed, a URL our
   own policy refused, a file robots.txt put out of reach. **A count of files that
@@ -2218,7 +2277,7 @@ Four postures a Talos integrator should know about rather than discover:
 
 ## 11. Versioning, and what a ruleset change does to a served crawl
 
-`RULESET_VERSION` (**0.20.0** as of Phase 26a) stamps **judgement**: bump it when
+`RULESET_VERSION` (**0.21.0** as of Phase 26b) stamps **judgement**: bump it when
 a rule's verdict or copy changes. Adding a rule or a metric family adds rows
 without changing a verdict — `metrics` rows carry no version column at all —
 which is the argument Phase 10 held 0.7.0 on.
@@ -2276,6 +2335,32 @@ should, and `site.health`'s `urlsCritical` changes meaning (from "mechanically
 broken" to "carrying a first-fix SEO defect"), so a health gauge drawn from it
 must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
+
+**Phase 26b bumped to 0.21.0, once: new ids, three widened readings, and a
+re-crawl attached.** Twenty-six ids joined (listed by family at the top of this document)
+and no existing rule's severity moved. Unlike 26a, 22 of the new rules read page
+facts the crawler records only from this phase on (`EXTRACTION_VERSION` 2,
+migrations 0026 and 0027), so re-judging an old crawl does not produce them: the
+marker `extraction.not-recorded` fires instead, once per crawl, and those checks
+read NOT MEASURED, never clean. Query rules refuse a crawl with any page below
+version 2 as a whole; page rules are silent on a page row whose new columns are
+null. Re-judging the Phase 25 gate crawl (lavishalice.com, 602 rows, all version 1;
+`docs/gates/phase-26b.md`) left all 1,907 findings of the older rules
+identical in rule, page, severity, key and evidence (only the `ruleset_version`
+stamp moved) and every metric row identical, and added 572 findings: the marker
+(`pagesNotRecorded` 602, `pagesRecorded` 0) and the three rules that read columns
+every crawl has (`title.same-as-h1` 335, `h2.missing` 233, `social.og-duplicate`
+3). Three changes reach rules that existed before, and only on a re-crawled page.
+First, the stored robots value joins every `<meta name="robots">`, so a `noindex`
+in a second robots meta now makes a page non-indexable and moves every rule and
+metric that reads indexability. Second, `security.mixed-content` also counts
+`http:` iframes and media, and `images.missing-alt`,
+`head.directives-outside-head` and `head.tags-outside-head` gain optional
+evidence. Third, share images become `resources` rows with no page reference, and
+every resource rule, metric and NOT MEASURED marker judges only files a page
+loads, so a share image never moves page weight or `resources.broken`. A crawl
+compared across the boundary therefore differs because there is more to see, and
+`crawl_compare` raises `ruleset-mismatch` across it.
 
 **Phase 26a bumped to 0.20.0, once, on the additive ground.** Forty ids joined
 (listed by family at the top of this document), and no existing rule's verdict,
@@ -2476,7 +2561,9 @@ Semantics a consumer must repeat to its own users:
   row count is how many URLs redirect, never how many chains there are.
 - **`resources` is one row per FILE, off the SERVED HTML.** An image four
   hundred pages carry is one row with `referencingPages: 400`, not four hundred
-  rows — the file is the unit of work, and the fix is made once. Two absences
+  rows — the file is the unit of work, and the fix is made once. A share image
+  (`og:image`, `twitter:image`) is a row with `referencingPages: 0`, because the
+  tag names it and no page loads it (Phase 26b). Two absences
   follow, on exactly the `links_to_4xx` pattern: a file that JAVASCRIPT injects
   at runtime was never in the served HTML and is **absent from this file rather
   than clean**, so an empty export says "the server sent no references" and never

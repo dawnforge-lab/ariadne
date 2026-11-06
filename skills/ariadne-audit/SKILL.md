@@ -604,6 +604,60 @@ every one of them. The checklist names each at its check, with its severity. By 
   pass, so on a `fetchResources: false` crawl it is silent and `resources.not-fetched`
   is the marker that says so.
 
+**Twenty-six rules joined at ruleset 0.21.0, and twenty-two of them need a
+re-crawl.** They read page facts the crawler records only since Phase 26b (extraction
+version 2): the document language, Open Graph and X tags, H2s, repeated titles and
+descriptions, bot-specific robots metas, meta refresh, link shapes, insecure forms and
+frames, image alt text, repeated pagination links and the head/body structure. Running
+`crawl_rules` at 0.21.0 over a crawl written before that does not judge them.
+`extraction.not-recorded` (info) fires once instead, with `pagesNotRecorded` and
+`pagesRecorded`, and every check it claims is NOT MEASURED on that crawl, never a PASS.
+The remedy is a re-crawl, not a re-run. Three of the rules, `title.same-as-h1`,
+`h2.missing` and `social.og-duplicate`, read columns every crawl has, so they judge
+old crawls too. On the Phase 25 gate crawl (602 pages, all written before the change)
+the marker fired with `pagesNotRecorded` 602 and only those three added findings. By
+check:
+
+- **CHECK-04, directives:** `directives.bot-conflict` (a `googlebot`-style robots meta
+  whose noindex or nofollow differs from the generic one; `none` counts as both). On a
+  re-crawled page the generic robots value now joins every `<meta name="robots">`, so a
+  `noindex` in a second robots meta makes the page non-indexable for every rule.
+- **CHECK-10, redirects:** `redirect.meta-refresh`, a meta refresh or `Refresh` header
+  that names a URL. A refresh that only reloads the page does not fire.
+- **CHECK-18, CHECK-04 and CHECK-24, head integrity:** `html.head-closed-early`
+  (warning). An element or text the head does not allow ended it, and head tags
+  followed. The Closing Element column names it; a tag-manager `<noscript><iframe>` in
+  the head is the usual cause. `head.directives-outside-head` and
+  `head.tags-outside-head` gain `headClosedEarly`, the element that pushed the tags out.
+- **CHECK-88, document structure:** `html.structure-invalid` (info). Problems that are
+  only head-missing and body-missing mean the page leaves out the `<head>` and `<body>`
+  tags, which HTML allows. That page is valid and not broken: record it as PASS with a
+  recommendation to write explicit tags. A repeated or misplaced tag is a FAIL.
+- **CHECK-22, pagination:** `pagination.multiple`, more than one rel=next or rel=prev.
+- **CHECK-25, hreflang:** `hreflang.html-lang-mismatch` compares the primary language
+  only (`en-US` and `en-gb` agree, `de` and `en` do not), and never `x-default`.
+- **CHECK-34, links:** `links.uncrawlable`: a link with no href but an onclick or a link
+  role, a `javascript:` href, or a bare `#` href. A named anchor (`<a name="top">`) and
+  an in-page `#section` link are not counted.
+- **CHECK-86, link hygiene:** `links.empty-href`, `links.unsafe-target-blank` and
+  `links.no-anchor-text` (internal links whose anchor text, an image's alt included, is
+  empty).
+- **CHECK-35, CHECK-36 and CHECK-37, on-page:** `title.multiple`,
+  `meta-description.multiple`, `title.same-as-h1`, `h2.missing`, `h2.too-long` and
+  `h2.duplicate`.
+- **CHECK-49, images:** `images.empty-alt` and `images.alt-too-long` (over 100
+  characters, counted when the page is crawled, so a re-run cannot change it).
+  `images.missing-alt` gains a sample of image addresses on a re-crawled page.
+- **CHECK-85, insecure forms:** `security.form-insecure`, a form on an `http:` page or
+  one that posts to `http:`. `security.mixed-content` now also counts `http:` iframes
+  and media (its `byKind` evidence).
+- **CHECK-87, social sharing tags:** `social.og-incomplete`, `social.x-incomplete`,
+  `social.og-multiple`, `social.og-url-mismatch`, `social.og-duplicate` and
+  `social.image-broken`. A share image is not loaded by the page, so it never counts
+  toward page weight, mixed content or `resources.broken`. On a `fetchResources: false`
+  crawl `social.image-broken` judges only relative or malformed image addresses, and
+  `resources.not-fetched` says the images' status was not asked.
+
 ---
 
 ## Phase 3 — the agent checks
