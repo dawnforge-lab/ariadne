@@ -449,9 +449,13 @@
  * That covers the html-structure snippet (tag and text), every `social` value,
  * `robotsMetas` contents, the joined `robotsMeta`, `metaRefresh` (in
  * `parseRefresh`), `htmlLang`, `h2Text`, the insecure sample URLs and the
- * missing-alt sample. The pre-26b strings (`title`, `metaDescription`,
- * `h1Text`, the og trio, link anchors, …) are NOT yet covered: a known gap,
- * outside this phase's scope.
+ * missing-alt sample. Storability itself is the WRITER's: ruling R10 put
+ * `storableDeep` at persist.ts's one buffering boundary, which also covers the
+ * pre-26b strings (`title`, `metaDescription`, `h1Text`, the og trio, link
+ * anchors, JSON-LD, …). It is applied here as well only so these caps cut on a
+ * code point. The pre-26b caps (`h1Text`, the placeholder window, …) still
+ * cut UTF-16 units: a half pair left at their edge reaches the writer and is
+ * stored as U+FFFD, never as a failed insert.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";

@@ -106,6 +106,7 @@ import {
 } from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
 import { engineVersion, redactRequestHeaders } from "./versions.js";
+import { storableDeep } from "./storable-text.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -2448,8 +2449,9 @@ async function persistSitemap(
       };
     });
     // discover() dedupes by URL, so a conflict here means a resume re-reading
-    // the same sitemap. The first read's row stands.
-    await db.insert(sitemapUrls).values(batch).onConflictDoNothing();
+    // the same sitemap. The first read's row stands. `lastmod` is the sitemap's
+    // own text, so the batch passes the storability boundary (ruling R10).
+    await db.insert(sitemapUrls).values(storableDeep(batch)).onConflictDoNothing();
   }
 }
 

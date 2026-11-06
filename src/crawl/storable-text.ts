@@ -41,6 +41,38 @@ export function storableCap(raw: string, max = Infinity): string {
   return storableText(raw, max).text;
 }
 
+/**
+ * `value` with every string inside it made storable (no cap): the one boundary
+ * a row passes before it is buffered for Postgres (persist.ts, the render
+ * writer). It walks arrays and plain objects, keys included (a parsed JSON-LD
+ * key can hold U+0000 too). Every other value is returned as it is: numbers,
+ * bigints, booleans, null, and class instances such as `Date`.
+ *
+ * A value that is already storable comes back unchanged: every string is
+ * `===` the input and objects are rebuilt with the same keys in the same order.
+ * Parity and dedupe keys therefore see clean text exactly as before.
+ *
+ * Recursive, so its depth is the value's nesting depth. The rows it sees are
+ * bounded by the analyzer's caps (`MAX_LD_JSON_CHARS` for JSON-LD), and the
+ * driver's own `JSON.stringify` of the same value recurses just as deep.
+ */
+export function storableDeep<T>(value: T): T {
+  return deep(value) as T;
+}
+
+function deep(value: unknown): unknown {
+  if (typeof value === "string") return storableText(value).text;
+  if (Array.isArray(value)) return value.map(deep);
+  if (value !== null && typeof value === "object") {
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value)) out[storableText(key).text] = deep(inner);
+    return out;
+  }
+  return value;
+}
+
 /** ES2024's `String.prototype.toWellFormed` (Node 22); the project's ES2023 lib does not declare it. */
 function wellFormed(s: string): string {
   return (s as string & { toWellFormed(): string }).toWellFormed();

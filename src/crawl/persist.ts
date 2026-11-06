@@ -108,6 +108,7 @@ import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
 import { EXTRACTION_VERSION } from "./versions.js";
+import { storableDeep } from "./storable-text.js";
 
 const DEFAULT_BATCH_SIZE = 100;
 
@@ -428,6 +429,14 @@ export class PageWriter {
    * Append rows one at a time, draining the moment the buffer is full. Row by
    * row rather than "append all, then drain" precisely so that a page with
    * more rows than `batchSize` never puts them all in the buffer at once.
+   *
+   * THE STORABILITY BOUNDARY (ruling R10). Every row this writer buffers passes
+   * through here, so every page-derived string in it is made storable at this
+   * one place: titles, anchors, rels, JSON-LD values and keys, URLs, header
+   * values, reasons. `storableDeep` maps U+0000 to U+2400 and a lone surrogate
+   * to U+FFFD, and returns a clean value unchanged. One hostile page therefore
+   * cannot make a batch insert throw, which would lose the batch and fail the
+   * crawl, and a resume would hit the same page again.
    */
   private async push<T>(
     buffer: T[],
@@ -435,7 +444,7 @@ export class PageWriter {
     flush: () => Promise<void>,
   ): Promise<void> {
     for (const row of rows) {
-      buffer.push(row);
+      buffer.push(storableDeep(row));
       if (buffer.length >= this.batchSize) await flush();
     }
   }
@@ -545,7 +554,9 @@ export class PageWriter {
     blocked: ReadonlyArray<{ item: PageWriterItem; reason: string }>,
   ): Promise<number> {
     if (blocked.length === 0) return 0;
-    const rows = blocked.map(({ item, reason }) => ({
+    // Through the storability boundary like every buffered row (see `push`):
+    // the reason quotes the site's robots.txt line.
+    const rows = blocked.map(({ item, reason }) => storableDeep({
       ...this.pageRow(
         `page_${randomUUID()}`,
         item,

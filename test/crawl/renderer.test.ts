@@ -2527,6 +2527,44 @@ describe("runRenderPass", () => {
     await expect(writeRenderResult(db, crawlId, ghost)).rejects.toThrow(/no page row/i);
   });
 
+  it("stores rendered strings holding a NUL or a lone surrogate (ruling R10)", async () => {
+    const crawlId = await newCrawl(["/hostile-render"]);
+    const result: RenderResult = {
+      url: `${site.base}/hostile-render`,
+      rendered: true,
+      wordCount: 1,
+      linkCount: 0,
+      navLinkCount: 0,
+      footerLinkCount: 0,
+      filterLinkCount: 0,
+      analyzerWordCount: 1,
+      renderableWordCount: 1,
+      title: "Ti\u0000tle",
+      h1Count: 1,
+      canonical: null,
+      robotsMeta: "noindex\u0000",
+      metaDescription: "d\uD800",
+      h1Text: "H\u0000\uDC00",
+      htmlPath: "/dev/null",
+      redirectUrl: null,
+      error: null,
+      blockedRequests: 0,
+      skippedPaintRequests: 0,
+      pacedRequests: 0,
+      cachedResponses: 0,
+      unpacedNetworkRequests: 0,
+      console: null,
+    };
+
+    await writeRenderResult(db, crawlId, result);
+
+    const row = await pageRow(crawlId, "/hostile-render");
+    expect(row.renderedTitle).toBe("Ti␀tle");
+    expect(row.renderedRobotsMeta).toBe("noindex␀");
+    expect(row.renderedMetaDescription).toBe("d�");
+    expect(row.renderedH1Text).toBe("H␀�");
+  });
+
   // -------------------------------------------------------------------------
   // Phase 25: render_console and render_version on the page row.
   // -------------------------------------------------------------------------

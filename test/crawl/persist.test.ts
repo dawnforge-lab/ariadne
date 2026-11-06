@@ -926,15 +926,13 @@ describe("PageWriter", () => {
     const url = `${SITE}/hostile-strings`;
     // `<img data-x="` is 13 units: the emoji's high surrogate lands on the
     // snippet cap's last unit. The robots content carries a raw lone surrogate,
-    // which no decoder produces but a direct string can.
-    //
-    // The NUL rides `twitter:title`, which only the 26b `social` column stores.
-    // In `og:title` it would ALSO reach the pre-26b `og_title` column, which is
-    // not sanitised and still makes this insert throw: a known gap outside this
-    // fix's scope (reported, not hidden).
+    // which no decoder produces but a direct string can. The og:title NUL
+    // reaches both the 26b `social` column and the pre-26b `og_title` column
+    // (ruling R10 covers the latter at the writer's boundary).
     const prefix = `<img data-x="${"x".repeat(HEAD_SNIPPET_MAX - 14)}`;
     const analysis = analyzePage(
-      `<html><head><meta name="twitter:title" content="Sh\u0000are">` +
+      `<html><head><meta property="og:title" content="Sh\u0000are">` +
+        `<meta name="twitter:title" content="X\u0000">` +
         `<meta name="robots" content="noindex\uD800">${prefix}😀"><title>t</title></head>` +
         `<body><p>x</p></body></html>`,
       url,
@@ -943,9 +941,111 @@ describe("PageWriter", () => {
     await writer.flush();
 
     const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
-    expect(row?.social?.x.title).toBe("Sh␀are");
-    expect(row?.robotsMeta).toBe("noindex�");
+    expect(row?.ogTitle).toBe("Sh\u2400are");
+    expect(row?.social?.og.title).toBe("Sh\u2400are");
+    expect(row?.social?.x.title).toBe("X\u2400");
+    expect(row?.robotsMeta).toBe("noindex\uFFFD");
     expect(row?.htmlStructure?.closedEarly).toEqual({ tag: "img", snippet: prefix, inNoscript: false });
+  });
+
+  it("persists every page-derived string storably at the writer's boundary (ruling R10)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/hostile-r10`;
+    // A NUL in the title, an anchor's text and a JSON-LD string value and key
+    // (the `\\u0000` escape is JSON's: JSON.parse turns it into a real NUL).
+    const analysis = analyzePage(
+      `<html><head><title>Ti\u0000tle</title>` +
+        `<script type="application/ld+json">{"@type":"Article","name":"a\\u0000b","k\\u0000":["c\\u0000"]}</script>` +
+        `</head><body><h1>H\u0000</h1><a href="/target">an\u0000chor</a></body></html>`,
+      url,
+    );
+    expect(analysis.title).toBe("Ti\u0000tle");
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.title).toBe("Ti\u2400tle");
+    expect(row?.h1Text).toBe("H\u2400");
+    const [link] = await db
+      .select({ anchor: links.anchor })
+      .from(links)
+      .where(and(eq(links.crawlId, crawlId), eq(links.targetUrl, `${SITE}/target`)));
+    expect(link?.anchor).toBe("an\u2400chor");
+    const [block] = await db
+      .select({ raw: structuredData.raw })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    expect(block?.raw).toEqual({ "@type": "Article", name: "a\u2400b", "k\u2400": ["c\u2400"] });
+  });
+
+  it("persists a lone surrogate in a direct analysis string as U+FFFD (ruling R10)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/lone-surrogate`;
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        title: "t\uD800",
+        metaDescription: "d\uDC00",
+        social: {
+          og: { title: "o\uD800" },
+          x: {},
+          counts: { "og:title": 1 },
+          conflicting: [],
+          outsideHead: false,
+          xViaProperty: false,
+        },
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.title).toBe("t\uFFFD");
+    expect(row?.metaDescription).toBe("d\uFFFD");
+    expect(row?.social?.og.title).toBe("o\uFFFD");
+  });
+
+  it("leaves a clean page's row exactly as it was: the boundary rewrites nothing storable", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/clean-r10`;
+    // Non-ASCII, emoji, a U+2400 the page wrote itself, an escaped-looking
+    // literal and JSON-LD: all storable already, so all must come back ===.
+    const analysis = analyzePage(
+      `<html lang="de"><head><title>Grüße 😀 ␀ \\u0000</title>` +
+        `<meta name="description" content="Ünïcödé — “quotes”">` +
+        `<meta property="og:title" content="Share 🎉">` +
+        `<script type="application/ld+json">{"@type":"Product","name":"Ä 😀","offers":[{"price":"1"}]}</script>` +
+        `</head><body><h1>Überschrift</h1><h2>Zwei 🎈</h2><a href="/z">Zürich 🚋</a></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.title).toBe(analysis.title);
+    expect(row?.metaDescription).toBe(analysis.metaDescription);
+    expect(row?.ogTitle).toBe(analysis.ogTitle);
+    expect(row?.h1Text).toBe(analysis.h1Text);
+    expect(row?.h2Text).toBe(analysis.h2Text);
+    expect(row?.htmlLang).toBe(analysis.htmlLang);
+    expect(row?.social).toEqual(analysis.social);
+    expect(row?.htmlStructure).toEqual(analysis.htmlStructure);
+    const [link] = await db
+      .select({ anchor: links.anchor })
+      .from(links)
+      .where(and(eq(links.crawlId, crawlId), eq(links.targetUrl, `${SITE}/z`)));
+    expect(link?.anchor).toBe(analysis.links[0]?.anchor);
+    const [block] = await db
+      .select({ raw: structuredData.raw })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    // jsonb stores keys in its own order, so the read-back is compared by value;
+    // the string-level identity is pinned in test/crawl/storable-text.test.ts.
+    expect(block?.raw).toEqual(analysis.structuredData[0]?.raw);
   });
 
   it("persists a rel=next count past the smallint range (Ruling R7, migration 0027)", async () => {

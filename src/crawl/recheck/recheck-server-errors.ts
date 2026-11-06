@@ -168,6 +168,7 @@ import type { RobotsInfo } from "../discovery.js";
 import { fetchPage, type FetchClass } from "../fetch-page.js";
 import type { HostGate } from "../politeness.js";
 import { isUrlAllowed } from "../url-policy.js";
+import { storableCap } from "../storable-text.js";
 
 /**
  * The floor under the gap between the two observations. See the module header
@@ -525,7 +526,9 @@ export async function recheckServerErrors(
       .set({
         recheckFetchClass: fetchClass,
         recheckStatusCode: statusCode,
-        recheckReason: reason,
+        // A reason can quote the site (a Location, a robots line): it passes
+        // the storability boundary (ruling R10). Clean text is unchanged.
+        recheckReason: reason === null ? null : storableCap(reason),
         // Moves with the class: `recheck_at is null` <=> `recheck_fetch_class
         // is null` over the whole table, which migration-0016's test asserts.
         recheckAt: new Date(),
