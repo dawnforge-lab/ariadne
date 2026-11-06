@@ -497,7 +497,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     (ISO 8601, RFC 822 / 850 / 1123), not `Date.parse`: a zone-less form is
 //     UTC with `assumedUtc: true`, and loose text is `dateParsed: false`.
 //     The date ends at its longest prefix `parseRobotsDate` accepts, so a
-//     directive after it with only a space between is still a token.
+//     directive after it with only a space between is still a token. The
+//     parser also reads asctime (UTC, `assumedUtc`), full month and day names,
+//     an ISO zone name or hours-only offset, and BST, CET, CEST, EET, EEST.
 //     The pagination target lookup drops every `disallowed` row (url-policy
 //     as well as robots.txt): never requested, so
 //     `pagination.non-indexable-target` no longer reports a url-policy

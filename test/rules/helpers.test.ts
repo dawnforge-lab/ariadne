@@ -979,7 +979,7 @@ describe("parseRobotsDate (PR #22 review)", () => {
       "June 25",
       "25 Jun 2010",
       "25 Jun 2010 15:00:00",
-      "25 Jun 2010 15:00:00 CEST",
+      "25 Jun 2010 15:00:00 QQT",
       "2010-02-30",
       "2010-06-25T24:00:00Z",
       "2010-06-25T15:00:00+2",
@@ -1033,5 +1033,86 @@ describe("unavailable_after ends where its date ends (PR #22 re-review M1)", () 
     expect(unavailableAfterOf("unavailable_after: next tuesday nofollow")).toBe(
       "next tuesday nofollow",
     );
+  });
+});
+
+describe("parseRobotsDate: the other widely used forms (PR #22 re-review M2)", () => {
+  const utc = (iso: string) => Date.parse(iso); // only ever called with an explicit Z
+
+  it("reads an ISO date-time followed by a zone name", () => {
+    expect(parseRobotsDate("2025-01-01 10:00:00 PST")).toEqual({
+      at: utc("2025-01-01T18:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2025-01-01T10:00 CET")).toEqual({
+      at: utc("2025-01-01T09:00:00Z"),
+      assumedUtc: false,
+    });
+  });
+
+  it("reads an ISO offset given in hours only", () => {
+    expect(parseRobotsDate("2010-06-25T15:00:00+05")).toEqual({
+      at: utc("2010-06-25T10:00:00Z"),
+      assumedUtc: false,
+    });
+    expect(parseRobotsDate("2010-06-25T15:00:00-03")).toEqual({
+      at: utc("2010-06-25T18:00:00Z"),
+      assumedUtc: false,
+    });
+  });
+
+  it("reads asctime as UTC and says the zone was assumed", () => {
+    expect(parseRobotsDate("Fri Jun 25 15:00:00 2010")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: true,
+    });
+    expect(parseRobotsDate("Fri Jun  5 15:00:00 2010")).toEqual({
+      at: utc("2010-06-05T15:00:00Z"),
+      assumedUtc: true,
+    });
+    expect(parseRobotsDate("Friday June 25 15:00:00 2010")).toEqual({
+      at: utc("2010-06-25T15:00:00Z"),
+      assumedUtc: true,
+    });
+  });
+
+  it("reads full day and month names", () => {
+    const at = utc("2010-06-25T15:00:00Z");
+    expect(parseRobotsDate("Friday, 25 June 2010 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 June 2010 15:00 UTC")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("Friday, 25-June-10 15:00:00 GMT")).toEqual({ at, assumedUtc: false });
+  });
+
+  it("knows the central and eastern European and British zones", () => {
+    const at = utc("2010-06-25T12:00:00Z");
+    expect(parseRobotsDate("25 Jun 2010 13:00:00 CET")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 14:00:00 CEST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 13:00:00 BST")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 14:00:00 EET")).toEqual({ at, assumedUtc: false });
+    expect(parseRobotsDate("25 Jun 2010 15:00:00 EEST")).toEqual({ at, assumedUtc: false });
+  });
+
+  it("still refuses everything else", () => {
+    for (const raw of [
+      "2010-06-25T15:00:00 QQT",
+      "2010-06-25 PST",
+      "2010-06-25T15:00:00+5",
+      "Fri Jun 25 15:00:00",
+      "Fri Jun 25 2010",
+      "Fri Jun 31 15:00:00 2010",
+      "Fry Jun 25 15:00:00 2010",
+      "25 Juno 2010 15:00 GMT",
+      "25 Ju 2010 15:00 GMT",
+      "constructor",
+    ]) {
+      expect(parseRobotsDate(raw), raw).toBeNull();
+    }
+  });
+
+  it("ends an unavailable_after date with a zone name before the next directive", () => {
+    expect(robotsTokens("unavailable_after: 2025-01-01 10:00:00 PST noindex")).toEqual([
+      "unavailable_after: 2025-01-01 10:00:00 pst",
+      "noindex",
+    ]);
   });
 });

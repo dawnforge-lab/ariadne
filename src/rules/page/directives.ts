@@ -80,7 +80,7 @@ export const directiveRules: PageRule[] = [
   // `fetched_at`, so re-judging an old crawl gives the same answer. A date that
   // does not parse fires too: Google ignores a directive it cannot parse, so
   // the page is not leaving the index when its author thinks it is. The date is
-  // read by `parseRobotsDate` (ISO 8601 and the RFC 822 / 850 / 1123 forms,
+  // read by `parseRobotsDate` (ISO 8601, the RFC 822 / 850 / 1123 forms and asctime,
   // nothing else), never by `Date.parse`; a zone-less ISO form is read as UTC
   // and the evidence carries `assumedUtc: true`.
   pageRule(

@@ -522,10 +522,29 @@ export function unavailableAfterOf(value: string | null): string | null {
 }
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const MONTH_NAMES = [
+  "january", "february", "march", "april", "may", "june",
+  "july", "august", "september", "october", "november", "december",
+];
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 
-/** RFC 822 zone names (section 5.1), plus `UTC`, as minutes east of UTC. */
+/** A month by its three-letter or full English name, 0-based, or -1. */
+function monthIndex(name: string): number {
+  const short = MONTHS.indexOf(name);
+  return short >= 0 ? short : MONTH_NAMES.indexOf(name);
+}
+
+/** Whether `name` is a weekday by its three-letter or full English name. */
+function isWeekday(name: string): boolean {
+  return WEEKDAYS.includes(name) || WEEKDAY_NAMES.includes(name);
+}
+
+/**
+ * Zone names, as minutes east of UTC: RFC 822's (section 5.1) plus `UTC`, and
+ * the central / eastern European and British names sites commonly write. A
+ * name not listed is not guessed at.
+ */
 const RFC822_ZONES: ReadonlyMap<string, number> = new Map([
   ["ut", 0],
   ["utc", 0],
@@ -539,17 +558,25 @@ const RFC822_ZONES: ReadonlyMap<string, number> = new Map([
   ["mdt", -360],
   ["pst", -480],
   ["pdt", -420],
+  ["bst", 60],
+  ["cet", 60],
+  ["cest", 120],
+  ["eet", 120],
+  ["eest", 180],
 ]);
 
 const ISO_DATE =
-  /^(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(z|[+-]\d{2}:?\d{2})?)?$/;
+  /^(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(z|[+-]\d{2}(?::?\d{2})?|\s+[a-z]+)?)?$/;
 
 const RFC_DATE = new RegExp(
   "^(?:([a-z]+),\\s*)?" + // weekday, optional
-    "(\\d{1,2})([ -])([a-z]{3})\\3(\\d{2}|\\d{4})\\s+" + // 25 Jun 2010 | 25-Jun-10
+    "(\\d{1,2})([ -])([a-z]+)\\3(\\d{2}|\\d{4})\\s+" + // 25 Jun 2010 | 25-June-10
     "(\\d{2}):(\\d{2})(?::(\\d{2}))?\\s+" + // 15:00[:00]
     "([a-z]+|[+-]\\d{4})$", // zone
 );
+
+/** C `asctime()`: `Fri Jun 25 15:00:00 2010`, the day space-padded. No zone. */
+const ASCTIME_DATE = /^([a-z]+)\s+([a-z]+)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/;
 
 /**
  * Epoch ms for the given UTC fields, or null when they name no real instant
@@ -566,12 +593,12 @@ function utcFields(y: number, mo: number, d: number, h: number, mi: number, s: n
   return at;
 }
 
-/** Minutes east of UTC for `+HHMM` / `+HH:MM`, or null when out of range. */
+/** Minutes east of UTC for `+HHMM`, `+HH:MM` or `+HH`, or null when out of range. */
 function offsetMinutes(zone: string): number | null {
-  const m = /^([+-])(\d{2}):?(\d{2})$/.exec(zone);
+  const m = /^([+-])(\d{2})(?::?(\d{2}))?$/.exec(zone);
   if (m === null) return null;
   const hours = Number(m[2]);
-  const minutes = Number(m[3]);
+  const minutes = Number(m[3] ?? 0);
   if (hours > 23 || minutes > 59) return null;
   return (m[1] === "-" ? -1 : 1) * (hours * 60 + minutes);
 }
@@ -584,15 +611,21 @@ function offsetMinutes(zone: string): number | null {
  *
  * Accepted, case-insensitively:
  *  - ISO 8601 / RFC 3339: `YYYY-MM-DD`, or that plus `T` (or a space) and
- *    `HH:MM[:SS[.fff]]`, with an optional `Z` or `±HH:MM` / `±HHMM` offset. A
- *    form with no zone is read as UTC and `assumedUtc` says so.
+ *    `HH:MM[:SS[.fff]]`, with an optional `Z`, `±HH:MM` / `±HHMM` / `±HH`
+ *    offset, or a space and a zone name from the list below. A form with no
+ *    zone is read as UTC and `assumedUtc` says so.
  *  - RFC 822 / RFC 1123: `[Wkd, ]DD Mon YY[YY] HH:MM[:SS] ZONE`.
  *  - RFC 850: `Weekday, DD-Mon-YY HH:MM:SS ZONE`.
- *    ZONE is `UT`, `UTC`, `GMT`, `Z`, the US zones `EST`..`PDT`, or `±HHMM`;
- *    these forms require one. A two-digit year is 20YY below 70 and 19YY from 70
- *    (RFC 6265's fixed pivot, so the answer does not depend on today's date). A
- *    weekday must be a weekday name; whether it agrees with the date is not
- *    checked, since the numeric date is what every reader uses.
+ *    ZONE is `UT`, `UTC`, `GMT`, `Z`, the US zones `EST`..`PDT`, `BST`, `CET`,
+ *    `CEST`, `EET`, `EEST`, or `±HHMM`; these forms require one. A two-digit
+ *    year is 20YY below 70 and 19YY from 70 (RFC 6265's fixed pivot, so the
+ *    answer does not depend on today's date).
+ *  - asctime: `Wkd Mon D HH:MM:SS YYYY`. It carries no zone, so it is read as
+ *    UTC and `assumedUtc` says so.
+ *    Month and weekday names may be written short (`Jun`, `Fri`) or in full
+ *    (`June`, `Friday`). A weekday must be a weekday name; whether it agrees
+ *    with the date is not checked, since the numeric date is what every reader
+ *    uses.
  *
  * Fields must name a real instant: `2010-02-30` and `24:00` are refused.
  */
@@ -613,18 +646,26 @@ export function parseRobotsDate(raw: string): { at: number; assumedUtc: boolean 
     if (base === null) return null;
     const ms = frac === undefined ? 0 : Math.floor(Number(`0.${frac}`) * 1000);
     if (zone === undefined) return { at: base + ms, assumedUtc: true };
-    const offset = zone === "z" ? 0 : offsetMinutes(zone);
+    const named = zone.trim();
+    const offset = named === "z" ? 0 : (RFC822_ZONES.get(named) ?? offsetMinutes(named));
     if (offset === null) return null;
     return { at: base + ms - offset * 60_000, assumedUtc: false };
+  }
+
+  const asc = ASCTIME_DATE.exec(text);
+  if (asc !== null) {
+    const [, weekday, mon, d, h, mi, s, y] = asc;
+    const month = monthIndex(mon!);
+    if (!isWeekday(weekday!) || month < 0) return null;
+    const base = utcFields(Number(y), month, Number(d), Number(h), Number(mi), Number(s));
+    return base === null ? null : { at: base, assumedUtc: true };
   }
 
   const rfc = RFC_DATE.exec(text);
   if (rfc === null) return null;
   const [, weekday, d, , mon, y, h, mi, s, zone] = rfc;
-  if (weekday !== undefined && !WEEKDAYS.includes(weekday) && !WEEKDAY_NAMES.includes(weekday)) {
-    return null;
-  }
-  const month = MONTHS.indexOf(mon!);
+  if (weekday !== undefined && !isWeekday(weekday)) return null;
+  const month = monthIndex(mon!);
   if (month < 0) return null;
   let year = Number(y);
   if (y!.length === 2) year += year < 70 ? 2000 : 1900;
