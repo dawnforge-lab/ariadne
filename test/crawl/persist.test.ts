@@ -127,6 +127,7 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     imagesMissingAltSample: [],
     relNextCount: 0,
     relPrevCount: 0,
+    htmlStructure: { htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true, closedEarly: null },
     ...overrides,
   };
 }
@@ -761,6 +762,7 @@ describe("PageWriter", () => {
     expect(row?.imagesMissingAltSample).toBeNull();
     expect(row?.relNextCount).toBeNull();
     expect(row?.relPrevCount).toBeNull();
+    expect(row?.htmlStructure).toBeNull();
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);
@@ -893,6 +895,28 @@ describe("PageWriter", () => {
       .from(links)
       .where(and(eq(links.crawlId, crawlId), eq(links.targetUrl, `${SITE}/home`)));
     expect(home?.anchor).toBe("Home");
+  });
+
+  it("writes the Phase 26b html structure facts (migration 0026)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/structure-facts`;
+    const analysis = analyzePage(
+      `<html><head><meta charset="utf-8"><noscript><iframe src="https://gtm.test/x"></iframe></noscript>` +
+        `</head><body><p>x</p></body><body></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.htmlStructure).toEqual({
+      htmlTags: 1,
+      headTags: 1,
+      bodyTags: 2,
+      headBeforeBody: true,
+      closedEarly: { tag: "iframe", snippet: `<iframe src="https://gtm.test/x">`, inNoscript: true },
+    });
   });
 
   it("persists a rel=next count past the smallint range (Ruling R7, migration 0027)", async () => {

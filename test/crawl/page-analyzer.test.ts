@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
+import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 
 const HTML = `<!doctype html><html><head>
 <title>Widget Shop</title>
@@ -713,5 +714,204 @@ describe("outside-head flags are first-occurrence flags", () => {
     const a = headOf(`<html><head><link rel="alternate" hreflang="en" href="/en"></head><body>
       <link rel="alternate" hreflang="en" href="/en"></body></html>`);
     expect(a.hreflangOutsideHeadCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 26b T4 — HTML structure facts. Explicit start-tag counts, head/body
+// order and the element that closed the head early (deviation 6). Cheerio
+// cannot be the oracle for these: parse5 normalises the tree (one html, one
+// head, one body, whatever the markup says), so every case is asserted by
+// value. The head-flag cases go through `headOf`, so the oracle still holds the
+// five outside-head flags while the structure facts are read beside them.
+// ---------------------------------------------------------------------------
+
+const structureOf = (html: string) => analyzePage(html, "https://x.test/").htmlStructure;
+
+describe("html structure: explicit tag counts and order", () => {
+  it("counts a second explicit <body>", () => {
+    expect(structureOf(`<html><head></head><body></body><body></body>`)).toEqual({
+      htmlTags: 1,
+      headTags: 1,
+      bodyTags: 2,
+      headBeforeBody: true,
+      closedEarly: null,
+    });
+  });
+
+  it("a <head> after the <body> is out of order", () => {
+    expect(structureOf(`<body></body><head></head>`).headBeforeBody).toBe(false);
+  });
+
+  it("no explicit tags at all: counts 0, order null", () => {
+    expect(structureOf(`<title>t</title><p>x</p>`)).toEqual({
+      htmlTags: 0,
+      headTags: 0,
+      bodyTags: 0,
+      headBeforeBody: null,
+      closedEarly: null,
+    });
+  });
+
+  it("order is null when only one of the two is explicit", () => {
+    expect(structureOf(`<html><head><title>t</title></head><p>x</p>`).headBeforeBody).toBeNull();
+    expect(structureOf(`<title>t</title><body><p>x</p></body>`).headBeforeBody).toBeNull();
+  });
+
+  it("counts every explicit <html> and <head>; the first of head and body decides the order", () => {
+    const s = structureOf(`<html><head></head><body><html lang="x"><head></head></body></html>`);
+    expect(s).toMatchObject({ htmlTags: 2, headTags: 2, bodyTags: 1, headBeforeBody: true });
+  });
+
+  it("implied tags are not counted: htmlparser2 implies none of the three", () => {
+    expect(structureOf(`<p>x`)).toMatchObject({ htmlTags: 0, headTags: 0, bodyTags: 0 });
+  });
+});
+
+describe("html structure: the head closed early (deviation 6, Review Focus 3)", () => {
+  it("a valid document that omits </head> and starts its body is not flagged", () => {
+    expect(structureOf(`<!doctype html><title>x</title><div>a</div>`).closedEarly).toBeNull();
+  });
+
+  it("a non-head child of a head <noscript> is the candidate, and </head> confirms it", () => {
+    const a = headOf(
+      `<head><meta charset=utf-8><noscript><iframe src="https://gtm/x"></iframe></noscript></head><body>`,
+    );
+    expect(a.htmlStructure.closedEarly).toEqual({
+      tag: "iframe",
+      inNoscript: true,
+      snippet: `<iframe src="https://gtm/x">`,
+    });
+  });
+
+  it("the head-noscript detection leaves the head machine exactly as it was", () => {
+    // The iframe is invisible to the head machine (Phase 23): the canonical
+    // after the noscript is still in the head, and nothing closed it.
+    const a = headOf(
+      `<html><head><noscript><iframe src="/x"></iframe></noscript>${CANONICAL}</head><body><p>x</p></body></html>`,
+    );
+    expect(a.headClosedBy).toBeNull();
+    expect(a.canonicalOutsideHead).toBe(false);
+    expect(a.htmlStructure.closedEarly).toMatchObject({ tag: "iframe", inNoscript: true });
+  });
+
+  it("link, meta and style inside a head <noscript> are not candidates", () => {
+    const s = structureOf(
+      `<html><head><noscript><link rel="stylesheet" href="/a.css"><meta name="x" content="y">` +
+        `<style>p{}</style></noscript><title>t</title></head><body><p>x</p></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("a <noscript> in the body is not a head noscript", () => {
+    const s = structureOf(
+      `<html><head><title>t</title></head><body><noscript><iframe src="/x"></iframe></noscript>` +
+        `<meta itemprop="name" content="n"></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("a non-head start tag followed by a head-only element", () => {
+    const a = headOf(`<head><div>x</div><title>t</title>`);
+    expect(a.htmlStructure.closedEarly).toEqual({ tag: "div", inNoscript: false, snippet: "<div>" });
+    expect(a.headClosedBy).toBe("div");
+  });
+
+  it("text in the head is recorded as #text with the trimmed text as its snippet", () => {
+    const a = headOf(`<head>hello</head>`);
+    expect(a.htmlStructure.closedEarly).toEqual({ tag: "#text", inNoscript: false, snippet: "hello" });
+    expect(a.headClosedBy).toBe("#text");
+  });
+
+  it("a 500-character start tag is capped at HEAD_SNIPPET_MAX", () => {
+    const tag = `<img src="/p.gif" data-x="${"x".repeat(500)}">`;
+    const s = structureOf(`<head>${tag}<title>t</title></head>`);
+    expect(s.closedEarly?.tag).toBe("img");
+    expect(s.closedEarly?.snippet).toBe(tag.slice(0, HEAD_SNIPPET_MAX));
+    expect(s.closedEarly?.snippet).toHaveLength(HEAD_SNIPPET_MAX);
+  });
+
+  it("long head text is capped at HEAD_SNIPPET_MAX", () => {
+    const s = structureOf(`<head>${"t".repeat(500)}</head>`);
+    expect(s.closedEarly?.snippet).toBe("t".repeat(HEAD_SNIPPET_MAX));
+  });
+
+  it("an explicit <body> after the candidate confirms it", () => {
+    const s = structureOf(`<html><head><img src="/p.gif"><body><p>x</p></body></html>`);
+    expect(s.closedEarly).toMatchObject({ tag: "img", inNoscript: false });
+  });
+
+  it("each head-only element after the candidate confirms it", () => {
+    const tails = [
+      `<title>t</title>`,
+      `<meta name="a" content="b">`,
+      `<link rel="icon" href="/i">`,
+      `<base href="/">`,
+      `<style>p{}</style>`,
+    ];
+    for (const tail of tails) {
+      expect(structureOf(`<head><img src="/p.gif"><p>x</p>${tail}`).closedEarly, tail).toMatchObject({
+        tag: "img",
+      });
+    }
+  });
+
+  it("nothing after the candidate but body content: not confirmed", () => {
+    const s = structureOf(`<head><title>t</title><img src="/p.gif"><p>x</p><script>1</script>`);
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("an explicit </head> before the body is not an early close", () => {
+    const s = structureOf(
+      `<html><head><title>t</title></head><body><div>x</div><title>u</title></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("<body> is where the head ends, not an early close, whatever follows it", () => {
+    // An omitted </head> with the body opened by <body>: the head ended where
+    // it was meant to, so a stylesheet link or a microdata meta in the body is
+    // no evidence of anything.
+    const s = structureOf(
+      `<html><head><title>t</title><body><link rel="stylesheet" href="/a.css">` +
+        `<meta itemprop="n" content="v"></body></html>`,
+    );
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("the FIRST candidate wins: a head-noscript child before a non-head tag", () => {
+    const s = structureOf(`<head><noscript><img src="/n.gif"></noscript><div>x</div></head>`);
+    expect(s.closedEarly).toEqual({ tag: "img", inNoscript: true, snippet: `<img src="/n.gif">` });
+  });
+
+  it("a stray </p> in the head is ignored; a stray </br> is a candidate, read as <br>", () => {
+    expect(structureOf(`<head><title>t</title></p></head>`).closedEarly).toBeNull();
+    expect(structureOf(`<head><title>t</title></br></head>`).closedEarly).toEqual({
+      tag: "br",
+      inNoscript: false,
+      snippet: "</br>",
+    });
+  });
+
+  it("a <div> inside a head <template> is not a candidate", () => {
+    const s = structureOf(`<head><template><div>x</div></template><title>t</title></head>`);
+    expect(s.closedEarly).toBeNull();
+  });
+
+  it("20 MB-safe: 100,000 divs leave a capped snippet and scalar state", () => {
+    const div = `<div class="${"c".repeat(300)}">x</div>`;
+    const s = structureOf(
+      `<html><head>${div.repeat(100_000)}<title>t</title></head><body></body></html>`,
+    );
+    expect(s.closedEarly?.snippet.length).toBeLessThanOrEqual(HEAD_SNIPPET_MAX);
+    // No array anywhere in the fact: four scalars and one fixed-shape object.
+    expect(s).toEqual({
+      htmlTags: 1,
+      headTags: 1,
+      bodyTags: 1,
+      headBeforeBody: true,
+      closedEarly: { tag: "div", inNoscript: false, snippet: div.slice(0, HEAD_SNIPPET_MAX) },
+    });
+    expect(JSON.stringify(s).length).toBeLessThan(400);
   });
 });

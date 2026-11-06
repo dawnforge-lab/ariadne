@@ -773,8 +773,8 @@ export class PageWriter {
       // Phase 26b facts (migration 0026). Null exactly when no analysis ran
       // (no HTML: nothing measured). With one, `social` is null only for a
       // page with no social tag and `meta_refresh` only for a page with no
-      // refresh; the counts, the anchor/insecure objects and the image sample
-      // are never null.
+      // refresh; the counts, the anchor/insecure/structure objects and the
+      // image sample are never null.
       htmlLang: analysis === null ? null : analysis.htmlLang,
       social: analysis === null ? null : analysis.social,
       h2Text: analysis === null ? null : analysis.h2Text,
@@ -789,8 +789,7 @@ export class PageWriter {
       imagesMissingAltSample: analysis === null ? null : analysis.imagesMissingAltSample,
       relNextCount: analysis === null ? null : analysis.relNextCount,
       relPrevCount: analysis === null ? null : analysis.relPrevCount,
-      // A later Phase 26b task fills this.
-      htmlStructure: null,
+      htmlStructure: analysis === null ? null : analysis.htmlStructure,
       htmlBytes: fetch.htmlBytes,
       domSize: analysis?.domSize ?? null,
       imagesTotal: analysis?.imagesTotal ?? 0,

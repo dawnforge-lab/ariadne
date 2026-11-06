@@ -413,6 +413,29 @@
  *    `ALT_TEXT_LONG_CHARS`, applied here, deviation 10) and
  *    `imagesMissingAltSample` (raw `src` of the first images with no `alt`),
  *    all in the existing `img` case beside `imagesMissingAlt`.
+ *
+ * Phase 26b (P26b-T4) added `htmlStructure`, in the same pass and as scalars
+ * (shape and cap in page-facts.ts). Every start tag the tokenizer emits is read,
+ * `<noscript>` and `<template>` content included.
+ *  - `htmlTags` / `headTags` / `bodyTags`: EXPLICIT start tags only.
+ *    htmlparser2 implies none of the three; an `isImplied` open is not counted.
+ *  - `headBeforeBody`: whether the first explicit `<head>` precedes the first
+ *    explicit `<body>`; null when either is absent.
+ *  - `closedEarly` (deviation 6): the first CANDIDATE met while the head
+ *    machine is in head mode — a start tag outside `HEAD_ALLOWED` (the token
+ *    `headClosedBy` names; a stray `</br>` included, a stray `</p>` not), a
+ *    start tag other than `link`/`meta`/`style` inside a head `<noscript>`
+ *    (`inNoscript: true`), or non-whitespace text (`#text`, snippet the text
+ *    trimmed of HTML whitespace). A start tag's snippet is its source,
+ *    `html.slice(startIndex, endIndex + 1)`, cut at `HEAD_SNIPPET_MAX` before it
+ *    is copied. `<body>` is NEVER a candidate: it is where a head is meant to
+ *    end. The candidate is reported only if a later token is evidence the head
+ *    was meant to go on — an explicit `</head>`, an explicit `<body>`, or a
+ *    `title`/`meta`/`link`/`base`/`style` start tag anywhere after it — and is
+ *    null otherwise, so a valid document that omits `</head>` and starts its
+ *    body is not flagged. The head-noscript read is BESIDE the Phase 23 machine,
+ *    not in it: a head noscript's children stay invisible to `headClosedBy`,
+ *    `headMode` and every outside-head flag, exactly as before.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
@@ -421,6 +444,7 @@ import { simhash64 } from "./simhash.js";
 import {
   ALT_TEXT_LONG_CHARS,
   H2_TEXT_MAX,
+  HEAD_SNIPPET_MAX,
   HTML_LANG_MAX,
   IMAGE_SAMPLE_MAX,
   IMAGE_SAMPLE_SRC_MAX,
@@ -433,6 +457,7 @@ import {
   SOCIAL_TEXT_MAX,
   SOCIAL_URL_MAX,
   type AnchorCounts,
+  type HtmlStructure,
   type InsecureRefKind,
   type InsecureRefs,
   type RefreshFact,
@@ -754,6 +779,13 @@ export interface PageAnalysis {
    * one with no `src`, so the sample is exactly the first such images.
    */
   imagesMissingAltSample: string[];
+  /**
+   * The document's explicit `<html>` / `<head>` / `<body>` start tags, the
+   * order of the first head and body, and what closed the head early, if
+   * anything did (Phase 26b, T4; deviation 6). Never null; see the module
+   * header's T4 block for each part.
+   */
+  htmlStructure: HtmlStructure;
 }
 
 /**
@@ -831,8 +863,22 @@ const AFTER_HEAD_REOPENS = new Set([
   "template",
   "title",
 ]);
+/**
+ * The children a head `<noscript>` may hold without ending the head when
+ * scripting is off (Phase 26b T4, the brief's closed list): anything else
+ * inside one is a closed-early candidate (deviation 6).
+ */
+const HEAD_NOSCRIPT_CHILDREN = new Set(["link", "meta", "style"]);
+/**
+ * Head-only start tags whose appearance AFTER a closed-early candidate is
+ * evidence the head was meant to continue (deviation 6), beside an explicit
+ * `</head>` and an explicit `<body>`.
+ */
+const HEAD_CONTINUES = new Set(["title", "meta", "link", "base", "style"]);
 /** Text that is not ASCII whitespace as HTML defines it (tab, LF, FF, CR, space). */
 const NON_HTML_WHITESPACE = /[^\t\n\f\r ]/;
+/** Leading and trailing ASCII whitespace as HTML defines it. */
+const HTML_WHITESPACE_EDGES = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
 /** Subtrees whose text is not visible content. */
 const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
 /**
@@ -1494,9 +1540,40 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // (fetch's TextDecoder does); this is for callers who hand over a raw string.
   // It can only sit in the first text event, which it necessarily is.
   let bomPending = html.charCodeAt(0) === 0xfeff;
-  const headOnOpenTag = (name: string, isImplied: boolean) => {
+
+  // HTML STRUCTURE (Phase 26b T4; module header). Scalars only: three counters,
+  // the first of head/body, and one candidate whose snippet is capped when it
+  // is taken, so the state is O(1) in page size whatever the document holds.
+  let htmlTags = 0;
+  let headTags = 0;
+  let bodyTags = 0;
+  let firstOfHeadBody: "head" | "body" | null = null;
+  // The first closed-early candidate (deviation 6), and whether a later token
+  // confirmed the head was meant to go on. Read together at the end.
+  let earlyCandidate: HtmlStructure["closedEarly"] = null;
+  let earlyConfirmed = false;
+  // A `<noscript>` opened in head mode with no other container around it is
+  // open. Its children are invisible to the head machine (they ride
+  // `headContainerDepth`) and STAY invisible to it; this flag only lets the
+  // candidate see them.
+  let inHeadNoscript = false;
+  const takeCandidate = (tag: string, snippet: string, inNoscript: boolean) => {
+    if (earlyCandidate !== null) return;
+    earlyCandidate = { tag, snippet, inNoscript };
+  };
+  /** The current start tag's source, cut at the cap before it is copied. */
+  const tagSnippet = (start: number, end: number) =>
+    html.slice(start, Math.min(end + 1, start + HEAD_SNIPPET_MAX));
+
+  const headOnOpenTag = (name: string, isImplied: boolean, start: number, end: number) => {
     if (headMode === "body") return;
     if (headContainerDepth > 0) {
+      // A non-head child of a head `<noscript>` is a candidate (deviation 6),
+      // read here without touching the machine: it stays suspended.
+      // (The stray-`</p>` exemption below applies here too.)
+      if (inHeadNoscript && !(isImplied && name === "p") && !HEAD_NOSCRIPT_CHILDREN.has(name)) {
+        takeCandidate(name, tagSnippet(start, end), true);
+      }
       if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;
       return;
     }
@@ -1508,10 +1585,14 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (headMode === "head") {
       if (HEAD_ALLOWED.has(name)) {
         if (HEAD_CONTAINERS.has(name)) headContainerDepth += 1;
+        if (name === "noscript") inHeadNoscript = true;
         return;
       }
       headClosedBy = name;
       headMode = "body";
+      // `<body>` is where a head is meant to end, so it is never an early
+      // close; every other tag that ends the head here is a candidate.
+      if (name !== "body") takeCandidate(name, tagSnippet(start, end), false);
       return;
     }
     // "after head": `<html>` merges into the root and a second `<head>` is
@@ -1528,6 +1609,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (headMode === "body") return;
     if (headContainerDepth > 0) {
       if (HEAD_CONTAINERS.has(name)) headContainerDepth -= 1;
+      if (headContainerDepth === 0) inHeadNoscript = false;
       return;
     }
     // Implied closes are htmlparser2's tree repair (it closes the head itself
@@ -1550,8 +1632,35 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     }
     if (headMode === "body" || headContainerDepth > 0) return;
     if (!NON_HTML_WHITESPACE.test(probe)) return;
-    if (headMode === "head") headClosedBy = "#text";
+    if (headMode === "head") {
+      headClosedBy = "#text";
+      // Trimmed of HTML whitespace only, so the text that made it a candidate
+      // (a non-breaking space included) is what the snippet shows.
+      takeCandidate(
+        "#text",
+        probe.replace(HTML_WHITESPACE_EDGES, "").slice(0, HEAD_SNIPPET_MAX),
+        false,
+      );
+    }
     headMode = "body";
+  };
+  /**
+   * The counts, the order, and the evidence that confirms a candidate, read
+   * from every explicit start tag BEFORE the head machine sees it, so the
+   * token that becomes the candidate can never confirm itself.
+   */
+  const structureOnOpenTag = (name: string, isImplied: boolean) => {
+    if (isImplied) return;
+    if (name === "html") htmlTags += 1;
+    else if (name === "head") headTags += 1;
+    else if (name === "body") bodyTags += 1;
+    if ((name === "head" || name === "body") && firstOfHeadBody === null) firstOfHeadBody = name;
+    if (earlyCandidate !== null && (name === "body" || HEAD_CONTINUES.has(name))) {
+      earlyConfirmed = true;
+    }
+  };
+  const structureOnCloseTag = (name: string, isImplied: boolean) => {
+    if (!isImplied && name === "head" && earlyCandidate !== null) earlyConfirmed = true;
   };
 
   /**
@@ -1798,8 +1907,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       onopentag(name, attribs, isImplied) {
         domSize += 1;
         // The head machine reads every open tag, above the noscript return:
-        // a `<noscript>` in the head is a container it has to see open.
-        headOnOpenTag(name, isImplied);
+        // a `<noscript>` in the head is a container it has to see open. The
+        // structure facts read it first (see `structureOnOpenTag`), and the
+        // machine gets the token's source span for a candidate's snippet.
+        structureOnOpenTag(name, isImplied);
+        headOnOpenTag(name, isImplied, parser.startIndex, parser.endIndex);
         // Hidden-surface bookkeeping first, and unconditionally: the
         // `noscript` early return below skips the rest of this handler, and
         // `onclosetag` has the mirror of it, so anything that must stay
@@ -2082,6 +2194,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       onclosetag(name, isImplied) {
         // The head machine's mirror of its open-tag hook, above the noscript
         // returns for the same reason.
+        structureOnCloseTag(name, isImplied);
         headOnCloseTag(name, isImplied);
         // The mirror of `onopentag`'s first block, in the same position and
         // for the same reason. An element is popped by the DEPTH it opened at,
@@ -2285,6 +2398,15 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     imagesEmptyAlt,
     imagesAltTooLong,
     imagesMissingAltSample,
+    htmlStructure: {
+      htmlTags,
+      headTags,
+      bodyTags,
+      headBeforeBody: headTags > 0 && bodyTags > 0 ? firstOfHeadBody === "head" : null,
+      // A candidate nothing confirmed is a document that simply started its
+      // body without `</head>` (deviation 6): not an early close.
+      closedEarly: earlyConfirmed ? earlyCandidate : null,
+    },
     bodyText,
     h1s,
     hasStructuredData,
@@ -2367,5 +2489,6 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     imagesEmptyAlt: raw.imagesEmptyAlt,
     imagesAltTooLong: raw.imagesAltTooLong,
     imagesMissingAltSample: raw.imagesMissingAltSample,
+    htmlStructure: raw.htmlStructure,
   };
 }

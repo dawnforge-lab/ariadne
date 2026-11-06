@@ -122,6 +122,11 @@
  * `img`'s trimmed, non-empty `alt` folded in where the image sits, as the port
  * now reads it.
  *
+ * Phase 26b (P26b-T4) added `htmlStructure` and stripped it, on `headClosedBy`'s
+ * reasoning (see `EXTENSION_FIELDS`): explicit html/head/body start-tag counts,
+ * their order and the early-close candidate are token-stream facts that parse5's
+ * normalised tree cannot show. The oracle did not move.
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -200,6 +205,13 @@ const EXTENSION_FIELDS = [
   // SET they come from is on the parity surface below. Covered in
   // test/crawl/analyzer-extensions.test.ts.
   "socialImageRefs",
+  // Phase 26b T4's structure facts. NOT a DOM read, and the DOM cannot see
+  // them: parse5 normalises the tree to one html, one head and one body
+  // whatever the markup said, so explicit start-tag counts and their order
+  // leave no trace in it, and `closedEarly` is `headClosedBy`'s case again (the
+  // tree records where nodes are, not what ended the head or what came after).
+  // Covered by value, cheerio-free, in test/crawl/page-analyzer.test.ts.
+  "htmlStructure",
 ] as const;
 
 /** The ten social tags `PageAnalysis.social` reads, as the oracle lists them. */
@@ -809,6 +821,7 @@ function expectParity(html: string) {
     resourceRefsCapped: _resourceRefsCapped,
     headClosedBy: _headClosedBy,
     socialImageRefs: _socialImageRefs,
+    htmlStructure: _htmlStructure,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
