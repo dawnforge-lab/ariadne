@@ -14,6 +14,7 @@ import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import { crawls, links, pageResources, pages } from "../../src/db/schema.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
+import type { InsecureRefs } from "../../src/crawl/parse/page-facts.js";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
 import { PageWriter } from "../../src/crawl/persist.js";
 import type { StoredResponseHeaders } from "../../src/crawl/response-headers.js";
@@ -242,6 +243,7 @@ describe("securityRules against the database", () => {
     headers?: StoredResponseHeaders | null;
     statusCode?: number;
     fetchClass?: string;
+    insecureRefs?: InsecureRefs | null;
   }
 
   async function newCrawl(siteUrl: string): Promise<string> {
@@ -261,6 +263,7 @@ describe("securityRules against the database", () => {
       statusCode: s.statusCode ?? 200,
       extractionVersion: s.extractionVersion === undefined ? 1 : s.extractionVersion,
       responseHeaders: s.headers === undefined ? fullHeaders() : s.headers,
+      insecureRefs: s.insecureRefs === undefined ? null : s.insecureRefs,
       depth: 1,
       discoveredVia: "link",
     }));
@@ -654,6 +657,106 @@ describe("securityRules against the database", () => {
         insecureCount: total,
         sample: urls.slice(0, BROKEN_SAMPLE_RESOURCES),
       });
+    });
+
+    const refs = (o: Partial<InsecureRefs>): InsecureRefs => ({
+      iframe: 0,
+      media: 0,
+      formAction: 0,
+      forms: 0,
+      sample: [],
+      ...o,
+    });
+
+    it("mixed-content fires on a v2 https page with only an http iframe, byKind.iframe 1", async () => {
+      const crawl = await newCrawl(HTTPS_SITE);
+      const ids = await addPages(crawl, [
+        {
+          url: `${HTTPS_SITE}/framed`,
+          extractionVersion: 2,
+          insecureRefs: refs({ iframe: 1, sample: [{ kind: "iframe", url: "http://x.example/f" }] }),
+        },
+        { url: `${HTTPS_SITE}/clean`, extractionVersion: 2, insecureRefs: refs({}) },
+        // A form action is a form-insecure matter, not mixed content.
+        {
+          url: `${HTTPS_SITE}/form`,
+          extractionVersion: 2,
+          insecureRefs: refs({
+            formAction: 1,
+            forms: 1,
+            sample: [{ kind: "form", url: "http://x.example/p" }],
+          }),
+        },
+      ]);
+      const found = await run("security.mixed-content", crawl);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({
+        pageId: ids.get(`${HTTPS_SITE}/framed`),
+        evidence: {
+          insecureCount: 1,
+          sample: ["http://x.example/f"],
+          byKind: { resources: 0, iframe: 1, media: 0 },
+        },
+      });
+    });
+
+    it("mixed-content adds resources, iframes and media, merging and capping the sample", async () => {
+      const crawl = await newCrawl(HTTPS_SITE);
+      const ids = await addPages(crawl, [
+        {
+          url: `${HTTPS_SITE}/all`,
+          extractionVersion: 2,
+          insecureRefs: refs({
+            iframe: 1,
+            media: 2,
+            sample: [
+              { kind: "media", url: "http://x.example/m1.mp4" },
+              { kind: "iframe", url: "http://x.example/a-frame" },
+              { kind: "media", url: "http://x.example/m2.mp4" },
+              { kind: "form", url: "http://x.example/not-counted" },
+            ],
+          }),
+        },
+      ]);
+      const resourceUrls = Array.from(
+        { length: BROKEN_SAMPLE_RESOURCES },
+        (_, i) => `http://x.example/r${String(i).padStart(2, "0")}.js`,
+      );
+      await db.insert(pageResources).values(
+        resourceUrls.map((resourceUrl) => ({
+          crawlId: crawl,
+          pageId: ids.get(`${HTTPS_SITE}/all`)!,
+          resourceUrl,
+        })),
+      );
+      const found = await run("security.mixed-content", crawl);
+      expect(found).toHaveLength(1);
+      const sorted = [
+        "http://x.example/a-frame",
+        "http://x.example/m1.mp4",
+        "http://x.example/m2.mp4",
+        ...resourceUrls,
+      ].sort();
+      expect(found[0]!.evidence).toEqual({
+        insecureCount: BROKEN_SAMPLE_RESOURCES + 3,
+        sample: sorted.slice(0, BROKEN_SAMPLE_RESOURCES),
+        byKind: { resources: BROKEN_SAMPLE_RESOURCES, iframe: 1, media: 2 },
+      });
+    });
+
+    it("mixed-content on a v1 https page is exactly the 0.20.0 result: no byKind key", async () => {
+      const crawl = await newCrawl(HTTPS_SITE);
+      const ids = await addPages(crawl, [{ url: `${HTTPS_SITE}/old` }]);
+      await db.insert(pageResources).values({
+        crawlId: crawl,
+        pageId: ids.get(`${HTTPS_SITE}/old`)!,
+        resourceUrl: "http://x.example/a.jpg",
+      });
+      const found = await run("security.mixed-content", crawl);
+      expect(found).toHaveLength(1);
+      expect(JSON.stringify(found[0]!.evidence)).toBe(
+        '{"insecureCount":1,"sample":["http://x.example/a.jpg"]}',
+      );
     });
 
     it("mixed-content does not judge an http page on an http site", async () => {

@@ -15,6 +15,7 @@ import { pixelWidthRules } from "./page/pixel-width.js";
 import { indexabilityRules } from "./page/indexability.js";
 import { headRules } from "./page/head.js";
 import { anchorRules } from "./page/anchors.js";
+import { paginationPageRules } from "./page/pagination.js";
 import { refreshRules } from "./page/refresh.js";
 import { socialRules } from "./page/social.js";
 import { technicalRules } from "./page/technical.js";
@@ -67,6 +68,8 @@ export function buildRegistry(): Registry {
     ...anchorRules,
     // The Open Graph and X tags (26b, CHECK-87).
     ...socialRules,
+    // More than one rel=next or rel=prev on a page (26b, CHECK-22).
+    ...paginationPageRules,
     ...technicalRules,
     ...hreflangRules,
     ...hreflangIntegrityRules,

@@ -456,10 +456,20 @@ describe("checklist coverage", () => {
   //   page    60 + 3 = 63
   //   query   96 + 1 = 97
   //   total   170 + 4 = 174
-  it("pins the ruleset split the gate doc reports: 174 rules = 63 page + 97 query + 14 metric", () => {
+  //
+  // Phase 26b Task 10 adds FOUR page rules: `security.form-insecure` (CHECK-85,
+  // in `src/rules/page/technical.ts`), `images.empty-alt` and
+  // `images.alt-too-long` (CHECK-49, same file) and `pagination.multiple`
+  // (CHECK-22, `src/rules/page/pagination.ts`). `security.mixed-content`
+  // widens, and is not a new rule.
+  //
+  //   page    63 + 4 = 67
+  //   query   97
+  //   total   174 + 4 = 178
+  it("pins the ruleset split the gate doc reports: 178 rules = 67 page + 97 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(174);
-    expect(registry.byKind("page")).toHaveLength(63);
+    expect(registry.all()).toHaveLength(178);
+    expect(registry.byKind("page")).toHaveLength(67);
     expect(registry.byKind("query")).toHaveLength(97);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus

@@ -65,6 +65,7 @@ import {
 } from "../../src/rules/metric/crawl-metrics.js";
 import {
   CANONICAL_MAX_HOPS,
+  IMAGE_ALT_MAX,
   RESTRICTIVE_DIRECTIVES,
   SOCIAL_IMAGE_MAX_BYTES,
   UNAVAILABLE_AFTER_WARN_DAYS,
@@ -1885,6 +1886,7 @@ describe("copy rubric: a threshold belongs in the title", () => {
     // The id names no threshold; the size half of its predicate is one, quoted
     // in megabytes as the title writes it ("over 5 MB").
     "social.image-broken": String(SOCIAL_IMAGE_MAX_BYTES / (1024 * 1024)),
+    "images.alt-too-long": String(IMAGE_ALT_MAX),
   };
 
   it("states the number in the title of every rule that fires on one", () => {

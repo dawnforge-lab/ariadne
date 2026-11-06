@@ -686,11 +686,24 @@ function linkPage(
   path: string,
   name: string,
   expectedIssues: string[],
-  copy: { title: string; description: string; h1: string; lede: string; topic: string; linksHtml: string },
+  copy: {
+    title: string;
+    description: string;
+    h1: string;
+    lede: string;
+    topic: string;
+    linksHtml: string;
+    /** Task 10 reuses this page shape; the default is the link rules' category. */
+    category?: string;
+    /** Raw HTML for the head. */
+    headExtra?: string;
+    /** Write `linksHtml` as it is, with no wrapping paragraph. */
+    raw?: boolean;
+  },
 ): Fixture {
   return {
     path,
-    category: "links",
+    category: copy.category ?? "links",
     name,
     expectedIssues,
     exact: true,
@@ -698,6 +711,7 @@ function linkPage(
       serve(req, res, () => ({
         title: copy.title,
         metaDescription: copy.description,
+        ...(copy.headExtra !== undefined ? { headExtra: copy.headExtra } : {}),
         bodyHtml:
           article({
             h1: copy.h1,
@@ -717,7 +731,7 @@ function linkPage(
                 body: "Fix the template that writes the link, not the individual page, so every page that uses the component is corrected at once and the habit does not return with the next release of the theme.",
               },
             ],
-          }) + `\n<p>${copy.linksHtml}</p>`,
+          }) + (copy.raw === true ? `\n${copy.linksHtml}` : `\n<p>${copy.linksHtml}</p>`),
       })),
   };
 }
@@ -783,6 +797,84 @@ const imageLinkNoAlt = linkPage(
   },
 );
 
+/**
+ * Task 10: forms, image alt and repeated pagination links. Same page shape as the
+ * link fixtures: an article with no picture of its own, plus the one element that
+ * carries the defect. The site is plain HTTP, so any form on it is an insecure
+ * form by the rule's definition; this is the only fixture that has one.
+ */
+const httpForm = linkPage(
+  "/p26b/http-form",
+  "A form on a page served over HTTP",
+  ["security.form-insecure"],
+  {
+    category: "technical",
+    title: "A search box on a page sent without encryption",
+    description:
+      "This page carries a search form and is served over plain HTTP, so whatever a visitor types travels across the network in the clear.",
+    h1: "A form that sends in the clear",
+    lede: "The search box below belongs to a page that was never moved to HTTPS, and the form inherits that.",
+    topic: "insecure-form",
+    raw: true,
+    linksHtml:
+      '<form action="/p26b/og-incomplete" method="get"><label>Search the guides <input type="text" name="q"></label> <button type="submit">Search</button></form>',
+  },
+);
+
+const emptyAlt = linkPage(
+  "/p26b/empty-alt",
+  "An image with an empty alt attribute",
+  ["images.empty-alt"],
+  {
+    category: "technical",
+    title: "A picture marked as decoration with no text",
+    description:
+      "The one image on this page has an alt attribute with nothing in it, which tells a screen reader to skip it and gives search engines no description.",
+    h1: "A picture that says nothing about itself",
+    lede: "The diagram below is declared decorative by its empty alt attribute, which is right for ornament and wrong for a picture that explains something.",
+    topic: "empty-alt",
+    raw: true,
+    linksHtml: `<img src="${SHARED_IMAGE_PATH}" alt="" width="720" height="360">`,
+  },
+);
+
+const LONG_ALT =
+  "A very long description of the diagram that keeps going well beyond what a screen reader user wants to hear, repeating the topic of the page again and again until it reads like a list of search terms instead of a caption";
+
+const longAlt = linkPage(
+  "/p26b/long-alt",
+  "An image whose alt text runs past 100 characters",
+  ["images.alt-too-long"],
+  {
+    category: "technical",
+    title: "A picture with a paragraph for its alt text",
+    description:
+      "The one image on this page carries an alt attribute of more than two hundred characters, which a screen reader reads out in full every time.",
+    h1: "An alt attribute that became a paragraph",
+    lede: "The diagram below is described at such length that the description would read better as the text of the page.",
+    topic: "long-alt",
+    raw: true,
+    linksHtml: `<img src="${SHARED_IMAGE_PATH}" alt="${LONG_ALT}" width="720" height="360">`,
+  },
+);
+
+const paginationMultiple = linkPage(
+  "/p26b/pagination-multiple",
+  "Two rel=next tags on one page",
+  ["pagination.multiple"],
+  {
+    category: "url",
+    title: "A page that names its next page twice",
+    description:
+      "Two link elements on this page both carry rel next, written by two different parts of the template, so a crawler cannot tell which one is the series.",
+    h1: "Two next links in one head",
+    lede: "A theme and a plugin each add a rel next link to the head of this page, and the page ends up declaring the next step of its series twice.",
+    topic: "next-link",
+    headExtra: '<link rel="next"><link rel="next">',
+    linksHtml: "The head of this page declares two next links.",
+  },
+);
+
 export const authoredP26bFixtures: Fixture[] = [
   botConflict,
   metaRefresh,
@@ -806,4 +898,8 @@ export const authoredP26bFixtures: Fixture[] = [
   emptyHref,
   targetBlank,
   imageLinkNoAlt,
+  httpForm,
+  emptyAlt,
+  longAlt,
+  paginationMultiple,
 ];

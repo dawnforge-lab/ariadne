@@ -401,9 +401,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "security.mixed-content": {
     title: "Security: HTTPS page loading HTTP resources",
     explanation:
-      "HTTPS pages that reference images, scripts or stylesheets with an http:// address; the row shows how many and lists up to 10 of them. Browsers block or warn about these files, so a page can lose its scripts or styles or show a not-secure warning even though it was served securely. Only img src, stylesheet and script references in the HTML response are checked.",
+      "HTTPS pages that reference images, scripts, stylesheets, iframes, video, audio or embedded media with an http:// address; the row shows how many and lists up to 10 of them. Browsers block or warn about these files, so a page can lose its scripts or styles or show a not-secure warning even though it was served securely. Only references in the HTML response are checked.",
     howToFix:
       "Change each listed address to https://, or to a path on your own host, and check that the file is served over HTTPS. Where a template or CMS field produces the address, fix it there.",
+  },
+  "security.form-insecure": {
+    title: "Security: Insecure form",
+    explanation:
+      "Pages with a form served over http://, or an HTTPS page whose form posts to an http:// address; the row shows the page's scheme, how many forms it has and up to 10 of the insecure actions. Whatever a visitor types into the form travels unencrypted, and browsers warn before sending it.",
+    howToFix:
+      "Serve the page over HTTPS and point every form action at an https:// address or a path on your own host.",
   },
 
   // --------------------------------------------------------------- hreflang
@@ -935,9 +942,23 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "images.missing-alt": {
     title: "Images: Missing alt text",
     explanation:
-      "Indexable, self-canonical pages with images that have no alt attribute; each row shows how many of the page's images. Alt text is what screen readers announce and the main way search engines understand an image. Only img elements in the HTML response are counted.",
+      "Indexable, self-canonical pages with images that have no alt attribute; each row shows how many of the page's images and, on pages crawled with the current extraction, the addresses of up to 10 of them. Alt text is what screen readers announce and the main way search engines understand an image. Only img elements in the HTML response are counted.",
     howToFix:
       "Give every meaningful image alt text describing what it conveys, and an empty alt (alt=\"\") to purely decorative images.",
+  },
+  "images.empty-alt": {
+    title: "Images: Empty alt text",
+    explanation:
+      "Indexable, self-canonical pages with images whose alt attribute is empty or only whitespace; each row shows how many of the page's images. An empty alt is correct for a purely decorative image and wrong for one that carries meaning, which a crawl cannot tell apart. Only img elements in the HTML response are counted.",
+    howToFix:
+      "Review each listed page and give any image that conveys information a short description. Leave alt=\"\" on images that are purely decorative.",
+  },
+  "images.alt-too-long": {
+    title: "Images: Alt text over 100 characters",
+    explanation:
+      "Indexable, self-canonical pages with images whose alt text, trimmed, is longer than 100 characters; each row shows how many. Long alt text is read out in full by screen readers and often reads as keyword stuffing. Only img elements in the HTML response are counted.",
+    howToFix:
+      "Shorten each alt text to a brief description of what the image shows, and move longer explanations into the surrounding text or a caption.",
   },
   "images.missing-dimensions": {
     title: "Images: Missing size attributes",
@@ -1103,6 +1124,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Pages in a series (they declare rel=prev) whose canonical names a different URL, shown in the row. Consolidating onto page 1 asks search engines to ignore what the later pages list; a self-referencing canonical keeps them indexable at the cost of near-duplicate listings.",
     howToFix:
       "If the items on deeper pages should be findable, canonicalise each page to itself. If the series only browses one collection, keep the canonical on page 1 and make sure the items have indexable pages of their own.",
+  },
+  "pagination.multiple": {
+    title: "Pagination: Multiple rel=next or rel=prev links",
+    explanation:
+      "Pages that declare more than one link with rel=next, or more than one with rel=prev; the row gives both counts. A series has one neighbour in each direction, so a second declaration usually means two templates or plugins wrote the same tag and a crawler cannot tell which one is meant.",
+    howToFix:
+      "Keep a single rel=next and a single rel=prev per page, and remove the duplicate from the template or plugin that adds it.",
   },
   "pagination.next-not-linked": {
     title: "Pagination: Next page linked only by rel=next",

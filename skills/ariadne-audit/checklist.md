@@ -1291,13 +1291,18 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   The crawl must have recorded the page's files for this to be answerable: when it
   recorded none, `resources.not-recorded` (info) is the NOT MEASURED marker, and the
   silence of the mixed-content finding says the crawl never recorded them rather
-  than that the site is clean. The remedy is a re-crawl. One rule answers it:
+  than that the site is clean. The remedy is a re-crawl. Two rules answer it:
   `security.mixed-content` (warning) — an HTTPS page with at least one `http:`
-  resource. One finding per page, carrying the count and up to ten of the URLs.
+  resource, iframe or media element. One finding per page, carrying the count and
+  up to ten of the URLs; on a page crawled with extraction 2 the optional `byKind`
+  splits the count into resources, iframes and media. `security.form-insecure`
+  (warning) — a form on an `http:` page, or a form on an `https:` page whose action
+  is `http:`; the evidence carries the page scheme, the form counts and up to ten of
+  the insecure actions. It is silent on a page extracted before version 2.
 - **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
-  - PASS if no HTTPS page references an `http:` image, script or stylesheet
-  - FAIL if `security.mixed-content` fired
+  - PASS if no HTTPS page references an `http:` image, script, stylesheet, iframe or media element, and no form posts to or is served over `http:`
+  - FAIL if `security.mixed-content` or `security.form-insecure` fired
   - NOT MEASURED if `resources.not-recorded` fired
   - Record: the referencing pages, the `http:` URLs and how many there are per page
 
@@ -1423,6 +1428,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - `pagination.sequence-error` (info) — the page's `rel="next"` names a crawled 200 page
     whose `rel="prev"` is absent or names a different page. A series that omits
     `rel="prev"` everywhere fires on every page of it; say so rather than listing it.
+  - `pagination.multiple` (info) — a page that declares more than one `rel="next"` or
+    more than one `rel="prev"` link; the evidence carries both counts. Two templates
+    or plugins have written the same tag. Silent on a page extracted before version 2.
   A JS-only "Load more" with no `rel="next"` at all leaves ALL FIVE rules silent — the
   engine cannot report a declaration nobody made. That is what the DevTools steps
   below are for, and it is why this check keeps them.
@@ -2796,11 +2804,14 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
 
 ### CHECK-49: Image optimisation and responsive images
 - **Priority**: Medium | **Requires**: Engine + DevTools
-- **Engine**: `issues_list` with `checkId: "CHECK-49"` — six rule ids can come back,
-  four of them findings about the site and two about the crawl.
+- **Engine**: `issues_list` with `checkId: "CHECK-49"` — eight rule ids can come back,
+  six of them findings about the site and two about the crawl.
   `images.missing-dimensions` (info) and `images.missing-alt` (warning), page by page
   across the whole crawl, with `issue_urls` naming the pages and the offending
-  images; and, since the resource pass, `images.oversized` (warning) for every image
+  images (on a page crawled with extraction 2, `images.missing-alt` also lists up to
+  ten image addresses); `images.empty-alt` (info) for pages with `alt=""` images,
+  which is right for decorative images and is a count to review, and
+  `images.alt-too-long` (info) for alt text over 100 characters; and, since the resource pass, `images.oversized` (warning) for every image
   over the 100,000 bytes this check's own WARN line names, and `images.legacy-format`
   (info) for the heavy ones a server sent as PNG or JPEG. Both name the FILE and say
   how many pages carry it, which is what turns "oversized image count" into a list of

@@ -586,6 +586,18 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `links.unsafe-target-blank` (info, CHECK-86). Query rule
 //     `links.no-anchor-text` (info, CHECK-86) opens with `v2Gate` and counts
 //     internal links whose stored anchor, image alt included, is empty. 174 rules.
+//  9. (T10) Four page rules: `security.form-insecure` (warning, CHECK-85,
+//     `isAuditable`: an `http:` page with a form, or an `https:` page with a form
+//     whose action is `http:`), `images.empty-alt` and `images.alt-too-long`
+//     (info, CHECK-49, `isJudged`; the 100-character limit is `IMAGE_ALT_MAX`,
+//     applied at extraction) in `src/rules/page/technical.ts`, and
+//     `pagination.multiple` (info, CHECK-22, `isAuditable`: more than one
+//     rel=next or rel=prev) in the new `src/rules/page/pagination.ts`. Two
+//     revisions: `security.mixed-content` also counts `http:` iframes and media
+//     from `pages.insecure_refs` (one statement; a v1 page's finding is the
+//     0.20.0 one, and a v2 page's gains the optional `byKind` evidence), and
+//     `images.missing-alt` gains an optional `sample` of image addresses on a
+//     v2 row. 178 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**
