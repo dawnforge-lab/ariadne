@@ -12,6 +12,7 @@ import {
   IMAGE_SAMPLE_MAX,
   IMAGE_SAMPLE_SRC_MAX,
   INSECURE_SAMPLE_MAX,
+  INSECURE_SAMPLE_URL_MAX,
   ROBOTS_META_CONTENT_MAX,
   ROBOTS_METAS_MAX,
   SOCIAL_TEXT_MAX,
@@ -1559,6 +1560,21 @@ describe("insecureRefs: http: references from iframes, media and forms", () => {
     expect(a.insecureRefs?.iframe).toBe(INSECURE_SAMPLE_MAX + 3);
     expect(a.insecureRefs?.sample).toHaveLength(INSECURE_SAMPLE_MAX);
     expect(a.insecureRefs?.sample[0]?.url).toBe("http://x.test/0");
+  });
+
+  it("caps each sampled URL at INSECURE_SAMPLE_URL_MAX; the counters see it whole", () => {
+    expect(INSECURE_SAMPLE_URL_MAX).toBe(1024);
+    const frames = Array.from(
+      { length: 10 },
+      (_, i) => `<iframe src="http://x.test/${i}${"p".repeat(5_000)}"></iframe>`,
+    );
+    const a = bodyPage(frames.join(""), "https://s.test/");
+    expect(a.insecureRefs?.iframe).toBe(10);
+    expect(a.insecureRefs?.sample).toHaveLength(10);
+    for (const [i, s] of (a.insecureRefs?.sample ?? []).entries()) {
+      expect(s.url).toHaveLength(INSECURE_SAMPLE_URL_MAX);
+      expect(s.url.startsWith(`http://x.test/${i}p`)).toBe(true);
+    }
   });
 
   it("ignores references inside <noscript>", () => {

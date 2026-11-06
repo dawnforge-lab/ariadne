@@ -534,6 +534,14 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `images.legacy-format`, `resources.uncached` and the four census markers)
 //     now counts only rows a page loads; `resources.broken`, `page.weight` and
 //     `security.mixed-content` already joined through `page_resources`.
+//  3. (T3) The analyzer fills `anchor_counts`, `insecure_refs`,
+//     `images_empty_alt`, `images_alt_too_long`, `images_missing_alt_sample`,
+//     `rel_next_count` and `rel_prev_count`. `links.anchor` now includes the
+//     trimmed alt of an image inside the link. Ruling R6: identical robots
+//     contents collapse before the `robots_meta` join, and one meta naming a
+//     twitter and an og tag counts as both. Migration 0027 (Ruling R7) widens
+//     `title_count`, `meta_description_count`, `rel_next_count` and
+//     `rel_prev_count` from smallint to integer, unclamped.
 export const RULESET_VERSION = "0.21.0";
 
 /**

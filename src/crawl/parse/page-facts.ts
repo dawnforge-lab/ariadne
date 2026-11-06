@@ -65,6 +65,8 @@ export const ROBOTS_METAS_MAX = 10;
 export const ROBOTS_META_CONTENT_MAX = 512;
 export const REFRESH_RAW_MAX = 512;
 export const INSECURE_SAMPLE_MAX = 10;
+/** Each `insecureRefs.sample[].url` is cut here; the counters use the whole URL. */
+export const INSECURE_SAMPLE_URL_MAX = 1024;
 export const IMAGE_SAMPLE_MAX = 10;
 export const IMAGE_SAMPLE_SRC_MAX = 512;
 export const HEAD_SNIPPET_MAX = 200;

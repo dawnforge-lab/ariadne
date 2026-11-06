@@ -406,7 +406,8 @@
  *    `iframe` (`<iframe src>`), `media` (`<video src|poster>`, `<audio src>`,
  *    `<source src>` inside a `<video>`/`<audio>` (a `mediaDepth` counter, on
  *    `pictureDepth`'s idiom), `<track src>`, `<embed src>`, `<object data>`)
- *    and `formAction` (`<form action>`); `forms` counts every `<form>`. Recorded
+ *    and `formAction` (`<form action>`); `forms` counts every `<form>`. A sampled
+ *    URL is cut at `INSECURE_SAMPLE_URL_MAX`; the counters see it whole. Recorded
  *    on every page whatever its scheme; the rules decide by the page's.
  *  - `imagesEmptyAlt`, `imagesAltTooLong` (trimmed alt over
  *    `ALT_TEXT_LONG_CHARS`, applied here, deviation 10) and
@@ -424,6 +425,7 @@ import {
   IMAGE_SAMPLE_MAX,
   IMAGE_SAMPLE_SRC_MAX,
   INSECURE_SAMPLE_MAX,
+  INSECURE_SAMPLE_URL_MAX,
   parseRefresh,
   ROBOTS_META_BOTS,
   ROBOTS_META_CONTENT_MAX,
@@ -738,7 +740,8 @@ export interface PageAnalysis {
    * Frame, media and form references that resolve (`normalizeUrl`) to an
    * `http:` URL, on every page whatever its own scheme (the rules decide by
    * the page's scheme), with every `<form>` counted and the first
-   * `INSECURE_SAMPLE_MAX` references sampled in document order.
+   * `INSECURE_SAMPLE_MAX` references sampled in document order, each sampled
+   * URL cut at `INSECURE_SAMPLE_URL_MAX`.
    */
   insecureRefs: InsecureRefs;
   /** `<img>` with an `alt` that is empty after trim. */
@@ -1276,7 +1279,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     else if (kind === "media") insecureRefs.media += 1;
     else insecureRefs.formAction += 1;
     if (insecureRefs.sample.length < INSECURE_SAMPLE_MAX) {
-      insecureRefs.sample.push({ kind, url: resolved });
+      insecureRefs.sample.push({ kind, url: resolved.slice(0, INSECURE_SAMPLE_URL_MAX) });
     }
   };
   /** One `<a>` start tag into `anchorCounts` (definitions in the module header). */

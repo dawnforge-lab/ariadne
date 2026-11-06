@@ -872,11 +872,15 @@ export const pages = pgTable("pages", {
   // below is NULLABLE with no default: null means "not measured" (the row was
   // written before extraction 2, `extraction_version` < 2), never "absent".
   // Shapes live in src/crawl/parse/page-facts.ts.
+  // The four counts (`title_count`, `meta_description_count`, `rel_next_count`,
+  // `rel_prev_count`) were created smallint by 0026 and widened to integer by
+  // 0027 (Ruling R7): a page inside the body cap can hold more than 32,767 such
+  // tags, and an out-of-range insert would fail the crawl. They are not clamped.
   htmlLang: text("html_lang"),
   social: jsonb("social").$type<SocialFacts>(),
   h2Text: text("h2_text"),
-  titleCount: smallint("title_count"),
-  metaDescriptionCount: smallint("meta_description_count"),
+  titleCount: integer("title_count"),
+  metaDescriptionCount: integer("meta_description_count"),
   robotsMetas: jsonb("robots_metas").$type<RobotsMetaEntry[]>(),
   metaRefresh: jsonb("meta_refresh").$type<RefreshFact>(),
   anchorCounts: jsonb("anchor_counts").$type<AnchorCounts>(),
@@ -884,8 +888,8 @@ export const pages = pgTable("pages", {
   imagesEmptyAlt: integer("images_empty_alt"),
   imagesAltTooLong: integer("images_alt_too_long"),
   imagesMissingAltSample: jsonb("images_missing_alt_sample").$type<string[]>(),
-  relNextCount: smallint("rel_next_count"),
-  relPrevCount: smallint("rel_prev_count"),
+  relNextCount: integer("rel_next_count"),
+  relPrevCount: integer("rel_prev_count"),
   htmlStructure: jsonb("html_structure").$type<HtmlStructure>(),
   // WHICH RENDER CAPTURE WROTE THE RENDERED COLUMNS (migration 0025;
   // `RENDER_CAPTURE_VERSION`, src/crawl/versions.ts). Stamped by the render writer

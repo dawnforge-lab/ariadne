@@ -895,6 +895,21 @@ describe("PageWriter", () => {
     expect(home?.anchor).toBe("Home");
   });
 
+  it("persists a rel=next count past the smallint range (Ruling R7, migration 0027)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/many-next`;
+    const analysis = analyzePage(
+      `<html><head>${`<link rel="next" href="/2">`.repeat(40_000)}</head><body><p>x</p></body></html>`,
+      url,
+    );
+    expect(analysis.relNextCount).toBe(40_000);
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.relNextCount).toBe(40_000);
+  });
+
   it("ignores a second row for the same (crawl, url)", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);

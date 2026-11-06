@@ -4,6 +4,11 @@
  * Claim: all fifteen columns exist with their types, are nullable with no
  * default, a row that never names them reads null ("not measured"), and the
  * three duplicate-group indexes exist.
+ *
+ * The types are read after EVERY migration has run. 0026 created the four
+ * counts (`title_count`, `meta_description_count`, `rel_next_count`,
+ * `rel_prev_count`) as smallint; 0027 widened them to integer (Ruling R7,
+ * test/db/migration-0027.test.ts), so integer is what this file sees.
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -23,8 +28,9 @@ const COLUMNS: Array<[column: string, type: string]> = [
   ["html_lang", "text"],
   ["social", "jsonb"],
   ["h2_text", "text"],
-  ["title_count", "smallint"],
-  ["meta_description_count", "smallint"],
+  // Created smallint by 0026, widened to integer by 0027 (see the header).
+  ["title_count", "integer"],
+  ["meta_description_count", "integer"],
   ["robots_metas", "jsonb"],
   ["meta_refresh", "jsonb"],
   ["anchor_counts", "jsonb"],
@@ -32,8 +38,8 @@ const COLUMNS: Array<[column: string, type: string]> = [
   ["images_empty_alt", "integer"],
   ["images_alt_too_long", "integer"],
   ["images_missing_alt_sample", "jsonb"],
-  ["rel_next_count", "smallint"],
-  ["rel_prev_count", "smallint"],
+  ["rel_next_count", "integer"],
+  ["rel_prev_count", "integer"],
   ["html_structure", "jsonb"],
 ];
 

@@ -143,6 +143,7 @@ import {
   IMAGE_SAMPLE_MAX,
   IMAGE_SAMPLE_SRC_MAX,
   INSECURE_SAMPLE_MAX,
+  INSECURE_SAMPLE_URL_MAX,
   parseRefresh,
   ROBOTS_META_BOTS,
   ROBOTS_META_CONTENT_MAX,
@@ -555,7 +556,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     if (kind === "iframe") insecureRefs.iframe += 1;
     else if (kind === "media") insecureRefs.media += 1;
     else insecureRefs.formAction += 1;
-    insecureRefs.sample.push({ kind, url: resolved });
+    insecureRefs.sample.push({ kind, url: resolved.slice(0, INSECURE_SAMPLE_URL_MAX) });
   };
   const walkInsecure = (node: DomNode, inMedia: boolean) => {
     const name = node.type === "tag" ? node.name?.toLowerCase() : undefined;
@@ -1464,6 +1465,7 @@ describe("the Phase 26b body facts, against the DOM", () => {
 
   it("agrees on insecure references, their order and the sample cap", () => {
     expectParity(`<html><body>
+      <iframe src="http://x.test/${"long".repeat(400)}"></iframe>
       <iframe src="http://x.test/a"></iframe><iframe src="https://x.test/s"></iframe>
       <video src="http://m.test/1" poster="http://m.test/2"><source src="http://m.test/3">
         <track src="http://m.test/4"></video>
