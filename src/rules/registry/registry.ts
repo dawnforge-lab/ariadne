@@ -500,6 +500,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     as well as robots.txt): never requested, so
 //     `pagination.non-indexable-target` no longer reports a url-policy
 //     refusal as a fetched non-200; `next-target-uncrawled` reports it.
+//     `pagination.loop` gives the same findings for less work: series that
+//     end are peeled off first, and each loop is walked once, from its
+//     member with the smallest `md5(url)`, then fanned out to its members.
 export const RULESET_VERSION = "0.20.0";
 
 /**

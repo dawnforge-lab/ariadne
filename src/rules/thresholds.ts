@@ -288,8 +288,9 @@ export const CANONICAL_MAX_HOPS = 10;
  * stops. A page is in a loop when the walk comes back to it inside this many
  * steps, so a loop longer than the limit is not recognised: the walk stops
  * first. Long archives exist, so the limit bounds the work and is not a claim
- * about series length: the walk starts from every page of the crawl, so its
- * cost is at most pages times this limit.
+ * about series length. The walk peels off every series that ends before it
+ * starts, and walks each loop in full from one member only (see `loopFindings`,
+ * src/rules/query/pagination.ts), so a long series costs one row per page.
  */
 export const PAGINATION_WALK_MAX = 500;
 

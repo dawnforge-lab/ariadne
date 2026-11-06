@@ -291,22 +291,44 @@ async function paginationFindingsMany(
  * one process (different crawls, see `RuleCaps`) never meet, and neither does a
  * run nested inside another transaction.
  *
- * THE WALK starts from every edge and follows `next` until it arrives back at
- * its start or has taken `PAGINATION_WALK_MAX` steps. Each row also carries the
- * smallest URL it has passed, in O(1), which on arrival is the loop's identity. A start page is in a loop
- * exactly when its walk arrives back at it; a page that only leads into somebody
- * else's loop spins in that loop until the step limit and is not reported. Each
- * member of a loop is its own start, so each is reported once, and the number of
- * steps it took is the loop's length. A loop longer than the limit is NOT
- * recognised. Termination rests on the step limit, which bounds the work at
- * pages times the limit.
+ * THE WALK, IN THREE STEPS, each bounded by the edges it can touch rather than
+ * by pages times the step limit (PR #22 review: the first version started a
+ * walk at EVERY edge, so a 2,000-page series in ascending URL order produced
+ * 875,250 walk rows and found nothing).
+ *
+ *  1. `ends` peels off every page whose `next` chain ENDS — at a target that
+ *     declares no `next` of its own (or was never crawled), or at a page already
+ *     peeled. Every `rel=next` edge has one target, so each page is peeled at
+ *     most once: a straight series of any length costs one row per page and
+ *     never reaches step 2. What is left is the loops and the pages that lead
+ *     into one.
+ *  2. `walk` starts from every page left, follows `next` and CONTINUES ONLY
+ *     WHILE THE PAGE IT IS ON SORTS AFTER ITS START, so each loop is walked in
+ *     full from exactly one member, its smallest: that walk passes every other
+ *     member and arrives back at its start after exactly the loop's length in
+ *     steps, while a walk from any other member stops at the first page that
+ *     sorts before it. A page that only leads into a loop never arrives back at
+ *     itself; it stops the same way or at `PAGINATION_WALK_MAX` steps, and is
+ *     not reported. A loop longer than the limit is NOT recognised.
+ *     THE ORDER IS `md5(url)`, NOT THE URL. A series that wraps from its last
+ *     page to its first is a loop in ascending URL order, and in that order
+ *     every member's walk would run on through the rest of the loop: 101,945
+ *     rows for a 450-page ring, 875,250 for a 2,000-page one. Hashed, the run of
+ *     pages that sort after a start is short whatever order the site's URLs
+ *     are in: 3,931 and 12,711 rows for those two rings, counting every
+ *     recursive step of the query (test/rules/pagination-query.test.ts reads
+ *     them from EXPLAIN ANALYZE). The walk still carries
+ *     the smallest URL it passes (`least_url`), which is the loop's identity
+ *     everywhere else, so the evidence is unchanged.
+ *  3. `members` fans each loop found out to its members by following `next`
+ *     from its smallest URL for the loop's length, so each member is reported
+ *     once with the loop's length, exactly as when every member walked itself.
  *
  * WHY NOT `CYCLE ... SET is_cycle`, which the plan names. It keeps the path so
  * far on every row, so a row at step k costs O(k): measured on a 502-page ring
- * (the worst case, every walk runs the full 500 steps) the first version, which
- * used it, took 26 s, and this version, whose rows are O(1), 0.4 s. A series of
- * a few hundred pages in a straight line costs the same order, and archives are
- * that long. The quoted path is built ONCE PER DISTINCT LOOP, starting from its
+ * (where every walk then ran the full 500 steps) the first version, which used
+ * it, took 26 s, and a version with O(1) rows 0.4 s; the walk above keeps its
+ * rows O(1) and walks each loop once. The quoted path is built ONCE PER DISTINCT LOOP, starting from its
  * smallest URL and at most `LOOP_QUOTE_MAX` steps, and every listed member of
  * the loop gets that same quote and the loop's true length, so the cost of the
  * path does not grow with the loop's length or its member count.
@@ -319,7 +341,7 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
 
   return db.transaction(async (tx) => {
     await tx.execute(
-      sql`create temporary table ${table} (src_id text not null, src_url text primary key, dst_url text not null)`,
+      sql`create temporary table ${table} (src_id text not null, src_url text primary key, dst_url text not null, src_key text not null, dst_key text not null)`,
     );
 
     let cursor = "";
@@ -352,9 +374,16 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
       }
       if (ids.length === 0) continue;
       await tx.execute(sql`
-        insert into ${table} (src_id, src_url, dst_url)
-        select * from unnest(${sql.param(ids)}::text[], ${sql.param(srcs)}::text[], ${sql.param(dsts)}::text[])`);
+        insert into ${table} (src_id, src_url, dst_url, src_key, dst_key)
+        select u.id, u.src, u.dst, md5(u.src), md5(u.dst)
+        from unnest(${sql.param(ids)}::text[], ${sql.param(srcs)}::text[], ${sql.param(dsts)}::text[])
+          as u(id, src, dst)`);
     }
+    // `ends` walks edges backwards (target to source), so it needs the target
+    // indexed; and a temp table is never auto-analyzed, so the planner is told
+    // its size rather than guessing.
+    await tx.execute(sql`create index on ${table} (dst_url)`);
+    await tx.execute(sql`analyze ${table}`);
 
     const rows = await tx.execute<{
       start_id: string;
@@ -363,19 +392,39 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
       path: string[];
       total: string;
     }>(sql`
-      with recursive walk(start_id, start_url, cur, least_url, depth) as (
-        select e.src_id, e.src_url, e.dst_url, least(e.src_url, e.dst_url), 1 from ${table} e
+      with recursive ends(url) as (
+        select e.src_url from ${table} e
+        where not exists (select 1 from ${table} n where n.src_url = e.dst_url)
+        union
+        select e.src_url from ends x join ${table} e on e.dst_url = x.url
+      ),
+      walk(start_url, start_key, cur, cur_key, least_url, depth) as (
+        select e.src_url, e.src_key, e.dst_url, e.dst_key, least(e.src_url, e.dst_url), 1
+        from ${table} e
+        where not exists (select 1 from ends x where x.url = e.src_url)
         union all
-        select w.start_id, w.start_url, n.dst_url, least(w.least_url, n.dst_url), w.depth + 1
+        select w.start_url, w.start_key, n.dst_url, n.dst_key, least(w.least_url, n.dst_url),
+               w.depth + 1
         from walk w
         join ${table} n on n.src_url = w.cur
-        where w.depth < ${PAGINATION_WALK_MAX} and w.cur <> w.start_url
+        where w.depth < ${PAGINATION_WALK_MAX}
+          and (w.cur_key, w.cur) > (w.start_key, w.start_url)
+      ),
+      loops as (select least_url, depth as len from walk where cur = start_url),
+      fan(least_url, len, url, step) as (
+        select l.least_url, l.len, l.least_url, 1 from loops l
+        union all
+        select f.least_url, f.len, n.dst_url, f.step + 1
+        from fan f
+        join ${table} n on n.src_url = f.url
+        where f.step < f.len
       ),
       members as (
-        select start_id, start_url, depth as len, least_url, count(*) over () as total
-        from walk
-        where cur = start_url
-        order by start_url
+        select e.src_id as start_id, f.url as start_url, f.len, f.least_url,
+               count(*) over () as total
+        from fan f
+        join ${table} e on e.src_url = f.url
+        order by f.url
         ${limitTo(caps.listing)}
       ),
       cycles as (select distinct least_url, len from members),

@@ -8,7 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql, type SQL } from "drizzle-orm";
 
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -522,6 +522,57 @@ describe("paginationRules against the database", () => {
   });
 
   describe("pagination.loop", () => {
+    /**
+     * Run `pagination.loop` and also report how many rows its recursive CTEs
+     * produced. The rule's own transaction is wrapped so the loop statement (the
+     * one `with recursive` query) is first run under `explain (analyze, format
+     * json)` on the same connection, temp table and all, and the `Actual Rows`
+     * of every Recursive Union node are summed. Deterministic, unlike a timer.
+     */
+    async function loopWithWork(
+      crawlId: string,
+    ): Promise<{ findings: Finding[]; recursiveRows: number }> {
+      let recursiveRows: number | null = null;
+      const dialect = (db as unknown as { dialect: { sqlToQuery(q: SQL): { sql: string } } })
+        .dialect;
+      const sumRecursive = (node: Record<string, unknown>): number => {
+        const own = node["Node Type"] === "Recursive Union" ? Number(node["Actual Rows"]) : 0;
+        const kids = (node["Plans"] as Record<string, unknown>[] | undefined) ?? [];
+        return own + kids.reduce((acc, k) => acc + sumRecursive(k), 0);
+      };
+      const wrapTx = (tx: Db): Db =>
+        new Proxy(tx, {
+          get(target, key) {
+            if (key === "execute") {
+              return async (q: SQL) => {
+                if (/^\s*with recursive/i.test(dialect.sqlToQuery(q).sql)) {
+                  const plan = await target.execute<{ "QUERY PLAN": [{ Plan: Record<string, unknown> }] }>(
+                    sql`explain (analyze, format json) ${q}`,
+                  );
+                  recursiveRows = sumRecursive(plan.rows[0]!["QUERY PLAN"][0].Plan);
+                }
+                return target.execute(q);
+              };
+            }
+            const value = Reflect.get(target, key, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      const wrapped = new Proxy(db, {
+        get(target, key) {
+          if (key === "transaction") {
+            return (fn: (tx: Db) => Promise<unknown>) =>
+              target.transaction((tx) => fn(wrapTx(tx as unknown as Db)));
+          }
+          const value = Reflect.get(target, key, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const findings = await rule("pagination.loop").run(wrapped, crawlId, { listing: null });
+      if (recursiveRows === null) throw new Error("the loop query was not seen");
+      return { findings, recursiveRows };
+    }
+
     const ring = (n: number, prefix = "/loop"): PageSpec[] =>
       Array.from({ length: n }, (_, i) => ({
         path: `${prefix}-${i + 1}`,
@@ -607,6 +658,95 @@ describe("paginationRules against the database", () => {
         { path: "/s-3", relNext: "/s-4", relPrev: "/s-2" },
       ]);
       expect(await findings("pagination.loop", crawlId)).toHaveLength(0);
+    });
+
+    // PR #22 review: the walk used to start from every edge, so a long series
+    // in ascending URL order cost pages x PAGINATION_WALK_MAX rows. A series
+    // that ends is now peeled off before any walk starts.
+    it("is silent on a 2,000-page straight series in ascending order, in bounded work", async () => {
+      const crawlId = await newCrawl();
+      const n = 2000;
+      const path = (i: number) => `/long-${String(i).padStart(4, "0")}`;
+      await addPages(
+        crawlId,
+        Array.from({ length: n }, (_, i) => ({ path: path(i), relNext: path(i + 1) })),
+      );
+      const { findings: found, recursiveRows } = await loopWithWork(crawlId);
+      expect(found).toEqual([]);
+      // Every row any recursive CTE of the loop query produced, read from the
+      // query's own EXPLAIN ANALYZE. Starting a walk at every page cost
+      // sum(min(n - i, PAGINATION_WALK_MAX)), about 875,000 rows here; peeling
+      // the series off first costs one row per page.
+      expect(recursiveRows).toBeLessThanOrEqual(2 * n);
+    });
+
+    // A series whose last page points back at the first is a ring in ascending
+    // URL order: no page is peeled off, and a walk that continued while the URL
+    // sorted after its start would cost each member the rest of the ring.
+    it("finds an ascending ring near the limit in bounded work", async () => {
+      const crawlId = await newCrawl();
+      const n = 450;
+      const path = (i: number) => `/asc-${String(i).padStart(3, "0")}`;
+      await addPages(
+        crawlId,
+        Array.from({ length: n }, (_, i) => ({ path: path(i), relNext: path((i + 1) % n) })),
+      );
+      const { findings: found, recursiveRows } = await loopWithWork(crawlId);
+      expect(found).toHaveLength(n);
+      expect(found.every((f) => (f.evidence as { cycleLength: number }).cycleLength === n)).toBe(
+        true,
+      );
+      // Starting at every member: n * n = 202,500 rows.
+      expect(recursiveRows).toBeLessThanOrEqual(10 * n);
+    });
+
+    it("does not recognise a 2,000-page ascending ring, in bounded work", async () => {
+      const crawlId = await newCrawl();
+      const n = 2000;
+      const path = (i: number) => `/big-${String(i).padStart(4, "0")}`;
+      await addPages(
+        crawlId,
+        Array.from({ length: n }, (_, i) => ({ path: path(i), relNext: path((i + 1) % n) })),
+      );
+      const { findings: found, recursiveRows } = await loopWithWork(crawlId);
+      expect(found).toEqual([]);
+      // Starting at every member: n * PAGINATION_WALK_MAX = 1,000,000 rows.
+      expect(recursiveRows).toBeLessThanOrEqual(10 * n);
+    });
+
+    it("finds two disjoint cycles, each quoted from its own smallest URL", async () => {
+      const crawlId = await newCrawl();
+      await addPages(crawlId, [...ring(3, "/a"), ...ring(2, "/b")]);
+      const found = await findings("pagination.loop", crawlId);
+      expect(found.map((f) => [f.pageUrl, f.evidence])).toEqual([
+        [url("/a-1"), { cycle: [url("/a-1"), url("/a-2"), url("/a-3")], cycleLength: 3 }],
+        [url("/a-2"), { cycle: [url("/a-1"), url("/a-2"), url("/a-3")], cycleLength: 3 }],
+        [url("/a-3"), { cycle: [url("/a-1"), url("/a-2"), url("/a-3")], cycleLength: 3 }],
+        [url("/b-1"), { cycle: [url("/b-1"), url("/b-2")], cycleLength: 2 }],
+        [url("/b-2"), { cycle: [url("/b-1"), url("/b-2")], cycleLength: 2 }],
+      ]);
+    });
+
+    it("does not report a tail into a cycle, whichever side of the cycle's URLs it sorts", async () => {
+      const crawlId = await newCrawl();
+      // `/0-tail` sorts before every member, `/z-tail` after; `/m-2` is the
+      // entry point and not the cycle's smallest URL.
+      await addPages(crawlId, [
+        { path: "/0-tail", relNext: "/z-tail" },
+        { path: "/z-tail", relNext: "/m-2" },
+        { path: "/m-1", relNext: "/m-2" },
+        { path: "/m-2", relNext: "/m-3" },
+        { path: "/m-3", relNext: "/m-1" },
+        { path: "/x-self", relNext: "/x-self" },
+        { path: "/w-into-self", relNext: "/x-self" },
+      ]);
+      const found = await findings("pagination.loop", crawlId);
+      expect(found.map((f) => [f.pageUrl, (f.evidence as { cycleLength: number }).cycleLength])).toEqual([
+        [url("/m-1"), 3],
+        [url("/m-2"), 3],
+        [url("/m-3"), 3],
+        [url("/x-self"), 1],
+      ]);
     });
 
     // The edge set the walk reads covers the whole crawl, so a cycle whose
