@@ -853,6 +853,42 @@ describe("robotsTokens (26a)", () => {
   });
 });
 
+describe("robotsTokens: whitespace delimiters (PR #22 review)", () => {
+  it("splits whitespace-delimited directives, as saysNoindex reads them", () => {
+    expect(robotsTokens("noindex nofollow")).toEqual(["noindex", "nofollow"]);
+    expect(robotsTokens("noarchive none")).toEqual(["noarchive", "none"]);
+  });
+
+  it("splits commas and whitespace together, with extra whitespace and mixed case", () => {
+    expect(robotsTokens("  NoIndex \t NOFOLLOW ,  noArchive   nosnippet ")).toEqual([
+      "noindex",
+      "nofollow",
+      "noarchive",
+      "nosnippet",
+    ]);
+  });
+
+  it("keeps a value directive with a space after its colon as one token", () => {
+    expect(robotsTokens("nosnippet, max-snippet: 50")).toEqual(["nosnippet", "max-snippet:50"]);
+    expect(robotsTokens("noindex max-image-preview : LARGE max-video-preview: -1")).toEqual([
+      "noindex",
+      "max-image-preview:large",
+      "max-video-preview:-1",
+    ]);
+    expect(robotsTokens("googlebot: noindex nofollow")).toEqual(["noindex", "nofollow"]);
+  });
+
+  it("keeps an unavailable_after date whole after a whitespace-delimited directive", () => {
+    expect(robotsTokens("noindex unavailable_after: 25 Jun 2010 15:00:00 PST")).toEqual([
+      "noindex",
+      "unavailable_after: 25 jun 2010 15:00:00 pst",
+    ]);
+    expect(
+      robotsTokens("NOINDEX  unavailable_after: Fri, 25 Jun 2010 15:00:00 GMT, nofollow"),
+    ).toEqual(["noindex", "unavailable_after: fri, 25 jun 2010 15:00:00 gmt", "nofollow"]);
+  });
+});
+
 describe("unavailableAfterOf (26a)", () => {
   it("returns the raw date, case and all, or null", () => {
     expect(unavailableAfterOf("noarchive, unavailable_after: 25 Jun 2010 15:00:00 PST")).toBe(

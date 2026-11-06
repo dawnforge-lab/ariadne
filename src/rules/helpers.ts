@@ -502,14 +502,20 @@ const VALUE_DIRECTIVES = new Set(["max-snippet", "max-image-preview", "max-video
 
 /**
  * The directive tokens of a robots meta or `X-Robots-Tag` value: split on
- * commas, lower-cased and trimmed, with a leading `<bot>:` prefix dropped.
+ * commas AND on whitespace, lower-cased, with a leading `<bot>:` prefix dropped.
+ *
+ * Whitespace delimits as a comma does: `content="noindex nofollow"` is two
+ * directives to a search engine, and `saysNoindex` / `NONE_DIRECTIVE` already
+ * read it that way, so a rule over these tokens must too.
  *
  * The prefix is ignored, as `saysNoindex` ignores it: a directive for one bot is
  * read as a directive for the page, and bot-specific judgement is 26b's job.
  * `max-snippet:0` is one token and not a prefix, so the value directives keep
- * their colon (whitespace around it is closed up). `unavailable_after: <date>`
- * is one token whose date may hold commas and colons, taken first so the split
- * does not cut it.
+ * their colon, and whitespace around any colon is closed up BEFORE the
+ * whitespace split, so `max-snippet: 50` stays the one token `max-snippet:50`.
+ * `unavailable_after: <date>` is one token whose date may hold spaces, commas
+ * and colons; it runs to the next comma that does not follow a weekday name,
+ * and is taken out first so neither split cuts it.
  *
  * Rules compare whole tokens, which is the point: `nofollowing` is not
  * `nofollow`, and `max-snippet:-1` is not `max-snippet:0`.
@@ -518,13 +524,16 @@ export function robotsTokens(value: string | null): string[] {
   if (!present(value)) return [];
   const tokens: string[] = [];
   const plain = (part: string): void => {
-    for (const raw of part.split(",")) {
-      let token = raw.trim().toLowerCase().replace(/\s*:\s*/g, ":");
-      const colon = token.indexOf(":");
-      if (colon > 0 && !VALUE_DIRECTIVES.has(token.slice(0, colon))) {
-        token = token.slice(colon + 1);
+    for (const segment of part.split(",")) {
+      const words = segment.toLowerCase().replace(/\s*:\s*/g, ":").split(/\s+/);
+      for (const word of words) {
+        let token = word;
+        const colon = token.indexOf(":");
+        if (colon > 0 && !VALUE_DIRECTIVES.has(token.slice(0, colon))) {
+          token = token.slice(colon + 1);
+        }
+        if (token !== "") tokens.push(token);
       }
-      if (token !== "") tokens.push(token);
     }
   };
   const match = UNAVAILABLE_AFTER.exec(value);

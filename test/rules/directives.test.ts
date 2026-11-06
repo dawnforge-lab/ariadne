@@ -64,6 +64,16 @@ describe("indexability.nofollow", () => {
     ).toMatchObject({ source: "both" });
   });
 
+  it("reads whitespace-delimited directives as saysNoindex does (PR #22 review)", () => {
+    expect(r.run(mkPage({ robotsMeta: "noindex nofollow", isIndexable: false }))).toHaveLength(1);
+    expect(r.run(mkPage({ xRobotsTag: "noarchive none", isIndexable: false }))).toHaveLength(1);
+    expect(r.run(mkPage({ robotsMeta: "noindex  follow", isIndexable: false }))).toHaveLength(0);
+    expect(
+      rule("directives.restrictive").run(mkPage({ robotsMeta: "noarchive NOSNIPPET" }))[0]!
+        .evidence,
+    ).toEqual({ directives: ["nosnippet"] });
+  });
+
   it("fires on none, which is noindex plus nofollow", () => {
     expect(r.run(mkPage({ robotsMeta: "none", isIndexable: false }))).toHaveLength(1);
     expect(r.run(mkPage({ xRobotsTag: "NONE" }))).toHaveLength(1);

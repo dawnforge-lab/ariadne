@@ -489,7 +489,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     not fire. It now files an HTTPS page fetched OK that links to an `http:`
 //     URL on the site's own host (modulo `www.`; `is_internal` is false for
 //     such a link and is not read), with `httpTargetCount` and a sorted
-//     `sample` of `BROKEN_SAMPLE_RESOURCES`.
+//     `sample` of `BROKEN_SAMPLE_RESOURCES`. `robotsTokens` splits on
+//     whitespace as well as commas (closing up `name: value` first), so
+//     `noindex nofollow` is two tokens for `indexability.nofollow` and
+//     `directives.restrictive`, as it already was for `saysNoindex`.
 export const RULESET_VERSION = "0.20.0";
 
 /**
