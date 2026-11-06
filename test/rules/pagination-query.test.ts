@@ -528,11 +528,28 @@ describe("paginationRules against the database", () => {
      * one `with recursive` query) is first run under `explain (analyze, format
      * json)` on the same connection, temp table and all, and the `Actual Rows`
      * of every Recursive Union node are summed. Deterministic, unlike a timer.
+     *
+     * Two more readings of the same plan, because the recursive row count alone
+     * cannot see a join that re-reads a big table on every iteration (PR #22
+     * re-review: `Hash rows=69000 loops=500` over a walk of a few hundred rows):
+     * `nodeRows` is every plan node's `Actual Rows` times its `Actual Loops`,
+     * which counts each rebuilt hash and each rescan, and `relations` names
+     * every table the statement read.
      */
-    async function loopWithWork(
-      crawlId: string,
-    ): Promise<{ findings: Finding[]; recursiveRows: number }> {
+    async function loopWithWork(crawlId: string): Promise<{
+      findings: Finding[];
+      recursiveRows: number;
+      nodeRows: number;
+      relations: Set<string>;
+    }> {
       let recursiveRows: number | null = null;
+      let nodeRows = 0;
+      const relations = new Set<string>();
+      const walkPlan = (node: Record<string, unknown>): void => {
+        nodeRows += Number(node["Actual Rows"]) * Number(node["Actual Loops"]);
+        if (typeof node["Relation Name"] === "string") relations.add(node["Relation Name"]);
+        for (const k of (node["Plans"] as Record<string, unknown>[] | undefined) ?? []) walkPlan(k);
+      };
       const dialect = (db as unknown as { dialect: { sqlToQuery(q: SQL): { sql: string } } })
         .dialect;
       const sumRecursive = (node: Record<string, unknown>): number => {
@@ -550,6 +567,7 @@ describe("paginationRules against the database", () => {
                     sql`explain (analyze, format json) ${q}`,
                   );
                   recursiveRows = sumRecursive(plan.rows[0]!["QUERY PLAN"][0].Plan);
+                  walkPlan(plan.rows[0]!["QUERY PLAN"][0].Plan);
                 }
                 return target.execute(q);
               };
@@ -570,7 +588,7 @@ describe("paginationRules against the database", () => {
       });
       const findings = await rule("pagination.loop").run(wrapped, crawlId, { listing: null });
       if (recursiveRows === null) throw new Error("the loop query was not seen");
-      return { findings, recursiveRows };
+      return { findings, recursiveRows, nodeRows, relations };
     }
 
     const ring = (n: number, prefix = "/loop"): PageSpec[] =>
@@ -712,6 +730,49 @@ describe("paginationRules against the database", () => {
       expect(found).toEqual([]);
       // Starting at every member: n * PAGINATION_WALK_MAX = 1,000,000 rows.
       expect(recursiveRows).toBeLessThanOrEqual(10 * n);
+    });
+
+    // PR #22 re-review I1: with many series peeled off and one long loop left,
+    // the walk joined the WHOLE edge table on every step, and the planner
+    // rebuilt a hash of it each time. The walk now reads only the edges the
+    // peel left behind, materialised in their own table.
+    it("walks only the edges the peel left, not the whole edge table", async () => {
+      const loop = 300;
+      const page = (a: number, i: number) =>
+        `/arch-${String(a).padStart(3, "0")}/p${String(i).padStart(2, "0")}`;
+      const loopPath = (i: number) => `/ring-${String(i).padStart(3, "0")}`;
+      // One ascending 300-page loop ...
+      const ringSpecs: PageSpec[] = Array.from({ length: loop }, (_, i) => ({
+        path: loopPath(i),
+        relNext: loopPath((i + 1) % loop),
+      }));
+      // ... and 500 twenty-page archives, each ending at an uncrawled page.
+      const archiveSpecs: PageSpec[] = Array.from({ length: 500 * 20 }, (_, k) => {
+        const a = Math.floor(k / 20);
+        return { path: page(a, k % 20), relNext: page(a, (k % 20) + 1) };
+      });
+      const measure = async (specs: PageSpec[]) => {
+        const crawlId = await newCrawl();
+        for (let i = 0; i < specs.length; i += 1000) {
+          await addPages(crawlId, specs.slice(i, i + 1000));
+        }
+        return loopWithWork(crawlId);
+      };
+      const alone = await measure(ringSpecs);
+      const crowded = await measure([...archiveSpecs, ...ringSpecs]);
+
+      for (const run of [alone, crowded]) {
+        expect(run.findings).toHaveLength(loop);
+        // The statement reads the residual table and nothing else.
+        expect(
+          [...run.relations].every((r) => r.startsWith("pagination_loops_")),
+          [...run.relations].join(),
+        ).toBe(true);
+      }
+      // Every row any plan node produced, loops and rebuilt hashes included, is
+      // the same with 10,000 peeled archive pages beside the loop as without
+      // them: the walk's cost no longer depends on the edges it does not walk.
+      expect(crowded.nodeRows).toBeLessThanOrEqual(alone.nodeRows * 1.05);
     });
 
     it("finds two disjoint cycles, each quoted from its own smallest URL", async () => {

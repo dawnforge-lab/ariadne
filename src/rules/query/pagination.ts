@@ -279,24 +279,40 @@ async function paginationFindingsMany(
  * a temporary table and dropped from memory. One recursive query then walks the
  * whole edge set inside the database. Node holds one batch.
  *
- * THE TEMPORARY TABLE lives inside one transaction, so every statement runs on
+ * THE TEMPORARY TABLES live inside one transaction, so every statement runs on
  * the SAME connection (a pool would otherwise hand each statement to a
- * different session, and a temp table is session-local). Its name carries a
- * random suffix and it is dropped before the transaction ends, so two runs in
+ * different session, and a temp table is session-local). Their names carry a
+ * random suffix and they are dropped before the transaction ends, so two runs in
  * one process (different crawls, see `RuleCaps`) never meet, and neither does a
  * run nested inside another transaction.
  *
- * THE WALK, IN THREE STEPS, each bounded by the edges it can touch rather than
- * by pages times the step limit (PR #22 review: the first version started a
- * walk at EVERY edge, so a 2,000-page series in ascending URL order produced
- * 875,250 walk rows and found nothing).
+ * THE WALK, IN THREE STEPS. What is bounded: the recursive rows (one per page
+ * peeled in step 1, a short run per page left for step 2, one per loop member
+ * in step 3, never pages times the step limit), and the JOIN INPUT of every
+ * recursive step after step 1, which is the residual table of pages step 1
+ * left, not the crawl's whole edge set. The step limit still bounds how far one
+ * walk goes. History (PR #22 review and re-review): the first version started
+ * a walk at EVERY edge, so a 2,000-page series in ascending URL order produced
+ * 875,250 walk rows and found nothing. The second walked few rows but joined
+ * the whole edge table on each step, and the planner rebuilt a hash of it every
+ * time: on the re-review's 69,000-edge crawl (2,500 twenty-page archives, one
+ * 5,000-page series, 20 400-page loops with 300-page tails) that was
+ * `Hash rows=69000 loops=500`, 15.9 s for 92,757 walk rows, against 11.5 s for
+ * the first version's 9.1 million. Peeling into a table of its own was
+ * measured there at 0.84 s for the peel and 0.19 s for the walk, with the same
+ * 8,000 members. The whole rule on that crawl, loading its 69,000 edges
+ * included, took 17.8–20.1 s before this change and 3.4–3.5 s after it
+ * (2026-11-06, dev Postgres 16, two runs each, 8,000 findings both times).
  *
  *  1. `ends` peels off every page whose `next` chain ENDS — at a target that
  *     declares no `next` of its own (or was never crawled), or at a page already
  *     peeled. Every `rel=next` edge has one target, so each page is peeled at
  *     most once: a straight series of any length costs one row per page and
- *     never reaches step 2. What is left is the loops and the pages that lead
- *     into one.
+ *     never reaches step 2. What is left — the loops and the pages that lead
+ *     into one — is copied into a second temporary table with its own primary
+ *     key and statistics, and steps 2 and 3 read only that table. That is sound
+ *     because a page left behind always points at a page left behind: had its
+ *     target been peeled, it would have been peeled with it.
  *  2. `walk` starts from every page left, follows `next` and CONTINUES ONLY
  *     WHILE THE PAGE IT IS ON SORTS AFTER ITS START, so each loop is walked in
  *     full from exactly one member, its smallest: that walk passes every other
@@ -332,7 +348,10 @@ async function paginationFindingsMany(
  * was not served as an HTML 200 has no `rel=next` signal to follow.
  */
 async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
-  const table = sql.raw(`pagination_edges_${randomUUID().replace(/-/g, "")}`);
+  const suffix = randomUUID().replace(/-/g, "");
+  const table = sql.raw(`pagination_edges_${suffix}`);
+  // The edges step 1 did not peel off: loops, and the pages leading into them.
+  const residual = sql.raw(`pagination_loops_${suffix}`);
 
   return db.transaction(async (tx) => {
     await tx.execute(
@@ -380,6 +399,21 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
     await tx.execute(sql`create index on ${table} (dst_url)`);
     await tx.execute(sql`analyze ${table}`);
 
+    // Step 1, into a table of its own, so the walk below joins a table the
+    // planner knows is small instead of re-reading every edge on every step.
+    await tx.execute(sql`
+      create temporary table ${residual} as
+      with recursive ends(url) as (
+        select e.src_url from ${table} e
+        where not exists (select 1 from ${table} n where n.src_url = e.dst_url)
+        union
+        select e.src_url from ends x join ${table} e on e.dst_url = x.url
+      )
+      select e.* from ${table} e
+      where not exists (select 1 from ends x where x.url = e.src_url)`);
+    await tx.execute(sql`alter table ${residual} add primary key (src_url)`);
+    await tx.execute(sql`analyze ${residual}`);
+
     const rows = await tx.execute<{
       start_id: string;
       start_url: string;
@@ -387,21 +421,14 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
       path: string[];
       total: string;
     }>(sql`
-      with recursive ends(url) as (
-        select e.src_url from ${table} e
-        where not exists (select 1 from ${table} n where n.src_url = e.dst_url)
-        union
-        select e.src_url from ends x join ${table} e on e.dst_url = x.url
-      ),
-      walk(start_url, start_key, cur, cur_key, least_url, depth) as (
+      with recursive walk(start_url, start_key, cur, cur_key, least_url, depth) as (
         select e.src_url, e.src_key, e.dst_url, e.dst_key, least(e.src_url, e.dst_url), 1
-        from ${table} e
-        where not exists (select 1 from ends x where x.url = e.src_url)
+        from ${residual} e
         union all
         select w.start_url, w.start_key, n.dst_url, n.dst_key, least(w.least_url, n.dst_url),
                w.depth + 1
         from walk w
-        join ${table} n on n.src_url = w.cur
+        join ${residual} n on n.src_url = w.cur
         where w.depth < ${PAGINATION_WALK_MAX}
           and (w.cur_key, w.cur) > (w.start_key, w.start_url)
       ),
@@ -411,14 +438,14 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
         union all
         select f.least_url, f.len, n.dst_url, f.step + 1
         from fan f
-        join ${table} n on n.src_url = f.url
+        join ${residual} n on n.src_url = f.url
         where f.step < f.len
       ),
       members as (
         select e.src_id as start_id, f.url as start_url, f.len, f.least_url,
                count(*) over () as total
         from fan f
-        join ${table} e on e.src_url = f.url
+        join ${residual} e on e.src_url = f.url
         order by f.url
         ${limitTo(caps.listing)}
       ),
@@ -428,7 +455,7 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
         union all
         select t.least_url, t.len, n.dst_url, t.path || n.dst_url, t.depth + 1
         from trail t
-        join ${table} n on n.src_url = t.cur
+        join ${residual} n on n.src_url = t.cur
         where t.depth < least(t.len, ${LOOP_QUOTE_MAX})
       )
       select m.start_id, m.start_url, m.len, t.path, m.total
@@ -437,6 +464,7 @@ async function loopFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Fi
         and t.depth = least(m.len, ${LOOP_QUOTE_MAX})
       order by m.start_url`);
 
+    await tx.execute(sql`drop table ${residual}`);
     await tx.execute(sql`drop table ${table}`);
 
     const findings = rows.rows.map((row) =>
