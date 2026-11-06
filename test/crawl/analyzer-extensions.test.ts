@@ -1496,6 +1496,14 @@ describe("anchor text takes an image's alt", () => {
     expect(bodyPage(`<a href="/x"><img src="a.png" alt="   "></a>`).links[0]?.anchor).toBe("");
   });
 
+  it("separates an alt from the anchor's text around it (final review I2)", () => {
+    expect(bodyPage(`<a href="/x">Home<img alt="Logo"></a>`).links[0]?.anchor).toBe("Home Logo");
+    expect(bodyPage(`<a href="/x"><img alt="Logo">Home</a>`).links[0]?.anchor).toBe("Logo Home");
+    expect(bodyPage(`<a href="/x"><img alt="A"><img alt="B"></a>`).links[0]?.anchor).toBe("A B");
+    expect(bodyPage(`<a href="/x"><img alt="Logo"></a>`).links[0]?.anchor).toBe("Logo");
+    expect(bodyPage(`<a href="/x">Home</a>`).links[0]?.anchor).toBe("Home");
+  });
+
   it("does not take the alt of an image outside any anchor", () => {
     const a = bodyPage(`<img src="a.png" alt="Loose"><a href="/x">Text</a>`);
     expect(a.links[0]?.anchor).toBe("Text");

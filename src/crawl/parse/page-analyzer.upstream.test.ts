@@ -608,7 +608,10 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   const anchorText = (node: DomNode): string => {
     if (node.type === "text") return node.data ?? "";
     const alt = node.type === "tag" && node.name === "img" ? node.attribs?.["alt"]?.trim() : undefined;
-    return (alt ?? "") + (node.children ?? []).map(anchorText).join("");
+    // A non-empty alt is a word of its own, spaced off from the text around it
+    // (final review I2); the whitespace collapse below folds the spaces.
+    const altWords = alt === undefined || alt === "" ? "" : ` ${alt} `;
+    return altWords + (node.children ?? []).map(anchorText).join("");
   };
 
   const linksByTarget = new Map<string, RawPageAnalysis["links"][number]>();
@@ -1475,6 +1478,8 @@ describe("the Phase 26b body facts, against the DOM", () => {
       <a href="/mixed">Visit <img src="c.png" alt="  our shop "> now</a>
       <a href="/blank"><img src="d.png" alt="  "></a>
       <img src="loose.png" alt="Loose"><a href="/after">After</a>
+      <a href="/glued">Home<img src="e.png" alt="Logo"></a>
+      <a href="/pair"><img src="f.png" alt="A"><img src="g.png" alt="B">Tail</a>
       </body></html>`);
   });
 

@@ -399,7 +399,9 @@
  *    tokens). The first three are exclusive; `unsafeBlank` is orthogonal.
  *  - ANCHOR TEXT NOW INCLUDES IMAGE ALT: an `<img>` inside an open anchor
  *    pushes its trimmed, non-empty `alt` into the anchor's text, as a text
- *    node would. `links.anchor` on a v2 row carries it; the oracle agrees.
+ *    node would, with a space either side so it is a word of its own
+ *    (`Home<img alt=Logo>` is "Home Logo"). `links.anchor` on a v2 row
+ *    carries it; the oracle agrees.
  *  - `relNextCount` / `relPrevCount`: every `<link rel~=next|prev>`, href or
  *    not. The first-only `relNext` / `relPrev` are unchanged.
  *  - `insecureRefs`: references that resolve (`normalizeUrl`) to `http:` —
@@ -2128,8 +2130,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               if (trimmedAlt === "") imagesEmptyAlt += 1;
               else if (trimmedAlt.length > ALT_TEXT_LONG_CHARS) imagesAltTooLong += 1;
               // An image link's alt is its anchor text (Phase 26b): pushed
-              // where a text node's words would be.
-              if (openAnchor && trimmedAlt !== "") openAnchor.text.push(trimmedAlt);
+              // where a text node's words would be, spaced off on both sides
+              // so it never glues to them ("Home" + "Logo" is "Home Logo",
+              // final review I2); `closeAnchor` collapses and trims.
+              if (openAnchor && trimmedAlt !== "") openAnchor.text.push(` ${trimmedAlt} `);
             }
             // One image, one count: missing either attribute is the same
             // layout-shift defect and must not be double-counted.
