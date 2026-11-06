@@ -2,12 +2,7 @@ import { sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { pages } from "../../db/schema.js";
-import {
-  isAuditable,
-  queryFinding,
-  resolveEffectiveCanonical,
-  type RuleIdentity,
-} from "../helpers.js";
+import { isAuditable, resolveEffectiveCanonical, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
   defineRule,
@@ -17,41 +12,13 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { CANONICAL_MAX_HOPS } from "../thresholds.js";
-import { capsOr, noteTruncation } from "./crawl-evidence.js";
+import { cappedListing, capsOr } from "./crawl-evidence.js";
 import { eachCanonicalTargetBatch, type ResolvedTarget } from "./link-targets.js";
 
 const CATEGORY = "canonical";
 
 const CHAIN: RuleIdentity = { id: "canonical.chain", severity: "warning" };
 const UNLINKED: RuleIdentity = { id: "canonical.unlinked", severity: "info" };
-
-/**
- * The cap-and-count both rules end in: findings arrive in the order the walk
- * visits them (batches by `pages.id`, each batch in declaring-URL order, as
- * `eachCanonicalTargetBatch` guarantees), the first `caps.listing` are kept, and
- * every one past that is only counted. Nothing is accumulated past the cap and
- * sliced afterwards, so RAM stays O(batch) however many pages fire, and the
- * total behind `noteTruncation` is exact because the scan always runs to the end.
- */
-function listing(self: RuleIdentity, caps: RuleCaps) {
-  const findings: Finding[] = [];
-  let total = 0;
-  return {
-    add(page: { id: string; url: string }, evidence: Record<string, unknown>): void {
-      total += 1;
-      if (caps.listing !== null && findings.length >= caps.listing) return;
-      findings.push(
-        queryFinding(self, {
-          pageId: page.id,
-          pageUrl: page.url,
-          evidence,
-          dedupeKey: page.url,
-        }),
-      );
-    },
-    done: (): Finding[] => noteTruncation(findings, total),
-  };
-}
 
 /** One page's walk down its canonical chain. */
 interface Walk {
@@ -109,7 +76,9 @@ async function chainFindings(
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
-  const out = listing(self, caps);
+  // Findings are listed in the order the walk meets them: batches by
+  // `pages.id`, each in declaring-URL order (`eachCanonicalTargetBatch`).
+  const out = cappedListing(self, caps);
   await eachCanonicalTargetBatch(db, crawlId, async (batch) => {
     const walks: Walk[] = [];
     for (const t of batch) {
@@ -177,15 +146,20 @@ async function chainFindings(
     }
 
     for (const w of walks) {
-      out.add(w.source.page, {
-        canonical: w.source.canonical,
-        hops: w.hops,
-        loop: w.loop,
-        // Present only when true: an absent key is "the walk reached an end".
-        ...(w.hopLimitReached ? { hopLimitReached: true } : {}),
-        // Likewise present only when the chain runs into a URL the crawl has
-        // no 200 page for, so the finding names where it was last seen going.
-        ...(w.unresolvedNext !== null ? { unresolvedNext: w.unresolvedNext } : {}),
+      out.add({
+        pageId: w.source.page.id,
+        pageUrl: w.source.page.url,
+        dedupeKey: w.source.page.url,
+        evidence: {
+          canonical: w.source.canonical,
+          hops: w.hops,
+          loop: w.loop,
+          // Present only when true: an absent key is "the walk reached an end".
+          ...(w.hopLimitReached ? { hopLimitReached: true } : {}),
+          // Likewise present only when the chain runs into a URL the crawl has
+          // no 200 page for, so the finding names where it was last seen going.
+          ...(w.unresolvedNext !== null ? { unresolvedNext: w.unresolvedNext } : {}),
+        },
       });
     }
   });
@@ -222,7 +196,7 @@ async function unlinkedFindings(
   crawlId: string,
   caps: RuleCaps,
 ): Promise<Finding[]> {
-  const out = listing(self, caps);
+  const out = cappedListing(self, caps);
   await eachCanonicalTargetBatch(db, crawlId, async (batch) => {
     const cohort = batch.filter((t) => isAuditable(t.target));
     if (cohort.length === 0) return;
@@ -239,7 +213,12 @@ async function unlinkedFindings(
 
     for (const t of cohort) {
       if (hasInlink.has(t.resolvedTo)) continue;
-      out.add(t.page, { canonical: t.canonical, resolvedTo: t.resolvedTo });
+      out.add({
+        pageId: t.page.id,
+        pageUrl: t.page.url,
+        dedupeKey: t.page.url,
+        evidence: { canonical: t.canonical, resolvedTo: t.resolvedTo },
+      });
     }
   });
   return out.done();

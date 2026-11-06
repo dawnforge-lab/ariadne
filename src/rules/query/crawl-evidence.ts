@@ -11,6 +11,7 @@ import type {
 } from "../../crawl/loop.js";
 import type { Db } from "../../db/client.js";
 import { crawls, sitemapUrls } from "../../db/schema.js";
+import { queryFinding, type RuleIdentity } from "../helpers.js";
 import type { Finding } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 
@@ -684,6 +685,34 @@ function noteOnLast(findings: Finding[], note: TruncationNote): Finding[] {
 export function noteTruncation(findings: Finding[], total: number): Finding[] {
   if (total <= findings.length) return findings;
   return noteOnLast(findings, { reported: findings.length, total });
+}
+
+/**
+ * The cap-and-count of a rule that finds its cases in a scan it runs to the end
+ * (a batched walk, not one SQL listing with a `count(*) over ()`): `add` every
+ * case in the order the scan meets it, and the first `caps.listing` become
+ * findings while every one past that is only counted. Nothing is accumulated
+ * past the cap and sliced afterwards, so RAM stays O(cap) however many cases
+ * fire, and `done` notes the exact total (`noteTruncation`) because the scan
+ * saw every case.
+ */
+export function cappedListing(
+  self: RuleIdentity,
+  caps: RuleCaps,
+): {
+  add(hit: Parameters<typeof queryFinding>[1]): void;
+  done(): Finding[];
+} {
+  const findings: Finding[] = [];
+  let total = 0;
+  return {
+    add(hit) {
+      total += 1;
+      if (caps.listing !== null && findings.length >= caps.listing) return;
+      findings.push(queryFinding(self, hit));
+    },
+    done: () => noteTruncation(findings, total),
+  };
 }
 
 /**

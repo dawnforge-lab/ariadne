@@ -51,7 +51,7 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { UNSAFE_REFERRER_POLICIES } from "../thresholds.js";
-import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { cappedListing, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { BROKEN_SAMPLE_RESOURCES } from "./resources.js";
 
 /** Pages read per round trip by the header scan: a batch, never the table. */
@@ -190,8 +190,7 @@ async function scanHttpsPages(
   evidenceFor: (h: StoredResponseHeaders) => Record<string, unknown> | null,
 ): Promise<Finding[]> {
   if (!(await headersGate(db, crawlId)).recorded) return [];
-  const findings: Finding[] = [];
-  let total = 0;
+  const out = cappedListing(self, caps);
   let cursor = "";
   for (;;) {
     const batch = await db.execute<{
@@ -210,19 +209,10 @@ async function scanHttpsPages(
       if (row.response_headers === null) throw corruptHeaders(row.url);
       const evidence = evidenceFor(row.response_headers);
       if (evidence === null) continue;
-      total += 1;
-      if (caps.listing !== null && findings.length >= caps.listing) continue;
-      findings.push(
-        queryFinding(self, {
-          pageId: row.id,
-          pageUrl: row.url,
-          evidence,
-          dedupeKey: row.url,
-        }),
-      );
+      out.add({ pageId: row.id, pageUrl: row.url, evidence, dedupeKey: row.url });
     }
   }
-  return noteTruncation(findings, total);
+  return out.done();
 }
 
 function hstsMissingFindings(

@@ -22,7 +22,7 @@ import {
 } from "../registry/registry.js";
 import type { RuleCaps } from "../registry/types.js";
 import { PAGINATION_WALK_MAX } from "../thresholds.js";
-import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
+import { cappedListing, capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 
 export { PAGINATION_WALK_MAX };
 
@@ -253,23 +253,18 @@ async function paginationFindingsMany(
   fires: (p: PaginatedPage) => Array<{ evidence: Record<string, unknown>; dedupeKey: string }>,
   caps: RuleCaps,
 ): Promise<Finding[]> {
-  const findings: Finding[] = [];
-  let total = 0;
+  const out = cappedListing(self, caps);
   await eachPaginatedPage(db, crawlId, (p) => {
     for (const hit of fires(p)) {
-      total += 1;
-      if (caps.listing !== null && findings.length >= caps.listing) continue;
-      findings.push(
-        queryFinding(self, {
-          pageId: p.page.id,
-          pageUrl: p.page.url,
-          evidence: hit.evidence,
-          dedupeKey: hit.dedupeKey,
-        }),
-      );
+      out.add({
+        pageId: p.page.id,
+        pageUrl: p.page.url,
+        evidence: hit.evidence,
+        dedupeKey: hit.dedupeKey,
+      });
     }
   });
-  return noteTruncation(findings, total);
+  return out.done();
 }
 
 /**
