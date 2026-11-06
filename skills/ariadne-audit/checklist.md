@@ -2003,6 +2003,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   It needs `renderPassCount` ≥ 1; without a render pass this is SKIP, not PASS.
   Whether the nav contains the RIGHT links (key categories) is judgement — read the
   nav on one page in a browser for that, and say that is what you did.
+- **Link elements a crawler cannot follow**: `links.uncrawlable` (warning) — a page
+  with `<a>` elements that have no `href` (only with an `onclick` or `role="link"` /
+  `role="button"`; a bookmark such as `<a name="top">` is not a link), a `javascript:`
+  href, or a bare `#` / `#!` href. `#section` is in-page navigation and is not counted.
+  The evidence is the three counts. A link written this way is not discovered through
+  that element, so a target reached only through such links is a crawl-reach gap.
 - **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if main nav and footer links are in initial HTML
@@ -2028,6 +2034,16 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     anchor is a generic English phrase ("click here", "read more", "learn more" and the
     rest of the list in the rule's thresholds). The judgement covers internal anchors
     only; anchors in other languages, and external anchors, are not judged.
+  Three more rules answer the rest of the check (all info):
+  - `links.empty-href` (info) — a page with `<a href="">`, which points back at the
+    page itself.
+  - `links.unsafe-target-blank` (info) — a page with `target="_blank"` links that carry
+    neither `noopener` nor `noreferrer` in `rel`.
+  - `links.no-anchor-text` (info) — a page with an INTERNAL link whose stored anchor is
+    empty after whitespace is removed. The stored anchor includes the alt text of an
+    image inside the link, so an image link with alt text is not textless and one
+    without is. Only the first anchor per target is stored, so a target reached first
+    by a textless link and later by a text link is listed too.
 - **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if no link points at a private host and generic anchors are rare

@@ -566,7 +566,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `resources.not-recorded` and `resources.not-fetched` claim CHECK-87, and
 //     `resources.not-fetched` also fires on a crawl whose only rows are
 //     unasked share images and whose pages count no image (R13). 161 rules.
-//  6. (T8) `directives.bot-conflict` (page, warning, CHECK-04: a bot-specific
+//  6. (T7) Heading and title rules, category `on-page`: `h2.missing`,
+//     `h2.too-long`, `h2.duplicate`, `title.multiple`,
+//     `meta-description.multiple` and `title.same-as-h1` (commit 06cf98e).
+//     `title.same-as-h1`, `h2.missing` and `social.og-duplicate` judge every
+//     crawl (deviation 1).
+//  7. (T8) `directives.bot-conflict` (page, warning, CHECK-04: a bot-specific
 //     robots meta whose noindex/nofollow state differs from the combined
 //     `robots` meta; `none` counts as both), `redirect.meta-refresh` (page,
 //     warning, CHECK-10: a meta refresh or `Refresh` header naming a URL, in
@@ -574,6 +579,13 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     info, CHECK-25: `v2Gate`, primary language subtag of `html_lang` against
 //     the page's self hreflang codes). `parseRefresh` follows the HTML refresh
 //     algorithm strictly (ruling R5). 170 rules.
+//  8. (T9) Link rules. Page rules in `src/rules/page/anchors.ts` over
+//     `pages.anchorCounts` (null on a v1 row, so silent): `links.uncrawlable`
+//     (warning, CHECK-34: `<a>` with no href but onclick/role, a `javascript:`
+//     href, or a `#` / `#!` href), `links.empty-href` and
+//     `links.unsafe-target-blank` (info, CHECK-86). Query rule
+//     `links.no-anchor-text` (info, CHECK-86) opens with `v2Gate` and counts
+//     internal links whose stored anchor, image alt included, is empty. 174 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**

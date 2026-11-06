@@ -38,6 +38,7 @@ import {
 } from "../thresholds.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { SAMPLE_SOURCES } from "./link-targets.js";
+import { v2Gate } from "./page-facts.js";
 
 const CATEGORY = "links" as const;
 
@@ -55,6 +56,7 @@ const NON_INDEXABLE_ONLY: RuleIdentity = {
 };
 const LOCALHOST: RuleIdentity = { id: "links.localhost", severity: "warning" };
 const ANCHOR: RuleIdentity = { id: "links.non-descriptive-anchor", severity: "info" };
+const NO_ANCHOR: RuleIdentity = { id: "links.no-anchor-text", severity: "info" };
 const HIGH_OUTLINKS: RuleIdentity = { id: "links.high-outlinks", severity: "info" };
 
 /**
@@ -423,6 +425,67 @@ async function anchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<
 }
 
 /**
+ * Internal links whose stored anchor is empty once whitespace (no-break spaces
+ * included, as `NORMALISED_ANCHOR` reads them) is removed. On an extraction 2 row
+ * the stored anchor includes the alt text of an image inside the link, so an
+ * image link with alt is not empty and one without alt is.
+ *
+ * Opens with `v2Gate`: the alt-in-anchor reading exists only on v2 rows, so on a
+ * crawl with any older page the marker speaks and this returns `[]`.
+ *
+ * Only the first anchor per target is stored (the existing link-dedupe
+ * contract), so a target reached first by an empty image link and later by a
+ * text link reads empty here.
+ */
+async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+  const gate = await v2Gate(db, crawlId);
+  if (!gate.recorded) return [];
+  const result = await db.execute<{
+    page_id: string;
+    page_url: string;
+    empty_count: number;
+    total_matches: number;
+    targets: string[];
+  }>(sql`
+    with srcs as (
+      select p.id as page_id, p.url as page_url,
+             count(*)::int as empty_count,
+             count(*) over ()::int as total_matches
+      from links l
+      join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
+      where l.crawl_id = ${crawlId} and l.is_internal and ${FETCHED_OK("p")}
+        and ${NORMALISED_ANCHOR} = ''
+      group by p.id, p.url
+      order by p.url
+      ${limitTo(caps.listing)}
+    )
+    select s.page_id, s.page_url, s.empty_count, s.total_matches, x.targets
+    from srcs s
+    cross join lateral (
+      select coalesce(array_agg(t.target_url order by t.target_url), array[]::text[]) as targets
+      from (
+        select distinct l.target_url
+        from links l
+        where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
+          and ${NORMALISED_ANCHOR} = ''
+        order by l.target_url
+        limit ${SAMPLE_SOURCES}
+      ) t
+    ) x
+    order by s.page_url`);
+
+  const findings = result.rows.map((row) =>
+    queryFinding(NO_ANCHOR, {
+      pageId: row.page_id,
+      pageUrl: row.page_url,
+      evidence: { count: row.empty_count, targets: row.targets },
+      dedupeKey: row.page_url,
+    }),
+  );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
+/**
  * Pages linking to more distinct internal URLs than `HIGH_INTERNAL_OUTLINKS`, or
  * more distinct external URLs than `HIGH_EXTERNAL_OUTLINKS`. The two counts are
  * never added: a page with 100 of each has crossed neither line.
@@ -530,6 +593,21 @@ export const linkHygieneRules: QueryRule[] = [
     ...copyFor(ANCHOR.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => anchorFindings(db, crawlId, capsOr(caps)),
+  }),
+
+  defineRule<QueryRule>({
+    kind: "query",
+    id: NO_ANCHOR.id,
+    checkIds: ["CHECK-86"],
+    category: CATEGORY,
+    severity: NO_ANCHOR.severity,
+    columns: [
+      { key: "count", label: "Links Without Anchor Text" },
+      { key: "targets", label: "Targets" },
+    ],
+    ...copyFor(NO_ANCHOR.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => noAnchorFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({

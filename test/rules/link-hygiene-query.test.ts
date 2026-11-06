@@ -36,7 +36,7 @@ function rule(id: string): QueryRule {
 }
 
 describe("linkHygieneRules metadata", () => {
-  it("defines the five rules of the plan's table, with its checks, severities and category", () => {
+  it("defines the six rules of the plan's table, with its checks, severities and category", () => {
     expect(
       Object.fromEntries(linkHygieneRules.map((r) => [r.id, [r.checkIds, r.severity, r.category]])),
     ).toEqual({
@@ -44,6 +44,7 @@ describe("linkHygieneRules metadata", () => {
       "links.only-from-non-indexable": [["CHECK-32"], "warning", "links"],
       "links.localhost": [["CHECK-86"], "warning", "links"],
       "links.non-descriptive-anchor": [["CHECK-86"], "info", "links"],
+      "links.no-anchor-text": [["CHECK-86"], "info", "links"],
       "links.high-outlinks": [["CHECK-33"], "info", "links"],
     });
   });
@@ -64,6 +65,7 @@ describe("the link-hygiene rules against the database", () => {
   interface PageSpec extends IndexabilitySpec {
     path: string;
     canonical?: string | null;
+    extractionVersion?: number | null;
   }
 
   async function newCrawl(): Promise<string> {
@@ -95,6 +97,7 @@ describe("the link-hygiene rules against the database", () => {
         xRobotsTag: s.xRobotsTag ?? null,
         canonicalHtml: s.canonical === undefined ? full : s.canonical,
         canonicalCount: s.canonical === null ? 0 : 1,
+        extractionVersion: s.extractionVersion === undefined ? null : s.extractionVersion,
         depth: 1,
         discoveredVia: "link",
       };
@@ -528,6 +531,70 @@ describe("the link-hygiene rules against the database", () => {
       const found = await run(ID, crawlId);
       expect(found[0]!.evidence["count"]).toBe(12);
       expect((found[0]!.evidence["anchors"] as string[]).length).toBe(10);
+    });
+  });
+
+  describe("links.no-anchor-text", () => {
+    const ID = "links.no-anchor-text";
+    const V2 = { extractionVersion: 2 };
+
+    it("fires on empty, whitespace-only and no-break-space anchors, one finding per page", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/b", ...V2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/z", anchor: "" },
+        { target: "/a", anchor: "  \t " },
+        { target: "/c", anchor: "\u00a0\u00a0" },
+        { target: "/d", anchor: "Pricing" },
+        { target: "https://elsewhere.example/x", anchor: "" },
+      ]);
+      await addLinks(crawlId, ids.get("/b")!, [{ target: "/d", anchor: "Pricing" }]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ ruleId: ID, severity: "info", pageUrl: url("/") });
+      expect(found[0]!.evidence).toEqual({
+        count: 3,
+        targets: [url("/a"), url("/c"), url("/z")],
+      });
+    });
+
+    it("an image link with alt (stored as the anchor) is not textless, one without alt is", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }]);
+      await addLinks(crawlId, ids.get("/")!, [
+        { target: "/with-alt", anchor: "Company logo" },
+        { target: "/no-alt", anchor: "" },
+      ]);
+      const found = await run(ID, crawlId);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.evidence).toEqual({ count: 1, targets: [url("/no-alt")] });
+    });
+
+    it("refuses a crawl with any page below extraction 2: the marker speaks, this is silent", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [{ path: "/", ...V2 }, { path: "/old", extractionVersion: 1 }]);
+      await addLinks(crawlId, ids.get("/")!, [{ target: "/z", anchor: "" }]);
+      expect(await run(ID, crawlId)).toHaveLength(0);
+    });
+
+    it("lists at most SAMPLE_SOURCES targets, counts every link, and caps the listing", async () => {
+      const crawlId = await newCrawl();
+      const specs = Array.from({ length: 3 }, (_, i) => ({ path: `/p${i}`, ...V2 }));
+      const ids = await addPages(crawlId, specs);
+      const n = SAMPLE_SOURCES + 4;
+      await addLinks(
+        crawlId,
+        ids.get("/p0")!,
+        Array.from({ length: n }, (_, i) => ({ target: `/t${String(i).padStart(3, "0")}`, anchor: "" })),
+      );
+      for (const s of specs.slice(1)) await addLinks(crawlId, ids.get(s.path)!, [{ target: "/x", anchor: "" }]);
+      const all = await run(ID, crawlId, { listing: null });
+      expect(all).toHaveLength(3);
+      expect(all[0]!.evidence["count"]).toBe(n);
+      expect((all[0]!.evidence["targets"] as string[]).length).toBe(SAMPLE_SOURCES);
+      const capped = await run(ID, crawlId, { listing: 2 });
+      expect(capped).toHaveLength(2);
+      expect(capped[1]!.evidence["truncated"]).toEqual({ reported: 2, total: 3 });
     });
   });
 

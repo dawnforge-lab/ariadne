@@ -1251,6 +1251,34 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
     howToFix:
       "Replace each generic anchor with words that describe the page it points at, such as the name of the product or the question the page answers.",
   },
+  "links.uncrawlable": {
+    title: "Links: Links crawlers cannot follow",
+    explanation:
+      "Pages with link elements that have no href (an onclick handler or a link role only), a javascript: href, or a bare # href. Search engines follow real URLs in href attributes, so a target reached only through these is not discovered through them. Each row counts the three kinds.",
+    howToFix:
+      "Give each link a real URL in its href attribute and attach any script behaviour on top of it. Use a button element for actions that do not navigate.",
+  },
+  "links.empty-href": {
+    title: "Links: Links with an empty href",
+    explanation:
+      "Pages with links whose href attribute is present but empty. An empty href points back at the current page, which is rarely intended and wastes a link a visitor could use.",
+    howToFix:
+      "Set each href to the intended URL, or remove the href and use a button element if the element is not meant to navigate.",
+  },
+  "links.unsafe-target-blank": {
+    title: "Links: New-tab links without noopener",
+    explanation:
+      "Pages with links that open in a new tab through target=_blank without rel=noopener or noreferrer. The opened page can reach the opener window, and the link leaks the referrer. Modern browsers reduce the risk, so this is a hygiene issue.",
+    howToFix:
+      "Add rel=\"noopener\" (or rel=\"noopener noreferrer\") to every link that uses target=\"_blank\".",
+  },
+  "links.no-anchor-text": {
+    title: "Links: Internal links with no anchor text",
+    explanation:
+      "Pages with internal links that have no text and no image alt text. The anchor is what tells visitors and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
+    howToFix:
+      "Add descriptive text to each link, or an alt attribute that describes the target to each image that is the only content of a link.",
+  },
   "links.high-outlinks": {
     title: "Links: Over 1,000 internal or 10 external links",
     explanation:

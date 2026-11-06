@@ -448,11 +448,19 @@ describe("checklist coverage", () => {
   //   page    58 + 2 = 60
   //   query   95 + 1 = 96
   //   total   167 + 3 = 170
-  it("pins the ruleset split the gate doc reports: 170 rules = 60 page + 96 query + 14 metric", () => {
+  //
+  // Phase 26b Task 9 adds THREE page rules, `links.uncrawlable` (CHECK-34),
+  // `links.empty-href` and `links.unsafe-target-blank` (CHECK-86), and ONE query
+  // rule, `links.no-anchor-text` (CHECK-86); all four claim checks already claimed.
+  //
+  //   page    60 + 3 = 63
+  //   query   96 + 1 = 97
+  //   total   170 + 4 = 174
+  it("pins the ruleset split the gate doc reports: 174 rules = 63 page + 97 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(170);
-    expect(registry.byKind("page")).toHaveLength(60);
-    expect(registry.byKind("query")).toHaveLength(96);
+    expect(registry.all()).toHaveLength(174);
+    expect(registry.byKind("page")).toHaveLength(63);
+    expect(registry.byKind("query")).toHaveLength(97);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

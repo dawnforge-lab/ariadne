@@ -677,6 +677,112 @@ const langPairFr = langPair(
   "Hreflang pair, French page whose lang attribute still says en",
 );
 
+/**
+ * Task 9: the link rules. Each page is a plain article plus one paragraph of
+ * links that carries its one defect; the target of any real link is another
+ * p26b fixture, so no link leaves the site.
+ */
+function linkPage(
+  path: string,
+  name: string,
+  expectedIssues: string[],
+  copy: { title: string; description: string; h1: string; lede: string; topic: string; linksHtml: string },
+): Fixture {
+  return {
+    path,
+    category: "links",
+    name,
+    expectedIssues,
+    exact: true,
+    handler: (req, res) =>
+      serve(req, res, () => ({
+        title: copy.title,
+        metaDescription: copy.description,
+        bodyHtml:
+          article({
+            h1: copy.h1,
+            lede: copy.lede,
+            withImage: false,
+            sections: [
+              {
+                h2: `What the ${copy.topic} links on this page look like`,
+                body: "Below the article sits a short paragraph of links written the way many templates write them, with the one habit this page demonstrates and nothing else out of the ordinary.",
+              },
+              {
+                h2: `Why the ${copy.topic} habit matters`,
+                body: "A link is read by visitors, by assistive technology and by crawlers, and each of them relies on the markup to know where it leads and what it is called. A link that is only partly written serves some of those readers and silently fails the others.",
+              },
+              {
+                h2: `Putting the ${copy.topic} habit right`,
+                body: "Fix the template that writes the link, not the individual page, so every page that uses the component is corrected at once and the habit does not return with the next release of the theme.",
+              },
+            ],
+          }) + `\n<p>${copy.linksHtml}</p>`,
+      })),
+  };
+}
+
+const uncrawlableLinks = linkPage(
+  "/p26b/uncrawlable-links",
+  "Links written as onclick, javascript: and #",
+  ["links.uncrawlable"],
+  {
+    title: "Menu items that only work when a script runs",
+    description:
+      "Three menu entries on this page navigate through an onclick handler, a javascript: address and a bare hash, so a crawler finds no address in any of them.",
+    h1: "Navigation a crawler cannot follow",
+    lede: "These entries move a visitor around the site, but none of them carries a real address in its href attribute.",
+    topic: "script-only",
+    linksHtml:
+      '<a onclick="go(1)">Spring catalogue</a> <a href="javascript:go(2)">Summer catalogue</a> <a href="#">Autumn catalogue</a>',
+  },
+);
+
+const emptyHref = linkPage(
+  "/p26b/empty-href",
+  "A link with an empty href",
+  ["links.empty-href"],
+  {
+    title: "A link that was never given an address",
+    description:
+      "One link on this page has an href attribute with nothing in it, which sends the visitor straight back to the page they are already reading.",
+    h1: "The link that points nowhere",
+    lede: "A template left the address out of one link, and the empty attribute resolves to the current page.",
+    topic: "empty-address",
+    linksHtml: '<a href="">Our winter range</a>',
+  },
+);
+
+const targetBlank = linkPage(
+  "/p26b/target-blank",
+  "A target=_blank link without noopener",
+  ["links.unsafe-target-blank"],
+  {
+    title: "A link that opens a new tab and keeps a handle",
+    description:
+      "One link on this page opens in a new tab without rel noopener, so the page it opens can reach back to this one through the window opener reference.",
+    h1: "Opening a new tab the careless way",
+    lede: "The link below asks the browser for a new tab and gives the opened page no reason to be kept at arm's length.",
+    topic: "new-tab",
+    linksHtml: '<a href="/p26b/og-incomplete" target="_blank">Read the sharing example</a>',
+  },
+);
+
+const imageLinkNoAlt = linkPage(
+  "/p26b/image-link-no-alt",
+  "An image link with no alt text",
+  ["links.no-anchor-text", "images.missing-alt"],
+  {
+    title: "A picture link that has no words for it",
+    description:
+      "The only content of one link on this page is an image with no alt attribute, so the link has no anchor text for visitors, readers or crawlers.",
+    h1: "A link made only of a picture",
+    lede: "The picture below is the whole of the link, and nothing in it says where the link leads.",
+    topic: "picture-only",
+    linksHtml: `<a href="/p26b/og-incomplete"><img src="${SHARED_IMAGE_PATH}" width="720" height="360"></a>`,
+  },
+);
+
 export const authoredP26bFixtures: Fixture[] = [
   botConflict,
   metaRefresh,
@@ -696,4 +802,8 @@ export const authoredP26bFixtures: Fixture[] = [
   titleMultiple,
   metaDescriptionMultiple,
   titleSameAsH1,
+  uncrawlableLinks,
+  emptyHref,
+  targetBlank,
+  imageLinkNoAlt,
 ];
