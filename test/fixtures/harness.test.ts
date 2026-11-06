@@ -2611,7 +2611,7 @@ describe("the fixture site end to end", () => {
       // the cohort (the two hreflang pair pages declare, the other two do not);
       // 10.8 with 13 over 120 before them, 11.5 over 113 before Task 7's seven
       // headings pages.
-      coveragePct: 12.1,
+      coveragePct: 11.7,
     });
     // The two counts are read from the tables the harness already holds, so a
     // fixture that stopped declaring hreflang, or a page that stopped being
@@ -2647,7 +2647,7 @@ describe("the fixture site end to end", () => {
     //   page's entry is on the legacy host, a distinct URL, so it counts; and
     //   Phase 26b Task 6's seven `/p26b/` social pages)
     // + 1 (/private/hidden)
-    // = 116 entries, all distinct, so the walk's first-source-wins dedupe drops
+    // = 116 entries (131 now: Task 9 adds four listed link pages), all distinct, so the walk's first-source-wins dedupe drops
     // none of them.
     //
     // 116 is nowhere near `SITEMAP_URL_CAP` (50,000), so no document breaches
@@ -2656,7 +2656,7 @@ describe("the fixture site end to end", () => {
     // rather than a floor.
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 1,
-      totalUrls: 127,
+      totalUrls: 131,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,
@@ -2670,7 +2670,7 @@ describe("the fixture site end to end", () => {
       "site|",
     ]);
     expect(metricsById.get("sitemap.structure")?.get(`sitemap_doc|${app.base}/sitemap.xml`)).toEqual(
-      { urls: 127, breaches50k: false },
+      { urls: 131, breaches50k: false },
     );
   });
 
