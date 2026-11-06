@@ -1244,8 +1244,12 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   by the host and protocol checks, not here, and a crawl written before the evidence
   layer (Phase 25) stored no response headers at all, so for such a crawl the
   silence of the finding rules is NOT a pass. Three rules answer it:
-  - `security.hsts-missing` (warning) — an HTTPS page that sent no
-    `Strict-Transport-Security`. One finding per page.
+  - `security.hsts-missing` (warning) — an HTTPS page whose
+    `Strict-Transport-Security` does not protect it: the header is absent, its
+    `max-age` is 0 (which tells browsers to drop HSTS), or it has no parseable
+    `max-age`. A browser reads the first such header, so that one decides. One
+    finding per page; the evidence key `hstsProblem` (HSTS Problem column) says which
+    of the last two it was, and is absent when the header was simply not sent.
   - `security.headers-missing` (info) — an HTTPS page missing an enforced
     `Content-Security-Policy` (Report-Only does not count), `X-Content-Type-Options:
     nosniff`, frame protection, or a safe `Referrer-Policy`. The evidence names which
@@ -1256,7 +1260,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     page of the crawl was written without response headers (a crawl before Phase 25,
     or a crawl mixing old and new pages), so neither rule above judged anything.
 - **Evaluate**:
-  - PASS if every HTTPS page sends HSTS and the other four headers
+  - PASS if every HTTPS page sends a protecting HSTS (max-age above 0) and the other four headers
   - WARN if `security.hsts-missing` fired
   - INFO if `security.headers-missing` fired: report which headers, and on how many pages
   - SKIP if `security.headers-not-recorded` fired, which it does when response headers
