@@ -21,6 +21,7 @@ import {
   NO_PREV_A,
   NO_PREV_B,
   OUTLINK_TARGET_PATH,
+  SELF_ONLY_SINGLE,
   TITLE_PX_BRACKETS,
   TITLE_PX_LADDER,
   calibrationFixtures,
@@ -148,6 +149,12 @@ describe("the calibration ladders", () => {
     expect(a).toContain(`<link rel="next" href="${base}${NO_PREV_B}">`);
     expect(a).not.toContain('rel="prev"');
     expect(b).not.toMatch(/rel="(?:prev|next)"/);
+  });
+
+  it("gives the hreflang probe exactly one alternate, to itself, and no x-default", async () => {
+    const page = await html(SELF_ONLY_SINGLE);
+    const alternates = [...page.matchAll(/<link rel="alternate" hreflang="([^"]+)" href="([^"]+)">/g)];
+    expect(alternates.map((m) => [m[1], m[2]])).toEqual([["en", `${base}${SELF_ONLY_SINGLE}`]]);
   });
 
   it("chains the depth rungs one link at a time, with only the first linked from the hub", async () => {

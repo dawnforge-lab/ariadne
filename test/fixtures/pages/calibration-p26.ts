@@ -386,6 +386,27 @@ function noPrevProbe(): Fixture[] {
   ];
 }
 
+/** The hreflang probe: a page whose ONE alternate (`en`) names itself, no `x-default`. */
+export const SELF_ONLY_SINGLE = `${CALIBRATION_PREFIX}/hreflang/self-only-single`;
+
+/**
+ * Not a ladder: a probe for one question the analysis-on run left. The harness
+ * fixture `/authored26/hreflang-self-only` names itself under `en` AND under
+ * `x-default`, and Screaming Frog's "Self Reference Only" stayed empty on it
+ * with its post-crawl analysis on. This page names itself once, under `en`
+ * only, so the report can say whether the `x-default` is what keeps it out.
+ */
+function selfOnlyProbe(): Fixture {
+  return page(SELF_ONLY_SINGLE, "Hreflang probe: one alternate, to itself", (req, res) =>
+    serve(req, res, (self) => ({
+      title: "Calibration probe, a page whose only alternate is itself",
+      metaDescription: DESCRIPTION,
+      headExtra: `<link rel="alternate" hreflang="en" href="${self}">`,
+      bodyHtml: body("hreflang self reference only"),
+    })),
+  );
+}
+
 /** Every calibration page. Not part of `allFixtures()`; see the header. */
 export function calibrationFixtures(): Fixture[] {
   return [
@@ -396,5 +417,6 @@ export function calibrationFixtures(): Fixture[] {
     ...responseTimeRungs(),
     ...depthRungs(),
     ...noPrevProbe(),
+    selfOnlyProbe(),
   ];
 }

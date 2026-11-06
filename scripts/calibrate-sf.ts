@@ -13,6 +13,14 @@
  *   DATABASE_URL=… npx tsx scripts/calibrate-sf.ts
  *   DATABASE_URL=… npx tsx scripts/calibrate-sf.ts --report-only <run dir>
  *   DATABASE_URL=… npx tsx scripts/calibrate-sf.ts --resume-ariadne <run dir>
+ *   DATABASE_URL=… npx tsx scripts/calibrate-sf.ts --sf-config <sf-run>/config/<file>.json
+ *
+ * `--sf-config` passes a SEO Spider configuration file (its JSON format) as
+ * `--config`. The file must live under the ignored `sf-run/` workspace and is
+ * never committed; the gate doc describes what it changes
+ * (`SF_CONFIG_DESCRIPTION`). The script confirms from the SEO Spider's own log
+ * that it loaded the file, and records the analysis setting it ran with
+ * (`autoAnalyseFromLog`).
  *
  * The full run:
  *
@@ -44,7 +52,8 @@
  */
 import { spawn, execFileSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { eq } from "drizzle-orm";
@@ -175,7 +184,18 @@ export const SF_FILTERS: readonly SfFilter[] = [
   // canonical
   { name: "Canonicals:Canonical Is Relative", kind: "tab", ruleIds: ["canonical.relative"], family: "canonical" },
   { name: "Canonicals:Contains Fragment URL", kind: "tab", ruleIds: ["canonical.fragment"], family: "canonical" },
-  { name: "Canonicals:Unlinked", kind: "tab", ruleIds: ["canonical.unlinked"], family: "canonical" },
+  {
+    name: "Canonicals:Unlinked",
+    kind: "tab",
+    ruleIds: ["canonical.unlinked"],
+    family: "canonical",
+    // Screaming Frog lists the unlinked canonical TARGET; Ariadne's finding is
+    // on the page that declares it and names the target in `resolvedTo`.
+    ariadneSubject: (d) => {
+      if (typeof d["resolvedTo"] !== "string") throw new Error("canonical.unlinked finding has no resolvedTo");
+      return d["resolvedTo"];
+    },
+  },
   { name: "Canonicals:Canonical Chains", kind: "report", file: "canonical_chains.csv", ruleIds: ["canonical.chain"], family: "canonical" },
   // hreflang
   { name: "Hreflang:Inconsistent Language & Region Return Links", kind: "tab", ruleIds: ["hreflang.inconsistent-return-code"], family: "hreflang" },
@@ -272,6 +292,10 @@ interface Reason {
  * predicates can be tested against a hand-built context.
  */
 export interface ReasonContext {
+  /** Whether the SEO Spider's post-crawl analysis ran (its own log line, `RunMeta.autoAnalyse`). */
+  autoAnalyse: boolean;
+  /** The `--sf-config` file the SEO Spider ran with, parsed, or null on its starting configuration. */
+  sfConfig: Record<string, Record<string, unknown>> | null;
   /** The scheme of the crawled fixture site, `http:` or `https:`. */
   siteScheme: string;
   /** Rows in THIS filter's Screaming Frog export (the context is per filter). */
@@ -284,6 +308,8 @@ export interface ReasonContext {
   ourWidth(kind: "title" | "description", key: string): number | null;
   /** Whether Ariadne wrote a finding of this rule for the key. */
   fired(ruleId: string, key: string): boolean;
+  /** The evidence of Ariadne's finding of this rule on the key, or undefined. */
+  details(ruleId: string, key: string): Record<string, unknown> | undefined;
 }
 
 /** The largest |SF width − serpWidth| a title divergence may show and still be "the measure" (ladder: 0–12 px). */
@@ -318,6 +344,17 @@ export function measureExplains(
 
 /** A reason that holds only when this filter's Screaming Frog export has no rows at all. */
 export const sfExportEmpty = (_key: string, ctx: ReasonContext): boolean => ctx.sfRowCount === 0;
+
+/**
+ * "The analysis did not run": the export is empty AND the SEO Spider's own log
+ * says the post-crawl analysis was off. On an analysis-on run it never holds,
+ * so an empty export there needs a reason of its own.
+ */
+export const analysisOffAndEmpty = (key: string, ctx: ReasonContext): boolean =>
+  !ctx.autoAnalyse && sfExportEmpty(key, ctx);
+
+/** The SEO Spider never fetched this URL: it has no row in its Internal export. */
+const sfNeverFetched = (key: string, ctx: ReasonContext): boolean => ctx.sf(key) === undefined;
 
 /** A reason that holds only on a plain-HTTP crawl, where the HTTPS-only rules have no cohort. */
 const httpSite = (_key: string, ctx: ReasonContext): boolean => ctx.siteScheme === "http:";
@@ -381,7 +418,15 @@ export const REASONS: Record<string, readonly Reason[]> = {
         "The relative canonical is in the HTTP `Link` header (`</index/canonical-conflict?via=header>`). `canonical.relative` judges the raw HTML `<link rel=canonical>` (spec: \"raw `canonical_html` is relative\"); a relative Link-header target is resolved against the request URL (RFC 8288), and this page is reported for the HTML/header disagreement as `canonical.html-header-conflict`.",
     },
   ],
-  "Canonicals:Unlinked": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
+  "Canonicals:Unlinked": [
+    { side: "ariadne-only", match: analysisOffAndEmpty, reason: ANALYSIS_OFF },
+    {
+      side: "sf-only",
+      match: CANONICAL_TRAP_KEY,
+      reason:
+        "A canonical target of the canonical trap. Screaming Frog crawls canonical targets and lists each unlinked one; Ariadne does not enqueue canonical targets, so it never fetched these, and `canonical.unlinked` judges only a target it crawled as an auditable page (the first, `?via=html`, is the canonical of `/index/canonical-conflict`, which Ariadne reports as `canonical.points-elsewhere` and `canonical.html-header-conflict`). Crawl scope, not the rule.",
+    },
+  ],
   "Canonicals:Canonical Chains": [
     { side: "sf-only", match: CANONICAL_TRAP_KEY, reason: TRAP },
     {
@@ -400,12 +445,40 @@ export const REASONS: Record<string, readonly Reason[]> = {
   "Hreflang:Self Reference Only": [
     {
       side: "ariadne-only",
-      match: sfExportEmpty,
+      // Checked: the analysis ran, the filter works (it lists other pages), SF
+      // crawled this page, and our evidence shows a SECOND self annotation
+      // (`x-default`) beside the language code.
+      match: (k, ctx) => {
+        const codes = ctx.details("hreflang.self-only", k)?.["hreflang"];
+        return (
+          ctx.autoAnalyse &&
+          ctx.sfRowCount > 0 &&
+          ctx.sf(k) !== undefined &&
+          Array.isArray(codes) &&
+          codes.length > 1 &&
+          codes.includes("x-default")
+        );
+      },
+      reason:
+        "Definition difference, shown by a probe: Screaming Frog lists `/calib26/hreflang/self-only-single` (ONE alternate, `en`, to itself) and not this page, whose alternates are `en` AND `x-default`, both to itself. It counts a page with a self `x-default` beside its self language code as more than self-reference only. `hreflang.self-only` reports any page whose only hreflang TARGET is itself, whatever codes name it, since such a page offers no alternate either way. Flagged for the controller; the rule is unchanged.",
+    },
+    {
+      side: "ariadne-only",
+      match: analysisOffAndEmpty,
       reason:
         "Screaming Frog's export is empty. The fixture's alternates (`en` and `x-default`) both name the page itself. Either its definition does not count an `x-default` to self as self-reference only, or the filter needs the post-crawl analysis that did not run (`mAutoAnalyse=false`); black-box, the two cannot be told apart at this configuration.",
     },
   ],
-  "Hreflang:Unlinked hreflang URLs": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
+  "Hreflang:Unlinked hreflang URLs": [
+    { side: "ariadne-only", match: analysisOffAndEmpty, reason: ANALYSIS_OFF },
+    {
+      side: "ariadne-only",
+      match: (k, ctx) =>
+        ctx.autoAnalyse && sfNeverFetched(k, ctx) && ctx.sfConfig?.["crawlConfig"]?.["crawlHreflang"] === false,
+      reason:
+        "Screaming Frog never fetched this URL (it has no row in its Internal export): the page is reachable only through an hreflang annotation, and the configuration the SEO Spider ran with does not crawl hreflang targets (`crawlConfig.crawlHreflang` is `false` in the configuration it returned). It cannot list an unlinked hreflang URL it did not crawl. Ariadne enqueues hreflang targets, crawled it, and found no `<a>` inlink. Crawl scope, not the rule.",
+    },
+  ],
   "Pagination:Non-Indexable": [
     {
       side: "sf-only",
@@ -414,7 +487,7 @@ export const REASONS: Record<string, readonly Reason[]> = {
         "Screaming Frog lists the series page that is itself non-indexable (canonicalised to page 1). `pagination.non-indexable-target` is about a rel=next/prev TARGET that is non-200 or noindex; a series page canonicalised to another is reported by `pagination.canonical-to-other`, which fires on this URL.",
     },
   ],
-  "Pagination:Pagination Loop": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
+  "Pagination:Pagination Loop": [{ side: "ariadne-only", match: analysisOffAndEmpty, reason: ANALYSIS_OFF }],
   "Pagination:Sequence Error": [
     {
       side: "sf-only",
@@ -429,7 +502,7 @@ export const REASONS: Record<string, readonly Reason[]> = {
         "Screaming Frog also checks the REVERSE direction: this page's rel=prev names `/`, and `/` declares no rel=next back to it. `pagination.sequence-error` checks one direction — A's next is B, and B's prev is not A (the spec's definition) — and reports the pair once, on A (`/authored26/sequence-a`, in both). Design difference; whether to add the reverse check is a controller decision.",
     },
   ],
-  "Links:Non-Indexable Page Inlinks Only": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
+  "Links:Non-Indexable Page Inlinks Only": [{ side: "ariadne-only", match: analysisOffAndEmpty, reason: ANALYSIS_OFF }],
   "Links:Outlinks To Localhost": [
     {
       side: "sf-only",
@@ -470,7 +543,10 @@ export const REASONS: Record<string, readonly Reason[]> = {
     { side: "sf-only", match: (k, ctx) => measureExplains("description", T.META_PX_MIN, "below", "sf-only", k, ctx), reason: META_ROUNDING },
     { side: "ariadne-only", match: (k, ctx) => measureExplains("description", T.META_PX_MIN, "below", "ariadne-only", k, ctx), reason: META_ROUNDING },
   ],
-  "Links:Pages With High Crawl Depth": [{ side: "ariadne-only", match: sfExportEmpty, reason: ANALYSIS_OFF }],
+  "Links:Pages With High Crawl Depth": [
+    { side: "ariadne-only", match: analysisOffAndEmpty, reason: ANALYSIS_OFF },
+    { side: "sf-only", match: CANONICAL_TRAP_KEY, reason: TRAP },
+  ],
   "Content:Low Content Pages": [
     {
       side: "sf-only",
@@ -503,22 +579,40 @@ export const REASONS: Record<string, readonly Reason[]> = {
  * The report's prose sections: what the calibration found that is not a row
  * of a table. Written here, beside the reasons, so a re-run carries them.
  */
-const RUN_NOTES: readonly string[] = [
+/**
+ * What the `--sf-config` file is, for the owner to reproduce it. The file is
+ * not committed (it is the SEO Spider's, and lives under the git-ignored
+ * sf-run/); this sentence is.
+ */
+const SF_CONFIG_DESCRIPTION =
+  "The file is the SEO Spider's own configuration as its MCP server returns it (`--mcp-streamable-http-server`, tool `sf_get_config_spider` with no category, the full JSON), saved unchanged except for ONE setting: `crawlAnalysisConfig.autoAnalyse` from `false` to `true` (Configuration > Crawl Analysis > Auto-analyse at End of Crawl), so the post-crawl analysis runs when the crawl ends. Every other setting, the filter thresholds included, is what the SEO Spider returned. The owner's own settings were not changed (nothing was set over MCP).";
+
+function runNotes(meta: RunMeta): string[] {
+  return [
   "## Findings that need a decision",
   "",
-  "1. **Screaming Frog's post-crawl analysis did not run.** Its startup log reports `mAutoAnalyse=false` at the configuration it starts with, the CLI has no option to run the analysis, and the brief forbids a custom `--config` (and changing the owner's SEO Spider settings). Six mapped filters came back empty although the fixture has the condition: Canonicals:Unlinked, Hreflang:Unlinked hreflang URLs, Pagination:Pagination Loop, Links:Non-Indexable Page Inlinks Only, Links:Pages With High Crawl Depth (empty even at depth 1,000+), and Hreflang:Self Reference Only (which may also be a definition difference). Those five rules and `DEEP_DEPTH` are therefore NOT calibrated by this run. To calibrate them the owner would supply a configuration with crawl analysis on (a saved `.seospiderconfig`, passed as `--config`); the script needs no other change.",
+  meta.autoAnalyse
+    ? "1. **The post-crawl filters, calibrated with Screaming Frog's analysis on.** This run passed `--sf-config` (see The run): the SEO Spider's own configuration with its post-crawl analysis switched on and nothing else changed, and its log confirms `mAutoAnalyse=true`. The six filters that came back empty with the analysis off now read: Pagination Loop and Non-Indexable Page Inlinks Only match exactly; Canonicals:Unlinked matches on the canonical targets both tools judge (the rest is the canonical trap); Pages With High Crawl Depth sets `DEEP_DEPTH` (5 -> 3, item 5); Hreflang Unlinked differs only because the SEO Spider does not crawl hreflang targets at this configuration (crawl scope); Hreflang Self Reference Only differs by definition, item 6."
+    : "1. **Screaming Frog's post-crawl analysis did not run.** Its startup log reports `mAutoAnalyse=false` at the configuration it starts with, the CLI has no option to run the analysis, and the brief forbids a custom `--config` (and changing the owner's SEO Spider settings). Six mapped filters came back empty although the fixture has the condition: Canonicals:Unlinked, Hreflang:Unlinked hreflang URLs, Pagination:Pagination Loop, Links:Non-Indexable Page Inlinks Only, Links:Pages With High Crawl Depth (empty even at depth 1,000+), and Hreflang:Self Reference Only (which may also be a definition difference). Those five rules and `DEEP_DEPTH` are therefore NOT calibrated by this run. To calibrate them the owner would supply a configuration with crawl analysis on (a saved `.seospiderconfig`, passed as `--config`); the script needs no other change.",
   "2. **`pagination.sequence-error` and a missing rel=prev (carried ruling).** Screaming Frog flags the page whose rel=next target declares NO rel=prev at all (`/calib26/pagination/no-prev-a` is in both lists), so our rule's behaviour on a missing prev matches it; nothing to change. Screaming Frog ALSO checks the reverse direction (B's prev is X, and X's next is not B: `/authored26/sequence-b`, SF only). Ours checks one direction, as the spec defines it (A's next is B, and B's prev is not A), and reports on A. On this fixture the reverse finding is the same defect (B's prev is wrong) seen from B, and ours already reports it on A. The reverse check would additionally catch a page whose rel=prev names a page that does not name it back when NO page names it as next; ours is silent there. Recommendation: leave the rule as the spec defines it; the controller decides whether the reverse direction is worth a second finding.",
   "3. **Title width measure.** Screaming Frog's title widths run 0–12 px wider than `serpWidth` on the ladder's strings (descriptions agree within 2 px). The bounds are the same numbers, so titles within about 12 px of a bound can be flagged by one tool only. Keeping our own measured table is the spec's requirement; no change proposed.",
-  "4. **`HIGH_EXTERNAL_OUTLINKS` moved from 100 to 10.** Screaming Frog's default flags a page with more than 10 unique external outlinks. That is a much busier finding than the starting value (any page with a footer of social links and a few citations); it is info severity. The value follows the brief's instruction to take SF's observed boundary.",
+  "4. **`HIGH_EXTERNAL_OUTLINKS` moved from 100 to 10** (owner confirmed). Screaming Frog's default flags a page with more than 10 unique external outlinks. That is a much busier finding than the starting value (any page with a footer of social links and a few citations); it is info severity.",
+  ...(meta.autoAnalyse
+    ? [
+        "5. **`DEEP_DEPTH` moved from 5 to 3.** Screaming Frog flags the click-depth ladder from depth 4 and not at depth 3, and its crawl depths on the chain equal ours. `structure.deep-page` is an existing rule, so this widens a finding older crawls already had: on the Phase 25 lavishalice crawl a read-only count gives 18 pages deeper than 3 links where 6 were deeper than 5 (before the rule's indexability filter). The audit checklist already fails key pages more than 3 clicks deep (CHECK-31), so the rule and the checklist now agree.",
+        "6. **`hreflang.self-only` and a self `x-default`.** A probe page whose one alternate (`en`) is itself IS listed by Screaming Frog; the harness fixture, whose alternates `en` and `x-default` are both itself, is not. Ours reports both, because neither page names any other version of itself. Recommendation: keep ours (an `x-default` to self adds no alternate); the controller decides.",
+      ]
+    : []),
   "",
   "## Notes on the run",
   "",
   "- **HTTPS-only rules** (`security.hsts-missing`, `security.headers-missing`, `security.http-url`, `security.mixed-content`) cannot be calibrated on a plain-HTTP site: Ariadne's rules have no cohort here by design. Screaming Frog reports the header filters and HTTP URLs on every page of an HTTP site, which is a design difference, not a calibration.",
   "- **The canonical trap.** `/index/canonical-conflict` (absorbed from badseo) builds its canonical as its own URL plus `?via=html`, so every canonical target names a deeper one. Screaming Frog fetches canonical targets and walked it over 2,000 URLs and 1,000 levels deep; Ariadne does not enqueue canonical targets and fetched only the page itself. Every trap URL in a divergence list carries that reason. The fixture is unchanged: the harness pins it.",
   "- **Sitemaps.** Screaming Frog's startup log reports `mCrawlSitemaps=false`: at its starting configuration it does not read XML sitemaps, so the sitemap rules have no counterpart and pages reachable only through the sitemap are crawled by Ariadne alone.",
-  "- **Screaming Frog's crawl list.** Every run of this script leaves a crawl named `ariadne-calibration-26a` in the SEO Spider's own crawl list (`--list-crawls`; the calibration's development left several, and one `ariadne-trial`). They are the owner's to delete (`--delete-crawl <id>`); the script does not delete them.",
+  "- **Screaming Frog's crawl list.** Every run of this script leaves a crawl named `ariadne-calibration-26a` in the SEO Spider's own crawl list (`--list-crawls`; the calibration's development left several, plus `ariadne-trial`, `ariadne-trial-analysis` and `ariadne-mcp-trial`). They are the owner's to delete (`--delete-crawl <id>`); the script does not delete them.",
   "",
-];
+  ];
+}
 
 // ------------------------------------------------------------------ CSV + keys
 
@@ -685,6 +779,29 @@ interface RunMeta {
   sfArgs: string[];
   startedAt: string;
   runDir: string;
+  /**
+   * The `--config` file the SEO Spider ran with, relative to `sf-run/`, and its
+   * sha256; absent when it ran on its starting configuration.
+   */
+  sfConfig?: { path: string; sha256: string };
+  /**
+   * Whether the SEO Spider's post-crawl analysis ran, as ITS OWN log line says
+   * (`mAutoAnalyse=true|false`). Read from the log, never assumed from the
+   * config we passed: the reasons and notes that depend on it state a fact.
+   */
+  autoAnalyse: boolean;
+}
+
+/**
+ * `mAutoAnalyse=…` from the SEO Spider's run log: the setting it actually ran
+ * with. A log carrying no such line, or two different values, is a throw.
+ */
+export function autoAnalyseFromLog(log: string): boolean {
+  const values = new Set([...log.matchAll(/mAutoAnalyse=(true|false)/g)].map((m) => m[1]));
+  if (values.size !== 1) {
+    throw new Error(`the SEO Spider log states mAutoAnalyse ${values.size === 0 ? "nowhere" : "both ways"}`);
+  }
+  return values.has("true");
 }
 
 function sfVersion(): string {
@@ -697,7 +814,7 @@ function sfVersion(): string {
   return v;
 }
 
-function sfArgs(base: string, outDir: string): string[] {
+function sfArgs(base: string, outDir: string, configPath: string | undefined): string[] {
   const all = [...SF_FILTERS, ...SF_DATA];
   const tabs = all.filter((f) => f.kind === "tab").map((f) => f.name);
   const reports = all.filter((f) => f.kind === "report").map((f) => f.name);
@@ -711,6 +828,7 @@ function sfArgs(base: string, outDir: string): string[] {
     "--export-format", "csv",
     "--overwrite",
     "--task-name", SF_TASK_NAME,
+    ...(configPath === undefined ? [] : ["--config", configPath]),
     "--export-tabs", tabs.join(","),
     "--save-report", reports.join(","),
   ];
@@ -816,7 +934,7 @@ async function runAriadne(base: string, legacyBase: string): Promise<AriadneResu
  * paths on the fixture origin, so the two halves compare across the port
  * change a second app start brings.
  */
-async function fullRun(outRoot: string, resumeDir?: string): Promise<string> {
+async function fullRun(outRoot: string, resumeDir?: string, sfConfigPath?: string): Promise<string> {
   const startedAt = new Date().toISOString();
   const runDir = resumeDir ?? join(outRoot, `run-${startedAt.replace(/[:.]/g, "-")}`);
   const sfDir = join(runDir, "sf");
@@ -828,10 +946,30 @@ async function fullRun(outRoot: string, resumeDir?: string): Promise<string> {
   try {
     let meta: RunMeta;
     if (resumeDir === undefined) {
-      const args = sfArgs(app.base, sfDir);
-      meta = { base: app.base, sfVersion: sfVersion(), sfArgs: args, startedAt, runDir };
-      console.log(`fixture site at ${app.base}; Screaming Frog ${meta.sfVersion} crawling…`);
+      const args = sfArgs(app.base, sfDir, sfConfigPath);
+      const version = sfVersion();
+      console.log(`fixture site at ${app.base}; Screaming Frog ${version} crawling…`);
       await runSf(args, join(runDir, "sf.log"));
+      const log = readFileSync(join(runDir, "sf.log"), "utf8");
+      if (sfConfigPath !== undefined && !log.includes(`Config loaded from ${sfConfigPath}`)) {
+        throw new Error(`the SEO Spider log does not say it loaded ${sfConfigPath}`);
+      }
+      meta = {
+        base: app.base,
+        sfVersion: version,
+        sfArgs: args,
+        startedAt,
+        runDir,
+        ...(sfConfigPath === undefined
+          ? {}
+          : {
+              sfConfig: {
+                path: relative(DEFAULT_OUT, sfConfigPath),
+                sha256: createHash("sha256").update(readFileSync(sfConfigPath)).digest("hex"),
+              },
+            }),
+        autoAnalyse: autoAnalyseFromLog(log),
+      };
       writeFileSync(join(runDir, "meta.json"), JSON.stringify(meta, null, 2));
     } else {
       meta = JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")) as RunMeta;
@@ -975,7 +1113,15 @@ function writeReport(runDir: string): number {
   const sfTitles = new Map(readExport(sfDir, SF_DATA[1]!, files, ["Title 1 Pixel Width"]).rows.map((r) => [sfKey(r), r]));
   const sfMetas = new Map(readExport(sfDir, SF_DATA[2]!, files, ["Meta Description 1 Pixel Width"]).rows.map((r) => [sfKey(r), r]));
   const ourPage = new Map(ariadne.pages.map((p) => [p.key, p]));
+  if (typeof meta.autoAnalyse !== "boolean") {
+    throw new Error(`${runDir}/meta.json has no autoAnalyse: re-run the SEO Spider half with this script`);
+  }
   const baseCtx: Omit<ReasonContext, "sfRowCount"> = {
+    autoAnalyse: meta.autoAnalyse,
+    sfConfig:
+      meta.sfConfig === undefined
+        ? null
+        : (JSON.parse(readFileSync(join(DEFAULT_OUT, meta.sfConfig.path), "utf8")) as Record<string, Record<string, unknown>>),
     siteScheme: new URL(ariadne.base).protocol,
     sf: (key) => internal.get(key),
     sfWidth: (kind, key) =>
@@ -988,6 +1134,8 @@ function writeReport(runDir: string): number {
       return text === undefined || text === null ? null : serpWidth(text, kind);
     },
     fired,
+    details: (ruleId, key) =>
+      ariadne.issues.find((i) => i.ruleId === ruleId && i.key === key)?.details as Record<string, unknown> | undefined,
   };
 
   // SF's list of URLs for a rule: the union over every filter mapped to it, so
@@ -1042,7 +1190,11 @@ function writeReport(runDir: string): number {
   w("## The run");
   w();
   w(`- Run: ${meta.startedAt} (run directory \`${runDir.replace(`${REPO}/`, "")}\`, git-ignored; SF exports are never committed).`);
-  w(`- Screaming Frog SEO Spider **${meta.sfVersion}** (Linux package), headless, at the configuration it starts with when given no \`--config\`. Licensed.`);
+  w(
+    meta.sfConfig === undefined
+      ? `- Screaming Frog SEO Spider **${meta.sfVersion}** (Linux package), headless, at the configuration it starts with when given no \`--config\`. Licensed. Its log reports \`mAutoAnalyse=${meta.autoAnalyse}\`.`
+      : `- Screaming Frog SEO Spider **${meta.sfVersion}** (Linux package), headless, licensed, with \`--config <sf-run>/${meta.sfConfig.path}\` (sha256 \`${meta.sfConfig.sha256.slice(0, 16)}…\`, git-ignored, not committed). ${SF_CONFIG_DESCRIPTION} Its log reports \`mAutoAnalyse=${meta.autoAnalyse}\`.`,
+  );
   w(`- Ariadne ruleset **${ariadne.rulesetVersion}**; \`runCrawl\` + \`runRules\` with the harness crawl config (\`maxPages\` 3000, \`maxDepth\` 20, uncapped listings, no render pass — no compared rule reads a rendered column).`);
   w(`- Site: every harness fixture (\`allFixtures()\`) plus the calibration ladders (\`calibrationFixtures()\`, \`${CALIBRATION_PREFIX}/…\`), served by \`startFixtureApp\` on 127.0.0.1. Screaming Frog crawled ${internal.size} internal HTML URLs; Ariadne wrote ${ariadne.pagesCrawled} \`pages\` rows (HTML and non-HTML, the sitemap-only pages included).`);
   w("- Command (the port is the run's):");
@@ -1053,12 +1205,13 @@ function writeReport(runDir: string): number {
       .map((a) => (a.includes(" ") || a.includes("<") || a.includes("&") ? JSON.stringify(a) : a))
       .join(" ")
       .replace(meta.base, "http://127.0.0.1:<port>")
-      .replace(join(runDir, "sf"), "<run dir>/sf")}`,
+      .replace(join(runDir, "sf"), "<run dir>/sf")
+      .replace(DEFAULT_OUT, "<sf-run>")}`,
   );
   w("```");
   w();
   w(
-    "**Black box.** Everything here about Screaming Frog is what it printed and exported for pages we wrote: filter exports, the Issues Overview report's issue names, the Internal tab's columns, and the lines of its own run log (which prints the settings it ran with, such as `mAutoAnalyse=false`). No Screaming Frog code, jar, decompiled source or configuration file was read (CLAUDE.md rule 8).",
+    "**Black box.** Everything here about Screaming Frog is what it printed and exported for pages we wrote: filter exports, the Issues Overview report's issue names, the Internal tab's columns, and the lines of its own run log (which prints the settings it ran with, such as `mAutoAnalyse`), and, for the `--sf-config` run, the configuration its own MCP server returned. No MCP transcript is kept in the repository. No Screaming Frog code, jar, decompiled source or configuration file was read (CLAUDE.md rule 8).",
   );
   w();
   w(
@@ -1258,6 +1411,19 @@ function writeReport(runDir: string): number {
     `First level SF flags: ${firstFlag(depthRows, (r) => r.sfFlag, (r) => `${r.level} (SF depth ${r.sf})`)}; first level Ariadne flags: ${firstFlag(depthRows, (r) => r.flag, (r) => `${r.level} (click depth ${r.ours})`)}.`,
   );
   w();
+  // The boundary in CRAWL DEPTH (SF's own column, which matches our click
+  // depth on this chain), not in chain level.
+  const depthOf = (r: (typeof depthRows)[number]): number => {
+    const d = num(r.sf);
+    if (d === null) throw new Error(`no SF crawl depth for ${r.key}`);
+    return d;
+  };
+  const depthClear = depthRows.filter((r) => !r.sfFlag).map(depthOf);
+  const depthHit = depthRows.filter((r) => r.sfFlag).map(depthOf);
+  const depthBoundary = {
+    sfLastClear: depthClear.length === 0 ? null : Math.max(...depthClear),
+    sfFirstFlagged: depthHit.length === 0 ? null : Math.min(...depthHit),
+  };
 
   w(`### Thin content (\`THIN_WORDS\` ${T.THIN_WORDS}, kept)`);
   w();
@@ -1276,7 +1442,7 @@ function writeReport(runDir: string): number {
   // A threshold this calibration sets from a ladder must sit exactly on the
   // boundary the ladder shows (adjacent rungs, last clear = the threshold), or
   // the report says MISMATCH and the run fails like an unexplained divergence.
-  const outlinkVerdict = (
+  const ladderVerdict = (
     name: string,
     start: number,
     current: number,
@@ -1326,8 +1492,8 @@ function writeReport(runDir: string): number {
   w();
   w("| Constant | Before | Screaming Frog 25.1 | Now | Decision |");
   w("|---|---:|---|---:|---|");
-  w(outlinkVerdict("HIGH_INTERNAL_OUTLINKS", 1000, T.HIGH_INTERNAL_OUTLINKS, internalBoundary));
-  w(outlinkVerdict("HIGH_EXTERNAL_OUTLINKS", 100, T.HIGH_EXTERNAL_OUTLINKS, externalBoundary));
+  w(ladderVerdict("HIGH_INTERNAL_OUTLINKS", 1000, T.HIGH_INTERNAL_OUTLINKS, internalBoundary));
+  w(ladderVerdict("HIGH_EXTERNAL_OUTLINKS", 100, T.HIGH_EXTERNAL_OUTLINKS, externalBoundary));
   w(pxVerdict("TITLE_PX_MAX", 561, T.TITLE_PX_MAX, "Page Titles:Over X Pixels", "over", titleBoundary));
   w(pxVerdict("TITLE_PX_MIN", 200, T.TITLE_PX_MIN, "Page Titles:Below X Pixels", "below", titleBoundary));
   w(pxVerdict("META_PX_MAX", 985, T.META_PX_MAX, "Meta Description:Over X Pixels", "over", metaBoundary));
@@ -1335,14 +1501,18 @@ function writeReport(runDir: string): number {
   w(
     `| \`SLOW_MS\` | 1500 | no response-time issue at its default configuration (Issues Overview, tab filters); its measured times match ours | ${T.SLOW_MS} | kept: no SF boundary to read |`,
   );
-  w(
-    `| \`DEEP_DEPTH\` | 5 | "Pages With High Crawl Depth" empty at every depth, 1 to over 1,000 (post-crawl analysis off); its depths match ours | ${T.DEEP_DEPTH} | kept: no SF boundary to read |`,
-  );
+  if (meta.autoAnalyse) {
+    w(ladderVerdict("DEEP_DEPTH", 5, T.DEEP_DEPTH, depthBoundary));
+  } else {
+    w(
+      `| \`DEEP_DEPTH\` | 5 | "Pages With High Crawl Depth" empty at every depth, 1 to over 1,000 (post-crawl analysis off); its depths match ours | ${T.DEEP_DEPTH} | kept: no SF boundary to read |`,
+    );
+  }
   w(
     `| \`THIN_WORDS\` | 150 | low content below 200 words of the whole page (observed: ${maxFlagged} listed, ${minUnflagged} not) | ${T.THIN_WORDS} | kept (spec): ours counts main-content words, template-aware |`,
   );
   w();
-  for (const line of RUN_NOTES) w(line);
+  for (const line of runNotes(meta)) w(line);
 
   // ---- details
   w("## Per filter: URLs and divergences");
@@ -1396,8 +1566,13 @@ async function main(): Promise<void> {
       throw new Error("--resume-ariadne needs a run directory whose Screaming Frog half completed (it holds meta.json)");
     }
     runDir = await fullRun(DEFAULT_OUT, assertUnderSfRun(argv[1]));
-  } else if (argv.length === 0) {
-    runDir = await fullRun(assertUnderSfRun(process.env["CALIBRATE_OUT"] ?? DEFAULT_OUT));
+  } else if (argv.length === 0 || (argv.length === 2 && argv[0] === "--sf-config")) {
+    // `--sf-config <file>`: a SEO Spider configuration (its JSON format) to run
+    // with, which must live under the git-ignored sf-run/ like everything else
+    // the SEO Spider touches, and must exist.
+    const config = argv[0] === "--sf-config" ? assertUnderSfRun(argv[1]!) : undefined;
+    if (config !== undefined && !existsSync(config)) throw new Error(`--sf-config: no such file ${config}`);
+    runDir = await fullRun(assertUnderSfRun(process.env["CALIBRATE_OUT"] ?? DEFAULT_OUT), undefined, config);
   } else {
     throw new Error(`unknown arguments: ${argv.join(" ")}`);
   }

@@ -13,6 +13,8 @@ import {
   META_WIDTH_GAP_PX,
   TITLE_WIDTH_GAP_PX,
   assertUnderSfRun,
+  analysisOffAndEmpty,
+  autoAnalyseFromLog,
   measureExplains,
   reasonFor,
   sfExportEmpty,
@@ -20,12 +22,15 @@ import {
 
 function ctx(over: Partial<ReasonContext> = {}): ReasonContext {
   return {
+    autoAnalyse: false,
+    sfConfig: null,
     siteScheme: "http:",
     sfRowCount: 0,
     sf: () => undefined,
     sfWidth: () => null,
     ourWidth: () => null,
     fired: () => false,
+    details: () => undefined,
     ...over,
   };
 }
@@ -51,7 +56,27 @@ describe("the calibration reasons", () => {
       // An analysis-on re-run: SF lists something, so a URL only we list is a
       // real divergence and must stay unexplained.
       expect(reasonFor(filter, "ariadne-only", "/authored26/x", ctx({ sfRowCount: 3 })), filter).toBeNull();
+      // Analysis ON and the export still empty: "the analysis did not run" is
+      // false, so this reason must not apply.
+      expect(
+        reasonFor(filter, "ariadne-only", "/authored26/x", ctx({ sfRowCount: 0, autoAnalyse: true })),
+        filter,
+      ).toBeNull();
     }
+    expect(analysisOffAndEmpty("/x", ctx({ autoAnalyse: true }))).toBe(false);
+  });
+
+  it("explains an unlinked hreflang target only when SF never fetched it AND its config does not crawl hreflang", () => {
+    const filter = "Hreflang:Unlinked hreflang URLs";
+    const off = { crawlConfig: { crawlHreflang: false } };
+    const on = ctx({ autoAnalyse: true, sfRowCount: 0, sfConfig: off });
+    expect(reasonFor(filter, "ariadne-only", "/t", on)).toMatch(/never fetched/);
+    // SF crawled the page: then its silence is a real divergence.
+    expect(reasonFor(filter, "ariadne-only", "/t", { ...on, sf: () => ({ Address: "/t" }) })).toBeNull();
+    // SF crawls hreflang targets: no reason.
+    expect(
+      reasonFor(filter, "ariadne-only", "/t", { ...on, sfConfig: { crawlConfig: { crawlHreflang: true } } }),
+    ).toBeNull();
   });
 
   it("explains a title divergence as the measurement only when the bound lies between the widths and the gap is small", () => {
@@ -91,6 +116,35 @@ describe("the calibration reasons", () => {
   it("explains the HTTPS-only filters only on a plain-HTTP crawl", () => {
     expect(reasonFor("Security:HTTP URLs", "sf-only", "/x", ctx({ siteScheme: "http:" }))).toMatch(/HTTPS-only/);
     expect(reasonFor("Security:HTTP URLs", "sf-only", "/x", ctx({ siteScheme: "https:" }))).toBeNull();
+  });
+});
+
+describe("the hreflang self-reference-only reason", () => {
+  const filter = "Hreflang:Self Reference Only";
+  const crawled = (codes: string[]): ReasonContext =>
+    ctx({
+      autoAnalyse: true,
+      sfRowCount: 1,
+      sf: () => ({ Address: "/p" }),
+      details: () => ({ hreflang: codes }),
+    });
+
+  it("explains only a page whose self annotations include an x-default beside the language code", () => {
+    expect(reasonFor(filter, "ariadne-only", "/p", crawled(["en", "x-default"]))).toMatch(/Definition difference/);
+    // One self code and nothing else: SF lists that shape, so a miss is real.
+    expect(reasonFor(filter, "ariadne-only", "/p", crawled(["en"]))).toBeNull();
+    // SF never crawled the page, or its filter is empty: not this reason.
+    expect(reasonFor(filter, "ariadne-only", "/p", { ...crawled(["en", "x-default"]), sf: () => undefined })).toBeNull();
+    expect(reasonFor(filter, "ariadne-only", "/p", { ...crawled(["en", "x-default"]), sfRowCount: 0 })).toBeNull();
+  });
+});
+
+describe("the SEO Spider's own statement of the analysis setting", () => {
+  it("reads mAutoAnalyse from its log, and refuses a log that states it nowhere or both ways", () => {
+    expect(autoAnalyseFromLog("x mCrawlAnalysisConfig=CrawlAnalysisConfig [mAutoAnalyse=true, y] mAutoAnalyse=true")).toBe(true);
+    expect(autoAnalyseFromLog("[mAutoAnalyse=false, mDisabledAnalysisTasks=[]]")).toBe(false);
+    expect(() => autoAnalyseFromLog("no such line")).toThrow(/nowhere/);
+    expect(() => autoAnalyseFromLog("mAutoAnalyse=true mAutoAnalyse=false")).toThrow(/both ways/);
   });
 });
 

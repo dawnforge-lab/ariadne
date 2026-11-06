@@ -56,12 +56,15 @@ export const SLOW_MS = 1500;
  * the sentence is changed with it. It moved from src/rules/page/technical.ts
  * with the rule (Phase 9).
  *
- * Not calibrated: Screaming Frog's crawl depths on the 1 … 10 chain match
- * ours exactly, but its "Pages With High Crawl Depth" filter came back empty
- * at every depth, consistent with its post-crawl analysis being off at the
- * configuration it starts with (docs/gates/phase-26a-calibration.md). Kept.
+ * Strictly greater: a page exactly this many links deep is not reported.
+ *
+ * Moved from 5. With its post-crawl analysis on (the one setting changed from
+ * the configuration it starts with), Screaming Frog flags the click-depth
+ * ladder from depth 4 and not at depth 3; its crawl depths on the 1 … 10 chain
+ * match ours exactly, so the boundary is the same number in both measures.
+ * calibrated against Screaming Frog 25.1 defaults, 2026-11-06 (docs/gates/phase-26a-calibration.md)
  */
-export const DEEP_DEPTH = 5;
+export const DEEP_DEPTH = 3;
 
 // ---- from src/rules/query/redirects.ts
 /**

@@ -480,6 +480,11 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `HIGH_EXTERNAL_OUTLINKS` 100 -> 10 (SF flags 11 distinct external
 //     targets and not 10); `HIGH_INTERNAL_OUTLINKS` 1000 was confirmed. See
 //     docs/gates/phase-26a-calibration.md. This is the last rule task: 154 rules.
+// 11. (T13 follow-up) `DEEP_DEPTH` 5 -> 3, so `structure.deep-page` (an
+//     existing rule, unchanged in shape) now reports pages more than 3 links
+//     from the home page. Screaming Frog, run with its post-crawl analysis on,
+//     flags the click-depth ladder from depth 4 and not at 3, with crawl depths
+//     equal to ours. Same calibration doc.
 export const RULESET_VERSION = "0.20.0";
 
 /**
