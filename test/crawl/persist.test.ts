@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
 import {
@@ -120,6 +120,13 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     metaDescriptionCount: 1,
     robotsMetas: [],
     metaRefresh: null,
+    anchorCounts: { noHref: 0, javascript: 0, hashOnly: 0, emptyHref: 0, unsafeBlank: 0 },
+    insecureRefs: { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] },
+    imagesEmptyAlt: 0,
+    imagesAltTooLong: 0,
+    imagesMissingAltSample: [],
+    relNextCount: 0,
+    relPrevCount: 0,
     ...overrides,
   };
 }
@@ -747,6 +754,13 @@ describe("PageWriter", () => {
     expect(row?.metaDescriptionCount).toBeNull();
     expect(row?.robotsMetas).toBeNull();
     expect(row?.metaRefresh).toBeNull();
+    expect(row?.anchorCounts).toBeNull();
+    expect(row?.insecureRefs).toBeNull();
+    expect(row?.imagesEmptyAlt).toBeNull();
+    expect(row?.imagesAltTooLong).toBeNull();
+    expect(row?.imagesMissingAltSample).toBeNull();
+    expect(row?.relNextCount).toBeNull();
+    expect(row?.relPrevCount).toBeNull();
     expect(await countOf(links, crawlId)).toBe(0);
     expect(await countOf(hreflang, crawlId)).toBe(0);
     expect(await countOf(structuredData, crawlId)).toBe(0);
@@ -835,6 +849,50 @@ describe("PageWriter", () => {
     const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
     expect(row?.robotsMeta).toBe("index, follow, noindex");
     expect(row?.isIndexable).toBe(false);
+  });
+
+  it("writes the Phase 26b body facts, and an image link's alt as its anchor (migration 0026)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/body-facts`;
+    const analysis = analyzePage(
+      `<html><head><link rel="next" href="/2"><link rel="next" href="/3"><link rel="prev" href="/0">` +
+        `</head><body><a href="/home"><img src="/logo.png" alt="Home"></a>` +
+        `<a href="#">top</a><a href="javascript:void(0)">js</a><a href="">e</a>` +
+        `<a onclick="go()">x</a><a target="_blank" href="/out">out</a>` +
+        `<iframe src="http://x.test/f"></iframe><form action="http://x.test/post"></form>` +
+        `<form action="/same-scheme"></form>` +
+        `<img src="/a.png" alt=""><img src="/b.png" alt="${"b".repeat(101)}"><img src="/c.png">` +
+        `</body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.anchorCounts).toEqual({
+      noHref: 1, javascript: 1, hashOnly: 1, emptyHref: 1, unsafeBlank: 1,
+    });
+    expect(row?.insecureRefs).toEqual({
+      iframe: 1,
+      media: 0,
+      formAction: 1,
+      forms: 2,
+      sample: [
+        { kind: "iframe", url: "http://x.test/f" },
+        { kind: "form", url: "http://x.test/post" },
+      ],
+    });
+    expect(row?.imagesEmptyAlt).toBe(1);
+    expect(row?.imagesAltTooLong).toBe(1);
+    expect(row?.imagesMissingAltSample).toEqual(["/c.png"]);
+    expect(row?.relNextCount).toBe(2);
+    expect(row?.relPrevCount).toBe(1);
+    const [home] = await db
+      .select({ anchor: links.anchor })
+      .from(links)
+      .where(and(eq(links.crawlId, crawlId), eq(links.targetUrl, `${SITE}/home`)));
+    expect(home?.anchor).toBe("Home");
   });
 
   it("ignores a second row for the same (crawl, url)", async () => {

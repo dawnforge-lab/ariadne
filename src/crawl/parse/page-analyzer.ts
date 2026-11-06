@@ -380,21 +380,59 @@
  * `<meta name=robots>` content joined with ", ", not the first one's. Google
  * combines repeated robots metas, and reading only the first missed a later
  * `noindex` — `isIndexable` (persist.ts) reads this field and now sees it.
- * `robotsOutsideHead` stays a first-element flag.
+ * `robotsOutsideHead` stays a first-element flag. Ruling R6 then refined two
+ * of these: a robots content identical (after trim) to one already kept is
+ * dropped before the join (first-seen order and spelling kept, every distinct
+ * directive survives), and one meta naming two social tags (`name=twitter:title
+ * property=og:title`) records both.
+ *
+ * Phase 26b (P26b-T3) added the body facts, in the same pass, every one a
+ * counter or a sample capped at ten (caps in page-facts.ts). `<noscript>`
+ * content stays invisible to all of them, as to every element read here.
+ *  - `anchorCounts`, over EVERY `<a>` start tag, including the ones that never
+ *    open a link: `noHref` (no `href` attribute AND `onclick`, or `role`
+ *    `link`/`button` — a bookmark is not a link, deviation 5); `emptyHref`
+ *    (`href` blank after trim); `javascript` (`/^\s*javascript:/i`);
+ *    `hashOnly` (trimmed href exactly `#` or `#!`; `#section` is in-page
+ *    navigation); `unsafeBlank` (`target=_blank`, an href that is not
+ *    `javascript:`, and neither `noopener` nor `noreferrer` among the `rel`
+ *    tokens). The first three are exclusive; `unsafeBlank` is orthogonal.
+ *  - ANCHOR TEXT NOW INCLUDES IMAGE ALT: an `<img>` inside an open anchor
+ *    pushes its trimmed, non-empty `alt` into the anchor's text, as a text
+ *    node would. `links.anchor` on a v2 row carries it; the oracle agrees.
+ *  - `relNextCount` / `relPrevCount`: every `<link rel~=next|prev>`, href or
+ *    not. The first-only `relNext` / `relPrev` are unchanged.
+ *  - `insecureRefs`: references that resolve (`normalizeUrl`) to `http:` —
+ *    `iframe` (`<iframe src>`), `media` (`<video src|poster>`, `<audio src>`,
+ *    `<source src>` inside a `<video>`/`<audio>` (a `mediaDepth` counter, on
+ *    `pictureDepth`'s idiom), `<track src>`, `<embed src>`, `<object data>`)
+ *    and `formAction` (`<form action>`); `forms` counts every `<form>`. Recorded
+ *    on every page whatever its scheme; the rules decide by the page's.
+ *  - `imagesEmptyAlt`, `imagesAltTooLong` (trimmed alt over
+ *    `ALT_TEXT_LONG_CHARS`, applied here, deviation 10) and
+ *    `imagesMissingAltSample` (raw `src` of the first images with no `alt`),
+ *    all in the existing `img` case beside `imagesMissingAlt`.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 import { simhash64 } from "./simhash.js";
 import {
+  ALT_TEXT_LONG_CHARS,
   H2_TEXT_MAX,
   HTML_LANG_MAX,
+  IMAGE_SAMPLE_MAX,
+  IMAGE_SAMPLE_SRC_MAX,
+  INSECURE_SAMPLE_MAX,
   parseRefresh,
   ROBOTS_META_BOTS,
   ROBOTS_META_CONTENT_MAX,
   ROBOTS_METAS_MAX,
   SOCIAL_TEXT_MAX,
   SOCIAL_URL_MAX,
+  type AnchorCounts,
+  type InsecureRefKind,
+  type InsecureRefs,
   type RefreshFact,
   type RobotsMetaEntry,
   type SocialFacts,
@@ -687,6 +725,32 @@ export interface PageAnalysis {
   robotsMetas: RobotsMetaEntry[];
   /** The first `<meta http-equiv=refresh content>`, through `parseRefresh`. */
   metaRefresh: RefreshFact | null;
+  /**
+   * The `<a>` start tags outside `<noscript>` that fall into each link-hygiene
+   * kind (Phase 26b, T3; the module header has each definition). Never null.
+   */
+  anchorCounts: AnchorCounts;
+  /** Every `<link rel~=next>`, with or without `href`. `relNext` is the first. */
+  relNextCount: number;
+  /** Every `<link rel~=prev>`, with or without `href`. `relPrev` is the first. */
+  relPrevCount: number;
+  /**
+   * Frame, media and form references that resolve (`normalizeUrl`) to an
+   * `http:` URL, on every page whatever its own scheme (the rules decide by
+   * the page's scheme), with every `<form>` counted and the first
+   * `INSECURE_SAMPLE_MAX` references sampled in document order.
+   */
+  insecureRefs: InsecureRefs;
+  /** `<img>` with an `alt` that is empty after trim. */
+  imagesEmptyAlt: number;
+  /** `<img>` whose trimmed `alt` is longer than `ALT_TEXT_LONG_CHARS`. */
+  imagesAltTooLong: number;
+  /**
+   * The raw `src` of the first `IMAGE_SAMPLE_MAX` images `imagesMissingAlt`
+   * counts, in document order, each capped at `IMAGE_SAMPLE_SRC_MAX`; `""` for
+   * one with no `src`, so the sample is exactly the first such images.
+   */
+  imagesMissingAltSample: string[];
 }
 
 /**
@@ -1142,6 +1206,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // list is O(page) in principle, as the hreflang codes are; robots metas are
   // a handful on any real page.
   const robotsContents: string[] = [];
+  // The trimmed contents already in `robotsContents` (ruling R6's dedupe).
+  const robotsSeen = new Set<string>();
   let sawRobotsMeta = false;
   const robotsMetas: RobotsMetaEntry[] = [];
   let metaRefresh: RefreshFact | null | undefined;
@@ -1183,6 +1249,60 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   let imagesMissingDimensions = 0;
   const linksByTarget = new Map<string, RawPageLink>();
   let openAnchor: OpenAnchor | null = null;
+
+  // PHASE 26b BODY FACTS (T3; module header). Counters, plus two samples
+  // capped at ten entries each: O(1) in page size.
+  const anchorCounts: AnchorCounts = {
+    noHref: 0,
+    javascript: 0,
+    hashOnly: 0,
+    emptyHref: 0,
+    unsafeBlank: 0,
+  };
+  let relNextCount = 0;
+  let relPrevCount = 0;
+  let imagesEmptyAlt = 0;
+  let imagesAltTooLong = 0;
+  const imagesMissingAltSample: string[] = [];
+  const insecureRefs: InsecureRefs = { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] };
+  // Open `<video>` / `<audio>` elements: a `<source>` is a media reference only
+  // inside one, told apart without a tree on `pictureDepth`'s idiom.
+  let mediaDepth = 0;
+  const noteInsecure = (kind: InsecureRefKind, raw: string | undefined) => {
+    if (raw === undefined) return;
+    const resolved = normalizeUrl(raw, pageUrl);
+    if (resolved === null || !resolved.startsWith("http:")) return;
+    if (kind === "iframe") insecureRefs.iframe += 1;
+    else if (kind === "media") insecureRefs.media += 1;
+    else insecureRefs.formAction += 1;
+    if (insecureRefs.sample.length < INSECURE_SAMPLE_MAX) {
+      insecureRefs.sample.push({ kind, url: resolved });
+    }
+  };
+  /** One `<a>` start tag into `anchorCounts` (definitions in the module header). */
+  const countAnchor = (attribs: Record<string, string>) => {
+    const href = attribs["href"];
+    if (href === undefined) {
+      // Deviation 5: a bookmark (`<a name>`, `<a id>`) is not a link. Only an
+      // href-less anchor that behaves like one is counted.
+      const role = attribs["role"]?.trim().toLowerCase();
+      if ("onclick" in attribs || role === "link" || role === "button") {
+        anchorCounts.noHref += 1;
+      }
+      return;
+    }
+    const trimmed = href.trim();
+    const isJavascript = /^\s*javascript:/i.test(href);
+    if (trimmed === "") anchorCounts.emptyHref += 1;
+    else if (isJavascript) anchorCounts.javascript += 1;
+    else if (trimmed === "#" || trimmed === "#!") anchorCounts.hashOnly += 1;
+    if (attribs["target"]?.trim().toLowerCase() === "_blank" && !isJavascript) {
+      const rel = (attribs["rel"] ?? "").trim().toLowerCase().split(/\s+/);
+      if (!rel.includes("noopener") && !rel.includes("noreferrer")) {
+        anchorCounts.unsafeBlank += 1;
+      }
+    }
+  };
 
   // The page's resource references, keyed by resolved URL so one page says one
   // thing about one file. O(page) and capped, like `linksByTarget` — the
@@ -1432,26 +1552,28 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   };
 
   /**
-   * One social tag (Phase 26b). Open Graph is read from `property=` first and
-   * `name=` second (both are in the wild); X from `name=` first and
-   * `property=` second, which X does not read and so is recorded as
-   * `xViaProperty`. One element is one tag, so `<meta name=og:title
-   * property=og:title>` counts once.
+   * The social tags one element names (Phase 26b). Open Graph is read from
+   * `property=` or `name=` (both are in the wild); X from `name=`, or from
+   * `property=`, which X does not read and so is recorded as `xViaProperty`.
+   * Each DISTINCT tag the element names is recorded once (ruling R6):
+   * `<meta name=twitter:title property=og:title>` is both og:title and
+   * twitter:title, while `<meta name=og:title property=og:title>` is og:title
+   * once.
    */
   const handleSocialTag = (
     name: string | undefined,
     property: string | undefined,
     content: string | undefined,
   ) => {
-    let tag: SocialTag;
-    let viaProperty = false;
-    if (isSocialTag(property) && property.startsWith("og:")) tag = property;
-    else if (isSocialTag(name)) tag = name;
-    else if (isSocialTag(property)) {
-      tag = property;
-      viaProperty = true;
-    } else return;
-    if (viaProperty) xViaProperty = true;
+    if (isSocialTag(property)) {
+      // Named by `name=` as well, a twitter tag is where X reads it.
+      if (property.startsWith("twitter:") && name !== property) xViaProperty = true;
+      recordSocialTag(property, content);
+    }
+    if (isSocialTag(name) && name !== property) recordSocialTag(name, content);
+  };
+
+  const recordSocialTag = (tag: SocialTag, content: string | undefined) => {
     if (headMode === "body") socialOutsideHead = true;
     socialCounts.set(tag, (socialCounts.get(tag) ?? 0) + 1);
     // A tag with no `content` is present and empty, as a `<meta
@@ -1502,7 +1624,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         sawRobotsMeta = true;
         robotsOutsideHead = headMode === "body";
       }
-      if (content !== undefined) robotsContents.push(content);
+      // Ruling R6: a content identical (after trim) to one already kept adds
+      // nothing to the directives, so it is dropped; first-seen order and the
+      // first spelling stay, and every distinct content survives.
+      if (content !== undefined && !robotsSeen.has(content.trim())) {
+        robotsSeen.add(content.trim());
+        robotsContents.push(content);
+      }
     } else if (name !== undefined && ROBOTS_META_BOT_NAMES.has(name)) {
       if (robotsMetas.length < ROBOTS_METAS_MAX) {
         // No `content` is present and empty, as for the description: the
@@ -1563,6 +1691,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (tokens.includes("amphtml")) hasAmp = true;
     if (tokens.includes("next") && relNext === undefined) relNext = href ?? null;
     if (tokens.includes("prev") && relPrev === undefined) relPrev = href ?? null;
+    // Every one, href or not (Phase 26b): the first-only reads above stay.
+    if (tokens.includes("next")) relNextCount += 1;
+    if (tokens.includes("prev")) relPrevCount += 1;
   };
 
   /**
@@ -1733,7 +1864,21 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             break;
           case "img": {
             imagesTotal += 1;
-            if (!("alt" in attribs)) imagesMissingAlt += 1;
+            const alt = attribs["alt"];
+            if (alt === undefined) {
+              imagesMissingAlt += 1;
+              // Phase 26b: which images, raw, so the finding can name them.
+              if (imagesMissingAltSample.length < IMAGE_SAMPLE_MAX) {
+                imagesMissingAltSample.push((attribs["src"] ?? "").slice(0, IMAGE_SAMPLE_SRC_MAX));
+              }
+            } else {
+              const trimmedAlt = alt.trim();
+              if (trimmedAlt === "") imagesEmptyAlt += 1;
+              else if (trimmedAlt.length > ALT_TEXT_LONG_CHARS) imagesAltTooLong += 1;
+              // An image link's alt is its anchor text (Phase 26b): pushed
+              // where a text node's words would be.
+              if (openAnchor && trimmedAlt !== "") openAnchor.text.push(trimmedAlt);
+            }
             // One image, one count: missing either attribute is the same
             // layout-shift defect and must not be double-counted.
             if (!("width" in attribs) || !("height" in attribs)) {
@@ -1755,10 +1900,37 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
           case "picture":
             pictureDepth += 1;
             break;
+          case "video":
+            mediaDepth += 1;
+            noteInsecure("media", attribs["src"]);
+            noteInsecure("media", attribs["poster"]);
+            break;
+          case "audio":
+            mediaDepth += 1;
+            noteInsecure("media", attribs["src"]);
+            break;
+          case "track":
+          case "embed":
+            noteInsecure("media", attribs["src"]);
+            break;
+          case "object":
+            noteInsecure("media", attribs["data"]);
+            break;
+          case "iframe":
+            noteInsecure("iframe", attribs["src"]);
+            break;
+          case "form":
+            insecureRefs.forms += 1;
+            noteInsecure("form", attribs["action"]);
+            break;
           case "source": {
-            // ONLY inside a <picture>. The same element inside <video> /
-            // <audio> names media, which is out of this phase's owner scope,
-            // and a depth counter is how the two are told apart without a tree.
+            // Inside a <video> / <audio> it names media: an insecure-reference
+            // site only (Phase 26b), never a resource ref.
+            if (mediaDepth > 0) noteInsecure("media", attribs["src"]);
+            // A resource ref ONLY inside a <picture>. The same element inside
+            // <video> / <audio> names media, which is out of this phase's owner
+            // scope, and a depth counter is how the two are told apart without
+            // a tree.
             if (pictureDepth === 0) break;
             addResource(attribs["src"], "image");
             const sourceSrcset = attribs["srcset"];
@@ -1820,6 +1992,9 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
               if (navDepth > 0) navLinkCount += 1;
               if (footerDepth > 0) footerLinkCount += 1;
             }
+            // Every `<a>` start tag, including those that never open below
+            // (no href, `javascript:`, `#…`): Phase 26b's anchor counts.
+            countAnchor(attribs);
             // HTML forbids nested <a>; browsers implicitly close the open
             // one, and the tokenizer has no tree correction, so mirror that.
             closeAnchor();
@@ -1947,6 +2122,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         }
         if (name === "nav" && navDepth > 0) navDepth -= 1;
         if (name === "picture" && pictureDepth > 0) pictureDepth -= 1;
+        if ((name === "video" || name === "audio") && mediaDepth > 0) mediaDepth -= 1;
         if (name === "footer" && footerDepth > 0) footerDepth -= 1;
         if (name === "head" && headDepth > 0) headDepth -= 1;
         if (name === "body" && bodyDepth > 0) bodyDepth -= 1;
@@ -2099,6 +2275,13 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     metaDescriptionCount,
     robotsMetas,
     metaRefresh: metaRefresh ?? null,
+    anchorCounts,
+    relNextCount,
+    relPrevCount,
+    insecureRefs,
+    imagesEmptyAlt,
+    imagesAltTooLong,
+    imagesMissingAltSample,
     bodyText,
     h1s,
     hasStructuredData,
@@ -2174,5 +2357,12 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     metaDescriptionCount: raw.metaDescriptionCount,
     robotsMetas: raw.robotsMetas,
     metaRefresh: raw.metaRefresh,
+    anchorCounts: raw.anchorCounts,
+    relNextCount: raw.relNextCount,
+    relPrevCount: raw.relPrevCount,
+    insecureRefs: raw.insecureRefs,
+    imagesEmptyAlt: raw.imagesEmptyAlt,
+    imagesAltTooLong: raw.imagesAltTooLong,
+    imagesMissingAltSample: raw.imagesMissingAltSample,
   };
 }

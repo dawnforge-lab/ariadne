@@ -6,8 +6,12 @@ import {
 } from "../../src/crawl/parse/page-analyzer.js";
 import { simhash64, hammingDistance } from "../../src/crawl/parse/simhash.js";
 import {
+  ALT_TEXT_LONG_CHARS,
   H2_TEXT_MAX,
   HTML_LANG_MAX,
+  IMAGE_SAMPLE_MAX,
+  IMAGE_SAMPLE_SRC_MAX,
+  INSECURE_SAMPLE_MAX,
   ROBOTS_META_CONTENT_MAX,
   ROBOTS_METAS_MAX,
   SOCIAL_TEXT_MAX,
@@ -1338,5 +1342,275 @@ describe("metaRefresh: the first <meta http-equiv=refresh>", () => {
 
   it("is null when there is none", () => {
     expect(headPage(`<meta http-equiv="content-type" content="text/html">`).metaRefresh).toBeNull();
+  });
+});
+
+/**
+ * Ruling R6 (Task 2 review): repeated identical robots metas collapse, and one
+ * meta naming a twitter: tag by name= and an og: tag by property= is both.
+ */
+describe("ruling R6: robots dedupe and one element naming two social tags", () => {
+  it("drops identical robots contents (after trim), keeping first-seen order and every directive", () => {
+    const a = headPage(
+      `<meta name="robots" content="index, follow">` +
+        `<meta name="robots" content=" index, follow ">` +
+        `<meta name="robots" content="noarchive">` +
+        `<meta name="robots" content="index, follow">`,
+      `<div>x</div><meta name="robots" content="noindex">`,
+    );
+    expect(a.robotsMeta).toBe("index, follow, noarchive, noindex");
+  });
+
+  it("keeps a single robots content raw, as before", () => {
+    expect(headPage(`<meta name="robots" content=" noindex ">`).robotsMeta).toBe(" noindex ");
+  });
+
+  it("records <meta name=twitter:title property=og:title> as both tags", () => {
+    const a = headPage(`<meta name="twitter:title" property="og:title" content="x">`);
+    expect(a.social?.og.title).toBe("x");
+    expect(a.social?.x.title).toBe("x");
+    expect(a.social?.counts).toEqual({ "og:title": 1, "twitter:title": 1 });
+    expect(a.social?.xViaProperty).toBe(false);
+  });
+
+  it("still counts an element naming one tag twice once", () => {
+    const a = headPage(`<meta name="og:title" property="og:title" content="x">`);
+    expect(a.social?.counts).toEqual({ "og:title": 1 });
+    const b = headPage(`<meta name="twitter:card" property="twitter:card" content="summary">`);
+    expect(b.social?.counts).toEqual({ "twitter:card": 1 });
+    expect(b.social?.xViaProperty).toBe(false);
+  });
+});
+
+/**
+ * Phase 26b, Task 3: the body facts — anchor counts, image alt in anchor text,
+ * rel next/prev counts, insecure references and the image alt facts.
+ */
+function bodyPage(bodyHtml: string, url = P26B_URL) {
+  return analyzePage(
+    `<!doctype html><html><head><title>t</title></head><body>${bodyHtml}</body></html>`,
+    url,
+  );
+}
+const NO_ANCHORS = { noHref: 0, javascript: 0, hashOnly: 0, emptyHref: 0, unsafeBlank: 0 };
+const NO_INSECURE = { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] };
+
+describe("anchorCounts: anchors that are not links (review focus 4)", () => {
+  it("does not count a bookmark: <a name> and <a id> carry no href and no link role", () => {
+    expect(bodyPage(`<a name="top"></a><a id="x">y</a>`).anchorCounts).toEqual(NO_ANCHORS);
+  });
+
+  it("counts an href-less anchor with onclick, role=link or role=button", () => {
+    const a = bodyPage(
+      `<a onclick="go()">a</a><a role="LINK">b</a><a role=" button ">c</a><a role="tab">d</a>`,
+    );
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, noHref: 3 });
+  });
+
+  it("does not call #section hash-only; # and #! are", () => {
+    const a = bodyPage(`<a href="#section">s</a><a href="#">h</a><a href=" #! ">b</a>`);
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, hashOnly: 2 });
+  });
+
+  it("counts ' JavaScript:void(0)' as javascript", () => {
+    const a = bodyPage(`<a href=" JavaScript:void(0)">x</a><a href="javascript:go()">y</a>`);
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, javascript: 2 });
+  });
+
+  it("counts href=\"\" as emptyHref, not noHref", () => {
+    const a = bodyPage(`<a href="">x</a><a href="   ">y</a>`);
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, emptyHref: 2 });
+  });
+
+  it("does not call target=_BLANK with rel=noopener unsafe", () => {
+    expect(bodyPage(`<a target="_BLANK" rel="noopener" href="/x">x</a>`).anchorCounts).toEqual(
+      NO_ANCHORS,
+    );
+  });
+
+  it("counts target=_blank without noopener/noreferrer as unsafe, never on a javascript: or missing href", () => {
+    const a = bodyPage(
+      `<a target="_blank" href="https://o.test/">a</a>` +
+        `<a target="_blank" rel="nofollow NoReferrer" href="/b">b</a>` +
+        `<a target="_blank" rel="nofollow" href="/c">c</a>` +
+        `<a target="_blank" href="javascript:void(0)">d</a>` +
+        `<a target="_blank">e</a>` +
+        `<a target="_self" href="/f">f</a>`,
+    );
+    expect(a.anchorCounts).toEqual({ ...NO_ANCHORS, javascript: 1, unsafeBlank: 2 });
+  });
+
+  it("ignores anchors inside <noscript>", () => {
+    expect(
+      bodyPage(`<noscript><a href="#">x</a><a onclick="y">y</a></noscript>`).anchorCounts,
+    ).toEqual(NO_ANCHORS);
+  });
+});
+
+describe("anchor text takes an image's alt", () => {
+  it("gives the alt as the anchor of an image link", () => {
+    const a = bodyPage(`<a href="/x"><img src="a.png" alt="Logo"></a>`);
+    expect(a.links).toHaveLength(1);
+    expect(a.links[0]?.anchor).toBe("Logo");
+  });
+
+  it("gives an empty anchor when the image has no alt", () => {
+    expect(bodyPage(`<a href="/x"><img src="a.png"></a>`).links[0]?.anchor).toBe("");
+  });
+
+  it("trims the alt and ignores a blank one", () => {
+    expect(bodyPage(`<a href="/x"><img src="a.png" alt="  Home  "></a>`).links[0]?.anchor).toBe(
+      "Home",
+    );
+    expect(bodyPage(`<a href="/x"><img src="a.png" alt="   "></a>`).links[0]?.anchor).toBe("");
+  });
+
+  it("does not take the alt of an image outside any anchor", () => {
+    const a = bodyPage(`<img src="a.png" alt="Loose"><a href="/x">Text</a>`);
+    expect(a.links[0]?.anchor).toBe("Text");
+  });
+});
+
+describe("relNextCount / relPrevCount: every rel next/prev link", () => {
+  it("counts each, with or without href, and keeps the first-only relNext", () => {
+    const a = headPage(
+      `<link rel="next" href="/2"><link rel="next" href="/3"><link rel="prev">` +
+        `<link rel="Prev prefetch" href="/0">`,
+    );
+    expect(a.relNextCount).toBe(2);
+    expect(a.relNext).toBe("/2");
+    expect(a.relPrevCount).toBe(2);
+    expect(a.relPrev).toBeNull();
+  });
+
+  it("is zero, not null, without any", () => {
+    const a = headPage(`<title>t</title>`);
+    expect(a.relNextCount).toBe(0);
+    expect(a.relPrevCount).toBe(0);
+  });
+});
+
+describe("insecureRefs: http: references from iframes, media and forms", () => {
+  it("counts the brief's page on https", () => {
+    const a = bodyPage(
+      `<iframe src="http://x.test/a"></iframe>` +
+        `<video><source src="http://x.test/v.mp4"></video>` +
+        `<form action="http://x.test/post"></form><form action="/ok"></form>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs).toEqual({
+      iframe: 1,
+      media: 1,
+      formAction: 1,
+      forms: 2,
+      sample: [
+        { kind: "iframe", url: "http://x.test/a" },
+        { kind: "media", url: "http://x.test/v.mp4" },
+        { kind: "form", url: "http://x.test/post" },
+      ],
+    });
+  });
+
+  it("reads every media site and none outside the closed list", () => {
+    const a = bodyPage(
+      `<video src="http://m.test/1" poster="http://m.test/2"></video>` +
+        `<audio src="http://m.test/3"><source src="http://m.test/4"></audio>` +
+        `<track src="http://m.test/5"><embed src="http://m.test/6">` +
+        `<object data="http://m.test/7"></object>` +
+        `<picture><source srcset="http://m.test/p.png" src="http://m.test/p2.png"></picture>` +
+        `<img src="http://m.test/i.png"><script src="http://m.test/s.js"></script>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs?.media).toBe(7);
+    expect(a.insecureRefs?.sample.map((s) => s.url)).toEqual(
+      [1, 2, 3, 4, 5, 6, 7].map((n) => `http://m.test/${n}`),
+    );
+  });
+
+  it("does not count https:, protocol-relative on https, data: or javascript: references", () => {
+    const a = bodyPage(
+      `<iframe src="https://x.test/"></iframe><iframe src="//x.test/rel"></iframe>` +
+        `<embed src="data:video/mp4;base64,AAAA"><form action="javascript:void(0)"></form><form></form>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs).toEqual({ ...NO_INSECURE, forms: 2 });
+  });
+
+  it("records relative references on an http page — the rules decide by the page's scheme", () => {
+    const a = bodyPage(`<iframe src="/frame"></iframe><form action="/post"></form>`, "http://s.test/");
+    expect(a.insecureRefs).toEqual({
+      iframe: 1,
+      media: 0,
+      formAction: 1,
+      forms: 1,
+      sample: [
+        { kind: "iframe", url: "http://s.test/frame" },
+        { kind: "form", url: "http://s.test/post" },
+      ],
+    });
+  });
+
+  it("caps the sample at INSECURE_SAMPLE_MAX while the counters stay exact", () => {
+    const frames = Array.from(
+      { length: INSECURE_SAMPLE_MAX + 3 },
+      (_, i) => `<iframe src="http://x.test/${i}"></iframe>`,
+    );
+    const a = bodyPage(frames.join(""), "https://s.test/");
+    expect(a.insecureRefs?.iframe).toBe(INSECURE_SAMPLE_MAX + 3);
+    expect(a.insecureRefs?.sample).toHaveLength(INSECURE_SAMPLE_MAX);
+    expect(a.insecureRefs?.sample[0]?.url).toBe("http://x.test/0");
+  });
+
+  it("ignores references inside <noscript>", () => {
+    const a = bodyPage(
+      `<noscript><iframe src="http://gtm.test/ns"></iframe></noscript>`,
+      "https://s.test/",
+    );
+    expect(a.insecureRefs).toEqual(NO_INSECURE);
+  });
+});
+
+describe("image alt facts", () => {
+  it("samples the first IMAGE_SAMPLE_MAX images with no alt, in document order", () => {
+    const imgs = Array.from({ length: 12 }, (_, i) => `<img src="/i${i}.png">`).join("");
+    const a = bodyPage(`<img src="/has.png" alt="x">${imgs}`);
+    expect(a.imagesMissingAlt).toBe(12);
+    expect(IMAGE_SAMPLE_MAX).toBe(10);
+    expect(a.imagesMissingAltSample).toEqual(Array.from({ length: 10 }, (_, i) => `/i${i}.png`));
+  });
+
+  it("samples the raw src, capped at IMAGE_SAMPLE_SRC_MAX, and '' for an image with no src", () => {
+    const long = `/${"s".repeat(IMAGE_SAMPLE_SRC_MAX + 20)}`;
+    const a = bodyPage(`<img src=" ./a.png "><img src="${long}"><img data-src="/lazy.png">`);
+    expect(a.imagesMissingAltSample).toEqual([
+      " ./a.png ",
+      long.slice(0, IMAGE_SAMPLE_SRC_MAX),
+      "",
+    ]);
+  });
+
+  it("counts alt=\"\" (after trim) as empty", () => {
+    const a = bodyPage(
+      `<img src="/a.png" alt=""><img src="/b.png" alt="   "><img src="/c.png" alt="c">`,
+    );
+    expect(a.imagesEmptyAlt).toBe(2);
+    expect(a.imagesMissingAlt).toBe(0);
+    expect(a.imagesMissingAltSample).toEqual([]);
+  });
+
+  it("counts an alt over ALT_TEXT_LONG_CHARS (after trim) as too long", () => {
+    expect(ALT_TEXT_LONG_CHARS).toBe(100);
+    const a = bodyPage(
+      `<img src="/a.png" alt="${"a".repeat(101)}">` +
+        `<img src="/b.png" alt="${"b".repeat(100)}">` +
+        `<img src="/c.png" alt="  ${"c".repeat(100)}  ">`,
+    );
+    expect(a.imagesAltTooLong).toBe(1);
+  });
+
+  it("ignores images inside <noscript>", () => {
+    const a = bodyPage(`<noscript><img src="/ns.png"><img src="/e.png" alt=""></noscript>`);
+    expect(a.imagesMissingAltSample).toEqual([]);
+    expect(a.imagesEmptyAlt).toBe(0);
   });
 });

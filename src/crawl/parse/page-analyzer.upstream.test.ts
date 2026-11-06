@@ -107,7 +107,20 @@
  * that walk already knows which side of the head each element is on. The
  * oracle moved once more: `robotsMeta` is now every `meta[name=robots]`
  * content joined with ", " (deviation 4), as the port now reads it.
- * `socialImageRefs` is stripped, on `resourceRefs`' reasoning.
+ * `socialImageRefs` is stripped, on `resourceRefs`' reasoning. Ruling R6 moved
+ * the oracle twice more, in step with the port: a robots content identical (after
+ * trim) to one already joined is dropped, and one meta naming two social tags
+ * (`name=twitter:title property=og:title`) is recorded as both.
+ *
+ * Phase 26b (P26b-T3) put the body facts on the parity surface, each by the
+ * selector that defines it: `anchorCounts` over `$("a")` (every anchor element,
+ * href or not), `relNextCount` / `relPrevCount` as `link[rel~=next|prev]`
+ * counts, `insecureRefs` by a document-order walk over the closed list of
+ * frame, media and form sites (a `<source>` only under a `<video>`/`<audio>`),
+ * and the three image alt facts in the same `img` walk as the alt counter. The
+ * oracle moved once more: an anchor's text is now its text nodes with each
+ * `img`'s trimmed, non-empty `alt` folded in where the image sits, as the port
+ * now reads it.
  *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
@@ -124,14 +137,20 @@ import {
 import { simhash64 } from "./simhash.js";
 import { normalizeUrl, isSameOrigin } from "./url-utils.js";
 import {
+  ALT_TEXT_LONG_CHARS,
   H2_TEXT_MAX,
   HTML_LANG_MAX,
+  IMAGE_SAMPLE_MAX,
+  IMAGE_SAMPLE_SRC_MAX,
+  INSECURE_SAMPLE_MAX,
   parseRefresh,
   ROBOTS_META_BOTS,
   ROBOTS_META_CONTENT_MAX,
   ROBOTS_METAS_MAX,
   SOCIAL_TEXT_MAX,
   SOCIAL_URL_MAX,
+  type InsecureRefKind,
+  type InsecureRefs,
   type SocialTag,
 } from "./page-facts.js";
 
@@ -381,13 +400,16 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
 
   // Phase 26b, deviation 4: EVERY robots meta's content, joined — Google
   // combines them. An element with no `content` contributes nothing, so a
-  // page whose only robots meta has none still reads null, as before.
+  // page whose only robots meta has none still reads null, as before. Ruling
+  // R6: a content identical after trim to an earlier one adds nothing; the
+  // first spelling is the one kept.
   const robotsContents = byAttr("meta", "name", "robots")
     .toArray()
     .flatMap((el) => {
       const content = $(el).attr("content");
       return content === undefined ? [] : [content];
-    });
+    })
+    .filter((content, i, all) => all.findIndex((c) => c.trim() === content.trim()) === i);
   const robotsMeta = robotsContents.length === 0 ? null : robotsContents.join(", ");
   const ogTitle =
     byAttr("meta", "property", "og:title").first().attr("content") ?? null;
@@ -475,13 +497,98 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   let imagesTotal = 0;
   let imagesMissingAlt = 0;
   let imagesMissingDimensions = 0;
+  // Phase 26b's alt facts ride the same walk, written from their contracts.
+  let imagesEmptyAlt = 0;
+  let imagesAltTooLong = 0;
+  const imagesMissingAltSample: string[] = [];
   $("img").each((_, el) => {
     imagesTotal += 1;
-    if ($(el).attr("alt") === undefined) imagesMissingAlt += 1;
+    const alt = $(el).attr("alt");
+    if (alt === undefined) {
+      imagesMissingAlt += 1;
+      imagesMissingAltSample.push(($(el).attr("src") ?? "").slice(0, IMAGE_SAMPLE_SRC_MAX));
+    } else if (alt.trim() === "") {
+      imagesEmptyAlt += 1;
+    } else if (alt.trim().length > ALT_TEXT_LONG_CHARS) {
+      imagesAltTooLong += 1;
+    }
     if ($(el).attr("width") === undefined || $(el).attr("height") === undefined) {
       imagesMissingDimensions += 1;
     }
   });
+
+  // Every anchor ELEMENT, href or not — the port counts `<a>` start tags, and
+  // the two agree wherever the tree builder adds no anchor (the pinned
+  // divergence at the end of this file is the case where it does).
+  const anchorCounts = { noHref: 0, javascript: 0, hashOnly: 0, emptyHref: 0, unsafeBlank: 0 };
+  $("a").each((_, el) => {
+    const href = $(el).attr("href");
+    if (href === undefined) {
+      const role = fold($(el).attr("role"));
+      if ($(el).attr("onclick") !== undefined || role === "link" || role === "button") {
+        anchorCounts.noHref += 1;
+      }
+      return;
+    }
+    const isJavascript = /^\s*javascript:/i.test(href);
+    if (href.trim() === "") anchorCounts.emptyHref += 1;
+    else if (isJavascript) anchorCounts.javascript += 1;
+    else if (["#", "#!"].includes(href.trim())) anchorCounts.hashOnly += 1;
+    const rel = relTokens($(el).attr("rel"));
+    if (
+      fold($(el).attr("target")) === "_blank" &&
+      !isJavascript &&
+      !rel.includes("noopener") &&
+      !rel.includes("noreferrer")
+    ) {
+      anchorCounts.unsafeBlank += 1;
+    }
+  });
+
+  // The insecure references: a tree walk, so the sample is in document order,
+  // with an in-media flag for `<source>`.
+  const insecureRefs: InsecureRefs = { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] };
+  const insecure = (kind: InsecureRefKind, value: string | undefined) => {
+    if (value === undefined) return;
+    const resolved = normalizeUrl(value, pageUrl);
+    if (resolved === null || !resolved.startsWith("http:")) return;
+    if (kind === "iframe") insecureRefs.iframe += 1;
+    else if (kind === "media") insecureRefs.media += 1;
+    else insecureRefs.formAction += 1;
+    insecureRefs.sample.push({ kind, url: resolved });
+  };
+  const walkInsecure = (node: DomNode, inMedia: boolean) => {
+    const name = node.type === "tag" ? node.name?.toLowerCase() : undefined;
+    const attribs = node.attribs ?? {};
+    if (name === "iframe") insecure("iframe", attribs["src"]);
+    if (name === "video") {
+      insecure("media", attribs["src"]);
+      insecure("media", attribs["poster"]);
+    }
+    if (name === "audio" || name === "track" || name === "embed") insecure("media", attribs["src"]);
+    if (name === "source" && inMedia) insecure("media", attribs["src"]);
+    if (name === "object") insecure("media", attribs["data"]);
+    if (name === "form") {
+      insecureRefs.forms += 1;
+      insecure("form", attribs["action"]);
+    }
+    for (const child of node.children ?? []) {
+      walkInsecure(child, inMedia || name === "video" || name === "audio");
+    }
+  };
+  walkInsecure($.root()[0] as unknown as DomNode, false);
+  insecureRefs.sample = insecureRefs.sample.slice(0, INSECURE_SAMPLE_MAX);
+  const imagesMissingAltSampleCapped = imagesMissingAltSample.slice(0, IMAGE_SAMPLE_MAX);
+
+  // `.text()` with every image's trimmed, non-empty `alt` read where the image
+  // sits: an image link's alt is its anchor text (Phase 26b). Every other node
+  // contributes what `.text()` gives it, so the anchors with no image agree
+  // with the oracle's earlier reading exactly.
+  const anchorText = (node: DomNode): string => {
+    if (node.type === "text") return node.data ?? "";
+    const alt = node.type === "tag" && node.name === "img" ? node.attribs?.["alt"]?.trim() : undefined;
+    return (alt ?? "") + (node.children ?? []).map(anchorText).join("");
+  };
 
   const linksByTarget = new Map<string, RawPageAnalysis["links"][number]>();
   $("a[href]").each((_, el) => {
@@ -492,7 +599,10 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     if (!resolved) return;
     if (linksByTarget.has(resolved)) return;
     if (linksByTarget.size >= 2_000) return;
-    const anchor = $(el).text().replace(/\s+/g, " ").trim().slice(0, 200);
+    const anchor = anchorText(el as unknown as DomNode)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 200);
     const rel = fold($(el).attr("rel")) ?? null;
     linksByTarget.set(resolved, {
       href: resolved,
@@ -568,15 +678,10 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       if (name === "meta") {
         const metaName = fold(attribs["name"]);
         const property = fold(attribs["property"]);
-        const tag =
-          isSocial(property) && property.startsWith("og:")
-            ? property
-            : isSocial(metaName)
-              ? metaName
-              : isSocial(property)
-                ? property
-                : undefined;
-        if (tag !== undefined) {
+        // Ruling R6: every DISTINCT social tag the element names, by either
+        // attribute; a twitter tag named only by `property=` is flagged.
+        const tags = new Set([property, metaName].filter(isSocial));
+        for (const tag of tags) {
           if (tag !== metaName && tag.startsWith("twitter:")) xViaProperty = true;
           if (outside) socialOutsideHead = true;
           const values = socialValues.get(tag) ?? [];
@@ -668,6 +773,13 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     metaDescriptionCount,
     robotsMetas,
     metaRefresh,
+    anchorCounts,
+    relNextCount: byRel("link", "next").length,
+    relPrevCount: byRel("link", "prev").length,
+    insecureRefs,
+    imagesEmptyAlt,
+    imagesAltTooLong,
+    imagesMissingAltSample: imagesMissingAltSampleCapped,
     links: Array.from(linksByTarget.values()),
     bodyText,
     h1s,
@@ -1302,5 +1414,77 @@ describe("the Phase 26b head facts and social set, against the DOM", () => {
       </head><body><svg><title>icon</title></svg><h2>  First  <em>sub</em> </h2><h2>second</h2></body></html>`);
     expectParity(`<html lang=""><body><h2></h2></body></html>`);
     expectParity(`<p>a fragment with no html tag</p>`);
+  });
+
+  it("agrees on ruling R6: repeated robots contents collapse, one meta naming two tags is both", () => {
+    expectParity(`<html><head>
+      <meta name="robots" content="index"><meta name="robots" content=" index ">
+      <meta name="robots" content="noarchive"><meta name="robots" content="index">
+      <meta name="twitter:title" property="og:title" content="both">
+      <meta name="og:description" property="twitter:description" content="crossed">
+      <meta name="twitter:card" property="twitter:card" content="summary">
+      </head><body><p>x</p><meta name="robots" content="noindex"></body></html>`);
+  });
+});
+
+/**
+ * Phase 26b's body facts (Task 3) against the selectors they are defined by:
+ * `a` start tags for the anchor counts, `img` for the alt facts,
+ * `link[rel~=next|prev]` for the counts, the closed media/frame/form list for
+ * the insecure references, and anchor text with `img[alt]` folded in.
+ */
+describe("the Phase 26b body facts, against the DOM", () => {
+  it("agrees on anchors that are not links", () => {
+    expectParity(`<html><body>
+      <a name="top"></a><a id="x">y</a><a onclick="go()">a</a><a role="LINK">b</a><a role="tab">t</a>
+      <a href="#section">s</a><a href="#">h</a><a href=" #! ">b</a>
+      <a href=" JavaScript:void(0)">j</a><a href="">e</a><a href="   ">e2</a>
+      <a target="_BLANK" rel="noopener" href="/x">x</a><a target="_blank" href="/y">y</a>
+      <a target="_blank" rel="NoReferrer nofollow" href="/z">z</a>
+      <a target="_blank" href="javascript:void(0)">jb</a><a target="_blank">nb</a>
+      <noscript><a href="#">ns</a></noscript>
+      </body></html>`);
+  });
+
+  it("agrees on image alt folded into anchor text", () => {
+    expectParity(`<html><body>
+      <a href="/logo"><img src="a.png" alt="Logo"></a>
+      <a href="/none"><img src="b.png"></a>
+      <a href="/mixed">Visit <img src="c.png" alt="  our shop "> now</a>
+      <a href="/blank"><img src="d.png" alt="  "></a>
+      <img src="loose.png" alt="Loose"><a href="/after">After</a>
+      </body></html>`);
+  });
+
+  it("agrees on rel next/prev counts", () => {
+    expectParity(`<html><head><link rel="next" href="/2"><link rel="NEXT" href="/3">
+      <link rel="prev"><link rel="prev prefetch" href="/0"><link rel="nextx" href="/n">
+      </head><body><p>x</p></body></html>`);
+  });
+
+  it("agrees on insecure references, their order and the sample cap", () => {
+    expectParity(`<html><body>
+      <iframe src="http://x.test/a"></iframe><iframe src="https://x.test/s"></iframe>
+      <video src="http://m.test/1" poster="http://m.test/2"><source src="http://m.test/3">
+        <track src="http://m.test/4"></video>
+      <audio><source src="/rel.mp3"><source src="http://m.test/5"></audio>
+      <picture><source src="http://m.test/pic"></picture><source src="http://m.test/loose">
+      <embed src="http://m.test/6"><object data="http://m.test/7"></object>
+      <form action="http://x.test/post"></form><form action="/ok"></form><form></form>
+      <form action="javascript:void(0)"></form>
+      <iframe src="http://x.test/8"></iframe><iframe src="http://x.test/9"></iframe>
+      <iframe src="http://x.test/10"></iframe><iframe src="http://x.test/11"></iframe>
+      <noscript><iframe src="http://gtm.test/ns"></iframe></noscript>
+      </body></html>`);
+  });
+
+  it("agrees on the image alt facts and the missing-alt sample", () => {
+    const imgs = Array.from({ length: 12 }, (_, i) => `<img src="/i${i}.png">`).join("");
+    expectParity(`<html><body>
+      <img src="/e.png" alt=""><img src="/e2.png" alt="  "><img data-src="/lazy.png">
+      <img src="/long.png" alt="${"a".repeat(101)}"><img src="/ok.png" alt="${"b".repeat(100)}">
+      <img src="/${"s".repeat(600)}">${imgs}
+      <noscript><img src="/ns.png"></noscript>
+      </body></html>`);
   });
 });
