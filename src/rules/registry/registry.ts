@@ -496,6 +496,10 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `directives.unavailable-after` reads its date with `parseRobotsDate`
 //     (ISO 8601, RFC 822 / 850 / 1123), not `Date.parse`: a zone-less form is
 //     UTC with `assumedUtc: true`, and loose text is `dateParsed: false`.
+//     The pagination target lookup drops every `disallowed` row (url-policy
+//     as well as robots.txt): never requested, so
+//     `pagination.non-indexable-target` no longer reports a url-policy
+//     refusal as a fetched non-200; `next-target-uncrawled` reports it.
 export const RULESET_VERSION = "0.20.0";
 
 /**

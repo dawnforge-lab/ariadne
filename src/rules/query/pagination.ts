@@ -9,7 +9,6 @@ import {
   hasNoindex,
   isAuditable,
   queryFinding,
-  ROBOTS_BLOCKED,
   type RuleIdentity,
 } from "../helpers.js";
 import { resolveEffectiveCanonical } from "../page/canonical.js";
@@ -175,10 +174,13 @@ async function eachPaginatedPage(
         from pages p
         where p.crawl_id = ${crawlId}
           and p.url = any(${sql.param(wanted)}::text[])
-          -- A robots-blocked row (Phase 23 T3) is a URL the crawl recorded and
-          -- NEVER FETCHED: to "was the next page crawled" it answers no, exactly
-          -- as the absence of a row did before such rows existed.
-          and not ${ROBOTS_BLOCKED("p")}`);
+          -- A disallowed row is a URL the crawl recorded and NEVER REQUESTED:
+          -- robots.txt refused it (Phase 23 T3, ROBOTS_BLOCKED) or our own
+          -- url-policy did, before any connection was made. Either way, to "was
+          -- the next page crawled" it answers no, exactly as the absence of a
+          -- row did before such rows existed, so it is not a target any rule
+          -- here judges as fetched (non-indexable-target, next-not-linked).
+          and p.fetch_class <> 'disallowed'`);
       for (const row of rows.rows) {
         targets.set(String(row.url), {
           url: String(row.url),
@@ -544,7 +546,8 @@ export const paginationRules: QueryRule[] = [
   // The series points at a page it cannot use: a rel=next or rel=prev whose
   // target the crawl FETCHED and that is not a 200, or is a 200 that says
   // noindex. A target the crawl never fetched is `next-target-uncrawled`'s, and
-  // a robots-blocked one was never requested. A 404 here is a broken series; a
+  // so is a `disallowed` one (robots.txt or url-policy), which was never
+  // requested. A 404 here is a broken series; a
   // noindex here is a series whose pages the site asked to be kept out.
   defineRule<QueryRule>({
     kind: "query",

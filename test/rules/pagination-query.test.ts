@@ -393,30 +393,14 @@ describe("paginationRules against the database", () => {
       });
     });
 
-    it("says why a target with no status is not usable: a timeout, a refused URL", async () => {
+    it("says why a fetched target with no status is not usable: a timeout", async () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, [
         { path: "/a", relNext: "/slow" },
         { path: "/slow", fetchClass: "timeout", statusCode: null },
-        { path: "/b", relNext: "/refused" },
       ]);
-      // A refusal by our own url-policy: `disallowed`, but NOT a robots.txt
-      // row, so it was a URL the crawl met and could not read.
-      await db.insert(pages).values({
-        id: `page_${randomUUID()}`,
-        crawlId,
-        url: url("/refused"),
-        urlNormalised: url("/refused"),
-        fetchClass: "disallowed",
-        fetchReason: "url-policy: private address",
-        statusCode: null,
-        depth: 1,
-        discoveredVia: "link",
-      });
       const found = await findings("pagination.non-indexable-target", crawlId);
-      expect(
-        found.map((f) => [f.pageUrl, f.evidence]).sort((x, y) => String(x[0]).localeCompare(String(y[0]))),
-      ).toEqual([
+      expect(found.map((f) => [f.pageUrl, f.evidence])).toEqual([
         [
           url("/a"),
           {
@@ -424,16 +408,6 @@ describe("paginationRules against the database", () => {
             target: url("/slow"),
             targetStatus: null,
             targetFetchClass: "timeout",
-            targetNoindex: false,
-          },
-        ],
-        [
-          url("/b"),
-          {
-            rel: "next",
-            target: url("/refused"),
-            targetStatus: null,
-            targetFetchClass: "disallowed",
             targetNoindex: false,
           },
         ],
@@ -495,25 +469,46 @@ describe("paginationRules against the database", () => {
       ]);
     });
 
-    it("leaves uncrawled and robots-blocked targets to next-target-uncrawled", async () => {
+    // Every `disallowed` row is a URL the crawl recorded and NEVER REQUESTED:
+    // robots.txt refused it, or our own url-policy did (a private address, a
+    // blocked host) before any connection. Neither was fetched, so neither is
+    // a fetched non-200 target; both are next-target-uncrawled's.
+    it("leaves uncrawled, robots-blocked and url-policy-refused targets to next-target-uncrawled", async () => {
       const crawlId = await newCrawl();
       await addPages(crawlId, [
         { path: "/a", relNext: "/never-crawled" },
         { path: "/b", relNext: "/blocked" },
+        { path: "/c", relNext: "/refused" },
+        { path: "/d", relPrev: "/refused" },
       ]);
-      await db.insert(pages).values({
-        id: `page_${randomUUID()}`,
-        crawlId,
-        url: url("/blocked"),
-        urlNormalised: url("/blocked"),
-        fetchClass: "disallowed",
-        fetchReason: "robots.txt: Disallow: /blocked",
-        statusCode: null,
-        depth: 1,
-        discoveredVia: "link",
-      });
+      await db.insert(pages).values([
+        {
+          id: `page_${randomUUID()}`,
+          crawlId,
+          url: url("/blocked"),
+          urlNormalised: url("/blocked"),
+          fetchClass: "disallowed",
+          fetchReason: "robots.txt: Disallow: /blocked",
+          statusCode: null,
+          depth: 1,
+          discoveredVia: "link",
+        },
+        {
+          id: `page_${randomUUID()}`,
+          crawlId,
+          url: url("/refused"),
+          urlNormalised: url("/refused"),
+          fetchClass: "disallowed",
+          fetchReason: "url-policy: private address",
+          statusCode: null,
+          depth: 1,
+          discoveredVia: "link",
+        },
+      ]);
 
       expect(await findings("pagination.non-indexable-target", crawlId)).toHaveLength(0);
+      const uncrawled = await findings("pagination.next-target-uncrawled", crawlId);
+      expect(uncrawled.map((f) => f.pageUrl).sort()).toEqual([url("/a"), url("/b"), url("/c")]);
     });
 
     it("is silent on a healthy series", async () => {
