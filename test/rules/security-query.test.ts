@@ -212,6 +212,26 @@ describe("missingSecurityHeaders", () => {
   });
 });
 
+describe("security.headers-not-recorded: no silent zero (PR #22 review)", () => {
+  it("throws when the cohort count returns no row, rather than reading it as zero", async () => {
+    // A count without `group by` always returns one row, so an empty result is
+    // a broken driver or query, never an empty cohort. Replayed answers: the
+    // coverage census says a page predates Phase 25, then the cohort count
+    // comes back empty.
+    const answers = [{ rows: [{ at_or_above: 0, below: 1 }] }, { rows: [] }];
+    const fake = {
+      execute: async () => {
+        const next = answers.shift();
+        if (next === undefined) throw new Error("unexpected query");
+        return next;
+      },
+    } as unknown as Db;
+    await expect(rule("security.headers-not-recorded").run(fake, "crawl_x")).rejects.toThrow(
+      /aggregate returned no row/,
+    );
+  });
+});
+
 describe("securityRules against the database", () => {
   let db: Db;
   const createdCrawls: string[] = [];

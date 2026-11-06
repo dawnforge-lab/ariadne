@@ -278,7 +278,13 @@ async function headersNotRecordedFindings(
   const cohort = await db.execute<{ n: number }>(sql`
     select count(*)::int as n from pages p
     where p.crawl_id = ${crawlId} and ${HTTPS_COHORT}`);
-  if ((cohort.rows[0]?.n ?? 0) === 0) return [];
+  // A count with no `group by` always answers one row: none is a broken query
+  // or driver, never an empty cohort (hard rule 7).
+  const row = cohort.rows[0];
+  if (row === undefined) {
+    throw new Error("security.headers-not-recorded: aggregate returned no row");
+  }
+  if (row.n === 0) return [];
   return [
     queryFinding(self, {
       pageId: null,
