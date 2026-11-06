@@ -52,25 +52,41 @@ export function storableCap(raw: string, max = Infinity): string {
  * `===` the input and objects are rebuilt with the same keys in the same order.
  * Parity and dedupe keys therefore see clean text exactly as before.
  *
- * Recursive, so its depth is the value's nesting depth. The rows it sees are
- * bounded by the analyzer's caps (`MAX_LD_JSON_CHARS` for JSON-LD), and the
- * driver's own `JSON.stringify` of the same value recurses just as deep.
+ * DEPTH IS BOUNDED, and going past the bound is a defect, so it throws (ruling
+ * R11). The walk recurses, and so does the driver's own `JSON.stringify` of the
+ * same value. The producers cap their nesting well below the bound: JSON-LD is
+ * refused past `MAX_LD_JSON_NESTING` (64) in the analyzer, and every other row
+ * is a few levels deep. A value deeper than `STORABLE_MAX_DEPTH` therefore
+ * means a producer lost its cap. It fails loudly here; it is never trimmed or
+ * dropped.
+ *
+ * Objects are built with `Object.fromEntries`, which defines properties and
+ * never assigns them. A `__proto__` key, an own key in anything `JSON.parse`
+ * made, therefore stays a key. Assigning it would call the prototype setter:
+ * the key would vanish and the prototype would change (review I2).
  */
 export function storableDeep<T>(value: T): T {
-  return deep(value) as T;
+  return deep(value, 0) as T;
 }
 
-function deep(value: unknown): unknown {
+/** The deepest array/object nesting `storableDeep` accepts; see its docblock. */
+export const STORABLE_MAX_DEPTH = 100;
+
+function deep(value: unknown, depth: number): unknown {
   if (typeof value === "string") return storableText(value).text;
-  if (Array.isArray(value)) return value.map(deep);
-  if (value !== null && typeof value === "object") {
-    const proto: unknown = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) return value;
-    const out: Record<string, unknown> = {};
-    for (const [key, inner] of Object.entries(value)) out[storableText(key).text] = deep(inner);
-    return out;
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= STORABLE_MAX_DEPTH) {
+    throw new Error(
+      `storableDeep: value nested deeper than ${STORABLE_MAX_DEPTH} levels; ` +
+        "the producer that built it must cap its nesting",
+    );
   }
-  return value;
+  if (Array.isArray(value)) return value.map((inner) => deep(inner, depth + 1));
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, inner]) => [storableText(key).text, deep(inner, depth + 1)]),
+  );
 }
 
 /** ES2024's `String.prototype.toWellFormed` (Node 22); the project's ES2023 lib does not declare it. */

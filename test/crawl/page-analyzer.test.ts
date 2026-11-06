@@ -936,6 +936,36 @@ describe("html structure: the head closed early (deviation 6, Review Focus 3)", 
     expect(s.closedEarly).toBeNull();
   });
 
+  it("script, noframes, basefont and bgsound inside a head <noscript> are not candidates (R12)", () => {
+    for (const child of [
+      `<script>1</script>`,
+      `<noframes>n</noframes>`,
+      `<basefont size="3">`,
+      `<bgsound src="/s.wav">`,
+    ]) {
+      const s = structureOf(`<html><head><noscript>${child}</noscript><title>t</title></head><body></body></html>`);
+      expect(s.closedEarly, child).toBeNull();
+    }
+  });
+
+  it("an orphan </head> is not evidence: htmlparser2 drops it (documented limit)", () => {
+    expect(structureOf(`<title>t</title><div>x</div></head>`).closedEarly).toBeNull();
+  });
+
+  it("C1: a head text of 2 MiB of inner spaces is trimmed in linear time", () => {
+    // `[ws]+$` backtracked quadratically on this shape (80k spaces: ~10 s); the
+    // edge scan is linear, so 2 MiB finishes well inside the test timeout.
+    const spaces = " ".repeat(2 * 1024 * 1024);
+    const s = structureOf(`<head>a${spaces}b</head>`);
+    expect(s.closedEarly).toEqual({
+      tag: "#text",
+      inNoscript: false,
+      snippet: `a${" ".repeat(HEAD_SNIPPET_MAX - 1)}`,
+    });
+    // Short text: both edges trimmed, the inner run kept.
+    expect(structureOf(`<head> \t a  b \n</head>`).closedEarly?.snippet).toBe("a  b");
+  });
+
   it("20 MB-safe: 100,000 divs leave a capped snippet and scalar state", () => {
     const div = `<div class="${"c".repeat(300)}">x</div>`;
     const s = structureOf(

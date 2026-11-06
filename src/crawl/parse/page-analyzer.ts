@@ -424,7 +424,8 @@
  *  - `closedEarly` (deviation 6): the first CANDIDATE met while the head
  *    machine is in head mode — a start tag outside `HEAD_ALLOWED` (the token
  *    `headClosedBy` names; a stray `</br>` included, a stray `</p>` not), a
- *    start tag other than `link`/`meta`/`style` inside a head `<noscript>`
+ *    start tag inside a head `<noscript>` other than `link`/`meta`/`style`
+ *    and, per ruling R12, `script`/`noframes`/`basefont`/`bgsound`
  *    (`inNoscript: true`), or non-whitespace text (`#text`, snippet the text
  *    trimmed of HTML whitespace). A start tag's snippet is its source,
  *    `html.slice(startIndex, endIndex + 1)`, cut at `HEAD_SNIPPET_MAX` before it
@@ -886,10 +887,21 @@ const AFTER_HEAD_REOPENS = new Set([
 ]);
 /**
  * The children a head `<noscript>` may hold without ending the head when
- * scripting is off (Phase 26b T4, the brief's closed list): anything else
- * inside one is a closed-early candidate (deviation 6).
+ * scripting is off: anything else inside one is a closed-early candidate
+ * (deviation 6). The brief's list was `link`, `meta`, `style`. Ruling R12 adds
+ * `script`, `noframes`, `basefont` and `bgsound`: the "in head noscript"
+ * insertion mode processes those in the head (`script` by popping the noscript
+ * and reprocessing it there), so none of them closes the head.
  */
-const HEAD_NOSCRIPT_CHILDREN = new Set(["link", "meta", "style"]);
+const HEAD_NOSCRIPT_CHILDREN = new Set([
+  "link",
+  "meta",
+  "style",
+  "script",
+  "noframes",
+  "basefont",
+  "bgsound",
+]);
 /**
  * The HTML "body-ok" link types: a `<link>` whose `rel` tokens are all among
  * these may sit in a body, so it is no evidence the head was meant to continue
@@ -908,8 +920,9 @@ const BODY_OK_LINK_RELS = new Set([
 ]);
 /** Text that is not ASCII whitespace as HTML defines it (tab, LF, FF, CR, space). */
 const NON_HTML_WHITESPACE = /[^\t\n\f\r ]/;
-/** Leading and trailing ASCII whitespace as HTML defines it. */
-const HTML_WHITESPACE_EDGES = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
+/** Tab, LF, FF, CR and space: ASCII whitespace as HTML defines it. */
+const isHtmlWhitespace = (code: number) =>
+  code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
 /** Subtrees whose text is not visible content. */
 const NON_CONTENT_TAGS = new Set(["script", "style", "noscript", "svg"]);
 /**
@@ -1071,6 +1084,14 @@ const MAX_LD_JSON_CHARS = 100_000;
 /** How far into nested arrays / `@graph` the JSON-LD node walk will go. */
 const MAX_LD_JSON_DEPTH = 5;
 /**
+ * The deepest array/object nesting a JSON-LD block may have (ruling R11). A
+ * deeper block is refused as a parse error, before `JSON.parse` sees it: its
+ * nodes would reach the writer's recursive storability walk and the driver's
+ * `JSON.stringify` (both recursive), and real JSON-LD is a handful of levels
+ * deep. Below `STORABLE_MAX_DEPTH` (storable-text.ts) by design.
+ */
+export const MAX_LD_JSON_NESTING = 64;
+/**
  * Placeholder copy, matched against the visible text (never the raw HTML — a
  * lorem-ipsum string in a script or a CSS comment is not shipped copy).
  * The accumulator collapses whitespace, so the two words are always one space
@@ -1176,6 +1197,33 @@ interface OpenAnchor {
   href: string;
   rel: string | null;
   text: string[];
+}
+
+/**
+ * The deepest `{` / `[` nesting in a JSON text, read without parsing it and
+ * without recursion: one pass, string literals (and their escapes) skipped.
+ * The text may not be valid JSON; `JSON.parse` decides that afterwards. Ruling
+ * R11 refuses a block deeper than `MAX_LD_JSON_NESTING`.
+ */
+function jsonNestingDepth(text: string): number {
+  let depth = 0;
+  let max = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 0x5c) i += 1; // backslash: skip the escaped unit
+      else if (c === 0x22) inString = false;
+    } else if (c === 0x22) {
+      inString = true;
+    } else if (c === 0x7b || c === 0x5b) {
+      depth += 1;
+      if (depth > max) max = depth;
+    } else if (c === 0x7d || c === 0x5d) {
+      depth -= 1;
+    }
+  }
+  return max;
 }
 
 /**
@@ -1674,10 +1722,18 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (headMode === "head") {
       headClosedBy = "#text";
       // Trimmed of HTML whitespace only, so the text that made it a candidate
-      // (a non-breaking space included) is what the snippet shows.
+      // (a non-breaking space included) is what the snippet shows. Linear by
+      // construction: one forward search for the first non-whitespace unit,
+      // one backward scan for the last, and a slice of at most the cap plus
+      // one unit (so a pair straddling the cap is seen and dropped whole).
+      // Never a trimming regex: `[ws]+$` backtracks quadratically on a long
+      // inner whitespace run (review C1).
+      const start = probe.search(NON_HTML_WHITESPACE);
+      let end = probe.length;
+      while (end > start && isHtmlWhitespace(probe.charCodeAt(end - 1))) end -= 1;
       takeCandidate(
         "#text",
-        storableCap(probe.replace(HTML_WHITESPACE_EDGES, ""), HEAD_SNIPPET_MAX),
+        storableCap(probe.slice(start, Math.min(end, start + HEAD_SNIPPET_MAX + 1)), HEAD_SNIPPET_MAX),
         false,
       );
     }
@@ -1731,6 +1787,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         return false;
     }
   };
+  /**
+   * An ORPHAN `</head>` (no `<head>` open) is never evidence here: htmlparser2
+   * drops an end tag whose element is not open, so no event arrives. For
+   * example, `<title>t</title><div>x</div></head>` reports null. This is the
+   * Phase 23 known limit again, here as a rare false negative.
+   */
   const structureOnCloseTag = (name: string, isImplied: boolean) => {
     // Implied or not: an svg htmlparser2 closes at its parent's end is closed.
     if (name === "svg" && structureSvgDepth > 0) structureSvgDepth -= 1;
@@ -1894,6 +1956,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     ldJsonChars = 0;
     ldJsonOversize = false;
     if (oversize) {
+      structuredDataParseErrors += 1;
+      return;
+    }
+    // Ruling R11: too deep is refused like too big, counted and not stored.
+    if (jsonNestingDepth(text) > MAX_LD_JSON_NESTING) {
       structuredDataParseErrors += 1;
       return;
     }

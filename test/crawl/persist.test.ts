@@ -979,6 +979,47 @@ describe("PageWriter", () => {
     expect(block?.raw).toEqual({ "@type": "Article", name: "a\u2400b", "k\u2400": ["c\u2400"] });
   });
 
+  it("round-trips a JSON-LD `__proto__` key intact (review I2)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/proto-key`;
+    const analysis = analyzePage(
+      `<html><head><script type="application/ld+json">{"@type":"X","__proto__":{"a":1},"name":"n"}</script>` +
+        `</head><body><p>x</p></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [block] = await db
+      .select({ raw: structuredData.raw })
+      .from(structuredData)
+      .where(eq(structuredData.crawlId, crawlId));
+    const raw = block?.raw as Record<string, unknown>;
+    expect(Object.hasOwn(raw, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(raw)).toBe(Object.prototype);
+    expect(raw).toEqual(JSON.parse(`{"@type":"X","__proto__":{"a":1},"name":"n"}`));
+  });
+
+  it("persists a page whose 5,000-deep JSON-LD block was refused (ruling R11)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/deep-ld`;
+    const deep = `{"@type":"X","a":${"[".repeat(5_000)}${"]".repeat(5_000)}}`;
+    const analysis = analyzePage(
+      `<html><head><script type="application/ld+json">${deep}</script></head><body><p>x</p></body></html>`,
+      url,
+    );
+    expect(analysis.structuredDataParseErrors).toBe(1);
+    expect(analysis.structuredData).toEqual([]);
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.structuredDataParseErrors).toBe(1);
+    expect(await countOf(structuredData, crawlId)).toBe(0);
+  });
+
   it("persists a lone surrogate in a direct analysis string as U+FFFD (ruling R10)", async () => {
     const crawlId = await newCrawl();
     const writer = new PageWriter(db, crawlId);

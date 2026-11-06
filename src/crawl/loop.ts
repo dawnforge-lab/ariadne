@@ -106,7 +106,7 @@ import {
 } from "./resources/fetch-resources.js";
 import { isUrlAllowed } from "./url-policy.js";
 import { engineVersion, redactRequestHeaders } from "./versions.js";
-import { storableDeep } from "./storable-text.js";
+import { storableCap, storableDeep } from "./storable-text.js";
 
 /**
  * `RenderSelectionConfig` is extended rather than restated: the render pass's
@@ -1156,7 +1156,9 @@ async function runToCompletion(
           .perHostDelayMs;
       },
     });
-    await db.update(crawls).set({ hostProbe }).where(eq(crawls.id, crawlId));
+    // Redirect targets and reasons the site's other spellings answered with:
+    // site text, so through the storability boundary (ruling R11).
+    await db.update(crawls).set({ hostProbe: storableDeep(hostProbe) }).where(eq(crawls.id, crawlId));
   }
   // Named by the probe: applied before the window and the gate exist, so no
   // worker ever runs at the unclamped pace — nor does discovery's sitemap walk.
@@ -1181,7 +1183,10 @@ async function runToCompletion(
   // exactly the crawl whose discovery evidence a reader most needs.
   await db
     .update(crawls)
-    .set({ discovery: discoveryEvidence(discovery, config) })
+    // The site's robots.txt text rides in this evidence (`robots.raw`, and the
+    // note can quote it), so it passes the storability boundary (ruling R11):
+    // a NUL in robots.txt must not fail the crawl before any page is fetched.
+    .set({ discovery: storableDeep(discoveryEvidence(discovery, config)) })
     .where(eq(crawls.id, crawlId));
 
   // Complete disallow: robots.txt could not be read, which is not permission
@@ -2285,7 +2290,12 @@ async function writeNotFoundProbe(
   crawlId: string,
   probe: NotFoundProbeEvidence,
 ): Promise<void> {
-  await db.update(crawls).set({ notfoundProbe: probe }).where(eq(crawls.id, crawlId));
+  // The site's answer to a missing URL (status, reason, location): site text,
+  // so through the storability boundary (ruling R11).
+  await db
+    .update(crawls)
+    .set({ notfoundProbe: storableDeep(probe) })
+    .where(eq(crawls.id, crawlId));
 }
 
 /**
@@ -2567,7 +2577,9 @@ async function closeCrawl(
       status,
       finishedAt: new Date(),
       pagesCrawled,
-      failureReason,
+      // A reason can quote the site (a robots.txt note, a fetch reason), so it
+      // passes the storability boundary (ruling R11). Null stays null.
+      failureReason: failureReason === null ? null : storableCap(failureReason),
       ...(refsCapped === null
         ? {}
         : {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzePage,
+  MAX_LD_JSON_NESTING,
   MAX_SOCIAL_IMAGE_REFS,
   SOFT_404_PHRASES,
 } from "../../src/crawl/parse/page-analyzer.js";
@@ -221,6 +222,35 @@ describe("JSON-LD capture", () => {
     );
     expect(a.structuredData.map((b) => b.type)).toEqual(["Article"]);
     expect(a.structuredDataParseErrors).toBe(1);
+  });
+  it("refuses a block nested deeper than MAX_LD_JSON_NESTING as a parse error (R11)", () => {
+    const nested = (depth: number) =>
+      `{"@type":"X","a":${"[".repeat(depth - 1)}${"]".repeat(depth - 1)}}`;
+    // The object is level 1, so `depth - 1` arrays put the deepest at `depth`.
+    const atCap = analyzePage(
+      `<script type="application/ld+json">${nested(MAX_LD_JSON_NESTING)}</script>`,
+      "https://ex.com/",
+    );
+    expect(atCap.structuredData.map((b) => b.type)).toEqual(["X"]);
+    expect(atCap.structuredDataParseErrors).toBe(0);
+    for (const depth of [MAX_LD_JSON_NESTING + 1, 5_000]) {
+      const a = analyzePage(
+        `<script type="application/ld+json">${nested(depth)}</script>` +
+          `<script type="application/ld+json">{"@type":"Article"}</script>`,
+        "https://ex.com/",
+      );
+      expect(a.structuredData.map((b) => b.type), String(depth)).toEqual(["Article"]);
+      expect(a.structuredDataParseErrors, String(depth)).toBe(1);
+    }
+  });
+  it("counts nesting outside string literals only, escapes included", () => {
+    const deepInString = `{"@type":"X","s":"${"[".repeat(200)}\\"${"{".repeat(200)}"}`;
+    const a = analyzePage(
+      `<script type="application/ld+json">${deepInString}</script>`,
+      "https://ex.com/",
+    );
+    expect(a.structuredData.map((b) => b.type)).toEqual(["X"]);
+    expect(a.structuredDataParseErrors).toBe(0);
   });
   it("does not treat JSON-LD text as visible content", () => {
     const a = analyzePage(

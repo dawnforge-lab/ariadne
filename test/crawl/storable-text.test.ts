@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
-import { NUL_MARK, storableCap, storableDeep, storableText } from "../../src/crawl/storable-text.js";
+import {
+  NUL_MARK,
+  STORABLE_MAX_DEPTH,
+  storableCap,
+  storableDeep,
+  storableText,
+} from "../../src/crawl/storable-text.js";
 
 describe("storableText: site text Postgres will accept", () => {
   it("replaces every U+0000 with U+2400, keeping the length", () => {
@@ -63,5 +69,25 @@ describe("storableDeep: the writer's boundary (ruling R10)", () => {
     expect(JSON.stringify(out, (_k, v: unknown) => (typeof v === "bigint" ? v.toString() : v))).toBe(
       JSON.stringify(analysis, (_k, v: unknown) => (typeof v === "bigint" ? v.toString() : v)),
     );
+  });
+
+  it("keeps a `__proto__` key as a key and leaves the prototype alone (review I2)", () => {
+    const parsed = JSON.parse(`{"@type":"X","__proto__":{"a":1},"name":"n"}`) as Record<string, unknown>;
+    const out = storableDeep(parsed);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.keys(out)).toEqual(["@type", "__proto__", "name"]);
+    expect(JSON.stringify(out)).toBe(JSON.stringify(parsed));
+  });
+
+  it("throws past STORABLE_MAX_DEPTH: a producer lost its cap (ruling R11)", () => {
+    const nest = (levels: number): unknown => {
+      let v: unknown = "leaf";
+      for (let i = 0; i < levels; i += 1) v = [v];
+      return v;
+    };
+    expect(storableDeep(nest(STORABLE_MAX_DEPTH))).toEqual(nest(STORABLE_MAX_DEPTH));
+    expect(() => storableDeep(nest(STORABLE_MAX_DEPTH + 1))).toThrow(/deeper than 100 levels/);
+    expect(() => storableDeep(nest(5_000))).toThrow(/deeper than 100 levels/);
   });
 });

@@ -434,9 +434,20 @@ export class PageWriter {
    * through here, so every page-derived string in it is made storable at this
    * one place: titles, anchors, rels, JSON-LD values and keys, URLs, header
    * values, reasons. `storableDeep` maps U+0000 to U+2400 and a lone surrogate
-   * to U+FFFD, and returns a clean value unchanged. One hostile page therefore
-   * cannot make a batch insert throw, which would lose the batch and fail the
-   * crawl, and a resume would hit the same page again.
+   * to U+FFFD, and returns a clean value unchanged.
+   *
+   * WHAT THIS GUARANTEES, exactly (ruling R11):
+   *  - No string in a buffered row holds U+0000 or a lone surrogate, the two
+   *    things Postgres `text`/`jsonb` refuse in a string. Such a page therefore
+   *    cannot make a batch insert throw on its text. Before this, it lost the
+   *    batch, failed the crawl, and failed again on resume.
+   *  - Nesting is bounded. A row nested deeper than `STORABLE_MAX_DEPTH` makes
+   *    `storableDeep` THROW here, at `addPage`, because a producer has lost its
+   *    cap. That is a defect to fix, never a value to trim. The analyzer refuses
+   *    JSON-LD deeper than `MAX_LD_JSON_NESTING` (64) as a parse error, so a
+   *    hostile page cannot reach it.
+   *  - Nothing else. Column constraints (NOT NULL, integer ranges, the
+   *    `(crawl_id, url)` conflict) are each value's producer's business.
    */
   private async push<T>(
     buffer: T[],
