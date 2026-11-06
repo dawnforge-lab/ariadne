@@ -44,8 +44,9 @@ describe("captureResponseHeaders", () => {
     expect(cut.truncated).toEqual(["link"]);
   });
 
-  it("holds exactly the 20 agreed names, all lower-case", () => {
-    expect(RESPONSE_HEADER_ALLOWLIST).toHaveLength(20);
+  it("holds exactly the 21 agreed names, all lower-case", () => {
+    expect(RESPONSE_HEADER_ALLOWLIST).toHaveLength(21);
+    expect(RESPONSE_HEADER_ALLOWLIST.includes("refresh")).toBe(true);
     for (const name of RESPONSE_HEADER_ALLOWLIST) expect(name).toBe(name.toLowerCase());
   });
 });

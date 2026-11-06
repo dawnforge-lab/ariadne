@@ -7,6 +7,9 @@ import type { StoredHostSpacing } from "../crawl/politeness.js";
 import type { StoredPlatformProfile } from "../crawl/platform.js";
 import type { RenderConsole } from "../crawl/render/console-capture.js";
 import type { StoredResponseHeaders } from "../crawl/response-headers.js";
+import type {
+  AnchorCounts, HtmlStructure, InsecureRefs, RefreshFact, RobotsMetaEntry, SocialFacts,
+} from "../crawl/parse/page-facts.js";
 
 export const crawls = pgTable("crawls", {
   id: text("id").primaryKey(),                 // e.g. crawl_<ulid>
@@ -862,6 +865,25 @@ export const pages = pgTable("pages", {
   // loudly rather than reading a missing fact as an absent one
   // (`extractionCoverage`, src/rules/helpers.ts).
   extractionVersion: smallint("extraction_version"),
+  // PHASE 26b PAGE FACTS (migration 0026, extraction version 2). Every column
+  // below is NULLABLE with no default: null means "not measured" (the row was
+  // written before extraction 2, `extraction_version` < 2), never "absent".
+  // Shapes live in src/crawl/parse/page-facts.ts.
+  htmlLang: text("html_lang"),
+  social: jsonb("social").$type<SocialFacts>(),
+  h2Text: text("h2_text"),
+  titleCount: smallint("title_count"),
+  metaDescriptionCount: smallint("meta_description_count"),
+  robotsMetas: jsonb("robots_metas").$type<RobotsMetaEntry[]>(),
+  metaRefresh: jsonb("meta_refresh").$type<RefreshFact>(),
+  anchorCounts: jsonb("anchor_counts").$type<AnchorCounts>(),
+  insecureRefs: jsonb("insecure_refs").$type<InsecureRefs>(),
+  imagesEmptyAlt: integer("images_empty_alt"),
+  imagesAltTooLong: integer("images_alt_too_long"),
+  imagesMissingAltSample: jsonb("images_missing_alt_sample").$type<string[]>(),
+  relNextCount: smallint("rel_next_count"),
+  relPrevCount: smallint("rel_prev_count"),
+  htmlStructure: jsonb("html_structure").$type<HtmlStructure>(),
   // WHICH RENDER CAPTURE WROTE THE RENDERED COLUMNS (migration 0025;
   // `RENDER_CAPTURE_VERSION`, src/crawl/versions.ts). Stamped by the render writer
   // only, so it is independent of `extraction_version`: re-rendering a pre-25 crawl
@@ -968,6 +990,15 @@ export const pages = pgTable("pages", {
   index("pages_dupe_h1_text")
     .on(t.crawlId, sql`btrim(${t.h1Text})`, t.url)
     .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.h1Text} is not null`),
+  index("pages_dupe_h2_text")
+    .on(t.crawlId, sql`btrim(${t.h2Text})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.h2Text} is not null`),
+  index("pages_dupe_og_title")
+    .on(t.crawlId, sql`btrim(${t.ogTitle})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.ogTitle} is not null`),
+  index("pages_dupe_og_description")
+    .on(t.crawlId, sql`btrim(${t.ogDescription})`, t.url)
+    .where(sql`${t.fetchClass} = 'ok' and ${t.statusCode} = 200 and ${t.isIndexable} = true and ${t.ogDescription} is not null`),
 ]);
 
 export const links = pgTable("links", {

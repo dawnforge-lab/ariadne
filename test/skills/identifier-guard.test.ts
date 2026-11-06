@@ -793,10 +793,10 @@ describe("the skills name only identifiers the engine has", () => {
     expect(skillFiles().length).toBeGreaterThanOrEqual(5);
     expect(SHAPED.length).toBeGreaterThan(500);
     expect(REGISTRY_IDS.size).toBeGreaterThan(50);
-    // 86 since P26a-T2 added CHECK-84..86; 83 since P11-T4 added CHECK-83, the
+    // 88 since P26b-T1 added CHECK-87 and CHECK-88; 86 since P26a-T2 added CHECK-84..86; 83 since P11-T4 added CHECK-83, the
     // engine-coverage check. (The count is one more than the highest id:
     // CHECK-33b is a check in its own right.)
-    expect(CHECK_IDS.size).toBe(86);
+    expect(CHECK_IDS.size).toBe(88);
     expect(TOOL_VOCABULARY.size).toBe(TOOL_NAMES.length + METRIC_SCOPES.length);
   });
 });

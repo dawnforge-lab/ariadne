@@ -163,11 +163,72 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
       },
       truncated: [],
     },
-    extractionVersion: 1,
+    // Extraction 2 (Phase 26b): a clean v2 page carries a clean value for every
+    // new fact, so no later rule fires on it. A v1 row (every new column null) is
+    // `mkV1Page`.
+    extractionVersion: 2,
+    htmlLang: "en",
+    social: {
+      og: {
+        title: "A perfectly reasonable share title",
+        type: "website",
+        image: `${url}/share.png`,
+        url,
+      },
+      x: { card: "summary_large_image", title: "A perfectly reasonable share title" },
+      counts: {
+        "og:title": 1, "og:type": 1, "og:image": 1, "og:url": 1,
+        "twitter:card": 1, "twitter:title": 1,
+      },
+      conflicting: [],
+      outsideHead: false,
+      xViaProperty: false,
+    },
+    h2Text: null,
+    titleCount: 1,
+    metaDescriptionCount: 1,
+    robotsMetas: [],
+    metaRefresh: null,
+    anchorCounts: { noHref: 0, javascript: 0, hashOnly: 0, emptyHref: 0, unsafeBlank: 0 },
+    insecureRefs: { iframe: 0, media: 0, formAction: 0, forms: 0, sample: [] },
+    imagesEmptyAlt: 0,
+    imagesAltTooLong: 0,
+    imagesMissingAltSample: [],
+    relNextCount: 0,
+    relPrevCount: 0,
+    htmlStructure: {
+      htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true, closedEarly: null,
+    },
     renderVersion: null,
     renderConsole: null,
     ...overrides,
   };
+}
+
+/**
+ * A page row written by extraction 1: every Phase 26b column is null ("not
+ * measured"). For the v1-silence tests: a v2 rule must say nothing on it.
+ */
+export function mkV1Page(overrides: Partial<PageRecord> = {}): PageRecord {
+  return mkPage({
+    extractionVersion: 1,
+    htmlLang: null,
+    social: null,
+    h2Text: null,
+    titleCount: null,
+    metaDescriptionCount: null,
+    robotsMetas: null,
+    metaRefresh: null,
+    anchorCounts: null,
+    insecureRefs: null,
+    imagesEmptyAlt: null,
+    imagesAltTooLong: null,
+    imagesMissingAltSample: null,
+    relNextCount: null,
+    relPrevCount: null,
+    htmlStructure: null,
+    ...overrides,
+  });
 }
 
 /**

@@ -407,3 +407,19 @@ export const TITLE_PX_MAX = 561;
 export const TITLE_PX_MIN = 200;
 export const META_PX_MAX = 985;
 export const META_PX_MIN = 400;
+
+/** The longest H2 a heading rule leaves alone, in characters. Strict. */
+export const H2_MAX = 70;
+
+/**
+ * The longest image alt text left alone, in characters. Re-exported from the
+ * extractor, which applies it when counting (`images_alt_too_long`): changing it
+ * needs an `EXTRACTION_VERSION` bump, or stored counts and this constant disagree.
+ */
+export { ALT_TEXT_LONG_CHARS as IMAGE_ALT_MAX } from "../crawl/parse/page-facts.js";
+
+/** The largest og/X share image, in bytes, before `social.image-broken` fires. */
+export const SOCIAL_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+/** The Open Graph tags a complete set carries. */
+export const OG_REQUIRED = ["title", "type", "image", "url"] as const;

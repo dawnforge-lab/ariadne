@@ -1683,6 +1683,8 @@ const AREAS = [
   "Performance",
   "Rendering",
   "Robots.txt",
+  "Social",
+  "HTML",
 ];
 
 /** `Area: Condition` — an area from the list above, then a condition. */

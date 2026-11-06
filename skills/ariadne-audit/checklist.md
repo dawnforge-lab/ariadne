@@ -1270,7 +1270,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     re-crawl
   - Record: per-header count of pages that send it, and the URLs that do not
 
-### CHECK-85: Mixed content
+### CHECK-85: Mixed content and insecure forms
 - **Priority**: High | **Requires**: Engine
 - **Engine**: `issues_list` with `checkId: "CHECK-85"`. The check asks whether an
   HTTPS page references any image, script or stylesheet over `http:`, which a browser
@@ -2014,6 +2014,43 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   - WARN if any link points at `localhost` or a private address, or generic anchors
     are common
   - Record: source page, target URL and anchor text for each finding
+
+### CHECK-87: Social sharing tags (Open Graph and X)
+- **Priority**: Medium | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-87"`. The check asks whether a page
+  carries the Open Graph and X (Twitter) tags that decide how a shared link looks:
+  a complete Open Graph set (title, type, image, url), an X card, tags that do not
+  contradict each other, tags placed in the head, and a share image that loads. The
+  evidence is the social tag set the crawler stored on each page; the image check
+  reads the recorded fetch of the image. These facts exist only for crawls written by
+  extraction version 2 or later: on an older crawl the crawl-level "not recorded" marker is the
+  NOT MEASURED marker, and silence says the crawl never measured them, not that the
+  site is clean. The remedy is a re-crawl. The rules that answer the check are named
+  in the engine's issue listing.
+- **Evaluate**:
+  - PASS if every judged page carries a complete, consistent, head-placed social set
+    and its share image loads
+  - FAIL if any rule listed under this check fired
+  - NOT MEASURED if the crawl-level "not recorded" marker fired
+  - Record: the pages with each gap and the tags that are missing or conflicting
+
+### CHECK-88: HTML document structure
+- **Priority**: Medium | **Requires**: Engine
+- **Engine**: `issues_list` with `checkId: "CHECK-88"`. The check asks whether the
+  HTML document is shaped so a parser reads it as written: one `<html>`, one `<head>`
+  before one `<body>`, and a `<head>` that is not closed early by an element that does
+  not belong in it (which pushes the tags after it, including the title, canonical and
+  robots tags, out of the head). The evidence is the document structure the crawler
+  recorded while parsing each page. These facts exist only for crawls written by
+  extraction version 2 or later: on an older crawl the crawl-level "not recorded" marker is the
+  NOT MEASURED marker. The remedy is a re-crawl.
+- **Evaluate**:
+  - PASS if every judged page has a single, correctly ordered html, head and body and
+    its head is not closed early
+  - FAIL if any rule listed under this check fired
+  - NOT MEASURED if the crawl-level "not recorded" marker fired
+  - Record: the pages, the structural fault and, for an early close, the tag that
+    ended the head
 
 ---
 

@@ -183,6 +183,13 @@
       "when": 1793797676497,
       "tag": "0025_talented_morg",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793987835166,
+      "tag": "0026_safe_paper_doll",
+      "breakpoints": true
     }
   ]
 }

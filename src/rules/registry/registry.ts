@@ -507,7 +507,22 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `pagination.loop` gives the same findings for less work: series that
 //     end are peeled off first, and each loop is walked once, from its
 //     member with the smallest `md5(url)`, then fanned out to its members.
-export const RULESET_VERSION = "0.20.0";
+// 0.21.0: Phase 26b, one parser wave (extraction version 2). ONE BUMP FOR THE
+// PHASE; later tasks append here. The version moves for the 26 new rules, which
+// read page facts the crawler did not extract before.
+//
+//  1. (T1) Migration 0026 adds fifteen nullable `pages` columns, none with a
+//     default (null means "not measured"): `html_lang`, `social`, `h2_text`,
+//     `title_count`, `meta_description_count`, `robots_metas`, `meta_refresh`,
+//     `anchor_counts`, `insecure_refs`, `images_empty_alt`,
+//     `images_alt_too_long`, `images_missing_alt_sample`, `rel_next_count`,
+//     `rel_prev_count` and `html_structure`, plus three duplicate-group indexes
+//     (`pages_dupe_h2_text`, `pages_dupe_og_title`, `pages_dupe_og_description`).
+//     `EXTRACTION_VERSION` moves 1 to 2 and the `refresh` response header joins
+//     the allowlist. CHECK-87 (social sharing tags) and CHECK-88 (HTML document
+//     structure) are new checklist ids; CHECK-85 widens to "Mixed content and
+//     insecure forms". No rule is registered yet.
+export const RULESET_VERSION = "0.21.0";
 
 /**
  * The 47 crawl-derived checks (sf-audit checklist, Pre-Crawl + sections 1–11):
