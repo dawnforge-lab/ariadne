@@ -183,6 +183,7 @@ export function mkPage(overrides: Partial<PageRecord> = {}): PageRecord {
       conflicting: [],
       outsideHead: false,
       xViaProperty: false,
+      imageRefs: { og: `${url}/share.png`, x: null },
     },
     h2Text: "A short section heading",
     titleCount: 1,

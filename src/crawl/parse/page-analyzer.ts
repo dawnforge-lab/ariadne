@@ -365,8 +365,10 @@
  *    at the end); `outsideHead` is any social tag met in body mode. Null only
  *    when the page has no social tag. `ogTitle` / `ogDescription` / `ogImage`
  *    are untouched: first `property=` value, raw, for their existing readers.
- *  - `socialImageRefs`: `og:image` / `twitter:image` values resolved by
- *    `normalizeUrl` under `addResource`'s skip rules, deduped, at most four —
+ *  - `socialImageRefs`: the two JUDGED share images only, the first `og:image`
+ *    and the first `twitter:image`, each resolved once (`shareImageRef`:
+ *    `normalizeUrl` of the whole value under `addResource`'s skip rules) and
+ *    stored as `social.imageRefs`; deduped, at most two (final review I1) —
  *    and deliberately NOT through `addResource`. A browser never loads a share
  *    image, so these become `resources` rows with no `page_resources` edge
  *    (deviation 3): no page weight, no mixed content, no `resources.broken`.
@@ -754,8 +756,9 @@ export interface PageAnalysis {
    */
   social: SocialFacts | null;
   /**
-   * The `og:image` and `twitter:image` values, resolved (`normalizeUrl`) and
-   * deduped, at most `MAX_SOCIAL_IMAGE_REFS`. NOT resource refs: a browser
+   * The non-null `social.imageRefs` (the first `og:image`, then the first
+   * `twitter:image`, each resolved by `shareImageRef`), deduped, so at most
+   * `MAX_SOCIAL_IMAGE_REFS`. NOT resource refs: a browser
    * never loads them, so they become `resources` rows with no `page_resources`
    * edge (deviation 3). A value that names no fetchable file is skipped here
    * and stays, raw, in `social`.
@@ -841,6 +844,19 @@ const SKIPPED_LINK_PROTOCOLS = /^(javascript:|mailto:|tel:|#)/;
  * `normalizeUrl`, which returns null for any other scheme.
  */
 const SKIPPED_RESOURCE_PROTOCOLS = /^(data:|javascript:|#)/i;
+/**
+ * The `resources` key of one share image (Phase 26b): its trimmed, UNCAPPED
+ * value resolved by `normalizeUrl` under `addResource`'s skip rules, or null
+ * when it names no fetchable file. The one place a share image is resolved:
+ * the analyzer stores the result in `SocialFacts.imageRefs` and queues it as
+ * a `resources` row, and `social.image-broken` reads the stored string back
+ * rather than resolving again (final review I1). Exported so a test can seed
+ * exactly what the analyzer would have stored.
+ */
+export function shareImageRef(value: string, pageUrl: string): string | null {
+  if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return null;
+  return normalizeUrl(value, pageUrl);
+}
 /**
  * The start tags the tree builder's "in head" insertion mode keeps in the head
  * (HTML Living Standard §13.2.6.4.4). Anything else — and `<body>` is anything
@@ -1022,14 +1038,16 @@ const MAX_EXTRACTED_LINKS = 2_000;
  */
 export const MAX_RESOURCE_REFS = 2_000;
 /**
- * Social image refs kept per page (Phase 26b). Open Graph allows `og:image` to
- * repeat and real pages do; four covers the `og:image` / `twitter:image` pair
- * and a couple of alternates. Each one is a request the resource pass will
- * spend against somebody's server for a file no page load fetches, so the cap
- * is a politeness bound as much as a memory one. Exported so the suite pins the
- * constant rather than a copy of its value.
+ * Social image refs kept per page (Phase 26b): one per JUDGED share image, the
+ * first `og:image` and the first `twitter:image` — exactly what
+ * `social.image-broken` reads. Open Graph allows `og:image` to repeat (a
+ * gallery), but an alternate no rule judges would be a request spent against
+ * somebody's server for nothing (final review I1), and it could crowd out the
+ * twitter:image that is judged. The bound holds by construction (one ref per
+ * tag); the constant names it. Exported so the suite pins the constant rather
+ * than a copy of its value.
  */
-export const MAX_SOCIAL_IMAGE_REFS = 4;
+export const MAX_SOCIAL_IMAGE_REFS = 2;
 /** Where each social tag's first value lands in `SocialFacts`, and its cap. */
 type SocialSlot =
   | { group: "og"; key: keyof SocialFacts["og"]; cap: number }
@@ -1332,9 +1350,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   const socialConflicting = new Set<SocialTag>();
   let socialOutsideHead = false;
   let xViaProperty = false;
-  // Insertion-ordered and capped at MAX_SOCIAL_IMAGE_REFS: document order,
-  // first occurrence wins, like every other ref list here.
-  const socialImageRefs = new Set<string>();
+  // The judged share images' refs (`shareImageRef` of each tag's FIRST value,
+  // whole, never capped), set when that first value is met; null while the tag
+  // is unseen, which is also what an absent tag stores.
+  const socialImageRef: SocialFacts["imageRefs"] = { og: null, x: null };
 
   // JSON-LD is buffered one block at a time: the tokenizer hands its text over
   // in pieces, and only the closing </script> says the block is complete.
@@ -1826,16 +1845,14 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // name=description>` without one is.
     const value = content?.trim() ?? "";
     const first = socialFirst.get(tag);
-    if (first === undefined) socialFirst.set(tag, value);
-    else if (first !== value) socialConflicting.add(tag);
-    if (tag === "og:image" || tag === "twitter:image") {
-      // `addResource`'s skip rules, in its order, but into a list of its own:
-      // a social image is NOT a resource ref (deviation 3, and the header).
-      if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return;
-      if (socialImageRefs.size >= MAX_SOCIAL_IMAGE_REFS) return;
-      const resolved = normalizeUrl(value, pageUrl);
-      if (resolved !== null) socialImageRefs.add(resolved);
-    }
+    if (first === undefined) {
+      socialFirst.set(tag, value);
+      // Only the FIRST value of each image tag is judged, so only it is
+      // resolved: into a slot of its own, never a resource ref (deviation 3,
+      // and the header).
+      if (tag === "og:image") socialImageRef.og = shareImageRef(value, pageUrl);
+      if (tag === "twitter:image") socialImageRef.x = shareImageRef(value, pageUrl);
+    } else if (first !== value) socialConflicting.add(tag);
   };
 
   const handleMetaTag = (attribs: Record<string, string>) => {
@@ -2447,8 +2464,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     htmlBytes === 0 ? 0 : Math.min(1, Buffer.byteLength(bodyText) / htmlBytes);
 
   // The social set, capped here and only here (see `socialFirst`). Null only
-  // when the page carried no social tag at all.
+  // when the page carried no social tag at all. `imageRefs` is NOT capped: it
+  // is the key of a `resources` row (see the field), and `socialImageRefs` is
+  // exactly its non-null values, deduped, og first.
   let social: SocialFacts | null = null;
+  let socialImageRefs: string[] = [];
   if (socialCounts.size > 0) {
     const og: SocialFacts["og"] = {};
     const x: SocialFacts["x"] = {};
@@ -2465,7 +2485,10 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       conflicting: [...socialConflicting].sort(),
       outsideHead: socialOutsideHead,
       xViaProperty,
+      imageRefs: { ...socialImageRef },
     };
+    const { og: ogRef, x: xRef } = socialImageRef;
+    socialImageRefs = [...new Set([ogRef, xRef].filter((ref) => ref !== null))];
   }
 
   return {
@@ -2527,7 +2550,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     hreflangOutsideHeadCount,
     htmlLang: htmlLang ?? null,
     social,
-    socialImageRefs: [...socialImageRefs],
+    socialImageRefs,
     h2Text,
     titleCount,
     metaDescriptionCount,

@@ -120,7 +120,8 @@
  * and the three image alt facts in the same `img` walk as the alt counter. The
  * oracle moved once more: an anchor's text is now its text nodes with each
  * `img`'s trimmed, non-empty `alt` folded in where the image sits, as the port
- * now reads it.
+ * now reads it; the final review (I2) spaced each alt off as a word of its own.
+ * The same review (I1) added `social.imageRefs` to the compared social set.
  *
  * Phase 26b (P26b-T4) added `htmlStructure` and stripped it, on `headClosedBy`'s
  * reasoning (see `EXTENSION_FIELDS`): explicit html/head/body start-tag counts,
@@ -743,6 +744,16 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       counts[tag] = values.length;
       if (new Set(values).size > 1) conflicting.push(tag);
     }
+    // The judged share images' `resources` keys, from each tag's first value
+    // WHOLE (never the capped one): `normalizeUrl` against the page, except a
+    // value that names no fetchable file (empty, `data:`, `javascript:`, a
+    // bare fragment), which has none. Written from `SocialFacts.imageRefs`'
+    // contract, not by calling the port's `shareImageRef`.
+    const imageRef = (tag: string): string | null => {
+      const first = socialValues.get(tag)?.[0];
+      if (first === undefined || first === "" || /^(data:|javascript:|#)/i.test(first)) return null;
+      return normalizeUrl(first, pageUrl);
+    };
     social = {
       og,
       x,
@@ -750,6 +761,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       conflicting: conflicting.sort(),
       outsideHead: socialOutsideHead,
       xViaProperty,
+      imageRefs: { og: imageRef("og:image"), x: imageRef("twitter:image") },
     } as RawPageAnalysis["social"];
   }
 
@@ -1384,7 +1396,7 @@ describe("the main-content stream, against the DOM", () => {
 /**
  * Phase 26b's head facts and social set against the selectors they are
  * defined by. `socialImageRefs` is stripped (see EXTENSION_FIELDS); the social
- * set it comes from is compared whole.
+ * set it comes from is compared whole, `imageRefs` (its source) included.
  */
 describe("the Phase 26b head facts and social set, against the DOM", () => {
   it("agrees on a complete, consistent social set", () => {
@@ -1413,6 +1425,18 @@ describe("the Phase 26b head facts and social set, against the DOM", () => {
       <noscript><meta property="og:url" content="/ns"></noscript>
       </head><body><div>x</div><meta name="twitter:card" content="summary"></body></html>`);
     expectParity(`<html><head><img src="/pixel.gif"><meta property="og:title" content="t"></head><body></body></html>`);
+  });
+
+  it("agrees on the judged share images' refs: first values only, whole, past the cap", () => {
+    expectParity(`<html><head>
+      <meta property="og:image" content="/1.png"><meta property="og:image" content="/2.png">
+      <meta property="og:image" content="/3.png"><meta property="og:image" content="/4.png">
+      <meta name="twitter:image" content="https://example.com/${"u".repeat(1_500)}.png">
+      </head><body><p>x</p></body></html>`);
+    expectParity(`<html><head>
+      <meta property="og:image" content="data:image/png;base64,AAAA">
+      <meta name="twitter:image" content=""><meta name="twitter:image" content="/later.png">
+      </head><body><p>x</p></body></html>`);
   });
 
   it("agrees on a page with no social tag at all", () => {

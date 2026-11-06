@@ -808,6 +808,7 @@ describe("PageWriter", () => {
       conflicting: ["og:title" as const],
       outsideHead: true,
       xViaProperty: true,
+      imageRefs: { og: `${SITE}/og.png`, x: null },
     };
     await writer.addPage(
       item(url),
@@ -1037,6 +1038,7 @@ describe("PageWriter", () => {
           conflicting: [],
           outsideHead: false,
           xViaProperty: false,
+          imageRefs: { og: null, x: null },
         },
       }),
       { complete: true },

@@ -949,8 +949,9 @@ zeroes here are not "this site references no files."** The finding that says
 which it is, is `resources.not-recorded` (§5.3).
 
 - `seen` — distinct files the SERVED HTML points at, images, stylesheets and
-  scripts, and since Phase 26b the share images its `og:image` / `twitter:image`
-  tags name (no page loads those; `referencingPages` 0 on the CSV view). Recorded
+  scripts, and since Phase 26b its first `og:image` and first `twitter:image`, the
+  two share images judged (no page loads those; `referencingPages` 0 on the CSV
+  view). Recorded
   even when `fetchResources` is false; a file a script injects at runtime is not in
   it at all.
 - `fetched` — a server answered about the file.

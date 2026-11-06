@@ -1098,6 +1098,7 @@ describe("social: the Open Graph and X set", () => {
       conflicting: ["og:title"],
       outsideHead: false,
       xViaProperty: false,
+      imageRefs: { og: null, x: null },
     });
   });
 
@@ -1165,23 +1166,47 @@ describe("social: the Open Graph and X set", () => {
     expect(a.socialImageRefs).toEqual(["https://ex.com/img/share.png"]);
   });
 
-  it("collects og:image and twitter:image refs, deduped, at most four, never into resourceRefs", () => {
+  it("refs only the two judged images: the FIRST og:image and the FIRST twitter:image", () => {
+    // Final review I1: an og:image array (a product gallery) must not crowd out
+    // the twitter:image `social.image-broken` judges, nor spend fetches on
+    // alternates no rule reads.
     const a = headPage(
       `<meta property="og:image" content="/1.png">` +
-        `<meta property="og:image" content="https://ex.com/1.png">` +
-        `<meta name="twitter:image" content="/2.png">` +
+        `<meta property="og:image" content="/2.png">` +
         `<meta property="og:image" content="/3.png">` +
         `<meta property="og:image" content="/4.png">` +
-        `<meta property="og:image" content="/5.png">`,
+        `<meta name="twitter:image" content="/x.png">`,
     );
-    expect(a.socialImageRefs).toEqual([
-      "https://ex.com/1.png",
-      "https://ex.com/2.png",
-      "https://ex.com/3.png",
-      "https://ex.com/4.png",
-    ]);
-    expect(MAX_SOCIAL_IMAGE_REFS).toBe(4);
+    expect(a.socialImageRefs).toEqual(["https://ex.com/1.png", "https://ex.com/x.png"]);
+    expect(a.social?.imageRefs).toEqual({ og: "https://ex.com/1.png", x: "https://ex.com/x.png" });
+    expect(MAX_SOCIAL_IMAGE_REFS).toBe(2);
     expect(a.resourceRefs).toEqual([]);
+  });
+
+  it("dedupes the two refs when both tags name one file", () => {
+    const a = headPage(
+      `<meta property="og:image" content="/1.png">` +
+        `<meta name="twitter:image" content="https://ex.com/1.png#frag">`,
+    );
+    expect(a.socialImageRefs).toEqual(["https://ex.com/1.png"]);
+    expect(a.social?.imageRefs).toEqual({ og: "https://ex.com/1.png", x: "https://ex.com/1.png" });
+  });
+
+  it("refs nothing for a tag whose FIRST value is empty, even if a later one is not", () => {
+    const a = headPage(
+      `<meta property="og:image" content=""><meta property="og:image" content="/later.png">`,
+    );
+    expect(a.social?.og.image).toBe("");
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(a.socialImageRefs).toEqual([]);
+  });
+
+  it("resolves a share image over SOCIAL_URL_MAX from its whole value, not the capped one", () => {
+    const long = `https://ex.com/og/${"u".repeat(1_500)}.png`;
+    const a = headPage(`<meta property="og:image" content="${long}">`);
+    expect(a.social?.og.image).toHaveLength(SOCIAL_URL_MAX);
+    expect(a.social?.imageRefs.og).toBe(long);
+    expect(a.socialImageRefs).toEqual([long]);
   });
 
   it("skips an image value that names no fetchable file, keeping it in social", () => {
@@ -1191,6 +1216,7 @@ describe("social: the Open Graph and X set", () => {
         `<meta name="twitter:image" content="#top">`,
     );
     expect(a.socialImageRefs).toEqual([]);
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
     expect(a.social?.og.image).toBe("data:image/png;base64,AAAA");
     expect(a.social?.x.image).toBe("");
   });
@@ -1347,6 +1373,7 @@ describe("the fixture site's default social set reads as complete and consistent
       conflicting: [],
       outsideHead: false,
       xViaProperty: false,
+      imageRefs: { og: `http://127.0.0.1:4000${SHARED_IMAGE_PATH}`, x: null },
     });
     expect(a.socialImageRefs).toEqual([`http://127.0.0.1:4000${SHARED_IMAGE_PATH}`]);
   });

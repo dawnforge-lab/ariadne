@@ -2094,10 +2094,10 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     rel=prev pages set aside); evidence `{field, value, count, pages,
     alternatesCollapsed, paginationExcluded}`. It reads columns older crawls have
     too, so it judges every crawl.
-  - `social.image-broken` (warning): per page, each og:image / twitter:image that is
-    relative or malformed, answered non-200, or is over 5 MB; evidence `{images:
-    [{tag, url, problem, statusCode?, bytes?, fetchClass?}]}`. A `problem` of
-    `not-fetched` appears only on a crawl whose file check ran, and means this
+  - `social.image-broken` (warning): per page, the first og:image and the first
+    twitter:image, each if relative or malformed, answered non-200, or over 5 MB;
+    evidence `{images: [{tag, url, problem, statusCode?, bytes?, fetchClass?}]}`. A
+    `problem` of `not-fetched` appears only on a crawl whose file check ran, and means this
     image was skipped by it (a budget, no record) or its request got no answer
     (`fetchClass` says which): report it as NOT CHECKED for that image, never as
     broken and never as a pass. When the file check asked about nothing on the

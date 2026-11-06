@@ -9,7 +9,8 @@
  * columns predate extraction 2, so it judges every crawl (deviation 1).
  *
  * `social.image-broken` reads `pages.social` and the `resources` row the
- * crawler wrote for each og/X image (deviation 3: a `resources` row, kind
+ * crawler wrote for each judged og/X image, found by the key the analyzer
+ * stored beside it (`social.imageRefs`) (deviation 3: a `resources` row, kind
  * `image`, with NO `page_resources` edge, so no resource rule, mixed-content
  * rule or page-weight metric sees it). It opens with `v2Gate`: a crawl not
  * wholly written by extraction 2 is refused, and `extraction.not-recorded`
@@ -19,7 +20,7 @@ import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { pages, resources } from "../../db/schema.js";
-import { normalizeUrl } from "../../crawl/parse/url-utils.js";
+import type { SocialFacts } from "../../crawl/parse/page-facts.js";
 import { JUDGED, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -117,18 +118,22 @@ const HTTP_SCHEME = /^https?:/i;
  * What can be said of an image value before any fetch. A share image is
  * fetched by the platform from the address as written, so it must be absolute
  * http(s): a value with no scheme at all (`/og.png`, `//cdn/og.png`) is
- * `relative`; one with another scheme, or one `new URL` refuses, is `invalid`.
- * Otherwise it resolves exactly as the analyzer resolved it into its
- * `resources` row (`normalizeUrl`).
+ * `relative`; one with another scheme, one `new URL` refuses, or one the
+ * analyzer could not resolve (`ref` null) is `invalid`.
+ *
+ * Otherwise its `resources` row is looked up by `ref`: the string the analyzer
+ * resolved from the WHOLE value and wrote as that row's key
+ * (`SocialFacts.imageRefs`, `shareImageRef`). The rule never resolves `url`
+ * itself: `url` is the stored value, cut at `SOCIAL_URL_MAX`, and resolving it
+ * would miss the row of every longer image (final review I1). One resolution,
+ * read back, cannot drift from the crawler's.
  */
-function candidate(tag: string, url: string, pageUrl: string): Candidate {
+function candidate(tag: string, url: string, ref: string | null): Candidate {
   if (!HAS_SCHEME.test(url)) return { tag, url, verdict: { problem: "relative" } };
-  if (!HTTP_SCHEME.test(url) || !URL.canParse(url)) {
+  if (!HTTP_SCHEME.test(url) || !URL.canParse(url) || ref === null) {
     return { tag, url, verdict: { problem: "invalid" } };
   }
-  const resolved = normalizeUrl(url, pageUrl);
-  if (resolved === null) throw new Error(`social.image-broken: ${url} parsed but did not normalise`);
-  return { tag, url, resolved };
+  return { tag, url, resolved: ref };
 }
 
 type ResourceRow = {
@@ -207,11 +212,21 @@ async function imageBrokenFindings(
       if (page.social === null) {
         throw new Error(`${self.id}: page ${page.url} matched an image with no social column`);
       }
+      // jsonb is not checked against the type: a v2 row written before the
+      // refs were stored has none, and re-resolving its capped value instead
+      // is the drift `imageRefs` exists to remove. Loud; a re-crawl fixes it.
+      const refs = page.social.imageRefs as SocialFacts["imageRefs"] | undefined;
+      if (refs === undefined) {
+        throw new Error(
+          `${self.id}: page ${page.url} has a social set with no imageRefs ` +
+            `(written before they were recorded); re-crawl`,
+        );
+      }
       const found: Candidate[] = [];
       const og = page.social.og.image;
       const x = page.social.x.image;
-      if (og !== undefined && og !== "") found.push(candidate("og:image", og, page.url));
-      if (x !== undefined && x !== "") found.push(candidate("twitter:image", x, page.url));
+      if (og !== undefined && og !== "") found.push(candidate("og:image", og, refs.og));
+      if (x !== undefined && x !== "") found.push(candidate("twitter:image", x, refs.x));
       return { page, found };
     });
 

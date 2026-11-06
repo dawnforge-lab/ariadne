@@ -11,7 +11,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 
-import type { SocialFacts } from "../../src/crawl/parse/page-facts.js";
+import { analyzePage, shareImageRef } from "../../src/crawl/parse/page-analyzer.js";
+import { SOCIAL_URL_MAX, type SocialFacts } from "../../src/crawl/parse/page-facts.js";
 import { RESOURCE_OFF_REASON } from "../../src/crawl/resources/fetch-resources.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -55,8 +56,15 @@ function caps(listing: number | null): RuleCaps {
   return { ...DEFAULT_RULE_CAPS, listing };
 }
 
-/** A social set holding only the images a case is about. */
+/**
+ * A social set holding only the images a case is about, with the `imageRefs`
+ * the analyzer would have stored beside them (`shareImageRef`, the one function
+ * that resolves a share image; relative values against the site root, which
+ * the rule never looks up).
+ */
 function images(og: string | undefined, x?: string): SocialFacts {
+  const ref = (value: string | undefined) =>
+    value === undefined ? null : shareImageRef(value, `${SITE}/`);
   return {
     og: { title: "A share title", type: "website", url: SITE, ...(og === undefined ? {} : { image: og }) },
     x: { card: "summary_large_image", ...(x === undefined ? {} : { image: x }) },
@@ -64,6 +72,7 @@ function images(og: string | undefined, x?: string): SocialFacts {
     conflicting: [],
     outsideHead: false,
     xViaProperty: false,
+    imageRefs: { og: ref(og), x: ref(x) },
   };
 }
 
@@ -358,6 +367,35 @@ describe("social query rules against the database", () => {
       expect(await imageBroken.run(db, crawlId)).toEqual([]);
     });
 
+    it("judges a share image over SOCIAL_URL_MAX by the row the analyzer queued (final review I1)", async () => {
+      // End to end through the analyzer: the stored og:image is cut at the
+      // cap, the `resources` row is keyed by the WHOLE resolved value, and the
+      // rule must find that row, not report the image unfetched.
+      const long = `${SITE}/og/${"u".repeat(1_500)}.png`;
+      const pageUrl = `${SITE}/a`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="${long}"></head><body><p>x</p></body></html>`,
+        pageUrl,
+      );
+      expect(analysis.social?.og.image).toHaveLength(SOCIAL_URL_MAX);
+      expect(analysis.socialImageRefs).toEqual([long]);
+      const { crawlId } = await seed(
+        [{ path: "/a", social: analysis.social }],
+        [{ url: analysis.socialImageRefs[0]!, fetchClass: "client_error", statusCode: 404, bytes: null }],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => x.evidence.images)).toEqual([
+        [{ tag: "og:image", url: analysis.social?.og.image, problem: "status", statusCode: 404 }],
+      ]);
+    });
+
+    it("throws on a v2 row whose social set predates imageRefs, never re-resolving the capped value", async () => {
+      const legacy: Partial<SocialFacts> = { ...images(OK) };
+      delete legacy.imageRefs;
+      const { crawlId } = await seed([{ path: "/a", social: legacy as SocialFacts }], [{ url: OK }]);
+      await expect(imageBroken.run(db, crawlId)).rejects.toThrow(/imageRefs/);
+    });
+
     it("matches the resource row by the resolved URL (fragment and host case ignored)", async () => {
       const { crawlId } = await seed(
         [{ path: "/a", social: images("https://SOCIAL.example/og/fine.png#x") }],
@@ -373,7 +411,7 @@ describe("social query rules against the database", () => {
         [
           { path: "/a", social: images(UNASKED) },
           { path: "/b", social: images(FAILED) },
-          // No `resources` row at all (past the analyzer's four-ref cap).
+          // No `resources` row at all (none was written for it).
           { path: "/c", social: images(`${SITE}/og/norow.png`) },
           // The check ran: this page's image was asked about and answered.
           { path: "/d", social: images(OK) },

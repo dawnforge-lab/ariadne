@@ -4,7 +4,9 @@
  *
  * Every fact is collected by the streaming tokenizer as state (hard rule 4) and
  * every one is capped (hard rule 6), so per-page memory stays O(1) in page size
- * beyond the caps below. The `pages` columns that store them are migration 0026;
+ * beyond the caps below. The one exception is `SocialFacts.imageRefs`: two
+ * resolved share-image URLs that must equal their `resources` rows' keys, so
+ * they are bounded as those keys are, by the body (see the field). The `pages` columns that store them are migration 0026;
  * null in a column means "not measured" (a row written before extraction 2).
  *
  * Every page-derived string among them goes through `storableCap`
@@ -31,12 +33,30 @@ export type SocialFacts = {
   outsideHead: boolean;
   /** A twitter:* tag given as property= rather than name=. */
   xViaProperty: boolean;
+  /**
+   * The address of each JUDGED share image (the first `og:image`, the first
+   * `twitter:image`), resolved once, at analysis, from its WHOLE value: the
+   * exact key of the `resources` row the crawler wrote for it. Null when the
+   * tag is absent or its first value names no fetchable file (empty, `data:`,
+   * `javascript:`, `#`, or one `normalizeUrl` refuses). `social.image-broken`
+   * looks rows up by this string and never re-resolves the capped `og.image` /
+   * `x.image`, so a share image over `SOCIAL_URL_MAX` still finds its row and
+   * the two sides cannot drift (final review I1).
+   *
+   * The one uncapped string in the page facts: it must equal its row's key
+   * byte for byte, so it is bounded exactly as `resources.url` is, by the page
+   * body; two per page at most. `normalizeUrl` output is ASCII, so storable.
+   */
+  imageRefs: { og: string | null; x: string | null };
 };
 
 /** Bot-specific robots metas only (not plain "robots"); `name` is lower-cased. */
 export type RobotsMetaEntry = { name: string; content: string };
 
-/** A `<meta http-equiv=refresh>`; `target` is resolved absolute, or null. */
+/**
+ * A `<meta http-equiv=refresh>`; `target` is resolved absolute (cut at
+ * `REFRESH_TARGET_MAX`), or null.
+ */
 export type RefreshFact = { raw: string; delaySeconds: number | null; target: string | null };
 
 export type AnchorCounts = {
