@@ -457,10 +457,13 @@ async function htmlLangMismatchFindings(
  * conflict: the union is what the engine reads, and a sitemap carrying more
  * locales than the template is ordinary. Those codes are reported as
  * information (`onlyIn`) on a page that does conflict, never as a finding of
- * their own. One source giving a code two targets is
- * `hreflang.multiple-entries`' (deviation 5); a source whose set is the other
- * source's plus one more URL still differs from it and is reported here too,
- * because the two sources do disagree.
+ * their own. One source giving a code two or more targets is
+ * `hreflang.multiple-entries`' (deviation 5), so only the sources that give
+ * the code EXACTLY ONE target are compared here: the HTML naming `/de` and
+ * `/de-2` beside a sitemap naming `/de` is one defect (the HTML's ambiguity),
+ * reported once by that rule, and removing `/de-2` clears it. Two single-target
+ * sources naming different URLs conflict whatever a third, ambiguous source
+ * says.
  *
  * The page must be annotated by at least two sources, which a conflicting code
  * implies. The cohort is the declaring pages of `DECLARATIONS` (fetched OK, a
@@ -513,7 +516,9 @@ async function sourceConflictFindings(
     ),
     per_code as (
       select page_id, code, count(*)::int as source_count,
-             count(distinct keys)::int as set_count
+             -- Single-target sources only: an ambiguous source is
+             -- multiple-entries' finding, never this one's (deviation 5).
+             count(distinct keys) filter (where cardinality(keys) = 1)::int as set_count
       from by_source
       group by page_id, code
     ),

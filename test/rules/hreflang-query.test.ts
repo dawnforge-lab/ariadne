@@ -845,6 +845,80 @@ describe("hreflangRules against the database", () => {
     });
   });
 
+  // Phase 26c: a declaration also arrives from a `Link` header on ANY
+  // classified response and from a sitemap entry tied to whatever page row its
+  // loc matched. A redirect, a 404 or a robots-blocked row serves no version
+  // anyone can rank, so it declares no cluster for the join rules or the
+  // x-default rule to judge, exactly as `missing-self-reference` already reads it.
+  describe("declaring pages that serve no content", () => {
+    it("are silent in missing-return-link, non-indexable-target and missing-x-default", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        "/ok",
+        { path: "/moved", fetchClass: "redirect", statusCode: 301 },
+        { path: "/gone", fetchClass: "client_error", statusCode: 404 },
+        { path: "/blocked", fetchClass: "disallowed", statusCode: null },
+        // The alternates: /fr names nobody back, /redir is a redirect.
+        "/fr",
+        { path: "/redir", fetchClass: "redirect", statusCode: 301 },
+      ]);
+      await db
+        .update(pages)
+        .set({ fetchReason: "robots.txt: Disallow: /blocked" })
+        .where(eq(pages.id, ids.get("/blocked")!));
+      // Each declarer names itself, /fr and /redir, and no x-default: a
+      // missing return link, a non-indexable alternate and a missing fallback
+      // on a page that served content.
+      const block = (self: string): Array<[string, string]> => [
+        ["en", url(self)],
+        ["fr", url("/fr")],
+        ["de", url("/redir")],
+      ];
+      await addHreflang(crawlId, ids.get("/moved")!, block("/moved"), "header");
+      await addHreflang(crawlId, ids.get("/gone")!, block("/gone"), "header");
+      await db.insert(sitemapHreflang).values(
+        block("/blocked").map(([code, target]) => ({
+          crawlId,
+          url: url("/blocked"),
+          urlNormalised: url("/blocked"),
+          hreflangCode: code,
+          targetUrl: target,
+          sitemapSource: url("/sitemap.xml"),
+        })),
+      );
+      expect(await deriveSitemapHreflang(db, crawlId)).toEqual({ rows: 3 });
+
+      for (const id of [
+        "hreflang.missing-return-link",
+        "hreflang.non-indexable-target",
+        "hreflang.missing-x-default",
+      ]) {
+        expect(await findings(id, crawlId), id).toHaveLength(0);
+      }
+
+      // The same block on a 200 still fires all three.
+      await addHreflang(crawlId, ids.get("/ok")!, block("/ok"), "header");
+      expect(
+        (await findings("hreflang.missing-return-link", crawlId)).map((f) => [
+          f.pageUrl,
+          f.evidence.target,
+        ]),
+      ).toEqual([
+        [url("/ok"), url("/fr")],
+        [url("/ok"), url("/redir")],
+      ]);
+      expect(
+        (await findings("hreflang.non-indexable-target", crawlId)).map((f) => [
+          f.pageUrl,
+          f.evidence.target,
+        ]),
+      ).toEqual([[url("/ok"), url("/redir")]]);
+      expect(
+        (await findings("hreflang.missing-x-default", crawlId)).map((f) => f.evidence.targets),
+      ).toEqual([[url("/fr"), url("/ok"), url("/redir")]]);
+    });
+  });
+
   describe("hreflang.missing-self-reference", () => {
     it("fires on a page whose declared set leaves the page itself out", async () => {
       const crawlId = await newCrawl();

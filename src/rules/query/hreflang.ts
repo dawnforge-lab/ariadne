@@ -412,6 +412,13 @@ async function declarationFindings(
   const findings: Finding[] = [];
   let total = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: true }, (set, context) => {
+    // The declaring page must serve content (`isAuditable`), as for
+    // `missing-self-reference`. Since Phase 26c a declaration also arrives from
+    // a `Link` header on any classified response (a 301, a 404) and from a
+    // sitemap entry tied to whatever page row its loc matched (a redirect, a
+    // robots-blocked row): none of those is a version anyone can rank, and its
+    // own row already says why.
+    if (!set.auditable) return;
     for (const member of set.targets) {
       const target = context.page(member);
       if (target === undefined) continue;
@@ -481,6 +488,10 @@ async function missingXDefaultFindings(
   /** 1 once the walk has seen a cluster it could not keep, 0 while it fits. */
   let beyondCap = 0;
   await eachDeclarationSet(db, crawlId, { withTargets: false }, (set) => {
+    // Only a declaring page that serves content states a cluster (see
+    // `declarationFindings`): a redirect's header or a robots-blocked row's
+    // sitemap entry is not one.
+    if (!set.auditable) return;
     // A page naming one URL is not a cluster: there is no other version to
     // fall back FROM, so there is nothing missing.
     if (set.hasXDefault || set.targets.length < 2) return;

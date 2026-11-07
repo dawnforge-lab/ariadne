@@ -857,33 +857,26 @@ describe("hreflangIntegrityRules against the database", () => {
       ]);
     });
 
-    it("compares whole target sets, codes normalised, x-default included", async () => {
+    it("compares single-target sources, codes normalised, x-default included", async () => {
       const crawlId = await newV3Crawl();
       const ids = await addPages(crawlId, [
         { path: "/a", ...V3 },
         { path: "/b", ...V3 },
+        { path: "/c", ...V3 },
       ]);
-      // /a: de_DE and de-de are one code; the HTML gives it two URLs and the
-      // sitemap one of them, so the two sources' sets differ.
+      // /a: de_DE and de-de are one code. The HTML gives it two URLs and the
+      // sitemap one of them: that is the HTML's ambiguity, multiple-entries'
+      // finding, and it never fires this rule as well (deviation 5).
       await declare(crawlId, ids, "/a", [["de_DE", "/de"], ["de-de", "/de-2"]], "html");
       await declare(crawlId, ids, "/a", [["DE-DE", "/de"]], "sitemap");
       // /b: the fallback disagrees and nothing else does.
       await declare(crawlId, ids, "/b", [["x-default", "/b"]], "html");
       await declare(crawlId, ids, "/b", [["x-default", "/"]], "header");
+      // /c: the same code spelled two ways, one URL each, and they differ.
+      await declare(crawlId, ids, "/c", [["de_DE", "/de"]], "html");
+      await declare(crawlId, ids, "/c", [["DE-DE", "/de-2"]], "sitemap");
       const found = await run(crawlId);
       expect(found.map((f) => [f.pageUrl, f.evidence])).toEqual([
-        [
-          url("/a"),
-          {
-            code: "de-de",
-            bySource: [
-              { source: "html", targets: [url("/de"), url("/de-2")] },
-              { source: "sitemap", targets: [url("/de")] },
-            ],
-            conflictingCodes: 1,
-            onlyIn: [],
-          },
-        ],
         [
           url("/b"),
           {
@@ -896,6 +889,42 @@ describe("hreflangIntegrityRules against the database", () => {
             onlyIn: [],
           },
         ],
+        [
+          url("/c"),
+          {
+            code: "de-de",
+            bySource: [
+              { source: "html", targets: [url("/de")] },
+              { source: "sitemap", targets: [url("/de-2")] },
+            ],
+            conflictingCodes: 1,
+            onlyIn: [],
+          },
+        ],
+      ]);
+    });
+
+    // Deviation 5, both ways round: an ambiguous source beside a single-target
+    // one is one defect, and only multiple-entries reports it.
+    it("is silent when one source gives a code {a,b} and another {a}", async () => {
+      const crawlId = await newV3Crawl();
+      const ids = await addPages(crawlId, [
+        { path: "/x", ...V3 },
+        { path: "/y", ...V3 },
+      ]);
+      await declare(crawlId, ids, "/x", [["de", "/de"], ["de", "/de-2"]], "html");
+      await declare(crawlId, ids, "/x", [["de", "/de"]], "sitemap");
+      await declare(crawlId, ids, "/y", [["de", "/de"]], "html");
+      await declare(crawlId, ids, "/y", [["de", "/de"], ["de", "/de-2"]], "header");
+      expect(await run(crawlId)).toHaveLength(0);
+      expect(
+        (await findings("hreflang.multiple-entries", crawlId)).map((f) => [
+          f.pageUrl,
+          f.evidence.sources,
+        ]),
+      ).toEqual([
+        [url("/x"), ["html"]],
+        [url("/y"), ["header"]],
       ]);
     });
 
