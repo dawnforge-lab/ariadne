@@ -736,7 +736,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     `resources.not-fetched` counts share-only rows as `share_image and not
 //     loaded by a page`. `crawl_status.resources` still counts every row, share
 //     images included, because the resource pass fetches them; the `resources`
-//     CSV view gains the column `shareImage` after `kind`. No rule change.
+//     CSV view gains the column `shareImage` after `kind`. Migration 0030
+//     backfills the flag on every edge-less row (26b's own definition of a
+//     share image), so older crawls are judged as before. No rule change.
 export const RULESET_VERSION = "0.22.0";
 
 /**
