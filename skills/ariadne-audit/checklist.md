@@ -1668,6 +1668,13 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
   URL-length check of its own: it is the one URL-shape rule, an indexable,
   self-canonical page whose stored URL is over 115 characters, which is usually a
   tracking or session parameter or a repeated folder.
+  `url.reference-too-long` (warning) sits beside it: a page that links to, loads
+  or names as an hreflang alternate an address over 2,500 characters (the one
+  limit for every indexed URL). The crawl neither followed nor checked those
+  references; the evidence counts them per kind (`links`, `resources`,
+  `hreflang`, one per reference) with `max: 2500`. It reads the page whatever its
+  index status. Over-long share images are `social.image-broken`'s `too-long`
+  problem (CHECK-87).
 - **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the facts this check reads from extraction version 3: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - FAIL if tracking param URLs are indexable without canonical to clean URL
@@ -2124,7 +2131,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     too, so it judges every crawl.
   - `social.image-broken` (warning): per page, the first og:image and the first
     twitter:image, each if relative or malformed, answered non-200, or over 5 MB;
-    evidence `{images: [{tag, url, problem, statusCode?, bytes?, fetchClass?}]}`. A
+    evidence `{images: [{tag, url, problem, statusCode?, bytes?, fetchClass?, max?}]}`.
+    A `problem` of `too-long` (pages crawled since Phase 26c only) is an address
+    over `max` (2,500) characters, which the crawl neither stored nor fetched. A
     `problem` of `not-fetched` appears only on a crawl whose file check ran, and means this
     image was skipped by it (a budget, no record) or its request got no answer
     (`fetchClass` says which): report it as NOT CHECKED for that image, never as

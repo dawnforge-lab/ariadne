@@ -1101,6 +1101,7 @@ describe("social: the Open Graph and X set", () => {
       outsideHead: false,
       xViaProperty: false,
       imageRefs: { og: null, x: null },
+      imageRefTooLong: { og: false, x: false },
     });
   });
 
@@ -1414,6 +1415,7 @@ describe("the fixture site's default social set reads as complete and consistent
       outsideHead: false,
       xViaProperty: false,
       imageRefs: { og: `http://127.0.0.1:4000${SHARED_IMAGE_PATH}`, x: null },
+      imageRefTooLong: { og: false, x: false },
     });
     expect(a.socialImageRefs).toEqual([`http://127.0.0.1:4000${SHARED_IMAGE_PATH}`]);
   });

@@ -131,6 +131,8 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     relNextCount: 0,
     relPrevCount: 0,
     htmlStructure: { htmlTags: 1, headTags: 1, bodyTags: 1, headBeforeBody: true, closedEarly: null },
+    // Phase 26c (extraction 3): no reference refused for its length.
+    overlongUrls: { links: 0, resources: 0, hreflang: 0 },
     ...overrides,
   };
 }
@@ -820,6 +822,7 @@ describe("PageWriter", () => {
       outsideHead: true,
       xViaProperty: true,
       imageRefs: { og: `${SITE}/og.png`, x: null },
+      imageRefTooLong: { og: false, x: false },
     };
     await writer.addPage(
       item(url),
@@ -935,6 +938,46 @@ describe("PageWriter", () => {
         lost: [],
       },
     });
+  });
+
+  // Phase 26c (Task 2): the 26b crash was a 3,000-character `src` reaching the
+  // `resources` btree. Every indexed URL column has the same limit, so a page
+  // carrying an over-long link, image, hreflang target and share image must
+  // write whole, with the counts on its row and none of the four anywhere.
+  it("writes a page with four over-long references and records the counts (migration 0029)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/overlong`;
+    const long = `${SITE}/${"z".repeat(3000)}`;
+    const analysis = analyzePage(
+      `<html><head><meta property="og:image" content="${long}">` +
+        `<link rel="alternate" hreflang="de" href="${long}"></head>` +
+        `<body><a href="${long}">l</a><img src="${long}"><a href="/fine">f</a></body></html>`,
+      url,
+    );
+    await writer.addPage(item(url), makeFetch(url), analysis, { complete: true });
+    await writer.flush();
+
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.overlongUrls).toEqual({ links: 1, resources: 1, hreflang: 1 });
+    expect(row?.social?.imageRefTooLong).toEqual({ og: true, x: false });
+    expect(row?.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(await countOf(links, crawlId)).toBe(1);
+    expect(await countOf(hreflang, crawlId)).toBe(0);
+    expect(await countOf(resources, crawlId)).toBe(0);
+    expect(await countOf(pageResources, crawlId)).toBe(0);
+  });
+
+  it("writes a null overlong_urls on a row with no analysis", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/no-analysis-overlong`;
+    await writer.addPage(item(url), makeFetch(url, { fetchClass: "client_error", statusCode: 404, body: null }), null, {
+      complete: true,
+    });
+    await writer.flush();
+    const [row] = await db.select().from(pages).where(eq(pages.crawlId, crawlId));
+    expect(row?.overlongUrls).toBeNull();
   });
 
   it("persists hostile 26b strings: a NUL, a pair cut at a cap, a lone surrogate", async () => {
@@ -1060,6 +1103,7 @@ describe("PageWriter", () => {
           outsideHead: false,
           xViaProperty: false,
           imageRefs: { og: null, x: null },
+          imageRefTooLong: { og: false, x: false },
         },
       }),
       { complete: true },

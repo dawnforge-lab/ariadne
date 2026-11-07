@@ -103,7 +103,7 @@ import {
   structuredData,
 } from "../db/schema.js";
 import type { FetchResult } from "./fetch-page.js";
-import type { PageAnalysis } from "./parse/page-analyzer.js";
+import { hreflangTarget, type PageAnalysis } from "./parse/page-analyzer.js";
 import { isSameOrigin, normalizeUrl } from "./parse/url-utils.js";
 import { completeUrls } from "./frontier.js";
 import { derivePageType, type PageTypePattern } from "./page-type.js";
@@ -813,6 +813,10 @@ export class PageWriter {
       relNextCount: analysis === null ? null : analysis.relNextCount,
       relPrevCount: analysis === null ? null : analysis.relPrevCount,
       htmlStructure: analysis === null ? null : analysis.htmlStructure,
+      // Phase 26c (migration 0029): the references the analyzer refused for
+      // being over `INDEXED_URL_MAX`. Null exactly when no analysis ran; with
+      // one, always an object, zeros included.
+      overlongUrls: analysis === null ? null : analysis.overlongUrls,
       htmlBytes: fetch.htmlBytes,
       domSize: analysis?.domSize ?? null,
       imagesTotal: analysis?.imagesTotal ?? 0,
@@ -849,10 +853,10 @@ export class PageWriter {
   ): HreflangRow[] {
     const rows: HreflangRow[] = [];
     for (const pair of analysis.hreflang) {
-      let target: string;
-      try {
-        target = new URL(pair.href, pageUrl).href;
-      } catch {
+      // The analyzer measured exactly this resolution against
+      // `INDEXED_URL_MAX` and dropped the targets over it (Phase 26c).
+      const target = hreflangTarget(pair.href, pageUrl);
+      if (target === null) {
         this.counts.hreflangUnresolved += 1;
         continue;
       }

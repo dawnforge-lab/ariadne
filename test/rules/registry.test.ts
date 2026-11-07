@@ -598,15 +598,18 @@ describe("check annotations", () => {
  * only by aria-label. `html.head-closed-early-harmless` (info) takes the early
  * head close that loses no head tag, and `html.head-closed-early` stays a
  * warning for the one that does. The critical list does not move.
+ *
+ * Phase 26c (0.22.0) Task 2 adds `url.reference-too-long` (warning): 64
+ * warnings. The critical list does not move.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 63 warning and 86 info rules", () => {
+  it("holds 33 critical, 64 warning and 86 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 63, info: 86 });
-    expect(all).toHaveLength(182);
+    expect(counts).toEqual({ critical: 33, warning: 64, info: 86 });
+    expect(all).toHaveLength(183);
   });
 
   it("names exactly the rules that are critical", () => {

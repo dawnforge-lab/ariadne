@@ -76,6 +76,7 @@ import {
   IMAGE_WEIGHT_WARN,
   UNCACHED_SAMPLE_RESOURCES,
 } from "../../src/rules/query/resources.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 
 /**
  * THE CLIENT-FACING COPY, PINNED.
@@ -916,6 +917,16 @@ describe("copy: URL shape (26a)", () => {
   it("quotes the search parameters the internal-search rule actually reads", () => {
     const list = `${INTERNAL_SEARCH_PARAMS.slice(0, -1).join(", ")} or ${INTERNAL_SEARCH_PARAMS.at(-1)}`;
     expect(copy("url.internal-search").explanation).toContain(`(${list})`);
+  });
+
+  // Phase 26c: one limit for every indexed URL, quoted from its constant, and
+  // the count is of references, as the analyzer counts them.
+  it("quotes the indexed-URL limit in the reference rule and in the share-image rule", () => {
+    const limit = `${INDEXED_URL_MAX.toLocaleString("en-US")} characters`;
+    expect(copy("url.reference-too-long").title).toContain(limit);
+    expect(copy("url.reference-too-long").explanation).toContain(limit);
+    expect(copy("url.reference-too-long").explanation).toMatch(/one per reference/);
+    expect(copy("social.image-broken").explanation).toContain(limit);
   });
 });
 
@@ -1887,6 +1898,8 @@ describe("copy rubric: a threshold belongs in the title", () => {
     // in megabytes as the title writes it ("over 5 MB").
     "social.image-broken": String(SOCIAL_IMAGE_MAX_BYTES / (1024 * 1024)),
     "images.alt-too-long": String(IMAGE_ALT_MAX),
+    // Phase 26c: the one indexed-URL limit, as the title spells it.
+    "url.reference-too-long": INDEXED_URL_MAX.toLocaleString("en-US"),
   };
 
   it("states the number in the title of every rule that fires on one", () => {

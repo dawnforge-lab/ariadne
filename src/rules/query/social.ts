@@ -14,13 +14,15 @@
  * `image`, with NO `page_resources` edge, so no resource rule, mixed-content
  * rule or page-weight metric sees it). It opens with `v2Gate`: a crawl not
  * wholly written by extraction 2 is refused, and `extraction.not-recorded`
- * speaks for it.
+ * speaks for it. Phase 26c added the `too-long` problem, read per row on
+ * extraction-3 rows only, so a v2 row is judged exactly as before (ruling R3).
  */
 import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
 
 import type { Db } from "../../db/client.js";
 import { pages, resources } from "../../db/schema.js";
 import type { SocialFacts } from "../../crawl/parse/page-facts.js";
+import { INDEXED_URL_MAX } from "../../crawl/parse/url-utils.js";
 import { JUDGED, type RuleIdentity } from "../helpers.js";
 import { copyFor } from "../registry/copy/index.js";
 import {
@@ -88,9 +90,18 @@ async function ogDuplicateFindings(
 /** Pages read per round trip by the image scan: a batch, never the table. */
 export const SOCIAL_IMAGE_BATCH = 500;
 
+/** The extraction that records `imageRefTooLong` (Phase 26c); below it the key is absent. */
+const TOO_LONG_EXTRACTION = 3;
+
 type ImageProblem =
   | { problem: "relative" }
   | { problem: "invalid" }
+  /**
+   * Phase 26c, extraction 3 only (ruling R3): the address resolved to more
+   * than `max` (`INDEXED_URL_MAX`) characters, so no `resources` row could be
+   * keyed by it and nothing fetched it (`SocialFacts.imageRefTooLong`).
+   */
+  | { problem: "too-long"; max: number }
   | { problem: "status"; statusCode: number }
   | { problem: "too-large"; bytes: number }
   /**
@@ -132,8 +143,14 @@ const HTTP_SCHEME = /^https?:/i;
  * itself: `url` is the stored value, cut at `SOCIAL_URL_MAX`, and resolving it
  * would miss the row of every longer image (final review I1). One resolution,
  * read back, cannot drift from the crawler's.
+ *
+ * `tooLong` (Phase 26c) is the analyzer's `imageRefTooLong` flag for this tag,
+ * read only on an extraction-3 row and false on any other (ruling R3). It
+ * decides first: such a value is absolute http(s) by construction and has a
+ * null ref, which 26b could only call `invalid`.
  */
-function candidate(tag: string, url: string, ref: string | null): Candidate {
+function candidate(tag: string, url: string, ref: string | null, tooLong: boolean): Candidate {
+  if (tooLong) return { tag, url, verdict: { problem: "too-long", max: INDEXED_URL_MAX } };
   if (!HAS_SCHEME.test(url)) return { tag, url, verdict: { problem: "relative" } };
   if (!HTTP_SCHEME.test(url) || !URL.canParse(url) || ref === null) {
     return { tag, url, verdict: { problem: "invalid" } };
@@ -198,7 +215,12 @@ async function imageBrokenFindings(
   let cursor = "";
   for (;;) {
     const batch = await db
-      .select({ id: pages.id, url: pages.url, social: pages.social })
+      .select({
+        id: pages.id,
+        url: pages.url,
+        social: pages.social,
+        extractionVersion: pages.extractionVersion,
+      })
       .from(pages)
       .where(
         and(
@@ -227,11 +249,29 @@ async function imageBrokenFindings(
             `(written before they were recorded); re-crawl`,
         );
       }
+      // Ruling R3: a v2 row is judged exactly as Phase 26b judged it, with no
+      // flag read. Extraction 3 always writes the flag, so a v3 social set
+      // without one predates it, and is as loud as `imageRefs` above.
+      let tooLong: SocialFacts["imageRefTooLong"] = { og: false, x: false };
+      if (page.extractionVersion !== null && page.extractionVersion >= TOO_LONG_EXTRACTION) {
+        const flags = page.social.imageRefTooLong as SocialFacts["imageRefTooLong"] | undefined;
+        if (flags === undefined) {
+          throw new Error(
+            `${self.id}: page ${page.url} is extraction ${page.extractionVersion} but its ` +
+              `social set has no imageRefTooLong (written before it was recorded); re-crawl`,
+          );
+        }
+        tooLong = flags;
+      }
       const found: Candidate[] = [];
       const og = page.social.og.image;
       const x = page.social.x.image;
-      if (og !== undefined && og !== "") found.push(candidate("og:image", og, refs.og));
-      if (x !== undefined && x !== "") found.push(candidate("twitter:image", x, refs.x));
+      if (og !== undefined && og !== "") {
+        found.push(candidate("og:image", og, refs.og, tooLong.og));
+      }
+      if (x !== undefined && x !== "") {
+        found.push(candidate("twitter:image", x, refs.x, tooLong.x));
+      }
       return { page, found };
     });
 

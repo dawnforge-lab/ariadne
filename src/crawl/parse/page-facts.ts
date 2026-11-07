@@ -49,8 +49,19 @@ export type SocialFacts = {
    * The one uncapped string in the page facts: it must equal its row's key
    * byte for byte, so it is bounded exactly as `resources.url` is, by the page
    * body; two per page at most. `normalizeUrl` output is ASCII, so storable.
+   *
+   * Phase 26c: a resolved address over `INDEXED_URL_MAX` is null here too (no
+   * `resources` row can be keyed by it), and `imageRefTooLong` says why.
    */
   imageRefs: { og: string | null; x: string | null };
+  /**
+   * Phase 26c (extraction 3): whether each judged share image resolved to an
+   * address over `INDEXED_URL_MAX`, so it has no ref and no `resources` row;
+   * `social.image-broken` reports it as `too-long`. Always present on a social
+   * object extraction 3 wrote, false for an absent or unresolvable image; a
+   * v2 object lacks the key and is judged as Phase 26b judged it (ruling R3).
+   */
+  imageRefTooLong: { og: boolean; x: boolean };
 };
 
 /** Bot-specific robots metas only (not plain "robots"); `name` is lower-cased. */
@@ -81,7 +92,12 @@ export type InsecureRefs = {
 
 /**
  * References a page made that were over `INDEXED_URL_MAX` (extraction 3):
- * counted per kind, never stored. `pages.overlong_urls`.
+ * counted per kind, never stored. `pages.overlong_urls`. Each is a count of
+ * REFERENCES (one per `<a>`, resource site or hreflang `<link>` refused), not
+ * of distinct URLs: keeping the refused URLs to dedupe them is what this
+ * avoids. Bounded by the per-page caps, which a refused reference consumes
+ * like a kept one (`links` 2,000, `resources` `MAX_RESOURCE_REFS`, `hreflang`
+ * 200). Share images are not counted here: `SocialFacts.imageRefTooLong`.
  */
 export type OverlongUrls = { links: number; resources: number; hreflang: number };
 

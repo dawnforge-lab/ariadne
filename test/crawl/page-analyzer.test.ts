@@ -1,7 +1,8 @@
 import * as cheerio from "cheerio";
 import { describe, expect, it } from "vitest";
-import { analyzePage } from "../../src/crawl/parse/page-analyzer.js";
+import { analyzePage, MAX_RESOURCE_REFS } from "../../src/crawl/parse/page-analyzer.js";
 import { HEAD_LOST_MAX, HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 
 const HTML = `<!doctype html><html><head>
 <title>Widget Shop</title>
@@ -1184,5 +1185,124 @@ describe("Phase 26b strings are storable in Postgres", () => {
     expect(a.social?.og.title).toBe("a�b");
     expect(a.h2Text).toBe("c�");
     expect(structureOf(`<head>x\uD800</head>`).closedEarly?.snippet).toBe("x�");
+  });
+});
+
+/**
+ * Phase 26c (Task 2): a reference whose resolved URL is over `INDEXED_URL_MAX`
+ * is counted in `overlongUrls`, never stored — a btree entry that large makes
+ * the insert throw. The check reads the URL the row would hold.
+ */
+describe("references too long to index (Phase 26c)", () => {
+  const PAGE = "https://x.test/p";
+  const LONG = `https://x.test/${"a".repeat(3000)}`;
+
+  it("counts an over-long link, image and hreflang target and keeps none of them", () => {
+    const a = analyzePage(
+      `<html><head><link rel="alternate" hreflang="de" href="${LONG}">` +
+        `<link rel="alternate" hreflang="en" href="/en"></head><body>` +
+        `<a href="${LONG}">long</a><a href="/short">short</a>` +
+        `<img src="${LONG}"><img src="/ok.png"></body></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls).toEqual({ links: 1, resources: 1, hreflang: 1 });
+    expect(a.links.map((l) => l.href)).toEqual(["https://x.test/short"]);
+    // Dense positions: the refused link consumed none.
+    expect(a.links[0]?.position).toBe(0);
+    expect(a.resourceRefs).toEqual([{ url: "https://x.test/ok.png", kind: "image" }]);
+    expect(a.hreflang).toEqual([{ code: "en", href: "/en" }]);
+  });
+
+  it("records zeros on a page with no over-long reference", () => {
+    const a = analyzePage(`<html><body><a href="/a">a</a><img src="/i.png"></body></html>`, PAGE);
+    expect(a.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 0 });
+  });
+
+  it("judges a reference by its resolved URL: a relative href that resolves over the limit is refused", () => {
+    // 2,490 characters of path, under the limit as written, over it once the
+    // page's origin is prefixed.
+    const relative = `/${"b".repeat(2490)}`;
+    expect(relative.length).toBeLessThanOrEqual(INDEXED_URL_MAX);
+    const a = analyzePage(
+      `<html><head><link rel="alternate" hreflang="de" href="${relative}"></head>` +
+        `<body><a href="${relative}">r</a><img src="${relative}"></body></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls).toEqual({ links: 1, resources: 1, hreflang: 1 });
+    expect(a.links).toEqual([]);
+    expect(a.hreflang).toEqual([]);
+  });
+
+  it("keeps a reference exactly at the limit", () => {
+    const base = "https://x.test/";
+    const atLimit = base + "c".repeat(INDEXED_URL_MAX - base.length);
+    const a = analyzePage(
+      `<html><head><link rel="alternate" hreflang="de" href="${atLimit}"></head>` +
+        `<body><a href="${atLimit}">x</a><img src="${atLimit}"></body></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls).toEqual({ links: 0, resources: 0, hreflang: 0 });
+    expect(a.links.map((l) => l.href)).toEqual([atLimit]);
+    expect(a.resourceRefs.map((r) => r.url)).toEqual([atLimit]);
+    expect(a.hreflang).toEqual([{ code: "de", href: atLimit }]);
+  });
+
+  it("an over-long og:image has no ref and is flagged; a short twitter:image keeps its ref", () => {
+    const a = analyzePage(
+      `<html><head><meta property="og:image" content="${LONG}">` +
+        `<meta name="twitter:image" content="https://x.test/x.png"></head></html>`,
+      PAGE,
+    );
+    expect(a.social?.imageRefs).toEqual({ og: null, x: "https://x.test/x.png" });
+    expect(a.social?.imageRefTooLong).toEqual({ og: true, x: false });
+    expect(a.socialImageRefs).toEqual(["https://x.test/x.png"]);
+  });
+
+  it("flags an over-long twitter:image the same way", () => {
+    const a = analyzePage(`<html><head><meta name="twitter:image" content="${LONG}"></head></html>`, PAGE);
+    expect(a.social?.imageRefs).toEqual({ og: null, x: null });
+    expect(a.social?.imageRefTooLong).toEqual({ og: false, x: true });
+    expect(a.socialImageRefs).toEqual([]);
+  });
+
+  it("does not flag a short, relative or absent share image", () => {
+    const a = analyzePage(
+      `<html><head><meta property="og:image" content="/og.png"></head></html>`,
+      PAGE,
+    );
+    expect(a.social?.imageRefTooLong).toEqual({ og: false, x: false });
+  });
+
+  it("a refused hreflang target still counts toward MAX_HREFLANG_PAIRS", () => {
+    const longPairs = Array.from(
+      { length: 200 },
+      (_, i) => `<link rel="alternate" hreflang="x${i}" href="${LONG}">`,
+    ).join("");
+    const a = analyzePage(
+      `<html><head>${longPairs}<link rel="alternate" hreflang="en" href="/en"></head></html>`,
+      PAGE,
+    );
+    expect(a.overlongUrls.hreflang).toBe(200);
+    expect(a.hreflang).toEqual([]);
+  });
+
+  it("a refused resource still counts toward MAX_RESOURCE_REFS", () => {
+    const longPath = `/${"d".repeat(INDEXED_URL_MAX)}`;
+    const longImages = Array.from(
+      { length: MAX_RESOURCE_REFS },
+      (_, i) => `<img src="${longPath}${i}">`,
+    ).join("");
+    const a = analyzePage(`<html><body>${longImages}<img src="/ok.png"></body></html>`, PAGE);
+    expect(a.overlongUrls.resources).toBe(MAX_RESOURCE_REFS);
+    expect(a.resourceRefs).toEqual([]);
+    expect(a.resourceRefsCapped).toBe(true);
+  });
+
+  it("a refused link still counts toward the per-page link cap (2,000)", () => {
+    const longPath = `/${"e".repeat(INDEXED_URL_MAX)}`;
+    const longLinks = Array.from({ length: 2_000 }, (_, i) => `<a href="${longPath}${i}">x</a>`).join("");
+    const a = analyzePage(`<html><body>${longLinks}<a href="/ok">ok</a></body></html>`, PAGE);
+    expect(a.overlongUrls.links).toBe(2_000);
+    expect(a.links).toEqual([]);
   });
 });

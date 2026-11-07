@@ -22,8 +22,19 @@ import {
   mkV1Page,
   ruleLookup,
 } from "./mk-page.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
+import type { PageRecord } from "../../src/rules/registry/types.js";
 
 const rule = ruleLookup(onPageRules, "onPageRules");
+
+/**
+ * Every rule here but `url.reference-too-long`, which is the one rule in the
+ * file NOT gated on the judged cohort: an over-long reference was never
+ * followed or stored whatever the page's index status, and the count is
+ * written only on a page the crawl analysed (null otherwise), so the column
+ * itself says when there is something to judge. Its own cases are below.
+ */
+const JUDGED_ON_PAGE_RULES = onPageRules.filter((r) => r.id !== "url.reference-too-long");
 
 /**
  * Page shapes whose union fires every on-page rule on a 200: nothing
@@ -77,6 +88,7 @@ describe("onPageRules metadata", () => {
         "title.too-long",
         "title.too-short",
         "url.too-long",
+        "url.reference-too-long",
       ].sort(),
     );
   });
@@ -103,6 +115,7 @@ describe("onPageRules metadata", () => {
     expect(rule("headings.h1-missing").checkIds).toEqual(["CHECK-37"]);
     expect(rule("headings.h1-too-long").checkIds).toEqual(["CHECK-37"]);
     expect(rule("url.too-long").checkIds).toEqual(["CHECK-28"]);
+    expect(rule("url.reference-too-long").checkIds).toEqual(["CHECK-28"]);
     expect(rule("h2.missing").checkIds).toEqual(["CHECK-37"]);
     expect(rule("h2.too-long").checkIds).toEqual(["CHECK-37"]);
     expect(rule("title.multiple").checkIds).toEqual(["CHECK-35"]);
@@ -138,7 +151,7 @@ describe("onPageRules metadata", () => {
     // Every on-page signal is missing or wrong in these shapes; the only reason
     // to stay silent is the fetch class. Redirects and errors are the status
     // rules' job.
-    expectSilentOnNonOkFetches(onPageRules, BROKEN_ON_PAGE);
+    expectSilentOnNonOkFetches(JUDGED_ON_PAGE_RULES, BROKEN_ON_PAGE);
   });
 
   // PHASE 22 §1. The same sweep for the other half of the judged cohort: a page
@@ -147,7 +160,7 @@ describe("onPageRules metadata", () => {
   // it defers to, or to nobody — and `site.health` counts both exclusions so
   // the silence is a number on the report rather than an absence.
   it("no rule fires on a 200 that is noindexed or canonicalised elsewhere", () => {
-    expectSilentOnNotJudged(onPageRules, BROKEN_ON_PAGE);
+    expectSilentOnNotJudged(JUDGED_ON_PAGE_RULES, BROKEN_ON_PAGE);
   });
 });
 
@@ -336,6 +349,46 @@ describe("heading rules", () => {
     expect(rid.run(mkPage({ title: "Shoes", h1Text: "Shoe" }))).toHaveLength(0);
     expect(rid.run(mkPage({ title: null, h1Text: null }))).toHaveLength(0);
     expect(rid.run(mkPage({ title: "", h1Text: "" }))).toHaveLength(0);
+  });
+
+  it("url.reference-too-long fires on one over-long link and carries every count and the limit", () => {
+    const r = rule("url.reference-too-long");
+    expect([r.severity, r.category, r.checkIds]).toEqual(["warning", "url", ["CHECK-28"]]);
+    expect(r.columns.map((c) => c.key)).toEqual(["links", "resources", "hreflang", "max"]);
+    const f = r.run(mkPage({ overlongUrls: { links: 1, resources: 0, hreflang: 0 } }));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warning");
+    expect(f[0]!.evidence).toEqual({ links: 1, resources: 0, hreflang: 0, max: INDEXED_URL_MAX });
+    expect(INDEXED_URL_MAX).toBe(2500);
+    expect(r.run(mkPage({ overlongUrls: { links: 0, resources: 2, hreflang: 0 } }))).toHaveLength(1);
+    expect(r.run(mkPage({ overlongUrls: { links: 0, resources: 0, hreflang: 3 } }))).toHaveLength(1);
+  });
+
+  it("url.reference-too-long is silent on all zeros and on a v2 row (null column)", () => {
+    const r = rule("url.reference-too-long");
+    expect(r.run(mkPage({ overlongUrls: { links: 0, resources: 0, hreflang: 0 } }))).toHaveLength(0);
+    // A v2 row was written before the counts existed: null is "not measured",
+    // and `extraction.not-recorded` speaks for it.
+    expect(r.run(mkPage({ extractionVersion: 2, overlongUrls: null }))).toHaveLength(0);
+    expect(
+      r.run(mkPage({ extractionVersion: 2, overlongUrls: { links: 4, resources: 0, hreflang: 0 } })),
+    ).toHaveLength(0);
+    expect(r.run(mkV1Page())).toHaveLength(0);
+    // A v3 row with no analysis (a 404, a redirect) has no counts either.
+    expect(r.run(mkPage({ overlongUrls: null }))).toHaveLength(0);
+  });
+
+  it("url.reference-too-long reports a page that is not judged: the reference was still never followed", () => {
+    const r = rule("url.reference-too-long");
+    const counts = { links: 1, resources: 0, hreflang: 0 };
+    expect(r.run(mkPage({ overlongUrls: counts, robotsMeta: "noindex", isIndexable: false }))).toHaveLength(1);
+  });
+
+  it("url.reference-too-long throws on a v3 count object missing a key: re-crawl", () => {
+    const partial = { links: 1, resources: 0 } as unknown as PageRecord["overlongUrls"];
+    expect(() => rule("url.reference-too-long").run(mkPage({ overlongUrls: partial }))).toThrow(
+      /re-crawl/,
+    );
   });
 
   it("url.too-long boundary: 116 fires, 115 does not, measured on the stored string", () => {

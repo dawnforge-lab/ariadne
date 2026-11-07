@@ -365,9 +365,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "social.image-broken": {
     title: "Social: Share image relative, broken, over 5 MB or not checked",
     explanation:
-      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was skipped by the file check or got no answer: whether it loads is unknown, which is not the same as broken (when the file check was off for the whole crawl, no image is listed for that and the crawl-level notice says so once).",
+      "Indexable, self-canonical pages whose og:image or twitter:image is a relative or malformed address or one longer than 2,500 characters, answered with a status other than 200, or is larger than 5 MB, so platforms show the shared link with no image. The Image Problems column lists each tag, its address and the problem. An image listed as not fetched was skipped by the file check or got no answer: whether it loads is unknown, which is not the same as broken (when the file check was off for the whole crawl, no image is listed for that and the crawl-level notice says so once).",
     howToFix:
-      "Use an absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run or resume the crawl to check an image listed as not fetched.",
+      "Use a short, absolute https address for og:image and twitter:image, serve the file with a 200 and keep it under 5 MB. Re-run or resume the crawl to check an image listed as not fetched.",
   },
   // --------------------------------------------------------------- security
   "security.headers-missing": {
@@ -1215,6 +1215,13 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Indexable, self-canonical pages whose URL is longer than 115 characters. Long URLs are truncated in search results, are hard to share and usually carry parameters, session values or repeated folders that should not be there.",
     howToFix:
       "Shorten the URL to the words that describe the page, drop needless folders and parameters, and 301 the old URL to the new one.",
+  },
+  "url.reference-too-long": {
+    title: "URL: Links or files with addresses over 2,500 characters",
+    explanation:
+      "Pages that link to, load or name as an hreflang alternate an address longer than 2,500 characters; the row counts each kind, one per reference. Addresses that long were not followed or checked by this crawl, and search engines may ignore or truncate them. They are almost always a filter, tracking or session value repeated into the URL by a template.",
+    howToFix:
+      "Find the template that builds the address and shorten it to the path and the parameters the page needs. Remove the reference if the target is not a page or file anyone should reach.",
   },
   "url.uppercase": {
     title: "URL: Upper-case letters in the path",

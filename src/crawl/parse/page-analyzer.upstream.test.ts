@@ -137,6 +137,13 @@
  * the tree, so it is shared rather than re-derived, on `parseRefresh`'s
  * precedent.
  *
+ * Phase 26c (P26c-T2) moved the oracle in step with the port's indexed-URL
+ * limit: a link whose resolved target is over `INDEXED_URL_MAX` is no link row
+ * and takes a slot under the 2,000 cap, and the social set carries
+ * `imageRefTooLong` with a null `imageRefs` entry for an over-long share image,
+ * both written from the fields' contracts with the shared constant. The new
+ * `overlongUrls` counts are stripped (see `EXTENSION_FIELDS`).
+ *
  * Cheerio is a devDependency and appears here only: it is the parity oracle,
  * never a crawl-path parser.
  */
@@ -151,7 +158,7 @@ import {
 } from "./page-analyzer.js";
 import { simhash64 } from "./simhash.js";
 import { storableCap } from "../storable-text.js";
-import { normalizeUrl, isSameOrigin } from "./url-utils.js";
+import { INDEXED_URL_MAX, normalizeUrl, isSameOrigin } from "./url-utils.js";
 import {
   ALT_TEXT_LONG_CHARS,
   ARIA_LABEL_MAX,
@@ -226,6 +233,14 @@ const EXTENSION_FIELDS = [
   // after the candidate in the TOKEN stream, which the normalised tree erases.
   // Covered by value, cheerio-free, in test/crawl/page-analyzer.test.ts.
   "htmlStructure",
+  // Phase 26c's refused-reference counts. Two of the three are counts over
+  // fields already stripped (`resourceRefs`, `hreflang`), and all three are a
+  // statement about the port's own limit and caps, `resourceRefsCapped`'s
+  // case. What the DOM CAN be held to is modelled: the oracle's links skip an
+  // over-long target (it takes a cap slot), and the social set's
+  // `imageRefTooLong` is compared. Counts covered in
+  // test/crawl/page-analyzer.test.ts.
+  "overlongUrls",
 ] as const;
 
 /** The ten social tags `PageAnalysis.social` reads, as the oracle lists them. */
@@ -643,14 +658,21 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
   };
 
   const linksByTarget = new Map<string, RawPageAnalysis["links"][number]>();
+  // Phase 26c: a target over the indexed-URL limit is no link row, and takes
+  // a slot under the cap as a kept one does.
+  let overlongLinks = 0;
   $("a[href]").each((_, el) => {
     const href = $(el).attr("href");
     if (!href) return;
     if (/^(javascript:|mailto:|tel:|#)/.test(href)) return;
     const resolved = normalizeUrl(href, pageUrl);
     if (!resolved) return;
+    if (linksByTarget.size + overlongLinks >= 2_000) return;
+    if (resolved.length > INDEXED_URL_MAX) {
+      overlongLinks += 1;
+      return;
+    }
     if (linksByTarget.has(resolved)) return;
-    if (linksByTarget.size >= 2_000) return;
     const anchor = anchorText(el as unknown as DomNode)
       .replace(/\s+/g, " ")
       .trim()
@@ -781,11 +803,18 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
     // value, another scheme or an empty one has none. Written from
     // `SocialFacts.imageRefs`' contract, not by calling the port's
     // `shareImageRef`.
-    const imageRef = (tag: string): string | null => {
+    // Phase 26c: a resolved address over the indexed-URL limit is no key; the
+    // ref is null and `imageRefTooLong` says why.
+    const resolvedImage = (tag: string): string | null => {
       const first = socialValues.get(tag)?.[0];
       if (first === undefined || !/^https?:/i.test(first)) return null;
       return normalizeUrl(first, pageUrl);
     };
+    const tooLong = (tag: string): boolean => {
+      const resolved = resolvedImage(tag);
+      return resolved !== null && resolved.length > INDEXED_URL_MAX;
+    };
+    const imageRef = (tag: string): string | null => (tooLong(tag) ? null : resolvedImage(tag));
     social = {
       og,
       x,
@@ -794,6 +823,7 @@ function analyzeHtmlWithCheerio(html: string, pageUrl: string): UpstreamShape {
       outsideHead: socialOutsideHead,
       xViaProperty,
       imageRefs: { og: imageRef("og:image"), x: imageRef("twitter:image") },
+      imageRefTooLong: { og: tooLong("og:image"), x: tooLong("twitter:image") },
     } as RawPageAnalysis["social"];
   }
 
@@ -877,6 +907,7 @@ function expectParity(html: string) {
     headClosedBy: _headClosedBy,
     socialImageRefs: _socialImageRefs,
     htmlStructure: _htmlStructure,
+    overlongUrls: _overlongUrls,
     ...streamed
   } = analyzeHtml(html, PAGE_URL);
   const reference = analyzeHtmlWithCheerio(html, PAGE_URL);
@@ -1590,5 +1621,21 @@ describe("the Phase 26b body facts, against the DOM", () => {
       <img src="/${"s".repeat(600)}">${imgs}
       <noscript><img src="/ns.png"></noscript>
       </body></html>`);
+  });
+});
+
+/** Phase 26c's indexed-URL limit, on the two facts the oracle models. */
+describe("the Phase 26c indexed-URL limit, against the DOM", () => {
+  const long = `https://example.com/${"q".repeat(3000)}`;
+
+  it("agrees that an over-long link is no link row and a short one keeps position 0", () => {
+    expectParity(`<html><body><a href="${long}">long</a><a href="/short">short</a>
+      <a href="${long}">again</a></body></html>`);
+  });
+
+  it("agrees on imageRefTooLong and the null ref of an over-long share image", () => {
+    expectParity(`<html><head><meta property="og:image" content="${long}">
+      <meta name="twitter:image" content="https://example.com/x.png"></head><body></body></html>`);
+    expectParity(`<html><head><meta name="twitter:image" content="${long}"></head></html>`);
   });
 });

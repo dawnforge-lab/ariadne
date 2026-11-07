@@ -718,6 +718,18 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     below it, carries `requiredVersion: 3`, and claims CHECK-08 and CHECK-28
 //     as well. `INDEXED_URL_MAX` (2,500) and `fitsIndex` are the one URL length
 //     limit for every indexed column. 182 rules.
+//  2. (T2) A URL over `INDEXED_URL_MAX` never reaches an insert. `url-policy`
+//     refuses one with the reason `too_long`; the analyzer drops an over-long
+//     link, resource or hreflang target (measured after resolving, as the row
+//     would hold it) and counts it in `pages.overlong_urls`, a refusal taking
+//     a slot under its kind's per-page cap; an over-long share image gets a
+//     null ref and `social.imageRefTooLong`. New page rule
+//     `url.reference-too-long` (warning, CHECK-28, category `url`) reports the
+//     counts with `{links, resources, hreflang, max}`; it is silent on a v2
+//     row and, alone in on-page.ts, not gated on the judged cohort.
+//     `social.image-broken` gains the problem `too-long` on extraction-3 rows
+//     only, and a v3 social set without `imageRefTooLong` throws "re-crawl";
+//     a v2 row is judged as in 26b (ruling R3). 183 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

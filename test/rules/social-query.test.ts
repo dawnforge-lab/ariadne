@@ -11,8 +11,9 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 
-import { analyzePage, shareImageRef } from "../../src/crawl/parse/page-analyzer.js";
+import { analyzePage, shareImage } from "../../src/crawl/parse/page-analyzer.js";
 import { SOCIAL_URL_MAX, type SocialFacts } from "../../src/crawl/parse/page-facts.js";
+import { INDEXED_URL_MAX } from "../../src/crawl/parse/url-utils.js";
 import { RESOURCE_OFF_REASON } from "../../src/crawl/resources/fetch-resources.js";
 import { closeDb, createDb, type Db } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
@@ -58,13 +59,13 @@ function caps(listing: number | null): RuleCaps {
 
 /**
  * A social set holding only the images a case is about, with the `imageRefs`
- * the analyzer would have stored beside them (`shareImageRef`, the one function
+ * the analyzer would have stored beside them (`shareImage`, the one function
  * that resolves a share image; relative values against the site root, which
- * the rule never looks up).
+ * the rule never looks up), and the Phase 26c `imageRefTooLong` flags.
  */
 function images(og: string | undefined, x?: string): SocialFacts {
-  const ref = (value: string | undefined) =>
-    value === undefined ? null : shareImageRef(value, `${SITE}/`);
+  const resolved = (value: string | undefined) =>
+    value === undefined ? { ref: null, tooLong: false } : shareImage(value, `${SITE}/`);
   return {
     og: { title: "A share title", type: "website", url: SITE, ...(og === undefined ? {} : { image: og }) },
     x: { card: "summary_large_image", ...(x === undefined ? {} : { image: x }) },
@@ -72,7 +73,9 @@ function images(og: string | undefined, x?: string): SocialFacts {
     conflicting: [],
     outsideHead: false,
     xViaProperty: false,
-    imageRefs: { og: ref(og), x: ref(x) },
+    imageRefs: { og: resolved(og).ref, x: resolved(x).ref },
+    // Phase 26c: present on every social object the analyzer writes (v3).
+    imageRefTooLong: { og: resolved(og).tooLong, x: resolved(x).tooLong },
   };
 }
 
@@ -438,6 +441,80 @@ describe("social query rules against the database", () => {
       delete legacy.imageRefs;
       const { crawlId } = await seed([{ path: "/a", social: legacy as SocialFacts }], [{ url: OK }]);
       await expect(imageBroken.run(db, crawlId)).rejects.toThrow(/imageRefs/);
+    });
+
+    // Phase 26c (Task 2): a share image whose resolved address is over
+    // INDEXED_URL_MAX gets no ref and no `resources` row; the analyzer flags it
+    // and the rule names it `too-long`, on a v3 row.
+    it("reports a share image too long to index as too-long on a v3 row (end to end)", async () => {
+      const long = `${SITE}/og/${"w".repeat(3_000)}.png`;
+      const pageUrl = `${SITE}/a`;
+      const analysis = analyzePage(
+        `<html><head><meta property="og:image" content="${long}">` +
+          `<meta name="twitter:image" content="${OK}"></head><body><p>x</p></body></html>`,
+        pageUrl,
+      );
+      expect(analysis.social?.imageRefTooLong).toEqual({ og: true, x: false });
+      const { crawlId } = await seed(
+        [{ path: "/a", social: analysis.social, extractionVersion: 3 }],
+        [{ url: OK }],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => x.evidence.images)).toEqual([
+        [{ tag: "og:image", url: analysis.social?.og.image, problem: "too-long", max: INDEXED_URL_MAX }],
+      ]);
+    });
+
+    it("reports a too-long twitter:image beside a fine og:image (v3)", async () => {
+      const long = `${SITE}/x/${"v".repeat(3_000)}.png`;
+      const { crawlId } = await seed(
+        [{ path: "/a", social: images(OK, long), extractionVersion: 3 }],
+        [{ url: OK }],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => x.evidence.images)).toEqual([
+        [{ tag: "twitter:image", url: long, problem: "too-long", max: INDEXED_URL_MAX }],
+      ]);
+    });
+
+    it("throws re-crawl on a v3 row whose social set has no imageRefTooLong", async () => {
+      const partial: Partial<SocialFacts> = { ...images(OK) };
+      delete partial.imageRefTooLong;
+      const { crawlId } = await seed(
+        [{ path: "/a", social: partial as SocialFacts, extractionVersion: 3 }],
+        [{ url: OK }],
+      );
+      await expect(imageBroken.run(db, crawlId)).rejects.toThrow(/imageRefTooLong.*re-crawl/);
+    });
+
+    // Ruling R3: a v2 row is judged exactly as in Phase 26b. It never carries
+    // the flag, so it neither throws nor reports `too-long`.
+    it("judges a v2 row without imageRefTooLong as in 26b: no throw, no too-long", async () => {
+      const BROKEN = `${SITE}/og/broken.png`;
+      const v2Fine: Partial<SocialFacts> = { ...images(OK) };
+      delete v2Fine.imageRefTooLong;
+      const v2Broken: Partial<SocialFacts> = { ...images(BROKEN) };
+      delete v2Broken.imageRefTooLong;
+      // A v2 row's over-long http value had no ref; 26b called that `invalid`.
+      const v2Long: Partial<SocialFacts> = {
+        ...images(undefined),
+        og: { image: `${SITE}/og/${"t".repeat(900)}.png` },
+        imageRefs: { og: null, x: null },
+      };
+      delete v2Long.imageRefTooLong;
+      const { crawlId } = await seed(
+        [
+          { path: "/a", social: v2Fine as SocialFacts, extractionVersion: 2 },
+          { path: "/b", social: v2Broken as SocialFacts, extractionVersion: 2 },
+          { path: "/c", social: v2Long as SocialFacts, extractionVersion: 2 },
+        ],
+        [{ url: OK }, { url: BROKEN, fetchClass: "client_error", statusCode: 404, bytes: null }],
+      );
+      const f = await imageBroken.run(db, crawlId);
+      expect(f.map((x) => [x.pageUrl, x.evidence.images])).toEqual([
+        [`${SITE}/b`, [{ tag: "og:image", url: BROKEN, problem: "status", statusCode: 404 }]],
+        [`${SITE}/c`, [{ tag: "og:image", url: `${SITE}/og/${"t".repeat(900)}.png`, problem: "invalid" }]],
+      ]);
     });
 
     it("matches the resource row by the resolved URL (fragment and host case ignored)", async () => {

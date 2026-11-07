@@ -487,10 +487,30 @@
  * code point. The pre-26b caps (`h1Text`, the placeholder window, …) still
  * cut UTF-16 units: a half pair left at their edge reaches the writer and is
  * stored as U+FFFD, never as a failed insert.
+ *
+ * Phase 26c (P26c-T2, extraction version 3) keeps every reference out of the
+ * index it cannot fit. A resolved URL over `INDEXED_URL_MAX` (url-utils.ts) is
+ * a btree entry Postgres refuses, so one such `src` made the whole page's
+ * insert throw in 26b. Each reference site now measures the URL its row would
+ * hold, after resolving, with `fitsIndex`:
+ *  - a link (`closeAnchor`, after `normalizeUrl`) and a resource
+ *    (`addResource`, after `normalizeUrl`) over the limit are dropped and
+ *    counted in `overlongUrls.links` / `.resources`;
+ *  - an hreflang pair is measured by `hreflangTarget`, the resolution the
+ *    writer stores (`new URL(...).href`, not `normalizeUrl`: the target column
+ *    keeps fragment and parameter order), and counted in `.hreflang`;
+ *  - a share image resolved by `shareImage` gets a null ref and
+ *    `social.imageRefTooLong` set, so it has no `resources` row.
+ * A refused reference takes a slot under its kind's existing cap (links 2,000,
+ * `MAX_RESOURCE_REFS`, `MAX_HREFLANG_PAIRS`) exactly as a kept one does, so a
+ * hostile page of refused URLs cannot make the pass resolve without bound. The
+ * counts are of references, not distinct URLs: deduping would mean keeping the
+ * refused strings. `url.reference-too-long` reports the counts; `url-policy`'s
+ * `too_long` refusal keeps the same URLs off every fetch path.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
-import { normalizeUrl, isSameOrigin } from "./url-utils.js";
+import { fitsIndex, normalizeUrl, isSameOrigin } from "./url-utils.js";
 import { simhash64 } from "./simhash.js";
 import { storableCap } from "../storable-text.js";
 import {
@@ -514,6 +534,7 @@ import {
   type HtmlStructure,
   type InsecureRefKind,
   type InsecureRefs,
+  type OverlongUrls,
   type RefreshFact,
   type RobotsMetaEntry,
   type SocialFacts,
@@ -799,7 +820,8 @@ export interface PageAnalysis {
    * never loads them, so they become `resources` rows with no `page_resources`
    * edge (deviation 3). A value that is not absolute http(s) (relative, another
    * scheme, empty) or that `normalizeUrl` refuses is skipped here and stays,
-   * raw, in `social`.
+   * raw, in `social`; so is one that resolves over `INDEXED_URL_MAX` (Phase
+   * 26c, `social.imageRefTooLong`).
    */
   socialImageRefs: string[];
   /** The first `<h2>`'s text, collected exactly as `h1Text` is; capped at `H2_TEXT_MAX`. */
@@ -851,6 +873,13 @@ export interface PageAnalysis {
    * header's T4 block for each part.
    */
   htmlStructure: HtmlStructure;
+  // ---- Phase 26c (extraction version 3) ----
+  /**
+   * References whose resolved URL is over `INDEXED_URL_MAX`, counted per kind
+   * and kept out of `links`, `resourceRefs` and `hreflang` (Phase 26c; the
+   * module header's Phase 26c block). Never null; zeros on a page with none.
+   */
+  overlongUrls: OverlongUrls;
 }
 
 /**
@@ -899,10 +928,41 @@ const ABSOLUTE_HTTP = /^https?:/i;
  * `social.image-broken` reads the stored string back rather than resolving
  * again (final review I1). Exported so a test can seed exactly what the
  * analyzer would have stored.
+ *
+ * Phase 26c: a resolved address over `INDEXED_URL_MAX` is no key at all (the
+ * `resources` btree refuses it), so `ref` is null and `tooLong` is true; the
+ * analyzer stores the pair as `imageRefs` / `imageRefTooLong`.
  */
+export function shareImage(
+  value: string,
+  pageUrl: string,
+): { ref: string | null; tooLong: boolean } {
+  if (!ABSOLUTE_HTTP.test(value)) return { ref: null, tooLong: false };
+  const resolved = normalizeUrl(value, pageUrl);
+  if (resolved !== null && !fitsIndex(resolved)) return { ref: null, tooLong: true };
+  return { ref: resolved, tooLong: false };
+}
+
+/** `shareImage`'s ref alone: the `resources` key the analyzer stores, or null. */
 export function shareImageRef(value: string, pageUrl: string): string | null {
-  if (!ABSOLUTE_HTTP.test(value)) return null;
-  return normalizeUrl(value, pageUrl);
+  return shareImage(value, pageUrl).ref;
+}
+
+/**
+ * The `hreflang.target_url` the writer stores for one `<link rel=alternate
+ * hreflang>` href: resolved against the page with `new URL(...).href`, fragment
+ * and parameter order kept, which is not `normalizeUrl`'s spelling. Null when it
+ * will not resolve; the writer counts those (`hreflangUnresolved`). The one
+ * definition, read by the analyzer to measure a target against
+ * `INDEXED_URL_MAX` and by persist.ts to write it, so the length checked is the
+ * length stored.
+ */
+export function hreflangTarget(href: string, pageUrl: string): string | null {
+  try {
+    return new URL(href, pageUrl).href;
+  } catch {
+    return null;
+  }
 }
 /**
  * The start tags the tree builder's "in head" insertion mode keeps in the head
@@ -1411,6 +1471,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // whole, never capped), set when that first value is met; null while the tag
   // is unseen, which is also what an absent tag stores.
   const socialImageRef: SocialFacts["imageRefs"] = { og: null, x: null };
+  // Phase 26c: set beside the ref, from the same `shareImage` call.
+  const socialImageRefTooLong: SocialFacts["imageRefTooLong"] = { og: false, x: false };
 
   // JSON-LD is buffered one block at a time: the tokenizer hands its text over
   // in pieces, and only the closing </script> says the block is complete.
@@ -1517,6 +1579,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
   // worded for exactly that: a reference dropped unexamined, which is all this
   // position can honestly claim. See `PageAnalysis.resourceRefsCapped`.
   let resourceRefsCapped = false;
+  // Phase 26c: references refused for being over `INDEXED_URL_MAX`, per kind.
+  // Each refusal takes a slot under its kind's cap, as a kept reference does,
+  // so a page of refused URLs cannot make the pass resolve without bound.
+  let overlongLinks = 0;
+  let overlongResources = 0;
+  let overlongHreflang = 0;
   let pictureDepth = 0;
   const addResource = (raw: string | undefined, kind: ResourceKind) => {
     if (raw === undefined) return;
@@ -1524,15 +1592,21 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     // Before the cap check, deliberately: a `data:` URI or a `javascript:` href
     // is not a resource at all, so turning one away is not a truncation.
     if (value === "" || SKIPPED_RESOURCE_PROTOCOLS.test(value)) return;
-    if (resourceRefs.size >= MAX_RESOURCE_REFS) {
+    if (resourceRefs.size + overlongResources >= MAX_RESOURCE_REFS) {
       resourceRefsCapped = true;
       return;
     }
     const resolved = normalizeUrl(value, pageUrl);
+    if (resolved === null) return;
+    // Phase 26c: no `resources` row can hold it; counted, never stored.
+    if (!fitsIndex(resolved)) {
+      overlongResources += 1;
+      return;
+    }
     // First kind wins, as the first anchor wins for a link target: one URL
     // referenced as both a script and an image is one file, and its kind is
     // whichever the document named first.
-    if (resolved === null || resourceRefs.has(resolved)) return;
+    if (resourceRefs.has(resolved)) return;
     resourceRefs.set(resolved, { url: resolved, kind });
   };
 
@@ -1965,8 +2039,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       // Only the FIRST value of each image tag is judged, so only it is
       // resolved: into a slot of its own, never a resource ref (deviation 3,
       // and the header).
-      if (tag === "og:image") socialImageRef.og = shareImageRef(value, pageUrl);
-      if (tag === "twitter:image") socialImageRef.x = shareImageRef(value, pageUrl);
+      if (tag === "og:image") {
+        ({ ref: socialImageRef.og, tooLong: socialImageRefTooLong.og } = shareImage(value, pageUrl));
+      }
+      if (tag === "twitter:image") {
+        ({ ref: socialImageRef.x, tooLong: socialImageRefTooLong.x } = shareImage(value, pageUrl));
+      }
     } else if (first !== value) socialConflicting.add(tag);
   };
 
@@ -2053,8 +2131,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       hreflangTags.push(code);
       // A pair with no href names no target, so it is not a pair. The code
       // itself survives on the raw `hreflangTags` list.
-      if (href !== undefined && hreflang.length < MAX_HREFLANG_PAIRS) {
-        hreflang.push({ code, href });
+      if (href !== undefined && hreflang.length + overlongHreflang < MAX_HREFLANG_PAIRS) {
+        // Phase 26c: measured as the writer will store it (`hreflangTarget`).
+        // An href that will not resolve is kept for the writer to count.
+        const target = hreflangTarget(href, pageUrl);
+        if (target !== null && !fitsIndex(target)) overlongHreflang += 1;
+        else hreflang.push({ code, href });
       }
     }
     // A stylesheet, matched as a token (`rel="preload stylesheet"` is one) and
@@ -2155,9 +2237,16 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     if (!openAnchor) return;
     const { href, rel, ariaLabel, text } = openAnchor;
     openAnchor = null;
-    if (linksByTarget.size >= MAX_EXTRACTED_LINKS) return;
+    if (linksByTarget.size + overlongLinks >= MAX_EXTRACTED_LINKS) return;
     const resolved = normalizeUrl(href, pageUrl);
-    if (!resolved || linksByTarget.has(resolved)) return;
+    if (!resolved) return;
+    // Phase 26c: no `links` row can hold it; counted, never stored, and it
+    // takes no position, so the sequence stays dense.
+    if (!fitsIndex(resolved)) {
+      overlongLinks += 1;
+      return;
+    }
+    if (linksByTarget.has(resolved)) return;
     const anchor = text
       .join("")
       .replace(/\s+/g, " ")
@@ -2603,6 +2692,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       outsideHead: socialOutsideHead,
       xViaProperty,
       imageRefs: { ...socialImageRef },
+      imageRefTooLong: { ...socialImageRefTooLong },
     };
     const { og: ogRef, x: xRef } = socialImageRef;
     socialImageRefs = [...new Set([ogRef, xRef].filter((ref) => ref !== null))];
@@ -2690,6 +2780,7 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       // not an early close.
       closedEarly: closedEarlyFact(),
     },
+    overlongUrls: { links: overlongLinks, resources: overlongResources, hreflang: overlongHreflang },
     bodyText,
     h1s,
     hasStructuredData,
@@ -2774,5 +2865,6 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     imagesAltTooLong: raw.imagesAltTooLong,
     imagesMissingAltSample: raw.imagesMissingAltSample,
     htmlStructure: raw.htmlStructure,
+    overlongUrls: { ...raw.overlongUrls },
   };
 }

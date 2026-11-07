@@ -348,6 +348,15 @@ const SKIP_HARNESS_CLAIMS: string[] = [
   // and checks the exact-cap row count is silent. The other three entry rules
   // have fixture pages (`/authored26/bad-lastmod`, `/long-loc`, `/cross-host-loc`).
   "sitemap.over-50k-urls",
+  // Phase 26c Task 2. `url.reference-too-long` is provokable by an ordinary
+  // page (a link, `<img>` or hreflang `href` over 2,500 characters), so this
+  // entry is TEMPORARY, not a "no page could" paragraph: the phase's fixture
+  // pages all land together in Task 11 (`test/fixtures/pages/authored-p26c.ts`),
+  // which adds the page and removes this entry. Until then the rule is proven by
+  // test/rules/on-page.test.ts (fires, silent on zeros, on a v2 row and on a v3
+  // row with no counts) and end to end through the analyzer and the writer by
+  // test/crawl/page-analyzer.test.ts and test/crawl/persist.test.ts.
+  "url.reference-too-long",
 ];
 
 /**
