@@ -650,10 +650,12 @@ check:
 - **CHECK-86, link hygiene:** `links.empty-href`, `links.unsafe-target-blank` (a
   new-tab link to another origin, a subdomain or `www.` variant included, without
   `noopener`; same-origin links are not counted), `links.no-anchor-text` (warning:
-  internal links that nothing names, with no anchor text, no image alt and no
-  `aria-label`) and `links.aria-label-only` (info: internal links named only by an
-  `aria-label`, which search engines do not read as anchor text; often fine for icon
-  links such as cart, wishlist or account).
+  internal links that nothing names, with no anchor text, no image alt, no
+  `aria-label` and no wider name) and `links.aria-label-only` (info: internal links
+  named only by attributes, an `aria-label` or a wider name (`aria-labelledby` as its
+  ids, a label inside the link, an icon's `<svg><title>`, a `title`), listed with
+  their source in `names`; search engines do not read these as anchor text; often
+  fine for icon links such as cart, wishlist or account).
 - **CHECK-35, CHECK-36 and CHECK-37, on-page:** `title.multiple`,
   `meta-description.multiple`, `title.same-as-h1`, `h2.missing`, `h2.too-long` and
   `h2.duplicate`.

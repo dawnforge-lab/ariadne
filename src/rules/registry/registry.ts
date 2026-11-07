@@ -748,6 +748,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     not `https:`, on extraction 3 only; evidence `{ogImage, secureUrl?}`.
 //     No browser loads an og:image, so it is a share-preview finding, not mixed
 //     content (owner decision: info). 184 rules.
+//  5. (T5) A link's wider name. A link with no anchor text and no aria-label
+//     of its own records `links.name_hint` / `name_hint_source`: the first of
+//     its `aria-labelledby` (the id list, unresolved: deviation 8), the first
+//     non-blank `aria-label` inside it, an icon's `<svg><title>`, and its
+//     `title`, capped at `ARIA_LABEL_MAX`. `links.no-anchor-text` now also needs
+//     the hint absent (`NAME_HINT_ABSENT`); `links.aria-label-only` fires on an
+//     aria-label OR a hint, is titled "Links: Named Only by Attributes" (id
+//     unchanged), and its evidence `labels` becomes `names: {source, value}[]`.
+//     Both open with `v3Gate` instead of `v2Gate`. 184 rules.
 export const RULESET_VERSION = "0.22.0";
 
 /**

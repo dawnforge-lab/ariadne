@@ -303,6 +303,8 @@ export class PageWriter {
           targetPageId: null,
           anchor: link.anchor,
           ariaLabel: link.ariaLabel,
+          nameHint: link.nameHint,
+          nameHintSource: link.nameHintSource,
           rel: link.rel,
           isInternal: isSameOrigin(link.href, item.url),
           isNofollow: link.nofollow,

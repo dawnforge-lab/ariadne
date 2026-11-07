@@ -46,9 +46,17 @@ By family:
   names it), `links.empty-href`, `links.unsafe-target-blank` (a `target=_blank` link
   to ANOTHER origin, a subdomain or `www.` variant included, without `noopener` or
   `noreferrer`; same-origin links are not counted) and `links.aria-label-only` (info;
-  an internal link with an empty anchor named only by its `aria-label`, with `labels`
-  in its evidence). A stored anchor now includes the alt of an image inside the link,
-  and each link row records its trimmed `aria-label` (never folded into the anchor).
+  an internal link with an empty anchor named only by its `aria-label`). A stored
+  anchor now includes the alt of an image inside the link, and each link row records
+  its trimmed `aria-label` (never folded into the anchor). Phase 26c (ruleset 0.22.0,
+  migration 0029, extraction version 3) widens both: a link row with no anchor text
+  and no `aria-label` records a wider name in `links.name_hint` /
+  `name_hint_source` (its `aria-labelledby` id list, unresolved; else an `aria-label`
+  inside it; else an icon's `<svg><title>`; else its `title`), so
+  `links.no-anchor-text` needs that absent too, and `links.aria-label-only`, now
+  titled "Links: Named Only by Attributes", fires on either and carries
+  `names: {source, value}[]` in place of `labels`. Both need extraction version 3:
+  on an older crawl `extraction.not-recorded` speaks and they are silent.
 - **Forms, images and pagination** (CHECK-85, CHECK-49, CHECK-22):
   `security.form-insecure` (warning; CHECK-85's title widens to "Mixed content and
   insecure forms"), `images.empty-alt`, `images.alt-too-long` (over 100 characters)
@@ -1368,7 +1376,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2244` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2245` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1982,7 +1990,7 @@ threshold";
 `test/rules/coverage.test.ts:584` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3080` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3081` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

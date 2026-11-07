@@ -272,7 +272,8 @@ never as clean. Grouped by the problem a client reads:
   targets from discovery, so it ranks with the orphan findings. `links.no-anchor-text`
   is a link nothing names, for visitors, screen readers or search engines.
   `links.empty-href`, `links.unsafe-target-blank`, `links.aria-label-only`,
-  `images.empty-alt` and `images.alt-too-long` are hygiene; an `aria-label` names an
+  `images.empty-alt` and `images.alt-too-long` are hygiene; an `aria-label` (or an
+  `aria-labelledby`, an inner label, an icon's `<svg><title>` or a `title`) names an
   icon link for screen readers, so `links.aria-label-only` matters only where the
   target matters for search. An empty alt on a decorative image is correct, so
   weigh `images.empty-alt` by which images it names.

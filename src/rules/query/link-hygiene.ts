@@ -38,7 +38,7 @@ import {
 } from "../thresholds.js";
 import { capsOr, limitTo, noteTruncation } from "./crawl-evidence.js";
 import { SAMPLE_SOURCES } from "./link-targets.js";
-import { v2Gate } from "./page-facts.js";
+import { v3Gate } from "./page-facts.js";
 
 const CATEGORY = "links" as const;
 
@@ -76,6 +76,16 @@ const NORMALISED_ANCHOR = sql`lower(btrim(regexp_replace(l.anchor, '[\\s\\u00a0]
  * null, and the rule does not rely on that, for `NORMALISED_ANCHOR`'s reason.
  */
 const ARIA_LABEL_ABSENT = sql`(btrim(regexp_replace(coalesce(l.aria_label, ''), '[\\s\\u00a0]+', ' ', 'g')) = '')`;
+
+/**
+ * A link's wider name (`links.name_hint`, Phase 26c) read as ABSENT, with
+ * `ARIA_LABEL_ABSENT`'s normalisation and for its reason: null (no hint, or a
+ * row written before migration 0029) or nothing but whitespace.
+ */
+const NAME_HINT_ABSENT = sql`(btrim(regexp_replace(coalesce(l.name_hint, ''), '[\\s\\u00a0]+', ' ', 'g')) = '')`;
+
+/** Nothing but the anchor is missing: an aria-label or a wider name names the link. */
+const NAMED_BY_ATTRIBUTES = sql`not (${ARIA_LABEL_ABSENT} and ${NAME_HINT_ABSENT})`;
 
 const anchorList = (): SQL =>
   sql.join(
@@ -436,21 +446,23 @@ async function anchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<
 /**
  * Internal links whose stored anchor is empty once whitespace (no-break spaces
  * included, as `NORMALISED_ANCHOR` reads them) is removed AND whose
- * `aria_label` is absent (`ARIA_LABEL_ABSENT`): a link nothing names (owner
- * call O1, 2026-11-07, which also made this a warning). On an extraction 2 row
- * the stored anchor includes the alt text of an image inside the link, so an
- * image link with alt is not empty and one without alt is. A link with an
- * empty anchor and an `aria-label` is `links.aria-label-only`'s.
+ * `aria_label` is absent (`ARIA_LABEL_ABSENT`) AND whose wider name is absent
+ * (`NAME_HINT_ABSENT`, Phase 26c): a link nothing names (owner call O1,
+ * 2026-11-07, which also made this a warning). Since extraction 2 the stored
+ * anchor includes the alt text of an image inside the link, so an image link
+ * with alt is not empty and one without alt is. A link with an empty anchor and
+ * an `aria-label` or a name hint (`aria-labelledby`, a label inside it, an
+ * icon's `<svg><title>`, its `title`) is `links.aria-label-only`'s.
  *
- * Opens with `v2Gate`: the alt-in-anchor reading exists only on v2 rows, so on a
- * crawl with any older page the marker speaks and this returns `[]`.
+ * Opens with `v3Gate`: the name hint is recorded only on v3 rows, so on a crawl
+ * with any older page the marker speaks and this returns `[]`.
  *
  * Only the first anchor per target is stored (the existing link-dedupe
  * contract), so a target reached first by an empty image link and later by a
  * text link reads empty here.
  */
 async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
-  const gate = await v2Gate(db, crawlId);
+  const gate = await v3Gate(db, crawlId);
   if (!gate.recorded) return [];
   const result = await db.execute<{
     page_id: string;
@@ -466,7 +478,7 @@ async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
       from links l
       join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
       where l.crawl_id = ${crawlId} and l.is_internal and ${FETCHED_OK("p")}
-        and ${NORMALISED_ANCHOR} = '' and ${ARIA_LABEL_ABSENT}
+        and ${NORMALISED_ANCHOR} = '' and ${ARIA_LABEL_ABSENT} and ${NAME_HINT_ABSENT}
       group by p.id, p.url
       order by p.url
       ${limitTo(caps.listing)}
@@ -479,7 +491,7 @@ async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
         select distinct l.target_url
         from links l
         where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
-          and ${NORMALISED_ANCHOR} = '' and ${ARIA_LABEL_ABSENT}
+          and ${NORMALISED_ANCHOR} = '' and ${ARIA_LABEL_ABSENT} and ${NAME_HINT_ABSENT}
         order by l.target_url
         limit ${SAMPLE_SOURCES}
       ) t
@@ -497,20 +509,30 @@ async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
 }
 
+/** One name `links.aria-label-only` lists: where it came from, and the value as stored. */
+interface LinkName {
+  source: string;
+  value: string;
+}
+
 /**
- * Internal links with an empty anchor (as `links.no-anchor-text` reads it) and
- * a non-blank `aria_label`: named for screen readers, but by nothing search
- * engines document as anchor text (owner call O1, 2026-11-07). The shape is
+ * Internal links with an empty anchor (as `links.no-anchor-text` reads it)
+ * named only by attributes: a non-blank `aria_label`, or a non-blank wider name
+ * (`name_hint`, Phase 26c: `aria-labelledby`'s id list, unresolved, a label on
+ * an element inside the link, an icon's `<svg><title>`, the `title`
+ * attribute). Named for screen readers, but by nothing search engines document
+ * as anchor text (owner call O1, 2026-11-07). The shape is
  * `links.no-anchor-text`'s: one finding per source page, the exact total with
- * `noteTruncation`, a sample of `SAMPLE_SOURCES` targets, and `labels`, the
- * distinct aria-labels of exactly those listed targets, sorted and capped the
- * same.
+ * `noteTruncation`, a sample of `SAMPLE_SOURCES` targets, and `names`, the
+ * distinct `{source, value}` pairs of exactly those listed targets (`source`
+ * is `aria-label` or the row's `name_hint_source`), sorted by value then
+ * source and capped the same.
  *
- * Opens with `v2Gate`, as `links.no-anchor-text` does: the empty anchor means
- * "no text and no alt" only on a v2 row.
+ * Opens with `v3Gate`, as `links.no-anchor-text` does: the name hint exists
+ * only on a v3 row.
  */
 async function ariaOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
-  const gate = await v2Gate(db, crawlId);
+  const gate = await v3Gate(db, crawlId);
   if (!gate.recorded) return [];
   const result = await db.execute<{
     page_id: string;
@@ -518,7 +540,7 @@ async function ariaOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
     aria_count: number;
     total_matches: number;
     targets: string[];
-    labels: string[];
+    names: { source: string | null; value: string }[];
   }>(sql`
     with srcs as (
       select p.id as page_id, p.url as page_url,
@@ -527,12 +549,12 @@ async function ariaOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
       from links l
       join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
       where l.crawl_id = ${crawlId} and l.is_internal and ${FETCHED_OK("p")}
-        and ${NORMALISED_ANCHOR} = '' and not ${ARIA_LABEL_ABSENT}
+        and ${NORMALISED_ANCHOR} = '' and ${NAMED_BY_ATTRIBUTES}
       group by p.id, p.url
       order by p.url
       ${limitTo(caps.listing)}
     )
-    select s.page_id, s.page_url, s.aria_count, s.total_matches, x.targets, y.labels
+    select s.page_id, s.page_url, s.aria_count, s.total_matches, x.targets, y.names
     from srcs s
     cross join lateral (
       select coalesce(array_agg(t.target_url order by t.target_url), array[]::text[]) as targets
@@ -540,22 +562,29 @@ async function ariaOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
         select distinct l.target_url
         from links l
         where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
-          and ${NORMALISED_ANCHOR} = '' and not ${ARIA_LABEL_ABSENT}
+          and ${NORMALISED_ANCHOR} = '' and ${NAMED_BY_ATTRIBUTES}
         order by l.target_url
         limit ${SAMPLE_SOURCES}
       ) t
     ) x
     cross join lateral (
-      select coalesce(array_agg(a.label order by a.label), array[]::text[]) as labels
+      select coalesce(
+               json_agg(json_build_object('source', n.source, 'value', n.value) order by n.value, n.source),
+               '[]'::json
+             ) as names
       from (
-        select distinct l.aria_label as label
+        select distinct v.source, v.value
         from links l
+        cross join lateral (
+          values ('aria-label', l.aria_label), (l.name_hint_source, l.name_hint)
+        ) v(source, value)
         where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
-          and ${NORMALISED_ANCHOR} = '' and not ${ARIA_LABEL_ABSENT}
+          and ${NORMALISED_ANCHOR} = '' and ${NAMED_BY_ATTRIBUTES}
           and l.target_url = any(x.targets)
-        order by 1
+          and btrim(regexp_replace(coalesce(v.value, ''), '[\\s\\u00a0]+', ' ', 'g')) <> ''
+        order by v.value, v.source
         limit ${SAMPLE_SOURCES}
-      ) a
+      ) n
     ) y
     order by s.page_url`);
 
@@ -563,11 +592,27 @@ async function ariaOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
     queryFinding(ARIA_ONLY, {
       pageId: row.page_id,
       pageUrl: row.page_url,
-      evidence: { count: row.aria_count, targets: row.targets, labels: row.labels },
+      evidence: { count: row.aria_count, targets: row.targets, names: namesOf(row.page_url, row.names) },
       dedupeKey: row.page_url,
     }),
   );
   return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
+/**
+ * The listed names, each with its source. A hint stored without its source
+ * breaks the writer's contract (`PageLink.nameHintSource` is null exactly when
+ * the hint is), so it is a loud error, never a name of unknown origin.
+ */
+function namesOf(pageUrl: string, rows: { source: string | null; value: string }[]): LinkName[] {
+  return rows.map(({ source, value }) => {
+    if (source === null) {
+      throw new Error(
+        `${ARIA_ONLY.id}: a link on ${pageUrl} has name_hint ${JSON.stringify(value)} with no name_hint_source`,
+      );
+    }
+    return { source, value };
+  });
 }
 
 /**
@@ -702,9 +747,9 @@ export const linkHygieneRules: QueryRule[] = [
     category: CATEGORY,
     severity: ARIA_ONLY.severity,
     columns: [
-      { key: "count", label: "Links Named Only by aria-label" },
+      { key: "count", label: "Links Named Only by Attributes" },
       { key: "targets", label: "Targets" },
-      { key: "labels", label: "aria-labels" },
+      { key: "names", label: "Accessible Names" },
     ],
     ...copyFor(ARIA_ONLY.id),
     rulesetVersion: RULESET_VERSION,

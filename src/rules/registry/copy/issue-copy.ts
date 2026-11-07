@@ -1338,14 +1338,14 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "links.no-anchor-text": {
     title: "Links: Internal links with no anchor text",
     explanation:
-      "Pages with internal links that nothing names: no text, no image alt text and no aria-label on the link itself (a label on an element inside the link, aria-labelledby, a title attribute or an svg <title> is not read). The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
+      "Pages with internal links that nothing names: no text, no image alt text, no aria-label, no aria-labelledby, no aria-label on an element inside the link, no svg <title> and no title attribute. The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
     howToFix:
       "Add descriptive text to each link, or an alt attribute that describes the target to each image that is the only content of a link.",
   },
   "links.aria-label-only": {
-    title: "Links: Internal links named only by aria-label",
+    title: "Links: Named Only by Attributes",
     explanation:
-      "Pages with internal links that have no visible text and no image alt text, only an aria-label, which the row lists. The label names the link for screen readers, but search engines document visible text and image alt as anchor text, not aria-label, so the link passes no anchor relevance to its target. This is often fine for icon links such as cart, wishlist or account.",
+      "Pages with internal links that have no visible text and no image alt text, only a name from attributes: an aria-label, aria-labelledby (listed as the ids it points to, not the text they hold), an aria-label on an element inside the link, an icon's svg <title> or a title attribute; the row lists each name and where it came from. These name the link for screen readers, but search engines document visible text and image alt as anchor text, not these attributes, so the link passes no anchor relevance to its target. This is often fine for icon links such as cart, wishlist or account.",
     howToFix:
       "Where the target matters for search, give the link visible text or an image with alt text that describes the target; icon links to pages such as the cart, wishlist or account can stay as they are.",
   },

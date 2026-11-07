@@ -471,7 +471,10 @@
  *    the candidate moves into the body. Document order, deduped, capped at
  *    `HEAD_LOST_MAX`. `<body>` and `</head>` confirm but are never lost, so
  *    a tracking pixel's `<noscript><img>` last in the head is an early close
- *    with `lost: []`. The confirmation rule itself is unchanged.
+ *    with `lost: []`. A `<template>`'s content is neither evidence nor lost:
+ *    a start tag inside one neither confirms the candidate nor joins `lost`
+ *    (`structureOnOpenTag` reads both at `templateDepth === 0`), since
+ *    template content is in no document's head.
  *
  * EVERY PHASE 26b STRING IS MADE STORABLE where it is capped, by the one shared
  * `storableCap` (src/crawl/storable-text.ts, also the render console's):
@@ -510,6 +513,19 @@
  * Phase 26c (P26c-T4) also records `og:image:secure_url` as one more social
  * tag (`SOCIAL_SLOTS`: first value, count, conflict, capped at
  * `SOCIAL_URL_MAX`); it is a plain fact, not a judged share image.
+ * Phase 26c (P26c-T5) records a link's wider name, `PageLink.nameHint` and
+ * `nameHintSource` (`links.name_hint` / `name_hint_source`), as tokenizer state
+ * on `OpenAnchor`, and only for a link whose anchor is empty and whose own
+ * `aria-label` is null. Precedence, highest first, approximating the
+ * accessible-name order: the `<a>`'s `aria-labelledby` (the trimmed id list,
+ * unresolved, since resolving ids needs the whole document: deviation 8); the
+ * first non-blank `aria-label` on an element opened inside the link; the first
+ * non-blank text of a `<title>` inside an `<svg>` inside the link (whitespace
+ * collapsed); the `<a>`'s `title`. Each is trimmed and cut at `ARIA_LABEL_MAX`
+ * through `storableCap`; only the winner is stored. The svg title is read in
+ * `ontext` above the `suppressDepth` return, by its own per-anchor state, so it
+ * never reaches the anchor text, and `titleCount` / `titleOutsideHead` /
+ * `titleDepth` keep their svg guard. `<noscript>` content names nothing.
  */
 import { createHash } from "node:crypto";
 import { Parser } from "htmlparser2";
@@ -544,6 +560,9 @@ import {
   type SocialTag,
 } from "./page-facts.js";
 
+/** Where a link's `nameHint` came from (Phase 26c), highest precedence first. */
+export type NameHintSource = "aria-labelledby" | "inner-aria-label" | "svg-title" | "title";
+
 /** A link as the `links` table wants it. */
 export interface PageLink {
   /** Absolute, normalized target URL (see url-utils `normalizeUrl`). */
@@ -557,6 +576,18 @@ export interface PageLink {
    * text, not `aria-label`.
    */
   ariaLabel: string | null;
+  /**
+   * Phase 26c: the link's wider name, recorded only when `anchor` is empty AND
+   * `ariaLabel` is null; otherwise null. The first of, in order: the `<a>`'s
+   * `aria-labelledby` (the id list as written, unresolved: deviation 8), the
+   * first non-blank `aria-label` on an element inside the link, the first
+   * non-blank text of a `<title>` inside an `<svg>` inside the link (whitespace
+   * collapsed), and the `<a>`'s `title`. Trimmed and cut at `ARIA_LABEL_MAX`
+   * through `storableCap`. Only the winner is kept; null when none names it.
+   */
+  nameHint: string | null;
+  /** Where `nameHint` came from; null exactly when `nameHint` is. */
+  nameHintSource: NameHintSource | null;
   /** Raw `rel` attribute, lowercased; null when the attribute was absent. */
   rel: string | null;
   nofollow: boolean;
@@ -1311,12 +1342,39 @@ interface OpenAnchor {
   rel: string | null;
   ariaLabel: string | null;
   text: string[];
+  // ---- Phase 26c: the wider name's candidates, each read as `ariaLabelOf` ----
+  /** The `<a>`'s own `aria-labelledby` (the id list) and `title`. */
+  labelledBy: string | null;
+  title: string | null;
+  /** The first non-blank `aria-label` on an element opened inside the link. */
+  innerAriaLabel: string | null;
+  /** `<svg>` elements open inside the link: a `<title>` is read only under one. */
+  svgDepth: number;
+  /** The text of the `<svg><title>` being read; null while none is open. */
+  svgTitleParts: string[] | null;
+  /** The first `<svg><title>` whose text is not blank, collapsed and capped. */
+  svgTitle: string | null;
 }
 
 /** An `aria-label` as `PageLink.ariaLabel` stores it: trimmed, capped, null when blank. */
 function ariaLabelOf(raw: string | undefined): string | null {
   const trimmed = raw?.trim() ?? "";
   return trimmed === "" ? null : storableCap(trimmed, ARIA_LABEL_MAX);
+}
+
+/** The winning wider name of a closed anchor (Phase 26c; `PageLink.nameHint`). */
+function nameHintOf(
+  anchor: OpenAnchor,
+): { nameHint: string | null; nameHintSource: NameHintSource | null } {
+  if (anchor.labelledBy !== null) {
+    return { nameHint: anchor.labelledBy, nameHintSource: "aria-labelledby" };
+  }
+  if (anchor.innerAriaLabel !== null) {
+    return { nameHint: anchor.innerAriaLabel, nameHintSource: "inner-aria-label" };
+  }
+  if (anchor.svgTitle !== null) return { nameHint: anchor.svgTitle, nameHintSource: "svg-title" };
+  if (anchor.title !== null) return { nameHint: anchor.title, nameHintSource: "title" };
+  return { nameHint: null, nameHintSource: null };
 }
 
 /**
@@ -2239,7 +2297,8 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
 
   const closeAnchor = () => {
     if (!openAnchor) return;
-    const { href, rel, ariaLabel, text } = openAnchor;
+    const closing = openAnchor;
+    const { href, rel, ariaLabel, text } = closing;
     openAnchor = null;
     if (linksByTarget.size + overlongLinks >= MAX_EXTRACTED_LINKS) return;
     const resolved = normalizeUrl(href, pageUrl);
@@ -2256,10 +2315,17 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, MAX_ANCHOR_CHARS);
+    // Phase 26c: the wider name only for a link its text and its own
+    // aria-label leave unnamed.
+    const hint =
+      anchor === "" && ariaLabel === null
+        ? nameHintOf(closing)
+        : { nameHint: null, nameHintSource: null };
     linksByTarget.set(resolved, {
       href: resolved,
       anchor,
       ariaLabel,
+      ...hint,
       rel,
       nofollow: (rel ?? "").split(/\s+/).includes("nofollow"),
       isInternal: isSameOrigin(resolved, pageUrl),
@@ -2304,6 +2370,23 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (CHROME_TAGS.has(name)) chromeDepth += 1;
         if (name === "noscript") noscriptDepth += 1;
         if (noscriptDepth > 0) return;
+        // Phase 26c: an element inside an open link may name it. Below the
+        // noscript return, so `<noscript>` content names nothing, as its text
+        // is no anchor; never the `<a>` itself, which closes this one below.
+        if (openAnchor && name !== "a") {
+          if (openAnchor.innerAriaLabel === null) {
+            openAnchor.innerAriaLabel = ariaLabelOf(attribs["aria-label"]);
+          }
+          if (name === "svg") openAnchor.svgDepth += 1;
+          else if (
+            name === "title" &&
+            openAnchor.svgDepth > 0 &&
+            openAnchor.svgTitle === null &&
+            openAnchor.svgTitleParts === null
+          ) {
+            openAnchor.svgTitleParts = [];
+          }
+        }
         switch (name) {
           case "title":
             // Ignore <title> inside <svg> — only the document title counts.
@@ -2487,6 +2570,12 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
                 rel: attribs["rel"]?.trim().toLowerCase() ?? null,
                 ariaLabel: ariaLabelOf(attribs["aria-label"]),
                 text: [],
+                labelledBy: ariaLabelOf(attribs["aria-labelledby"]),
+                title: ariaLabelOf(attribs["title"]),
+                innerAriaLabel: null,
+                svgDepth: 0,
+                svgTitleParts: null,
+                svgTitle: null,
               };
             }
             break;
@@ -2524,6 +2613,11 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
             ldJsonParts.push(text);
           }
         }
+        // Phase 26c: an icon's `<svg><title>` sits inside a suppressed subtree
+        // (`svg` is a NON_CONTENT_TAG), so it is read before the return below.
+        // It is never anchor text and never the document title: `titleDepth`,
+        // `titleCount` and `titleOutsideHead` keep their own svg guard.
+        if (openAnchor?.svgTitleParts && noscriptDepth === 0) openAnchor.svgTitleParts.push(text);
         if (suppressDepth > 0) return;
         if (titleDepth > 0) {
           titleParts.push(text);
@@ -2610,6 +2704,16 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
         if (name === "footer" && footerDepth > 0) footerDepth -= 1;
         if (name === "head" && headDepth > 0) headDepth -= 1;
         if (name === "body" && bodyDepth > 0) bodyDepth -= 1;
+        // Phase 26c: the open-tag hook's mirror, below the noscript returns as
+        // that hook is below its own.
+        if (openAnchor) {
+          if (name === "title" && openAnchor.svgTitleParts !== null) {
+            openAnchor.svgTitle = ariaLabelOf(openAnchor.svgTitleParts.join("").replace(/\s+/g, " "));
+            openAnchor.svgTitleParts = null;
+          } else if (name === "svg" && openAnchor.svgDepth > 0) {
+            openAnchor.svgDepth -= 1;
+          }
+        }
         if (name === "a") closeAnchor();
         if (name === "h1" && openH1) {
           h1s.push(openH1.join("").trim());
@@ -2822,10 +2926,12 @@ export function analyzePage(html: string, url: string): PageAnalysis {
     navLinkCount: raw.navLinkCount,
     footerLinkCount: raw.footerLinkCount,
     frameworkMarkers: raw.frameworkMarkers,
-    links: raw.links.map(({ href, anchor, ariaLabel, rel, nofollow, position }) => ({
+    links: raw.links.map(({ href, anchor, ariaLabel, nameHint, nameHintSource, rel, nofollow, position }) => ({
       href,
       anchor,
       ariaLabel,
+      nameHint,
+      nameHintSource,
       rel,
       nofollow,
       position,

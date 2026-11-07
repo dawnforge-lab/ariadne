@@ -1960,12 +1960,13 @@ describe("the fixture site end to end", () => {
   });
 
   it("the owner-call fixtures carry the evidence their markup produces (O1, O3)", () => {
-    // O1: an icon link named only by its aria-label, with the label it carries.
+    // O1: an icon link named only by its aria-label, with the label it carries
+    // and its source (Phase 26c: `labels` became `names`).
     expect(detailsByPath.get("/p26b/aria-label-link\nlinks.aria-label-only")).toEqual({
       pageUrl: `${app.base}/p26b/aria-label-link`,
       count: 1,
       targets: [`${app.base}/p26b/empty-href`],
-      labels: ["The empty address example"],
+      names: [{ source: "aria-label", value: "The empty address example" }],
     });
     // O3: the noscript iframe is the last thing in the head, so nothing is lost;
     // the banner div is followed by a favicon link, which is.

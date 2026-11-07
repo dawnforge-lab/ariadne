@@ -2083,17 +2083,22 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     another origin, and a same-origin new-tab link is not reported.
   - `links.no-anchor-text` (warning) — a page with an INTERNAL link that nothing names:
     its stored anchor is empty after whitespace is removed AND it has no `aria-label`
-    (absent or blank). The stored anchor includes the alt text of an image inside the
+    (absent or blank) AND no wider name: no `aria-labelledby`, no `aria-label` on an
+    element inside the link, no `<title>` in an `<svg>` inside it and no `title`
+    attribute. The stored anchor includes the alt text of an image inside the
     link, so an image link with alt text is not textless and one without is. Only the
     first anchor per target is stored, so a target reached first by a textless link
     and later by a text link is listed too.
   - `links.aria-label-only` (info) — a page with an INTERNAL link whose anchor is empty
-    but which carries a non-blank `aria-label`; the row lists the targets and their
-    labels. The label names the link for screen readers, but search engines document
-    visible text and image alt as anchor text, not `aria-label`, so the link passes no
-    anchor relevance. Often fine for icon links (cart, wishlist, account); where the
-    target matters for search, the fix is visible text or an image alt.
-- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
+    but which is named by attributes: a non-blank `aria-label`, or a wider name (in
+    order: `aria-labelledby`, recorded as the ids it points to and not the text they
+    hold; an `aria-label` on an element inside the link; an icon's `<svg><title>`;
+    the `title` attribute). The row lists the targets and their `names`, each with
+    its source. These name the link for screen readers, but search engines document
+    visible text and image alt as anchor text, not these attributes, so the link
+    passes no anchor relevance. Often fine for icon links (cart, wishlist, account);
+    where the target matters for search, the fix is visible text or an image alt.
+- **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2 (version 3 for `links.no-anchor-text` and `links.aria-label-only`, which read a link's wider name): on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if no link points at a private host and generic anchors are rare
   - WARN if any link points at `localhost` or a private address, any internal link has

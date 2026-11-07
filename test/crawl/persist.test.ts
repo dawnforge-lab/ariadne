@@ -21,7 +21,7 @@ import {
   leaseBatch,
 } from "../../src/crawl/frontier.js";
 import type { FetchResult } from "../../src/crawl/fetch-page.js";
-import { analyzePage, type PageAnalysis } from "../../src/crawl/parse/page-analyzer.js";
+import { analyzePage, type PageAnalysis, type PageLink } from "../../src/crawl/parse/page-analyzer.js";
 import { HEAD_SNIPPET_MAX } from "../../src/crawl/parse/page-facts.js";
 
 function databaseUrl(): string {
@@ -60,11 +60,22 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
     footerLinkCount: 4,
     frameworkMarkers: ["__NEXT_DATA__"],
     links: [
-      { href: `${SITE}/one`, anchor: "one", ariaLabel: null, rel: null, nofollow: false, position: 0 },
+      {
+        href: `${SITE}/one`,
+        anchor: "one",
+        ariaLabel: null,
+        nameHint: null,
+        nameHintSource: null,
+        rel: null,
+        nofollow: false,
+        position: 0,
+      },
       {
         href: `${SITE}/two`,
         anchor: "",
         ariaLabel: "Wishlist",
+        nameHint: null,
+        nameHintSource: null,
         rel: "nofollow",
         nofollow: true,
         position: 1,
@@ -73,6 +84,8 @@ function makeAnalysis(overrides: Partial<PageAnalysis> = {}): PageAnalysis {
         href: "https://other.example/three",
         anchor: "three",
         ariaLabel: null,
+        nameHint: null,
+        nameHintSource: null,
         rel: null,
         nofollow: false,
         position: 2,
@@ -230,6 +243,8 @@ describe("PageWriter", () => {
       href: `${SITE}/l/${i}`,
       anchor: `l${i}`,
       ariaLabel: null,
+      nameHint: null,
+      nameHintSource: null,
       rel: null,
       nofollow: false,
       position: i,
@@ -434,6 +449,49 @@ describe("PageWriter", () => {
     expect(byTarget.get(`${SITE}/two`)?.isNofollow).toBe(true);
     expect(byTarget.get("https://other.example/three")?.isInternal).toBe(false);
     expect(byTarget.get("https://other.example/three")?.position).toBe(2);
+  });
+
+  it("writes a link's name hint and its source as the analyzer gave them, nulls included (Phase 26c)", async () => {
+    const crawlId = await newCrawl();
+    const writer = new PageWriter(db, crawlId);
+    const url = `${SITE}/named`;
+    const link = (path: string, position: number, nameHint: string | null, nameHintSource: PageLink["nameHintSource"]) => ({
+      href: `${SITE}${path}`,
+      anchor: "",
+      ariaLabel: null,
+      nameHint,
+      nameHintSource,
+      rel: null,
+      nofollow: false,
+      position,
+    });
+    await writer.addPage(
+      item(url),
+      makeFetch(url),
+      makeAnalysis({
+        links: [
+          link("/labelledby", 0, "cart-label cart-count", "aria-labelledby"),
+          link("/inner", 1, "Cart", "inner-aria-label"),
+          link("/svg", 2, "Menu", "svg-title"),
+          link("/title", 3, "Account", "title"),
+          link("/nothing", 4, null, null),
+        ],
+      }),
+      { complete: true },
+    );
+    await writer.flush();
+
+    const rows = await db
+      .select({ targetUrl: links.targetUrl, nameHint: links.nameHint, nameHintSource: links.nameHintSource })
+      .from(links)
+      .where(eq(links.crawlId, crawlId));
+    expect(Object.fromEntries(rows.map((r) => [r.targetUrl, [r.nameHint, r.nameHintSource]]))).toEqual({
+      [`${SITE}/labelledby`]: ["cart-label cart-count", "aria-labelledby"],
+      [`${SITE}/inner`]: ["Cart", "inner-aria-label"],
+      [`${SITE}/svg`]: ["Menu", "svg-title"],
+      [`${SITE}/title`]: ["Account", "title"],
+      [`${SITE}/nothing`]: [null, null],
+    });
   });
 
   it("writes the fetch-side columns and a normalised url", async () => {
@@ -1197,6 +1255,8 @@ describe("PageWriter", () => {
             href: `${SITE}/one`,
             anchor: "one",
             ariaLabel: null,
+            nameHint: null,
+            nameHintSource: null,
             rel: null,
             nofollow: false,
             position: 3_000_000_000,
