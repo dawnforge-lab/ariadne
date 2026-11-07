@@ -441,7 +441,7 @@ a head `<noscript><img>` tracking pixel is a `html.head-closed-early` warning.
 - `h2.duplicate` anchors a group on `min(url)`, which makes two template-sharing exact
   fixtures sort-order dependent.
 - A `Refresh` header cut at the stored value cap is parsed as stored; a second `Refresh`
-  header is ignored; `en_US` splits only on `-`.
+  header is ignored.
 - Test gaps named in review: a v1 non-OK page plus a v2 200 page for the marker; a
   cap/exact-total test for `hreflang.html-lang-mismatch`; non-null `relNext` with
   `relNextCount` 2; head-after-body combined with another problem.

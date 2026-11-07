@@ -651,6 +651,9 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     PR #23 review: `insecure_refs.sample` keeps `INSECURE_SAMPLE_MAX` per
 //     kind (iframe, media, form; at most 30 in all), so ten `http:` iframes
 //     no longer leave a counted `http:` form action with no sample.
+//     PR #23 review: `hreflang.html-lang-mismatch` takes the primary subtag
+//     before the first `-` OR `_` on both sides, so `lang="en_US"` agrees
+//     with a self hreflang `en-us`.
 export const RULESET_VERSION = "0.21.0";
 
 /**

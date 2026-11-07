@@ -704,6 +704,22 @@ describe("hreflangIntegrityRules against the database", () => {
       expect(await run(crawlId)).toHaveLength(0);
     });
 
+    it("splits the primary subtag on _ as well as - (lang=en_US against en-us)", async () => {
+      const crawlId = await newCrawl();
+      const ids = await addPages(crawlId, [
+        { path: "/a", htmlLang: "en_US", ...V2 },
+        { path: "/b", htmlLang: "en", ...V2 },
+        { path: "/c", htmlLang: "de_DE", ...V2 },
+      ]);
+      await declare(crawlId, ids, "/a", [["en-us", "/a"]]);
+      await declare(crawlId, ids, "/b", [["en_GB", "/b"]]);
+      await declare(crawlId, ids, "/c", [["en_GB", "/c"]]);
+      const found = await run(crawlId);
+      expect(found.map((f) => f.evidence)).toEqual([
+        { htmlLang: "de_DE", hreflangCodes: ["en_gb"] },
+      ]);
+    });
+
     it("is silent when any self code shares the language", async () => {
       const crawlId = await newCrawl();
       const ids = await addPages(crawlId, [{ path: "/a", htmlLang: "fr", ...V2 }]);

@@ -316,8 +316,9 @@ async function unlinkedTargetFindings(
  *
  * The page's SELF codes are its html-source hreflang codes whose target is the
  * page itself (the cohort above), `x-default` excluded. Only the PRIMARY
- * language subtag is compared (before `-`, lower-cased): `en-US` against `en-gb`
- * agree, `de` against `en` do not. The page fires when it has at least one self
+ * language subtag is compared (before the first `-` or `_`, lower-cased, on
+ * both sides): `en-US` against `en-gb` agree, and so do `en_US` against
+ * `en-us`; `de` against `en` do not. The page fires when it has at least one self
  * code and none of their primary subtags equals `html_lang`'s. A page with no
  * `lang`, or no self code, has nothing to compare and is not this rule's.
  */
@@ -348,8 +349,8 @@ async function htmlLangMismatchFindings(
       from self_codes s
       join pages p on p.id = s.page_id and p.crawl_id = ${crawlId}
       where nullif(btrim(p.html_lang), '') is not null
-        and not (lower(split_part(btrim(p.html_lang), '-', 1)) = any (
-          select lower(split_part(c, '-', 1)) from unnest(s.codes) as c))
+        and not (split_part(replace(lower(btrim(p.html_lang)), '_', '-'), '-', 1) = any (
+          select split_part(replace(lower(c), '_', '-'), '-', 1) from unnest(s.codes) as c))
     )
     select * from hits order by page_url ${limitTo(caps.listing)}`);
 
