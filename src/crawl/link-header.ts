@@ -20,6 +20,8 @@
  * skipped to the next comma outside a quoted string and COUNTED in
  * `malformed`, never silently dropped and never thrown: the header is the
  * site's text, and one bad entry must not cost the good ones beside it.
+ * Lenient where servers commonly are: an empty parameter (a trailing or
+ * doubled `;`) is ignored, and an empty unquoted value (`foo=`) reads as `""`.
  */
 
 export interface LinkHeaderEntry {
@@ -92,6 +94,10 @@ function readEntry(value: string, start: number): { entry: LinkHeaderEntry | nul
     if (value[i] !== ";") return { entry: null, end: i };
     i += 1;
     while (i < value.length && OWS.test(value[i]!)) i += 1;
+    // An empty parameter (`rel="canonical";`, `a;;b`) is a no-op, not a
+    // malformed entry: trailing semicolons are common in hand-written server
+    // configs, and refusing them would lose the site's canonical.
+    if (i >= value.length || value[i] === "," || value[i] === ";") continue;
 
     const nameStart = i;
     while (i < value.length && TCHAR.test(value[i]!)) i += 1;
@@ -111,10 +117,10 @@ function readEntry(value: string, start: number): { entry: LinkHeaderEntry | nul
       } else {
         // A token by the grammar. Read up to the next delimiter rather than
         // stopping at the first non-tchar, so an unquoted `anchor=/a/b` is
-        // read whole instead of being called malformed.
+        // read whole instead of being called malformed. An empty one
+        // (`foo=`) is read as `""`, like a parameter with no `=`.
         const valueStart = i;
         while (i < value.length && !/[;,\s]/.test(value[i]!)) i += 1;
-        if (i === valueStart) return { entry: null, end: i };
         paramValue = value.slice(valueStart, i);
       }
     }

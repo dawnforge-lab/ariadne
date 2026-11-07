@@ -262,10 +262,16 @@ export function parseCanonicalLinkHeader(value: string | null): string | null {
   return canonicalOf(parseLinkHeader([value]).entries);
 }
 
-/** The first entry whose `rel` tokens include `canonical`, its URI verbatim. */
+/**
+ * The first entry with a non-empty URI whose `rel` tokens include `canonical`,
+ * its URI verbatim. An empty `<>` is skipped rather than ending the search, as
+ * the pre-26c regex did.
+ */
 function canonicalOf(entries: LinkHeaderEntry[]): string | null {
-  const canonical = entries.find((entry) => relTokens(entry).includes("canonical"));
-  return canonical === undefined ? null : canonical.uri || null;
+  const canonical = entries.find(
+    (entry) => entry.uri !== "" && relTokens(entry).includes("canonical"),
+  );
+  return canonical === undefined ? null : canonical.uri;
 }
 
 /**

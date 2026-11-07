@@ -223,6 +223,18 @@ beforeAll(async () => {
         '</c>; rel="canonical"; hreflang="fr"',
       ]);
       res.end("<html></html>");
+    } else if (req.url === "/link-trailing-semicolons") {
+      // Hand-written server configs end params with `;` (review I1).
+      res.setHeader("content-type", "text/html");
+      res.setHeader("link", [
+        '<https://ex.com/c3>; rel="canonical";',
+        '<https://ex.com/de>; rel="alternate"; hreflang="de";, <https://ex.com/en>; rel="alternate"; hreflang="en"; foo=',
+      ]);
+      res.end("<html></html>");
+    } else if (req.url === "/link-empty-canonical-first") {
+      res.setHeader("content-type", "text/html");
+      res.setHeader("link", "<>; rel=canonical, <https://ex.com/c4>; rel=canonical");
+      res.end("<html></html>");
     } else if (req.url === "/no-canonical") {
       res.setHeader("content-type", "text/html");
       res.setHeader("link", '<https://ex.com/next>; rel="next"');
@@ -616,6 +628,21 @@ describe("fetchPage", () => {
       "https://ex.com/c2",
     );
     expect((await fetchPage(`${base}/no-canonical`, OPTS)).canonicalHeader).toBeNull();
+  });
+
+  it("reads a canonical and hreflang pairs whose params end in a semicolon (review I1)", async () => {
+    const r = await fetchPage(`${base}/link-trailing-semicolons`, OPTS);
+    expect(r.canonicalHeader).toBe("https://ex.com/c3");
+    expect(r.headerHreflang).toEqual([
+      { code: "de", href: "https://ex.com/de" },
+      { code: "en", href: "https://ex.com/en" },
+    ]);
+  });
+
+  it("skips an empty canonical URI and takes the next canonical (review I1b)", async () => {
+    expect((await fetchPage(`${base}/link-empty-canonical-first`, OPTS)).canonicalHeader).toBe(
+      "https://ex.com/c4",
+    );
   });
 
   describe("hreflang from the Link header (Phase 26c)", () => {

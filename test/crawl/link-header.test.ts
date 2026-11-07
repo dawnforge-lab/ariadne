@@ -91,6 +91,32 @@ describe("parseLinkHeader (RFC 8288)", () => {
     });
   });
 
+  it("ignores an empty parameter: a trailing or doubled semicolon (review I1)", () => {
+    expect(parseLinkHeader(['<https://x/c>; rel="canonical";'])).toEqual({
+      entries: [{ uri: "https://x/c", params: { rel: "canonical" } }],
+      malformed: 0,
+    });
+    expect(
+      parseLinkHeader(['<https://x/de>; rel="alternate"; hreflang="de";, <https://x/en>;; rel=alternate ; ; hreflang=en ;']),
+    ).toEqual({
+      entries: [
+        { uri: "https://x/de", params: { rel: "alternate", hreflang: "de" } },
+        { uri: "https://x/en", params: { rel: "alternate", hreflang: "en" } },
+      ],
+      malformed: 0,
+    });
+  });
+
+  it("reads an empty unquoted value as the empty string (review I1)", () => {
+    expect(parseLinkHeader(['<https://x/c>; rel="canonical"; foo=', "<https://x/d>; foo= ; rel=next"])).toEqual({
+      entries: [
+        { uri: "https://x/c", params: { rel: "canonical", foo: "" } },
+        { uri: "https://x/d", params: { foo: "", rel: "next" } },
+      ],
+      malformed: 0,
+    });
+  });
+
   it("ignores empty list elements and empty values", () => {
     expect(parseLinkHeader(["", " , ,<https://x/a>; rel=next,, "])).toEqual({
       entries: [{ uri: "https://x/a", params: { rel: "next" } }],
