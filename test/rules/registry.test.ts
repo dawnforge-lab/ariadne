@@ -590,15 +590,21 @@ describe("check annotations", () => {
  * list: metric rules (`metricRule` takes no severity and hard-codes `info`) and
  * the fifteen markers (26a added `security.headers-not-recorded`, 26b `extraction.not-recorded`), which report a hole in OUR evidence and never a fault of
  * the site.
+ *
+ * Owner calls 2026-11-07 (0.21.0, unreleased, so no bump under ruling R20; the
+ * rationale is in the registry's 0.21.0 note): `links.no-anchor-text` moves
+ * info to warning, since it now fires only on a link nothing names (no text, no
+ * alt, no aria-label), and `links.aria-label-only` (info) takes the links named
+ * only by aria-label. The critical list does not move.
  */
 describe("severity shape of the ruleset", () => {
   const all = buildRegistry().all();
 
-  it("holds 33 critical, 62 warning and 85 info rules", () => {
+  it("holds 33 critical, 63 warning and 85 info rules", () => {
     const counts = { critical: 0, warning: 0, info: 0 };
     for (const r of all) counts[r.severity] += 1;
-    expect(counts).toEqual({ critical: 33, warning: 62, info: 85 });
-    expect(all).toHaveLength(180);
+    expect(counts).toEqual({ critical: 33, warning: 63, info: 85 });
+    expect(all).toHaveLength(181);
   });
 
   it("names exactly the rules that are critical", () => {

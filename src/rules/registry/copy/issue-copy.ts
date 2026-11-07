@@ -1317,9 +1317,16 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "links.no-anchor-text": {
     title: "Links: Internal links with no anchor text",
     explanation:
-      "Pages with internal links that have no text and no image alt text. The anchor is what tells visitors and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
+      "Pages with internal links that nothing names: no text, no image alt text and no aria-label. The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
     howToFix:
       "Add descriptive text to each link, or an alt attribute that describes the target to each image that is the only content of a link.",
+  },
+  "links.aria-label-only": {
+    title: "Links: Internal links named only by aria-label",
+    explanation:
+      "Pages with internal links that have no visible text and no image alt text, only an aria-label, which the row lists. The label names the link for screen readers, but search engines document visible text and image alt as anchor text, not aria-label, so the link passes no anchor relevance to its target. This is often fine for icon links such as cart, wishlist or account.",
+    howToFix:
+      "Where the target matters for search, give the link visible text or an image with alt text that describes the target; icon links to pages such as the cart, wishlist or account can stay as they are.",
   },
   "links.high-outlinks": {
     title: "Links: Over 1,000 internal or 10 external links",

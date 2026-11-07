@@ -2053,7 +2053,7 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     anchor is a generic English phrase ("click here", "read more", "learn more" and the
     rest of the list in the rule's thresholds). The judgement covers internal anchors
     only; anchors in other languages, and external anchors, are not judged.
-  Three more rules answer the rest of the check (all info):
+  Four more rules answer the rest of the check:
   - `links.empty-href` (info) — a page with `<a href="">`, which points back at the
     page itself.
   - `links.unsafe-target-blank` (info) — a page with `target="_blank"` links to
@@ -2061,16 +2061,23 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     cross-origin target counts (an exact origin compare, so a subdomain or a `www.`
     variant is another origin): reverse tabnabbing needs the opened page to be on
     another origin, and a same-origin new-tab link is not reported.
-  - `links.no-anchor-text` (info) — a page with an INTERNAL link whose stored anchor is
-    empty after whitespace is removed. The stored anchor includes the alt text of an
-    image inside the link, so an image link with alt text is not textless and one
-    without is. Only the first anchor per target is stored, so a target reached first
-    by a textless link and later by a text link is listed too.
+  - `links.no-anchor-text` (warning) — a page with an INTERNAL link that nothing names:
+    its stored anchor is empty after whitespace is removed AND it has no `aria-label`
+    (absent or blank). The stored anchor includes the alt text of an image inside the
+    link, so an image link with alt text is not textless and one without is. Only the
+    first anchor per target is stored, so a target reached first by a textless link
+    and later by a text link is listed too.
+  - `links.aria-label-only` (info) — a page with an INTERNAL link whose anchor is empty
+    but which carries a non-blank `aria-label`; the row lists the targets and their
+    labels. The label names the link for screen readers, but search engines document
+    visible text and image alt as anchor text, not `aria-label`, so the link passes no
+    anchor relevance. Often fine for icon links (cart, wishlist, account); where the
+    target matters for search, the fix is visible text or an image alt.
 - **Crawl-level marker**: `extraction.not-recorded` (info) is the NOT MEASURED marker for the page facts this check reads from extraction version 2: on a crawl extracted before them (or one mixing old and new pages) the rules that read those facts did not run, so their part of this check is NOT MEASURED, never a pass. The remedy is a re-crawl.
 - **Evaluate**:
   - PASS if no link points at a private host and generic anchors are rare
-  - WARN if any link points at `localhost` or a private address, or generic anchors
-    are common
+  - WARN if any link points at `localhost` or a private address, any internal link has
+    nothing that names it (`links.no-anchor-text`), or generic anchors are common
   - Record: source page, target URL and anchor text for each finding
 
 ### CHECK-87: Social sharing tags (Open Graph and X)

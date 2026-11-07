@@ -56,7 +56,8 @@ const NON_INDEXABLE_ONLY: RuleIdentity = {
 };
 const LOCALHOST: RuleIdentity = { id: "links.localhost", severity: "warning" };
 const ANCHOR: RuleIdentity = { id: "links.non-descriptive-anchor", severity: "info" };
-const NO_ANCHOR: RuleIdentity = { id: "links.no-anchor-text", severity: "info" };
+const NO_ANCHOR: RuleIdentity = { id: "links.no-anchor-text", severity: "warning" };
+const ARIA_ONLY: RuleIdentity = { id: "links.aria-label-only", severity: "info" };
 const HIGH_OUTLINKS: RuleIdentity = { id: "links.high-outlinks", severity: "info" };
 
 /**
@@ -67,6 +68,14 @@ const HIGH_OUTLINKS: RuleIdentity = { id: "links.high-outlinks", severity: "info
  * writers could fill, and "Read  More" must match whichever wrote it.
  */
 const NORMALISED_ANCHOR = sql`lower(btrim(regexp_replace(l.anchor, '[\\s\\u00a0]+', ' ', 'g')))`;
+
+/**
+ * A link's `aria-label` read as ABSENT: null (no attribute, or a row written
+ * before migration 0028) or nothing but whitespace, a no-break space included,
+ * as `NORMALISED_ANCHOR` reads the anchor. The analyzer stores a blank label as
+ * null, and the rule does not rely on that, for `NORMALISED_ANCHOR`'s reason.
+ */
+const ARIA_LABEL_ABSENT = sql`(btrim(regexp_replace(coalesce(l.aria_label, ''), '[\\s\\u00a0]+', ' ', 'g')) = '')`;
 
 const anchorList = (): SQL =>
   sql.join(
@@ -426,9 +435,12 @@ async function anchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<
 
 /**
  * Internal links whose stored anchor is empty once whitespace (no-break spaces
- * included, as `NORMALISED_ANCHOR` reads them) is removed. On an extraction 2 row
+ * included, as `NORMALISED_ANCHOR` reads them) is removed AND whose
+ * `aria_label` is absent (`ARIA_LABEL_ABSENT`): a link nothing names (owner
+ * call O1, 2026-11-07, which also made this a warning). On an extraction 2 row
  * the stored anchor includes the alt text of an image inside the link, so an
- * image link with alt is not empty and one without alt is.
+ * image link with alt is not empty and one without alt is. A link with an
+ * empty anchor and an `aria-label` is `links.aria-label-only`'s.
  *
  * Opens with `v2Gate`: the alt-in-anchor reading exists only on v2 rows, so on a
  * crawl with any older page the marker speaks and this returns `[]`.
@@ -454,7 +466,7 @@ async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
       from links l
       join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
       where l.crawl_id = ${crawlId} and l.is_internal and ${FETCHED_OK("p")}
-        and ${NORMALISED_ANCHOR} = ''
+        and ${NORMALISED_ANCHOR} = '' and ${ARIA_LABEL_ABSENT}
       group by p.id, p.url
       order by p.url
       ${limitTo(caps.listing)}
@@ -467,7 +479,7 @@ async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
         select distinct l.target_url
         from links l
         where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
-          and ${NORMALISED_ANCHOR} = ''
+          and ${NORMALISED_ANCHOR} = '' and ${ARIA_LABEL_ABSENT}
         order by l.target_url
         limit ${SAMPLE_SOURCES}
       ) t
@@ -479,6 +491,79 @@ async function noAnchorFindings(db: Db, crawlId: string, caps: RuleCaps): Promis
       pageId: row.page_id,
       pageUrl: row.page_url,
       evidence: { count: row.empty_count, targets: row.targets },
+      dedupeKey: row.page_url,
+    }),
+  );
+  return noteTruncation(findings, result.rows[0]?.total_matches ?? 0);
+}
+
+/**
+ * Internal links with an empty anchor (as `links.no-anchor-text` reads it) and
+ * a non-blank `aria_label`: named for screen readers, but by nothing search
+ * engines document as anchor text (owner call O1, 2026-11-07). The shape is
+ * `links.no-anchor-text`'s: one finding per source page, the exact total with
+ * `noteTruncation`, a sample of `SAMPLE_SOURCES` targets, and `labels`, the
+ * distinct aria-labels of exactly those listed targets, sorted and capped the
+ * same.
+ *
+ * Opens with `v2Gate`, as `links.no-anchor-text` does: the empty anchor means
+ * "no text and no alt" only on a v2 row.
+ */
+async function ariaOnlyFindings(db: Db, crawlId: string, caps: RuleCaps): Promise<Finding[]> {
+  const gate = await v2Gate(db, crawlId);
+  if (!gate.recorded) return [];
+  const result = await db.execute<{
+    page_id: string;
+    page_url: string;
+    aria_count: number;
+    total_matches: number;
+    targets: string[];
+    labels: string[];
+  }>(sql`
+    with srcs as (
+      select p.id as page_id, p.url as page_url,
+             count(*)::int as aria_count,
+             count(*) over ()::int as total_matches
+      from links l
+      join pages p on p.id = l.source_page_id and p.crawl_id = ${crawlId}
+      where l.crawl_id = ${crawlId} and l.is_internal and ${FETCHED_OK("p")}
+        and ${NORMALISED_ANCHOR} = '' and not ${ARIA_LABEL_ABSENT}
+      group by p.id, p.url
+      order by p.url
+      ${limitTo(caps.listing)}
+    )
+    select s.page_id, s.page_url, s.aria_count, s.total_matches, x.targets, y.labels
+    from srcs s
+    cross join lateral (
+      select coalesce(array_agg(t.target_url order by t.target_url), array[]::text[]) as targets
+      from (
+        select distinct l.target_url
+        from links l
+        where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
+          and ${NORMALISED_ANCHOR} = '' and not ${ARIA_LABEL_ABSENT}
+        order by l.target_url
+        limit ${SAMPLE_SOURCES}
+      ) t
+    ) x
+    cross join lateral (
+      select coalesce(array_agg(a.label order by a.label), array[]::text[]) as labels
+      from (
+        select distinct l.aria_label as label
+        from links l
+        where l.crawl_id = ${crawlId} and l.source_page_id = s.page_id and l.is_internal
+          and ${NORMALISED_ANCHOR} = '' and not ${ARIA_LABEL_ABSENT}
+          and l.target_url = any(x.targets)
+        order by 1
+        limit ${SAMPLE_SOURCES}
+      ) a
+    ) y
+    order by s.page_url`);
+
+  const findings = result.rows.map((row) =>
+    queryFinding(ARIA_ONLY, {
+      pageId: row.page_id,
+      pageUrl: row.page_url,
+      evidence: { count: row.aria_count, targets: row.targets, labels: row.labels },
       dedupeKey: row.page_url,
     }),
   );
@@ -608,6 +693,22 @@ export const linkHygieneRules: QueryRule[] = [
     ...copyFor(NO_ANCHOR.id),
     rulesetVersion: RULESET_VERSION,
     run: (db, crawlId, caps) => noAnchorFindings(db, crawlId, capsOr(caps)),
+  }),
+
+  defineRule<QueryRule>({
+    kind: "query",
+    id: ARIA_ONLY.id,
+    checkIds: ["CHECK-86"],
+    category: CATEGORY,
+    severity: ARIA_ONLY.severity,
+    columns: [
+      { key: "count", label: "Links Named Only by aria-label" },
+      { key: "targets", label: "Targets" },
+      { key: "labels", label: "aria-labels" },
+    ],
+    ...copyFor(ARIA_ONLY.id),
+    rulesetVersion: RULESET_VERSION,
+    run: (db, crawlId, caps) => ariaOnlyFindings(db, crawlId, capsOr(caps)),
   }),
 
   defineRule<QueryRule>({

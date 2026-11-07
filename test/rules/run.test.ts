@@ -135,7 +135,9 @@ describe("buildRegistry", () => {
     expect(ids).toContain("render.title-changed");
     expect(ids).toContain("render.meta-description-changed");
     expect(ids).toContain("render.h1-changed");
-    expect(ids.length).toBe(180);
+    // Owner call O1 (2026-11-07): the link named only by aria-label.
+    expect(ids).toContain("links.aria-label-only");
+    expect(ids.length).toBe(181);
   });
 
   it("registers every kind the runner drives", () => {

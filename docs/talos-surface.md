@@ -1204,7 +1204,7 @@ a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
 `test/fixtures/harness.test.ts:1234` "declares a column for every evidence key it
 writes, and writes every column it declares",
-`test/rules/registry.test.ts:733` "finds one defining file per rule, and the key
+`test/rules/registry.test.ts:739` "finds one defining file per rule, and the key
 spelled inside it".
 
 ### 4.4a `issue_inlinks` → `{columns, items, nextCursor}` — the links that point at it
@@ -1352,7 +1352,7 @@ header on the catalog, and only on metric rules",
 and one row per scope",
 `test/rules/metric-table.test.ts:351` "gives every metric rule a table whose
 columns are the catalog's",
-`test/fixtures/harness.test.ts:2203` "renders every metric's table, with no
+`test/fixtures/harness.test.ts:2205` "renders every metric's table, with no
 empty column and no unmapped key".
 
 ### 4.5 `metrics_get` → `{items: MetricRow[], nextCursor}`
@@ -1963,10 +1963,10 @@ canonicalises under noindex", `test/rules/health-metrics.test.ts:412`
 are over", `test/rules/copy.test.ts:1520` "says the counts are the authority, not the
 ratio", `test/rules/copy.test.ts:1537` "grades nothing: no score, no label, no
 threshold";
-`test/rules/coverage.test.ts:555` "site.health is filed under the
+`test/rules/coverage.test.ts:562` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3020` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3041` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 

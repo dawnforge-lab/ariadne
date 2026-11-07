@@ -474,11 +474,18 @@ describe("checklist coverage", () => {
   //   page    67 + 2 = 69
   //   query   97
   //   total   178 + 2 = 180
-  it("pins the ruleset split the gate doc reports: 180 rules = 69 page + 97 query + 14 metric", () => {
+  //
+  // Owner call O1 (2026-11-07) adds ONE query rule, `links.aria-label-only`
+  // (CHECK-86, already claimed), in `src/rules/query/link-hygiene.ts`.
+  //
+  //   page    69
+  //   query   97 + 1 = 98
+  //   total   180 + 1 = 181
+  it("pins the ruleset split: 181 rules = 69 page + 98 query + 14 metric", () => {
     const registry = buildRegistry();
-    expect(registry.all()).toHaveLength(180);
+    expect(registry.all()).toHaveLength(181);
     expect(registry.byKind("page")).toHaveLength(69);
-    expect(registry.byKind("query")).toHaveLength(97);
+    expect(registry.byKind("query")).toHaveLength(98);
     // The link-graph five, the two content metrics and hreflang coverage, plus
     // the URL-parameter, redirect-volume and sitemap-structure metrics, plus
     // the render pass's coverage, the health rollup, and the page-weight table.

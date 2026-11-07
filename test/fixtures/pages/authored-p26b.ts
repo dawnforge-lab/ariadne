@@ -787,6 +787,28 @@ const targetBlank = linkPage(
   },
 );
 
+/**
+ * Owner call O1: an icon link with no text and no alt, named only by its
+ * `aria-label`. Screen readers announce the label; search engines take no
+ * anchor text from it, so it is the info note and not `links.no-anchor-text`.
+ */
+const ariaLabelLink = linkPage(
+  "/p26b/aria-label-link",
+  "An icon link named only by aria-label",
+  ["links.aria-label-only"],
+  {
+    title: "An icon link that only a screen reader can name",
+    description:
+      "One link on this page is an icon with no visible words, named only by an aria-label that screen readers announce and search engines skip.",
+    h1: "A link that speaks only to assistive technology",
+    lede: "The icon below leads to another page of the site, and the only words attached to it live in an attribute no visitor sees.",
+    topic: "icon-only",
+    linksHtml:
+      '<a href="/p26b/empty-href" aria-label="The empty address example">' +
+      '<svg width="16" height="16" aria-hidden="true"><path d="M0 0h16v16H0z"></path></svg></a>',
+  },
+);
+
 const imageLinkNoAlt = linkPage(
   "/p26b/image-link-no-alt",
   "An image link with no alt text",
@@ -1019,6 +1041,7 @@ export const authoredP26bFixtures: Fixture[] = [
   uncrawlableLinks,
   emptyHref,
   targetBlank,
+  ariaLabelLink,
   imageLinkNoAlt,
   httpForm,
   emptyAlt,

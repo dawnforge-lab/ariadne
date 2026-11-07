@@ -682,6 +682,15 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     origin other than the page's (exact `URL.origin`, so a subdomain or a
 //     `www.` variant counts); a same-origin new-tab link, and an href that does
 //     not resolve, is not counted (O2).
+//     Owner calls 2026-11-07: each link's trimmed `aria-label` is recorded in
+//     `links.aria_label` (migration 0028; `ARIA_LABEL_MAX` 200, null when absent
+//     or blank), off the element that supplies the anchor. `links.no-anchor-text`
+//     moves info to WARNING and fires only when the anchor is empty and the
+//     aria-label absent or blank: a link nothing names. New query rule
+//     `links.aria-label-only` (info, CHECK-86, `v2Gate`): an internal link with
+//     an empty anchor and a non-blank aria-label, with `labels` in its evidence.
+//     Search engines document visible text and image alt as anchor text, not
+//     aria-label (O1). 181 rules.
 export const RULESET_VERSION = "0.21.0";
 
 /**
