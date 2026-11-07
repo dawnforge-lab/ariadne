@@ -408,6 +408,15 @@ wording, §7); they are no longer here.
   (`addResource` never capped a URL); 26b's `imageRefs` take the same path. Proposal: one
   shared resource-URL length limit at `addResource` and `shareImageRef`, refused as a
   classified skip, with the rule reporting such an image.
+- **Share images are told apart only by a missing edge.** A share image is a `resources`
+  row (kind `image`) with no `page_resources` edge (deviation 3); nothing on the row says
+  so. A `kind` value or an `is_share_image` column would name them at the source. That is
+  a schema change, so it waits for 26c. Today two surfaces count them with page-loaded
+  files: `src/api/service.ts` `resourceCoverage` (`crawl_status.resources`: `seen`,
+  `fetched`, `failed`, `skipped` and the robots counts are one aggregate over every
+  `resources` row of the crawl, with no edge join), and the `resources` CSV view
+  (`src/api/csv.ts`), which lists every row, a share image appearing as kind `image` with
+  `referencingPages` 0.
 
 **Owner calls (true per the spec, §4.3).** `links.no-anchor-text` ignores `aria-label`;
 `links.unsafe-target-blank` counts same-origin links; nothing judges an `http:` og:image on
@@ -428,13 +437,8 @@ a head `<noscript><img>` tracking pixel is a `html.head-closed-early` warning.
 - `crawl_status.resources.seen`, `skipped` and `owedWork` include share images, while the four
   census markers count page-loaded files only (documented in `docs/talos-surface.md`): on
   one crawl the two numbers differ (here 4,290 seen, 418 of them share images).
-- Re-rendering a version-1 crawl compares its first-only `robots_meta` with the joined
-  rendered one, so `render.noindex-changed` can fire falsely when only a second robots meta
-  says noindex.
 - `refresh.selfTarget` compares a target cut at 1,024 characters with the uncut page URL, so a
   self-refresh on a URL over 1,024 characters reads as not-self.
-- `security.mixed-content`'s `insecure_refs.sample` is document-order and shared with forms,
-  so ten `http:` forms and one iframe give `byKind.iframe` 1 with no iframe in the sample.
 - `h2.duplicate` anchors a group on `min(url)`, which makes two template-sharing exact
   fixtures sort-order dependent.
 - A `Refresh` header cut at the stored value cap is parsed as stored; a second `Refresh`
