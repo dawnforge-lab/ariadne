@@ -29,6 +29,24 @@ the og-only fetch check carried from Task 6 are done (§5, §6). The first run's
 sent 17 GETs to the live site, under the cap of 40; the re-run sent none beyond the crawl and
 one probe.
 
+**The registry moved after the gate (owner calls, 2026-11-07).** The owner decided the five
+calls of §4.3 / §8 after this gate was measured, on the unreleased 0.21.0 (ruling R20: no
+version bump). Three were built on this branch: O1 (`aria-label`), O2 (cross-origin
+`target=_blank`) and O3 (the head pixel). The registry now holds **182 rules** (70 page / 98
+query / 14 metric; 33 critical / 63 warning / 86 info; 15 markers): `links.aria-label-only`
+(query, info) and `html.head-closed-early-harmless` (page, info) are new, and
+`links.no-anchor-text` moved from info to warning. Migration 0028 adds `links.aria_label`,
+and `htmlStructure.closedEarly` gains `lost`. `rules_catalog` is 183,428 bytes. **Every
+figure measured in this document is the gate run's and is NOT re-measured**: the suite
+count, the RSS, the row sizes, and the per-rule counts of §4.1, which the gate code
+produced. On this gate's crawl, O1 and O2 would move two of §4.1's rows. The wishlist icon
+(`aria-label="Wishlist"`) is `links.aria-label-only`, not `links.no-anchor-text`, and the
+same-origin `/pages/delivery` link no longer counts toward `links.unsafe-target-blank`
+(`returns.lavishalice.com` is another origin and still does). Neither shows on a re-judge of
+the stored crawl: its link rows predate migration 0028, so every `aria_label` reads null,
+and `unsafeBlank` was counted at extraction. Both need a re-crawl. O3 changes nothing here,
+because `closedEarly` is null on every row.
+
 ## Gate clauses (spec "Gate 26b", plan Task 12)
 
 | # | clause | result | where |
@@ -256,17 +274,32 @@ count equals the inspector's. No rule was changed.
 
 ### 4.3 True per the spec, worth the owner's attention
 
+**Decided by the owner on 2026-11-07** (the outcomes below; the first four bullets are the
+calls as the gate raised them):
+
 - **`links.no-anchor-text` and `aria-label`.** All 505 findings are one link, the wishlist
   icon, which has `aria-label="Wishlist"`. As specified ("internal link with no text and no
   image alt"), the rule does not read `aria-label`. Screen readers announce it, and search
   engines treat it inconsistently. Counting `aria-label` as anchor text would silence this
-  site entirely.
+  site entirely. **Decided (O1):** each link's `aria-label` is recorded
+  (`links.aria_label`, migration 0028); `links.no-anchor-text` becomes a warning for a link
+  nothing names (no text, no alt, no `aria-label`), and the new `links.aria-label-only`
+  (info) reports a link named only by `aria-label`, which search engines do not read as
+  anchor text.
 - **`links.unsafe-target-blank` and same-origin links.** The spec counts every
   `target=_blank` without `noopener` or `noreferrer`. On product pages one of the two is
   same-origin (`https://lavishalice.com/pages/delivery`). Screaming Frog's equivalent filter
   counts cross-origin links only, so a calibration run would disagree on 254 product pages here.
+  **Decided (O2):** only a link whose href resolves to another origin counts (exact
+  `URL.origin`, so a subdomain or a `www.` variant counts).
 - **An `http:` og:image on an `https:` site.** No 26b rule judges it. The
-  `og:image:secure_url` is `https:`.
+  `og:image:secure_url` is `https:`. **Decided, for Phase 26c:** flag an `http:` `og:image`
+  on an `https:` page unless `og:image:secure_url` is `https:` (§8).
+- **`html.structure-invalid` on a valid tagless document (R14).** **Decided:** kept as it is.
+- **A head `<noscript><img>` tracking pixel.** **Decided (O3):** `closedEarly` records the
+  head tags it loses (`lost`); `html.head-closed-early` (warning) fires only when something
+  is lost, and the new `html.head-closed-early-harmless` (info) reports the early close that
+  loses nothing, such as the pixel last in the head.
 - `pagination.sequence-error`, a Phase 26a rule, fired 4 times on the first run's crawl and 0
   times on the Phase 25 crawl, because `/collections/garden-party?page=2` was crawled then and
   names `?page=1` as its prev. On the re-run it is 0 again, and no page has a rel=prev. That
@@ -443,11 +476,23 @@ wording, §7); they are no longer here.
   `resources` row of the crawl, with no edge join), and the `resources` CSV view
   (`src/api/csv.ts`), which lists every row, a share image appearing as kind `image` with
   `referencingPages` 0.
+- **An `http:` share image on an `https:` page (owner call, 2026-11-07).** Flag an `http:`
+  `og:image` on an `https:` page, unless `og:image:secure_url` is `https:`. That needs
+  `og:image:secure_url` recorded, an extraction addition (a new key in the `social` set and
+  an extraction-version decision), so it lands in 26c rather than on this branch. On the
+  gate crawl the og:image is `http:` and `og:image:secure_url` is `https:`, so the rule as
+  decided would stay silent there.
 
-**Owner calls (true per the spec, §4.3).** `links.no-anchor-text` ignores `aria-label`;
-`links.unsafe-target-blank` counts same-origin links; nothing judges an `http:` og:image on
-an `https:` site; `html.structure-invalid` reports a valid tagless document at info (R14);
-a head `<noscript><img>` tracking pixel is a `html.head-closed-early` warning.
+**Owner calls (true per the spec, §4.3): decided 2026-11-07.**
+- `links.no-anchor-text` ignores `aria-label`: **O1**, built on this branch (`aria-label`
+  recorded; no-anchor-text a warning for a link nothing names; new `links.aria-label-only`,
+  info).
+- `links.unsafe-target-blank` counts same-origin links: **O2**, built (cross-origin only).
+- Nothing judges an `http:` og:image on an `https:` site: **Phase 26c** (above).
+- `html.structure-invalid` reports a valid tagless document at info (R14): **kept as it is**.
+- A head `<noscript><img>` tracking pixel is a `html.head-closed-early` warning: **O3**, built
+  (`closedEarly.lost`; warning only when tags are lost; new
+  `html.head-closed-early-harmless`, info).
 
 **Minor.**
 
