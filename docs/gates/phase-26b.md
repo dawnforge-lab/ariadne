@@ -36,16 +36,18 @@ version bump). Three were built on this branch: O1 (`aria-label`), O2 (cross-ori
 query / 14 metric; 33 critical / 63 warning / 86 info; 15 markers): `links.aria-label-only`
 (query, info) and `html.head-closed-early-harmless` (page, info) are new, and
 `links.no-anchor-text` moved from info to warning. Migration 0028 adds `links.aria_label`,
-and `htmlStructure.closedEarly` gains `lost`. `rules_catalog` is 183,585 bytes. **Every
+and `htmlStructure.closedEarly` gains `lost`. `rules_catalog` is 183,585 bytes. **Outside §4.4, every
 figure measured in this document is the gate run's and is NOT re-measured**: the suite
 count, the RSS, the row sizes, and the per-rule counts of §4.1, which the gate code
-produced. On this gate's crawl, O1 and O2 would move two of §4.1's rows. The wishlist icon
-(`aria-label="Wishlist"`) is `links.aria-label-only`, not `links.no-anchor-text`, and the
-same-origin `/pages/delivery` link no longer counts toward `links.unsafe-target-blank`
-(`returns.lavishalice.com` is another origin and still does). Neither shows on a re-judge of
-the stored crawl: its link rows predate migration 0028, so every `aria_label` reads null,
-and `unsafeBlank` was counted at extraction. Both need a re-crawl. O3 changes nothing here,
-because `closedEarly` is null on every row.
+produced. A re-judge of the stored crawl cannot show O1 or O2 (its link rows predate
+migration 0028, so every `aria_label` reads null, and `unsafeBlank` was counted at
+extraction), so the owner OK'd **a third lavishalice crawl on `82f2e4b`** (§4.4). It shows
+O1 and O2 on the real site exactly as built: the wishlist icon moves from
+`links.no-anchor-text` (now 0) to `links.aria-label-only` (504, every OK page), and the
+`unsafeBlank` total falls from 527 to 269 as the same-origin `/pages/delivery` link stops
+counting. O3 changes nothing there, because `closedEarly` is null on every row. On the 494
+OK pages both crawls share, every other rule's findings are identical, and the peak RSS was
+237.2 MB.
 
 ## Gate clauses (spec "Gate 26b", plan Task 12)
 
@@ -305,6 +307,36 @@ calls as the gate raised them):
   names `?page=1` as its prev. On the re-run it is 0 again, and no page has a rel=prev. That
   is the site and the 600-page cap, not an effect of 26b.
 
+### 4.4 The owner calls on a third crawl (`82f2e4b`, 2026-11-07)
+
+Same recipe as the re-run (`gate26b-r3/crawl.mts`, a copy of `gate26b-r2/crawl.mts`): crawl
+`crawl_4dd32709-56c9-4a62-9af4-7a843f76ff6c`, 600 pages, 0 failed, 504 OK, 2 robots-blocked,
+two 429s absorbed by the governor at 2 s spacing; 17 min 51 s wall clock; render 21 pages,
+0 failures; rules 3,401 findings. Peak RSS **242,904 kB = 237.2 MB** (budget 246.3 MB). No
+request beyond the crawl itself. Outputs: `owner.txt`, `drift.txt`, `newfindings.txt`.
+
+| owner call | re-run (`ed5c634`) | third crawl (`82f2e4b`) | reading |
+|---|---|---|---|
+| O1 `links.no-anchor-text` (now warning) | info, 200 listed, 505 exact | **0** | the only nameless link on the site was the wishlist icon, and it has an `aria-label` |
+| O1 `links.aria-label-only` (new, info) | (did not exist) | 200 listed, **504** exact, `labels: ["Wishlist"]`, one target `/apps/wishlist` | the same icon, on every OK page; 2,521 links carry an `aria_label` (504 each of "Wishlist" and the four "Follow on …" social icons, which are external and not judged, and one "Privacy Policy & Terms of Service" link) |
+| O2 `unsafeBlank` total | 527 on 259 pages | **269** on 257 pages | on the 248 product pages both crawls share, 2 → 1: `/pages/delivery` (same origin) no longer counts, `returns.lavishalice.com` (another origin) still does. Klarna 13 → 13 and the GDPR / privacy pages 1 → 1, all cross-origin |
+| O2 `links.unsafe-target-blank` | 259 | 257 | every flagged page still has a cross-origin link, so no page drops out; 251 / 251 on the shared pages, and the 259 → 257 is the page set |
+| O3 `html.head-closed-early` / `-harmless` | 0 / (did not exist) | 0 / 0 | `closedEarly` is null on all 602 rows |
+| `html.structure-invalid` | 0 | 0 | kept as it is |
+
+**Everything else is the site.** `drift.sql` compares every page-attached rule on the 494 OK
+pages both crawls share: 45 rules, each identical, except `links.aria-label-only` (the
+listing, capped at 200, lands on 196 shared pages), `security.headers-missing` (the same
+capped listing, 504 exact against 505) and one `links.only-from-non-indexable`. The 11 OK
+URLs only in the re-run and the 10 only in the third crawl are `?country=` variants plus
+`/collections/all`; the 600-page cap reached `/collections/outlet-under-100`'s `?country=`
+copies this time. That accounts for the two new findings: `links.only-from-non-indexable`
+on `/collections/outlet-under-100` (its only inlinks are those three copies) and a
+**`links.broken-internal`** (critical) on `/collections/clutch-bags`, which the outlet page
+links as "clutches" and which answered **404**. Both are true per their rules and neither is
+a 26b rule. No link text changed between the crawls (0 on the common internal links), as
+expected with no extraction change since `ed5c634`.
+
 ## 5. The og-only resource fetch (carried from Task 6's review)
 
 Task 6's review asked whether the resource pass actually fetches a share image's
@@ -492,6 +524,7 @@ wording, §7); they are no longer here.
   recorded; no-anchor-text a warning for a link nothing names; new `links.aria-label-only`,
   info).
 - `links.unsafe-target-blank` counts same-origin links: **O2**, built (cross-origin only).
+- O1 and O2 are shown on the real site by the third crawl (§4.4).
 - Nothing judges an `http:` og:image on an `https:` site: **Phase 26c** (above).
 - `html.structure-invalid` reports a valid tagless document at info (R14): **kept as it is**.
 - A head `<noscript><img>` tracking pixel is a `html.head-closed-early` warning: **O3**, built
