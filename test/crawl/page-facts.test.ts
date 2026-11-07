@@ -25,19 +25,52 @@ describe("parseRefresh", () => {
   it("an unresolvable url gives a null target", () => {
     expect(parseRefresh("0;url=http://[bad", BASE).target).toBeNull();
   });
-  it("requires a separator before the url part", () => {
-    expect(parseRefresh("5abc", BASE)).toMatchObject({ delaySeconds: 5, target: null });
+  it("a value that is not a refresh has no delay and no target (5abc)", () => {
+    expect(parseRefresh("5abc", BASE)).toMatchObject({ delaySeconds: null, target: null });
+    expect(parseRefresh("", BASE)).toMatchObject({ delaySeconds: null, target: null });
+    expect(parseRefresh(" \t", BASE)).toMatchObject({ delaySeconds: null, target: null });
     expect(parseRefresh("5 /x", BASE).target).toBe("https://base.test/x");
   });
-  it("a url part needs url then = ; a bare url is accepted", () => {
-    expect(parseRefresh("0;urlfoo", BASE).target).toBeNull();
-    expect(parseRefresh("0;url /x", BASE).target).toBeNull();
+  it("ignores a run of digits and dots after the delay, which is the integer part", () => {
+    expect(parseRefresh("1.5.3; url=/x", BASE)).toMatchObject({
+      delaySeconds: 1,
+      target: "https://base.test/x",
+    });
+    expect(parseRefresh(".5; url=/x", BASE)).toMatchObject({
+      delaySeconds: 0,
+      target: "https://base.test/x",
+    });
+    expect(parseRefresh("2.", BASE)).toMatchObject({ delaySeconds: 2, target: null });
+  });
+  it("a url part without = is parsed whole, url prefix included (WHATWG)", () => {
+    expect(parseRefresh("0; urlredirect.html", BASE).target).toBe(
+      "https://base.test/dir/urlredirect.html",
+    );
+    expect(parseRefresh("0;urlfoo", BASE).target).toBe("https://base.test/dir/urlfoo");
+    expect(parseRefresh("0; URL /next", BASE).target).toBe("https://base.test/dir/URL%20/next");
+    expect(parseRefresh("0;url /x", BASE).target).toBe("https://base.test/dir/url%20/x");
     expect(parseRefresh("0; URL = /x", BASE).target).toBe("https://base.test/x");
     expect(parseRefresh("0; /next", BASE).target).toBe("https://base.test/next");
+    expect(parseRefresh("0;u/x", BASE).target).toBe("https://base.test/dir/u/x");
   });
   it("a quoted url ends at the matching quote", () => {
     expect(parseRefresh("0;url='a'b", BASE).target).toBe("https://base.test/dir/a");
     expect(parseRefresh('0;url="a', BASE).target).toBe("https://base.test/dir/a");
+    expect(parseRefresh("0;url='/a'b'", BASE).target).toBe("https://base.test/a");
+  });
+  it("an empty url part is a reload timer: no target", () => {
+    expect(parseRefresh("0;url=", BASE)).toMatchObject({ delaySeconds: 0, target: null });
+    expect(parseRefresh("0;url=''", BASE)).toMatchObject({ delaySeconds: 0, target: null });
+    expect(parseRefresh("0; ", BASE)).toMatchObject({ delaySeconds: 0, target: null });
+  });
+  it("skips ASCII whitespace only, never other JS whitespace", () => {
+    // U+00A0 is not ASCII whitespace: it is not a separator, so not a refresh.
+    expect(parseRefresh("0\u00a0/x", BASE)).toMatchObject({ delaySeconds: null, target: null });
+    expect(parseRefresh("\u00a00;url=/x", BASE)).toMatchObject({
+      delaySeconds: null,
+      target: null,
+    });
+    expect(parseRefresh("\f0\n;\r\turl\n=\t/x", BASE).target).toBe("https://base.test/x");
   });
   it("an invalid base url throws", () => {
     expect(() => parseRefresh("0;url=/x", "not a url")).toThrow();

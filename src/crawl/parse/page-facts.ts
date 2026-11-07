@@ -112,42 +112,101 @@ export const ROBOTS_META_BOTS = [
   "msnbot", "slurp", "yandex", "baiduspider", "duckduckbot", "applebot",
 ] as const;
 
+/** ASCII whitespace as the HTML Standard defines it: TAB, LF, FF, CR, SPACE. */
+const isAsciiWhitespace = (c: string | undefined): boolean =>
+  c === "\t" || c === "\n" || c === "\f" || c === "\r" || c === " ";
+const isAsciiDigit = (c: string | undefined): boolean => c !== undefined && c >= "0" && c <= "9";
+/** What the URL parser strips from both ends of its input: C0 controls and space. */
+const URL_PARSER_TRIM = /^[\u0000-\u0020]+|[\u0000-\u0020]+$/g;
+
 /**
- * Parse a `<meta http-equiv=refresh content=…>` value per the HTML refresh
- * algorithm: leading digits (optional fraction) are the delay. A separator
- * (`;`, `,` or whitespace) is REQUIRED before a URL part (`5abc` has no URL).
- * The URL part is `url`, optional whitespace and `=` (any case), then an
- * optional quote; a part that starts `url` without `=` has no URL (`urlfoo`),
- * while a part that does not start with `url` is a bare URL (`0; /next`). A
- * quoted URL ends at its closing quote, an unquoted one at the end, trimmed.
- * The target is resolved against `baseUrl`; an invalid `baseUrl` throws, and
- * only the target's own failure to resolve gives `target: null`.
+ * Parse a `<meta http-equiv=refresh content=…>` value, or a `Refresh` header,
+ * by the HTML Standard's "shared declarative refresh steps" exactly (ruling
+ * R19, which replaces R5's URL rule):
+ *
+ * 1. Skip ASCII whitespace and collect ASCII digits as the delay. No digits
+ *    and no `.` next means the value is not a refresh at all (`abc`); no
+ *    digits before a `.` is a delay of 0 (`.5`).
+ * 2. A following run of digits and `.` is IGNORED, so the delay is the
+ *    integer part (`1.5.3` is 1).
+ * 3. If anything is left, it must start with `;`, `,` or ASCII whitespace, or
+ *    the value is not a refresh (`5abc` has no delay and no target). Then
+ *    whitespace, one optional `;` or `,`, whitespace.
+ * 4. The URL string is the remainder. A leading `url` (any case), optional
+ *    whitespace and `=` are consumed only when ALL are there; on the first
+ *    mismatch the remainder is parsed whole, so `0; urlredirect.html` names
+ *    `urlredirect.html` and `0; URL /next` names `URL /next`. After `=` (or
+ *    when the remainder does not start with `u`), whitespace and one optional
+ *    quote are skipped, and a quoted string is cut at the same quote.
+ *
+ * Conventions kept from before: no URL part, or a URL string the URL parser
+ * reads as empty (nothing but C0 controls and spaces), gives `target: null`,
+ * a reload timer, which `redirect.meta-refresh` treats as silent; a URL string
+ * `new URL` refuses gives `target: null`; `raw` is cut at `REFRESH_RAW_MAX`
+ * and the resolved target at `REFRESH_TARGET_MAX`; an invalid `baseUrl`
+ * throws. Only ASCII whitespace is skipped, never JavaScript's wider `\s`.
  */
 export function parseRefresh(value: string, baseUrl: string): RefreshFact {
   const raw = storableCap(value, REFRESH_RAW_MAX);
   const base = new URL(baseUrl);
-  const m = /^\s*(\d+(?:\.\d*)?|\.\d+)/.exec(value);
-  if (!m) return { raw, delaySeconds: null, target: null };
-  const delaySeconds = Number(m[1]);
-  const after = value.slice(m[0].length);
-  const sep = /^(?:\s*[;,]\s*|\s+)/.exec(after);
-  if (!sep) return { raw, delaySeconds, target: null };
-  let rest = after.slice(sep[0].length);
-  if (/^url/i.test(rest)) {
-    const eq = /^url\s*=\s*/i.exec(rest);
-    if (!eq) return { raw, delaySeconds, target: null };
-    rest = rest.slice(eq[0].length);
+  const notRefresh: RefreshFact = { raw, delaySeconds: null, target: null };
+  let pos = 0;
+  const skipWhitespace = (): void => {
+    while (isAsciiWhitespace(value[pos])) pos += 1;
+  };
+
+  // Step 1: the delay.
+  skipWhitespace();
+  const timeStart = pos;
+  while (isAsciiDigit(value[pos])) pos += 1;
+  const timeString = value.slice(timeStart, pos);
+  if (timeString === "" && value[pos] !== ".") return notRefresh;
+  const delaySeconds = timeString === "" ? 0 : Number(timeString);
+
+  // Step 2: digits and dots after it are ignored.
+  while (isAsciiDigit(value[pos]) || value[pos] === ".") pos += 1;
+
+  // Step 3: the separator.
+  if (pos < value.length) {
+    const c = value[pos];
+    if (c !== ";" && c !== "," && !isAsciiWhitespace(c)) return notRefresh;
+    skipWhitespace();
+    if (value[pos] === ";" || value[pos] === ",") pos += 1;
+    skipWhitespace();
   }
-  const quote = rest[0];
-  if (quote === '"' || quote === "'") {
-    const close = rest.indexOf(quote, 1);
-    rest = close === -1 ? rest.slice(1) : rest.slice(1, close);
+  if (pos >= value.length) return { raw, delaySeconds, target: null };
+
+  // Step 4: the URL string.
+  let urlString = value.slice(pos);
+  parse: {
+    if (value[pos] === "u" || value[pos] === "U") {
+      pos += 1;
+      if (value[pos] !== "r" && value[pos] !== "R") break parse;
+      pos += 1;
+      if (value[pos] !== "l" && value[pos] !== "L") break parse;
+      pos += 1;
+      skipWhitespace();
+      if (value[pos] !== "=") break parse;
+      pos += 1;
+      skipWhitespace();
+    }
+    // The quote step.
+    const quote = value[pos] === "'" || value[pos] === '"' ? value[pos]! : "";
+    if (quote !== "") pos += 1;
+    urlString = value.slice(pos);
+    if (quote !== "") {
+      const close = urlString.indexOf(quote);
+      if (close !== -1) urlString = urlString.slice(0, close);
+    }
   }
-  rest = rest.trim();
-  if (rest === "") return { raw, delaySeconds, target: null };
+
+  // Parse.
+  if (urlString.replace(URL_PARSER_TRIM, "") === "") return { raw, delaySeconds, target: null };
+  let href: string;
   try {
-    return { raw, delaySeconds, target: storableCap(new URL(rest, base).href, REFRESH_TARGET_MAX) };
+    href = new URL(urlString, base).href;
   } catch {
     return { raw, delaySeconds, target: null };
   }
+  return { raw, delaySeconds, target: storableCap(href, REFRESH_TARGET_MAX) };
 }

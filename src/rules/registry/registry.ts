@@ -654,6 +654,12 @@ const KINDS = ["page", "query", "metric"] as const satisfies readonly AnyRule["k
 //     PR #23 review: `hreflang.html-lang-mismatch` takes the primary subtag
 //     before the first `-` OR `_` on both sides, so `lang="en_US"` agrees
 //     with a self hreflang `en-us`.
+//     PR #23 review: `parseRefresh` follows the HTML Standard's shared
+//     declarative refresh steps exactly (ruling R19, replacing R5's URL rule):
+//     the delay is the integer part (`1.5.3` is 1, `.5` is 0), `5abc` is no
+//     refresh at all, and a `url` prefix without `=` is part of the URL
+//     (`0; urlredirect.html` names `urlredirect.html`). Only ASCII whitespace
+//     is skipped.
 export const RULESET_VERSION = "0.21.0";
 
 /**
