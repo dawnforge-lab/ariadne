@@ -995,6 +995,7 @@ beforeAll(async () => {
       value: {
         docs: 2,
         totalUrls: 376,
+        totalMemberships: 376,
         oversizedDocsSkipped: 0,
         urlCapBreaches: 0,
         entryCapReached: false,
@@ -1642,8 +1643,9 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
     const res = await table("sitemap.structure");
     expect(labels(res)).toEqual([
       "Sitemap",
-      "Entries",
+      "URLs (Site) / Listings (Document)",
       "Over 50,000 Entries",
+      "Listings (All Documents)",
       "Documents",
       "Documents Dropped For Size",
       "Entry Cap Reached",
@@ -1657,6 +1659,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         scope: "Site",
         entries: 376,
         over50kEntries: 0,
+        totalMemberships: 376,
         docs: 2,
         oversizedDocsSkipped: 0,
         entryCapReached: false,
@@ -1671,6 +1674,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         scope: `${SITE}/sitemap_blogs_1.xml`,
         entries: 5,
         over50kEntries: false,
+        totalMemberships: null,
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
@@ -1683,6 +1687,7 @@ describe("GET /crawls/:id/metrics/:metricId", () => {
         scope: `${SITE}/sitemap_products_1.xml`,
         entries: 371,
         over50kEntries: false,
+        totalMemberships: null,
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,
@@ -3123,12 +3128,13 @@ describe("GET /crawls/:id/export?format=csv", () => {
       `/crawls/${crawlM}/export?format=csv&view=metric_table&metricId=sitemap.structure`,
     );
     expect(sitemap.records[0]).toEqual([
-      "Sitemap", "Entries", "Over 50,000 Entries", "Documents",
+      "Sitemap", "URLs (Site) / Listings (Document)", "Over 50,000 Entries",
+      "Listings (All Documents)", "Documents",
       "Documents Dropped For Size", "Entry Cap Reached", "Counts Exact",
       "Membership Cap Reached", "Hreflang Cap Reached", "Over-Long Locs Not Stored",
     ]);
     expect(rows(sitemap)[1]).toEqual([
-      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "", "", "", "", "",
+      `${SITE}/sitemap_blogs_1.xml`, "5", "false", "", "", "", "", "", "", "", "",
     ]);
 
     // The header is written for a metric that measured nothing too: a zero-row

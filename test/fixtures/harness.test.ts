@@ -2748,6 +2748,7 @@ describe("the fixture site end to end", () => {
     expect(siteMetric("sitemap.structure")).toEqual({
       docs: 1,
       totalUrls: 140,
+      totalMemberships: 140,
       oversizedDocsSkipped: 0,
       urlCapBreaches: 0,
       entryCapReached: false,

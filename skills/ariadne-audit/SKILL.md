@@ -879,7 +879,7 @@ broken there.
           "metricId": "sitemap.structure",
           "scope": "site",
           "scopeValue": "",
-          "value": { "docs": 6, "totalUrls": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0 }
+          "value": { "docs": 6, "totalUrls": 4102, "totalMemberships": 4102, "urlCapBreaches": 0, "entryCapReached": false, "oversizedDocsSkipped": 0 }
         }
       ]
     },

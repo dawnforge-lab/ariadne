@@ -896,7 +896,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.over-50k-urls": {
     title: "Sitemaps: Sitemap over 50,000 URLs",
     explanation:
-      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, which is exact: a URL listed in two documents counts once in each. A crawl made before sitemap memberships were recorded cannot judge this and reports nothing, and a re-crawl answers it.",
+      "A sitemap document that lists more than 50,000 URLs, the protocol limit per document; entries past it are not read. The row gives the document and its entry count, which is exact: a URL listed in two documents counts once in each, except that a row saying the membership cap was reached is a floor. A crawl made before sitemap memberships were recorded cannot judge this and reports nothing, and a re-crawl answers it.",
     howToFix:
       "Split the sitemap into several documents of 50,000 URLs or fewer and list them in a sitemap index.",
   },
@@ -917,7 +917,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "sitemap.structure": {
     title: "Sitemaps: Sitemap structure",
     explanation:
-      "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total entries, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), whether the counts are exact, the sitemap walk's own caps (memberships, hreflang alternates) and how many over-long addresses were not stored, and the largest 50 documents with their entry counts. When the counts are exact, an entry in several documents counts in each document; on a crawl made before that was recorded it is counted once, under the first.",
+      "How sitemap entries are distributed across sitemap documents: how many documents contributed at least one unique entry, total distinct URLs, total listings across documents, documents dropped for size, documents over the 50,000-entry limit, whether the crawl's entry cap stopped collection (every count is then a floor and the 50,000 check may miss), whether the counts are exact, the sitemap walk's own caps (memberships, hreflang alternates) and how many over-long addresses were not stored, and the largest 50 documents with their entry counts. Total URLs counts each URL once; total listings and each document's count are listings, so an entry in several documents counts in each (listings in this document), and on a crawl made before that was recorded they are counted once, under the first.",
     howToFix:
       "Split sitemaps by content type so stale sections can be seen and submitted separately. Split any document over 50,000 entries; entries past the limit are not read.",
   },

@@ -119,6 +119,7 @@ describe("perScope", () => {
       site({
         docs: 5,
         totalUrls: 376,
+        totalMemberships: 400,
         urlCapBreaches: 0,
         oversizedDocsSkipped: 0,
         entryCapReached: false,
@@ -131,8 +132,9 @@ describe("perScope", () => {
     ]);
     expect(labels(shaped)).toEqual([
       "Sitemap",
-      "Entries",
+      "URLs (Site) / Listings (Document)",
       "Over 50,000 Entries",
+      "Listings (All Documents)",
       "Documents",
       "Documents Dropped For Size",
       "Entry Cap Reached",
@@ -146,6 +148,7 @@ describe("perScope", () => {
         scope: "Site",
         entries: 376,
         over50kEntries: 0,
+        totalMemberships: 400,
         docs: 5,
         oversizedDocsSkipped: 0,
         entryCapReached: false,
@@ -158,6 +161,7 @@ describe("perScope", () => {
         scope: "https://site/sitemap-1.xml",
         entries: 5,
         over50kEntries: false,
+        totalMemberships: null,
         docs: null,
         oversizedDocsSkipped: null,
         entryCapReached: null,

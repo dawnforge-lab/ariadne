@@ -291,6 +291,7 @@ type SitemapRow = {
   scope_value: string;
   docs: number | null;
   total_urls: number | null;
+  total_listings: number | null;
   url_cap_breaches: number | null;
   urls: number | null;
   breaches_50k: boolean | null;
@@ -319,8 +320,12 @@ type SitemapRow = {
  *    one contributes nothing either (the walk dedupes by URL, first source
  *    wins). Those are all documents with no rows to be counted from, and this
  *    column says so rather than implying they were never read.
- *  - `totalUrls` — sitemap entries stored for the crawl, deduped the same way:
- *    a URL listed in three documents is one entry, filed under the first.
+ *  - `totalUrls` — distinct sitemap URLs stored for the crawl (`sitemap_urls`),
+ *    on EVERY crawl: a URL listed in three documents is one URL, filed under the
+ *    first. It is the denominator the CHECK-07 ratio divides by.
+ *  - `totalMemberships` (Phase 26c) — listings across all documents, summed from
+ *    `sitemap_memberships`: that same URL counts three times. Null on a crawl
+ *    that recorded no memberships.
  *  - `oversizedDocsSkipped` — documents the walk fetched and DROPPED WHOLE for
  *    exceeding the read cap, from the crawl's discovery evidence. Their entries
  *    are in neither count above, and without this column their absence would be
@@ -334,9 +339,9 @@ type SitemapRow = {
  *    footnote for that reason: the numbers beside it change meaning (hard rule
  *    7).
  *  - `docCountsExact` (Phase 26c) — true when the crawl recorded sitemap facts
- *    and the counts above come from `sitemap_memberships`, one row per URL per
- *    document: a URL in three documents counts in all three and `totalUrls` is
- *    their sum. False for an older crawl, counted from `sitemap_urls` as above.
+ *    and the per-document `urls` come from `sitemap_memberships`, one row per
+ *    URL per document: a URL in three documents counts in all three, listings in
+ *    that document. False for an older crawl, counted from `sitemap_urls`.
  *  - `membershipLimited`, `hreflangLimited`, `overlongLocsSkipped` — the
  *    sitemap walk's own caps and refusals, from `discovery.sitemapFacts`. A
  *    pre-26c crawl did not record them and says null, never zero.
@@ -372,7 +377,7 @@ async function sitemapStructure(db: Db, crawlId: string, self: MetricIdentity): 
     ),
     totals as (
       select count(*)::int as docs,
-             coalesce(sum(urls), 0)::int as total_urls,
+             coalesce(sum(urls), 0)::int as total_listings,
              count(*) filter (where urls > ${SITEMAP_URL_CAP})::int as url_cap_breaches
       from per_doc
     ),
@@ -382,12 +387,15 @@ async function sitemapStructure(db: Db, crawlId: string, self: MetricIdentity): 
       from per_doc
     )
     select 0 as ord, 'site' as scope, '' as scope_value,
-           t.docs, t.total_urls, t.url_cap_breaches,
+           t.docs,
+           (select count(*)::int from sitemap_urls u where u.crawl_id = ${crawlId}) as total_urls,
+           t.total_listings, t.url_cap_breaches,
            null::int as urls, null::boolean as breaches_50k
     from totals t
     union all
     select r.rn as ord, 'sitemap_doc' as scope, r.source as scope_value,
-           null::int as docs, null::int as total_urls, null::int as url_cap_breaches,
+           null::int as docs, null::int as total_urls, null::int as total_listings,
+           null::int as url_cap_breaches,
            r.urls, r.urls > ${SITEMAP_URL_CAP} as breaches_50k
     from ranked r
     where r.rn <= ${SITEMAP_DOC_ROWS_CAP}
@@ -400,6 +408,10 @@ async function sitemapStructure(db: Db, crawlId: string, self: MetricIdentity): 
         value: {
           docs: num(row.docs, "docs", self.id),
           totalUrls: num(row.total_urls, "total_urls", self.id),
+          // Listings across documents, from the membership table: null on a
+          // crawl that recorded none (hard rule 7), never the distinct count.
+          totalMemberships:
+            facts === null ? null : num(row.total_listings, "total_listings", self.id),
           oversizedDocsSkipped: discovery.truncation.oversizedDocsSkipped,
           urlCapBreaches: num(row.url_cap_breaches, "url_cap_breaches", self.id),
           entryCapReached: discovery.truncation.entryLimited,
@@ -450,12 +462,13 @@ export const crawlMetrics: MetricRule[] = [
     ["CHECK-08"],
     SITEMAP,
     perScope("Sitemap", [
-      { key: "entries", label: "Entries", from: ["totalUrls", "urls"] },
+      { key: "entries", label: "URLs (Site) / Listings (Document)", from: ["totalUrls", "urls"] },
       {
         key: "over50kEntries",
         label: "Over 50,000 Entries",
         from: ["urlCapBreaches", "breaches50k"],
       },
+      { key: "totalMemberships", label: "Listings (All Documents)" },
       { key: "docs", label: "Documents" },
       { key: "oversizedDocsSkipped", label: "Documents Dropped For Size" },
       { key: "entryCapReached", label: "Entry Cap Reached" },

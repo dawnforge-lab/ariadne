@@ -636,7 +636,7 @@ clamping it").
 **Closed vocabularies.** Every query parameter, body field and tool argument is
 on a closed list. `?serverity=critical` is a 400 naming both the typo and the
 accepted set, never an unfiltered listing with a 200 on it
-(`test/api/query.test.ts:4026` "refuses a typo'd filter instead of answering the
+(`test/api/query.test.ts:4032` "refuses a typo'd filter instead of answering the
 question nobody asked"). MCP argument typos are refused by the SDK's schema
 validator before the handler runs (`test/api/mcp.test.ts:825` "refuses an
 argument nobody allowed, naming it").
@@ -1088,28 +1088,28 @@ server error and that is an answer; what is unknown is whether it persists. The
 page keeps its `critical` finding, and its evidence carries
 `recheck: "not run"` so a report writer can say which it is (§5.5).
 
-Pinned: `test/api/query.test.ts:2058` "the fields an audit checks itself against"
+Pinned: `test/api/query.test.ts:2063` "the fields an audit checks itself against"
 (15 tests over the whole block — the marker, the live findings count,
 `pagesScanned`, the one-statement read, the four the recheck block added, and
 the no-response partition Phase 23 added),
-`test/api/query.test.ts:2171` "counts
+`test/api/query.test.ts:2176` "counts
 the resource census off the database, partitioned exactly",
-`test/api/query.test.ts:2213` "answers the block on a crawl that holds no
-resource rows at all", `test/api/query.test.ts:2405` "reports the cap-exceeded
+`test/api/query.test.ts:2218` "answers the block on a crawl that holds no
+resource rows at all", `test/api/query.test.ts:2410` "reports the cap-exceeded
 page count a crawl stamped, and null when none did",
-`test/api/query.test.ts:2432` "echoes whether the crawl
-asked about its files", `test/api/query.test.ts:2450` "409s a stored
+`test/api/query.test.ts:2437` "echoes whether the crawl
+asked about its files", `test/api/query.test.ts:2455` "409s a stored
 fetchResources that is not a boolean"; over the agent transport,
 `test/api/mcp.test.ts:1059` "answers the resource census and whether the crawl
 asked for it" and `test/api/mcp.test.ts:1148` "tells an agent what the resource
 numbers mean, and what they do not". The recheck block:
-`test/api/query.test.ts:2224` "partitions the crawl's server errors by what the
+`test/api/query.test.ts:2229` "partitions the crawl's server errors by what the
 second look found" (the arithmetic, over a fixture holding one row of every
-outcome), `test/api/query.test.ts:2269` "counts as cleared exactly the classes
+outcome), `test/api/query.test.ts:2274` "counts as cleared exactly the classes
 http.server-error-transient fires on" (the surface and the rule read ONE set,
-imported, never two lists), `test/api/query.test.ts:2349` "tells a crawl with no
+imported, never two lists), `test/api/query.test.ts:2354` "tells a crawl with no
 server errors apart from a crawl nobody rechecked",
-`test/api/query.test.ts:2385` "keeps the recheck block off the crawl listing";
+`test/api/query.test.ts:2390` "keeps the recheck block off the crawl listing";
 over the agent transport, `test/api/mcp.test.ts:1089` "answers the recheck
 coverage, and keeps its two zeroes apart" (which also reads the block off a
 crawl the suite really ran). The robots split itself is
@@ -1134,8 +1134,8 @@ the rows the rule wrote — under a `pageType` filter it is legitimately smaller
 than the note's own `reported`. `sampleUrls` is at most 5 and is a sample, never
 a slice: `issue_urls` is the slice.
 
-Pinned: `test/api/query.test.ts:1061` "groups by rule, orders by severity then
-rule id", `test/api/query.test.ts:1204` "says so when a rule's listing was capped"
+Pinned: `test/api/query.test.ts:1062` "groups by rule, orders by severity then
+rule id", `test/api/query.test.ts:1205` "says so when a rule's listing was capped"
 (the capped shape); `test/api/mcp.test.ts:1788` "groups findings by rule, orders
 them by severity" and `test/api/mcp.test.ts:1802` "carries a capped rule's real
 magnitude".
@@ -1220,9 +1220,9 @@ its own `pageUrl` key. It is deliberately NOT flattened into the row: nine
 rules record a `statusCode` of their own, and flattening would let one of them
 replace a column derived from the page row.
 
-Pinned: `test/api/query.test.ts:1266` "returns the URL slice with the evidence as
-stored", `test/api/query.test.ts:1447` "never leaks a column the projection did
-not name", `test/api/query.test.ts:1455` "carries a finding with no page as a
+Pinned: `test/api/query.test.ts:1267` "returns the URL slice with the evidence as
+stored", `test/api/query.test.ts:1448` "never leaks a column the projection did
+not name", `test/api/query.test.ts:1456` "carries a finding with no page as a
 null url", `test/rules/helpers.test.ts:697` "maps each fetch class to the status
 a reader acts on", `test/rules/helpers.test.ts:717` "names a block a block,
 whatever status the challenge was served with",
@@ -1366,15 +1366,15 @@ them would hand a client a file saying "`_pos` appears on 47 URLs" while losing
 "this site has 5 parameters on 61 URLs". The file is named
 `crawl_<uuid>-<metricId>.csv`.
 
-Pinned: `test/api/query.test.ts:1565` "serves the metric's copy, its header and
-one row per scope", `test/api/query.test.ts:1641` "puts both sitemap scopes in
+Pinned: `test/api/query.test.ts:1566` "serves the metric's copy, its header and
+one row per scope", `test/api/query.test.ts:1642` "puts both sitemap scopes in
 one table, with the site-only cells empty",
-`test/api/query.test.ts:1708` "says which kind of empty a rowless table is, and
-refuses the two that are not", `test/api/query.test.ts:1744` "serves the same
+`test/api/query.test.ts:1713` "says which kind of empty a rowless table is, and
+refuses the two that are not", `test/api/query.test.ts:1749` "serves the same
 header on the catalog, and only on metric rules",
 `test/api/mcp.test.ts:2221` "answers one metric's table: the copy, the header,
 and one row per scope",
-`test/rules/metric-table.test.ts:373` "gives every metric rule a table whose
+`test/rules/metric-table.test.ts:377` "gives every metric rule a table whose
 columns are the catalog's",
 `test/fixtures/harness.test.ts:2259` "renders every metric's table, with no
 empty column and no unmapped key".
@@ -1386,7 +1386,7 @@ empty column and no unmapped key".
 copy travels with it. Scopes: `site | page_type | sitemap_doc` (`rule` was never
 one — corrected in P21-T1, beside §4.4b). See §6 for
 `site.health` and for the absent-family trap.
-Pinned: `test/api/query.test.ts:1489` "returns the stored value with the
+Pinned: `test/api/query.test.ts:1490` "returns the stored value with the
 registry's copy joined", `test/api/mcp.test.ts:2192` "answers the measured
 numbers with their copy joined".
 
@@ -1467,11 +1467,11 @@ the two bounds every weight figure needs (the `src`+`srcset` ceiling, the
 unweighed-file floor). Per template it is `metrics_get` with
 `metricId: "page.weight"`, which states both; per file it is the `resources` CSV
 view (§12), which carries `referencingPages`.
-Pinned: `test/api/query.test.ts:1764` "returns a slim projection and nothing
+Pinned: `test/api/query.test.ts:1769` "returns a slim projection and nothing
 else" (the widened projection, pinned as a whole set),
-`test/api/query.test.ts:1802` "carries both observations, and never lets the
+`test/api/query.test.ts:1807` "carries both observations, and never lets the
 second rewrite the first", `test/api/mcp.test.ts:2344` "names every field of the
-row it answers with, in its own description", `test/api/query.test.ts:1905` "carries both word counts, so the number a
+row it answers with, in its own description", `test/api/query.test.ts:1910` "carries both word counts, so the number a
 reader quotes is the one they can see", `test/api/mcp.test.ts:2278` "answers the
 crawled pages, slim and ordered by URL".
 
@@ -1482,7 +1482,7 @@ sitemapSources[], suppliedSitemaps[], userAgent}`. It is **stored evidence, neve
 a re-fetch**: the file as the crawl read it, which is the only honest answer to
 "what did this crawl obey". `outcome ∈ read | absent | unreachable`, and
 `unreachable` is not "there are no rules" (RFC 9309 §2.3.1.4).
-Pinned: `test/api/query.test.ts:1953` "answers with the robots.txt the crawl
+Pinned: `test/api/query.test.ts:1958` "answers with the robots.txt the crawl
 read, and the metadata that makes it readable", `test/api/mcp.test.ts:2381`
 "answers with the robots.txt the crawl read, verbatim".
 
@@ -1497,9 +1497,9 @@ seeded as `http://example.com/`. It is the engine's one definition of "the same
 site" (`hostnameSpellings`), the same one the cross-site compare refusal uses.
 A `siteUrl` that is not an http(s) URL is **refused by name and never read as
 "no filter"** — a dropped filter would answer with every crawl the engine holds.
-Pinned: `test/api/query.test.ts:3389` "narrows the listing to one site, and
-leaves the other site's crawls out", `test/api/query.test.ts:3395` "matches the
-apex and www spellings, both schemes", `test/api/query.test.ts:3409` "refuses a
+Pinned: `test/api/query.test.ts:3395` "narrows the listing to one site, and
+leaves the other site's crawls out", `test/api/query.test.ts:3401` "matches the
+apex and www spellings, both schemes", `test/api/query.test.ts:3415` "refuses a
 siteUrl that is not an http(s) URL rather than dropping the filter";
 `test/api/mcp.test.ts:2087` "narrows crawl_list to one site".
 
@@ -1558,7 +1558,7 @@ so a UI that draws both puts the same rule in the same place twice. The METRIC
 rules follow them as one contiguous block, by their declared `table.order` then
 by id (Phase 21); no other listing has an opinion about where a metric goes,
 because a metric writes no finding row and never appears in `issues_list`.
-Pinned: `test/api/query.test.ts:4227` "leads the metric section with the site
+Pinned: `test/api/query.test.ts:4233` "leads the metric section with the site
 census, then the declared sequence".
 
 A NOT MEASURED marker's row carries one field more — `marker`, the reason
@@ -1621,15 +1621,15 @@ cap the two differ by construction, which is what `atLeast` is for. Quoting a
 catalog count to a client as "the number of orphans on this site" is the Phase 6
 D-1 incident recurring in a new place.
 
-Pinned: `test/api/query.test.ts:2487` "answers the whole ruleset with its
-client-facing copy and no fired state", `test/api/query.test.ts:2567` "joins a
+Pinned: `test/api/query.test.ts:2492` "answers the whole ruleset with its
+client-facing copy and no fired state", `test/api/query.test.ts:2572` "joins a
 judged crawl's fired state, and counts a clean rule as zero",
-`test/api/query.test.ts:2591` "marks a metric rule's structural zero apart from a
-real clean", `test/api/query.test.ts:2617` "says fired null on a crawl nobody has
-judged, however many rows it holds", `test/api/query.test.ts:2634` "marks a
+`test/api/query.test.ts:2596` "marks a metric rule's structural zero apart from a
+real clean", `test/api/query.test.ts:2622` "says fired null on a crawl nobody has
+judged, however many rows it holds", `test/api/query.test.ts:2639` "marks a
 capped rule's count as a floor, agreeing with issues_list",
-`test/api/query.test.ts:2673` "reads the marker and the counts from one
-statement", `test/api/query.test.ts:2529` "carries the registry's marker on every
+`test/api/query.test.ts:2678` "reads the marker and the counts from one
+statement", `test/api/query.test.ts:2534` "carries the registry's marker on every
 NOT MEASURED marker, and on no other rule"; `test/api/mcp.test.ts:1908` "joins a
 judged crawl's fired state, zero included, summing to findingsCount" and
 `test/api/mcp.test.ts:1971` "names every field it actually answers with".
@@ -1740,7 +1740,7 @@ rows cannot say it and only the config can.
    nobody weighed, and reports the referenced-and-weighed pair beside it.
 
 Pinned: `src/db/schema.ts`'s `resources.fetch_class` comment (the column says
-this); `test/api/query.test.ts:3016` "writes one row per referenced file, with
+this); `test/api/query.test.ts:3021` "writes one row per referenced file, with
 the class that makes an empty status readable" (all four spellings in the CSV);
 `test/crawl/fetch-resources.test.ts:1335` "asks nobody anything when the operator
 turned resource fetching off".
@@ -1797,7 +1797,7 @@ Pinned: `src/db/schema.ts`'s `crawls.resource_refs_capped_pages` comment;
 `test/db/migration-0014.test.ts:232` "leaves the column null on a row no crawl
 loop ever closed"; `test/db/migration-0014.test.ts:210` "stamps 0 on a crawl that
 lost nothing — a measurement, not a silence";
-`test/api/query.test.ts:2405` "reports the cap-exceeded page count a crawl
+`test/api/query.test.ts:2410` "reports the cap-exceeded page count a crawl
 stamped, and null when none did".
 
 ### 5.5 `recheckFetchClass` null — nobody asked about this page
@@ -1831,10 +1831,10 @@ evidence blob carries `recheck: "not run"` (one of `"not run"`, `"capped"`,
 than implying a re-verification that never happened.
 
 Pinned: `src/db/schema.ts`'s `pages.recheck_fetch_class` comment (the null
-contract, stated at the column); `test/api/query.test.ts:1802` "carries both
+contract, stated at the column); `test/api/query.test.ts:1807` "carries both
 observations, and never lets the second rewrite the first" (the three nulls,
 told apart row by row, and the `recheckAt` invariant over every row of a
-listing); `test/api/query.test.ts:2349` "tells a crawl with no server errors
+listing); `test/api/query.test.ts:2354` "tells a crawl with no server errors
 apart from a crawl nobody rechecked" (the two zeroes, at the crawl level).
 
 ### 5.6 `failureReason` null — either nothing failed, or nobody could say
@@ -1871,7 +1871,7 @@ is the one move that changes the status without closing the crawl — the fixtur
 holds the robots request so the row is read mid-run);
 `test/api/mcp.test.ts:3134` "clears the failure sentence of the crawl a resume
 accepts" (the same, over the queue's own writer and on the wire);
-`test/api/query.test.ts:4170` "tells a pre-0017 failed
+`test/api/query.test.ts:4176` "tells a pre-0017 failed
 crawl apart from a crawl that did not fail" (the two nulls, on the wire).
 
 ---
@@ -1990,7 +1990,7 @@ threshold";
 `test/rules/coverage.test.ts:592` "site.health is filed under the
 engine-coverage check, and CHECK-32 lost no claimant" (the re-file in both
 directions, and CHECK-83 outside the crawl-derived universe);
-`test/fixtures/harness.test.ts:3102` "the health rollup agrees with a
+`test/fixtures/harness.test.ts:3103` "the health rollup agrees with a
 page-by-page recount" — an independent recount in JavaScript over the end-to-end
 fixture crawl.
 
@@ -2152,9 +2152,9 @@ showing a user.
 
 Pinned: the whole `GET /compare` and `GET /compare/urls` blocks of
 `test/api/query.test.ts` — the arithmetic, the per-URL collapse, every caveat and
-every refusal — of which `test/api/query.test.ts:3458` "answers both sides,
+every refusal — of which `test/api/query.test.ts:3464` "answers both sides,
 comparable, and the rules in issues_list's order" is the answer itself and
-`test/api/query.test.ts:3872` "makes the same refusals as the summary" is the
+`test/api/query.test.ts:3878` "makes the same refusals as the summary" is the
 drill-down inheriting the summary's refusals; over the agent transport,
 `test/api/mcp.test.ts:2034` "answers the counts and the caveat when the two
 rulesets differ" and `test/api/mcp.test.ts:2099` "names every field it answers
@@ -2218,8 +2218,8 @@ Obligation 6, as a checked property rather than a promise:
 - No stack frame, no filesystem path, no repository document, no connection
   string, no private host, in any answer or any refusal. Pinned as a standing
   guard over live answers and over the CSV bytes:
-  `test/api/query.test.ts:3936` "carries no path, no document and no stack in any
-  answer this phase added" and `test/api/query.test.ts:3979` "holds for the CSV
+  `test/api/query.test.ts:3942` "carries no path, no document and no stack in any
+  answer this phase added" and `test/api/query.test.ts:3985` "holds for the CSV
   bytes, which are a response like any other".
 - Refusals name **the caller's own words** — the ids they supplied, the field
   they misspelled, the accepted vocabulary — plus, for a cross-site compare, the
@@ -2519,7 +2519,7 @@ Three consequences a consumer must plan for:
 2. **A malformed truncation note is a 500, not a dropped field.** If a rule
    writes a note naming neither `total` nor `atLeast`, the issues surface fails
    loudly rather than answering with a bare `count` a reader would take as the
-   total (`test/api/query.test.ts:1241` "500s a truncation note it cannot read
+   total (`test/api/query.test.ts:1242` "500s a truncation note it cannot read
    rather than dropping it"). Same family of decision as the 409: the
    engine refuses to answer rather than answer wrongly.
 3. **Copy is always today's.** Every surface joins titles, explanations and
@@ -2628,7 +2628,7 @@ Semantics a consumer must repeat to its own users:
   column in these nine views emits one (a metric's cells are counts, bytes,
   distances and percentages, none of which go below zero). It is not a text-column guard: a
   `Cache-Control` header is the server's own string and lands in a cell exactly
-  as a page title does, which is what `test/api/query.test.ts:3057` "never lets a
+  as a page title does, which is what `test/api/query.test.ts:3062` "never lets a
   crawled string become a formula" asserts.
 - **No BOM**, `\r\n` line endings, RFC 4180 quoting. Excel on a non-UTF-8
   Windows locale may mangle accents on a double-click; every parser and pipeline
@@ -2648,19 +2648,19 @@ Pinned: `test/api/csv.test.ts` (the writer, the guard, the
 flattening, the SQL keyset pins, and the eight-view vocabulary — including
 `test/api/csv.test.ts:235` "heads the issue_urls view with the rule's own
 columns, in the rule's own order");
-`test/api/query.test.ts:2875` "writes each view's header, always, and the row a
+`test/api/query.test.ts:2880` "writes each view's header, always, and the row a
 caller came for" (including the three recheck columns, empty on a page nobody
-re-asked about and filled on one that was), `test/api/query.test.ts:3016` "writes one row per referenced
+re-asked about and filled on one that was), `test/api/query.test.ts:3021` "writes one row per referenced
 file, with the class that makes an empty status readable" (the four unfetched
-spellings), `test/api/query.test.ts:3057` "never lets a crawled string become a
-formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:3078`
+spellings), `test/api/query.test.ts:3062` "never lets a crawled string become a
+formula" (including a hostile `Cache-Control`), `test/api/query.test.ts:3083`
 "quotes a cell holding a comma, a quote or a newline",
-`test/api/query.test.ts:3178` "exports exactly as many rows as the source holds"
+`test/api/query.test.ts:3184` "exports exactly as many rows as the source holds"
 (for `resources`, against BOTH of its tables: one row per file, and the
-referencing counts summing to the edge table), `test/api/query.test.ts:3233`
+referencing counts summing to the edge table), `test/api/query.test.ts:3239`
 "reads every view through a cursor that can be walked one row at a time",
-`test/api/query.test.ts:3268` "refuses a view, a format or a rule it cannot
-answer", `test/api/query.test.ts:3338` "refuses a crawl holding a retired rule's
+`test/api/query.test.ts:3274` "refuses a view, a format or a rule it cannot
+answer", `test/api/query.test.ts:3344` "refuses a crawl holding a retired rule's
 findings BEFORE the header", `test/api/http.test.ts:2022` "tears the response
 when a CSV export fails mid-stream, rather than truncating the file";
 `test/api/mcp.test.ts:796` "describes the shape of the CSV it writes, not just

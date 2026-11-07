@@ -218,12 +218,14 @@ export const sitemapEntryRules: QueryRule[] = [
     columns: [
       { key: "sitemap", label: "Sitemap" },
       { key: "entries", label: "Entries" },
+      { key: "membershipLimited", label: "Membership Cap Reached", optional: true },
     ],
     ...copyFor(OVER_50K.id),
     rulesetVersion: RULESET_VERSION,
     run: async (db, crawlId, caps): Promise<Finding[]> => {
       await readCrawlEvidence(db, crawlId, OVER_50K.id);
-      if ((await readSitemapFacts(db, crawlId, OVER_50K.id)) === null) return [];
+      const facts = await readSitemapFacts(db, crawlId, OVER_50K.id);
+      if (facts === null) return [];
       const result = await db.execute<{
         sitemap_source: string;
         entries: number;
@@ -244,7 +246,12 @@ export const sitemapEntryRules: QueryRule[] = [
         queryFinding(OVER_50K, {
           pageId: null,
           pageUrl: null,
-          evidence: { sitemap: row.sitemap_source, entries: row.entries },
+          evidence: {
+            sitemap: row.sitemap_source,
+            entries: row.entries,
+            // The membership cap dropped later listings: the count is a floor.
+            ...(facts.membershipLimited ? { membershipLimited: true } : {}),
+          },
           dedupeKey: row.sitemap_source,
         }),
       );

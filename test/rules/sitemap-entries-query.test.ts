@@ -174,6 +174,24 @@ describe("the sitemap entry rules against the database", () => {
     ]);
   });
 
+  it("says membershipLimited on its evidence when the membership cap was hit (the count is a floor)", async () => {
+    const crawlId = await newCrawl(
+      undefined,
+      undefined,
+      mkDiscovery({ sitemapFacts: { membershipLimited: true } }),
+    );
+    await db.execute(sql`
+      insert into sitemap_memberships (crawl_id, url, url_normalised, sitemap_source)
+      select ${crawlId}, ${SITE + "/p/"} || g, ${SITE + "/p/"} || g, ${SOURCE}
+      from generate_series(1, ${SITEMAP_URL_CAP + 1}) g`);
+    const [finding] = await run("sitemap.over-50k-urls", crawlId);
+    expect(finding!.evidence).toEqual({
+      sitemap: SOURCE,
+      entries: SITEMAP_URL_CAP + 1,
+      membershipLimited: true,
+    });
+  });
+
   it("refuses a crawl without sitemapFacts (returns nothing) and the marker speaks", async () => {
     const crawlId = await newCrawl(undefined, undefined, mkDiscovery({ sitemapFacts: null }));
     await db.execute(sql`

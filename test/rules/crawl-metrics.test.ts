@@ -449,6 +449,7 @@ describe("the crawl metrics against the database", () => {
         oversizedDocsSkipped: 2,
         urlCapBreaches: 0,
         entryCapReached: false,
+        totalMemberships: null,
         docCountsExact: false,
         membershipLimited: null,
         hreflangLimited: null,
@@ -498,6 +499,7 @@ describe("the crawl metrics against the database", () => {
         oversizedDocsSkipped: 0,
         urlCapBreaches: 1,
         entryCapReached: false,
+        totalMemberships: null,
         docCountsExact: false,
         membershipLimited: null,
         hreflangLimited: null,
@@ -525,6 +527,7 @@ describe("the crawl metrics against the database", () => {
         oversizedDocsSkipped: 0,
         urlCapBreaches: 0,
         entryCapReached: false,
+        totalMemberships: null,
         docCountsExact: false,
         membershipLimited: null,
         hreflangLimited: null,
@@ -544,6 +547,7 @@ describe("the crawl metrics against the database", () => {
       expect(rows[0]!.value).toEqual({
         docs: 0,
         totalUrls: 0,
+        totalMemberships: 0,
         oversizedDocsSkipped: 0,
         urlCapBreaches: 0,
         entryCapReached: false,
@@ -592,7 +596,10 @@ describe("the crawl metrics against the database", () => {
       ]);
       expect(await site(ID, crawlId)).toEqual({
         docs: 2,
-        totalUrls: 3,
+        // Distinct sitemap URLs (/shared, /p1) keep their meaning; the three
+        // listings are the memberships.
+        totalUrls: 2,
+        totalMemberships: 3,
         oversizedDocsSkipped: 0,
         urlCapBreaches: 0,
         entryCapReached: false,
@@ -616,7 +623,13 @@ describe("the crawl metrics against the database", () => {
         select ${crawlId}, ${`${SITE}/m/`} || g, ${`${SITE}/m/`} || g, src
         from generate_series(1, ${SITEMAP_URL_CAP + 1}) g, unnest(array[${a}, ${b}]::text[]) src`);
       const s = await site(ID, crawlId);
-      expect(s).toMatchObject({ docs: 2, urlCapBreaches: 2, docCountsExact: true });
+      expect(s).toMatchObject({
+        docs: 2,
+        urlCapBreaches: 2,
+        docCountsExact: true,
+        totalUrls: 0,
+        totalMemberships: 2 * (SITEMAP_URL_CAP + 1),
+      });
       expect((await docRows(crawlId)).map(([, v]) => v)).toEqual([
         { urls: SITEMAP_URL_CAP + 1, breaches50k: true },
         { urls: SITEMAP_URL_CAP + 1, breaches50k: true },

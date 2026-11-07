@@ -932,7 +932,9 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     in the future when the sitemap was read (`reason: "future"`; a date-only value on
     the crawl's own UTC day is not future)
   `issue_urls` per rule for the URL lists; `metrics_get` with
-  `metricId: "sitemap.structure"` gives `totalUrls` for the denominator.
+  `metricId: "sitemap.structure"` gives `totalUrls` for the denominator: distinct
+  sitemap URLs, a URL listed in several documents counted once (not
+  `totalMemberships`, which counts every listing).
 - **Evaluate**:
   - FAIL if non-indexable URLs > 0
   - WARN if `sitemap.cross-host-loc` (warning) > 0: entries on a host the sitemap may
@@ -958,7 +960,8 @@ and `get_account_summaries` (GA4) to identify the correct property IDs for the d
     sitemap document: `{url, sitemaps (up to 10), count}`; `membershipLimited: true`
     says the crawl's membership cap was reached and later listings were not recorded
   The metric's rows:
-  - the `site` row: `{docs, totalUrls, urlCapBreaches, entryCapReached,
+  - the `site` row: `{docs, totalUrls (distinct URLs), totalMemberships (listings,
+    null on an older crawl), urlCapBreaches, entryCapReached,
     oversizedDocsSkipped, docCountsExact, membershipLimited, hreflangLimited,
     overlongLocsSkipped}`. `docCountsExact: false` is a crawl made before memberships
     were recorded: its counts come from the deduplicated entry list and the three
