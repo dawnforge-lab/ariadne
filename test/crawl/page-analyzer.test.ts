@@ -1101,6 +1101,18 @@ describe("html structure: what an early close loses (owner call O3)", () => {
     );
   });
 
+  it("ignores tags inside a <template>: template content is never in the head", () => {
+    const s = structureOf(
+      `<html><head><div>x</div><template><meta name="x" content="y"><title>t</title></template></head><body></body></html>`,
+    );
+    // The `<body>` start tag is still evidence; nothing in the template is lost.
+    expect(s.closedEarly).toMatchObject({ tag: "div", lost: [] });
+    const t = structureOf(
+      `<html><head><div>x</div><template><meta name="x" content="y"></template><link rel="canonical" href="/c"></head><body></body></html>`,
+    );
+    expect(t.closedEarly?.lost).toEqual(["link rel=canonical"]);
+  });
+
   it("a hostile rel token is made storable and cut at HEAD_SNIPPET_MAX", () => {
     const token = "x".repeat(HEAD_SNIPPET_MAX + 50);
     const s = structureOf(`<head><div>x</div><link rel="${token}" href="/"></head>`);

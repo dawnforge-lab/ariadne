@@ -1850,10 +1850,19 @@ export function analyzeHtml(html: string, pageUrl: string): RawPageAnalysis {
     else if (name === "head") headTags += 1;
     else if (name === "body") bodyTags += 1;
     if ((name === "head" || name === "body") && firstOfHeadBody === null) firstOfHeadBody = name;
-    if (earlyCandidate !== null && !earlyConfirmed && isHeadEvidence(name, attribs)) {
+    // Template content is never in the head (or the body): a tag inside a
+    // `<template>` neither shows the head was meant to go on nor is lost by an
+    // early close. `templateDepth` counts this tag's own `<template>` only after
+    // this call, so the template element itself is judged as a tag.
+    if (
+      earlyCandidate !== null &&
+      !earlyConfirmed &&
+      templateDepth === 0 &&
+      isHeadEvidence(name, attribs)
+    ) {
       earlyConfirmed = true;
     }
-    if (earlyCandidate !== null && !earlyLostDone) {
+    if (earlyCandidate !== null && !earlyLostDone && templateDepth === 0) {
       if (name === "body") {
         earlyLostDone = true;
       } else {

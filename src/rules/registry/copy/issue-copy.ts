@@ -633,9 +633,9 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "html.head-closed-early-harmless": {
     title: "HTML: Head closed early, nothing lost yet",
     explanation:
-      "Pages where an element the <head> does not allow, named and quoted in the row (often a tracking pixel's <noscript><img>), ends the head under the HTML parsing rules, but no head tag comes after it, so nothing is lost today. Anything added after it later, such as a canonical, hreflang or robots tag, would be ignored by a parser that closes the head there.",
+      "Pages where an element or text the <head> does not allow, named and quoted in the row (often a tracking pixel's <noscript><img>), ends the head under the HTML parsing rules, but no head tag comes after it, so nothing is lost today. Anything added after it later, such as a canonical, hreflang or robots tag, would be ignored by a parser that closes the head there.",
     howToFix:
-      "Move the element into the <body>; a tracking pixel's <noscript><img> belongs at the top of the body, so head tags added later stay in the head.",
+      "Move the element into the <body>, or remove stray text; a tracking pixel's <noscript><img> belongs at the top of the body, so head tags added later stay in the head.",
   },
   "html.structure-invalid": {
     title: "HTML: Head or body tag missing, repeated or out of order",
@@ -1315,7 +1315,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
       "Set each href to the intended URL, or remove the href and use a button element if the element is not meant to navigate.",
   },
   "links.unsafe-target-blank": {
-    title: "Links: New-tab links to other sites without noopener",
+    title: "Links: New-tab links to other origins without noopener",
     explanation:
       "Pages with links to another origin (another site, a subdomain or the www variant of this host) that open in a new tab through target=_blank without rel=noopener or noreferrer; links to the page's own origin are not counted. The opened page can reach the opener window, and the link leaks the referrer. Modern browsers reduce the risk, so this is a hygiene issue.",
     howToFix:
@@ -1324,7 +1324,7 @@ export const ISSUE_COPY: Record<string, IssueCopy> = {
   "links.no-anchor-text": {
     title: "Links: Internal links with no anchor text",
     explanation:
-      "Pages with internal links that nothing names: no text, no image alt text and no aria-label. The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
+      "Pages with internal links that nothing names: no text, no image alt text and no aria-label on the link itself (a label on an element inside the link, aria-labelledby, a title attribute or an svg <title> is not read). The anchor is what tells visitors, screen readers and search engines what the target is about. Only the first anchor seen for each target is stored, so a target first linked without text and later with text is listed too.",
     howToFix:
       "Add descriptive text to each link, or an alt attribute that describes the target to each image that is the only content of a link.",
   },

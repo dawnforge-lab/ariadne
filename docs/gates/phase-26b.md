@@ -36,7 +36,7 @@ version bump). Three were built on this branch: O1 (`aria-label`), O2 (cross-ori
 query / 14 metric; 33 critical / 63 warning / 86 info; 15 markers): `links.aria-label-only`
 (query, info) and `html.head-closed-early-harmless` (page, info) are new, and
 `links.no-anchor-text` moved from info to warning. Migration 0028 adds `links.aria_label`,
-and `htmlStructure.closedEarly` gains `lost`. `rules_catalog` is 183,428 bytes. **Every
+and `htmlStructure.closedEarly` gains `lost`. `rules_catalog` is 183,585 bytes. **Every
 figure measured in this document is the gate run's and is NOT re-measured**: the suite
 count, the RSS, the row sizes, and the per-rule counts of §4.1, which the gate code
 produced. On this gate's crawl, O1 and O2 would move two of §4.1's rows. The wishlist icon
@@ -476,6 +476,10 @@ wording, §7); they are no longer here.
   `resources` row of the crawl, with no edge join), and the `resources` CSV view
   (`src/api/csv.ts`), which lists every row, a share image appearing as kind `image` with
   `referencingPages` 0.
+- **A link's name from inside it.** `links.no-anchor-text` reads the `aria-label` on the
+  `<a>` only. A label on an element inside the link, `aria-labelledby`, a `title` attribute
+  or an icon's `<svg><title>` is not read, so such a link is reported as a link nothing
+  names (a warning). The copy says so; reading the accessible name in full is for 26c.
 - **An `http:` share image on an `https:` page (owner call, 2026-11-07).** Flag an `http:`
   `og:image` on an `https:` page, unless `og:image:secure_url` is `https:`. That needs
   `og:image:secure_url` recorded, an extraction addition (a new key in the `social` set and
