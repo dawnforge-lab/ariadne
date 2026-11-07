@@ -1,23 +1,26 @@
 # The Ariadne surface Talos codes against
 
-**Status:** the contract as of Phase 26b (ruleset 0.21.0, migrations 0000–0027,
+**Status:** the contract as of Phase 26b (ruleset 0.21.0, migrations 0000–0028,
 18 MCP tools / 18 HTTP routes; every column label in this document is served
 under the ruleset version the engine reports — `rules_catalog`'s
 `rulesetVersion`, which the metric-table pass moves).
 `docs/talos-integration.md` says *why* the seam exists and what obligations bind
 it; this document says *what the seam is*.
 
-**What Phase 26b changed here: twenty-six rule ids, which need a re-crawl.**
-Ruleset 0.21.0, migrations 0026 and 0027 (fifteen nullable `pages` columns, four of
-them widened to integer by 0027), and no tool, route or field added. The ids arrive
+**What Phase 26b changed here: twenty-eight rule ids, which need a re-crawl.**
+Ruleset 0.21.0, migrations 0026, 0027 and 0028 (fifteen nullable `pages` columns, four
+of them widened to integer by 0027, and the nullable `links.aria_label` from 0028), and
+no tool, route or field added. The ids arrive
 through the listings that already exist, as Phase 26a's did, each with its own copy
-and `columns`. `rules_catalog` now answers 180 rows (69 page, 97 query, 14 metric; 15
-of them markers), and the finding rules split 33 critical / 62 warning / 71 info (85
-info counting the fourteen metric rules). Unlike 26a's rules, these read page facts
+and `columns`. `rules_catalog` now answers 182 rows (70 page, 98 query, 14 metric; 15
+of them markers), and the finding rules split 33 critical / 63 warning / 72 info (86
+info counting the fourteen metric rules). The owner calls of 2026-11-07, made on the
+unreleased 0.21.0, account for two of the ids and one severity: see "Links" and
+"Document structure" below. Unlike 26a's rules, these read page facts
 the crawler records only from this phase on (extraction version 2), so `crawl_rules`
 over an older crawl does NOT produce them. On any crawl with a page written before the
 change, the NOT MEASURED marker `extraction.not-recorded` (info, the fifteenth marker)
-fires once with `pagesNotRecorded` and `pagesRecorded`, and the 22 rules it covers are
+fires once with `pagesNotRecorded` and `pagesRecorded`, and the 24 rules it covers are
 silent; a re-crawl is the remedy (§11). Three rules read columns every crawl has
 (`title.same-as-h1`, `h2.missing`, `social.og-duplicate`) and judge old crawls too.
 By family:
@@ -38,9 +41,14 @@ By family:
   never compared). On a re-crawled page the stored robots value joins EVERY
   `<meta name="robots">`, so a `noindex` in a second robots meta now makes the page
   non-indexable for every rule and for `pages_query`'s `indexable`.
-- **Links** (CHECK-34, CHECK-86): `links.uncrawlable` (warning),
-  `links.empty-href`, `links.unsafe-target-blank` and `links.no-anchor-text` (info).
-  A stored anchor now includes the alt of an image inside the link.
+- **Links** (CHECK-34, CHECK-86): `links.uncrawlable` and `links.no-anchor-text`
+  (warning; an internal link with no text, no image alt and no `aria-label`: nothing
+  names it), `links.empty-href`, `links.unsafe-target-blank` (a `target=_blank` link
+  to ANOTHER origin, a subdomain or `www.` variant included, without `noopener` or
+  `noreferrer`; same-origin links are not counted) and `links.aria-label-only` (info;
+  an internal link with an empty anchor named only by its `aria-label`, with `labels`
+  in its evidence). A stored anchor now includes the alt of an image inside the link,
+  and each link row records its trimmed `aria-label` (never folded into the anchor).
 - **Forms, images and pagination** (CHECK-85, CHECK-49, CHECK-22):
   `security.form-insecure` (warning; CHECK-85's title widens to "Mixed content and
   insecure forms"), `images.empty-alt`, `images.alt-too-long` (over 100 characters)
@@ -49,11 +57,16 @@ By family:
   `images.missing-alt` gains an optional `sample`.
 - **Document structure** (CHECK-18, CHECK-04, CHECK-24, and CHECK-88, new):
   `html.head-closed-early` (warning; the element or text that ended the head while
-  head tags followed) and `html.structure-invalid` (info; not exactly one `<head>`
-  and one `<body>` tag, or the head after the body). A page that leaves out the
+  head tags followed, with those tags in `lost`), `html.head-closed-early-harmless`
+  (info; the same early close with no head tag after it, such as a tracking pixel's
+  `<noscript><img>` last in the head) and `html.structure-invalid` (info; not exactly
+  one `<head>` and one `<body>` tag, or the head after the body). A page that leaves out the
   optional `<head>`/`<body>` tags is valid HTML and is still listed, and the copy
   says so rather than calling it broken. `head.directives-outside-head` and
-  `head.tags-outside-head` gain optional `headClosedEarly` evidence.
+  `head.tags-outside-head` gain optional `headClosedEarly` evidence, present when an
+  early close lost head tags. A version-2 crawl written before the owner calls of
+  2026-11-07 has early closes with no `lost` list; the four rules that read it fail
+  loudly on such a row and ask for a re-crawl.
 
 Two engine changes ride with it and are visible in served values. Every string the
 crawler stores from a page, and the site text a crawl row keeps (robots.txt), is made
@@ -621,12 +634,13 @@ validator before the handler runs (`test/api/mcp.test.ts:825` "refuses an
 argument nobody allowed, naming it").
 
 **Not paginated, on purpose:** `rules_catalog` and `crawl_compare`. Both are
-bounded by the **ruleset** (180 rows at 0.21.0) rather than by the crawl. The
-catalog is ~176 KB (**180,545 bytes**, re-measured 2026-11-07 at the end of
-Phase 26b over all 180 rows of ruleset 0.21.0 by serialising what
+bounded by the **ruleset** (182 rows at 0.21.0) rather than by the crawl. The
+catalog is ~179 KB (**183,428 bytes**, re-measured 2026-11-07 after the owner calls
+over all 182 rows of ruleset 0.21.0 by serialising what
 `rulesCatalog` answers with no crawl id — 15 markers at 2,274 bytes, the
 `marker` values JSON-serialised as one array, and the fourteen tables at 5,239
-the same way, unchanged; the 154,237 before it was measured 2026-11-05 at the end of
+the same way, unchanged; the 180,545 before it was measured the same day at the end
+of Phase 26b over the 180 rows before the owner calls, the same way; the 154,237 before it was measured 2026-11-05 at the end of
 Phase 26a over all 154 rows of ruleset 0.20.0 the same way — 14 markers at 2,157
 bytes and the fourteen tables at 5,239; the
 115,443 before it was measured 2026-10-22 at the end of
@@ -2338,10 +2352,10 @@ must show the ruleset version beside the number. Stored findings keep the
 severity their ruleset stamped; nothing is backfilled.
 
 **Phase 26b bumped to 0.21.0, once: new ids, three widened readings, and a
-re-crawl attached.** Twenty-six ids joined (listed by family at the top of this document)
-and no existing rule's severity moved. Unlike 26a, 22 of the new rules read page
+re-crawl attached.** Twenty-eight ids joined (listed by family at the top of this document)
+and no existing rule's severity moved. Unlike 26a, 24 of the new rules read page
 facts the crawler records only from this phase on (`EXTRACTION_VERSION` 2,
-migrations 0026 and 0027), so re-judging an old crawl does not produce them: the
+migrations 0026, 0027 and 0028), so re-judging an old crawl does not produce them: the
 marker `extraction.not-recorded` fires instead, once per crawl, and those checks
 read NOT MEASURED, never clean. Query rules refuse a crawl with any page below
 version 2 as a whole; page rules are silent on a page row whose new columns are

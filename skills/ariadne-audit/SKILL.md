@@ -604,7 +604,7 @@ every one of them. The checklist names each at its check, with its severity. By 
   pass, so on a `fetchResources: false` crawl it is silent and `resources.not-fetched`
   is the marker that says so.
 
-**Twenty-six rules joined at ruleset 0.21.0, and twenty-two of them need a
+**Twenty-eight rules joined at ruleset 0.21.0, and twenty-four of them need a
 re-crawl.** They read page facts the crawler records only since Phase 26b (extraction
 version 2): the document language, Open Graph and X tags, H2s, repeated titles and
 descriptions, bot-specific robots metas, meta refresh, link shapes, insecure forms and
@@ -629,9 +629,14 @@ check:
   that names a URL. A refresh that only reloads the page does not fire.
 - **CHECK-18, CHECK-04 and CHECK-24, head integrity:** `html.head-closed-early`
   (warning). An element or text the head does not allow ended it, and head tags
-  followed. The Closing Element column names it; a tag-manager `<noscript><iframe>` in
-  the head is the usual cause. `head.directives-outside-head` and
-  `head.tags-outside-head` gain `headClosedEarly`, the element that pushed the tags out.
+  followed. The Closing Element column names it and Head Tags Lost lists the tags it
+  pushed into the body; a tag-manager `<noscript><iframe>` in the head is the usual
+  cause. `html.head-closed-early-harmless` (info) is the same early close with no head
+  tag after it, so nothing is lost today: typically a tracking pixel's
+  `<noscript><img>` last in the head. It is not a FAIL; record it as a risk for tags
+  added later. `head.directives-outside-head` and `head.tags-outside-head` gain
+  `headClosedEarly`, the element that pushed the tags out, when the early close lost
+  tags.
 - **CHECK-88, document structure:** `html.structure-invalid` (info). Problems that are
   only head-missing and body-missing mean the page leaves out the `<head>` and `<body>`
   tags, which HTML allows. That page is valid and not broken: record it as PASS with a
@@ -642,9 +647,13 @@ check:
 - **CHECK-34, links:** `links.uncrawlable`: a link with no href but an onclick or a link
   role, a `javascript:` href, or a bare `#` href. A named anchor (`<a name="top">`) and
   an in-page `#section` link are not counted.
-- **CHECK-86, link hygiene:** `links.empty-href`, `links.unsafe-target-blank` and
-  `links.no-anchor-text` (internal links whose anchor text, an image's alt included, is
-  empty).
+- **CHECK-86, link hygiene:** `links.empty-href`, `links.unsafe-target-blank` (a
+  new-tab link to another origin, a subdomain or `www.` variant included, without
+  `noopener`; same-origin links are not counted), `links.no-anchor-text` (warning:
+  internal links that nothing names, with no anchor text, no image alt and no
+  `aria-label`) and `links.aria-label-only` (info: internal links named only by an
+  `aria-label`, which search engines do not read as anchor text; often fine for icon
+  links such as cart, wishlist or account).
 - **CHECK-35, CHECK-36 and CHECK-37, on-page:** `title.multiple`,
   `meta-description.multiple`, `title.same-as-h1`, `h2.missing`, `h2.too-long` and
   `h2.duplicate`.
